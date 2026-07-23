@@ -181,6 +181,7 @@ impl Provider for OpenRouterProvider {
             ],
             &body,
             self.rate_limiter.as_ref(),
+            request.request_timeout_secs,
         )
         .await?;
 
@@ -223,6 +224,7 @@ impl Provider for OpenRouterProvider {
             ],
             &body,
             self.rate_limiter.as_ref(),
+            request.request_timeout_secs,
         )
         .await?;
 
@@ -509,6 +511,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -530,6 +533,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::json!({ "top_p": 0.9, "seed": 3 }),
+            request_timeout_secs: None,
         };
         let body = provider.build_request_body(&request);
         assert_eq!(body["top_p"], serde_json::json!(0.9));
@@ -554,6 +558,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -599,6 +604,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -850,6 +856,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -876,6 +883,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -903,6 +911,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -930,6 +939,7 @@ mod tests {
                 parameters: serde_json::json!({"type": "object"}),
             }],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -953,6 +963,7 @@ mod tests {
             temperature: 0.5,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -1006,6 +1017,7 @@ mod tests {
             temperature: 0.0,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         }
     }
 

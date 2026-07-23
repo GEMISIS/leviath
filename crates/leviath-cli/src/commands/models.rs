@@ -1675,6 +1675,7 @@ mod tests {
             temperature: 0.0,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
         let result = provider.infer(request).await;
         assert!(result.is_err());

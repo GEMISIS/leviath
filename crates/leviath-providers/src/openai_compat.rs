@@ -34,6 +34,7 @@ pub async fn send_chat_request(
     headers: &[(&str, String)],
     body: &serde_json::Value,
     limiter: Option<&RateLimiter>,
+    request_timeout_secs: Option<u64>,
 ) -> Result<reqwest::Response> {
     #[cfg(feature = "debug-http")]
     {
@@ -52,7 +53,8 @@ pub async fn send_chat_request(
     #[cfg(feature = "debug-http")]
     let start = std::time::Instant::now();
 
-    let mut builder = client.post(url);
+    let mut builder =
+        crate::provider::apply_request_timeout(client.post(url), request_timeout_secs);
     for (name, value) in headers {
         builder = builder.header(*name, value);
     }
@@ -520,6 +522,7 @@ mod tests {
             temperature: 0.5,
             tools: vec![],
             extra: serde_json::json!({}),
+            request_timeout_secs: None,
         }
     }
 
@@ -883,6 +886,7 @@ mod tests {
             temperature: 0.0,
             tools: vec![],
             extra: serde_json::json!({}),
+            request_timeout_secs: None,
         };
         let body = build_openai_request_body(&req);
         assert_eq!(body["messages"].as_array().unwrap().len(), 0);
@@ -1134,6 +1138,7 @@ mod tests {
             temperature: 0.5,
             tools: vec![],
             extra: serde_json::json!({}),
+            request_timeout_secs: None,
         };
         let body = build_openai_request_body(&req);
         let messages = body["messages"].as_array().unwrap();
@@ -1170,6 +1175,7 @@ mod tests {
             temperature: 0.0,
             tools: vec![],
             extra: serde_json::json!({}),
+            request_timeout_secs: None,
         };
         let body = build_openai_request_body(&req);
         let msg = &body["messages"].as_array().unwrap()[0];
@@ -1204,6 +1210,7 @@ mod tests {
             temperature: 0.5,
             tools: vec![],
             extra: serde_json::json!({}),
+            request_timeout_secs: None,
         };
         let body = build_openai_request_body(&req);
         let messages = body["messages"].as_array().unwrap();
@@ -1238,6 +1245,7 @@ mod tests {
             temperature: 0.5,
             tools: vec![],
             extra: serde_json::json!({}),
+            request_timeout_secs: None,
         };
         let body = build_openai_request_body(&req);
         let messages = body["messages"].as_array().unwrap();
@@ -1269,6 +1277,7 @@ mod tests {
             temperature: 0.0,
             tools: vec![],
             extra: serde_json::json!({}),
+            request_timeout_secs: None,
         };
         let body = build_openai_request_body(&req);
         let messages = body["messages"].as_array().unwrap();
@@ -1403,6 +1412,7 @@ mod tests {
             &[("content-type", "application/json".to_string())],
             &body,
             Some(&limiter),
+            None,
         )
         .await;
         assert!(resp.is_ok());
@@ -1427,6 +1437,7 @@ mod tests {
                 ("content-type", "application/json".to_string()),
             ],
             &body,
+            None,
             None,
         )
         .await;

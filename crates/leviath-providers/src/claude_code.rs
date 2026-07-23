@@ -429,12 +429,15 @@ async fn retry_etxtbsy<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io
 #[async_trait]
 impl Provider for ClaudeCodeProvider {
     async fn infer(&self, request: InferenceRequest) -> Result<InferenceResponse> {
-        self.infer_with_timeout(
-            request,
-            &std::env::temp_dir(),
-            std::time::Duration::from_secs(300),
-        )
-        .await
+        // Honor a per-stage `request_timeout_secs`; fall back to the shared
+        // default so this provider is bounded the same way as the HTTP ones.
+        let timeout = std::time::Duration::from_secs(
+            request
+                .request_timeout_secs
+                .unwrap_or(crate::provider::DEFAULT_INFERENCE_TIMEOUT_SECS),
+        );
+        self.infer_with_timeout(request, &std::env::temp_dir(), timeout)
+            .await
     }
 
     async fn count_tokens(&self, text: &str, _model: &str) -> usize {
@@ -967,6 +970,7 @@ mod tests {
             temperature: 0.0,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         }
     }
 
@@ -1063,6 +1067,24 @@ mod tests {
             )
             .await
             .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+        let _ = std::fs::remove_file(&script);
+    }
+
+    #[tokio::test]
+    async fn infer_honors_per_request_timeout() {
+        // `infer()` must read a per-stage `request_timeout_secs` and abort the
+        // subprocess at that deadline instead of the 15-minute default — proving
+        // the per-stage timeout reaches this (non-HTTP) provider too.
+        let script = write_stub_script(
+            "infer-per-req",
+            "sleep 5\necho '{\"result\": \"late\"}'\n",
+            "ping -n 6 127.0.0.1 >nul\r\necho {\"result\": \"late\"}",
+        );
+        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
+        let mut request = make_request();
+        request.request_timeout_secs = Some(1);
+        let err = provider.infer(request).await.unwrap_err();
         assert!(err.to_string().contains("timed out"), "{err}");
         let _ = std::fs::remove_file(&script);
     }

@@ -39,13 +39,15 @@ pub struct RetryPolicy {
     /// Hard ceiling on the total wall-clock time one job (all attempts +
     /// backoffs) may run before it is aborted and its pool slot freed.
     ///
-    /// The provider's HTTP client already has a read-*stall* timeout, but a
-    /// connection that keeps trickling keepalive bytes without ever completing
-    /// (a stalled stream) resets that timer forever, so the permit would leak
-    /// and, once enough leak, the model's pool fills and new agents never get a
-    /// slot. This bound guarantees a slot is released within a fixed time. The
-    /// default is generous — far above any realistic single inference — so it
-    /// only ever catches a genuine hang.
+    /// Providers apply this same deadline as their own per-call timeout, so a
+    /// call normally ends there. This outer bound is the backstop: a provider
+    /// timer can be defeated (e.g. a connection that keeps trickling keepalive
+    /// bytes without ever completing resets a read timer forever), which would
+    /// leak the permit until the model's pool fills and new agents never get a
+    /// slot. Wrapping the whole job in a wall-clock timeout guarantees the slot
+    /// is released within a fixed time regardless. Defaults to
+    /// [`leviath_providers::DEFAULT_INFERENCE_TIMEOUT_SECS`]; a stage's
+    /// `request_timeout_secs` overrides it per stage.
     pub job_timeout: Duration,
 }
 
@@ -54,7 +56,12 @@ impl Default for RetryPolicy {
         Self {
             max_attempts: 4,
             base_delay: Duration::from_secs(1),
-            job_timeout: Duration::from_secs(1800),
+            // The unified default inference deadline. A stage's
+            // `request_timeout_secs` overrides this per stage (see
+            // `pipeline::retry_policy_for`); the providers apply the same value
+            // as their own per-call timeout, so this is the single outer bound
+            // that also frees the pool slot if a provider's timer is defeated.
+            job_timeout: Duration::from_secs(leviath_providers::DEFAULT_INFERENCE_TIMEOUT_SECS),
         }
     }
 }
@@ -190,6 +197,7 @@ mod tests {
             temperature: 0.0,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         }
     }
 
@@ -382,6 +390,7 @@ mod tests {
                 parameters: serde_json::json!({"type": "object"}),
             }],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
         let text = flatten_request_text(&req);
         assert!(text.contains("sys"));

@@ -330,6 +330,7 @@ async fn run_test_case(
         // `lev test` advertises no tools (matches prior single-shot behaviour).
         tools: Vec::new(),
         extra: serde_json::Value::Null,
+        request_timeout_secs: None,
     };
 
     let response = provider

@@ -546,16 +546,18 @@ impl Provider for AnthropicProvider {
         #[cfg(feature = "debug-http")]
         let start = std::time::Instant::now();
 
-        let response = self
-            .apply_headers(self.client.post(&url))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                #[cfg(feature = "debug-http")]
-                crate::debug_http::log_error("anthropic", &url, &e.to_string());
-                ProviderError::RequestFailed(e.to_string())
-            })?;
+        let response = crate::provider::apply_request_timeout(
+            self.apply_headers(self.client.post(&url)),
+            request.request_timeout_secs,
+        )
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            #[cfg(feature = "debug-http")]
+            crate::debug_http::log_error("anthropic", &url, &e.to_string());
+            ProviderError::RequestFailed(e.to_string())
+        })?;
 
         #[cfg(feature = "debug-http")]
         crate::debug_http::log_response(
@@ -638,16 +640,18 @@ impl Provider for AnthropicProvider {
         #[cfg(feature = "debug-http")]
         let start = std::time::Instant::now();
 
-        let response = self
-            .apply_headers(self.client.post(&url))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                #[cfg(feature = "debug-http")]
-                crate::debug_http::log_error("anthropic", &url, &e.to_string());
-                ProviderError::RequestFailed(e.to_string())
-            })?;
+        let response = crate::provider::apply_request_timeout(
+            self.apply_headers(self.client.post(&url)),
+            request.request_timeout_secs,
+        )
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            #[cfg(feature = "debug-http")]
+            crate::debug_http::log_error("anthropic", &url, &e.to_string());
+            ProviderError::RequestFailed(e.to_string())
+        })?;
 
         #[cfg(feature = "debug-http")]
         crate::debug_http::log_response(
@@ -1077,6 +1081,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -1108,6 +1113,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::json!({ "top_p": 0.9, "top_k": 40 }),
+            request_timeout_secs: None,
         };
         let body = provider.build_request_body(&request);
         assert_eq!(body["top_p"], serde_json::json!(0.9));
@@ -1275,6 +1281,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -1319,6 +1326,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -1459,6 +1467,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -1513,6 +1522,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -1560,6 +1570,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
         let body = provider.build_request_body(&request);
         assert_eq!(body["system"], "ephemeral");
@@ -1956,6 +1967,7 @@ mod tests {
                 parameters: serde_json::json!({"type": "object"}),
             }],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -1980,6 +1992,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -2002,6 +2015,7 @@ mod tests {
             temperature: 0.5,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -2032,6 +2046,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -2055,6 +2070,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -2081,6 +2097,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -2109,6 +2126,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -2301,6 +2319,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
         let result = provider.infer(request).await;
         assert!(result.is_err());
@@ -2334,6 +2353,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
         assert!(provider.infer_stream(request).await.is_err());
     }
@@ -2454,6 +2474,7 @@ mod tests {
             temperature: 0.5,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -2591,6 +2612,7 @@ mod tests {
             temperature: 0.0,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         }
     }
 

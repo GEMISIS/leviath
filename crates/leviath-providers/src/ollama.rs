@@ -290,18 +290,19 @@ impl Provider for OllamaProvider {
         #[cfg(feature = "debug-http")]
         let start = std::time::Instant::now();
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                #[cfg(feature = "debug-http")]
-                crate::debug_http::log_error("ollama", &url, &e.to_string());
-                ProviderError::RequestFailed(e.to_string())
-            })?;
+        let response = crate::provider::apply_request_timeout(
+            self.client.post(&url),
+            request.request_timeout_secs,
+        )
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            #[cfg(feature = "debug-http")]
+            crate::debug_http::log_error("ollama", &url, &e.to_string());
+            ProviderError::RequestFailed(e.to_string())
+        })?;
 
         #[cfg(feature = "debug-http")]
         crate::debug_http::log_response(
@@ -353,18 +354,19 @@ impl Provider for OllamaProvider {
         #[cfg(feature = "debug-http")]
         let start = std::time::Instant::now();
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                #[cfg(feature = "debug-http")]
-                crate::debug_http::log_error("ollama", &url, &e.to_string());
-                ProviderError::RequestFailed(e.to_string())
-            })?;
+        let response = crate::provider::apply_request_timeout(
+            self.client.post(&url),
+            request.request_timeout_secs,
+        )
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            #[cfg(feature = "debug-http")]
+            crate::debug_http::log_error("ollama", &url, &e.to_string());
+            ProviderError::RequestFailed(e.to_string())
+        })?;
 
         #[cfg(feature = "debug-http")]
         crate::debug_http::log_response(
@@ -926,6 +928,7 @@ mod tests {
             temperature: 0.8,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -952,6 +955,7 @@ mod tests {
             temperature: 0.8,
             tools: vec![],
             extra: serde_json::json!({ "top_k": 40, "top_p": 0.95 }),
+            request_timeout_secs: None,
         };
         let body = provider.build_request_body(&request);
         // Ollama's sampling knobs live under `options`.
@@ -977,6 +981,7 @@ mod tests {
             temperature: 0.8,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -1021,6 +1026,7 @@ mod tests {
             temperature: 0.8,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -1056,6 +1062,7 @@ mod tests {
                 parameters: serde_json::json!({"type": "object"}),
             }],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -1188,6 +1195,7 @@ mod tests {
             temperature: 0.5,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -1210,6 +1218,7 @@ mod tests {
             temperature: 0.5,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -1246,6 +1255,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -1282,6 +1292,7 @@ mod tests {
                 },
             ],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -1374,6 +1385,7 @@ mod tests {
             temperature: 0.5,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
         let result = provider.infer(request).await;
         assert!(result.is_err());
@@ -1396,6 +1408,7 @@ mod tests {
             temperature: 0.5,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
         let result = provider.infer_stream(request).await;
         assert!(
@@ -1892,6 +1905,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
         let body = provider.build_request_body(&request);
         assert!(body["options"].get("temperature").is_none());
@@ -1964,6 +1978,7 @@ mod tests {
             temperature: 0.5,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         }
     }
 
