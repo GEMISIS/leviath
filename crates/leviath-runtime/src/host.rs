@@ -38,8 +38,15 @@ pub struct SpawnArgs {
     pub run_id: String,
     /// Path to the agent manifest directory or bundle.
     pub blueprint_path: String,
-    /// The task prompt.
+    /// The task prompt. Seeded into the region keyed `task` (see
+    /// [`crate::context_setup::init_window_seeded`]); a matching `regions`
+    /// entry, if present, overrides it.
     pub task: String,
+    /// Literal seed content for named caller-input regions, keyed by the
+    /// region's caller-input name. Merged over `task` at spawn. `#[serde(default)]`
+    /// keeps older requests (which never sent this) deserializing to an empty map.
+    #[serde(default)]
+    pub regions: HashMap<String, String>,
     /// Optional model override (`provider/model` or `model`).
     #[serde(default)]
     pub model: Option<String>,
@@ -132,8 +139,9 @@ pub enum SubAgentOp {
 pub enum ControlOp {
     /// Spawn a new agent. Reply is the run id on success, or an error message.
     Spawn {
-        /// The spawn request.
-        args: SpawnArgs,
+        /// The spawn request. Boxed because it is much larger than the other
+        /// variants' payloads.
+        args: Box<SpawnArgs>,
         /// Reply channel.
         reply: oneshot::Sender<Result<String, String>>,
     },
@@ -1150,10 +1158,10 @@ mod tests {
         }));
 
         let result = ask(&mut host, |reply| ControlOp::Spawn {
-            args: SpawnArgs {
+            args: Box::new(SpawnArgs {
                 run_id: "r1".to_string(),
                 ..Default::default()
-            },
+            }),
             reply,
         })
         .await;
@@ -1173,7 +1181,7 @@ mod tests {
         let mut host = host_with(vec![]);
         host.set_spawner(Box::new(|_world, _args| Err("bad blueprint".to_string())));
         let result = ask(&mut host, |reply| ControlOp::Spawn {
-            args: SpawnArgs::default(),
+            args: Box::new(SpawnArgs::default()),
             reply,
         })
         .await;
@@ -1184,7 +1192,7 @@ mod tests {
     async fn spawn_op_errors_without_a_spawner() {
         let mut host = host_with(vec![]);
         let result = ask(&mut host, |reply| ControlOp::Spawn {
-            args: SpawnArgs::default(),
+            args: Box::new(SpawnArgs::default()),
             reply,
         })
         .await;

@@ -89,6 +89,8 @@ async fn spawn(h: &SubAgentHandle, args: &serde_json::Value) -> String {
         false,
         Vec::new(),
         child_max_depth,
+        // Sub-agents receive their whole task via `full_task`; no region flags.
+        std::collections::HashMap::new(),
     ) {
         Ok(a) => a,
         Err(e) => return format!("[error] cannot spawn '{blueprint}': {e}"),

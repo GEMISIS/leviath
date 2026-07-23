@@ -28,7 +28,10 @@
 pub mod mapping;
 pub mod protocol;
 
-pub use mapping::{flatten_prompt, is_permission_request, permission_request, stop_reason_for};
+pub use mapping::{
+    flatten_prompt, is_permission_request, parse_region_markers, permission_request,
+    stop_reason_for,
+};
 pub use protocol::{
     AgentCapabilities, AgentInfo, ClientCapabilities, ContentBlock, EmbeddedResource,
     InitializeParams, InitializeResult, JsonRpcError, JsonRpcMessage, MAX_FRAME_BYTES,

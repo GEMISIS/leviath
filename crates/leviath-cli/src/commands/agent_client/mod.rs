@@ -40,7 +40,7 @@ use leviath_agent_client::{
     PROTOCOL_VERSION, PromptCapabilities, RequestPermissionResult, SessionCancelParams,
     SessionNewParams, SessionNewResult, SessionPromptParams, SessionPromptResult, SessionUpdate,
     SessionUpdateParams, StopReason, error_codes, flatten_prompt, is_permission_request,
-    permission_request,
+    parse_region_markers, permission_request,
 };
 use leviath_core::interaction::{ApprovalScope, InteractionRequest, InteractionResponse};
 use leviath_core::run_meta::RunStatus;
@@ -333,8 +333,8 @@ impl Server {
         let params: SessionPromptParams = params
             .and_then(|p| serde_json::from_value(p).ok())
             .unwrap_or_default();
-        let task = flatten_prompt(&params.prompt);
-        if task.is_empty() {
+        let text = flatten_prompt(&params.prompt);
+        if text.is_empty() {
             self.write(&JsonRpcMessage::error_response(
                 id,
                 error_codes::INVALID_PARAMS,
@@ -343,7 +343,11 @@ impl Server {
             .await;
             return;
         }
-        let stop_reason = self.run_turn(reader, task).await;
+        // Parse `---region:<name>---` markers; with none, the whole text is the
+        // `task` region (back-compat).
+        let regions = parse_region_markers(&text);
+        let task = regions.get("task").cloned().unwrap_or_default();
+        let stop_reason = self.run_turn(reader, task, regions).await;
         self.write(&JsonRpcMessage::response(
             id,
             &SessionPromptResult { stop_reason },
@@ -367,7 +371,12 @@ impl Server {
 
     /// Drive one prompt turn: spawn (or message) the agent, then translate the
     /// daemon's events and the run's output until it goes terminal or parks.
-    async fn run_turn(&mut self, reader: &mut BoxReader, task: String) -> StopReason {
+    async fn run_turn(
+        &mut self,
+        reader: &mut BoxReader,
+        task: String,
+        regions: std::collections::HashMap<String, String>,
+    ) -> StopReason {
         // Subscribe before spawning so no event between spawn and subscribe is
         // missed. An unreachable daemon ends the turn as a refusal.
         let Ok(mut stream) = self.control.subscribe().await else {
@@ -380,7 +389,7 @@ impl Server {
             .expect("session present")
             .session_id
             .clone();
-        let run_id = match self.start_run(task).await {
+        let run_id = match self.start_run(task, regions).await {
             RunStart::Ready(run_id) => run_id,
             // The agent already finished and won't take another message — the
             // turn is simply over, not a failure.
@@ -465,7 +474,13 @@ impl Server {
     }
 
     /// Spawn the agent on the first prompt, or deliver a message on later ones.
-    async fn start_run(&mut self, task: String) -> RunStart {
+    /// `regions` seeds named caller-input regions on the first (spawning) prompt;
+    /// on later prompts the text is delivered as a message and `regions` is unused.
+    async fn start_run(
+        &mut self,
+        task: String,
+        regions: std::collections::HashMap<String, String>,
+    ) -> RunStart {
         let existing = self
             .session
             .as_ref()
@@ -492,7 +507,8 @@ impl Server {
             }
             None => {
                 let session = self.session.as_ref().expect("session present");
-                let spawn = spawn_args(&session.blueprint, &task, &session.cwd, &self.args);
+                let spawn =
+                    spawn_args(&session.blueprint, &task, &session.cwd, &self.args, regions);
                 match self.control.spawn(spawn).await {
                     Ok(ControlResponse::Spawned { run_id }) => {
                         self.session.as_mut().expect("session present").run_id =

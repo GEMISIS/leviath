@@ -2011,6 +2011,15 @@ fn unmet_required_regions(
         .regions
         .iter()
         .filter(|r| r.required)
+        // Caller-input regions are validated (and seeded) at spawn, not written
+        // by the agent — skip them here so this gate never nags the agent to
+        // populate a slot the caller owns.
+        .filter(|r| {
+            !matches!(
+                r.seed,
+                Some(leviath_core::layout::RegionSeed::CallerInput { .. })
+            )
+        })
         .filter(|r| {
             window
                 .get_region(&r.name)
@@ -2491,6 +2500,29 @@ pub fn spawn_agent(
     stages: Vec<ResolvedStage>,
     global_batch_tool_hint: bool,
 ) -> Result<Entity, String> {
+    let seeds = std::collections::HashMap::from([("task".to_string(), task.to_string())]);
+    spawn_agent_seeded(
+        world,
+        agent_id,
+        blueprint,
+        &seeds,
+        stages,
+        global_batch_tool_hint,
+    )
+}
+
+/// Like [`spawn_agent`], but seeds the context window from a name→content map
+/// (caller-input regions filled by the CLI/ACP/API, plus blueprint-resolved
+/// seeds) rather than a single task string. `spawn_agent` is the thin wrapper
+/// that seeds only the `task` key.
+pub fn spawn_agent_seeded(
+    world: &mut World,
+    agent_id: String,
+    blueprint: leviath_core::Blueprint,
+    seeds: &std::collections::HashMap<String, String>,
+    stages: Vec<ResolvedStage>,
+    global_batch_tool_hint: bool,
+) -> Result<Entity, String> {
     let stage_infs: Vec<StageInference> = stages
         .into_iter()
         .map(|rs| StageInference {
@@ -2511,7 +2543,7 @@ pub fn spawn_agent(
     // context setup (layout swap + system-prompt injection) just as entering any
     // later stage would.
     let mut window = ContextWindow::new(blueprint.context_layout.total_budget_tokens);
-    crate::context_setup::init_window(&mut window, &blueprint, task);
+    crate::context_setup::init_window_seeded(&mut window, &blueprint, seeds);
     apply_stage_context(&setups[0], &mut window)?;
 
     let stage0_name = blueprint.stages[0].name.clone();
@@ -6583,6 +6615,36 @@ mod tests {
         assert_eq!(
             unmet_required_regions(&bp.0, &bp.0.stages[0], &bare).len(),
             1
+        );
+    }
+
+    #[test]
+    fn unmet_required_regions_skips_caller_input_seeded_regions() {
+        // A required region whose content comes from the caller at spawn must NOT
+        // be flagged by the agent-facing gate, even when empty and the stage can
+        // write context — the caller owns it, not the agent.
+        let region = leviath_core::layout::RegionDefinition::new(
+            "plan".to_string(),
+            RegionKind::Pinned,
+            4000,
+        )
+        .with_required(true, None)
+        .with_seed(leviath_core::layout::RegionSeed::CallerInput {
+            name: "plan".to_string(),
+        });
+        let layout = leviath_core::layout::ContextLayout::new(vec![region], 10_000);
+        let mut stage = stage_named("a", None, false, None);
+        stage.available_tools = vec!["context_write".to_string()];
+        stage.context_layout = Some(layout.clone());
+        let bp = AgentBlueprint(leviath_core::Blueprint::new(
+            "t".to_string(),
+            "d".to_string(),
+            vec![stage],
+            layout,
+        ));
+        assert!(
+            unmet_required_regions(&bp.0, &bp.0.stages[0], &window_with_plan(false)).is_empty(),
+            "caller-input region is validated at spawn, not gated here"
         );
     }
 

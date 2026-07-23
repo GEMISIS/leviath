@@ -4,7 +4,9 @@
 //! (the reloaded agent is `ReadyToInfer`), rather than being lost.
 //!
 //! For each `<runs_dir>/<run_id>/meta.json` whose status is non-terminal, this
-//! loads the blueprint (via [`build_agent`], reusing the spawn path), restores the
+//! loads the blueprint (via [`build_agent_for_reload`], reusing the spawn path),
+//! which skips the required-at-spawn region gate since the window is restored
+//! from a snapshot; restores the
 //! persisted context / stage / iteration / token totals via
 //! [`leviath_runtime::restore::restore_agent`], and preserves the original run
 //! metadata. Anything unreadable or un-reloadable is skipped (logged), never fatal.
@@ -36,7 +38,7 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::Config;
-use crate::daemon::spawn::build_agent;
+use crate::daemon::spawn::build_agent_for_reload;
 use crate::daemon::tool_service::CliToolService;
 
 /// Reload every non-terminal persisted run under `runs_dir`, returning the
@@ -256,6 +258,10 @@ fn reload_one(
         run_id: meta.run_id.clone(),
         blueprint_path: meta.agent_path.clone(),
         task: meta.task.clone(),
+        // Region seed content isn't replayed on reload: the window is restored
+        // from the persisted context snapshot after build_agent, so re-seeding
+        // would be redundant (and could double up content).
+        regions: Default::default(),
         model: meta.model.clone(),
         workdir: meta.workdir.clone(),
         metadata: meta.metadata.clone(),
@@ -267,7 +273,7 @@ fn reload_one(
         max_depth: None,
         parent_run_id: meta.parent_run_id.clone(),
     };
-    let entity = build_agent(
+    let entity = build_agent_for_reload(
         world.world_mut(),
         tool_service,
         config,

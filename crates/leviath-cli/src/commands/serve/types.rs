@@ -166,6 +166,9 @@ pub(super) struct SpawnAgentReq {
     #[serde(default)]
     pub(super) allow: Vec<String>,
     pub(super) workdir: Option<String>,
+    /// Literal seed content for named caller-input regions, keyed by region name.
+    #[serde(default)]
+    pub(super) regions: HashMap<String, String>,
     #[serde(default)]
     pub(super) metadata: HashMap<String, String>,
     pub(super) callback_url: Option<String>,

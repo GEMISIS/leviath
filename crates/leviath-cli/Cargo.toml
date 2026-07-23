@@ -34,6 +34,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 rhai = { workspace = true }
+glob = { workspace = true }
 dirs = "6.0.0"
 chrono = { workspace = true }
 bevy_ecs = { workspace = true }

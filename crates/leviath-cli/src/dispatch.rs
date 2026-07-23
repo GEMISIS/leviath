@@ -127,6 +127,18 @@ pub trait RiskyExecutors {
     async fn mcp(&self, args: commands::mcp::McpArgs) -> anyhow::Result<()>;
 }
 
+/// Inject argv-prescanned dynamic `--<region>` seed flags into a parsed
+/// `run` command. A no-op for every other subcommand. Kept here (a tested lib
+/// seam) so the bin entrypoint's post-parse wiring stays branch-free.
+pub fn apply_region_flags(
+    command: &mut Commands,
+    regions: std::collections::HashMap<String, String>,
+) {
+    if let Commands::Run(args) = command {
+        args.regions = regions;
+    }
+}
+
 /// Route a parsed subcommand to its executor. Safe commands are called
 /// directly (and are exercised through `dispatch()` by the tests below); the
 /// I/O-risky ones go through `ex` (see [`RiskyExecutors`]).
@@ -209,6 +221,24 @@ mod tests {
             name: "unused".to_string(),
             template: "software-engineer".to_string(),
         }
+    }
+
+    // ─── apply_region_flags ──────────────────────────────────────────────────
+
+    #[test]
+    fn apply_region_flags_populates_run_and_noops_other_commands() {
+        let mut run = Commands::Run(commands::run::RunArgs::default());
+        let flags = std::collections::HashMap::from([("criteria".to_string(), "safe".to_string())]);
+        apply_region_flags(&mut run, flags);
+        assert!(
+            matches!(&run, Commands::Run(a) if a.regions.get("criteria").map(String::as_str) == Some("safe")),
+            "region flag was injected into the Run args"
+        );
+        // A non-run command hits the no-op branch: it must not panic (and there
+        // is nothing to inject). Asserting the variant here would leave an
+        // always-false `matches!` arm uncovered, so the call itself is the check.
+        let mut other = Commands::Ps(commands::ps::PsArgs::default());
+        apply_region_flags(&mut other, std::collections::HashMap::new());
     }
 
     // ─── Risky variants: routed through the injected executor ────────────────

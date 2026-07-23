@@ -9,6 +9,8 @@
 pub mod manifest;
 pub mod session;
 
+use std::collections::HashMap;
+
 use clap::Args;
 
 // Re-export the provider-registry builders used by the daemon setup.
@@ -43,4 +45,171 @@ pub struct RunArgs {
     /// Override the blueprint's max sub-agent tree depth.
     #[arg(long)]
     pub max_depth: Option<usize>,
+
+    /// Dynamic per-region seed flags (`--<region> <text|@file>`), collected by an
+    /// argv pre-scan in the binary since region names are blueprint-defined.
+    /// clap skips this field; it is populated after parsing.
+    #[arg(skip)]
+    pub regions: HashMap<String, String>,
+}
+
+/// The `run` subcommand's own long flags — everything NOT in this set is treated
+/// as a dynamic `--<region>` seed flag by [`extract_region_flags`].
+const KNOWN_RUN_FLAGS: &[&str] = &[
+    "task",
+    "model",
+    "yolo",
+    "allow",
+    "max-depth",
+    "verbose",
+    "help",
+    "version",
+];
+
+/// Pre-scan a full argv (program name first) for dynamic `--<region>` flags on
+/// the `run` subcommand, since region names are blueprint-defined and clap can't
+/// declare them. Returns `(argv_for_clap, region_flags)`: a `--<name>` (or
+/// `--<name>=<value>`) whose `<name>` is not a known `run` flag is pulled out
+/// (with its value) into the map; every other token passes through untouched.
+///
+/// A no-`=` region flag consumes the following token as its value. If argv has
+/// no `run` subcommand token, nothing is extracted (the returned argv equals the
+/// input). Pure — no environment or I/O — so it is unit-testable in isolation.
+pub fn extract_region_flags(argv: Vec<String>) -> (Vec<String>, HashMap<String, String>) {
+    // Locate the subcommand: the first bareword (non-`-`) token after the program
+    // name. Only activate when it is `run`.
+    let sub_pos = argv
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, t)| !t.starts_with('-'))
+        .map(|(i, _)| i);
+    let Some(sub_pos) = sub_pos else {
+        return (argv, HashMap::new());
+    };
+    if argv[sub_pos] != "run" {
+        return (argv, HashMap::new());
+    }
+
+    let mut out: Vec<String> = argv[..=sub_pos].to_vec();
+    let mut regions = HashMap::new();
+    let mut i = sub_pos + 1;
+    while i < argv.len() {
+        let token = &argv[i];
+        if let Some(name) = token.strip_prefix("--") {
+            // Split an `=`-joined value if present.
+            let (name, inline) = match name.split_once('=') {
+                Some((n, v)) => (n, Some(v.to_string())),
+                None => (name, None),
+            };
+            if !name.is_empty() && !KNOWN_RUN_FLAGS.contains(&name) {
+                let value = match inline {
+                    Some(v) => v,
+                    None => {
+                        // Consume the next token as the value, if any.
+                        i += 1;
+                        argv.get(i).cloned().unwrap_or_default()
+                    }
+                };
+                regions.insert(name.to_string(), value);
+                i += 1;
+                continue;
+            }
+        }
+        out.push(token.clone());
+        i += 1;
+    }
+    (out, regions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn extracts_dynamic_region_flags_and_preserves_known_ones() {
+        let (out, regions) = extract_region_flags(argv(&[
+            "lev",
+            "run",
+            "agents/reviewer",
+            "--task",
+            "review it",
+            "--files",
+            "@src/main.rs",
+            "--review-criteria",
+            "@policy.md",
+            "--yolo",
+        ]));
+        // Known flags + positional pass through to clap.
+        assert_eq!(
+            out,
+            argv(&[
+                "lev",
+                "run",
+                "agents/reviewer",
+                "--task",
+                "review it",
+                "--yolo",
+            ])
+        );
+        assert_eq!(
+            regions.get("files").map(String::as_str),
+            Some("@src/main.rs")
+        );
+        assert_eq!(
+            regions.get("review-criteria").map(String::as_str),
+            Some("@policy.md")
+        );
+    }
+
+    #[test]
+    fn extracts_equals_joined_region_flag() {
+        let (out, regions) = extract_region_flags(argv(&["lev", "run", "a", "--criteria=be safe"]));
+        assert_eq!(out, argv(&["lev", "run", "a"]));
+        assert_eq!(regions.get("criteria").map(String::as_str), Some("be safe"));
+    }
+
+    #[test]
+    fn no_region_flags_leaves_argv_unchanged() {
+        let input = argv(&["lev", "run", "a", "--task", "t"]);
+        let (out, regions) = extract_region_flags(input.clone());
+        assert_eq!(out, input);
+        assert!(regions.is_empty());
+    }
+
+    #[test]
+    fn non_run_subcommand_is_untouched() {
+        // A dynamic-looking flag on another subcommand is left for clap to reject.
+        let input = argv(&["lev", "ps", "--weird", "x"]);
+        let (out, regions) = extract_region_flags(input.clone());
+        assert_eq!(out, input);
+        assert!(regions.is_empty());
+    }
+
+    #[test]
+    fn no_subcommand_token_is_untouched() {
+        // Only flags, no bareword subcommand → nothing extracted.
+        let input = argv(&["lev", "--verbose"]);
+        let (out, regions) = extract_region_flags(input.clone());
+        assert_eq!(out, input);
+        assert!(regions.is_empty());
+    }
+
+    #[test]
+    fn trailing_region_flag_without_value_maps_to_empty() {
+        // A dynamic flag at the very end with no following value → empty string.
+        let (out, regions) = extract_region_flags(argv(&["lev", "run", "a", "--spec"]));
+        assert_eq!(out, argv(&["lev", "run", "a"]));
+        assert_eq!(regions.get("spec").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn global_verbose_before_run_still_activates() {
+        let (_out, regions) = extract_region_flags(argv(&["lev", "-v", "run", "a", "--spec", "x"]));
+        assert_eq!(regions.get("spec").map(String::as_str), Some("x"));
+    }
 }

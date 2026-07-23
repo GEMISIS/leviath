@@ -9,7 +9,7 @@ use crate::blueprint::{
     StageMode, TransitionCondition, TransitionEdge,
 };
 use crate::error::{Error, Result};
-use crate::layout::RegionDefinition;
+use crate::layout::{RegionDefinition, RegionSeed};
 use crate::lifecycle::CompactionConfig;
 use crate::{Blueprint, ContextLayout, EvictionStrategy, RegionKind, Stage};
 
@@ -625,11 +625,15 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
 
+            let seed = parse_region_seed(region_name, region_value.get("seed"));
+
             total_tokens += max_tokens;
-            regions.push(
-                RegionDefinition::new(region_name.clone(), kind, max_tokens)
-                    .with_required(required, required_message),
-            );
+            let mut def = RegionDefinition::new(region_name.clone(), kind, max_tokens)
+                .with_required(required, required_message);
+            if let Some(seed) = seed {
+                def = def.with_seed(seed);
+            }
+            regions.push(def);
         }
     }
 
@@ -818,6 +822,67 @@ fn parse_region_mapping(v: &toml::Value) -> RegionMapping {
         from_region: str_field(v, "from_region"),
         to_region: str_field(v, "to_region"),
         transform,
+    }
+}
+
+/// Parse a region's `seed` value from `[context.regions.<name>]`.
+///
+/// String forms: `"task_input"` → caller input keyed `task` (the `--task`/prompt
+/// text); any other string → caller input keyed by that string, with the
+/// convenience alias `"input"` meaning "keyed by this region's own name".
+/// Table forms: `{ glob = "…" }`, `{ files = [...] }`, `{ literal = "…" }`,
+/// `{ rhai = "…" }`, or `{ caller = "…" }`.
+///
+/// Back-compat: a region literally named `task` with no `seed` gets an implicit
+/// `CallerInput { name: "task" }`, so unmodified blueprints seed the task text
+/// exactly as before.
+fn parse_region_seed(region_name: &str, value: Option<&toml::Value>) -> Option<RegionSeed> {
+    let Some(value) = value else {
+        return (region_name == "task").then(|| RegionSeed::CallerInput {
+            name: "task".to_string(),
+        });
+    };
+    match value {
+        toml::Value::String(s) => Some(match s.as_str() {
+            "task_input" => RegionSeed::CallerInput {
+                name: "task".to_string(),
+            },
+            "input" => RegionSeed::CallerInput {
+                name: region_name.to_string(),
+            },
+            other => RegionSeed::CallerInput {
+                name: other.to_string(),
+            },
+        }),
+        toml::Value::Table(t) => {
+            if let Some(pattern) = t.get("glob").and_then(|v| v.as_str()) {
+                Some(RegionSeed::Glob {
+                    pattern: pattern.to_string(),
+                })
+            } else if let Some(files) = t.get("files").and_then(|v| v.as_array()) {
+                Some(RegionSeed::Files {
+                    paths: files
+                        .iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect(),
+                })
+            } else if let Some(text) = t.get("literal").and_then(|v| v.as_str()) {
+                Some(RegionSeed::Literal {
+                    text: text.to_string(),
+                })
+            } else if let Some(script) = t.get("rhai").and_then(|v| v.as_str()) {
+                Some(RegionSeed::Rhai {
+                    script: script.to_string(),
+                })
+            } else {
+                t.get("caller")
+                    .and_then(|v| v.as_str())
+                    .map(|name| RegionSeed::CallerInput {
+                        name: name.to_string(),
+                    })
+            }
+        }
+        _ => None,
     }
 }
 
@@ -1190,6 +1255,143 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         let conv = bp.context_layout.get_region("conversation").unwrap();
         assert!(!conv.required, "unmarked region defaults to not required");
         assert!(conv.required_message.is_none());
+    }
+
+    #[test]
+    fn parse_manifest_reads_region_seed_shapes() {
+        let toml = r#"
+[agent]
+name = "seed-test"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+
+[context.regions]
+task = { kind = "pinned", max_tokens = 4000, seed = "task_input" }
+criteria = { kind = "pinned", max_tokens = 2000, seed = "input" }
+alias = { kind = "pinned", max_tokens = 2000, seed = "files_arg" }
+specs = { kind = "pinned", max_tokens = 8000, seed = { glob = "specs/*.md" } }
+config = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.yaml", "b.yaml"] } }
+lit = { kind = "pinned", max_tokens = 500, seed = { literal = "hello" } }
+scripted = { kind = "pinned", max_tokens = 500, seed = { rhai = "init.rhai" } }
+plain = { kind = "pinned", max_tokens = 500 }
+conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let region = |n: &str| bp.context_layout.get_region(n).unwrap().seed.clone();
+        assert_eq!(
+            region("task"),
+            Some(RegionSeed::CallerInput {
+                name: "task".to_string()
+            })
+        );
+        assert_eq!(
+            region("criteria"),
+            Some(RegionSeed::CallerInput {
+                name: "criteria".to_string()
+            }),
+            "\"input\" is keyed by the region's own name"
+        );
+        assert_eq!(
+            region("alias"),
+            Some(RegionSeed::CallerInput {
+                name: "files_arg".to_string()
+            }),
+            "a bare string is a caller-input key"
+        );
+        assert_eq!(
+            region("specs"),
+            Some(RegionSeed::Glob {
+                pattern: "specs/*.md".to_string()
+            })
+        );
+        assert_eq!(
+            region("config"),
+            Some(RegionSeed::Files {
+                paths: vec!["a.yaml".to_string(), "b.yaml".to_string()]
+            })
+        );
+        assert_eq!(
+            region("lit"),
+            Some(RegionSeed::Literal {
+                text: "hello".to_string()
+            })
+        );
+        assert_eq!(
+            region("scripted"),
+            Some(RegionSeed::Rhai {
+                script: "init.rhai".to_string()
+            })
+        );
+        assert!(
+            region("plain").is_none(),
+            "a non-task region with no seed stays None"
+        );
+    }
+
+    #[test]
+    fn parse_manifest_region_seed_caller_table_and_non_seed_shapes() {
+        let toml = r#"
+[agent]
+name = "seed-edges"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+
+[context.regions]
+via_caller = { kind = "pinned", max_tokens = 500, seed = { caller = "extra" } }
+unknown_tbl = { kind = "pinned", max_tokens = 500, seed = { nope = "x" } }
+weird_type = { kind = "pinned", max_tokens = 500, seed = 42 }
+conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let region = |n: &str| bp.context_layout.get_region(n).unwrap().seed.clone();
+        assert_eq!(
+            region("via_caller"),
+            Some(RegionSeed::CallerInput {
+                name: "extra".to_string()
+            })
+        );
+        // A table with none of the recognized keys → no seed.
+        assert!(region("unknown_tbl").is_none());
+        // A non-string, non-table seed value → no seed.
+        assert!(region("weird_type").is_none());
+    }
+
+    #[test]
+    fn parse_manifest_seeds_unnamed_task_region_by_default() {
+        // A region literally named `task` with no explicit `seed` still gets an
+        // implicit CallerInput seed, preserving pre-feature task seeding.
+        let toml = r#"
+[agent]
+name = "implicit-task"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+
+[context.regions]
+task = { kind = "pinned", max_tokens = 4000 }
+conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        assert_eq!(
+            bp.context_layout.get_region("task").unwrap().seed,
+            Some(RegionSeed::CallerInput {
+                name: "task".to_string()
+            })
+        );
     }
 
     #[test]

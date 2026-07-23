@@ -49,8 +49,9 @@ pub use windows::{
 pub enum ControlRequest {
     /// Spawn a new agent.
     Spawn {
-        /// The spawn request.
-        args: SpawnArgs,
+        /// The spawn request. Boxed because it is much larger than the other
+        /// variants' payloads.
+        args: Box<SpawnArgs>,
     },
     /// Query a run's status.
     Status {
@@ -352,7 +353,10 @@ impl ControlClient {
 
     /// Spawn a new agent.
     pub async fn spawn(&self, args: SpawnArgs) -> std::io::Result<ControlResponse> {
-        self.request(&ControlRequest::Spawn { args }).await
+        self.request(&ControlRequest::Spawn {
+            args: Box::new(args),
+        })
+        .await
     }
 
     /// Query a run's status.
@@ -531,10 +535,11 @@ mod tests {
     #[tokio::test]
     async fn spawn_request_round_trips() {
         let resp = round_trip(&ControlRequest::Spawn {
-            args: SpawnArgs {
+            args: Box::new(SpawnArgs {
                 run_id: "run-9".to_string(),
                 blueprint_path: "/agents/x".to_string(),
                 task: "do it".to_string(),
+                regions: Default::default(),
                 model: None,
                 workdir: "/w".to_string(),
                 metadata: Default::default(),
@@ -543,7 +548,7 @@ mod tests {
                 allow: Vec::new(),
                 max_depth: None,
                 parent_run_id: None,
-            },
+            }),
         })
         .await;
         assert_eq!(
@@ -557,10 +562,10 @@ mod tests {
     #[tokio::test]
     async fn spawn_error_from_host_becomes_error_response() {
         let resp = round_trip(&ControlRequest::Spawn {
-            args: SpawnArgs {
+            args: Box::new(SpawnArgs {
                 run_id: "FAIL".to_string(),
                 ..Default::default()
-            },
+            }),
         })
         .await;
         assert_eq!(
@@ -928,7 +933,7 @@ mod tests {
             std::mem::discriminant(
                 &dispatch(
                     ControlRequest::Spawn {
-                        args: SpawnArgs::default()
+                        args: Box::new(SpawnArgs::default())
                     },
                     &op_tx
                 )

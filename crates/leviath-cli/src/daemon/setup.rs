@@ -296,10 +296,11 @@ mod tests {
         .unwrap();
         let (reply, rx) = oneshot::channel();
         host.handle(ControlOp::Spawn {
-            args: SpawnArgs {
+            args: Box::new(SpawnArgs {
                 run_id: "run-s".to_string(),
                 blueprint_path: manifest.to_string_lossy().to_string(),
                 task: "t".to_string(),
+                regions: Default::default(),
                 model: None,
                 workdir: std::env::temp_dir().to_string_lossy().to_string(),
                 metadata: Default::default(),
@@ -308,7 +309,7 @@ mod tests {
                 allow: Vec::new(),
                 max_depth: None,
                 parent_run_id: None,
-            },
+            }),
             reply,
         });
         assert_eq!(rx.await.unwrap(), Ok("run-s".to_string()));
@@ -369,10 +370,11 @@ mod tests {
         // Drive a Spawn control op through the host.
         let (reply, rx) = oneshot::channel();
         host.handle(ControlOp::Spawn {
-            args: SpawnArgs {
+            args: Box::new(SpawnArgs {
                 run_id: "run-1".to_string(),
                 blueprint_path: manifest.to_string_lossy().to_string(),
                 task: "do it".to_string(),
+                regions: Default::default(),
                 model: None,
                 workdir: std::env::temp_dir().to_string_lossy().to_string(),
                 metadata: Default::default(),
@@ -381,7 +383,7 @@ mod tests {
                 allow: Vec::new(),
                 max_depth: None,
                 parent_run_id: None,
-            },
+            }),
             reply,
         });
         assert_eq!(rx.await.unwrap(), Ok("run-1".to_string()));
