@@ -70,6 +70,33 @@ pub struct InferenceJob {
     /// The per-model pool permit, held for the whole request and released when
     /// the job finishes.
     pub permit: InferencePermit,
+    /// When set, count the assembled request's tokens exactly (via the
+    /// provider's `count_tokens`, which uses a remote endpoint where available)
+    /// before calling `infer`, and fail early if it would exceed the model's
+    /// context window. Off by default — the runtime's cheap `len/4` estimates
+    /// drive normal budgeting; this is the opt-in accurate guard.
+    pub exact_token_counting: bool,
+}
+
+/// Flatten a request into the text whose tokens we count for the budget guard:
+/// system blocks, every message's textual content, and each tool's name +
+/// description + JSON schema. This mirrors what the provider sends closely enough
+/// for a context-window check (exact per-message/role overhead is the provider's
+/// to add; the bulk is this text).
+fn flatten_request_text(request: &InferenceRequest) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for block in &request.system {
+        parts.push(block.text.clone());
+    }
+    for msg in &request.messages {
+        parts.push(msg.content.as_text());
+    }
+    for tool in &request.tools {
+        parts.push(tool.name.clone());
+        parts.push(tool.description.clone());
+        parts.push(tool.parameters.to_string());
+    }
+    parts.join("\n")
 }
 
 /// The completed result of an [`InferenceJob`], applied on a later tick by the
@@ -98,7 +125,26 @@ pub async fn run_inference_job(
         provider,
         request,
         permit,
+        exact_token_counting,
     } = job;
+    // Opt-in accurate pre-flight budget guard: count the assembled request
+    // exactly (remote endpoint where the provider has one, heuristic otherwise)
+    // and refuse a request that would overflow the model's context window,
+    // rather than sending it and letting the provider reject it after the fact.
+    if exact_token_counting {
+        let text = flatten_request_text(&request);
+        let used = provider.count_tokens(&text, &request.model).await;
+        let max = provider.max_context_tokens(&request.model);
+        if used.saturating_add(request.max_tokens) > max {
+            drop(permit);
+            let _ = results.send(InferenceOutcome {
+                entity,
+                result: Err(ProviderError::TokenLimitExceeded { used, max }),
+            });
+            wake.notify_one();
+            return;
+        }
+    }
     // Retry transient failures (connection reset, timeout, 429, 5xx) with
     // exponential backoff, holding the permit across the backoff; a permanent
     // error fails immediately. The whole thing is bounded by `job_timeout` so a
@@ -180,7 +226,7 @@ mod tests {
                 Fixed::Err(m) => Err(ProviderError::Other(m.clone())),
             }
         }
-        fn count_tokens(&self, _text: &str, _model: &str) -> usize {
+        async fn count_tokens(&self, _text: &str, _model: &str) -> usize {
             1
         }
         fn max_context_tokens(&self, _model: &str) -> usize {
@@ -201,6 +247,7 @@ mod tests {
             provider,
             request: test_request(),
             permit: pools.try_acquire("m").expect("free pool"),
+            exact_token_counting: false,
         }
     }
 
@@ -222,6 +269,7 @@ mod tests {
             provider,
             request: test_request(),
             permit,
+            exact_token_counting: false,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let policy = RetryPolicy {
@@ -272,13 +320,151 @@ mod tests {
         assert!(outcome.result.is_err());
     }
 
+    /// A provider with a fixed `count_tokens` result and context window, used to
+    /// drive the opt-in pre-inference budget guard. `infer` always succeeds.
+    struct Counter {
+        count: usize,
+        max: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for Counter {
+        async fn infer(
+            &self,
+            _req: InferenceRequest,
+        ) -> leviath_providers::Result<InferenceResponse> {
+            Ok(response("ok"))
+        }
+        async fn count_tokens(&self, _text: &str, _model: &str) -> usize {
+            self.count
+        }
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            self.max
+        }
+        fn name(&self) -> &str {
+            "counter"
+        }
+        fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+    }
+
+    fn counting_job(provider: Arc<dyn Provider>, exact: bool) -> InferenceJob {
+        let pools = InferencePools::new(InferencePoolConfig::new());
+        InferenceJob {
+            entity: Entity::from_raw(7),
+            provider,
+            request: test_request(), // max_tokens: 100
+            permit: pools.try_acquire("m").expect("free pool"),
+            exact_token_counting: exact,
+        }
+    }
+
     #[test]
-    fn fixed_provider_metadata_is_exercised() {
+    fn flatten_request_text_includes_system_messages_and_tools() {
+        use leviath_providers::{SystemBlock, Tool};
+        let req = InferenceRequest {
+            system: vec![SystemBlock {
+                text: "sys".to_string(),
+                cache_hint: leviath_core::CacheHint::Never,
+            }],
+            messages: vec![leviath_providers::Message {
+                role: "user".to_string(),
+                content: "hello".into(),
+                cache_breakpoint: false,
+            }],
+            model: "m".to_string(),
+            max_tokens: 10,
+            temperature: 0.0,
+            tools: vec![Tool {
+                name: "search".to_string(),
+                description: "find things".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+            extra: serde_json::Value::Null,
+        };
+        let text = flatten_request_text(&req);
+        assert!(text.contains("sys"));
+        assert!(text.contains("hello"));
+        assert!(text.contains("search"));
+        assert!(text.contains("find things"));
+        assert!(text.contains("object"));
+    }
+
+    #[tokio::test]
+    async fn guard_rejects_request_over_context_window() {
+        // count(950) + max_tokens(100) = 1050 > context(1000) ⇒ rejected pre-flight.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let provider = Arc::new(Counter {
+            count: 950,
+            max: 1000,
+        });
+        run_inference_job(
+            counting_job(provider, true),
+            tx,
+            Arc::new(Notify::new()),
+            RetryPolicy::default(),
+        )
+        .await;
+        let outcome = rx.try_recv().expect("outcome sent");
+        let err = outcome.result.expect_err("should be rejected");
+        assert!(
+            matches!(
+                err,
+                ProviderError::TokenLimitExceeded {
+                    used: 950,
+                    max: 1000
+                }
+            ),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn guard_allows_request_within_context_window() {
+        // count(800) + 100 = 900 ≤ 1000 ⇒ proceeds to infer.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let provider = Arc::new(Counter {
+            count: 800,
+            max: 1000,
+        });
+        run_inference_job(
+            counting_job(provider, true),
+            tx,
+            Arc::new(Notify::new()),
+            RetryPolicy::default(),
+        )
+        .await;
+        let outcome = rx.try_recv().expect("outcome sent");
+        assert_eq!(outcome.result.expect("should succeed").content, "ok");
+    }
+
+    #[tokio::test]
+    async fn guard_off_skips_the_count_and_proceeds() {
+        // Even wildly over budget, with the flag off the guard never runs.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let provider = Arc::new(Counter {
+            count: 1_000_000,
+            max: 1000,
+        });
+        run_inference_job(
+            counting_job(provider, false),
+            tx,
+            Arc::new(Notify::new()),
+            RetryPolicy::default(),
+        )
+        .await;
+        let outcome = rx.try_recv().expect("outcome sent");
+        assert_eq!(outcome.result.expect("should succeed").content, "ok");
+    }
+
+    #[tokio::test]
+    async fn fixed_provider_metadata_is_exercised() {
         // Covers the mock's non-`infer` trait methods (the pipeline resolves
         // these off the provider elsewhere; here we just keep them measured).
         let p = Fixed::Ok(response("x"));
         assert_eq!(p.name(), "fixed");
-        assert_eq!(p.count_tokens("t", "m"), 1);
+        assert_eq!(p.count_tokens("t", "m").await, 1);
         assert_eq!(p.max_context_tokens("m"), 100_000);
         let _ = p.capabilities("m");
     }
@@ -332,7 +518,7 @@ mod tests {
                 None => Err(ProviderError::Other("exhausted".to_string())),
             }
         }
-        fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+        async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
             1
         }
         fn max_context_tokens(&self, _m: &str) -> usize {
@@ -426,14 +612,14 @@ mod tests {
         assert_eq!(*provider.calls.lock().unwrap(), 1); // no retry on a permanent error
     }
 
-    #[test]
-    fn scripted_provider_metadata_is_exercised() {
+    #[tokio::test]
+    async fn scripted_provider_metadata_is_exercised() {
         let p = Scripted {
             steps: std::sync::Mutex::new(std::collections::VecDeque::new()),
             calls: std::sync::Mutex::new(0),
         };
         assert_eq!(p.name(), "scripted");
-        assert_eq!(p.count_tokens("t", "m"), 1);
+        assert_eq!(p.count_tokens("t", "m").await, 1);
         assert_eq!(p.max_context_tokens("m"), 100_000);
         let _ = p.capabilities("m");
     }

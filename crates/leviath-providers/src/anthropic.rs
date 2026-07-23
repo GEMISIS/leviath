@@ -272,6 +272,38 @@ impl AnthropicProvider {
         }
     }
 
+    /// Call Anthropic's exact `/messages/count_tokens` endpoint for `text`.
+    ///
+    /// Wraps the text as a single user message (the endpoint counts structured
+    /// message input). Returns the reported `input_tokens`, or an error the
+    /// caller turns into a heuristic fallback. Does not consume the inference
+    /// rate limiter — counting is a cheap, best-effort side call.
+    async fn count_tokens_remote(&self, text: &str, model: &str) -> Result<usize> {
+        let url = format!("{}/messages/count_tokens", self.base_url);
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [{ "role": "user", "content": text }],
+        });
+        let response = self
+            .apply_headers(self.client.post(&url))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+        let response = crate::provider::check_http_response(response, None).await?;
+        let value: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+        value
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .ok_or_else(|| {
+                ProviderError::InvalidResponse("count_tokens missing input_tokens".to_string())
+            })
+    }
+
     /// Build the request body for the Anthropic API.
     fn build_request_body(&self, request: &InferenceRequest) -> serde_json::Value {
         // Anthropic allows at most 4 `cache_control` blocks per request, counted
@@ -661,9 +693,19 @@ impl Provider for AnthropicProvider {
         Ok(Box::pin(stream))
     }
 
-    fn count_tokens(&self, text: &str, _model: &str) -> usize {
-        // Anthropic-specific: ~3.5 chars per token (more efficient than GPT)
-        (text.len() as f32 / 3.5) as usize
+    async fn count_tokens(&self, text: &str, model: &str) -> usize {
+        // Prefer the exact `/messages/count_tokens` endpoint; fall back to the
+        // ~3.5 chars/token heuristic on any error (network, non-2xx, parse).
+        match self.count_tokens_remote(text, model).await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "Anthropic count_tokens endpoint failed; using heuristic"
+                );
+                crate::tokenizer::count_tokens(text, model)
+            }
+        }
     }
 
     fn max_context_tokens(&self, model: &str) -> usize {
@@ -1560,28 +1602,92 @@ mod tests {
 
     // ── Additional coverage tests ──────────────────────────────────────────
 
-    #[test]
-    fn test_count_tokens_basic() {
-        let provider = AnthropicProvider::new("test-key".to_string());
-        let tokens = provider.count_tokens("Hello, world!", "claude-sonnet-4-6");
+    /// Build a provider whose count-token endpoint is unreachable, so
+    /// `count_tokens` deterministically falls back to the local heuristic
+    /// without any real network call.
+    fn heuristic_only_provider() -> AnthropicProvider {
+        AnthropicProvider {
+            client: reqwest::Client::new(),
+            api_key: "test-key".to_string(),
+            base_url: "http://127.0.0.1:19997".to_string(),
+            rate_limiter: None,
+            capability_overrides: HashMap::new(),
+            cache_ttl: CacheTtl::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_count_tokens_basic() {
+        let provider = heuristic_only_provider();
+        let tokens = provider
+            .count_tokens("Hello, world!", "claude-sonnet-4-6")
+            .await;
         assert!(tokens > 0);
         // ~3.5 chars per token → 13 chars ≈ 3-4 tokens
         assert!(tokens < 10);
     }
 
-    #[test]
-    fn test_count_tokens_empty() {
-        let provider = AnthropicProvider::new("test-key".to_string());
-        let tokens = provider.count_tokens("", "claude-sonnet-4-6");
+    #[tokio::test]
+    async fn test_count_tokens_empty() {
+        let provider = heuristic_only_provider();
+        let tokens = provider.count_tokens("", "claude-sonnet-4-6").await;
         assert_eq!(tokens, 0);
     }
 
-    #[test]
-    fn test_count_tokens_long_string() {
-        let provider = AnthropicProvider::new("test-key".to_string());
+    #[tokio::test]
+    async fn test_count_tokens_long_string() {
+        let provider = heuristic_only_provider();
         let text = "a".repeat(3500);
-        let tokens = provider.count_tokens(&text, "claude-sonnet-4-6");
-        assert_eq!(tokens, 1000); // 3500 / 3.5 = 1000
+        let tokens = provider.count_tokens(&text, "claude-sonnet-4-6").await;
+        assert_eq!(tokens, 1000); // heuristic fallback: 3500 / 3.5 = 1000
+    }
+
+    #[tokio::test]
+    async fn test_count_tokens_uses_exact_endpoint() {
+        // The endpoint's `input_tokens` wins over the heuristic when reachable.
+        let url = spawn_mock_server(200, "OK", br#"{"input_tokens": 42}"#).await;
+        let provider = AnthropicProvider {
+            client: reqwest::Client::new(),
+            api_key: "test-key".to_string(),
+            base_url: url,
+            rate_limiter: None,
+            capability_overrides: HashMap::new(),
+            cache_ttl: CacheTtl::default(),
+        };
+        let tokens = provider.count_tokens("anything", "claude-sonnet-4-6").await;
+        assert_eq!(tokens, 42);
+    }
+
+    #[tokio::test]
+    async fn test_count_tokens_falls_back_on_error_status() {
+        // A 500 from the endpoint → heuristic fallback (7 chars / 3.5 = 2).
+        let url = spawn_mock_server(500, "Internal Server Error", b"boom").await;
+        let provider = AnthropicProvider {
+            client: reqwest::Client::new(),
+            api_key: "test-key".to_string(),
+            base_url: url,
+            rate_limiter: None,
+            capability_overrides: HashMap::new(),
+            cache_ttl: CacheTtl::default(),
+        };
+        let tokens = provider.count_tokens("1234567", "claude-sonnet-4-6").await;
+        assert_eq!(tokens, 2);
+    }
+
+    #[tokio::test]
+    async fn test_count_tokens_falls_back_on_missing_field() {
+        // 200 but no `input_tokens` → heuristic fallback (7 chars / 3.5 = 2).
+        let url = spawn_mock_server(200, "OK", br#"{"unexpected": true}"#).await;
+        let provider = AnthropicProvider {
+            client: reqwest::Client::new(),
+            api_key: "test-key".to_string(),
+            base_url: url,
+            rate_limiter: None,
+            capability_overrides: HashMap::new(),
+            cache_ttl: CacheTtl::default(),
+        };
+        let tokens = provider.count_tokens("1234567", "claude-sonnet-4-6").await;
+        assert_eq!(tokens, 2);
     }
 
     #[test]

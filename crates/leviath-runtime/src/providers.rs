@@ -58,7 +58,7 @@ mod tests {
         ) -> Result<InferenceResponse, ProviderError> {
             Err(ProviderError::ApiError("stub".to_string()))
         }
-        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+        async fn count_tokens(&self, text: &str, _model: &str) -> usize {
             text.len()
         }
         fn max_context_tokens(&self, _model: &str) -> usize {
@@ -97,7 +97,7 @@ mod tests {
     async fn stub_provider_methods_are_exercised() {
         let p = StubProvider;
         assert_eq!(p.name(), "stub");
-        assert_eq!(p.count_tokens("abcd", "m"), 4);
+        assert_eq!(p.count_tokens("abcd", "m").await, 4);
         assert_eq!(p.max_context_tokens("m"), 8192);
         let _ = p.capabilities("m");
         let request = InferenceRequest {

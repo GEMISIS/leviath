@@ -478,7 +478,15 @@ pub trait Provider: Send + Sync {
     }
 
     /// Count tokens in the given text for this provider's models.
-    fn count_tokens(&self, text: &str, model: &str) -> usize;
+    ///
+    /// Providers with an exact remote token-count endpoint (Anthropic, Gemini)
+    /// call it here and fall back to a local heuristic on any error, so this is
+    /// infallible. Providers without such an endpoint (OpenAI via tiktoken,
+    /// OpenRouter, Ollama, Claude Code) compute locally and never `.await` on
+    /// the network. Because an implementation may perform a network round-trip,
+    /// do **not** call this on a hot per-entry accounting path; use it for
+    /// bounded, request-level checks.
+    async fn count_tokens(&self, text: &str, model: &str) -> usize;
 
     /// Get the maximum context tokens for a model.
     fn max_context_tokens(&self, model: &str) -> usize;
@@ -867,7 +875,7 @@ mod tests {
             })
         }
 
-        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+        async fn count_tokens(&self, text: &str, _model: &str) -> usize {
             text.len()
         }
 
@@ -917,10 +925,10 @@ mod tests {
         assert!(models.is_empty());
     }
 
-    #[test]
-    fn minimal_provider_trait_accessors() {
+    #[tokio::test]
+    async fn minimal_provider_trait_accessors() {
         let provider = MinimalProvider;
-        assert_eq!(provider.count_tokens("hello", "any"), 5);
+        assert_eq!(provider.count_tokens("hello", "any").await, 5);
         assert_eq!(provider.max_context_tokens("any"), 1000);
         assert_eq!(provider.name(), "minimal");
         assert_eq!(
