@@ -185,6 +185,27 @@ A deterministic sensitivity model (Public / Internal / Private) tags every conte
 
 </td>
 </tr>
+<tr>
+<td width="33%" valign="top">
+
+**📦 Sandboxed Tool Execution**
+
+By default an agent's shell commands run **directly on your machine** — no runtime, nothing to install. Opt in per agent *or* per stage to route them into an isolated environment instead: a **container** (Docker, Podman, or any Docker-CLI-compatible engine — Leviath isn't prescriptive) or a fresh set of Linux **namespaces** (no runtime needed). Run analysis on the host and implementation in a networkless container. The daemon creates a warm container per agent and tears it down at reap, so no orphans; file tools keep working over the bind-mounted workdir.
+
+```toml
+[sandbox]
+kind = "container"   # none (default) | namespace | container
+image = "ubuntu:24.04"
+# engine = "podman"  # optional; auto-detects docker/podman when omitted
+
+[stages.implement.sandbox]
+kind = "container"
+image = "node:22-slim"
+network = false      # isolate this stage
+```
+
+</td>
+</tr>
 </table>
 
 ## 📊 Benchmarks

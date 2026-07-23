@@ -92,6 +92,13 @@ pub type Spawner = Box<dyn FnMut(&mut PipelineWorld, &SpawnArgs) -> Result<Entit
 /// [`WorldHost::set_reloader`].
 pub type Reloader = Box<dyn FnMut(&mut PipelineWorld, &str) -> Option<Entity> + Send>;
 
+/// The daemon-installed hook run just before a terminal agent's entity is
+/// despawned (reaped). It receives the world and the entity while both are still
+/// valid, so the daemon can release per-agent resources the runtime doesn't know
+/// about — tearing down the agent's sandbox and dropping its tool state.
+/// Installed with [`WorldHost::set_reaper`]; a no-op when none is set.
+pub type Reaper = Box<dyn FnMut(&mut PipelineWorld, Entity) + Send>;
+
 /// A world-access request from an agent's tool lane. The sub-agent tools
 /// (`spawn_agent`/`check_agent`/`send_to_agent`/`kill_agent`) need the world and
 /// the [`Spawner`], which only the host holds — the tool lane runs async, off the
@@ -352,6 +359,7 @@ pub struct WorldHost {
     interactions: InteractionHub,
     spawner: Option<Spawner>,
     reloader: Option<Reloader>,
+    reaper: Option<Reaper>,
     events: broadcast::Sender<WorldEvent>,
     emitted: HashMap<String, Emitted>,
     emitted_interactions: HashSet<String>,
@@ -383,6 +391,7 @@ impl WorldHost {
             interactions,
             spawner: None,
             reloader: None,
+            reaper: None,
             events,
             emitted: HashMap::new(),
             emitted_interactions: HashSet::new(),
@@ -554,13 +563,21 @@ impl WorldHost {
             self.emitted.insert(run_id, cur);
         }
 
-        // Reap: despawn the entity and erase its host-map entries. Iterating a
-        // snapshot of `by_run_id` above means removing here is safe.
+        // Reap: run the daemon's reap hook (sandbox teardown + tool-state drop)
+        // while the entity is still valid, then despawn it and erase its host-map
+        // entries. Iterating a snapshot of `by_run_id` above means removing here
+        // is safe. The reaper is moved out for the loop to avoid borrowing `self`
+        // twice, then restored.
+        let mut reaper = self.reaper.take();
         for (run_id, entity) in to_reap {
+            if let Some(reaper) = reaper.as_mut() {
+                reaper(&mut self.world, entity);
+            }
             self.world.world_mut().despawn(entity);
             self.by_run_id.remove(&run_id);
             self.emitted.remove(&run_id);
         }
+        self.reaper = reaper;
 
         for (agent_id, request) in self.interactions.pending() {
             if self.emitted_interactions.insert(request.id.clone()) {
@@ -601,6 +618,13 @@ impl WorldHost {
     /// Without one, an op targeting a run that isn't in memory just misses.
     pub fn set_reloader(&mut self, reloader: Reloader) {
         self.reloader = Some(reloader);
+    }
+
+    /// Install the reap hook run just before each terminal agent is despawned,
+    /// so the daemon can tear down that agent's sandbox and drop its tool state.
+    /// Without one, reaping just despawns the entity (the prior behavior).
+    pub fn set_reaper(&mut self, reaper: Reaper) {
+        self.reaper = Some(reaper);
     }
 
     /// Resolve a run id to a live entity, paging it in from disk if it has been
@@ -1743,6 +1767,39 @@ mod tests {
         host.emit_events();
         host.emit_events();
         assert!(host.live_entity("active").is_some());
+    }
+
+    #[tokio::test]
+    async fn reaper_runs_once_per_agent_before_despawn() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let mut host = host_with(vec![]);
+
+        // The reap hook records that it saw a still-live entity, proving it runs
+        // before despawn. A `static` counter dodges the `'static` closure bound.
+        static SEEN_LIVE: AtomicUsize = AtomicUsize::new(0);
+        SEEN_LIVE.store(0, Ordering::SeqCst);
+        host.set_reaper(Box::new(|world, entity| {
+            // Branch-free (`live as usize`) so the whole closure body is covered
+            // by a single firing; the assertion below confirms `live` was true.
+            let live = world.world().get::<AgentState>(entity).is_some();
+            SEEN_LIVE.fetch_add(live as usize, Ordering::SeqCst);
+        }));
+
+        let root = {
+            let mut s = agent_state("root");
+            s.status = AgentStatus::Complete;
+            host.world.world_mut().spawn(s).id()
+        };
+        host.register("root", root);
+        host.emit_events(); // first pass: emit terminal event, not yet reaped
+        assert_eq!(SEEN_LIVE.load(Ordering::SeqCst), 0);
+        host.emit_events(); // second pass: reaper fires, then despawn
+        assert!(host.live_entity("root").is_none(), "reaped after emit");
+        assert_eq!(
+            SEEN_LIVE.load(Ordering::SeqCst),
+            1,
+            "reaper ran exactly once, while the entity was still live"
+        );
     }
 
     /// Spawn a `Waiting` agent (optionally with an extra marker component) and

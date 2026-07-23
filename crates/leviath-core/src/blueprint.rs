@@ -65,6 +65,12 @@ pub struct Blueprint {
     /// File tracking configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_tracking: Option<FileTrackingConfig>,
+
+    /// Agent-level sandbox configuration for tool execution. Per-stage
+    /// `[stages.<name>.sandbox]` overrides this; both cascade through
+    /// [`crate::resolve_sandbox`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<crate::sandbox::ToolSandboxConfig>,
 }
 
 impl Blueprint {
@@ -90,6 +96,7 @@ impl Blueprint {
             batch_tool_hint: None,
             repetition_detection: None,
             file_tracking: None,
+            sandbox: None,
         }
     }
 
@@ -664,6 +671,13 @@ pub struct Stage {
     #[serde(default)]
     pub batch_tool_hint: Option<bool>,
 
+    /// Per-stage sandbox override. `None` inherits the agent-level
+    /// `Blueprint.sandbox` (which in turn inherits the global default = host).
+    /// Set a tighter sandbox here to isolate a single stage — e.g. run analysis
+    /// on the host but implementation in a networkless container.
+    #[serde(default)]
+    pub sandbox: Option<crate::sandbox::ToolSandboxConfig>,
+
     /// Optional routing configuration for tool results.
     /// When set, tool results are routed to the configured region(s) instead
     /// of the default "conversation" region.
@@ -698,6 +712,7 @@ impl Stage {
             allow_as_worker: false,
             security: None,
             batch_tool_hint: None,
+            sandbox: None,
             tool_result_routing: None,
         }
     }

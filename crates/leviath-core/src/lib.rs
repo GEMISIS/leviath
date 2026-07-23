@@ -22,6 +22,7 @@ pub mod policy;
 pub mod region;
 pub mod run_archive;
 pub mod run_meta;
+pub mod sandbox;
 pub mod taint;
 
 pub use blueprint::{
@@ -37,6 +38,7 @@ pub use region::{
     ContentFormat, EntryKind, EvictionStrategy, Region, RegionEntry, RegionKind, RegionSchema,
     SerializedToolCall,
 };
+pub use sandbox::{OnUnavailable, SandboxKind, ToolSandboxConfig, resolve_sandbox};
 pub use taint::{
     GateDecision, GateDecisionSource, GateEvent, RegionTaint, SecurityConfig, TaintLevel,
     ToolClassification, ToolDirection,

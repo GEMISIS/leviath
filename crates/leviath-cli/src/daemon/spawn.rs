@@ -165,6 +165,7 @@ fn build_tool_state(
     agent_perms: HashMap<String, String>,
     launch_overrides: HashMap<String, crate::config::ToolPolicy>,
     subagent: Option<SubAgentHandle>,
+    sandbox: Option<Arc<crate::daemon::sandbox_manager::SandboxManager>>,
 ) -> Arc<AgentToolState> {
     let entry_perms = stage_perms_by_index
         .get(entry_index)
@@ -183,6 +184,7 @@ fn build_tool_state(
         interaction: hub.backend_for(run_id),
         stage_name: Arc::new(StdMutex::new(entry_stage.to_string())),
         subagent,
+        sandbox,
     })
 }
 
@@ -428,21 +430,57 @@ fn build_agent_inner(
         }
     }
 
-    // 2. Per-agent built-in tools (over the agent's workdir).
-    let builtins = Arc::new(leviath_tools::BuiltinTools::new(
-        leviath_tools::ToolContext::new(std::path::PathBuf::from(&args.workdir)),
+    // 2a. Entry stage + per-stage sandbox resolution. Each stage's effective
+    // sandbox cascades stage → agent → global (`resolve_sandbox`); building the
+    // manager creates any containers up front and fails here (returning the
+    // error to the spawner) when a required runtime is unavailable and the config
+    // says to error. `None` means no stage is sandboxed → no executor attached
+    // (zero overhead, exact prior host behavior).
+    let entry_stage = blueprint
+        .entry_stage
+        .clone()
+        .or_else(|| blueprint.stages.first().map(|s| s.name.clone()))
+        .unwrap_or_default();
+    let entry_index = blueprint
+        .stages
+        .iter()
+        .position(|s| s.name == entry_stage)
+        .unwrap_or(0);
+    let stage_sandbox_by_index: Vec<leviath_core::ToolSandboxConfig> = blueprint
+        .stages
+        .iter()
+        .map(|s| {
+            leviath_core::resolve_sandbox(
+                config.sandbox.as_ref(),
+                blueprint.sandbox.as_ref(),
+                s.sandbox.as_ref(),
+            )
+        })
+        .collect();
+    let sandbox = crate::daemon::sandbox_manager::SandboxManager::build(
+        &args.run_id,
+        stage_sandbox_by_index,
+        &args.workdir,
+        entry_index,
+    )?
+    .map(Arc::new);
+
+    // 2b. Per-agent built-in tools (over the agent's workdir), routing shell
+    // execution through the sandbox when one is configured.
+    let mut builtins = leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(
+        std::path::PathBuf::from(&args.workdir),
     ));
+    if let Some(mgr) = &sandbox {
+        builtins =
+            builtins.with_shell_executor(mgr.clone() as Arc<dyn leviath_tools::ShellExecutor>);
+    }
+    let builtins = Arc::new(builtins);
     let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
     let mut all_tool_defs = builtins.tool_defs();
     all_tool_defs.extend(leviath_tools::BuiltinTools::subagent_tool_defs());
     all_tool_defs.extend(mcp_tool_defs.iter().cloned());
 
     // 3. Resolve stages against the world's providers.
-    let entry_stage = blueprint
-        .entry_stage
-        .clone()
-        .or_else(|| blueprint.stages.first().map(|s| s.name.clone()))
-        .unwrap_or_default();
     let stages = {
         let registry = &world
             .get_resource::<Providers>()
@@ -495,11 +533,6 @@ fn build_agent_inner(
         .iter()
         .map(|s| s.tool_permissions.clone())
         .collect();
-    let entry_index = blueprint
-        .stages
-        .iter()
-        .position(|s| s.name == entry_stage)
-        .unwrap_or(0);
     // Agent-level tool permissions (the manifest's top-level `[tool_permissions]`,
     // recorded in blueprint metadata). Populates the tool state's agent-level
     // policy layer (between stage and global in `resolve_policy`), which was
@@ -611,6 +644,7 @@ fn build_agent_inner(
         agent_perms,
         launch_overrides,
         Some(subagent),
+        sandbox,
     );
     tool_service.register(entity, state);
 
@@ -918,6 +952,73 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("spec"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn build_agent_attaches_sandbox_when_configured() {
+        // A `namespace` sandbox with `on_unavailable = "warn"` builds on every
+        // platform without running any external command, so this deterministically
+        // exercises the spawn-side sandbox wiring (manager built + attached).
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"sb\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [sandbox]\nkind = \"namespace\"\non_unavailable = \"warn\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let entity = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+            sub_tx(),
+        )
+        .expect("spawn succeeds");
+        // The agent's tool state carries a sandbox manager.
+        let state = cli.take(entity).expect("state registered");
+        assert!(state.sandbox.is_some(), "sandbox manager attached");
+    }
+
+    #[tokio::test]
+    async fn build_agent_errors_when_sandbox_runtime_unavailable() {
+        // A container sandbox naming a nonexistent engine fails to start on every
+        // platform (no runtime needed), so build_agent surfaces the error — this
+        // covers the `?` on `SandboxManager::build` uniformly across OSes,
+        // independent of which container runtimes happen to be installed.
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"sb\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [sandbox]\nkind = \"container\"\nimage = \"x\"\nengine = \"leviath-no-such-engine\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let err = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+            sub_tx(),
+        )
+        .expect_err("a nonexistent engine can't start the container");
+        assert!(err.contains("sandbox unavailable"), "got: {err}");
     }
 
     #[tokio::test]
