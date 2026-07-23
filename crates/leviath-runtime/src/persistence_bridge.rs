@@ -38,6 +38,12 @@ pub struct PersistJob {
     /// restart. `None` ⇒ the agent isn't waiting on a fan-out (any stale file is
     /// removed).
     pub fanout: Option<String>,
+    /// Serialized [`InteractionPointState`](crate::interaction_points::InteractionPointState)
+    /// for an agent parked at a stage-boundary interaction point (e.g. plan_approval),
+    /// written to `interactions.json` so a restart re-presents the same prompt rather
+    /// than dropping it and re-inferring (issue #38). `None` ⇒ the agent isn't parked
+    /// at an interaction point (any stale file is removed).
+    pub interactions: Option<String>,
 }
 
 /// The single-lane persistence worker: writes each [`PersistJob`]'s files under
@@ -166,6 +172,15 @@ async fn write_snapshot(
         Some(json) => write_bytes_atomic(&fanout_path, json.as_bytes(), &job.run_id).await,
         None => {
             let _ = tokio::fs::remove_file(&fanout_path).await;
+        }
+    }
+    // Interaction-point waiting state (whole-file), or remove any stale file once the
+    // agent is no longer parked at a stage-boundary interaction point.
+    let interactions_path = dir.join("interactions.json");
+    match &job.interactions {
+        Some(json) => write_bytes_atomic(&interactions_path, json.as_bytes(), &job.run_id).await,
+        None => {
+            let _ = tokio::fs::remove_file(&interactions_path).await;
         }
     }
 }
@@ -339,6 +354,7 @@ mod tests {
             log_appends: vec![],
             taint_audit: None,
             fanout: None,
+            interactions: None,
         })
         .unwrap();
         drop(tx); // close so the worker loop ends
@@ -364,6 +380,7 @@ mod tests {
             log_appends: vec![],
             taint_audit: None,
             fanout: None,
+            interactions: None,
         }
     }
 
@@ -581,6 +598,7 @@ mod tests {
                 log_appends: vec![(0, "[tool] list_dir: .".to_string())],
                 taint_audit: None,
                 fanout: None,
+                interactions: None,
             },
             "machine-test",
             "world-test",
@@ -613,6 +631,7 @@ mod tests {
                 log_appends: vec![],
                 taint_audit: Some((2, r#"[{"tool_name":"shell"}]"#.to_string())),
                 fanout: None,
+                interactions: None,
             },
             "machine-test",
             "world-test",
@@ -622,6 +641,31 @@ mod tests {
         let audit =
             std::fs::read_to_string(dir.path().join("r/stages/2/taint_audit.json")).unwrap();
         assert!(audit.contains("shell"));
+    }
+
+    #[tokio::test]
+    async fn interactions_sidecar_is_written_then_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r/interactions.json");
+
+        // A job parked at an interaction point writes the sidecar.
+        write_snapshot(
+            dir.path(),
+            &PersistJob {
+                interactions: Some(r#"{"cursor":0,"round":1,"body":"the plan"}"#.to_string()),
+                ..job("r")
+            },
+            "machine-test",
+            "world-test",
+            None,
+        )
+        .await;
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("the plan"));
+
+        // A later job that is no longer parked removes the stale sidecar.
+        write_snapshot(dir.path(), &job("r"), "machine-test", "world-test", None).await;
+        assert!(!path.exists());
     }
 
     #[tokio::test]
@@ -638,6 +682,7 @@ mod tests {
                 log_appends: vec![],
                 taint_audit: None,
                 fanout: None,
+                interactions: None,
             },
             "machine-test",
             "world-test",
@@ -675,6 +720,7 @@ mod tests {
                 log_appends: vec![],
                 taint_audit: None,
                 fanout: None,
+                interactions: None,
             },
             "machine-test",
             "world-test",
@@ -703,6 +749,7 @@ mod tests {
                 log_appends: vec![],
                 taint_audit: None,
                 fanout: None,
+                interactions: None,
             },
             "machine-test",
             "world-test",
@@ -735,6 +782,7 @@ mod tests {
                 log_appends: vec![],
                 taint_audit: None,
                 fanout: None,
+                interactions: None,
             },
             "machine-test",
             "world-test",
