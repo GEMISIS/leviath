@@ -819,6 +819,13 @@ impl WorldHost {
         }
     }
 
+    /// Flush all queued persistence and stop the hosted world, guaranteeing every
+    /// dirty agent's final snapshot reaches disk. Call after [`Self::serve`]
+    /// returns (see [`PipelineWorld::flush_and_stop`]).
+    pub async fn flush_and_stop(&mut self) {
+        self.world.flush_and_stop().await;
+    }
+
     /// Run the host: drive the world to quiescence, then park until an async
     /// result wakes it, a control op arrives, or shutdown is signalled. Returns
     /// when shutdown fires or the control channel closes.
@@ -1486,6 +1493,15 @@ mod tests {
         assert!(rx.await.unwrap());
         // The serve loop returns once the world's shutdown is signalled.
         handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn flush_and_stop_delegates_to_the_world() {
+        // The host's flush-and-stop drains the world's persistence lane; calling it
+        // (even with no agents) returns cleanly and is idempotent.
+        let mut host = host_with(vec![]);
+        host.flush_and_stop().await;
+        host.flush_and_stop().await; // second call is a no-op
     }
 
     #[tokio::test]
