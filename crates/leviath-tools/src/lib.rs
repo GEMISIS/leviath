@@ -44,7 +44,36 @@ impl ToolContext {
     }
 }
 
-/// Built-in tools: read_file, write_file, edit_file, list_dir, bash.
+/// Alias → canonical built-in tool name.
+///
+/// A blueprint's `available_tools` may name a built-in by any alias listed here;
+/// it resolves to the canonical tool that is advertised to the model and
+/// executed. This is the single source of truth for aliases — [`names`],
+/// [`BuiltinTools::execute`], and the daemon's `available_tools` filtering all go
+/// through [`canonical_tool_name`], so adding a row here is all it takes to add
+/// an alias everywhere. Add rows only for genuine synonyms of an existing tool.
+///
+/// [`names`]: BuiltinTools::names
+pub const TOOL_ALIASES: &[(&str, &str)] = &[
+    // `bash` is the familiar name for the general shell tool.
+    ("bash", "shell"),
+];
+
+/// Resolve `name` through [`TOOL_ALIASES`] to its canonical built-in name.
+///
+/// Returns the input unchanged when it is not an alias — which includes every
+/// canonical built-in and every MCP tool name, so this is safe to apply to any
+/// tool name before matching it against a definition.
+pub fn canonical_tool_name(name: &str) -> &str {
+    for (alias, canonical) in TOOL_ALIASES {
+        if *alias == name {
+            return canonical;
+        }
+    }
+    name
+}
+
+/// Built-in tools: read_file, write_file, edit_file, list_dir, shell.
 pub struct BuiltinTools {
     ctx: ToolContext,
 }
@@ -450,38 +479,47 @@ impl BuiltinTools {
         ]
     }
 
-    /// Names of all built-in tools.
+    /// Names of all built-in tools, including every alias in [`TOOL_ALIASES`].
+    ///
+    /// Aliases are included so tool-call dispatch recognizes a call arriving
+    /// under an alias name as a built-in; the canonical names are what get
+    /// advertised to the model.
     pub fn names(&self) -> Vec<String> {
-        vec![
-            "read_file".to_string(),
-            "read_files".to_string(),
-            "write_file".to_string(),
-            "edit_file".to_string(),
-            "list_dir".to_string(),
-            "shell".to_string(),
-            "bash".to_string(), // Alias for backward compatibility
-            "present_for_review".to_string(),
-            "ask_user_text".to_string(),
-            "ask_user_choice".to_string(),
-            "ask_user_confirm".to_string(),
-            "edit_document".to_string(),
-            "context_write".to_string(),
-            "context_append".to_string(),
-            "context_read".to_string(),
-            "context_delete".to_string(),
-            "context_list".to_string(),
+        let mut names: Vec<String> = [
+            "read_file",
+            "read_files",
+            "write_file",
+            "edit_file",
+            "list_dir",
+            "shell",
+            "present_for_review",
+            "ask_user_text",
+            "ask_user_choice",
+            "ask_user_confirm",
+            "edit_document",
+            "context_write",
+            "context_append",
+            "context_read",
+            "context_delete",
+            "context_list",
         ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        names.extend(TOOL_ALIASES.iter().map(|(alias, _)| alias.to_string()));
+        names
     }
 
-    /// Execute a built-in tool by name, returning the result as a string.
+    /// Execute a built-in tool by name (resolving aliases), returning the result
+    /// as a string.
     pub async fn execute(&self, name: &str, args: Value) -> String {
-        match name {
+        match canonical_tool_name(name) {
             "read_file" => self.read_file(&args).await,
             "read_files" => self.read_files(&args).await,
             "write_file" => self.write_file(&args).await,
             "edit_file" => self.edit_file(&args).await,
             "list_dir" => self.list_dir(&args).await,
-            "shell" | "bash" => self.shell(&args).await,
+            "shell" => self.shell(&args).await,
             n if n.starts_with("context_") => {
                 "[error] context tools must be handled by the runtime".to_string()
             }
@@ -1021,6 +1059,22 @@ mod tests {
         let names = tools.names();
         assert!(names.contains(&"bash".to_string()));
         assert!(names.contains(&"shell".to_string()));
+    }
+
+    #[test]
+    fn canonical_tool_name_resolves_aliases_and_passes_others_through() {
+        // An alias resolves to its canonical name.
+        assert_eq!(canonical_tool_name("bash"), "shell");
+        // A canonical built-in is unchanged.
+        assert_eq!(canonical_tool_name("shell"), "shell");
+        assert_eq!(canonical_tool_name("read_file"), "read_file");
+        // An unknown name (e.g. an MCP tool whose server may not be installed)
+        // passes through untouched, so it is matched/omitted as-is.
+        assert_eq!(canonical_tool_name("acme__do_thing"), "acme__do_thing");
+        // Every alias in the table round-trips to a real canonical name.
+        for (alias, canonical) in TOOL_ALIASES {
+            assert_eq!(canonical_tool_name(alias), *canonical);
+        }
     }
 
     #[test]
