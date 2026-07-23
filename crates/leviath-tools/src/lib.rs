@@ -776,7 +776,12 @@ impl BuiltinTools {
     ) -> (&'static str, &'static str) {
         if let Some(shell) = env_shell
             && (shell.ends_with("/zsh") || shell.ends_with("/bash") || shell.ends_with("/sh"))
+            && shell_exists(&shell)
         {
+            // Only trust `$SHELL` when it actually exists — a stale or
+            // sandbox-missing `$SHELL` (e.g. `/bin/zsh` in an environment that
+            // doesn't ship it) otherwise made every shell call fail to spawn.
+            // When it's missing, fall through to the known-path fallback list.
             let shell: &'static str = Box::leak(shell.into_boxed_str());
             return (shell, "-c");
         }
@@ -1810,8 +1815,11 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn detect_shell_impl_returns_zsh_from_env() {
+        // `$SHELL` is trusted only when it exists on disk.
         let (shell, flag) =
-            BuiltinTools::detect_shell_impl(Some("/usr/local/bin/zsh".to_string()), &|_| false);
+            BuiltinTools::detect_shell_impl(Some("/usr/local/bin/zsh".to_string()), &|s| {
+                s == "/usr/local/bin/zsh"
+            });
         assert_eq!(shell, "/usr/local/bin/zsh");
         assert_eq!(flag, "-c");
     }
@@ -1820,7 +1828,9 @@ mod tests {
     #[test]
     fn detect_shell_impl_returns_bash_from_env() {
         let (shell, flag) =
-            BuiltinTools::detect_shell_impl(Some("/usr/local/bin/bash".to_string()), &|_| false);
+            BuiltinTools::detect_shell_impl(Some("/usr/local/bin/bash".to_string()), &|s| {
+                s == "/usr/local/bin/bash"
+            });
         assert_eq!(shell, "/usr/local/bin/bash");
         assert_eq!(flag, "-c");
     }
@@ -1829,8 +1839,23 @@ mod tests {
     #[test]
     fn detect_shell_impl_returns_sh_from_env() {
         let (shell, flag) =
-            BuiltinTools::detect_shell_impl(Some("/usr/bin/sh".to_string()), &|_| false);
+            BuiltinTools::detect_shell_impl(Some("/usr/bin/sh".to_string()), &|s| {
+                s == "/usr/bin/sh"
+            });
         assert_eq!(shell, "/usr/bin/sh");
+        assert_eq!(flag, "-c");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn detect_shell_impl_falls_back_when_env_shell_is_missing() {
+        // Regression for #79: `$SHELL` is a recognized shell name but does not
+        // exist on disk (a stale or sandbox-missing `/bin/zsh`). It must NOT be
+        // returned — fall through to an available fallback instead of failing
+        // every shell call with "No such file or directory".
+        let (shell, flag) =
+            BuiltinTools::detect_shell_impl(Some("/bin/zsh".to_string()), &|s| s == "/bin/sh");
+        assert_eq!(shell, "/bin/sh");
         assert_eq!(flag, "-c");
     }
 

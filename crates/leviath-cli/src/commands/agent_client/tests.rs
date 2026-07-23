@@ -23,6 +23,10 @@ use tokio::task::JoinHandle;
 /// its on-disk output.
 const RUN_ID: &str = "coder-test-run";
 
+/// The default working directory the harness gives the server, standing in for
+/// the directory `lev agent-client` was launched from.
+const HARNESS_DEFAULT_CWD: &str = "/harness-launch-dir";
+
 /// Aborts a background task when the harness is dropped.
 struct AbortOnDrop(JoinHandle<()>);
 impl Drop for AbortOnDrop {
@@ -128,6 +132,7 @@ impl Harness {
                 control,
                 args,
                 runs_path,
+                HARNESS_DEFAULT_CWD.to_string(),
             )
             .await;
         });
@@ -448,6 +453,7 @@ async fn output_failing_mid_turn_ends_the_turn() {
             control,
             args,
             runs.path().to_path_buf(),
+            HARNESS_DEFAULT_CWD.to_string(),
         ),
     )
     .await;
@@ -473,6 +479,7 @@ async fn a_broken_output_stream_winds_the_server_down() {
             control,
             AgentClientArgs::default(),
             runs,
+            HARNESS_DEFAULT_CWD.to_string(),
         ),
     )
     .await;
@@ -531,6 +538,41 @@ async fn session_new_opens_a_session_and_returns_its_id() {
             .starts_with("coder")
     );
     drop(bp);
+    h.close_input().await;
+}
+
+#[tokio::test]
+async fn empty_cwd_defaults_to_the_launch_directory() {
+    // Regression for #80: a `session/new` with an empty `cwd` must give the
+    // spawned agent the directory `lev agent-client` was launched from (the
+    // harness's default), not an empty workdir that runs in the daemon's dir.
+    let captured = Arc::new(std::sync::Mutex::new(None));
+    let cap = captured.clone();
+    let daemon = ScriptedDaemon::new(vec![completed("complete")], move |req| match req {
+        ControlRequest::Spawn { args } => {
+            *cap.lock().unwrap() = Some(args.workdir.clone());
+            ControlResponse::Spawned {
+                run_id: RUN_ID.to_string(),
+            }
+        }
+        _ => ControlResponse::Ok { ok: true },
+    });
+    let (_bp, args) = blueprint_args();
+    let mut h = Harness::start(daemon, args);
+    h.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}"#)
+        .await;
+    let _ = h.recv().await;
+    // Empty cwd → falls back to the launch directory.
+    h.send(r#"{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":""}}"#)
+        .await;
+    let _ = h.recv().await;
+    h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}"#)
+        .await;
+    let _ = h.recv_until(is_result).await;
+    assert_eq!(
+        captured.lock().unwrap().as_deref(),
+        Some(HARNESS_DEFAULT_CWD)
+    );
     h.close_input().await;
 }
 
@@ -1140,7 +1182,15 @@ async fn an_unreachable_daemon_makes_a_prompt_refuse() {
     let runs_dir = tempfile::tempdir().unwrap();
     let runs_path = runs_dir.path().to_path_buf();
     let server = tokio::spawn(async move {
-        let _ = serve_over(BufReader::new(server_in), server_out, bad, args, runs_path).await;
+        let _ = serve_over(
+            BufReader::new(server_in),
+            server_out,
+            bad,
+            args,
+            runs_path,
+            HARNESS_DEFAULT_CWD.to_string(),
+        )
+        .await;
     });
     let mut h = Harness {
         to_server,

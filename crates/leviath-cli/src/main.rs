@@ -108,12 +108,18 @@ impl RiskyExecutors for RealExecutors {
         // (`agent_client::serve_over`) is fully unit-tested over an in-memory
         // duplex; only the real stdio + socket wiring lives here.
         ensure_daemon_running().await?;
+        // The directory `lev agent-client` was launched from is the default
+        // working dir for sessions whose `session/new` omits `cwd`.
+        let default_cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
         commands::agent_client::serve_over(
             tokio::io::BufReader::new(tokio::io::stdin()),
             tokio::io::stdout(),
             control_client()?,
             args,
             leviath_cli::runstate::runs_dir(),
+            default_cwd,
         )
         .await
     }
