@@ -270,6 +270,13 @@ pub struct SecurityConfig {
 
 impl Default for SecurityConfig {
     fn default() -> Self {
+        // A present `[security]` block (even empty) means "configure security",
+        // so the struct default is taint-on; a manifest with no block at all
+        // yields `None`, which callers must resolve through
+        // [`resolve_security`]/[`resolve_taint_enabled`] (default off). Do NOT
+        // use `unwrap_or_default()` on an optional agent/global config — that
+        // conflates "no block" with "empty block" and forces taint on
+        // everywhere; cascade through the global setting instead.
         Self {
             taint_tracking: true,
         }

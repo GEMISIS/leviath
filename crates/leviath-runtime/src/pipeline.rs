@@ -563,6 +563,7 @@ pub fn dispatch_tools(
             Option<&ToolSensitivities>,
             Option<&mut crate::taint::TaintGate>,
             Option<&crate::gate_prompt::GateResolved>,
+            Option<&crate::components::GateAutoApprove>,
         ),
         With<ReadyForTools>,
     >,
@@ -581,9 +582,21 @@ pub fn dispatch_tools(
     // gate-prompt lane are wired (the daemon); otherwise blocks are returned as
     // `[blocked]` immediately, preserving the headless/non-interactive behavior.
     let interactive = hub.as_ref().zip(gate_stage.as_ref());
-    for (entity, state, result, mut window, routing, sensitivities, mut gate, resolved) in
-        agents.iter_mut()
+    for (
+        entity,
+        state,
+        result,
+        mut window,
+        routing,
+        sensitivities,
+        mut gate,
+        resolved,
+        auto_gate,
+    ) in agents.iter_mut()
     {
+        // `--yolo`: waive taint-gate enforcement so a headless run never blocks
+        // on a gate prompt no one can answer (taint tracking still records).
+        let auto_approve_gates = auto_gate.is_some();
         if state.status != AgentStatus::Active {
             continue; // paused / waiting / cancelled — don't start new work
         }
@@ -623,7 +636,7 @@ pub fn dispatch_tools(
                     continue;
                 }
             }
-            if let Some(gate) = gate.as_deref_mut() {
+            if let Some(gate) = gate.as_deref_mut().filter(|_| !auto_approve_gates) {
                 let decision = gate.check_with_policy(
                     &state.agent_id,
                     &c.name,
@@ -4060,6 +4073,46 @@ mod tests {
         assert!(world.get::<crate::gate_prompt::GateResolved>(e).is_some());
         assert!(world.get::<ReadyForTools>(e).is_none());
         assert!(world.get::<AwaitingTools>(e).is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_tools_auto_approves_a_gate_block_under_yolo() {
+        // Same blocked + interactive scenario as above, but the agent carries
+        // `GateAutoApprove` (set by `--yolo`): the gate is waived, so the call
+        // dispatches to the lane instead of raising a prompt no one can answer.
+        let (jtx, mut jrx) = mpsc::unbounded_channel();
+        let (gtx, _grx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(std::sync::Arc::new(EchoService)));
+        world.insert_resource(ToolStage(jtx));
+        world.insert_resource(crate::interaction_hub::InteractionHub::new());
+        world.insert_resource(crate::gate_prompt::GatePromptStage {
+            outcomes: gtx,
+            wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+            runtime: tokio::runtime::Handle::current(),
+        });
+        let e = world
+            .spawn((
+                agent_state(),
+                infer_with(vec![tc("c_shell", "shell")]),
+                tainted_conv_window(),
+                ReadyForTools,
+                enabled_gate(),
+                crate::components::GateAutoApprove,
+            ))
+            .id();
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_tools);
+        s.run(&mut world);
+        // No gate prompt was raised; the call went to the lane.
+        assert!(
+            world
+                .get::<crate::gate_prompt::AwaitingGatePrompt>(e)
+                .is_none()
+        );
+        assert!(world.get::<AwaitingTools>(e).is_some());
+        assert!(world.get::<ReadyForTools>(e).is_none());
+        assert_eq!(jrx.try_recv().expect("job enqueued").entity, e);
     }
 
     #[tokio::test]

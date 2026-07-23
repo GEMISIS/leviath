@@ -68,6 +68,19 @@ pub struct SubAgentChildren {
 #[derive(Component, Debug, Clone)]
 pub struct AwaitingInteraction;
 
+/// Marker: auto-approve this agent's taint-gate blocks instead of raising a
+/// gate prompt.
+///
+/// Set when an agent is launched with `--yolo` (approve everything, run
+/// unattended). The taint gate raises a `MultipleChoice` interaction that the
+/// tool-policy `--yolo` wildcard does not cover, so without this a headless run
+/// — e.g. one driven over the Agent Client Protocol, where no human can answer —
+/// would block forever on a gate no one resolves. When present,
+/// [`dispatch_tools`](crate::pipeline::dispatch_tools) skips the gate check for
+/// this agent (taint tracking still records for audit; enforcement is waived).
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct GateAutoApprove;
+
 /// Status of an agent.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum AgentStatus {
