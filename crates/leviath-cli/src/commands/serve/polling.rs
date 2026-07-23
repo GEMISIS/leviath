@@ -123,6 +123,15 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
             // error (if any) rides the webhook payload below.
             result: runstate::read_meta(&run_id).ok().and_then(|m| m.error),
         },
+        WorldEvent::Log {
+            run_id,
+            agent_id,
+            line,
+        } => ServerEvent::Log {
+            agent_id,
+            run_id,
+            line,
+        },
     }
 }
 
@@ -257,6 +266,14 @@ mod tests {
                 status: "complete".into()
             }),
             "agent_completed"
+        );
+        assert_eq!(
+            mapped_tag(WorldEvent::Log {
+                run_id: "r".into(),
+                agent_id: "a".into(),
+                line: "hello".into()
+            }),
+            "log"
         );
     }
 

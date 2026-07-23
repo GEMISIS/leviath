@@ -731,7 +731,8 @@ fn world_event_run_id(event: &WorldEvent) -> &str {
         | WorldEvent::Tokens { run_id, .. }
         | WorldEvent::Context { run_id, .. }
         | WorldEvent::Interaction { run_id, .. }
-        | WorldEvent::Completed { run_id, .. } => run_id,
+        | WorldEvent::Completed { run_id, .. }
+        | WorldEvent::Log { run_id, .. } => run_id,
     }
 }
 
