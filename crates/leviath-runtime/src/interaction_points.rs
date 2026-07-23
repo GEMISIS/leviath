@@ -31,6 +31,7 @@ use std::sync::Arc;
 use bevy_ecs::prelude::*;
 use leviath_core::blueprint::{InteractionPoint, InteractionStyle, StageMode};
 use leviath_core::interaction::{InteractionRequest, InteractionResponse};
+use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -74,6 +75,24 @@ pub struct InteractionPointRounds(pub usize);
 /// the pre-edit version) and consumed on the next dispatch.
 #[derive(Component, Debug, Clone)]
 pub struct PlanBodyOverride(pub String);
+
+// ─── Restart persistence ─────────────────────────────────────────────────────
+
+/// Serializable snapshot of an agent parked at a stage-boundary interaction point,
+/// persisted to `<run_dir>/interactions.json` so a daemon restart can re-present the
+/// exact same prompt instead of dropping it and re-issuing inference (issue #38).
+/// Mirrors the fan-out sidecar (`fanout.json`). Everything needed to resume is small:
+/// the reviewed document lives here (and in a persisted context region), and the
+/// request id is derived from the agent id + point name + round.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct InteractionPointState {
+    /// Which point (index into the stage's `points`) was open.
+    pub cursor: usize,
+    /// How many directive/edit revision rounds had been taken at that point.
+    pub round: usize,
+    /// The document that was under review (the point's `body`), re-presented as-is.
+    pub body: String,
+}
 
 // ─── Lane plumbing ───────────────────────────────────────────────────────────
 
@@ -273,6 +292,88 @@ async fn run_interaction_point(
 
     let _ = outcomes.send(InteractionPointOutcome { entity, decision });
     wake.notify_one();
+}
+
+/// Re-arm an agent that was blocked at an interaction point when the daemon stopped,
+/// bringing it back in the *waiting* state with the same open request — rather than
+/// the default `Active` + `ReadyToInfer` restore, which would re-issue inference and
+/// drop the prompt (issue #38).
+///
+/// Looks up the point from the agent's (already-restored) blueprint + stage cursor,
+/// restores the point cursor/round, flips the agent to `Waiting` (clearing the
+/// spawn-set `ReadyToInfer`, marking `AwaitingInteractionPoint`), and re-spawns the
+/// ask task so the request re-registers in the hub with the same id
+/// (`{agent_id}-point-{name}-{round}`). From there it is indistinguishable from a live
+/// dispatch: a client that had the prompt open still sees it, and answering it later
+/// routes normally through [`collect_interaction_point`].
+///
+/// A no-op (leaving the default restore in place) when the interaction-point lane
+/// isn't wired (a test world), or when the stage is no longer an interactive-points
+/// stage / the cursor is out of range (e.g. the blueprint changed under the run).
+pub fn restore_interaction_point(world: &mut World, entity: Entity, state: InteractionPointState) {
+    // The lane + hub must both be wired (they are in the daemon; absent in a test
+    // world) — otherwise there is nothing to await the re-opened request.
+    let Some(((outcomes, wake, runtime), hub)) = world
+        .get_resource::<InteractionPointStage>()
+        .map(|s| (s.outcomes.clone(), s.wake.clone(), s.runtime.clone()))
+        .zip(world.get_resource::<InteractionHub>().cloned())
+    else {
+        return;
+    };
+
+    // Resolve the point from the restored blueprint + stage cursor. A reloaded agent
+    // always carries these; a blueprint that changed out from under the run (stage no
+    // longer interactive, or fewer points) leaves the default restore in place rather
+    // than resuming a stale prompt.
+    let agent_id = world
+        .get::<AgentState>(entity)
+        .expect("a reloaded agent has AgentState")
+        .agent_id
+        .clone();
+    let point = {
+        let bp = world
+            .get::<AgentBlueprint>(entity)
+            .expect("a reloaded agent has a blueprint");
+        let cursor = world
+            .get::<StageCursor>(entity)
+            .expect("a reloaded agent has a stage cursor");
+        stage_points(bp, cursor)
+            .and_then(|p| p.get(state.cursor))
+            .cloned()
+    };
+    let Some(point) = point else {
+        tracing::warn!(
+            ?entity,
+            cursor = state.cursor,
+            "interaction-point restore skipped: stage not interactive or cursor out of range"
+        );
+        return;
+    };
+
+    // Re-arm the waiting state: restore the cursor/round, mark the agent awaiting the
+    // point, and clear the spawn-set `ReadyToInfer` so the inference lane won't fire.
+    {
+        let mut e = world.entity_mut(entity);
+        e.insert(InteractionPointCursor(state.cursor));
+        e.insert(InteractionPointRounds(state.round));
+        e.insert(AwaitingInteractionPoint);
+        e.remove::<ReadyToInfer>();
+        e.get_mut::<AgentState>()
+            .expect("a reloaded agent has AgentState")
+            .status = AgentStatus::Waiting;
+    }
+
+    // Re-open the request in the hub and await it, exactly as a live dispatch would.
+    runtime.spawn(run_interaction_point(
+        entity,
+        hub,
+        agent_id,
+        point,
+        state.body,
+        state.round,
+        outcomes,
+        wake,
+    ));
 }
 
 // ─── Systems ─────────────────────────────────────────────────────────────────
@@ -1378,5 +1479,175 @@ mod tests {
                 edited: "edited body".to_string(),
             }
         );
+    }
+
+    // ── restore (restart persistence, issue #38) ──
+
+    #[test]
+    fn interaction_point_state_round_trips() {
+        let s = InteractionPointState {
+            cursor: 2,
+            round: 1,
+            body: "# Plan\n1. do it".to_string(),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(
+            serde_json::from_str::<InteractionPointState>(&json).unwrap(),
+            s
+        );
+    }
+
+    /// A world with the interaction-point lane + hub wired, keeping the results
+    /// receiver so a resumed point can be answered and collected end-to-end.
+    fn resume_world() -> (
+        World,
+        InteractionHub,
+        UnboundedReceiver<InteractionPointOutcome>,
+    ) {
+        let hub = InteractionHub::new();
+        let (tx, rx) = unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(hub.clone());
+        world.insert_resource(InteractionPointStage {
+            outcomes: tx,
+            wake: Arc::new(Notify::new()),
+            runtime: Handle::current(),
+        });
+        (world, hub, rx)
+    }
+
+    /// A freshly "restored" agent as `restore_agent` leaves it (Active +
+    /// ReadyToInfer) before interaction-point restore runs.
+    fn restored_agent(world: &mut World, bp: AgentBlueprint) -> Entity {
+        world
+            .spawn((
+                agent_state(AgentStatus::Active),
+                bp,
+                window_with_plan(),
+                StageCursor { index: 0 },
+                ReadyToInfer,
+            ))
+            .id()
+    }
+
+    #[tokio::test]
+    async fn restore_rearms_waiting_and_reopens_the_prompt() {
+        let (mut world, hub, _rx) = resume_world();
+        let e = restored_agent(&mut world, blueprint_with(vec![plan_point()]));
+        restore_interaction_point(
+            &mut world,
+            e,
+            InteractionPointState {
+                cursor: 0,
+                round: 2,
+                body: "the plan".to_string(),
+            },
+        );
+
+        // Re-armed in the waiting state: the inference lane won't fire.
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Waiting
+        );
+        assert!(world.get::<AwaitingInteractionPoint>(e).is_some());
+        assert!(world.get::<ReadyToInfer>(e).is_none());
+        assert_eq!(world.get::<InteractionPointCursor>(e).unwrap().0, 0);
+        assert_eq!(world.get::<InteractionPointRounds>(e).unwrap().0, 2);
+
+        // The ask task re-registered the *same* request id in the hub, with the body.
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        let pending = hub.pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, "run-1");
+        assert_eq!(pending[0].1.id, "run-1-point-plan_approval-2");
+        assert_eq!(pending[0].1.body.as_deref(), Some("the plan"));
+    }
+
+    #[tokio::test]
+    async fn restore_then_answer_drives_the_transition() {
+        let (mut world, hub, mut rx) = resume_world();
+        let e = restored_agent(&mut world, blueprint_with(vec![plan_point()]));
+        restore_interaction_point(
+            &mut world,
+            e,
+            InteractionPointState {
+                cursor: 0,
+                round: 0,
+                body: "the plan".to_string(),
+            },
+        );
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+
+        // Approve the re-opened prompt; the outcome lands on the lane.
+        let id = hub.pending()[0].1.id.clone();
+        let mut r = InteractionResponse::text(&id, "");
+        r.choice_index = Some(0); // Approve
+        assert!(hub.answer(r));
+        let outcome = rx.recv().await.unwrap();
+
+        // Feed it to collect and confirm the stage proceeds.
+        let (tx2, rx2) = unbounded_channel();
+        tx2.send(outcome).unwrap();
+        world.insert_resource(InteractionPointResults(rx2));
+        let mut s = Schedule::default();
+        s.add_systems(collect_interaction_point);
+        s.run(&mut world);
+
+        assert!(world.get::<ResolveTransition>(e).is_some());
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Active
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_noop_on_noninteractive_stage() {
+        let (mut world, hub, _rx) = resume_world();
+        let e = restored_agent(&mut world, noninteractive_bp());
+        restore_interaction_point(
+            &mut world,
+            e,
+            InteractionPointState {
+                cursor: 0,
+                round: 0,
+                body: "x".to_string(),
+            },
+        );
+        // Left as the default restore: Active + ReadyToInfer, nothing re-opened.
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Active
+        );
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert!(world.get::<AwaitingInteractionPoint>(e).is_none());
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(hub.pending().is_empty());
+    }
+
+    #[tokio::test]
+    async fn restore_noop_without_lane_wired() {
+        // No InteractionPointStage / hub resources (a test world) ⇒ no-op.
+        let mut world = World::new();
+        let e = restored_agent(&mut world, blueprint_with(vec![plan_point()]));
+        restore_interaction_point(
+            &mut world,
+            e,
+            InteractionPointState {
+                cursor: 0,
+                round: 0,
+                body: "x".to_string(),
+            },
+        );
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Active
+        );
+        assert!(world.get::<ReadyToInfer>(e).is_some());
     }
 }

@@ -8,6 +8,16 @@
 //! persisted context / stage / iteration / token totals via
 //! [`leviath_runtime::restore::restore_agent`], and preserves the original run
 //! metadata. Anything unreadable or un-reloadable is skipped (logged), never fatal.
+//!
+//! One exception to the "re-issue inference" resume: a run that was parked at a
+//! stage-boundary interaction point (e.g. `plan_approval`) wrote an
+//! `interactions.json` sidecar while blocked. For those, `reload_one` calls
+//! [`leviath_runtime::interaction_points::restore_interaction_point`] to bring the
+//! agent back in the *waiting* state with the same prompt re-opened, rather than
+//! re-inferring and dropping it (issue #38). Model-initiated dynamic tools
+//! (`ask_user_*`, `present_for_review`, `edit_document`) and taint-gate prompts are
+//! not persisted — they block inside the transient tool-worker turn, so on restart
+//! they take the ordinary re-inference path and the model simply re-asks.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -18,6 +28,7 @@ use leviath_mcp::ToolExecutor;
 use leviath_providers::Tool;
 use leviath_runtime::host::{SpawnArgs, SubAgentOp};
 use leviath_runtime::interaction_hub::InteractionHub;
+use leviath_runtime::interaction_points::InteractionPointState;
 use leviath_runtime::persistence::{RunMetadata, TokenTotals};
 use leviath_runtime::restore::restore_agent;
 use leviath_runtime::world::PipelineWorld;
@@ -286,14 +297,32 @@ fn reload_one(
     );
 
     // `build_agent` stamps fresh run metadata; preserve the original identity.
-    let mut md = world
-        .world_mut()
-        .get_mut::<RunMetadata>(entity)
-        .expect("build_agent attached run metadata");
-    md.started_at = meta.started_at;
-    md.title = meta.title.clone();
-    md.callback_url = meta.callback_url.clone();
-    // `parent_run_id` was already restored via `args` into build_agent's metadata.
+    {
+        let mut md = world
+            .world_mut()
+            .get_mut::<RunMetadata>(entity)
+            .expect("build_agent attached run metadata");
+        md.started_at = meta.started_at;
+        md.title = meta.title.clone();
+        md.callback_url = meta.callback_url.clone();
+        // `parent_run_id` was already restored via `args` into build_agent's metadata.
+    }
+
+    // If this run was parked at a stage-boundary interaction point (e.g.
+    // plan_approval), re-present it in the *waiting* state rather than the default
+    // `Active` + `ReadyToInfer` restore — so the open prompt survives the restart
+    // instead of being dropped and re-inferred (issue #38). A missing/malformed
+    // sidecar, or a blueprint that no longer matches, leaves the default restore.
+    if let Some(state) = std::fs::read_to_string(run_dir.join("interactions.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<InteractionPointState>(&s).ok())
+    {
+        leviath_runtime::interaction_points::restore_interaction_point(
+            world.world_mut(),
+            entity,
+            state,
+        );
+    }
 
     Ok(entity)
 }
@@ -508,6 +537,91 @@ mod tests {
         let totals = world.world().get::<TokenTotals>(*entity).unwrap();
         assert_eq!(totals.prompt_tokens, 42);
         assert_eq!(totals.tool_calls, 3);
+    }
+
+    /// A temp agent dir holding the `software-engineer` manifest, whose stage 0
+    /// (`plan`) is an `interactive_points` stage with a `plan_approval` point.
+    fn interactive_agent_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../agents/software-engineer/agent.leviath"),
+        )
+        .expect("read software-engineer manifest");
+        std::fs::write(dir.path().join("agent.leviath"), manifest).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn reload_resumes_a_blocked_interaction_point_in_the_waiting_state() {
+        let agent = interactive_agent_dir();
+        let manifest = agent.path().join("agent.leviath");
+        let runs = tempfile::tempdir().unwrap();
+
+        // A run parked at the plan_approval interaction point (stage 0 = plan)...
+        write_run(
+            runs.path(),
+            "run-await",
+            manifest.to_str().unwrap(),
+            RunStatus::WaitingInput,
+            None,
+        );
+        // ...plus the interaction sidecar the daemon wrote while it was blocked.
+        std::fs::write(
+            runs.path().join("run-await/interactions.json"),
+            serde_json::to_string(&InteractionPointState {
+                cursor: 0,
+                round: 0,
+                body: "## Plan\n1. do it".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        world.insert_interaction_hub(hub.clone()); // restore reads the hub resource
+        let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
+        let restored = reload_persisted_agents(
+            &mut world,
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            runs.path(),
+            999,
+            &sub_tx(),
+        );
+
+        assert_eq!(restored.len(), 1);
+        let (run_id, entity) = &restored[0];
+        assert_eq!(run_id, "run-await");
+        // Re-armed in the *waiting* state (not the default Active), so no inference
+        // re-issues and the open prompt isn't dropped — the issue #38 fix.
+        assert_eq!(world.agent_status(*entity), Some(AgentStatus::Waiting));
+        assert!(
+            world
+                .world()
+                .get::<leviath_runtime::interaction_points::AwaitingInteractionPoint>(*entity)
+                .is_some()
+        );
+        assert!(
+            world
+                .world()
+                .get::<leviath_runtime::pipeline::ReadyToInfer>(*entity)
+                .is_none(),
+            "the spawn-set ReadyToInfer is cleared so the inference lane won't fire"
+        );
+
+        // The prompt was re-opened in the hub, carrying the reviewed plan.
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        let pending = hub.pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, "run-await");
+        assert_eq!(pending[0].1.body.as_deref(), Some("## Plan\n1. do it"));
     }
 
     #[tokio::test]

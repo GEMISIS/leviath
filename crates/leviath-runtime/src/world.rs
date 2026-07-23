@@ -967,6 +967,120 @@ mod tests {
         assert!(dir.path().join("run-42").join("context.json").exists());
     }
 
+    /// A single-stage blueprint whose stage is an `interactive_points` stage with a
+    /// `plan_approval` point (the shape that blocks awaiting human approval).
+    fn interactive_blueprint() -> leviath_core::Blueprint {
+        use leviath_core::blueprint::{InteractionPoint, InteractionStyle, StageMode};
+        let layout = leviath_core::layout::ContextLayout::new(
+            vec![leviath_core::layout::RegionDefinition::new(
+                "conversation".to_string(),
+                RegionKind::Clearable,
+                10_000,
+            )],
+            12_000,
+        );
+        let mut s = leviath_core::Stage::new(
+            "plan".to_string(),
+            leviath_core::blueprint::ModelConfig::new("script".to_string(), "m".to_string()),
+        );
+        s.mode = StageMode::InteractivePoints {
+            points: vec![InteractionPoint {
+                name: "plan_approval".to_string(),
+                prompt: "Approve?".to_string(),
+                required: true,
+                style: InteractionStyle::MultipleChoice,
+                options: vec!["Approve".to_string(), "Abort".to_string()],
+                directives: std::collections::HashMap::new(),
+                abort_options: vec!["Abort".to_string()],
+                edit_options: vec![],
+                document_region: None,
+            }],
+        };
+        leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout)
+    }
+
+    #[tokio::test]
+    async fn persists_interaction_point_when_a_live_agent_blocks() {
+        // Drive a real agent through inference → transition → the interaction-point
+        // lane until it blocks awaiting approval, and assert the daemon wrote the
+        // `interactions.json` sidecar — the issue #38 persist side, end-to-end
+        // through the live lane (a tool call first, then a text "plan", so the stage
+        // transitions into the interaction point rather than looping on nudges).
+        let dir = tempfile::tempdir().unwrap();
+        let mut world = PipelineWorld::new(
+            registry_with(vec![with_tool("c1", "read"), text("## Plan\n1. do it")]),
+            Arc::new(EchoTools),
+            InferencePoolConfig::new(),
+            dir.path().to_path_buf(),
+            Handle::current(),
+        );
+        world.insert_interaction_hub(crate::interaction_hub::InteractionHub::new());
+        let e = world.spawn_agent((
+            AgentBlueprint(interactive_blueprint()),
+            StageCursor { index: 0 },
+            agent_state(),
+            crate::components::MessageInbox::default(),
+            StageProgress::default(),
+            StageInferences(vec![stage("m")]),
+            StageSetups(vec![setup()]),
+            VisitCounts::default(),
+            window(),
+            stage("m"),
+            setup().inference_config,
+            crate::persistence::RunMetadata {
+                run_id: "run-ip".to_string(),
+                agent_name: "a".to_string(),
+                agent_path: "/p".to_string(),
+                task: "t".to_string(),
+                model: None,
+                workdir: "/w".to_string(),
+                num_stages: 1,
+                started_at: 0,
+                parent_run_id: None,
+                metadata: std::collections::HashMap::new(),
+                callback_url: None,
+                title: None,
+            },
+            crate::persistence::TokenTotals::default(),
+            crate::pipeline::PersistWatermark::default(),
+            ReadyToInfer,
+        ));
+
+        world.run_until_idle(30).await;
+        // `run_until_idle` stops once no inference/tool is in flight, but the
+        // interaction-point ask task registers in the hub just after; the real
+        // daemon's `run()` loop catches its wake, so pump fixed points here until
+        // `reflect_interaction_status` flips the agent to Waiting (and persistence
+        // captures the sidecar).
+        for _ in 0..50 {
+            if world.agent_status(e) == Some(AgentStatus::Waiting) {
+                break;
+            }
+            tokio::task::yield_now().await;
+            world.run_to_fixed_point();
+        }
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Waiting));
+
+        // Poll until the interaction sidecar lands (the persistence worker writes it
+        // on its own task once the agent is parked Waiting at the point).
+        let path = dir.path().join("run-ip").join("interactions.json");
+        let mut sidecar = None;
+        for _ in 0..200 {
+            if let Ok(t) = std::fs::read_to_string(&path)
+                && let Ok(s) =
+                    serde_json::from_str::<crate::interaction_points::InteractionPointState>(&t)
+            {
+                sidecar = Some(s);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let s = sidecar.expect("interaction-point sidecar flushed to disk");
+        assert_eq!(s.cursor, 0);
+        assert_eq!(s.round, 0);
+        assert_eq!(s.body, "## Plan\n1. do it");
+    }
+
     #[tokio::test]
     async fn spawn_from_blueprint_errors_on_oversized_system_prompt() {
         let mut world = build_world(registry_with(vec![]));

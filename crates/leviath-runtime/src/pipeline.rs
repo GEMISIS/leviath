@@ -1505,8 +1505,14 @@ pub fn dispatch_persistence(
         Option<&crate::components::ParentRef>,
         Option<&crate::components::SubAgentChildren>,
         Option<&crate::fanout::FanOutWaiting>,
+        (
+            Option<&crate::interaction_points::AwaitingInteractionPoint>,
+            Option<&crate::interaction_points::InteractionPointCursor>,
+            Option<&crate::interaction_points::InteractionPointRounds>,
+        ),
     )>,
     stage: Res<PersistenceStage>,
+    hub: Option<Res<InteractionHub>>,
 ) {
     for (
         md,
@@ -1521,6 +1527,7 @@ pub fn dispatch_persistence(
         parent_ref,
         children,
         fan_out_waiting,
+        (awaiting_point, ip_cursor, ip_rounds),
     ) in agents.iter_mut()
     {
         let now = chrono::Utc::now().timestamp();
@@ -1571,6 +1578,26 @@ pub fn dispatch_persistence(
         // waiting — see the writer).
         let fanout = fan_out_waiting
             .map(|w| serde_json::to_string(&w.to_state()).expect("FanOutState always serializes"));
+        // An agent parked at a stage-boundary interaction point: persist the open
+        // point (cursor/round + the reviewed document) so a restart re-presents the
+        // same prompt rather than dropping it and re-inferring (issue #38). The
+        // document comes from the open request in the hub — which is present by the
+        // time `reflect_interaction_status` (running just before this system) has
+        // flipped the agent to `Waiting`. If the request isn't registered yet, skip
+        // this tick; the next persist captures it (removing any stale sidecar).
+        let interactions = awaiting_point.and_then(|_| {
+            let request = hub
+                .as_ref()?
+                .pending()
+                .into_iter()
+                .find(|(aid, req)| aid == &state.agent_id && req.id.contains("-point-"))?;
+            let ip_state = crate::interaction_points::InteractionPointState {
+                cursor: ip_cursor.map_or(0, |c| c.0),
+                round: ip_rounds.map_or(0, |r| r.0),
+                body: request.1.body.unwrap_or_default(),
+            };
+            Some(serde_json::to_string(&ip_state).expect("InteractionPointState always serializes"))
+        });
         let _ = stage.0.send(PersistJob {
             run_id: md.run_id.clone(),
             meta,
@@ -1580,6 +1607,7 @@ pub fn dispatch_persistence(
             log_appends,
             taint_audit,
             fanout,
+            interactions,
         });
     }
 }
@@ -3469,6 +3497,112 @@ mod tests {
         run_dispatch_persistence(&mut world);
         let job = rx.try_recv().expect("job sent");
         assert!(job.fanout.is_some(), "fan-out waiting state persisted");
+    }
+
+    #[tokio::test]
+    async fn dispatch_persistence_serializes_interaction_point() {
+        use crate::dynamic_interaction::InteractionBackend;
+        let (mut world, mut rx) = world_with_persistence();
+        let hub = InteractionHub::new();
+        world.insert_resource(hub.clone());
+        world.spawn((
+            run_metadata(),
+            agent_state(), // agent_id = "a"
+            conv_window(),
+            StageCursor { index: 0 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+            crate::interaction_points::AwaitingInteractionPoint,
+            crate::interaction_points::InteractionPointCursor(1),
+            crate::interaction_points::InteractionPointRounds(3),
+        ));
+
+        // Open the point request for this agent in the hub, carrying the document.
+        let backend = hub.backend_for("a".to_string());
+        let ask = tokio::spawn(async move {
+            let mut req = leviath_core::interaction::InteractionRequest::multiple_choice(
+                "a-point-plan_approval-3",
+                "Approve?",
+                vec!["Approve".to_string(), "Abort".to_string()],
+                "plan",
+            );
+            req.body = Some("the plan".to_string());
+            backend.ask(req).await
+        });
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+
+        run_dispatch_persistence(&mut world);
+        let job = rx.try_recv().expect("job sent");
+        let json = job.interactions.expect("interaction-point state persisted");
+        let state: crate::interaction_points::InteractionPointState =
+            serde_json::from_str(&json).unwrap();
+        assert_eq!(state.cursor, 1);
+        assert_eq!(state.round, 3);
+        assert_eq!(state.body, "the plan");
+
+        // Let the still-blocked ask complete so its task ends cleanly.
+        assert!(
+            hub.answer(leviath_core::interaction::InteractionResponse::text(
+                "a-point-plan_approval-3",
+                "",
+            ))
+        );
+        ask.await.unwrap();
+    }
+
+    #[test]
+    fn dispatch_persistence_omits_interactions_when_not_at_a_point() {
+        let (mut world, mut rx) = world_with_persistence();
+        world.spawn((
+            run_metadata(),
+            agent_state(),
+            conv_window(),
+            StageCursor { index: 0 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+        ));
+        run_dispatch_persistence(&mut world);
+        let job = rx.try_recv().expect("job sent");
+        assert!(job.interactions.is_none());
+    }
+
+    #[test]
+    fn dispatch_persistence_omits_interactions_without_a_hub() {
+        // Awaiting a point but no hub resource (e.g. a test world) ⇒ nothing to read
+        // the open request from, so no sidecar is written.
+        let (mut world, mut rx) = world_with_persistence();
+        world.spawn((
+            run_metadata(),
+            agent_state(),
+            conv_window(),
+            StageCursor { index: 0 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+            crate::interaction_points::AwaitingInteractionPoint,
+        ));
+        run_dispatch_persistence(&mut world);
+        assert!(rx.try_recv().expect("job sent").interactions.is_none());
+    }
+
+    #[test]
+    fn dispatch_persistence_omits_interactions_when_request_not_yet_registered() {
+        // Awaiting a point with a hub present, but the ask task hasn't registered the
+        // request yet ⇒ skip this tick (the next persist captures it).
+        let (mut world, mut rx) = world_with_persistence();
+        world.insert_resource(InteractionHub::new()); // empty
+        world.spawn((
+            run_metadata(),
+            agent_state(),
+            conv_window(),
+            StageCursor { index: 0 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+            crate::interaction_points::AwaitingInteractionPoint,
+        ));
+        run_dispatch_persistence(&mut world);
+        assert!(rx.try_recv().expect("job sent").interactions.is_none());
     }
 
     #[test]
