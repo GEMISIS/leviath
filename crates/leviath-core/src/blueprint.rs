@@ -796,6 +796,16 @@ pub struct ModelConfig {
     /// Optional parameters that apply to whichever model gets selected.
     #[serde(default)]
     pub parameters: HashMap<String, serde_json::Value>,
+
+    /// Optional per-stage cap on the wall-clock time (in seconds) one inference
+    /// for this stage may run — the whole call including retries. When set, it
+    /// overrides the default job timeout; when `None`, the default applies.
+    ///
+    /// This lets a stage with slow first-token latency (e.g. a large-prompt
+    /// analyze call) get a long cap while a quick iterative stage fails fast on
+    /// a stalled connection instead of hanging for the full default.
+    #[serde(default)]
+    pub request_timeout_secs: Option<u64>,
 }
 
 fn default_allow_user_default() -> bool {
@@ -809,6 +819,7 @@ impl ModelConfig {
             models: vec![ModelEntry::new(provider, model)],
             allow_user_default: true,
             parameters: HashMap::new(),
+            request_timeout_secs: None,
         }
     }
 
@@ -1321,6 +1332,7 @@ mod tests {
             ],
             allow_user_default: true,
             parameters: HashMap::new(),
+            request_timeout_secs: None,
         };
         assert_eq!(mc.models.len(), 3);
         assert_eq!(mc.models[0].provider, "anthropic");
@@ -1337,6 +1349,7 @@ mod tests {
             ],
             allow_user_default: false,
             parameters: HashMap::new(),
+            request_timeout_secs: None,
         };
         let json = serde_json::to_string(&mc).unwrap();
         let back: ModelConfig = serde_json::from_str(&json).unwrap();
@@ -1368,6 +1381,7 @@ mod tests {
             models: vec![],
             allow_user_default: true,
             parameters: HashMap::new(),
+            request_timeout_secs: None,
         };
         assert_eq!(mc.provider(), "anthropic");
         assert_eq!(mc.model(), "claude-sonnet-4-6");

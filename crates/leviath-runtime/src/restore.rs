@@ -171,6 +171,7 @@ mod tests {
                 max_output_tokens: None,
                 extra_params: Default::default(),
                 batch_tool_hint: false,
+                request_timeout_secs: None,
             },
             routing: None,
             accepts_messages: true,

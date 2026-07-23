@@ -136,6 +136,11 @@ pub struct InferenceConfig {
     /// (see [`leviath_core::taint::resolve_batch_tool_hint`]); `false` by default
     /// so an unset config is a no-op.
     pub batch_tool_hint: bool,
+    /// Per-stage cap on the wall-clock time (in seconds) one inference for this
+    /// stage may run (the whole call including retries). Sourced from
+    /// `[stages.<name>.model] request_timeout_secs`. When `Some`, it overrides the
+    /// default inference job timeout at dispatch; when `None`, the default applies.
+    pub request_timeout_secs: Option<u64>,
 }
 
 /// Per-entity tool result routing configuration.
