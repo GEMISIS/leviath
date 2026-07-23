@@ -313,7 +313,14 @@ provider = "leviath"
 session  = "acp"          # Gas City's key name for the Agent Client Protocol
 ```
 
-> **Two protocols, one acronym.** "ACP" is claimed by two unrelated things: the **Agent Client Protocol** (JSON-RPC/stdio, implemented here — this is the Gas City integration) and the **Agent Communication Protocol** (a REST API from the BeeAI project, not implemented in Leviath). This repo never writes the bare acronym unqualified. Hosts that implement `session/request_permission` get interactive tool approval; hosts that don't (Gas City today) should run with `--yolo`, since tool-approval prompts otherwise pause the run.
+**Interaction & completion.** A `session/prompt` stays in flight (the agent shows as *busy*) until the run **genuinely finishes** — it is never reported "done" while the agent is still waiting on input. How interactions are handled depends on the host:
+
+- **Hosts that implement `session/request_permission`** (e.g. Zed) get interactive tool approval in-turn, and drive their own conversation for other questions.
+- **Hosts that don't** (e.g. Gas City, whose ACP path reports interaction unsupported) — the question is surfaced as agent output and the run keeps going; you resolve it through **Leviath's own surfaces** (`lev dash` / `lev respond`), and the turn ends only when the run truly completes. Gas City stays responsive throughout (its prompt wait is non-blocking).
+
+For a clean "sling a task and get a result" flow with Gas City, prefer **autonomous blueprints that run to completion** (or pass `--yolo` to auto-approve tools). Conversational agents that ask follow-up questions will keep the bead *busy* until you answer them in `lev dash`.
+
+> **Two protocols, one acronym.** "ACP" is claimed by two unrelated things: the **Agent Client Protocol** (JSON-RPC/stdio, implemented here — this is the Gas City integration) and the **Agent Communication Protocol** (a REST API from the BeeAI project, not implemented in Leviath). This repo never writes the bare acronym unqualified.
 
 ## ⌨️ CLI
 
