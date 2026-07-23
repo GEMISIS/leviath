@@ -337,6 +337,9 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
     info!("leviath daemon listening");
     println!("leviath daemon listening");
     host.serve(op_rx).await;
+    // Serve returned on shutdown: drain the persistence lane so every dirty agent's
+    // final snapshot is on disk before we exit (the runtime is still alive here).
+    host.flush_and_stop().await;
     Ok(())
 }
 

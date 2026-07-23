@@ -47,14 +47,23 @@ pub fn reload_persisted_agents(
     let Ok(dir_entries) = std::fs::read_dir(runs_dir) else {
         return Vec::new(); // no runs dir yet — nothing to recover
     };
-    for dir_entry in dir_entries.flatten() {
-        let run_dir = dir_entry.path();
-        let Some(meta) = read_meta(&run_dir) else {
-            continue; // no meta.json, or unreadable/unparseable
-        };
-        if is_terminal(&meta.status) {
-            continue; // completed / cancelled / errored — don't resume
-        }
+    // Scan phase: collect every persisted run's metadata + whether it's parked mid
+    // fan-out (has a fanout.json), so the triage can rank them.
+    let candidates: Vec<(RunMeta, bool)> = dir_entries
+        .flatten()
+        .filter_map(|dir_entry| {
+            let run_dir = dir_entry.path();
+            let meta = read_meta(&run_dir)?; // no meta.json, or unreadable/unparseable
+            let parked_on_fanout = run_dir.join("fanout.json").exists();
+            Some((meta, parked_on_fanout))
+        })
+        .collect();
+    // Order phase: drop terminal runs and rank the rest actionable-first (in-flight
+    // inference / pending tool results before blocked-on-input), so interrupted work
+    // that can make progress resumes ahead of runs that can't.
+    let ordered = leviath_runtime::restore::triage_restores(candidates);
+    for meta in ordered {
+        let run_dir = runs_dir.join(&meta.run_id);
         match reload_one(
             world,
             tool_service,
@@ -508,6 +517,44 @@ mod tests {
         let totals = world.world().get::<TokenTotals>(*entity).unwrap();
         assert_eq!(totals.prompt_tokens, 42);
         assert_eq!(totals.tool_calls, 3);
+    }
+
+    #[tokio::test]
+    async fn reload_restores_actionable_runs_before_blocked_and_skips_terminal() {
+        let agent = agent_dir();
+        let mpath = agent.path().join("agent.leviath");
+        let mpath = mpath.to_str().unwrap();
+        let runs = tempfile::tempdir().unwrap();
+        // Directory iteration order is unspecified; name the blocked run so it would
+        // sort ahead alphabetically, proving the triage (not the filesystem) decides.
+        write_run(
+            runs.path(),
+            "aaa-blocked",
+            mpath,
+            RunStatus::WaitingInput,
+            None,
+        );
+        write_run(runs.path(), "zzz-active", mpath, RunStatus::Running, None);
+        write_run(runs.path(), "mmm-done", mpath, RunStatus::Complete, None);
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
+        let restored = reload_persisted_agents(
+            &mut world,
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            runs.path(),
+            999,
+            &sub_tx(),
+        );
+
+        // Terminal run skipped; the actionable (Running) run is restored first.
+        let order: Vec<&str> = restored.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(order, vec!["zzz-active", "aaa-blocked"]);
     }
 
     #[tokio::test]

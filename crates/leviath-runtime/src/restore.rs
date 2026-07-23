@@ -10,11 +10,70 @@
 
 use bevy_ecs::prelude::*;
 use leviath_core::region::RegionEntry;
-use leviath_core::run_meta::ContextSnapshot;
+use leviath_core::run_meta::{ContextSnapshot, RunMeta, RunStatus};
 
 use crate::components::{AgentState, AgentStatus, ContextWindow};
 use crate::persistence::TokenTotals;
 use crate::pipeline::{StageCursor, StageInferences, StageSetups};
+
+/// How urgently a persisted run should be brought back on restart. Ordered so a
+/// higher value restores first (see [`triage_restores`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RestorePriority {
+    /// Restorable, but can make no immediate progress: blocked on user input,
+    /// done-but-interactive (awaiting optional follow-up), or a parent parked mid
+    /// fan-out waiting on its children. Brought back after the actionable runs.
+    Blocked,
+    /// Actionable now: an in-flight inference to re-dispatch or pending tool
+    /// results to process. These resume real work the moment they're reloaded, so
+    /// they come back first.
+    Active,
+}
+
+/// Classify one persisted run for restart recovery from its on-disk status and
+/// whether it is parked mid fan-out (a `<run_dir>/fanout.json` is present).
+///
+/// Returns `None` for a **terminal** run (`Complete` / `Error` / `Cancelled`) —
+/// those are never resumed. A run parked on a fan-out is [`Blocked`] regardless of
+/// its status: it can't progress until its children finish.
+///
+/// [`Blocked`]: RestorePriority::Blocked
+pub fn classify_restore(status: &RunStatus, parked_on_fanout: bool) -> Option<RestorePriority> {
+    match status {
+        RunStatus::Complete | RunStatus::Error | RunStatus::Cancelled => None,
+        _ if parked_on_fanout => Some(RestorePriority::Blocked),
+        RunStatus::Starting | RunStatus::Running => Some(RestorePriority::Active),
+        RunStatus::WaitingInput | RunStatus::CompleteInteractive => Some(RestorePriority::Blocked),
+    }
+}
+
+/// Triage a set of persisted runs into the order they should be restored on
+/// restart: drop terminal runs, then rank the rest **actionable-first**
+/// ([`RestorePriority::Active`] before [`Blocked`]), breaking ties by most-recently
+/// updated. Each input is `(meta, parked_on_fanout)` where `parked_on_fanout` is
+/// whether the run has a `fanout.json` (see [`classify_restore`]); the returned
+/// [`RunMeta`]s are ready to reload in order.
+///
+/// This lets a resource- or time-constrained caller restore only a prefix (the most
+/// actionable agents) and still make the most progress possible.
+///
+/// [`Blocked`]: RestorePriority::Blocked
+pub fn triage_restores(candidates: Vec<(RunMeta, bool)>) -> Vec<RunMeta> {
+    let mut ranked: Vec<(RestorePriority, RunMeta)> = candidates
+        .into_iter()
+        .filter_map(|(meta, parked)| {
+            classify_restore(&meta.status, parked).map(|prio| (prio, meta))
+        })
+        .collect();
+    // Higher priority first; within a tier, most-recently updated first. `sort_by`
+    // is stable, so equal keys keep their scan order.
+    ranked.sort_by(|(a_prio, a), (b_prio, b)| {
+        b_prio
+            .cmp(a_prio)
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+    });
+    ranked.into_iter().map(|(_, meta)| meta).collect()
+}
 
 /// Restore a just-spawned `entity` to the persisted state captured in `snapshot`
 /// (its context), `stage_index` + `iteration` (its position), and `totals` (its
@@ -246,6 +305,88 @@ mod tests {
         assert_eq!(world.get::<TokenTotals>(entity).unwrap().prompt_tokens, 100);
         // Still ready to (re-)infer.
         assert!(world.get::<ReadyToInfer>(entity).is_some());
+    }
+
+    fn meta_with(run_id: &str, status: RunStatus, updated_at: i64) -> RunMeta {
+        let mut m = RunMeta::new(
+            run_id.to_string(),
+            "a".to_string(),
+            "/p".to_string(),
+            "t".to_string(),
+            None,
+            "/w".to_string(),
+            1,
+        );
+        m.status = status;
+        m.updated_at = updated_at;
+        m
+    }
+
+    #[test]
+    fn classify_restore_skips_terminal_and_ranks_the_rest() {
+        // Terminal → skipped.
+        assert_eq!(classify_restore(&RunStatus::Complete, false), None);
+        assert_eq!(classify_restore(&RunStatus::Error, false), None);
+        assert_eq!(classify_restore(&RunStatus::Cancelled, false), None);
+        // Actionable → Active.
+        assert_eq!(
+            classify_restore(&RunStatus::Running, false),
+            Some(RestorePriority::Active)
+        );
+        assert_eq!(
+            classify_restore(&RunStatus::Starting, false),
+            Some(RestorePriority::Active)
+        );
+        // No immediate progress → Blocked.
+        assert_eq!(
+            classify_restore(&RunStatus::WaitingInput, false),
+            Some(RestorePriority::Blocked)
+        );
+        assert_eq!(
+            classify_restore(&RunStatus::CompleteInteractive, false),
+            Some(RestorePriority::Blocked)
+        );
+        // Parked mid fan-out is Blocked even when otherwise Running.
+        assert_eq!(
+            classify_restore(&RunStatus::Running, true),
+            Some(RestorePriority::Blocked)
+        );
+        // A terminal run parked on a fan-out is still skipped.
+        assert_eq!(classify_restore(&RunStatus::Complete, true), None);
+    }
+
+    #[test]
+    fn triage_orders_actionable_first_then_by_recency_and_drops_terminal() {
+        let candidates = vec![
+            (
+                meta_with("blocked-old", RunStatus::WaitingInput, 100),
+                false,
+            ),
+            (meta_with("active-old", RunStatus::Running, 200), false),
+            (meta_with("terminal", RunStatus::Complete, 999), false),
+            (meta_with("active-new", RunStatus::Starting, 300), false),
+            (meta_with("parked", RunStatus::Running, 999), true), // fan-out → Blocked
+            (
+                meta_with("blocked-new", RunStatus::WaitingInput, 400),
+                false,
+            ),
+        ];
+        let order: Vec<String> = triage_restores(candidates)
+            .into_iter()
+            .map(|m| m.run_id)
+            .collect();
+        // Active tier first (most-recent first), then Blocked tier (most-recent
+        // first, with the fan-out-parked run demoted into it). Terminal dropped.
+        assert_eq!(
+            order,
+            vec![
+                "active-new".to_string(),  // Active, updated 300
+                "active-old".to_string(),  // Active, updated 200
+                "parked".to_string(),      // Blocked (fan-out), updated 999
+                "blocked-new".to_string(), // Blocked, updated 400
+                "blocked-old".to_string(), // Blocked, updated 100
+            ]
+        );
     }
 
     #[test]

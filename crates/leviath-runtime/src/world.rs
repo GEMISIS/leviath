@@ -62,6 +62,10 @@ pub struct PipelineWorld {
     /// The tool worker task; kept so it lives as long as the world. It exits on
     /// its own when the world (and thus the [`ToolStage`] sender) is dropped.
     _tool_task: JoinHandle<()>,
+    /// The persistence worker task. Retained (rather than detached) so
+    /// [`Self::flush_and_stop`] can close its channel and `await` it, guaranteeing
+    /// every queued snapshot reaches disk before shutdown. `None` once flushed.
+    persist_task: Option<JoinHandle<()>>,
 }
 
 impl PipelineWorld {
@@ -95,9 +99,10 @@ impl PipelineWorld {
         let (cs_tx, cs_rx) = unbounded_channel();
 
         let tool_task = runtime.spawn(tool_worker(tool_job_rx, tool_res_tx, wake.clone()));
-        // Fire-and-forget: the persistence worker exits when the world (and thus
-        // its PersistenceStage sender) is dropped.
-        runtime.spawn(persistence_worker(runs_dir, persist_rx));
+        // Retained so `flush_and_stop` can drain it on shutdown. Left to its own
+        // devices otherwise: it exits when the world (and thus its PersistenceStage
+        // sender) is dropped.
+        let persist_task = runtime.spawn(persistence_worker(runs_dir, persist_rx));
         let ip_runtime = runtime.clone();
         let gp_runtime = runtime.clone();
 
@@ -202,6 +207,7 @@ impl PipelineWorld {
             shutdown,
             msg_tx,
             _tool_task: tool_task,
+            persist_task: Some(persist_task),
         }
     }
 
@@ -274,6 +280,34 @@ impl PipelineWorld {
     /// loop that has taken ownership of the world on another task.
     pub fn shutdown_handle(&self) -> Arc<Notify> {
         self.shutdown.clone()
+    }
+
+    /// Cleanly stop the world, guaranteeing every queued snapshot reaches disk.
+    ///
+    /// The persistence lane is async and fire-and-forget, so a plain shutdown (the
+    /// [`Self::run`]/`serve` loop returning, then the world dropping) can lose
+    /// snapshots still queued in the channel. This method closes that gap: it
+    /// signals shutdown, drives one last fixed point so any state that settled
+    /// after the loop parked is dispatched to the lane, then **closes the lane and
+    /// awaits the worker** so all queued writes (`meta.json` / `context.json` /
+    /// `run.lvr`) land before it returns.
+    ///
+    /// Call it after the serve loop has returned (the tokio runtime must still be
+    /// alive for the worker to be scheduled). Idempotent: a second call is a no-op
+    /// because the persistence resource is already removed and the task taken.
+    pub async fn flush_and_stop(&mut self) {
+        // Idempotent — the serve loop has usually already returned on this signal.
+        self.shutdown.notify_one();
+        // Dispatch anything that settled between the last park and now (e.g. an
+        // inference result that woke the loop the same instant shutdown fired).
+        self.run_to_fixed_point();
+        // Drop the *only* `PersistJob` sender so the worker's `recv()` loop drains
+        // its queue and then ends.
+        self.world.remove_resource::<PersistenceStage>();
+        // Wait for every queued write to hit disk.
+        if let Some(task) = self.persist_task.take() {
+            let _ = task.await;
+        }
     }
 
     /// The status of an agent, if it still exists.
@@ -965,6 +999,140 @@ mod tests {
         let meta = meta.expect("final Complete snapshot flushed to disk");
         assert_eq!(meta.run_id, "run-42");
         assert!(dir.path().join("run-42").join("context.json").exists());
+    }
+
+    #[tokio::test]
+    async fn flush_and_stop_drains_queued_snapshots() {
+        // Unlike a plain shutdown, `flush_and_stop` awaits the persistence worker,
+        // so the final snapshot is guaranteed on disk the instant it returns — no
+        // filesystem polling required (contrast the test above).
+        let dir = tempfile::tempdir().unwrap();
+        let mut world = PipelineWorld::new(
+            registry_with(vec![with_tool("c1", "do"), text("done")]),
+            Arc::new(EchoTools),
+            InferencePoolConfig::new(),
+            dir.path().to_path_buf(),
+            Handle::current(),
+        );
+        world.spawn_agent((
+            AgentBlueprint(blueprint()),
+            StageCursor { index: 0 },
+            agent_state(),
+            crate::components::MessageInbox::default(),
+            StageProgress::default(),
+            StageInferences(vec![stage("m")]),
+            StageSetups(vec![setup()]),
+            VisitCounts::default(),
+            window(),
+            stage("m"),
+            setup().inference_config,
+            crate::persistence::RunMetadata {
+                run_id: "run-flush".to_string(),
+                agent_name: "a".to_string(),
+                agent_path: "/p".to_string(),
+                task: "t".to_string(),
+                model: None,
+                workdir: "/w".to_string(),
+                num_stages: 1,
+                started_at: 0,
+                parent_run_id: None,
+                metadata: std::collections::HashMap::new(),
+                callback_url: None,
+                title: None,
+            },
+            crate::persistence::TokenTotals::default(),
+            crate::pipeline::PersistWatermark::default(),
+            ReadyToInfer,
+        ));
+
+        world.run_until_idle(20).await;
+        world.flush_and_stop().await;
+
+        // Read immediately — the drain guarantees the write landed.
+        let meta_path = dir.path().join("run-flush").join("meta.json");
+        let text = std::fs::read_to_string(&meta_path).expect("meta.json flushed on stop");
+        let meta: leviath_core::run_meta::RunMeta = serde_json::from_str(&text).unwrap();
+        assert_eq!(meta.run_id, "run-flush");
+        assert_eq!(meta.status, leviath_core::run_meta::RunStatus::Complete);
+
+        // A second call is a no-op (resource already removed, task taken) — no panic.
+        world.flush_and_stop().await;
+        assert!(meta_path.exists());
+    }
+
+    #[tokio::test]
+    async fn world_init_and_restore_needs_no_daemon_infra() {
+        // `PipelineWorld::new` + `restore::restore_agent` form a self-contained
+        // spin-up→restore path: no control socket, HTTP server, PID files, or build
+        // markers — only providers, a tool service, a runs dir, and a runtime. This
+        // locks that in so the daemon wiring stays optional.
+        use leviath_core::region::EntryKind;
+        use leviath_core::run_meta::{ContextSnapshot, RegionEntrySnapshot, RegionSnapshot};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut world = PipelineWorld::new(
+            registry_with(vec![text("unused")]),
+            Arc::new(EchoTools),
+            InferencePoolConfig::new(),
+            dir.path().to_path_buf(),
+            Handle::current(),
+        );
+        let entity = world.spawn_agent((
+            AgentBlueprint(blueprint()),
+            StageCursor { index: 0 },
+            agent_state(),
+            crate::components::MessageInbox::default(),
+            StageProgress::default(),
+            StageInferences(vec![stage("m")]),
+            StageSetups(vec![setup()]),
+            VisitCounts::default(),
+            window(),
+            stage("m"),
+            setup().inference_config,
+            crate::persistence::TokenTotals::default(),
+        ));
+
+        let snapshot = ContextSnapshot {
+            stage_name: "s0".to_string(),
+            total_tokens: 4,
+            max_tokens: 10_000,
+            regions: vec![RegionSnapshot {
+                name: "conversation".to_string(),
+                kind: "clearable".to_string(),
+                current_tokens: 4,
+                max_tokens: 10_000,
+                entries: vec![RegionEntrySnapshot {
+                    content: "restored turn".to_string(),
+                    tokens: 4,
+                    kind: EntryKind::UserMessage,
+                    metadata: None,
+                    key: None,
+                }],
+            }],
+        };
+        crate::restore::restore_agent(
+            world.world_mut(),
+            entity,
+            &snapshot,
+            0,
+            3,
+            crate::persistence::TokenTotals::default(),
+        );
+
+        let state = world
+            .world()
+            .get::<crate::components::AgentState>(entity)
+            .unwrap();
+        assert_eq!(state.status, AgentStatus::Active);
+        assert_eq!(state.iteration, 3);
+        let win = world
+            .world()
+            .get::<crate::components::ContextWindow>(entity)
+            .unwrap();
+        assert_eq!(
+            win.get_region("conversation").unwrap().content[0].content,
+            "restored turn"
+        );
     }
 
     #[tokio::test]
