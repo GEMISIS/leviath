@@ -636,7 +636,7 @@ pub fn dispatch_tools(
                     continue;
                 }
             }
-            if let Some(gate) = gate.as_deref_mut().filter(|_| !auto_approve_gates) {
+            if let Some(gate) = gate.as_deref_mut() {
                 let decision = gate.check_with_policy(
                     &state.agent_id,
                     &c.name,
@@ -646,21 +646,38 @@ pub fn dispatch_tools(
                     script_checker,
                 );
                 if !decision.is_allowed() {
-                    match (interactive, decision.blocked_levels()) {
-                        (Some(_), Some((taint, clearance))) => {
-                            pending_prompts.push((
-                                c.tool_id.clone(),
-                                c.name.clone(),
-                                taint,
-                                clearance,
-                            ));
+                    if auto_approve_gates {
+                        // `--yolo`: waive enforcement but record the override in
+                        // the audit trail (rather than skipping the gate), so the
+                        // over-cleared call is still accounted for. Fall through
+                        // to dispatch the call.
+                        let (taint, clearance) = decision
+                            .blocked_levels()
+                            .expect("a non-Allowed GateDecision is always Blocked");
+                        gate.record_allow(
+                            &state.agent_id,
+                            &c.name,
+                            taint,
+                            clearance,
+                            leviath_core::taint::GateDecisionSource::YoloAutoApprove,
+                        );
+                    } else {
+                        match (interactive, decision.blocked_levels()) {
+                            (Some(_), Some((taint, clearance))) => {
+                                pending_prompts.push((
+                                    c.tool_id.clone(),
+                                    c.name.clone(),
+                                    taint,
+                                    clearance,
+                                ));
+                            }
+                            _ => {
+                                context_results
+                                    .push((c.tool_id.clone(), taint_block_message(&decision)));
+                            }
                         }
-                        _ => {
-                            context_results
-                                .push((c.tool_id.clone(), taint_block_message(&decision)));
-                        }
+                        continue;
                     }
-                    continue;
                 }
             }
             lane_calls.push(leviath_providers::ToolCall {
@@ -4113,6 +4130,23 @@ mod tests {
         assert!(world.get::<AwaitingTools>(e).is_some());
         assert!(world.get::<ReadyForTools>(e).is_none());
         assert_eq!(jrx.try_recv().expect("job enqueued").entity, e);
+        // The waived block is still recorded in the audit trail. Evaluate the
+        // predicate first so the assert message stays static (a call in the
+        // message only runs on failure and would read as uncovered).
+        let recorded_yolo_override = world
+            .get::<crate::taint::TaintGate>(e)
+            .unwrap()
+            .audit_log()
+            .iter()
+            .any(|ev| {
+                ev.allowed
+                    && ev.decision_source
+                        == leviath_core::taint::GateDecisionSource::YoloAutoApprove
+            });
+        assert!(
+            recorded_yolo_override,
+            "expected a YoloAutoApprove audit entry"
+        );
     }
 
     #[tokio::test]

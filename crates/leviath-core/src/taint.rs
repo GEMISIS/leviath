@@ -392,6 +392,10 @@ pub enum GateDecisionSource {
     UserDenied,
     /// Taint tracking is disabled — automatic allow.
     TaintDisabled,
+    /// Auto-approved by `--yolo`: the gate would have blocked, but the agent
+    /// runs unattended so enforcement is waived. Recorded (rather than silently
+    /// skipped) so the audit trail still shows the over-cleared call.
+    YoloAutoApprove,
 }
 
 /// Built-in tool classification defaults per the plan.
