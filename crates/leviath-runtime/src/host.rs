@@ -820,34 +820,39 @@ impl WorldHost {
     }
 
     /// Flush all queued persistence and stop the hosted world, guaranteeing every
-    /// dirty agent's final snapshot reaches disk. Call after [`Self::serve`]
-    /// returns (see [`PipelineWorld::flush_and_stop`]).
+    /// dirty agent's final snapshot reaches disk (see
+    /// [`PipelineWorld::flush_and_stop`]). Invoked automatically when [`Self::serve`]
+    /// returns; also exposed directly for callers that drive the world themselves.
     pub async fn flush_and_stop(&mut self) {
         self.world.flush_and_stop().await;
     }
 
     /// Run the host: drive the world to quiescence, then park until an async
     /// result wakes it, a control op arrives, or shutdown is signalled. Returns
-    /// when shutdown fires or the control channel closes.
+    /// when shutdown fires or the control channel closes — and before returning,
+    /// **flushes all queued persistence to disk** ([`Self::flush_and_stop`]) so a
+    /// clean daemon shutdown never loses a dirty agent's final snapshot.
     pub async fn serve(&mut self, mut control_rx: UnboundedReceiver<ControlOp>) {
         let wake = self.world.wake_handle();
         let shutdown = self.world.shutdown_handle();
-        loop {
+        'serve: loop {
             self.world.run_to_fixed_point();
             self.emit_events();
             tokio::select! {
                 _ = wake.notified() => {}
-                _ = shutdown.notified() => return,
+                _ = shutdown.notified() => break 'serve,
                 op = control_rx.recv() => {
                     match op {
                         Some(op) => self.handle(op),
-                        None => return, // all control senders dropped
+                        None => break 'serve, // all control senders dropped
                     }
                 }
                 // The host holds a `subagent_tx`, so this only yields `Some`.
                 Some(sub) = self.subagent_rx.recv() => self.handle_subagent(sub),
             }
         }
+        // Shutting down: drain the persistence lane before the world is dropped.
+        self.flush_and_stop().await;
     }
 }
 
