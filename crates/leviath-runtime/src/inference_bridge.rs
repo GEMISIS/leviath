@@ -408,16 +408,9 @@ mod tests {
         .await;
         let outcome = rx.try_recv().expect("outcome sent");
         let err = outcome.result.expect_err("should be rejected");
-        assert!(
-            matches!(
-                err,
-                ProviderError::TokenLimitExceeded {
-                    used: 950,
-                    max: 1000
-                }
-            ),
-            "got: {err}"
-        );
+        // Assert on the Display string (branch-free) rather than `matches!`,
+        // whose non-matching arm would be an uncovered region.
+        assert_eq!(err.to_string(), "Token limit exceeded: 950 > 1000");
     }
 
     #[tokio::test]
@@ -437,6 +430,16 @@ mod tests {
         .await;
         let outcome = rx.try_recv().expect("outcome sent");
         assert_eq!(outcome.result.expect("should succeed").content, "ok");
+    }
+
+    #[tokio::test]
+    async fn counter_provider_metadata_is_exercised() {
+        // Keep the Counter mock's non-`infer` trait methods measured.
+        let p = Counter { count: 5, max: 10 };
+        assert_eq!(p.name(), "counter");
+        assert_eq!(p.max_context_tokens("m"), 10);
+        assert_eq!(p.count_tokens("t", "m").await, 5);
+        assert!(p.capabilities("m").supports_streaming);
     }
 
     #[tokio::test]

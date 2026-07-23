@@ -227,12 +227,12 @@ impl PipelineWorld {
     /// world — see [`crate::inference_bridge::InferenceJob::exact_token_counting`].
     /// Call once at startup when the run config requests it, before serving.
     pub fn set_exact_token_counting(&mut self, enabled: bool) {
-        if let Some(mut stage) = self
-            .world
-            .get_resource_mut::<crate::pipeline::InferenceStage>()
-        {
-            stage.exact_token_counting = enabled;
-        }
+        // `InferenceStage` is inserted by every `PipelineWorld::new` path, so it
+        // is a hard invariant here — `resource_mut` (which panics if absent) is
+        // correct and keeps this branch-free.
+        self.world
+            .resource_mut::<crate::pipeline::InferenceStage>()
+            .exact_token_counting = enabled;
     }
 
     /// Install the shared interaction hub as a world resource and attach this
