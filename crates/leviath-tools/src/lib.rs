@@ -4,11 +4,115 @@
 
 use leviath_providers::Tool;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
+
+/// A platform feature a built-in tool depends on.
+///
+/// Each built-in declares the capabilities it requires (see
+/// [`tool_required_capabilities`]); the current platform declares what it
+/// provides (see [`PlatformCapabilities`]). A tool whose requirements aren't
+/// met by the platform simply doesn't register — it's dropped from
+/// advertisement, name-recognition, and dispatch. This lets platform-specific
+/// tools (like `shell`, which spawns OS processes) coexist without per-tool
+/// `#[cfg]` gates or one-off boolean flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ToolCapability {
+    /// Can launch child processes (e.g. the `shell` tool, stdio MCP servers).
+    ProcessSpawn,
+    /// Can read and write files.
+    FileSystem,
+    /// Can make outbound network/HTTP requests.
+    Network,
+}
+
+/// The set of [`ToolCapability`]s the current platform provides.
+///
+/// Detection is compile-time: [`current`](Self::current) resolves to the
+/// capability set for the build target. Desktop targets provide everything; a
+/// future mobile or wasm host would provide a reduced set (no
+/// [`ProcessSpawn`](ToolCapability::ProcessSpawn)). This mirrors the
+/// `leviath-sys` crate's approach of centralizing platform `#[cfg]` branching
+/// in one place rather than scattering it across call sites.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformCapabilities {
+    capabilities: HashSet<ToolCapability>,
+}
+
+impl PlatformCapabilities {
+    /// Capabilities for a desktop host: process spawning, filesystem, network.
+    pub fn desktop() -> Self {
+        Self {
+            capabilities: HashSet::from([
+                ToolCapability::ProcessSpawn,
+                ToolCapability::FileSystem,
+                ToolCapability::Network,
+            ]),
+        }
+    }
+
+    /// Capabilities for a mobile host: filesystem and network, but no process
+    /// spawning (so the `shell` tool doesn't register).
+    pub fn mobile() -> Self {
+        Self {
+            capabilities: HashSet::from([ToolCapability::FileSystem, ToolCapability::Network]),
+        }
+    }
+
+    /// The capability set for the platform this binary was built for.
+    ///
+    /// Only desktop targets are built today, so this resolves to
+    /// [`desktop`](Self::desktop). A future mobile/wasm target adds a `cfg` arm
+    /// here returning [`mobile`](Self::mobile) — every built-in then auto-filters
+    /// against it with no other change.
+    pub fn current() -> Self {
+        Self::desktop()
+    }
+
+    /// Build a capability set from an explicit collection (tests, future hosts).
+    pub fn from_capabilities(caps: impl IntoIterator<Item = ToolCapability>) -> Self {
+        Self {
+            capabilities: caps.into_iter().collect(),
+        }
+    }
+
+    /// Whether the platform provides `cap`.
+    pub fn supports(&self, cap: ToolCapability) -> bool {
+        self.capabilities.contains(&cap)
+    }
+
+    /// Whether the platform provides *every* capability in `required`. An empty
+    /// requirement slice is always satisfied.
+    pub fn satisfies(&self, required: &[ToolCapability]) -> bool {
+        required.iter().all(|c| self.supports(*c))
+    }
+}
+
+impl Default for PlatformCapabilities {
+    fn default() -> Self {
+        Self::current()
+    }
+}
+
+/// The capabilities a built-in tool requires to function.
+///
+/// Keyed by *canonical* tool name (resolve aliases via [`canonical_tool_name`]
+/// first). An empty slice means the tool is platform-agnostic and always
+/// available — this covers the runtime-handled tools (`present_for_review`,
+/// `ask_user_*`, `edit_document`, `context_*`) which touch neither the OS
+/// process table nor the filesystem directly.
+pub fn tool_required_capabilities(canonical_name: &str) -> &'static [ToolCapability] {
+    match canonical_name {
+        "shell" => &[ToolCapability::ProcessSpawn],
+        "read_file" | "read_files" | "write_file" | "edit_file" | "list_dir" => {
+            &[ToolCapability::FileSystem]
+        }
+        _ => &[],
+    }
+}
 
 /// Context for tool execution — defines the sandbox root.
 pub struct ToolContext {
@@ -74,19 +178,42 @@ pub fn canonical_tool_name(name: &str) -> &str {
 }
 
 /// Built-in tools: read_file, write_file, edit_file, list_dir, shell.
+///
+/// Carries the [`PlatformCapabilities`] of the current platform; tools whose
+/// [`tool_required_capabilities`] aren't satisfied are dropped from
+/// [`tool_defs`](Self::tool_defs), [`names`](Self::names), and rejected by
+/// [`execute`](Self::execute).
 pub struct BuiltinTools {
     ctx: ToolContext,
+    platform: PlatformCapabilities,
 }
 
 impl BuiltinTools {
-    /// Create a new BuiltinTools instance with the given sandbox context.
+    /// Create a new BuiltinTools instance with the given sandbox context,
+    /// filtering tools against the current platform's capabilities.
     pub fn new(ctx: ToolContext) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            platform: PlatformCapabilities::current(),
+        }
     }
 
-    /// All tool definitions to advertise to the LLM.
+    /// Create a BuiltinTools instance with an explicit platform capability set,
+    /// for tests or hosts that need to override the compile-time default.
+    pub fn with_capabilities(ctx: ToolContext, platform: PlatformCapabilities) -> Self {
+        Self { ctx, platform }
+    }
+
+    /// Whether a built-in named `canonical_name` is available on this platform.
+    fn available(&self, canonical_name: &str) -> bool {
+        self.platform
+            .satisfies(tool_required_capabilities(canonical_name))
+    }
+
+    /// All tool definitions to advertise to the LLM, minus any whose required
+    /// platform capabilities aren't provided by the current platform.
     pub fn tool_defs(&self) -> Vec<Tool> {
-        vec![
+        let mut defs = vec![
             Tool {
                 name: "read_file".to_string(),
                 description: "Read the complete contents of a file. Use this to examine existing code, configurations, or data files before making changes.".to_string(),
@@ -361,7 +488,9 @@ impl BuiltinTools {
                     "required": []
                 }),
             },
-        ]
+        ];
+        defs.retain(|t| self.available(&t.name));
+        defs
     }
 
     /// Tool definitions for sub-agent management tools.
@@ -504,16 +633,33 @@ impl BuiltinTools {
             "context_list",
         ]
         .iter()
+        // Drop any canonical built-in the current platform can't provide, so a
+        // filtered-out tool (e.g. `shell` without `ProcessSpawn`) isn't even
+        // recognized as a built-in on dispatch.
+        .filter(|n| self.available(n))
         .map(|s| s.to_string())
         .collect();
-        names.extend(TOOL_ALIASES.iter().map(|(alias, _)| alias.to_string()));
+        // Include an alias only when its canonical target survived filtering
+        // (so `bash` disappears together with `shell`).
+        names.extend(
+            TOOL_ALIASES
+                .iter()
+                .filter(|(_, canonical)| self.available(canonical))
+                .map(|(alias, _)| alias.to_string()),
+        );
         names
     }
 
     /// Execute a built-in tool by name (resolving aliases), returning the result
     /// as a string.
     pub async fn execute(&self, name: &str, args: Value) -> String {
-        match canonical_tool_name(name) {
+        let canonical = canonical_tool_name(name);
+        // A tool whose platform capabilities aren't met never advertises, but a
+        // caller could still dispatch to it directly — reject it here too.
+        if !self.available(canonical) {
+            return format!("[error] tool '{}' is not available on this platform", name);
+        }
+        match canonical {
             "read_file" => self.read_file(&args).await,
             "read_files" => self.read_files(&args).await,
             "write_file" => self.write_file(&args).await,
@@ -874,6 +1020,15 @@ mod tests {
 
     fn make_tools(dir: &std::path::Path) -> BuiltinTools {
         BuiltinTools::new(ToolContext::new(dir.to_path_buf()))
+    }
+
+    /// Built-ins over a mobile capability set (no `ProcessSpawn`), so the
+    /// `shell` tool and its `bash` alias are filtered out.
+    fn make_mobile_tools(dir: &std::path::Path) -> BuiltinTools {
+        BuiltinTools::with_capabilities(
+            ToolContext::new(dir.to_path_buf()),
+            PlatformCapabilities::mobile(),
+        )
     }
 
     // ── Tool definitions ──────────────────────────────────────────────────
@@ -1956,6 +2111,137 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("b.txt")).unwrap(),
             "BBB"
+        );
+    }
+
+    // ── Platform capabilities ─────────────────────────────────────────────
+
+    #[test]
+    fn desktop_supports_all_capabilities() {
+        let caps = PlatformCapabilities::desktop();
+        assert!(caps.supports(ToolCapability::ProcessSpawn));
+        assert!(caps.supports(ToolCapability::FileSystem));
+        assert!(caps.supports(ToolCapability::Network));
+    }
+
+    #[test]
+    fn mobile_lacks_process_spawn() {
+        let caps = PlatformCapabilities::mobile();
+        assert!(!caps.supports(ToolCapability::ProcessSpawn));
+        assert!(caps.supports(ToolCapability::FileSystem));
+        assert!(caps.supports(ToolCapability::Network));
+    }
+
+    #[test]
+    fn current_matches_desktop_and_is_the_default() {
+        // Only desktop targets are built today.
+        assert_eq!(
+            PlatformCapabilities::current(),
+            PlatformCapabilities::desktop()
+        );
+        assert_eq!(
+            PlatformCapabilities::default(),
+            PlatformCapabilities::desktop()
+        );
+    }
+
+    #[test]
+    fn satisfies_requires_all_and_empty_is_always_met() {
+        let caps = PlatformCapabilities::mobile();
+        assert!(caps.satisfies(&[]));
+        assert!(caps.satisfies(&[ToolCapability::FileSystem]));
+        assert!(!caps.satisfies(&[ToolCapability::ProcessSpawn]));
+        // All-or-nothing: one unmet requirement fails the whole set.
+        assert!(!caps.satisfies(&[ToolCapability::FileSystem, ToolCapability::ProcessSpawn]));
+    }
+
+    #[test]
+    fn from_capabilities_builds_explicit_set() {
+        let caps = PlatformCapabilities::from_capabilities([ToolCapability::Network]);
+        assert!(caps.supports(ToolCapability::Network));
+        assert!(!caps.supports(ToolCapability::FileSystem));
+    }
+
+    #[test]
+    fn tool_required_capabilities_by_name() {
+        assert_eq!(
+            tool_required_capabilities("shell"),
+            &[ToolCapability::ProcessSpawn]
+        );
+        assert_eq!(
+            tool_required_capabilities("read_file"),
+            &[ToolCapability::FileSystem]
+        );
+        // Runtime-handled / platform-agnostic tools require nothing.
+        assert!(tool_required_capabilities("context_write").is_empty());
+        assert!(tool_required_capabilities("present_for_review").is_empty());
+        assert!(tool_required_capabilities("unknown_tool").is_empty());
+    }
+
+    #[test]
+    fn mobile_tool_defs_omit_shell_but_keep_the_rest() {
+        let dir = std::env::temp_dir();
+        let tools = make_mobile_tools(&dir);
+        let names: Vec<String> = tools.tool_defs().iter().map(|t| t.name.clone()).collect();
+        assert!(!names.contains(&"shell".to_string()));
+        // The other 15 built-ins remain.
+        assert_eq!(tools.tool_defs().len(), 15);
+        assert!(names.contains(&"read_file".to_string()));
+        assert!(names.contains(&"context_write".to_string()));
+        assert!(names.contains(&"present_for_review".to_string()));
+    }
+
+    #[test]
+    fn desktop_tool_defs_include_shell() {
+        let dir = std::env::temp_dir();
+        let tools = make_tools(&dir);
+        let names: Vec<String> = tools.tool_defs().iter().map(|t| t.name.clone()).collect();
+        assert!(names.contains(&"shell".to_string()));
+    }
+
+    #[test]
+    fn mobile_names_omit_shell_and_bash_alias() {
+        let dir = std::env::temp_dir();
+        let tools = make_mobile_tools(&dir);
+        let names = tools.names();
+        assert!(!names.contains(&"shell".to_string()));
+        assert!(!names.contains(&"bash".to_string()));
+        // File + context tools still recognized.
+        assert!(names.contains(&"read_file".to_string()));
+        assert!(names.contains(&"context_write".to_string()));
+    }
+
+    #[test]
+    fn desktop_names_include_shell_and_bash_alias() {
+        let dir = std::env::temp_dir();
+        let tools = make_tools(&dir);
+        let names = tools.names();
+        assert!(names.contains(&"shell".to_string()));
+        assert!(names.contains(&"bash".to_string()));
+    }
+
+    #[tokio::test]
+    async fn mobile_execute_shell_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_mobile_tools(dir.path());
+        let out = tools.execute("shell", json!({"command": "echo hi"})).await;
+        assert!(out.contains("not available on this platform"), "got: {out}");
+        // The `bash` alias resolves to `shell` and is rejected the same way.
+        let out = tools.execute("bash", json!({"command": "echo hi"})).await;
+        assert!(out.contains("not available on this platform"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn mobile_execute_file_tool_still_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_mobile_tools(dir.path());
+        let out = tools
+            .execute("write_file", json!({"path": "x.txt", "content": "hi"}))
+            .await;
+        assert!(!out.starts_with("[error]"), "got: {out}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("x.txt")).unwrap(),
+            "hi"
         );
     }
 }
