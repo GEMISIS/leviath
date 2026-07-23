@@ -1513,6 +1513,7 @@ pub fn dispatch_persistence(
     )>,
     stage: Res<PersistenceStage>,
     hub: Option<Res<InteractionHub>>,
+    sink: Option<Res<crate::host::WorldEventSink>>,
 ) {
     for (
         md,
@@ -1556,6 +1557,19 @@ pub fn dispatch_persistence(
         }
         if watermark_changed {
             watermark.last = Some(current);
+        }
+
+        // Stream each buffered line to WS subscribers as a `Log` event (in
+        // addition to the disk append below). No-op in worlds without the sink
+        // (test / `lev run`); a zero-subscriber `send` error is ignored.
+        if let Some(sink) = &sink {
+            for (_idx, line) in output_appends.iter().chain(log_appends.iter()) {
+                let _ = sink.0.send(crate::host::WorldEvent::Log {
+                    run_id: md.run_id.clone(),
+                    agent_id: state.agent_id.clone(),
+                    line: line.clone(),
+                });
+            }
         }
 
         // Tree links, for a deterministic restart-time rebuild of the graph.
@@ -3633,6 +3647,75 @@ mod tests {
         run_dispatch_persistence(&mut world);
         let job = rx.try_recv().expect("append-triggered job");
         assert_eq!(job.log_appends, vec![(0, "late log".to_string())]);
+    }
+
+    #[test]
+    fn dispatch_persistence_broadcasts_buffered_lines_as_log_events() {
+        use crate::host::{WorldEvent, WorldEventSink};
+        let (mut world, _rx) = world_with_persistence();
+        let (sink_tx, mut sink_rx) = tokio::sync::broadcast::channel(16);
+        world.insert_resource(WorldEventSink(sink_tx));
+        let mut buf = StageIoBuffer::default();
+        buf.output.push((0, "readable output".to_string()));
+        buf.logs.push((0, "[Tokens: 1 in, 2 out]".to_string()));
+        world.spawn((
+            run_metadata(),
+            agent_state(),
+            conv_window(),
+            StageCursor { index: 0 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+            buf,
+        ));
+
+        run_dispatch_persistence(&mut world);
+
+        // Output lines stream first, then operational logs — each as a `Log`
+        // carrying the agent's run/agent ids and the raw line.
+        let first = sink_rx.try_recv().expect("output log event");
+        assert_eq!(
+            first,
+            WorldEvent::Log {
+                run_id: "run-1".to_string(),
+                agent_id: "a".to_string(),
+                line: "readable output".to_string(),
+            }
+        );
+        let second = sink_rx.try_recv().expect("operational log event");
+        assert_eq!(
+            second,
+            WorldEvent::Log {
+                run_id: "run-1".to_string(),
+                agent_id: "a".to_string(),
+                line: "[Tokens: 1 in, 2 out]".to_string(),
+            }
+        );
+        assert!(sink_rx.try_recv().is_err(), "no extra events");
+    }
+
+    #[test]
+    fn dispatch_persistence_emits_no_log_events_without_a_sink() {
+        use crate::host::WorldEventSink;
+        let (mut world, _rx) = world_with_persistence();
+        // A sink whose sender is *not* installed as a world resource: the system
+        // can't reach it, so nothing is broadcast.
+        let (sink_tx, mut sink_rx) = tokio::sync::broadcast::channel(16);
+        let _keep_alive = WorldEventSink(sink_tx);
+        let mut buf = StageIoBuffer::default();
+        buf.output.push((0, "line".to_string()));
+        world.spawn((
+            run_metadata(),
+            agent_state(),
+            conv_window(),
+            StageCursor { index: 0 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+            buf,
+        ));
+
+        run_dispatch_persistence(&mut world);
+
+        assert!(sink_rx.try_recv().is_err(), "no events without the sink");
     }
 
     #[test]

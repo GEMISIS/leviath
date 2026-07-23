@@ -286,7 +286,25 @@ pub enum WorldEvent {
         /// The terminal status label.
         status: String,
     },
+    /// A run produced a per-agent log/output line (readable assistant output or
+    /// an operational `[Tokens: …]` / `[tool] …` / `[error] …` line).
+    Log {
+        /// The run id.
+        run_id: String,
+        /// The agent id.
+        agent_id: String,
+        /// The log line text.
+        line: String,
+    },
 }
+
+/// A world resource holding a clone of the host's [`WorldEvent`] broadcast
+/// sender, so ECS systems (e.g. the persistence drain) can push events — notably
+/// per-agent [`WorldEvent::Log`] lines — into the same stream the control
+/// transport serves. Absent in worlds that don't stream (test / `lev run`), where
+/// systems that depend on it become no-ops.
+#[derive(bevy_ecs::system::Resource, Clone)]
+pub struct WorldEventSink(pub broadcast::Sender<WorldEvent>);
 
 /// A short, stable status label for [`WorldEvent`].
 fn status_str(status: &AgentStatus) -> &'static str {
@@ -340,8 +358,13 @@ impl WorldHost {
 
     /// Wrap a world with a specific interaction hub — the daemon shares one hub
     /// between the tool service's per-agent backends and this host.
-    pub fn with_interactions(world: PipelineWorld, interactions: InteractionHub) -> Self {
+    pub fn with_interactions(mut world: PipelineWorld, interactions: InteractionHub) -> Self {
         let (events, _) = broadcast::channel(1024);
+        // Let ECS systems (the persistence drain) push events — per-agent log
+        // lines — into the same stream the control transport serves.
+        world
+            .world_mut()
+            .insert_resource(WorldEventSink(events.clone()));
         let (subagent_tx, subagent_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             world,
