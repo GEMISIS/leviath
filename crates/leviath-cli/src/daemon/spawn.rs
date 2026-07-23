@@ -122,9 +122,18 @@ fn resolve_stages(
             let tools = if stage.available_tools.is_empty() {
                 Vec::new()
             } else {
+                // Resolve aliases (e.g. `bash` → `shell`) so a stage that names a
+                // tool by an alias still selects its canonical definition. A name
+                // that matches nothing (an alias-free typo, or an MCP tool whose
+                // server isn't installed) is simply omitted — no error.
                 all_tool_defs
                     .iter()
-                    .filter(|t| stage.available_tools.iter().any(|n| n == &t.name))
+                    .filter(|t| {
+                        stage
+                            .available_tools
+                            .iter()
+                            .any(|n| leviath_tools::canonical_tool_name(n) == t.name)
+                    })
                     .cloned()
                     .collect()
             };
@@ -912,6 +921,41 @@ mod tests {
             &tools,
         );
         assert!(resolved[0].tools.is_empty());
+    }
+
+    #[test]
+    fn resolve_stages_matches_by_alias_and_skips_unknown_names() {
+        // A stage names `bash` (an alias) and a not-installed MCP tool. The
+        // filter must select the canonical `shell` definition for the alias and
+        // silently omit the unknown name (no error, no panic).
+        let mut stage =
+            leviath_core::Stage::new("s".to_string(), model_cfg(vec![("anthropic", "m")]));
+        stage.available_tools = vec!["bash".to_string(), "acme__uninstalled".to_string()];
+        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
+        let tools = vec![
+            Tool {
+                name: "shell".to_string(),
+                description: String::new(),
+                parameters: serde_json::Value::Null,
+            },
+            Tool {
+                name: "read_file".to_string(),
+                description: String::new(),
+                parameters: serde_json::Value::Null,
+            },
+        ];
+        let resolved = resolve_stages(
+            &bp,
+            None,
+            &Config::default(),
+            &registry_with(&["anthropic"]),
+            &tools,
+        );
+        let selected: Vec<&str> = resolved[0].tools.iter().map(|t| t.name.as_str()).collect();
+        // `bash` resolved to `shell`; the unknown MCP name and unlisted
+        // `read_file` were both excluded.
+        assert_eq!(selected, vec!["shell"]);
     }
 
     #[tokio::test]
