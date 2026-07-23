@@ -413,14 +413,19 @@ async fn output_failing_mid_turn_ends_the_turn() {
     std::fs::write(out, "mid-turn output\n").unwrap();
 
     let (_bp, args) = blueprint_args();
-    let cwd = std::path::Path::new(args.agent.as_ref().unwrap());
+    let cwd = args.agent.clone().unwrap();
+    // Build the session/new line via serde so the cwd path is JSON-escaped —
+    // Windows paths contain backslashes that would otherwise be invalid JSON.
+    let session_new = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "session/new",
+        "params": {"cwd": cwd},
+    });
     let script = format!(
         "{}\n{}\n{}\n",
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
-        format_args!(
-            r#"{{"jsonrpc":"2.0","id":2,"method":"session/new","params":{{"cwd":"{}"}}}}"#,
-            cwd.to_string_lossy()
-        ),
+        session_new,
         r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}"#,
     );
     let writer = FailAfter {
@@ -543,11 +548,14 @@ async fn session_new_errors_when_no_blueprint_resolves() {
     // No --agent, and the cwd has no blueprint.
     let mut h = Harness::start(daemon, AgentClientArgs::default());
     let empty = tempfile::tempdir().unwrap();
-    h.send(&format!(
-        r#"{{"jsonrpc":"2.0","id":1,"method":"session/new","params":{{"cwd":"{}"}}}}"#,
-        empty.path().to_string_lossy()
-    ))
-    .await;
+    // serde-build so the (possibly backslash-containing) path is JSON-escaped.
+    let msg = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "session/new",
+        "params": {"cwd": empty.path().to_string_lossy()},
+    });
+    h.send(&msg.to_string()).await;
     let resp = h.recv().await;
     assert_eq!(resp.error.unwrap().code, error_codes::INVALID_PARAMS);
     h.close_input().await;
