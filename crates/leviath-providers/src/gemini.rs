@@ -326,7 +326,10 @@ impl GeminiProvider {
             .filter_map(|item| {
                 // `name` is like "models/gemini-3.5-flash"; the id drops the prefix.
                 let name = item.get("name")?.as_str()?;
-                let id = name.strip_prefix("models/").unwrap_or(name).to_string();
+                let id = match name.strip_prefix("models/") {
+                    Some(rest) => rest.to_string(),
+                    None => name.to_string(),
+                };
                 // Start from the family defaults, then override with the API's
                 // authoritative limits where present.
                 let mut capabilities = self.capabilities(&id);
@@ -673,6 +676,49 @@ mod tests {
         assert_eq!(tokens, 2);
     }
 
+    #[tokio::test]
+    async fn test_count_tokens_falls_back_on_connection_error() {
+        // Base ends in `/openai` so `native_base` resolves, but the port is dead:
+        // the POST fails at send() → RequestFailed → heuristic fallback.
+        let provider = GeminiProvider {
+            client: reqwest::Client::new(),
+            api_key: "key".to_string(),
+            base_url: "http://127.0.0.1:19997/openai".to_string(),
+            rate_limiter: None,
+            capability_overrides: HashMap::new(),
+        };
+        let tokens = provider.count_tokens("12345678", "gemini-3.5-flash").await;
+        assert_eq!(tokens, 2);
+    }
+
+    #[tokio::test]
+    async fn test_count_tokens_falls_back_on_malformed_json() {
+        let base = spawn_mock_server(200, "OK", b"not json").await;
+        let provider = GeminiProvider {
+            client: reqwest::Client::new(),
+            api_key: "key".to_string(),
+            base_url: format!("{}/openai", base),
+            rate_limiter: None,
+            capability_overrides: HashMap::new(),
+        };
+        let tokens = provider.count_tokens("12345678", "gemini-3.5-flash").await;
+        assert_eq!(tokens, 2);
+    }
+
+    #[tokio::test]
+    async fn test_count_tokens_falls_back_on_missing_total_tokens() {
+        let base = spawn_mock_server(200, "OK", br#"{"unexpected": true}"#).await;
+        let provider = GeminiProvider {
+            client: reqwest::Client::new(),
+            api_key: "key".to_string(),
+            base_url: format!("{}/openai", base),
+            rate_limiter: None,
+            capability_overrides: HashMap::new(),
+        };
+        let tokens = provider.count_tokens("12345678", "gemini-3.5-flash").await;
+        assert_eq!(tokens, 2);
+    }
+
     #[test]
     fn test_capabilities_override_takes_precedence() {
         let mut overrides = HashMap::new();
@@ -992,6 +1038,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_models_native_id_without_models_prefix_is_used_verbatim() {
+        // A `name` lacking the "models/" prefix is used as-is (unwrap_or branch).
+        let body = br#"{"models":[{"name":"gemini-bare","inputTokenLimit":500000}]}"#;
+        let base = spawn_mock_server(200, "OK", body).await;
+        let provider = native_provider_with_base(&base);
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gemini-bare");
+        assert_eq!(models[0].capabilities.max_context_tokens, 500_000);
+    }
+
+    #[tokio::test]
+    async fn list_models_native_connection_error() {
+        // `/openai` base resolves native, dead port → RequestFailed.
+        let provider = GeminiProvider {
+            client: reqwest::Client::new(),
+            api_key: "test-key".to_string(),
+            base_url: "http://127.0.0.1:19997/openai".to_string(),
+            rate_limiter: None,
+            capability_overrides: HashMap::new(),
+        };
+        let err = provider.list_models().await.unwrap_err();
+        assert!(err.to_string().contains("Request failed:"));
+    }
+
+    #[tokio::test]
+    async fn list_models_native_malformed_json_errors() {
+        let base = spawn_mock_server(200, "OK", b"not json").await;
+        let provider = native_provider_with_base(&base);
+        let err = provider.list_models().await.unwrap_err();
+        assert!(err.to_string().contains("Invalid response:"));
+    }
+
+    #[tokio::test]
+    async fn list_models_native_non_success_status_errors() {
+        // A non-2xx from the native endpoint propagates via check_http_response.
+        let base = spawn_mock_server(401, "Unauthorized", b"bad key").await;
+        let provider = native_provider_with_base(&base);
+        let err = provider.list_models().await.unwrap_err();
+        assert!(err.to_string().contains("401"));
+    }
+
+    #[tokio::test]
     async fn list_models_native_missing_models_field_errors() {
         let base = spawn_mock_server(200, "OK", b"{}").await;
         let provider = native_provider_with_base(&base);
@@ -1001,7 +1090,10 @@ mod tests {
 
     #[tokio::test]
     async fn list_models_native_skips_entries_without_name() {
-        let body = br#"{"models":[{"no_name":true},{"name":"models/gemini-3-flash"}]}"#;
+        // First entry has no `name` (get None), second's `name` is a non-string
+        // (as_str None) — both filtered out; only the valid third survives.
+        let body =
+            br#"{"models":[{"no_name":true},{"name":123},{"name":"models/gemini-3-flash"}]}"#;
         let base = spawn_mock_server(200, "OK", body).await;
         let provider = native_provider_with_base(&base);
         let models = provider.list_models().await.unwrap();

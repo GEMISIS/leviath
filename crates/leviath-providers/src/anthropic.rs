@@ -1675,6 +1675,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_count_tokens_falls_back_on_malformed_json() {
+        // 200 but a non-JSON body → InvalidResponse on parse → heuristic (7/3.5 = 2).
+        let url = spawn_mock_server(200, "OK", b"not json").await;
+        let provider = AnthropicProvider {
+            client: reqwest::Client::new(),
+            api_key: "test-key".to_string(),
+            base_url: url,
+            rate_limiter: None,
+            capability_overrides: HashMap::new(),
+            cache_ttl: CacheTtl::default(),
+        };
+        let tokens = provider.count_tokens("1234567", "claude-sonnet-4-6").await;
+        assert_eq!(tokens, 2);
+    }
+
+    #[tokio::test]
     async fn test_count_tokens_falls_back_on_missing_field() {
         // 200 but no `input_tokens` → heuristic fallback (7 chars / 3.5 = 2).
         let url = spawn_mock_server(200, "OK", br#"{"unexpected": true}"#).await;
