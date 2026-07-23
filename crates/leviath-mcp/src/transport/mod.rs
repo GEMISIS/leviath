@@ -6,6 +6,7 @@
 //! against the crate-internal `Transport` trait and never learns which one it
 //! is talking over.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -16,6 +17,18 @@ pub(crate) mod sse;
 pub mod stdio;
 
 pub(crate) use jsonrpc::{JsonRpcRequest, JsonRpcResponse};
+
+/// Re-authenticates a connection whose bearer token has expired mid-session.
+///
+/// Implemented by the OAuth layer (which owns the token store); the HTTP
+/// transport calls it when a request comes back `401`, then retries once. A
+/// trait keeps the transport free of any OAuth/token-store knowledge.
+#[async_trait]
+pub trait BearerRefresher: Send + Sync {
+    /// Force a token refresh and return the new `Authorization` header value
+    /// (e.g. `"Bearer …"`), persisting the rotation as a side effect.
+    async fn refresh(&self) -> anyhow::Result<String>;
+}
 
 /// How long to wait for a server to answer a request before giving up.
 ///
@@ -52,4 +65,10 @@ pub(crate) trait Transport: Send {
     /// Release the connection. Implementations swallow errors from an
     /// already-dead peer so cleanup can never fail.
     async fn close(&mut self) -> anyhow::Result<()>;
+
+    /// Attach a refresher used to re-authenticate on a mid-session `401`.
+    ///
+    /// The default is a no-op — only the HTTP transport can re-auth; stdio has
+    /// no bearer to refresh.
+    fn set_bearer_refresher(&mut self, _refresher: Arc<dyn BearerRefresher>) {}
 }

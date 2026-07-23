@@ -418,6 +418,55 @@ impl OAuthClient {
     }
 }
 
+/// A [`crate::transport::BearerRefresher`] backed by the on-disk token store.
+///
+/// On a mid-session `401` the HTTP transport calls this: it refreshes the
+/// stored token non-interactively, persists the rotation, and hands back the
+/// new `Authorization` header value.
+pub struct StoredTokenRefresher {
+    server_name: String,
+    store_path: std::path::PathBuf,
+    /// Current Unix time; a fn so a long-lived transport stays current.
+    clock: fn() -> u64,
+}
+
+impl StoredTokenRefresher {
+    /// A refresher for `server_name`, reading and writing `store_path`.
+    pub fn new(server_name: impl Into<String>, store_path: std::path::PathBuf) -> Self {
+        Self {
+            server_name: server_name.into(),
+            store_path,
+            clock: system_now_secs,
+        }
+    }
+}
+
+/// Wall-clock Unix time in seconds.
+fn system_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[async_trait::async_trait]
+impl crate::transport::BearerRefresher for StoredTokenRefresher {
+    async fn refresh(&self) -> anyhow::Result<String> {
+        let mut store = AuthStore::load(&self.store_path)?;
+        let auth = store.get(&self.server_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no stored credentials for MCP server '{}'",
+                self.server_name
+            )
+        })?;
+        let refreshed = OAuthClient::new().refresh(auth, (self.clock)()).await?;
+        let value = format!("Bearer {}", refreshed.access_token);
+        store.set(&self.server_name, refreshed);
+        store.save(&self.store_path)?;
+        Ok(value)
+    }
+}
+
 /// Compose the browser authorization URL.
 fn build_authorize_url(
     endpoint: &str,
@@ -1274,6 +1323,83 @@ mod tests {
             .await
             .expect_err("a dead refresh must fail");
         assert!(err.to_string().contains("lev mcp login srv"), "got: {err}");
+    }
+
+    // ─── StoredTokenRefresher ─────────────────────────────────────────────
+
+    use crate::transport::BearerRefresher;
+
+    fn refresher_at(dir: &std::path::Path) -> StoredTokenRefresher {
+        StoredTokenRefresher {
+            server_name: "srv".to_string(),
+            store_path: dir.join("mcp-auth.json"),
+            clock: || 2_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn stored_refresher_rotates_and_persists_the_token() {
+        let server = mock_auth_server("default").await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = AuthStore::default();
+        store.set(
+            "srv",
+            ServerAuth {
+                token_endpoint: format!("{}/token", server.base),
+                refresh_token: Some("good".to_string()),
+                expires_at: 1,
+                ..Default::default()
+            },
+        );
+        let refresher = refresher_at(dir.path());
+        store.save(&refresher.store_path).unwrap();
+
+        let value = refresher.refresh().await.expect("refresh should succeed");
+        assert_eq!(value, "Bearer new-access");
+        // The rotation is persisted.
+        let reloaded = AuthStore::load(&refresher.store_path).unwrap();
+        assert_eq!(reloaded.get("srv").unwrap().access_token, "new-access");
+    }
+
+    #[tokio::test]
+    async fn stored_refresher_errors_without_stored_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let refresher = refresher_at(dir.path());
+        // Empty store → nothing to refresh.
+        let err = refresher.refresh().await.expect_err("no creds must fail");
+        assert!(
+            err.to_string().contains("no stored credentials"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stored_refresher_surfaces_a_refresh_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = AuthStore::default();
+        store.set(
+            "srv",
+            ServerAuth {
+                token_endpoint: "http://127.0.0.1:1/token".to_string(),
+                refresh_token: Some("good".to_string()),
+                expires_at: 1,
+                ..Default::default()
+            },
+        );
+        let refresher = refresher_at(dir.path());
+        store.save(&refresher.store_path).unwrap();
+        assert!(refresher.refresh().await.is_err());
+    }
+
+    #[test]
+    fn stored_refresher_new_uses_the_system_clock() {
+        let r = StoredTokenRefresher::new("s", std::path::PathBuf::from("/tmp/x"));
+        assert!((r.clock)() > 1_600_000_000);
+    }
+
+    #[test]
+    fn system_now_secs_advances_past_the_epoch() {
+        assert!(system_now_secs() > 1_600_000_000);
     }
 
     #[tokio::test]

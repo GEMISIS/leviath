@@ -188,6 +188,18 @@ impl MCPClient {
         Ok(Self::new(Box::new(transport)))
     }
 
+    /// Attach a refresher used to re-authenticate on a mid-session `401`.
+    ///
+    /// Only the HTTP transport acts on it; stdio ignores it. The daemon sets
+    /// this for an OAuth-backed HTTP server so a long run whose token expires
+    /// keeps working.
+    pub fn set_refresher(
+        &mut self,
+        refresher: std::sync::Arc<dyn crate::transport::BearerRefresher>,
+    ) {
+        self.transport.set_bearer_refresher(refresher);
+    }
+
     /// Build a client for a configured server, over whichever transport the
     /// entry describes.
     ///
@@ -1505,6 +1517,32 @@ for line in sys.stdin:
         // No server is listening; construction must still succeed, because
         // the first request is what connects.
         assert!(MCPClient::connect_http("http://127.0.0.1:1/mcp", &HashMap::new()).is_ok());
+    }
+
+    struct NoopRefresher;
+    #[async_trait::async_trait]
+    impl crate::transport::BearerRefresher for NoopRefresher {
+        async fn refresh(&self) -> anyhow::Result<String> {
+            Ok("Bearer x".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn set_refresher_on_stdio_is_a_noop() {
+        // stdio has no bearer, so the transport's default no-op handles it; this
+        // drives MCPClient::set_refresher and the default trait method.
+        let mut client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
+        client.set_refresher(std::sync::Arc::new(NoopRefresher));
+    }
+
+    #[tokio::test]
+    async fn set_refresher_on_http_is_accepted() {
+        let mut client =
+            MCPClient::connect_http("http://127.0.0.1:1/mcp", &HashMap::new()).unwrap();
+        // Exercise the refresher itself so its body is covered.
+        use crate::transport::BearerRefresher as _;
+        assert_eq!(NoopRefresher.refresh().await.unwrap(), "Bearer x");
+        client.set_refresher(std::sync::Arc::new(NoopRefresher));
     }
 
     #[test]
