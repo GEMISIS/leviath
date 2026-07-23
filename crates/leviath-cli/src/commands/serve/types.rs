@@ -172,6 +172,9 @@ pub(super) struct SpawnAgentReq {
     #[serde(default)]
     pub(super) metadata: HashMap<String, String>,
     pub(super) callback_url: Option<String>,
+    /// Optional shared secret; when set, completion webhooks carry an
+    /// `X-Leviath-Signature: sha256=<hex>` HMAC of the body keyed on this secret.
+    pub(super) callback_secret: Option<String>,
 }
 
 #[derive(Serialize, Debug)]

@@ -104,6 +104,10 @@ pub struct Config {
     /// `true` at the narrower scope.
     #[serde(default = "default_true")]
     pub batch_tool_hint: bool,
+
+    /// Completion-webhook delivery tuning (retry/backoff/timeout).
+    #[serde(default)]
+    pub webhook: WebhookConfig,
 }
 
 fn default_true() -> bool {
@@ -143,6 +147,61 @@ impl Default for LimitsConfig {
         Self {
             max_concurrent_inferences: default_max_concurrent_inferences(),
             default_max_iterations: default_default_max_iterations(),
+        }
+    }
+}
+
+fn default_webhook_max_retries() -> u32 {
+    3
+}
+
+fn default_webhook_base_delay_ms() -> u64 {
+    500
+}
+
+fn default_webhook_max_delay_ms() -> u64 {
+    30_000
+}
+
+fn default_webhook_timeout_secs() -> u64 {
+    10
+}
+
+/// Completion-webhook delivery tuning.
+///
+/// A completion webhook is POSTed when a run reaches a terminal status. Delivery
+/// retries on transient failures (network errors, timeouts, 5xx, 429, 408) with
+/// exponential backoff. Each field has a safe default so `[webhook]` can be
+/// omitted entirely.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookConfig {
+    /// Number of retries **after** the first attempt (so total sends is
+    /// `max_retries + 1`). Defaults to `3`. Set `0` to disable retries.
+    #[serde(default = "default_webhook_max_retries")]
+    pub max_retries: u32,
+
+    /// Base backoff before the first retry, in milliseconds. Subsequent retries
+    /// double it (capped at `max_delay_ms`). Defaults to `500`.
+    #[serde(default = "default_webhook_base_delay_ms")]
+    pub base_delay_ms: u64,
+
+    /// Upper bound on any single backoff delay, in milliseconds. Defaults to
+    /// `30_000` (30s).
+    #[serde(default = "default_webhook_max_delay_ms")]
+    pub max_delay_ms: u64,
+
+    /// Per-attempt request timeout, in seconds. Defaults to `10`.
+    #[serde(default = "default_webhook_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl Default for WebhookConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: default_webhook_max_retries(),
+            base_delay_ms: default_webhook_base_delay_ms(),
+            max_delay_ms: default_webhook_max_delay_ms(),
+            timeout_secs: default_webhook_timeout_secs(),
         }
     }
 }
@@ -208,6 +267,7 @@ impl Default for Config {
             taint_tracking: false,
             limits: LimitsConfig::default(),
             batch_tool_hint: true,
+            webhook: WebhookConfig::default(),
         }
     }
 }
@@ -1684,6 +1744,12 @@ anthropic_api_key = "sk-ant-test-key"
                 default_max_iterations: Some(99),
             },
             batch_tool_hint: true,
+            webhook: WebhookConfig {
+                max_retries: 5,
+                base_delay_ms: 250,
+                max_delay_ms: 10_000,
+                timeout_secs: 7,
+            },
         };
 
         let serialized = toml::to_string_pretty(&config).unwrap();
@@ -1691,6 +1757,10 @@ anthropic_api_key = "sk-ant-test-key"
 
         assert_eq!(deserialized.default_provider, "anthropic");
         assert_eq!(deserialized.limits.max_concurrent_inferences, Some(4));
+        assert_eq!(deserialized.webhook.max_retries, 5);
+        assert_eq!(deserialized.webhook.base_delay_ms, 250);
+        assert_eq!(deserialized.webhook.max_delay_ms, 10_000);
+        assert_eq!(deserialized.webhook.timeout_secs, 7);
         assert_eq!(deserialized.limits.default_max_iterations, Some(99));
         assert_eq!(
             deserialized.providers.anthropic_api_key.as_deref(),

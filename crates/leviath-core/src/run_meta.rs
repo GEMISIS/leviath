@@ -82,6 +82,10 @@ pub struct RunMeta {
     /// Webhook URL to POST on agent completion/error.
     #[serde(default)]
     pub callback_url: Option<String>,
+    /// Optional shared secret used to HMAC-SHA256 sign the webhook body
+    /// (`X-Leviath-Signature` header) so the receiver can verify authenticity.
+    #[serde(default)]
+    pub callback_secret: Option<String>,
     /// Links sub-agent runs to their parent run.
     #[serde(default)]
     pub parent_run_id: Option<String>,
@@ -135,6 +139,7 @@ impl RunMeta {
             title: None,
             metadata: HashMap::new(),
             callback_url: None,
+            callback_secret: None,
             parent_run_id: None,
             children: Vec::new(),
             depth: 0,
@@ -286,6 +291,7 @@ mod tests {
         assert!(m.title.is_none());
         assert!(m.metadata.is_empty());
         assert!(m.callback_url.is_none());
+        assert!(m.callback_secret.is_none());
         assert!(m.parent_run_id.is_none());
         assert!(m.children.is_empty());
         assert_eq!(m.depth, 0);
@@ -308,6 +314,7 @@ mod tests {
         m.status = RunStatus::Running;
         m.metadata.insert("k".to_string(), "v".to_string());
         m.title = Some("A title".to_string());
+        m.callback_secret = Some("shh".to_string());
         m.parent_run_id = Some("parent-1".to_string());
         m.children = vec!["child-a".to_string(), "child-b".to_string()];
         m.depth = 2;
@@ -318,6 +325,7 @@ mod tests {
         assert_eq!(back.status, RunStatus::Running);
         assert_eq!(back.metadata.get("k").map(String::as_str), Some("v"));
         assert_eq!(back.title.as_deref(), Some("A title"));
+        assert_eq!(back.callback_secret.as_deref(), Some("shh"));
         assert_eq!(back.parent_run_id.as_deref(), Some("parent-1"));
         assert_eq!(
             back.children,

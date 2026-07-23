@@ -266,6 +266,7 @@ fn reload_one(
         workdir: meta.workdir.clone(),
         metadata: meta.metadata.clone(),
         callback_url: meta.callback_url.clone(),
+        callback_secret: meta.callback_secret.clone(),
         // Launch overrides aren't persisted; a reloaded run reverts to its
         // blueprint's own tool policy (safe-side: more prompting, never less).
         yolo: false,
@@ -320,6 +321,7 @@ fn reload_one(
         md.started_at = meta.started_at;
         md.title = meta.title.clone();
         md.callback_url = meta.callback_url.clone();
+        md.callback_secret = meta.callback_secret.clone();
         // `parent_run_id` was already restored via `args` into build_agent's metadata.
     }
 
@@ -463,6 +465,7 @@ mod tests {
             title: Some("Resume Me".to_string()),
             metadata: std::collections::HashMap::new(),
             callback_url: Some("http://cb".to_string()),
+            callback_secret: None,
             parent_run_id: parent_run_id.map(str::to_string),
             children: children.iter().map(|s| s.to_string()).collect(),
             depth,

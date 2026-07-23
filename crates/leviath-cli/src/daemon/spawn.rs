@@ -544,6 +544,7 @@ fn build_agent_inner(
         parent_run_id: args.parent_run_id.clone(),
         metadata: args.metadata.clone(),
         callback_url: args.callback_url.clone(),
+        callback_secret: args.callback_secret.clone(),
         title: None,
     };
     {
@@ -820,6 +821,7 @@ mod tests {
             workdir: std::env::temp_dir().to_string_lossy().to_string(),
             metadata: HashMap::new(),
             callback_url: None,
+            callback_secret: None,
             yolo: false,
             allow: Vec::new(),
             max_depth: None,
@@ -1525,6 +1527,7 @@ conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
             workdir: workdir.to_string(),
             metadata: HashMap::new(),
             callback_url: None,
+            callback_secret: None,
             yolo: false,
             allow: Vec::new(),
             max_depth: None,
