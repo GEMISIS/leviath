@@ -143,6 +143,13 @@ impl Dashboard {
             ]),
             Line::from(vec![
                 Span::styled(
+                    "  m        ",
+                    Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("Manage MCP servers"),
+            ]),
+            Line::from(vec![
+                Span::styled(
                     "  Esc      ",
                     Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD),
                 ),

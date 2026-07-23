@@ -3,6 +3,7 @@
 mod graph;
 mod helpers;
 mod input;
+mod mcp;
 mod render;
 mod state;
 #[cfg(test)]
@@ -159,6 +160,9 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
         // meta/context/stages there).
         dashboard.sync_from_run_state();
 
+        // Surface any completed MCP login/test as a toast.
+        dashboard.drain_mcp_outcomes();
+
         // Draw
         terminal.draw(|frame| dashboard.draw(frame))?;
 
@@ -187,15 +191,46 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
 /// from the real-terminal I/O sliver.
 fn init_dashboard(control: ControlClient, yank_fn: fn(&str) -> bool) -> Dashboard {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let mut dashboard =
-        Dashboard::new_with_log_path(cmd_tx, crate::runstate::dashboard_log_path(), yank_fn);
+    // The real MCP screen operates on the user's config + token store, opens a
+    // real browser for login, and reads the wall clock.
+    let mcp_ctx = types::McpContext {
+        config_path: crate::config::Config::config_path(),
+        store_path: leviath_mcp::AuthStore::default_path().unwrap_or_default(),
+        opener: leviath_sys::open_url,
+        clock: mcp_system_now,
+    };
+    let mut dashboard = Dashboard::new_with_log_path(
+        cmd_tx,
+        crate::runstate::dashboard_log_path(),
+        yank_fn,
+        mcp_ctx,
+    );
 
     // Forward the dashboard's control commands to the daemon.
     tokio::spawn(daemon_background_loop(control, cmd_rx));
 
+    // Run MCP logins/tests off the UI loop. A freshly-built dashboard always
+    // has its background channel ends.
+    let (mcp_cmd_rx, mcp_outcome_tx) = dashboard
+        .take_mcp_bg_ends()
+        .expect("a fresh dashboard has its MCP background channel ends");
+    tokio::spawn(mcp::mcp_background_loop(
+        dashboard.mcp_context(),
+        mcp_cmd_rx,
+        mcp_outcome_tx,
+    ));
+
     dashboard.add_log("Dashboard started. Use `lev run <agent>` to start an agent.".to_string());
 
     dashboard
+}
+
+/// Wall-clock Unix time in seconds, for the production MCP context.
+fn mcp_system_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Load config, build the dashboard + engine, and run the event loop against
@@ -232,6 +267,11 @@ mod tests {
     #[test]
     fn dashboard_args_can_be_constructed() {
         let _args = DashboardArgs {};
+    }
+
+    #[test]
+    fn mcp_system_now_advances_past_the_epoch() {
+        assert!(mcp_system_now() > 1_600_000_000);
     }
 
     #[test]

@@ -138,6 +138,44 @@ pub(super) enum DaemonCommand {
     Message { agent_id: String, content: String },
 }
 
+/// A long-running MCP action dispatched from the (sync) MCP screen to the async
+/// background task, so browser login and connect-and-list never block the UI.
+#[derive(Debug, PartialEq)]
+pub(super) enum McpCommand {
+    /// Run the OAuth browser login for a server.
+    Login { name: String },
+    /// Connect to a server and count its tools.
+    Test { name: String },
+}
+
+/// The result of an [`McpCommand`], drained each tick and shown as a toast.
+#[derive(Debug, PartialEq)]
+pub(super) struct McpOutcome {
+    /// Human-readable result to toast.
+    pub(super) message: String,
+    /// Whether it succeeded (drives the toast colour).
+    pub(super) ok: bool,
+}
+
+/// One row of the MCP management screen.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct McpRow {
+    pub(super) name: String,
+    pub(super) transport: String,
+    pub(super) endpoint: String,
+    pub(super) auth: String,
+}
+
+/// Paths + injected seams the MCP screen's file/OAuth operations use, so the
+/// whole screen is testable without the real home directory or a browser.
+#[derive(Clone)]
+pub(super) struct McpContext {
+    pub(super) config_path: std::path::PathBuf,
+    pub(super) store_path: std::path::PathBuf,
+    pub(super) opener: leviath_mcp::BrowserOpener,
+    pub(super) clock: fn() -> u64,
+}
+
 /// Toast notification shown as an overlay.
 #[derive(Debug, Clone)]
 pub(super) struct Toast {

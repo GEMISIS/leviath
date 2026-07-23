@@ -17,6 +17,12 @@ impl Dashboard {
             return;
         }
 
+        // MCP management screen is modal: it owns all keys while open.
+        if self.mcp_screen {
+            self.handle_mcp_screen_key(key_code);
+            return;
+        }
+
         // Delete confirmation popup has highest priority
         if self.confirm_delete {
             match key_code {
@@ -496,6 +502,71 @@ impl Dashboard {
             }
             KeyCode::Char('?') => {
                 self.show_help = true;
+            }
+            KeyCode::Char('m') => {
+                // Open the MCP management screen; load the current servers.
+                self.mcp_screen = true;
+                self.mcp_selected = 0;
+                self.refresh_mcp_rows();
+            }
+            _ => {}
+        }
+    }
+
+    /// Keys handled while the MCP management screen is open.
+    ///
+    /// In add mode the line editor owns typing; otherwise the keys drive the
+    /// server list (navigate, add, delete, login, test).
+    fn handle_mcp_screen_key(&mut self, key_code: KeyCode) {
+        if self.mcp_add_mode {
+            match key_code {
+                KeyCode::Esc => {
+                    self.mcp_add_mode = false;
+                    self.mcp_add_input.clear();
+                }
+                KeyCode::Enter => {
+                    let line = std::mem::take(&mut self.mcp_add_input);
+                    self.mcp_add_mode = false;
+                    self.mcp_add_from_line(&line);
+                }
+                KeyCode::Backspace => {
+                    self.mcp_add_input.pop();
+                }
+                KeyCode::Char(c) => {
+                    self.mcp_add_input.push(c);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        match key_code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mcp_screen = false;
+            }
+            KeyCode::Up => {
+                self.mcp_selected = self.mcp_selected.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                if !self.mcp_rows.is_empty() && self.mcp_selected + 1 < self.mcp_rows.len() {
+                    self.mcp_selected += 1;
+                }
+            }
+            KeyCode::Char('a') => {
+                self.mcp_add_mode = true;
+                self.mcp_add_input.clear();
+            }
+            KeyCode::Char('d') => {
+                self.mcp_remove_selected();
+            }
+            KeyCode::Char('l') => {
+                self.mcp_login_selected();
+            }
+            KeyCode::Char('t') => {
+                self.mcp_test_selected();
+            }
+            KeyCode::Char('r') => {
+                self.refresh_mcp_rows();
             }
             _ => {}
         }
@@ -2600,5 +2671,157 @@ mod tests {
                 let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
             },
         );
+    }
+
+    // ─── MCP management screen keys ───────────────────────────────────────
+
+    /// A dashboard whose MCP context points at a temp dir.
+    fn mcp_dash(dir: &std::path::Path) -> Dashboard {
+        let mut dash = make_test_dashboard();
+        dash.mcp_ctx.config_path = dir.join("config.toml");
+        dash.mcp_ctx.store_path = dir.join("mcp-auth.json");
+        dash
+    }
+
+    #[test]
+    fn m_opens_the_mcp_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = mcp_dash(dir.path());
+        dash.handle_key(key(KeyCode::Char('m')));
+        assert!(dash.mcp_screen);
+    }
+
+    #[test]
+    fn q_and_esc_close_the_mcp_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = mcp_dash(dir.path());
+        dash.mcp_screen = true;
+        dash.handle_key(key(KeyCode::Char('q')));
+        assert!(!dash.mcp_screen);
+
+        dash.mcp_screen = true;
+        dash.handle_key(key(KeyCode::Esc));
+        assert!(!dash.mcp_screen);
+    }
+
+    #[test]
+    fn arrows_navigate_the_mcp_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = mcp_dash(dir.path());
+        dash.mcp_add_from_line("a npx");
+        dash.mcp_add_from_line("b npx");
+        dash.refresh_mcp_rows();
+        dash.mcp_screen = true;
+        dash.mcp_selected = 0;
+
+        dash.handle_key(key(KeyCode::Down));
+        assert_eq!(dash.mcp_selected, 1);
+        dash.handle_key(key(KeyCode::Down)); // clamped at last
+        assert_eq!(dash.mcp_selected, 1);
+        dash.handle_key(key(KeyCode::Up));
+        assert_eq!(dash.mcp_selected, 0);
+        dash.handle_key(key(KeyCode::Up)); // clamped at 0
+        assert_eq!(dash.mcp_selected, 0);
+    }
+
+    #[test]
+    fn a_opens_the_add_editor_and_enter_adds() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = mcp_dash(dir.path());
+        dash.mcp_screen = true;
+
+        dash.handle_key(key(KeyCode::Char('a')));
+        assert!(dash.mcp_add_mode);
+        // Type "srv npx".
+        for c in "srv npx".chars() {
+            dash.handle_key(key(KeyCode::Char(c)));
+        }
+        // A backspace then retype to cover Backspace.
+        dash.handle_key(key(KeyCode::Backspace));
+        dash.handle_key(key(KeyCode::Char('x')));
+        dash.handle_key(key(KeyCode::Enter));
+        assert!(!dash.mcp_add_mode);
+
+        let config =
+            crate::config::Config::load_from_path_public(&dash.mcp_ctx.config_path).unwrap();
+        assert_eq!(config.mcp_servers.len(), 1);
+        assert_eq!(config.mcp_servers[0].command.as_deref(), Some("npx")); // "np" + "x"
+    }
+
+    #[test]
+    fn esc_cancels_the_add_editor() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = mcp_dash(dir.path());
+        dash.mcp_screen = true;
+        dash.mcp_add_mode = true;
+        dash.mcp_add_input = "half typed".to_string();
+        dash.handle_key(key(KeyCode::Esc));
+        assert!(!dash.mcp_add_mode);
+        assert!(dash.mcp_add_input.is_empty());
+    }
+
+    #[test]
+    fn add_editor_ignores_non_text_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = mcp_dash(dir.path());
+        dash.mcp_screen = true;
+        dash.mcp_add_mode = true;
+        // A key with no meaning in the editor is a no-op.
+        dash.handle_key(key(KeyCode::Down));
+        assert!(dash.mcp_add_mode);
+        assert!(dash.mcp_add_input.is_empty());
+    }
+
+    #[test]
+    fn d_deletes_the_selected_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = mcp_dash(dir.path());
+        dash.mcp_add_from_line("gone npx");
+        dash.refresh_mcp_rows();
+        dash.mcp_screen = true;
+        dash.mcp_selected = 0;
+        dash.handle_key(key(KeyCode::Char('d')));
+        assert!(dash.mcp_rows.is_empty());
+    }
+
+    #[test]
+    fn l_and_t_dispatch_login_and_test() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = mcp_dash(dir.path());
+        dash.mcp_add_from_line("remote https://e.com/mcp");
+        dash.refresh_mcp_rows();
+        dash.mcp_screen = true;
+        dash.mcp_selected = 0;
+        dash.handle_key(key(KeyCode::Char('l')));
+        dash.handle_key(key(KeyCode::Char('t')));
+        assert!(dash.mcp_cmd_rx_for_test().try_recv().is_ok());
+        assert!(dash.mcp_cmd_rx_for_test().try_recv().is_ok());
+    }
+
+    #[test]
+    fn r_refreshes_the_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = mcp_dash(dir.path());
+        dash.mcp_screen = true;
+        // Add a server on disk behind the screen's back, then refresh.
+        let mut config = crate::config::Config::default();
+        config
+            .mcp_servers
+            .push(leviath_mcp::MCPServerConfig::stdio("x", "npx", vec![]));
+        config
+            .save_to_path_public(&dash.mcp_ctx.config_path)
+            .unwrap();
+        assert!(dash.mcp_rows.is_empty());
+        dash.handle_key(key(KeyCode::Char('r')));
+        assert_eq!(dash.mcp_rows.len(), 1);
+    }
+
+    #[test]
+    fn unbound_mcp_screen_keys_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = mcp_dash(dir.path());
+        dash.mcp_screen = true;
+        dash.handle_key(key(KeyCode::Char('z')));
+        assert!(dash.mcp_screen, "an unbound key does nothing");
     }
 }

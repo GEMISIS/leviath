@@ -273,7 +273,7 @@ Ten agents ship out of the box — each a multi-stage graph with model fallback 
   <img src="docs/assets/dashboard-final.png" alt="lev dash — the Leviath terminal dashboard showing the agent list and live activity log" width="900">
 </p>
 
-`lev dash` is a full TUI for managing concurrent agents: stage tabs, context-window visualization, markdown rendering, search/filter, sub-agent tree view, clipboard yank, and mouse support.
+`lev dash` is a full TUI for managing concurrent agents: stage tabs, context-window visualization, markdown rendering, search/filter, sub-agent tree view, clipboard yank, and mouse support. Press **`m`** to open the MCP management screen — add, remove, log in to, and test tool servers without leaving the dashboard.
 
 ## 🌐 API Server
 
