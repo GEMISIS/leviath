@@ -258,10 +258,19 @@ pub fn build_agent(
     let num_stages = blueprint.stages.len();
     let compaction = blueprint.compaction_config.clone();
     let max_child_depth = blueprint.max_child_depth.unwrap_or(DEFAULT_SUBAGENT_DEPTH);
-    // Taint gate: opt-in via the blueprint's `[security]` block. When on, the
-    // agent's outbound tool calls are gated against its context taint + the policy
-    // allowlist; when absent/off no gate is attached (zero enforcement overhead).
-    let security = blueprint.security.clone().unwrap_or_default();
+    // Taint gate: opt-in via the blueprint's `[security]` block, else the global
+    // config's `taint_tracking`, else off. Cascading through
+    // `resolve_security` (rather than `unwrap_or_default`, which forced taint on
+    // for every agent because `SecurityConfig::default()` is taint-on) means a
+    // blueprint with no `[security]` block correctly inherits the global setting
+    // — off by default. When on, the agent's outbound tool calls are gated
+    // against its context taint + the policy allowlist; when off no gate is
+    // attached (zero enforcement overhead).
+    let security = leviath_core::taint::resolve_security(
+        config.taint_tracking,
+        blueprint.security.as_ref(),
+        None,
+    );
     let tool_sensitivities: Option<HashMap<String, leviath_core::TaintLevel>> =
         security.taint_tracking.then(|| {
             let gate = leviath_runtime::TaintGate::new(security.clone());
@@ -335,6 +344,12 @@ pub fn build_agent(
                 leviath_runtime::TaintGate::new(security.clone()),
                 leviath_runtime::pipeline::ToolSensitivities(sensitivities),
             ));
+            // `--yolo` means run unattended: waive taint-gate prompts (the
+            // tool-policy wildcard below doesn't cover them), so a headless run
+            // never blocks on a gate no one can answer.
+            if args.yolo {
+                entity_mut.insert(leviath_runtime::components::GateAutoApprove);
+            }
             // `Option`'s iterator enables tracking without a dead "no window" arm
             // (a freshly spawned agent always carries a ContextWindow).
             entity_mut
@@ -636,6 +651,88 @@ mod tests {
                 .unwrap()
                 .overall_taint()
                 .is_some()
+        );
+        // Without `--yolo`, the gate stays interactive: no auto-approve marker.
+        assert!(
+            world
+                .world()
+                .get::<leviath_runtime::components::GateAutoApprove>(entity)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn build_agent_yolo_attaches_gate_auto_approve_when_taint_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"sec\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [security]\ntaint_tracking = true\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let mut args = spawn_args(&manifest.to_string_lossy());
+        args.yolo = true;
+        let entity = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &args,
+            100,
+            sub_tx(),
+        )
+        .expect("spawn succeeds");
+        // Taint on + `--yolo` ⇒ gate is auto-approved (marker attached) so a
+        // headless run never blocks on a gate prompt.
+        assert!(
+            world
+                .world()
+                .get::<leviath_runtime::components::GateAutoApprove>(entity)
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn build_agent_no_security_block_leaves_taint_off_by_default() {
+        // Bug regression: a blueprint with no `[security]` block and a default
+        // (taint-off) global config must NOT attach the taint gate — previously
+        // `unwrap_or_default()` forced it on for every agent.
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"plain\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let entity = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &Config::default(), // taint_tracking defaults to false
+            mcp,
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+            sub_tx(),
+        )
+        .expect("spawn succeeds");
+        assert!(
+            world
+                .world()
+                .get::<leviath_runtime::TaintGate>(entity)
+                .is_none(),
+            "no [security] block + global off ⇒ no taint gate"
         );
     }
 
