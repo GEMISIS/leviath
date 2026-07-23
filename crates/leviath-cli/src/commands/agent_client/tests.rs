@@ -171,6 +171,15 @@ impl Harness {
         }
     }
 
+    /// Write `RUN_ID`'s persisted `meta.json` with the given snake_case status,
+    /// simulating what the daemon's persistence lane records (the turn reads this
+    /// to decide when the run is genuinely done).
+    fn write_meta_status(&self, status: &str) {
+        let dir = self.runs_dir.path().join(RUN_ID);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("meta.json"), format!(r#"{{"status":"{status}"}}"#)).unwrap();
+    }
+
     /// Write agent output to `RUN_ID`'s stage `idx` output log under the runs dir.
     fn write_output(&self, idx: usize, text: &str) {
         let path = self
@@ -787,11 +796,14 @@ async fn a_second_prompt_that_cannot_be_delivered_ends_the_turn() {
     h.close_input().await;
 }
 
-// ─── interactions: park (no client capabilities) ─────────────────────────────
+// ─── interactions: no client capabilities (Gas City) — keep turn in flight ───
 
 #[tokio::test]
-async fn an_interaction_without_client_capabilities_is_surfaced_and_parks() {
-    let daemon = ScriptedDaemon::new(vec![free_text_event()], spawn_ok);
+async fn an_interaction_without_capabilities_is_surfaced_but_does_not_end_the_turn() {
+    // The interaction is raised, then the run continues and completes. The turn
+    // must surface the question AND only end on the completion — never on the
+    // interaction itself (which would tell the client "done" prematurely).
+    let daemon = ScriptedDaemon::new(vec![free_text_event(), completed("complete")], spawn_ok);
     let (mut h, _bp) = opened_session(daemon, false).await;
     h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}"#)
         .await;
@@ -805,7 +817,7 @@ async fn an_interaction_without_client_capabilities_is_surfaced_and_parks() {
             .unwrap()
             .contains("What color?")
     );
-    // …and the turn ends (parked) rather than blocking.
+    // …and the turn ends only when the run actually completes.
     assert_eq!(
         h.recv_until(is_result).await.result.unwrap()["stopReason"],
         "end_turn"
@@ -814,11 +826,116 @@ async fn an_interaction_without_client_capabilities_is_surfaced_and_parks() {
 }
 
 #[tokio::test]
-async fn a_tool_approval_without_capabilities_also_parks() {
-    let daemon = ScriptedDaemon::new(vec![approval_event()], spawn_ok);
+async fn a_tool_approval_without_capabilities_keeps_the_turn_alive_until_done() {
+    let daemon = ScriptedDaemon::new(vec![approval_event(), completed("complete")], spawn_ok);
     let (mut h, _bp) = opened_session(daemon, false).await;
     h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}"#)
         .await;
+    assert_eq!(
+        h.recv_until(is_result).await.result.unwrap()["stopReason"],
+        "end_turn"
+    );
+    h.close_input().await;
+}
+
+#[tokio::test]
+async fn a_run_that_settles_into_complete_interactive_ends_the_turn_via_meta() {
+    // CompleteInteractive emits no terminal `Completed` event — the agent stays
+    // live for follow-up — so the turn must detect "done" from the persisted run
+    // status on the poll tick.
+    let daemon = ScriptedDaemon::new(vec![status_event()], spawn_ok);
+    let (mut h, _bp) = opened_session(daemon, false).await;
+    h.write_meta_status("complete_interactive");
+    h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}"#)
+        .await;
+    assert_eq!(
+        h.recv_until(is_result).await.result.unwrap()["stopReason"],
+        "end_turn"
+    );
+    h.close_input().await;
+}
+
+#[tokio::test]
+async fn a_done_run_status_is_detected_on_the_poll_tick_with_no_events() {
+    // No world events flow at all (subscribe stays open, empty). The run's done
+    // state is discovered only by the periodic status poll, exercising the tick
+    // branch's completion check.
+    let daemon = ScriptedDaemon::new(vec![], spawn_ok);
+    let (mut h, _bp) = opened_session(daemon, false).await;
+    h.write_meta_status("complete");
+    h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}"#)
+        .await;
+    assert_eq!(
+        h.recv_until(is_result).await.result.unwrap()["stopReason"],
+        "end_turn"
+    );
+    h.close_input().await;
+}
+
+#[tokio::test]
+async fn a_waiting_input_run_status_does_not_end_the_turn() {
+    // meta says the run is blocked on input (waiting_input); a status event flows
+    // but the turn must NOT end on it. Only the later completion returns.
+    let daemon = ScriptedDaemon::new(vec![status_event(), completed("complete")], spawn_ok);
+    let (mut h, _bp) = opened_session(daemon, false).await;
+    h.write_meta_status("waiting_input");
+    h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}"#)
+        .await;
+    assert_eq!(
+        h.recv_until(is_result).await.result.unwrap()["stopReason"],
+        "end_turn"
+    );
+    h.close_input().await;
+}
+
+#[tokio::test]
+async fn an_error_run_status_ends_the_turn_as_refusal_via_meta() {
+    let daemon = ScriptedDaemon::new(vec![status_event()], spawn_ok);
+    let (mut h, _bp) = opened_session(daemon, false).await;
+    h.write_meta_status("error");
+    h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}"#)
+        .await;
+    assert_eq!(
+        h.recv_until(is_result).await.result.unwrap()["stopReason"],
+        "refusal"
+    );
+    h.close_input().await;
+}
+
+#[tokio::test]
+async fn a_cancelled_run_status_ends_the_turn_as_cancelled_via_meta() {
+    let daemon = ScriptedDaemon::new(vec![status_event()], spawn_ok);
+    let (mut h, _bp) = opened_session(daemon, false).await;
+    h.write_meta_status("cancelled");
+    h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}"#)
+        .await;
+    assert_eq!(
+        h.recv_until(is_result).await.result.unwrap()["stopReason"],
+        "cancelled"
+    );
+    h.close_input().await;
+}
+
+// ─── interactions: capable client parks non-approval interactions ─────────────
+
+#[tokio::test]
+async fn a_capable_client_parks_a_non_approval_interaction() {
+    // With capabilities, a free-text question is surfaced and the turn ends so
+    // the client can re-prompt with the answer (standard ACP), even with no
+    // completion event.
+    let daemon = ScriptedDaemon::new(vec![free_text_event()], spawn_ok);
+    let (mut h, _bp) = opened_session(daemon, true).await;
+    h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}"#)
+        .await;
+    let chunk = h
+        .recv_until(|m| update_kind(m).as_deref() == Some("agent_message_chunk"))
+        .await;
+    assert!(
+        chunk.params.unwrap()["update"]["content"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("What color?")
+    );
     assert_eq!(
         h.recv_until(is_result).await.result.unwrap()["stopReason"],
         "end_turn"
@@ -1190,4 +1307,62 @@ async fn a_closed_event_stream_ends_the_turn() {
         "end_turn"
     );
     h.close_input().await;
+}
+
+// ─── pure helpers: run-status → stop reason ──────────────────────────────────
+
+mod run_status_helpers {
+    use super::*;
+    use leviath_core::run_meta::RunStatus;
+
+    #[test]
+    fn read_run_status_reads_the_persisted_status_ignoring_extra_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("r1");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(
+            run.join("meta.json"),
+            r#"{"status":"complete_interactive","run_id":"r1","extra":1}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_run_status(dir.path(), "r1"),
+            Some(RunStatus::CompleteInteractive)
+        );
+    }
+
+    #[test]
+    fn read_run_status_is_none_when_missing_or_malformed() {
+        let dir = tempfile::tempdir().unwrap();
+        // Missing file.
+        assert_eq!(read_run_status(dir.path(), "nope"), None);
+        // Present but not valid JSON.
+        let run = dir.path().join("bad");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(run.join("meta.json"), "not json").unwrap();
+        assert_eq!(read_run_status(dir.path(), "bad"), None);
+    }
+
+    #[test]
+    fn stop_reason_for_run_status_maps_every_status() {
+        assert_eq!(
+            stop_reason_for_run_status(&RunStatus::Complete),
+            Some(StopReason::EndTurn)
+        );
+        assert_eq!(
+            stop_reason_for_run_status(&RunStatus::CompleteInteractive),
+            Some(StopReason::EndTurn)
+        );
+        assert_eq!(
+            stop_reason_for_run_status(&RunStatus::Error),
+            Some(StopReason::Refusal)
+        );
+        assert_eq!(
+            stop_reason_for_run_status(&RunStatus::Cancelled),
+            Some(StopReason::Cancelled)
+        );
+        assert_eq!(stop_reason_for_run_status(&RunStatus::Starting), None);
+        assert_eq!(stop_reason_for_run_status(&RunStatus::Running), None);
+        assert_eq!(stop_reason_for_run_status(&RunStatus::WaitingInput), None);
+    }
 }

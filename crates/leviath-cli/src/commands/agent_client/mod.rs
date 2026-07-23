@@ -43,6 +43,7 @@ use leviath_agent_client::{
     permission_request,
 };
 use leviath_core::interaction::{ApprovalScope, InteractionRequest, InteractionResponse};
+use leviath_core::run_meta::RunStatus;
 use leviath_runtime::control_socket::{ControlClient, ControlRequest, ControlResponse};
 use leviath_runtime::host::WorldEvent;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
@@ -167,13 +168,16 @@ enum RunStart {
     SpawnFailed,
 }
 
-/// What became of a tool-approval interaction raised mid-turn.
+/// What became of an interaction raised mid-turn.
 enum InteractionOutcome {
-    /// The approval was resolved (via `session/request_permission`); the run
-    /// continues, so the turn keeps streaming.
-    Answered,
-    /// The interaction has no protocol answer path; it was surfaced as output and
-    /// the turn ends with this reason, leaving the run parked for a later prompt.
+    /// The interaction was resolved in-turn (via `session/request_permission`),
+    /// or the client cannot answer it and Leviath will handle it out of band —
+    /// either way the turn keeps streaming until the run reaches a done state.
+    Continue,
+    /// The interaction was surfaced as output and the turn ends now with this
+    /// reason, leaving the run parked for the client's next prompt. Used only for
+    /// clients that drive their own conversation (they advertised capabilities);
+    /// the client re-prompts with the answer.
     Park(StopReason),
 }
 
@@ -394,7 +398,7 @@ impl Server {
                         }
                         WorldEvent::Interaction { request, .. } => {
                             match self.handle_interaction(reader, &session_id, &run_id, request).await {
-                                InteractionOutcome::Answered => {}
+                                InteractionOutcome::Continue => {}
                                 InteractionOutcome::Park(reason) => return reason,
                             }
                         }
@@ -402,9 +406,21 @@ impl Server {
                         // that's needed.
                         _ => {}
                     }
+                    // A run can reach a done state without a `Completed` event —
+                    // `CompleteInteractive` stays live for follow-up, so it emits
+                    // no terminal event. Consult the persisted run status after
+                    // every event so the turn ends when (and only when) the run is
+                    // genuinely finished, never while it is merely `WaitingInput`
+                    // on an interaction Leviath is handling out of band.
+                    if let Some(reason) = self.run_finished(&run_id) {
+                        return reason;
+                    }
                 }
                 _ = tokio::time::sleep(OUTPUT_POLL) => {
                     self.flush_output(&session_id, &mut tail, &run_id).await;
+                    if let Some(reason) = self.run_finished(&run_id) {
+                        return reason;
+                    }
                 }
                 incoming = read_line(reader) => {
                     match incoming {
@@ -420,6 +436,17 @@ impl Server {
         }
         // The output stream broke mid-turn; the client is gone.
         StopReason::EndTurn
+    }
+
+    /// Whether the run has reached a state that should end the current turn,
+    /// read from its persisted `meta.json` status. Returns the stop reason to
+    /// report, or `None` while the run is still starting / running / blocked on
+    /// input (`WaitingInput`) — the latter must keep the turn in flight so a
+    /// non-interactive client is never told "done" while the agent is actually
+    /// waiting on an interaction Leviath is handling out of band.
+    fn run_finished(&self, run_id: &str) -> Option<StopReason> {
+        let status = read_run_status(&self.runs_dir, run_id)?;
+        stop_reason_for_run_status(&status)
     }
 
     /// Spawn the agent on the first prompt, or deliver a message on later ones.
@@ -463,7 +490,23 @@ impl Server {
         }
     }
 
-    /// Handle a tool-approval interaction raised while a turn is streaming.
+    /// Handle an interaction raised while a turn is streaming.
+    ///
+    /// The strategy depends on whether the client advertised capabilities at
+    /// `initialize` (i.e. whether it implements the client-side protocol methods
+    /// and can answer an agent-initiated request):
+    ///
+    /// - **Capable client + tool approval** → drive it over
+    ///   `session/request_permission`, answered in-turn; the run continues.
+    /// - **Capable client + any other interaction** → surface the question as
+    ///   output and end the turn (`Park`). The client owns the conversation and
+    ///   re-prompts with the answer, which arrives as the next `session/prompt` —
+    ///   the standard Agent Client Protocol turn boundary.
+    /// - **Client without capabilities (e.g. Gas City, which reports interaction
+    ///   unsupported)** → surface the question as output and **keep the turn in
+    ///   flight** (`Continue`). The run is genuinely blocked, so the turn must not
+    ///   report "done"; the human resolves it through Leviath's own surfaces
+    ///   (`lev dash` / `lev respond`) and the run then continues to completion.
     async fn handle_interaction(
         &mut self,
         reader: &mut BoxReader,
@@ -471,19 +514,24 @@ impl Server {
         run_id: &str,
         request: InteractionRequest,
     ) -> InteractionOutcome {
-        // A tool approval, and a host that can answer an agent request → drive it
-        // over `session/request_permission`.
-        if self.caps_present && is_permission_request(&request) {
-            return self
-                .request_permission(reader, session_id, run_id, request)
+        if self.caps_present {
+            if is_permission_request(&request) {
+                return self
+                    .request_permission(reader, session_id, run_id, request)
+                    .await;
+            }
+            // A capable client drives its own conversation: surface the question
+            // and hand control back so it can re-prompt with the answer.
+            self.emit_chunk(session_id, &format!("{}\n", request.prompt))
                 .await;
+            return InteractionOutcome::Park(StopReason::EndTurn);
         }
-        // Otherwise surface the question as output and end the turn; the run stays
-        // parked on the interaction for a later prompt (or an out-of-band answer
-        // via `lev respond` / `lev dash`).
+        // A client that cannot answer interactions: surface the question and keep
+        // the turn alive. Leviath handles the interaction out of band; the turn
+        // ends only when the run itself reaches a done state.
         self.emit_chunk(session_id, &format!("{}\n", request.prompt))
             .await;
-        InteractionOutcome::Park(StopReason::EndTurn)
+        InteractionOutcome::Continue
     }
 
     /// Ask the host to approve a tool call and relay the decision to the daemon.
@@ -521,7 +569,7 @@ impl Server {
                     .await;
                 self.answer_interaction(&request.id, false, ApprovalScope::Once)
                     .await;
-                return InteractionOutcome::Answered;
+                return InteractionOutcome::Continue;
             }
             if msg.id.as_ref() == Some(&request_id) {
                 let choice = msg
@@ -534,7 +582,7 @@ impl Server {
                     });
                 self.answer_interaction(&request.id, choice.approved, choice.scope)
                     .await;
-                return InteractionOutcome::Answered;
+                return InteractionOutcome::Continue;
             }
             // Unrelated message; keep waiting.
         }
@@ -623,6 +671,40 @@ impl Server {
     fn next_id(&mut self) -> i64 {
         self.next_request_id += 1;
         self.next_request_id
+    }
+}
+
+/// Read the persisted `RunStatus` for `run_id` from `<runs_dir>/<run_id>/meta.json`.
+///
+/// Deserializes into a minimal projection that reads only the `status` field, so
+/// it does not depend on the full [`RunMeta`](leviath_core::run_meta::RunMeta)
+/// shape and tolerates a partially-written or older metadata file. Returns
+/// `None` if the file is missing or unreadable (the run hasn't persisted yet).
+fn read_run_status(runs_dir: &std::path::Path, run_id: &str) -> Option<RunStatus> {
+    #[derive(serde::Deserialize)]
+    struct StatusOnly {
+        status: RunStatus,
+    }
+    let path = runs_dir.join(run_id).join("meta.json");
+    let json = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<StatusOnly>(&json)
+        .ok()
+        .map(|s| s.status)
+}
+
+/// The stop reason to report for a run in `status`, or `None` if the run has not
+/// finished and the turn should keep streaming.
+///
+/// `CompleteInteractive` counts as finished: the agent completed its required
+/// work and is only idling for optional follow-up, so control returns to the
+/// client. `WaitingInput` does **not** — the agent is blocked on an interaction,
+/// which is exactly the state that must not be reported as "done".
+fn stop_reason_for_run_status(status: &RunStatus) -> Option<StopReason> {
+    match status {
+        RunStatus::Complete | RunStatus::CompleteInteractive => Some(StopReason::EndTurn),
+        RunStatus::Error => Some(StopReason::Refusal),
+        RunStatus::Cancelled => Some(StopReason::Cancelled),
+        RunStatus::Starting | RunStatus::Running | RunStatus::WaitingInput => None,
     }
 }
 
