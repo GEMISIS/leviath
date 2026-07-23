@@ -771,6 +771,18 @@ async fn events_for_other_runs_are_ignored() {
     h.close_input().await;
 }
 
+#[test]
+fn world_event_run_id_reads_the_run_id_from_a_log_event() {
+    // A `Log` event carries the run id like every other variant; the pump uses
+    // this to filter events to the active run.
+    let ev = WorldEvent::Log {
+        run_id: "run-log".to_string(),
+        agent_id: "a".to_string(),
+        line: "some output".to_string(),
+    };
+    assert_eq!(world_event_run_id(&ev), "run-log");
+}
+
 // ─── session/prompt: spawn / message failures ────────────────────────────────
 
 #[tokio::test]
