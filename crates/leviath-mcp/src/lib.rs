@@ -26,6 +26,6 @@ pub use client::{
 pub use discovery::{
     MCPServerConfig, MCPTransport, ResolvedTransport, ToolDiscovery, ToolMetadata,
 };
-pub use execution::{ExecutionResult, ToolExecutor};
+pub use execution::{ExecutionResult, ToolExecutor, sanitize_tool_name};
 pub use transport::stdio::filter_env;
 pub use transport::{DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT};

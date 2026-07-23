@@ -1,9 +1,40 @@
 //! Tool execution via MCP.
 
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::client::{MCPClient, ToolResult, ToolResultContent};
+use crate::discovery::ToolMetadata;
+
+/// Provider tool-name limit: the name advertised to the LLM must match
+/// `^[A-Za-z0-9_-]{1,64}$` (the Anthropic/OpenAI rule). MCP names are laxer
+/// (they allow dots), so any MCP name that violates this would make the
+/// provider reject the *entire* request.
+const MAX_TOOL_NAME_LEN: usize = 64;
+
+/// Sanitize an MCP tool name into the provider-accepted character set.
+///
+/// Every character outside `[A-Za-z0-9_-]` (notably `.`, which MCP allows and
+/// real servers use) becomes `_`, and the result is truncated to 64 bytes. An
+/// empty result (a name of only illegal characters) falls back to `tool`.
+pub fn sanitize_tool_name(name: &str) -> String {
+    let mut out: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    out.truncate(MAX_TOOL_NAME_LEN);
+    if out.is_empty() {
+        "tool".to_string()
+    } else {
+        out
+    }
+}
 
 /// Result of a tool execution, with convenience fields.
 #[derive(Debug, Clone)]
@@ -20,6 +51,12 @@ pub struct ExecutionResult {
 pub struct ToolExecutor {
     /// Active MCP clients, keyed by server name
     clients: HashMap<String, MCPClient>,
+    /// Advertised tool name → (server name, original tool name).
+    ///
+    /// The name advertised to the LLM is sanitized to the provider's character
+    /// rule and made unique across servers; this maps it back to the server and
+    /// the original name the server itself expects on a `tools/call`.
+    aliases: HashMap<String, (String, String)>,
 }
 
 impl ToolExecutor {
@@ -27,17 +64,87 @@ impl ToolExecutor {
     pub fn new() -> Self {
         Self {
             clients: HashMap::new(),
+            aliases: HashMap::new(),
         }
     }
 
-    /// Register an MCP client for a server.
+    /// Register an MCP client for a server, advertising its tools under names
+    /// safe for the LLM/provider.
+    ///
+    /// Equivalent to [`Self::add_client_advertised`] reserving nothing; kept for
+    /// callers that don't need the advertised metadata back.
     pub fn add_client(&mut self, server_name: String, client: MCPClient) {
-        self.clients.insert(server_name, client);
+        let _ = self.add_client_advertised(server_name, client, &HashSet::new());
     }
 
-    /// Execute a tool by looking up which server owns it.
+    /// Register a client and return its tools under *advertised* names.
     ///
-    /// Searches all connected servers' cached tool lists to find the right one.
+    /// Each advertised name is [`sanitize_tool_name`]d and made unique against
+    /// `reserved` (e.g. the built-in tool names) and every previously-registered
+    /// tool, so the set of names handed to the provider is always valid and
+    /// collision-free. The returned metadata carries the advertised names; the
+    /// alias back to `(server, original)` is recorded for routing.
+    pub fn add_client_advertised(
+        &mut self,
+        server_name: String,
+        client: MCPClient,
+        reserved: &HashSet<String>,
+    ) -> Vec<ToolMetadata> {
+        let mut advertised = Vec::new();
+        for tool in client.cached_tools() {
+            let name = self.unique_advertised_name(&tool.name, &server_name, reserved);
+            self.aliases
+                .insert(name.clone(), (server_name.clone(), tool.name.clone()));
+            if name != tool.name {
+                tracing::debug!(
+                    server = %server_name,
+                    original = %tool.name,
+                    advertised = %name,
+                    "Renamed MCP tool to satisfy provider naming rules"
+                );
+            }
+            advertised.push(ToolMetadata {
+                name,
+                description: tool.description.clone(),
+                schema: tool.schema.clone(),
+            });
+        }
+        self.clients.insert(server_name, client);
+        advertised
+    }
+
+    /// Compute a unique, provider-safe advertised name for `original`.
+    ///
+    /// Prefers the sanitized name; on a clash with `reserved` or an existing
+    /// alias, prefixes with the server name; if that still clashes, appends a
+    /// numeric suffix.
+    fn unique_advertised_name(
+        &self,
+        original: &str,
+        server: &str,
+        reserved: &HashSet<String>,
+    ) -> String {
+        let free = |name: &str| !reserved.contains(name) && !self.aliases.contains_key(name);
+
+        let base = sanitize_tool_name(original);
+        if free(&base) {
+            return base;
+        }
+        let prefixed = sanitize_tool_name(&format!("{server}__{original}"));
+        if free(&prefixed) {
+            return prefixed;
+        }
+        let mut n = 2;
+        loop {
+            let candidate = sanitize_tool_name(&format!("{prefixed}_{n}"));
+            if free(&candidate) {
+                return candidate;
+            }
+            n += 1;
+        }
+    }
+
+    /// Execute a tool by its advertised name, routing to the owning server.
     pub async fn execute(
         &mut self,
         tool_name: &str,
@@ -45,22 +152,16 @@ impl ToolExecutor {
     ) -> anyhow::Result<ExecutionResult> {
         tracing::info!(tool = %tool_name, "Executing tool");
 
-        // Find which server owns this tool
-        let server_name = self
-            .clients
-            .iter()
-            .find(|(_, client)| client.cached_tools().iter().any(|t| t.name == tool_name))
-            .map(|(name, _)| name.clone());
+        // The advertised → (server, original) alias is the authoritative route.
+        if let Some((server, original)) = self.aliases.get(tool_name).cloned() {
+            return self.execute_on(&server, &original, arguments).await;
+        }
 
-        let server_name = server_name.ok_or_else(|| {
-            anyhow::anyhow!(
-                "No MCP server found with tool '{}'. Available servers: {:?}",
-                tool_name,
-                self.clients.keys().collect::<Vec<_>>()
-            )
-        })?;
-
-        self.execute_on(&server_name, tool_name, arguments).await
+        Err(anyhow::anyhow!(
+            "No MCP server found with tool '{}'. Available tools: {:?}",
+            tool_name,
+            self.aliases.keys().collect::<Vec<_>>()
+        ))
     }
 
     /// Execute a tool on a specific server.
@@ -697,5 +798,196 @@ for line in sys.stdin:
             },
         }]);
         assert_eq!(text, "");
+    }
+
+    // ─── tool-name sanitization ───────────────────────────────────────────
+
+    #[test]
+    fn sanitize_passes_a_clean_name_through() {
+        assert_eq!(sanitize_tool_name("get_weather-2"), "get_weather-2");
+    }
+
+    #[test]
+    fn sanitize_replaces_dots_and_other_illegal_chars() {
+        // Dots are legal in MCP but rejected by the provider name rule.
+        assert_eq!(sanitize_tool_name("admin.tools.list"), "admin_tools_list");
+        assert_eq!(sanitize_tool_name("weird name!/#"), "weird_name___");
+    }
+
+    #[test]
+    fn sanitize_truncates_to_the_limit() {
+        let long = "a".repeat(200);
+        assert_eq!(sanitize_tool_name(&long).len(), MAX_TOOL_NAME_LEN);
+    }
+
+    #[test]
+    fn sanitize_of_illegal_chars_becomes_underscores_and_empty_falls_back() {
+        // Illegal chars each become `_` (still a valid name); only a fully
+        // empty result falls back to a placeholder.
+        assert_eq!(sanitize_tool_name("...."), "____");
+        assert_eq!(sanitize_tool_name(""), "tool");
+    }
+
+    // ─── unique_advertised_name ───────────────────────────────────────────
+
+    #[test]
+    fn unique_name_prefers_the_sanitized_base() {
+        let exec = ToolExecutor::new();
+        let reserved = HashSet::new();
+        assert_eq!(
+            exec.unique_advertised_name("github.search", "gh", &reserved),
+            "github_search"
+        );
+    }
+
+    #[test]
+    fn unique_name_prefixes_on_a_reserved_collision() {
+        // The base clashes with a built-in tool name → prefix with the server.
+        let exec = ToolExecutor::new();
+        let reserved: HashSet<String> = ["bash".to_string()].into_iter().collect();
+        assert_eq!(
+            exec.unique_advertised_name("bash", "srv", &reserved),
+            "srv__bash"
+        );
+    }
+
+    #[test]
+    fn unique_name_prefixes_on_an_existing_alias_collision() {
+        let mut exec = ToolExecutor::new();
+        exec.aliases.insert(
+            "search".to_string(),
+            ("a".to_string(), "search".to_string()),
+        );
+        assert_eq!(
+            exec.unique_advertised_name("search", "b", &HashSet::new()),
+            "b__search"
+        );
+    }
+
+    #[test]
+    fn unique_name_appends_a_number_when_the_prefix_also_collides() {
+        let mut exec = ToolExecutor::new();
+        // Both the base and the server-prefixed form are already taken.
+        exec.aliases.insert(
+            "search".to_string(),
+            ("a".to_string(), "search".to_string()),
+        );
+        exec.aliases
+            .insert("b__search".to_string(), ("x".to_string(), "y".to_string()));
+        assert_eq!(
+            exec.unique_advertised_name("search", "b", &HashSet::new()),
+            "b__search_2"
+        );
+
+        // And when _2 is taken too, it moves on to _3 (covers the loop step).
+        exec.aliases.insert(
+            "b__search_2".to_string(),
+            ("x".to_string(), "y".to_string()),
+        );
+        assert_eq!(
+            exec.unique_advertised_name("search", "b", &HashSet::new()),
+            "b__search_3"
+        );
+    }
+
+    // ─── advertised routing with live clients ─────────────────────────────
+
+    /// A stub whose single tool is named `tool_name`, echoing a fixed reply.
+    fn stub_named(tool_name: &str) -> String {
+        format!(
+            r#"
+import sys, json
+def respond(id, result):
+    sys.stdout.write(json.dumps({{"jsonrpc": "2.0", "id": id, "result": result}}) + "\n")
+    sys.stdout.flush()
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method, id_ = req.get("method", ""), req.get("id")
+    if method == "initialize":
+        respond(id_, {{"capabilities": {{}}, "protocolVersion": "2024-11-05"}})
+    elif method == "tools/list":
+        respond(id_, {{"tools": [{{"name": "{tool_name}", "inputSchema": {{}}}}]}})
+    elif method == "tools/call":
+        respond(id_, {{"content": [{{"type": "text", "text": "called " + req["params"]["name"]}}], "isError": False}})
+"#
+        )
+    }
+
+    async fn spawn_named(tool_name: &str) -> MCPClient {
+        let mut client =
+            MCPClient::spawn("python3", &["-c", &stub_named(tool_name)], &HashMap::new())
+                .await
+                .expect("spawn");
+        client.connect().await.expect("connect");
+        client.list_tools().await.expect("list");
+        client
+    }
+
+    #[tokio::test]
+    async fn a_dotted_tool_is_advertised_sanitized_and_still_routes() {
+        let _guard = always_on_tracing_guard();
+        let mut executor = ToolExecutor::new();
+        let client = spawn_named("github.search").await;
+        let advertised = executor.add_client_advertised("gh".to_string(), client, &HashSet::new());
+        assert_eq!(advertised[0].name, "github_search");
+
+        // The LLM calls the advertised name; the server is called with its
+        // original name ("github.search").
+        let result = executor
+            .execute("github_search", serde_json::json!({}))
+            .await
+            .expect("advertised name routes");
+        assert!(result.success);
+        assert_eq!(result.text, "called github.search");
+    }
+
+    #[tokio::test]
+    async fn two_servers_sharing_a_tool_name_are_disambiguated() {
+        let _guard = always_on_tracing_guard();
+        let mut executor = ToolExecutor::new();
+
+        let a = spawn_named("search").await;
+        let a_names = executor.add_client_advertised("alpha".to_string(), a, &HashSet::new());
+        assert_eq!(a_names[0].name, "search");
+
+        let b = spawn_named("search").await;
+        // Reserve what alpha already advertised.
+        let reserved: HashSet<String> = a_names.iter().map(|t| t.name.clone()).collect();
+        let b_names = executor.add_client_advertised("beta".to_string(), b, &reserved);
+        assert_eq!(b_names[0].name, "beta__search");
+
+        // Both route to their own server with the original name "search".
+        assert!(
+            executor
+                .execute("search", serde_json::json!({}))
+                .await
+                .unwrap()
+                .success
+        );
+        assert!(
+            executor
+                .execute("beta__search", serde_json::json!({}))
+                .await
+                .unwrap()
+                .success
+        );
+    }
+
+    #[tokio::test]
+    async fn add_client_reserving_nothing_registers_identity_aliases() {
+        let _guard = always_on_tracing_guard();
+        let mut executor = ToolExecutor::new();
+        let client = spawn_named("plain").await;
+        executor.add_client("s".to_string(), client);
+        assert!(
+            executor
+                .execute("plain", serde_json::json!({}))
+                .await
+                .unwrap()
+                .success
+        );
     }
 }

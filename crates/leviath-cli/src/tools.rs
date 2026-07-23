@@ -30,7 +30,7 @@ impl ToolRegistry {
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
 
         let mut mcp_executor = ToolExecutor::new();
-        let mut mcp_tool_defs = Vec::new();
+        let mut mcp_tool_defs: Vec<Tool> = Vec::new();
 
         if !config.mcp_servers.is_empty() {
             let mut discovery = ToolDiscovery::new();
@@ -60,9 +60,19 @@ impl ToolRegistry {
                     .discover_from_config_with_auth(server_cfg, auth_header)
                     .await
                 {
-                    Ok((tool_metas, client)) => {
-                        mcp_executor.add_client(server_cfg.name.clone(), client);
-                        for meta in tool_metas {
+                    Ok((_tool_metas, client)) => {
+                        // Advertise under provider-safe, collision-free names,
+                        // reserving the built-in names and every MCP name already
+                        // advertised so nothing the LLM sees is duplicated or
+                        // uses a character the provider rejects.
+                        let mut reserved: HashSet<String> = builtin_names.clone();
+                        reserved.extend(mcp_tool_defs.iter().map(|t| t.name.clone()));
+                        let advertised = mcp_executor.add_client_advertised(
+                            server_cfg.name.clone(),
+                            client,
+                            &reserved,
+                        );
+                        for meta in advertised {
                             mcp_tool_defs.push(Tool {
                                 name: meta.name,
                                 description: meta.description,
@@ -294,6 +304,44 @@ for line in sys.stdin:
         assert_eq!(registry.mcp_tool_defs.len(), 1);
         assert_eq!(registry.mcp_tool_defs[0].name, "echo");
 
+        registry.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn build_advertises_two_servers_and_namespaces_a_collision() {
+        // Two stdio servers each exposing an `echo` tool. The second is
+        // advertised under a namespaced name so the LLM never sees a duplicate,
+        // and the reserved-name closure (which reads already-advertised names)
+        // runs on the second server.
+        with_tracing(|| {});
+        let registry = with_temp_home(|| async {
+            let config = Config {
+                mcp_servers: vec![
+                    MCPServerConfig::stdio(
+                        "alpha",
+                        "python3",
+                        vec!["-c".to_string(), STUB_INIT_AND_LIST.to_string()],
+                    ),
+                    MCPServerConfig::stdio(
+                        "beta",
+                        "python3",
+                        vec!["-c".to_string(), STUB_INIT_AND_LIST.to_string()],
+                    ),
+                ],
+                ..Config::default()
+            };
+            ToolRegistry::build(std::env::temp_dir(), &config).await
+        })
+        .await;
+
+        let names: Vec<&str> = registry
+            .mcp_tool_defs
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        // First server keeps `echo`; the second is disambiguated.
+        assert!(names.contains(&"echo"), "names: {names:?}");
+        assert!(names.contains(&"beta__echo"), "names: {names:?}");
         registry.shutdown().await;
     }
 
