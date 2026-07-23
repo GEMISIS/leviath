@@ -67,12 +67,25 @@ mod tests {
 
     #[test]
     fn tokens_are_url_safe_with_no_padding() {
+        // The url-safe predicate, named so its arms can be exercised
+        // deterministically. Driving it only over the random tokens below would
+        // flake the coverage gate: a 43-char base64url token has a sizable chance
+        // of containing no `-` (or no `_`) at all, leaving those comparison arms
+        // unevaluated on that run.
+        let url_safe = |b: u8| b.is_ascii_alphanumeric() || b == b'-' || b == b'_';
+        // Cover every arm regardless of what the CSPRNG produced this run: an
+        // alphanumeric (first arm), a `-` (second arm), a `_` (third arm), and a
+        // rejected byte (all arms false).
+        assert!(url_safe(b'A'));
+        assert!(url_safe(b'9'));
+        assert!(url_safe(b'-'));
+        assert!(url_safe(b'_'));
+        assert!(!url_safe(b'!'));
+
         let pkce = Pkce::generate();
         for token in [&pkce.verifier, &pkce.challenge, &pkce.state] {
             assert!(
-                token
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+                token.bytes().all(url_safe),
                 "token is not url-safe: {token}"
             );
         }
