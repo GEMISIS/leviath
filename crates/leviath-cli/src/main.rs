@@ -21,7 +21,7 @@ use tracing::info;
 
 use leviath_cli::commands;
 use leviath_cli::commands::dashboard::{CrosstermEventSource, DashboardArgs, TerminalSetup};
-use leviath_cli::dispatch::{Commands, RiskyExecutors, dispatch};
+use leviath_cli::dispatch::{Commands, RiskyExecutors, apply_region_flags, dispatch};
 
 /// Leviath CLI - Agent framework with structured context windows
 #[derive(Parser)]
@@ -39,7 +39,13 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    // Pre-scan argv for dynamic `--<region>` seed flags on `run` (region names
+    // are blueprint-defined, so clap can't declare them), then parse the rest
+    // and fold the extracted flags back in (both steps are tested lib seams).
+    let (argv, region_flags) =
+        commands::run::extract_region_flags(std::env::args().collect::<Vec<_>>());
+    let mut cli = Cli::parse_from(argv);
+    apply_region_flags(&mut cli.command, region_flags);
 
     // Initialize tracing. Logs go to stderr, never stdout: `lev agent-client`
     // uses stdout as its JSON-RPC protocol channel, and a stray log line there
@@ -176,6 +182,7 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
         args.yolo,
         args.allow,
         args.max_depth,
+        args.regions,
     )?;
     leviath_cli::daemon::client::send_spawn(&control_client()?, spawn_args).await
 }

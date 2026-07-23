@@ -162,6 +162,48 @@ impl ContextLayout {
     }
 }
 
+/// Where a region's initial content comes from at run start.
+///
+/// A region without a seed starts empty and is populated by the agent. A seeded
+/// region is filled before the first inference: `CallerInput` regions are filled
+/// by the run's caller (a CLI `--<name>` flag, an ACP `---region:<name>---`
+/// marker, or the API `regions` map); the remaining variants are resolved by the
+/// daemon from the run's workdir (which is why this type only *declares* the
+/// source — `leviath-core` stays filesystem-agnostic; resolution lives in the
+/// CLI daemon's spawner).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegionSeed {
+    /// Filled at run time by the caller, keyed by `name` (defaults to the
+    /// region's own name; the sentinel `task` maps to the `--task`/prompt text).
+    /// When the owning region is `required`, a missing value is a hard error
+    /// before any inference runs.
+    CallerInput {
+        /// The caller-input key this region is filled from.
+        name: String,
+    },
+    /// Concatenated contents of the workdir files matching a glob pattern.
+    Glob {
+        /// Glob pattern, resolved relative to the run's workdir.
+        pattern: String,
+    },
+    /// Concatenated contents of an explicit list of workdir-relative files.
+    Files {
+        /// File paths, resolved relative to the run's workdir.
+        paths: Vec<String>,
+    },
+    /// A static literal string baked into the blueprint.
+    Literal {
+        /// The verbatim seed text.
+        text: String,
+    },
+    /// The `String` returned by running a Rhai script from the workdir.
+    Rhai {
+        /// Script path, resolved relative to the run's workdir.
+        script: String,
+    },
+}
+
 /// Definition of a region in a layout.
 ///
 /// This is the blueprint for creating a Region instance. It specifies the
@@ -195,6 +237,12 @@ pub struct RegionDefinition {
     /// but empty. Falls back to a generated default when `None`.
     #[serde(default)]
     pub required_message: Option<String>,
+
+    /// Where this region's initial content comes from at run start. `None`
+    /// means the region starts empty (the agent populates it). See
+    /// [`RegionSeed`].
+    #[serde(default)]
+    pub seed: Option<RegionSeed>,
 }
 
 impl RegionDefinition {
@@ -208,7 +256,14 @@ impl RegionDefinition {
             description: None,
             required: false,
             required_message: None,
+            seed: None,
         }
+    }
+
+    /// Set this region's seed source.
+    pub fn with_seed(mut self, seed: RegionSeed) -> Self {
+        self.seed = Some(seed);
+        self
     }
 
     /// Mark this region as required, with an optional custom nudge message.

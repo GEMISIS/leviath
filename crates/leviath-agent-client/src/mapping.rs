@@ -59,6 +59,78 @@ pub fn flatten_prompt(blocks: &[ContentBlock]) -> String {
     parts.join("\n\n").trim().to_string()
 }
 
+/// Parse `---region:<name>---` markers out of a flattened prompt into a
+/// name→content map.
+///
+/// A line that is exactly `---region:<name>---` (after trimming) opens a region
+/// block; its content runs until the next `---region:...---` marker, an
+/// `---end-regions---` line, or the end of the text. Any text before the first
+/// marker becomes the `task` region. With **no** markers at all, the whole text
+/// is returned as `{ "task": text }` — the exact pre-feature behavior, so hosts
+/// that don't use markers are unaffected.
+///
+/// Region bodies are trimmed; empty blocks are dropped. Pure — no I/O.
+pub fn parse_region_markers(text: &str) -> std::collections::HashMap<String, String> {
+    use std::collections::HashMap;
+
+    let marker_name = |line: &str| -> Option<String> {
+        let t = line.trim();
+        t.strip_prefix("---region:")
+            .and_then(|rest| rest.strip_suffix("---"))
+            .map(|n| n.trim().to_string())
+    };
+
+    let mut out = HashMap::new();
+    // Current region name (None = the leading "task" block) and its accumulated
+    // lines. `ended` becomes true after `---end-regions---`.
+    let mut current: Option<String> = None;
+    let mut buf: Vec<&str> = Vec::new();
+    let mut ended = false;
+    let mut saw_marker = false;
+
+    let flush = |name: &Option<String>, buf: &mut Vec<&str>, out: &mut HashMap<String, String>| {
+        let body = buf.join("\n");
+        let body = body.trim();
+        if !body.is_empty() {
+            let key = name.clone().unwrap_or_else(|| "task".to_string());
+            out.insert(key, body.to_string());
+        }
+        buf.clear();
+    };
+
+    for line in text.lines() {
+        if ended {
+            break;
+        }
+        if line.trim() == "---end-regions---" {
+            flush(&current, &mut buf, &mut out);
+            ended = true;
+            continue;
+        }
+        if let Some(name) = marker_name(line) {
+            flush(&current, &mut buf, &mut out);
+            current = Some(name);
+            saw_marker = true;
+            continue;
+        }
+        buf.push(line);
+    }
+    if !ended {
+        flush(&current, &mut buf, &mut out);
+    }
+
+    if !saw_marker {
+        // No markers: preserve exact legacy behavior (whole text → task).
+        let mut out = HashMap::new();
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            out.insert("task".to_string(), trimmed.to_string());
+        }
+        return out;
+    }
+    out
+}
+
 /// The stop reason to report for a run that has reached `status`.
 ///
 /// `Error` maps to `refusal` rather than inventing a failure code: the protocol
@@ -190,6 +262,57 @@ mod tests {
             body: None,
             body_format: Default::default(),
         }
+    }
+
+    // ─── parse_region_markers ────────────────────────────────────────────────
+
+    #[test]
+    fn markers_absent_puts_whole_text_in_task() {
+        let out = parse_region_markers("just do the thing");
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out.get("task").map(String::as_str),
+            Some("just do the thing")
+        );
+    }
+
+    #[test]
+    fn markers_absent_empty_text_yields_empty_map() {
+        assert!(parse_region_markers("   \n  ").is_empty());
+    }
+
+    #[test]
+    fn leading_text_before_first_marker_becomes_task() {
+        let text = "build a parser\n---region:criteria---\nfocus on safety";
+        let out = parse_region_markers(text);
+        assert_eq!(out.get("task").map(String::as_str), Some("build a parser"));
+        assert_eq!(
+            out.get("criteria").map(String::as_str),
+            Some("focus on safety")
+        );
+    }
+
+    #[test]
+    fn multiple_regions_and_end_marker_with_trailing_text_dropped() {
+        let text = "\
+---region:task---
+build it
+---region:criteria---
+be careful
+---end-regions---
+this trailing text is ignored";
+        let out = parse_region_markers(text);
+        assert_eq!(out.get("task").map(String::as_str), Some("build it"));
+        assert_eq!(out.get("criteria").map(String::as_str), Some("be careful"));
+        assert_eq!(out.len(), 2, "trailing text after end marker is dropped");
+    }
+
+    #[test]
+    fn empty_region_blocks_are_dropped() {
+        let text = "---region:task---\nreal\n---region:empty---\n   \n";
+        let out = parse_region_markers(text);
+        assert_eq!(out.get("task").map(String::as_str), Some("real"));
+        assert!(!out.contains_key("empty"));
     }
 
     // ─── flatten_prompt ──────────────────────────────────────────────────────

@@ -3,15 +3,26 @@
 //! `lev run` (and reusable by other clients). The socket-path resolution + connect
 //! live in the binary; these cores are unit-testable against a fake socket server.
 
+use std::collections::HashMap;
+
 use anyhow::bail;
+use leviath_core::layout::RegionSeed;
 use leviath_runtime::control_socket::{ControlClient, ControlResponse};
 use leviath_runtime::host::SpawnArgs;
 
 use crate::commands::run::manifest::find_manifest;
+use crate::commands::run::session::read_region_value;
 use crate::runstate::new_run_id;
 
 /// Resolve the local inputs of a spawn request: find the manifest, mint a run id
-/// from the agent's directory name, and record the working directory.
+/// from the agent's directory name, record the working directory, and resolve
+/// any dynamic `--<region>` flags (raw values, `@path` or literal) against the
+/// blueprint's declared caller-input regions.
+///
+/// `regions` maps a flag name to its raw value. An unknown region name (one the
+/// blueprint doesn't read as caller input) is a hard error here — fast, local
+/// typo protection before the daemon is contacted.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_spawn_args(
     path: &str,
     task: &str,
@@ -20,6 +31,7 @@ pub fn resolve_spawn_args(
     yolo: bool,
     allow: Vec<String>,
     max_depth: Option<usize>,
+    regions: HashMap<String, String>,
 ) -> anyhow::Result<SpawnArgs> {
     let manifest = find_manifest(path)?;
     let agent_name = manifest
@@ -27,10 +39,46 @@ pub fn resolve_spawn_args(
         .and_then(|p| p.file_name())
         .and_then(|n| n.to_str())
         .unwrap_or("agent");
+
+    // Validate + resolve region flags against the blueprint's caller-input regions.
+    let resolved_regions = if regions.is_empty() {
+        HashMap::new()
+    } else {
+        let content = std::fs::read_to_string(&manifest)
+            .map_err(|e| anyhow::anyhow!("read manifest '{}': {e}", manifest.display()))?;
+        let blueprint = leviath_core::manifest::parse_manifest(&content)
+            .map_err(|e| anyhow::anyhow!("parse manifest: {e}"))?;
+        let declared: Vec<String> = blueprint
+            .context_layout
+            .regions
+            .iter()
+            .filter_map(|r| match &r.seed {
+                Some(RegionSeed::CallerInput { name }) => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut out = HashMap::new();
+        for (name, raw) in regions {
+            if !declared.contains(&name) {
+                bail!(
+                    "unknown region '--{name}'; this agent's caller-input regions are: {}",
+                    if declared.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        declared.join(", ")
+                    }
+                );
+            }
+            out.insert(name, read_region_value(&raw)?);
+        }
+        out
+    };
+
     Ok(SpawnArgs {
         run_id: new_run_id(agent_name),
         blueprint_path: manifest.to_string_lossy().to_string(),
         task: task.to_string(),
+        regions: resolved_regions,
         model,
         workdir: workdir.to_string(),
         metadata: Default::default(),
@@ -92,6 +140,7 @@ mod tests {
             false,
             Vec::new(),
             None,
+            HashMap::new(),
         )
         .unwrap();
         assert!(args.run_id.contains("my-agent"));
@@ -111,9 +160,200 @@ mod tests {
                 "/work",
                 false,
                 Vec::new(),
-                None
+                None,
+                HashMap::new(),
             )
             .is_err()
+        );
+    }
+
+    /// Write a manifest declaring a `criteria` caller-input region, returning its
+    /// path.
+    fn write_region_manifest(dir: &std::path::Path) -> std::path::PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("agent.leviath"),
+            r#"
+[agent]
+name = "reviewer"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+
+[context.regions]
+task = { kind = "pinned", max_tokens = 4000, seed = "task_input" }
+criteria = { kind = "pinned", max_tokens = 2000, seed = "input" }
+conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
+"#,
+        )
+        .unwrap();
+        dir.join("agent.leviath")
+    }
+
+    #[test]
+    fn resolve_spawn_args_resolves_declared_region_and_reads_at_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write_region_manifest(&dir.path().join("reviewer"));
+        let policy = dir.path().join("policy.md");
+        std::fs::write(&policy, "  focus on safety  ").unwrap();
+
+        let regions = HashMap::from([(
+            "criteria".to_string(),
+            format!("@{}", policy.to_string_lossy()),
+        )]);
+        let args = resolve_spawn_args(
+            manifest.to_str().unwrap(),
+            "review it",
+            None,
+            "/work",
+            false,
+            Vec::new(),
+            None,
+            regions,
+        )
+        .unwrap();
+        // `@path` was read and trimmed.
+        assert_eq!(
+            args.regions.get("criteria").map(String::as_str),
+            Some("focus on safety")
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_args_unknown_region_reports_none_when_no_caller_inputs() {
+        // A blueprint with zero caller-input regions: the error lists "(none)".
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("noinput");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("agent.leviath"),
+            r#"
+[agent]
+name = "noinput"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+
+[context.regions]
+data = { kind = "pinned", max_tokens = 2000 }
+conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
+"#,
+        )
+        .unwrap();
+        let manifest = agent_dir.join("agent.leviath");
+        let regions = HashMap::from([("foo".to_string(), "x".to_string())]);
+        let err = resolve_spawn_args(
+            manifest.to_str().unwrap(),
+            "t",
+            None,
+            "/work",
+            false,
+            Vec::new(),
+            None,
+            regions,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("(none)"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_spawn_args_manifest_read_error_surfaces() {
+        // `find_manifest` accepts a dir whose `agent.leviath` merely *exists*; when
+        // that entry is itself a directory, the client-side read fails (EISDIR).
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("dirmanifest");
+        std::fs::create_dir_all(agent_dir.join("agent.leviath")).unwrap();
+        let regions = HashMap::from([("x".to_string(), "y".to_string())]);
+        let err = resolve_spawn_args(
+            agent_dir.to_str().unwrap(),
+            "t",
+            None,
+            "/work",
+            false,
+            Vec::new(),
+            None,
+            regions,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("read manifest"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_spawn_args_manifest_parse_error_surfaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("badtoml");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("agent.leviath"),
+            "this is : not = valid toml [[[",
+        )
+        .unwrap();
+        let regions = HashMap::from([("x".to_string(), "y".to_string())]);
+        let err = resolve_spawn_args(
+            agent_dir.join("agent.leviath").to_str().unwrap(),
+            "t",
+            None,
+            "/work",
+            false,
+            Vec::new(),
+            None,
+            regions,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("parse manifest"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_spawn_args_region_value_bad_file_errors() {
+        // A declared region whose `@file` value can't be read → the error from
+        // read_region_value propagates out of resolve_spawn_args.
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write_region_manifest(&dir.path().join("reviewer"));
+        let regions = HashMap::from([("criteria".to_string(), "@/no/such/file.md".to_string())]);
+        let err = resolve_spawn_args(
+            manifest.to_str().unwrap(),
+            "review it",
+            None,
+            "/work",
+            false,
+            Vec::new(),
+            None,
+            regions,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("Failed to read region file"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_args_rejects_unknown_region_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write_region_manifest(&dir.path().join("reviewer"));
+        let regions = HashMap::from([("bogus".to_string(), "x".to_string())]);
+        let err = resolve_spawn_args(
+            manifest.to_str().unwrap(),
+            "review it",
+            None,
+            "/work",
+            false,
+            Vec::new(),
+            None,
+            regions,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("unknown region '--bogus'"),
+            "got: {err}"
         );
     }
 

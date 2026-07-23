@@ -72,6 +72,8 @@ impl FanOutSpawner for DaemonFanOutSpawner {
             false,
             Vec::new(),
             None,
+            // Fan-out workers get their split of the parent task via `task`.
+            std::collections::HashMap::new(),
         )
         .map_err(|e| format!("resolve worker blueprint: {e}"))?;
         // Nest the worker under its fan-out parent in the run tree.
@@ -332,6 +334,7 @@ mod tests {
             run_id: "parent".to_string(),
             blueprint_path: manifest_path.to_string(),
             task: "parent task".to_string(),
+            regions: HashMap::new(),
             model: None,
             workdir: std::env::temp_dir().to_string_lossy().to_string(),
             metadata: HashMap::new(),

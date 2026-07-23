@@ -65,6 +65,25 @@ fn resolve_task_with(
     )
 }
 
+/// Resolve one CLI region-flag value: `@path` reads (and trims) that file's
+/// contents; anything else is literal text. Unlike `--task`, the `@` is an
+/// explicit file marker, so a missing `@file` is an error (the user meant a
+/// file), not a literal fallback.
+pub fn read_region_value(raw: &str) -> anyhow::Result<String> {
+    match raw.strip_prefix('@') {
+        Some(path) => {
+            let content = std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("Failed to read region file '{}': {}", path, e))?;
+            let trimmed = content.trim().to_string();
+            if trimmed.is_empty() {
+                anyhow::bail!("Region file '{}' is empty.", path);
+            }
+            Ok(trimmed)
+        }
+        None => Ok(raw.to_string()),
+    }
+}
+
 /// Same as [`resolve_task_with`], but with the editor launch itself injected
 /// too — lets tests deterministically exercise `launch_editor`'s error
 /// propagating out of `resolve_task_with` (the `result?` a few lines down)
@@ -408,6 +427,42 @@ mod tests {
     #[should_panic(expected = "expected Ok, got Err(boom)")]
     fn assert_launch_ok_panics_when_err() {
         assert_launch_ok(&Err(anyhow::anyhow!("boom")));
+    }
+
+    // ─── read_region_value ────────────────────────────────────────────────
+
+    #[test]
+    fn read_region_value_literal_passthrough() {
+        assert_eq!(read_region_value("just text").unwrap(), "just text");
+    }
+
+    #[test]
+    fn read_region_value_at_path_reads_and_trims() {
+        let dir = std::env::temp_dir().join("lev-test-region-value");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("r.md");
+        std::fs::write(&file, "  hello region  \n").unwrap();
+        let raw = format!("@{}", file.to_string_lossy());
+        assert_eq!(read_region_value(&raw).unwrap(), "hello region");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_region_value_at_missing_file_errors() {
+        let err = read_region_value("@/no/such/region/file.md").unwrap_err();
+        assert!(err.to_string().contains("Failed to read region file"));
+    }
+
+    #[test]
+    fn read_region_value_at_empty_file_errors() {
+        let dir = std::env::temp_dir().join("lev-test-region-empty");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("empty.md");
+        std::fs::write(&file, "   \n").unwrap();
+        let raw = format!("@{}", file.to_string_lossy());
+        let err = read_region_value(&raw).unwrap_err();
+        assert!(err.to_string().contains("is empty"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ─── platform_default_editors ─────────────────────────────────────────

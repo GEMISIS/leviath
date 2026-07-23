@@ -60,11 +60,13 @@ pub(super) fn spawn_args(
     task: &str,
     cwd: &str,
     args: &AgentClientArgs,
+    regions: std::collections::HashMap<String, String>,
 ) -> SpawnArgs {
     SpawnArgs {
         run_id: new_run_id(&blueprint.agent_name),
         blueprint_path: blueprint.manifest_path.to_string_lossy().to_string(),
         task: task.to_string(),
+        regions,
         model: None,
         workdir: cwd.to_string(),
         metadata: Default::default(),
@@ -144,12 +146,18 @@ prompt = "Plan the work"
             allow: vec!["bash".to_string()],
             max_depth: Some(2),
         };
-        let spawn = spawn_args(&resolved, "do the thing", "/work", &args);
+        let regions =
+            std::collections::HashMap::from([("criteria".to_string(), "be safe".to_string())]);
+        let spawn = spawn_args(&resolved, "do the thing", "/work", &args, regions);
         assert_eq!(
             spawn.blueprint_path,
             resolved.manifest_path.to_string_lossy()
         );
         assert_eq!(spawn.task, "do the thing");
+        assert_eq!(
+            spawn.regions.get("criteria").map(String::as_str),
+            Some("be safe")
+        );
         assert_eq!(spawn.workdir, "/work");
         assert!(spawn.model.is_none());
         assert!(spawn.yolo);

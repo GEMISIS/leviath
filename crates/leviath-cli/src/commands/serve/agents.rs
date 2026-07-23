@@ -46,6 +46,7 @@ pub(super) async fn spawn_agent(
         run_id,
         blueprint_path: manifest_path.to_string_lossy().to_string(),
         task: body.task.clone(),
+        regions: body.regions.clone(),
         model: body.model.clone(),
         workdir,
         metadata: body.metadata.clone(),

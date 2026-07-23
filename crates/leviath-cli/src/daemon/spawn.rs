@@ -22,7 +22,7 @@ use leviath_runtime::host::{SpawnArgs, SubAgentOp};
 use leviath_runtime::interaction_hub::InteractionHub;
 use leviath_runtime::persistence::{RunMetadata, TokenTotals};
 use leviath_runtime::pipeline::{
-    CompactionSettings, PersistWatermark, Providers, ResolvedStage, spawn_agent,
+    CompactionSettings, PersistWatermark, Providers, ResolvedStage, spawn_agent_seeded,
 };
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
@@ -186,10 +186,158 @@ fn build_tool_state(
     })
 }
 
+/// Resolve every region's initial content from its blueprint-declared
+/// [`RegionSeed`] plus the caller-provided values on `args`, into a
+/// name→content map ready for [`spawn_agent_seeded`].
+///
+/// The caller map is `{ "task": args.task } ∪ args.regions` (a `regions["task"]`
+/// wins). Then:
+/// - `CallerInput { name }` pulls from the caller map; if the region is
+///   `required` and the value is missing/blank this returns `Err` — the
+///   required-at-spawn gate, before any inference.
+/// - `Files` / `Glob` read workdir files; `Literal` is verbatim; `Rhai` runs a
+///   workdir script whose `String` return seeds the region.
+/// - Any caller key (other than `task`) that isn't a declared `CallerInput`
+///   region is rejected (typo protection, mirrors the CLI-side check).
+fn resolve_seeds(
+    blueprint: &Blueprint,
+    args: &SpawnArgs,
+    workdir: &str,
+) -> Result<HashMap<String, String>, String> {
+    use leviath_core::layout::RegionSeed;
+
+    // The effective caller-supplied values: task text plus any named regions.
+    let mut caller: HashMap<String, String> = HashMap::new();
+    caller.insert("task".to_string(), args.task.clone());
+    for (k, v) in &args.regions {
+        caller.insert(k.clone(), v.clone());
+    }
+
+    // Unknown caller keys are tolerated here (silently unused): the CLI already
+    // rejects typos client-side in `resolve_spawn_args`, and an ACP host sending
+    // a stray `---region:...---` marker shouldn't fail the whole turn over it.
+
+    let base = std::path::Path::new(workdir);
+    let mut seeds: HashMap<String, String> = HashMap::new();
+
+    for region in &blueprint.context_layout.regions {
+        let Some(seed) = &region.seed else { continue };
+        match seed {
+            RegionSeed::CallerInput { name } => {
+                let value = caller.get(name).map(|s| s.as_str()).unwrap_or("");
+                if value.trim().is_empty() {
+                    if region.required {
+                        return Err(region.required_message.clone().unwrap_or_else(|| {
+                            format!(
+                                "required region '{}' was not provided; supply it via \
+                                 --{name} <text|@file> (CLI), a ---region:{name}--- block \
+                                 (ACP), or the API `regions` field",
+                                region.name
+                            )
+                        }));
+                    }
+                    // Optional and unprovided — leave the region empty.
+                    continue;
+                }
+                seeds.insert(region.name.clone(), value.to_string());
+            }
+            RegionSeed::Literal { text } => {
+                seeds.insert(region.name.clone(), text.clone());
+            }
+            RegionSeed::Files { paths } => {
+                let content = read_and_concat(
+                    &region.name,
+                    paths.iter().map(|p| base.join(p)),
+                    region.required,
+                )?;
+                if let Some(content) = content {
+                    seeds.insert(region.name.clone(), content);
+                }
+            }
+            RegionSeed::Glob { pattern } => {
+                let full = base.join(pattern);
+                let full = full.to_string_lossy();
+                let matches = glob::glob(&full)
+                    .map_err(|e| format!("region '{}': bad glob '{pattern}': {e}", region.name))?;
+                let paths: Vec<std::path::PathBuf> = matches.filter_map(|m| m.ok()).collect();
+                let content = read_and_concat(&region.name, paths.into_iter(), region.required)?;
+                match content {
+                    Some(content) => {
+                        seeds.insert(region.name.clone(), content);
+                    }
+                    None if region.required => {
+                        return Err(format!(
+                            "required region '{}': glob '{pattern}' matched no files",
+                            region.name
+                        ));
+                    }
+                    None => {}
+                }
+            }
+            RegionSeed::Rhai { script } => {
+                let path = base.join(script);
+                let src = std::fs::read_to_string(&path).map_err(|e| {
+                    format!(
+                        "region '{}': read rhai seed '{}': {e}",
+                        region.name,
+                        path.display()
+                    )
+                })?;
+                let mut input = rhai::Map::new();
+                input.insert("task".into(), rhai::Dynamic::from(args.task.clone()));
+                input.insert("workdir".into(), rhai::Dynamic::from(workdir.to_string()));
+                let out = leviath_scripting::ScriptEngine::new()
+                    .transform(&src, input)
+                    .map_err(|e| format!("region '{}': rhai seed failed: {e}", region.name))?;
+                if !out.trim().is_empty() {
+                    seeds.insert(region.name.clone(), out);
+                } else if region.required {
+                    return Err(format!(
+                        "required region '{}': rhai seed '{script}' returned empty",
+                        region.name
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(seeds)
+}
+
+/// Read each file and concatenate with `--- <path> ---` headers. Returns
+/// `Ok(None)` when the list is empty; a missing/unreadable file is an error only
+/// when `required`, else it is skipped.
+fn read_and_concat(
+    region: &str,
+    paths: impl Iterator<Item = std::path::PathBuf>,
+    required: bool,
+) -> Result<Option<String>, String> {
+    let mut parts: Vec<String> = Vec::new();
+    for path in paths {
+        match std::fs::read_to_string(&path) {
+            Ok(text) => parts.push(format!("--- {} ---\n{}", path.display(), text)),
+            Err(e) => {
+                if required {
+                    return Err(format!(
+                        "region '{region}': read seed file '{}': {e}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+    }
+    Ok((!parts.is_empty()).then(|| parts.join("\n\n")))
+}
+
 /// Load the blueprint at `args.blueprint_path`, spawn the agent into `world`,
 /// register its tool state, and return the new entity. Operates on the raw ECS
 /// [`World`] so it is callable both from the host's spawner (via
 /// `PipelineWorld::world_mut`) and from a fan-out world-system.
+///
+/// Enforces the required-at-spawn region gate — a fresh spawn whose required
+/// caller-input regions weren't provided fails here. Use
+/// [`build_agent_for_reload`] on the recovery path, where the window is restored
+/// from a snapshot afterward and the gate must not re-fire.
 #[allow(clippy::too_many_arguments)]
 pub fn build_agent(
     world: &mut World,
@@ -201,6 +349,62 @@ pub fn build_agent(
     args: &SpawnArgs,
     now_secs: i64,
     subagent_tx: UnboundedSender<SubAgentOp>,
+) -> Result<Entity, String> {
+    build_agent_inner(
+        world,
+        tool_service,
+        config,
+        shared_mcp,
+        mcp_tool_defs,
+        hub,
+        args,
+        now_secs,
+        subagent_tx,
+        true,
+    )
+}
+
+/// Like [`build_agent`], but skips the required-at-spawn region gate — used by
+/// restart recovery, which reloads a run that already passed the gate when first
+/// spawned and whose context window is restored from a snapshot after this call.
+#[allow(clippy::too_many_arguments)]
+pub fn build_agent_for_reload(
+    world: &mut World,
+    tool_service: &CliToolService,
+    config: &Config,
+    shared_mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
+    mcp_tool_defs: &[Tool],
+    hub: &InteractionHub,
+    args: &SpawnArgs,
+    now_secs: i64,
+    subagent_tx: UnboundedSender<SubAgentOp>,
+) -> Result<Entity, String> {
+    build_agent_inner(
+        world,
+        tool_service,
+        config,
+        shared_mcp,
+        mcp_tool_defs,
+        hub,
+        args,
+        now_secs,
+        subagent_tx,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_agent_inner(
+    world: &mut World,
+    tool_service: &CliToolService,
+    config: &Config,
+    shared_mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
+    mcp_tool_defs: &[Tool],
+    hub: &InteractionHub,
+    args: &SpawnArgs,
+    now_secs: i64,
+    subagent_tx: UnboundedSender<SubAgentOp>,
+    enforce_seeds: bool,
 ) -> Result<Entity, String> {
     // 1. Load the blueprint (the client resolves the manifest path).
     let content = std::fs::read_to_string(&args.blueprint_path)
@@ -305,17 +509,28 @@ pub fn build_agent(
         .first()
         .map(|s| format!("{}/{}", s.provider_name, s.model));
 
-    // 5. Spawn the agent.
-    let entity = spawn_agent(
+    // 5. Resolve region seeds (caller input + blueprint-declared sources) into
+    // concrete content. On a fresh spawn (`enforce_seeds`), required caller-input
+    // regions that weren't provided fail here — before any inference, so no
+    // tokens are spent. On reload the window is restored from a snapshot after
+    // this, so seeding is skipped entirely.
+    let seeds = if enforce_seeds {
+        resolve_seeds(&blueprint, args, &args.workdir)?
+    } else {
+        HashMap::new()
+    };
+
+    // 6. Spawn the agent.
+    let entity = spawn_agent_seeded(
         world,
         args.run_id.clone(),
         blueprint,
-        &args.task,
+        &seeds,
         stages,
         config.batch_tool_hint,
     )?;
 
-    // 6. Attach run metadata / token totals / persistence watermark (+ optional
+    // 7. Attach run metadata / token totals / persistence watermark (+ optional
     // compaction settings).
     let metadata = RunMetadata {
         run_id: args.run_id.clone(),
@@ -366,7 +581,7 @@ pub fn build_agent(
         });
     }
 
-    // 7. Register the per-agent tool state.
+    // 8. Register the per-agent tool state.
     // Launch overrides: `--yolo` allows every tool (`*` wildcard); `--allow X`
     // allows tool `X` outright.
     let mut launch_overrides: HashMap<String, crate::config::ToolPolicy> = HashMap::new();
@@ -600,6 +815,7 @@ mod tests {
             run_id: "run-x".to_string(),
             blueprint_path: path.to_string(),
             task: "do the thing".to_string(),
+            regions: HashMap::new(),
             model: None,
             workdir: std::env::temp_dir().to_string_lossy().to_string(),
             metadata: HashMap::new(),
@@ -666,6 +882,40 @@ mod tests {
                 .get::<leviath_runtime::components::GateAutoApprove>(entity)
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn build_agent_errors_when_required_caller_region_missing() {
+        // A required caller-input region that the request doesn't provide makes
+        // build_agent fail (via resolve_seeds) before spawning — no inference.
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"needs\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\n\
+             [context.regions]\n\
+             spec = { kind = \"pinned\", max_tokens = 2000, seed = \"input\", required = true }\n\
+             conversation = { kind = \"sliding_window\", max_items = 20, max_tokens = 10000 }\n",
+        )
+        .unwrap();
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        // spawn_args() provides only the task, not the required `spec` region.
+        let err = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+            sub_tx(),
+        )
+        .unwrap_err();
+        assert!(err.contains("spec"), "got: {err}");
     }
 
     #[tokio::test]
@@ -1240,5 +1490,254 @@ system_prompt = "be brief"
         )
         .unwrap_err();
         assert!(err.contains("parse manifest"));
+    }
+
+    // ─── resolve_seeds ────────────────────────────────────────────────────────
+
+    fn bp(regions_toml: &str) -> Blueprint {
+        let toml = format!(
+            r#"
+[agent]
+name = "seedy"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+
+[context.regions]
+{regions_toml}
+conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
+"#
+        );
+        leviath_core::manifest::parse_manifest(&toml).unwrap()
+    }
+
+    fn args_with(task: &str, regions: HashMap<String, String>, workdir: &str) -> SpawnArgs {
+        SpawnArgs {
+            run_id: "r".to_string(),
+            blueprint_path: "/bp".to_string(),
+            task: task.to_string(),
+            regions,
+            model: None,
+            workdir: workdir.to_string(),
+            metadata: HashMap::new(),
+            callback_url: None,
+            yolo: false,
+            allow: Vec::new(),
+            max_depth: None,
+            parent_run_id: None,
+        }
+    }
+
+    #[test]
+    fn resolve_seeds_fills_task_and_caller_input() {
+        let bp = bp(
+            r#"task = { kind = "pinned", max_tokens = 4000, seed = "task_input" }
+criteria = { kind = "pinned", max_tokens = 2000, seed = "input" }"#,
+        );
+        let args = args_with(
+            "build it",
+            HashMap::from([("criteria".to_string(), "be safe".to_string())]),
+            "/tmp",
+        );
+        let seeds = resolve_seeds(&bp, &args, "/tmp").unwrap();
+        assert_eq!(seeds.get("task").map(String::as_str), Some("build it"));
+        assert_eq!(seeds.get("criteria").map(String::as_str), Some("be safe"));
+    }
+
+    #[test]
+    fn resolve_seeds_required_caller_input_missing_is_error() {
+        let bp =
+            bp(r#"spec = { kind = "pinned", max_tokens = 2000, seed = "input", required = true }"#);
+        let args = args_with("t", HashMap::new(), "/tmp");
+        let err = resolve_seeds(&bp, &args, "/tmp").unwrap_err();
+        assert!(err.contains("spec"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_seeds_optional_caller_input_missing_is_omitted() {
+        let bp = bp(r#"notes = { kind = "pinned", max_tokens = 2000, seed = "input" }"#);
+        let args = args_with("t", HashMap::new(), "/tmp");
+        let seeds = resolve_seeds(&bp, &args, "/tmp").unwrap();
+        assert!(!seeds.contains_key("notes"));
+    }
+
+    #[test]
+    fn resolve_seeds_literal_and_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "alpha").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "beta").unwrap();
+        let bp = bp(
+            r#"lit = { kind = "pinned", max_tokens = 500, seed = { literal = "hello" } }
+docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"] } }"#,
+        );
+        let args = args_with("t", HashMap::new(), &dir.path().to_string_lossy());
+        let seeds = resolve_seeds(&bp, &args, &dir.path().to_string_lossy()).unwrap();
+        assert_eq!(seeds.get("lit").map(String::as_str), Some("hello"));
+        let docs = seeds.get("docs").unwrap();
+        assert!(docs.contains("alpha") && docs.contains("beta"));
+    }
+
+    #[test]
+    fn resolve_seeds_glob_concatenates_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("specs")).unwrap();
+        std::fs::write(dir.path().join("specs/one.md"), "spec one").unwrap();
+        std::fs::write(dir.path().join("specs/two.md"), "spec two").unwrap();
+        let bp =
+            bp(r#"specs = { kind = "pinned", max_tokens = 4000, seed = { glob = "specs/*.md" } }"#);
+        let wd = dir.path().to_string_lossy().to_string();
+        let args = args_with("t", HashMap::new(), &wd);
+        let seeds = resolve_seeds(&bp, &args, &wd).unwrap();
+        let specs = seeds.get("specs").unwrap();
+        assert!(specs.contains("spec one") && specs.contains("spec two"));
+    }
+
+    #[test]
+    fn resolve_seeds_rhai_runs_script() {
+        let dir = tempfile::tempdir().unwrap();
+        // A script that returns the task text uppercased-ish via concatenation.
+        std::fs::write(
+            dir.path().join("init.rhai"),
+            r#""seeded: " + input["task"]"#,
+        )
+        .unwrap();
+        let bp = bp(
+            r#"scripted = { kind = "pinned", max_tokens = 500, seed = { rhai = "init.rhai" } }"#,
+        );
+        let wd = dir.path().to_string_lossy().to_string();
+        let args = args_with("hello", HashMap::new(), &wd);
+        let seeds = resolve_seeds(&bp, &args, &wd).unwrap();
+        assert_eq!(
+            seeds.get("scripted").map(String::as_str),
+            Some("seeded: hello")
+        );
+    }
+
+    #[test]
+    fn resolve_seeds_files_required_missing_errors_optional_skips() {
+        let dir = tempfile::tempdir().unwrap();
+        let wd = dir.path().to_string_lossy().to_string();
+        // Required + a missing file → error.
+        let req = bp(
+            r#"docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["missing.txt"] }, required = true }"#,
+        );
+        let args = args_with("t", HashMap::new(), &wd);
+        let err = resolve_seeds(&req, &args, &wd).unwrap_err();
+        assert!(err.contains("missing.txt"), "got: {err}");
+        // Optional + a missing file → the region is simply omitted.
+        let opt = bp(
+            r#"docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["missing.txt"] } }"#,
+        );
+        let seeds = resolve_seeds(&opt, &args, &wd).unwrap();
+        assert!(!seeds.contains_key("docs"));
+    }
+
+    #[test]
+    fn resolve_seeds_glob_no_match_required_errors_optional_skips() {
+        let dir = tempfile::tempdir().unwrap();
+        let wd = dir.path().to_string_lossy().to_string();
+        let args = args_with("t", HashMap::new(), &wd);
+        // Required glob with no matches → error.
+        let req = bp(
+            r#"specs = { kind = "pinned", max_tokens = 2000, seed = { glob = "none/*.md" }, required = true }"#,
+        );
+        let err = resolve_seeds(&req, &args, &wd).unwrap_err();
+        assert!(err.contains("matched no files"), "got: {err}");
+        // Optional glob with no matches → region omitted.
+        let opt =
+            bp(r#"specs = { kind = "pinned", max_tokens = 2000, seed = { glob = "none/*.md" } }"#);
+        let seeds = resolve_seeds(&opt, &args, &wd).unwrap();
+        assert!(!seeds.contains_key("specs"));
+    }
+
+    #[test]
+    fn resolve_seeds_bad_glob_pattern_errors() {
+        // An unclosed `[` is an invalid glob pattern → `glob::glob` returns Err.
+        let dir = tempfile::tempdir().unwrap();
+        let wd = dir.path().to_string_lossy().to_string();
+        let bp = bp(r#"specs = { kind = "pinned", max_tokens = 2000, seed = { glob = "[" } }"#);
+        let args = args_with("t", HashMap::new(), &wd);
+        let err = resolve_seeds(&bp, &args, &wd).unwrap_err();
+        assert!(err.contains("bad glob"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_seeds_rhai_script_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // A script that calls an undefined function → runtime error.
+        std::fs::write(dir.path().join("boom.rhai"), "undefined_func()").unwrap();
+        let wd = dir.path().to_string_lossy().to_string();
+        let bp = bp(
+            r#"scripted = { kind = "pinned", max_tokens = 500, seed = { rhai = "boom.rhai" } }"#,
+        );
+        let args = args_with("t", HashMap::new(), &wd);
+        let err = resolve_seeds(&bp, &args, &wd).unwrap_err();
+        assert!(err.contains("rhai seed failed"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_seeds_glob_matching_directory_required_errors() {
+        // A required glob that matches a directory entry → reading it as a file
+        // fails, so read_and_concat returns Err and resolve_seeds propagates it.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+        let wd = dir.path().to_string_lossy().to_string();
+        let bp = bp(
+            r#"specs = { kind = "pinned", max_tokens = 2000, seed = { glob = "sub*" }, required = true }"#,
+        );
+        let args = args_with("t", HashMap::new(), &wd);
+        let err = resolve_seeds(&bp, &args, &wd).unwrap_err();
+        assert!(err.contains("read seed file"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_seeds_rhai_read_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let wd = dir.path().to_string_lossy().to_string();
+        let bp = bp(
+            r#"scripted = { kind = "pinned", max_tokens = 500, seed = { rhai = "nope.rhai" } }"#,
+        );
+        let args = args_with("t", HashMap::new(), &wd);
+        let err = resolve_seeds(&bp, &args, &wd).unwrap_err();
+        assert!(err.contains("read rhai seed"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_seeds_rhai_empty_required_errors_optional_skips() {
+        let dir = tempfile::tempdir().unwrap();
+        // A script returning an empty string.
+        std::fs::write(dir.path().join("empty.rhai"), r#""""#).unwrap();
+        let wd = dir.path().to_string_lossy().to_string();
+        let args = args_with("t", HashMap::new(), &wd);
+        let req = bp(
+            r#"scripted = { kind = "pinned", max_tokens = 500, seed = { rhai = "empty.rhai" }, required = true }"#,
+        );
+        let err = resolve_seeds(&req, &args, &wd).unwrap_err();
+        assert!(err.contains("returned empty"), "got: {err}");
+        // Optional + empty → region omitted (no error).
+        let opt = bp(
+            r#"scripted = { kind = "pinned", max_tokens = 500, seed = { rhai = "empty.rhai" } }"#,
+        );
+        let seeds = resolve_seeds(&opt, &args, &wd).unwrap();
+        assert!(!seeds.contains_key("scripted"));
+    }
+
+    #[test]
+    fn resolve_seeds_tolerates_unknown_caller_region() {
+        // Unknown caller keys are silently unused (CLI validates client-side;
+        // ACP stray markers must not fail the spawn).
+        let bp = bp(r#"task = { kind = "pinned", max_tokens = 4000, seed = "task_input" }"#);
+        let args = args_with(
+            "t",
+            HashMap::from([("ghost".to_string(), "x".to_string())]),
+            "/tmp",
+        );
+        let seeds = resolve_seeds(&bp, &args, "/tmp").unwrap();
+        assert_eq!(seeds.get("task").map(String::as_str), Some("t"));
+        assert!(!seeds.contains_key("ghost"));
     }
 }
