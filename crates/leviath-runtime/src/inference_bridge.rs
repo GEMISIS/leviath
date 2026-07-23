@@ -36,6 +36,17 @@ pub struct RetryPolicy {
     /// Base backoff; the retry after attempt `n` waits `base_delay * 2^(n-1)`
     /// (so 1s, 2s, 4s, … for a 1s base).
     pub base_delay: Duration,
+    /// Hard ceiling on the total wall-clock time one job (all attempts +
+    /// backoffs) may run before it is aborted and its pool slot freed.
+    ///
+    /// The provider's HTTP client already has a read-*stall* timeout, but a
+    /// connection that keeps trickling keepalive bytes without ever completing
+    /// (a stalled stream) resets that timer forever, so the permit would leak
+    /// and, once enough leak, the model's pool fills and new agents never get a
+    /// slot. This bound guarantees a slot is released within a fixed time. The
+    /// default is generous — far above any realistic single inference — so it
+    /// only ever catches a genuine hang.
+    pub job_timeout: Duration,
 }
 
 impl Default for RetryPolicy {
@@ -43,6 +54,7 @@ impl Default for RetryPolicy {
         Self {
             max_attempts: 4,
             base_delay: Duration::from_secs(1),
+            job_timeout: Duration::from_secs(1800),
         }
     }
 }
@@ -89,17 +101,28 @@ pub async fn run_inference_job(
     } = job;
     // Retry transient failures (connection reset, timeout, 429, 5xx) with
     // exponential backoff, holding the permit across the backoff; a permanent
-    // error fails immediately.
-    let mut attempt = 1u32;
-    let result = loop {
-        match provider.infer(request.clone()).await {
-            Ok(response) => break Ok(response),
-            Err(e) if e.is_transient() && attempt < retry.max_attempts => {
-                tokio::time::sleep(retry.base_delay * 2u32.pow(attempt - 1)).await;
-                attempt += 1;
+    // error fails immediately. The whole thing is bounded by `job_timeout` so a
+    // never-completing (stalled-stream) call cannot hold the pool slot forever.
+    let attempts = async {
+        let mut attempt = 1u32;
+        loop {
+            match provider.infer(request.clone()).await {
+                Ok(response) => break Ok(response),
+                Err(e) if e.is_transient() && attempt < retry.max_attempts => {
+                    tokio::time::sleep(retry.base_delay * 2u32.pow(attempt - 1)).await;
+                    attempt += 1;
+                }
+                Err(e) => break Err(e),
             }
-            Err(e) => break Err(e),
         }
+    };
+    let result = match tokio::time::timeout(retry.job_timeout, attempts).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(leviath_providers::ProviderError::Other(format!(
+            "inference exceeded the {}s job timeout and was aborted to free the \
+             pool slot (a stalled or never-completing response)",
+            retry.job_timeout.as_secs()
+        ))),
     };
     drop(permit); // free the pool slot before the collect system runs
     let _ = results.send(InferenceOutcome { entity, result });
@@ -182,6 +205,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_job_aborts_a_hung_call_and_frees_the_pool_slot() {
+        // A model pool of one slot, taken by the (hung) job under test.
+        let mut cfg = InferencePoolConfig::new();
+        cfg.set_limit("m", 1);
+        let pools = InferencePools::new(cfg);
+        let permit = pools.try_acquire("m").expect("free pool");
+        assert!(pools.try_acquire("m").is_none(), "pool should be full");
+
+        let provider = Arc::new(Scripted {
+            steps: std::sync::Mutex::new(vec![Step::Hang].into()),
+            calls: std::sync::Mutex::new(0),
+        });
+        let job = InferenceJob {
+            entity: Entity::from_raw(7),
+            provider,
+            request: test_request(),
+            permit,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let policy = RetryPolicy {
+            max_attempts: 1,
+            base_delay: Duration::ZERO,
+            job_timeout: Duration::from_millis(50),
+        };
+        run_inference_job(job, tx, Arc::new(Notify::new()), policy).await;
+
+        // The hung call was aborted with a timeout error…
+        let outcome = rx.try_recv().expect("outcome sent");
+        let err = outcome.result.expect_err("hung call should error");
+        assert!(err.to_string().contains("job timeout"), "got: {err}");
+        // …and its pool slot is free again for the next agent.
+        assert!(
+            pools.try_acquire("m").is_some(),
+            "the slot must be released after the timeout"
+        );
+    }
+
+    #[tokio::test]
     async fn run_job_reports_ok_and_wakes() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let wake = Arc::new(Notify::new());
@@ -243,6 +304,8 @@ mod tests {
         Ok(String),
         Transient,
         Permanent,
+        /// Never returns — a stalled/hung call, for the job-timeout test.
+        Hang,
     }
 
     /// A provider that plays a scripted sequence of results and counts calls.
@@ -258,10 +321,14 @@ mod tests {
             _req: InferenceRequest,
         ) -> leviath_providers::Result<InferenceResponse> {
             *self.calls.lock().unwrap() += 1;
-            match self.steps.lock().unwrap().pop_front() {
+            // Pop before matching so the mutex guard is not held across the
+            // `Hang` arm's `.await` (which would make this future non-`Send`).
+            let step = self.steps.lock().unwrap().pop_front();
+            match step {
                 Some(Step::Ok(t)) => Ok(response(&t)),
                 Some(Step::Transient) => Err(ProviderError::RateLimitExceeded),
                 Some(Step::Permanent) => Err(ProviderError::Other("permanent".to_string())),
+                Some(Step::Hang) => std::future::pending().await,
                 None => Err(ProviderError::Other("exhausted".to_string())),
             }
         }
@@ -283,6 +350,7 @@ mod tests {
         RetryPolicy {
             max_attempts,
             base_delay: Duration::ZERO,
+            job_timeout: Duration::from_secs(30),
         }
     }
 
