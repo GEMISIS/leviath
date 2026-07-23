@@ -23,8 +23,13 @@ use reqwest::{StatusCode, Url};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use super::Transport;
+use std::sync::Arc;
+
 use super::jsonrpc::{self, Inbound, JsonRpcRequest, JsonRpcResponse};
+use super::{BearerRefresher, Transport};
+
+/// HTTP header carrying the bearer token, updated in place on a refresh.
+const AUTHORIZATION: &str = "authorization";
 
 /// Header carrying the server's session identifier.
 const SESSION_HEADER: &str = "mcp-session-id";
@@ -154,6 +159,8 @@ pub(crate) struct HttpTransport {
     session_id: Option<String>,
     protocol_version: Option<String>,
     legacy: Option<LegacyStream>,
+    /// Re-auths the bearer on a mid-session `401`, if configured.
+    refresher: Option<Arc<dyn BearerRefresher>>,
 }
 
 impl HttpTransport {
@@ -170,7 +177,39 @@ impl HttpTransport {
             session_id: None,
             protocol_version: None,
             legacy: None,
+            refresher: None,
         })
+    }
+
+    /// Replace the `Authorization` header with a refreshed value.
+    fn set_auth_header(&mut self, value: &str) {
+        match HeaderValue::from_str(value) {
+            Ok(v) => {
+                self.headers
+                    .insert(HeaderName::from_static(AUTHORIZATION), v);
+            }
+            Err(e) => tracing::warn!(error = %e, "Refreshed bearer is not a valid header value"),
+        }
+    }
+
+    /// POST `body`; if the reply is `401` and a refresher is configured, refresh
+    /// the token once and retry.
+    ///
+    /// A long-running agent can outlive its access token; without this, every
+    /// call after expiry would fail for the rest of the run. The retry happens
+    /// at most once per request, so a genuinely-rejecting server can't loop.
+    async fn post_maybe_refresh(&mut self, body: &str) -> anyhow::Result<reqwest::Response> {
+        let response = self.post(body).await?;
+        if response.status() != StatusCode::UNAUTHORIZED {
+            return Ok(response);
+        }
+        let Some(refresher) = self.refresher.clone() else {
+            return Ok(response);
+        };
+        tracing::info!("MCP request returned 401 — refreshing the token and retrying");
+        let value = refresher.refresh().await?;
+        self.set_auth_header(&value);
+        self.post(body).await
     }
 
     /// The endpoint POSTs go to: the configured URL, or whatever the legacy
@@ -414,7 +453,7 @@ impl HttpTransport {
         body: &str,
         id: Option<u64>,
     ) -> anyhow::Result<JsonRpcResponse> {
-        let response = self.post(body).await?;
+        let response = self.post_maybe_refresh(body).await?;
         let status = response.status();
         if !status.is_success() {
             return Err(error_for_status(status, response).await);
@@ -451,7 +490,7 @@ impl HttpTransport {
         body: &str,
         id: Option<u64>,
     ) -> anyhow::Result<JsonRpcResponse> {
-        let response = self.post(body).await?;
+        let response = self.post_maybe_refresh(body).await?;
         let status = response.status();
 
         // A 404/405 on the message endpoint is how a legacy-only server
@@ -613,6 +652,10 @@ impl Transport for HttpTransport {
                 .await;
         }
         Ok(())
+    }
+
+    fn set_bearer_refresher(&mut self, refresher: Arc<dyn BearerRefresher>) {
+        self.refresher = Some(refresher);
     }
 }
 
@@ -1887,5 +1930,135 @@ mod tests {
         t.send_notification(&JsonRpcRequest::notification("x", serde_json::json!({})))
             .await
             .expect("a 202 to a legacy notification is success");
+    }
+
+    // ─── mid-session 401 refresh ──────────────────────────────────────────
+
+    /// A refresher that hands back a fixed token and counts its calls.
+    struct CountingRefresher {
+        calls: Arc<AtomicUsize>,
+        value: String,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl BearerRefresher for CountingRefresher {
+        async fn refresh(&self) -> anyhow::Result<String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                anyhow::bail!("refresh boom");
+            }
+            Ok(self.value.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_401_triggers_a_refresh_and_a_successful_retry() {
+        let _guard = always_on_tracing_guard();
+        // The first POST (stale token) is answered 401; after the retry carries
+        // the refreshed token, it succeeds.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/mcp",
+            post(|headers: AxumHeaders| async move {
+                let auth = headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                if auth == "Bearer fresh" {
+                    ([(CONTENT_TYPE, "application/json")], ok_frame(1)).into_response()
+                } else {
+                    AxumStatus::UNAUTHORIZED.into_response()
+                }
+            }),
+        );
+        let url = format!("{}/mcp", serve(app).await);
+        let mut t = transport(&url);
+        t.set_bearer_refresher(Arc::new(CountingRefresher {
+            calls: calls.clone(),
+            value: "Bearer fresh".to_string(),
+            fail: false,
+        }));
+
+        let value = t
+            .send_request(&init(), DEFAULT_REQUEST_TIMEOUT)
+            .await
+            .expect("refresh + retry should succeed")
+            .into_result()
+            .unwrap();
+        assert_eq!(value, serde_json::json!({"ok": true}));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "refreshed exactly once");
+    }
+
+    #[tokio::test]
+    async fn a_401_without_a_refresher_surfaces_the_error() {
+        let _guard = always_on_tracing_guard();
+        let app = Router::new().route("/mcp", post(|| async { AxumStatus::UNAUTHORIZED }));
+        let url = format!("{}/mcp", serve(app).await);
+        let mut t = transport(&url);
+        // No refresher configured → the 401 is a plain failure.
+        assert!(
+            t.send_request(&init(), DEFAULT_REQUEST_TIMEOUT)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_refresh_propagates() {
+        let _guard = always_on_tracing_guard();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route("/mcp", post(|| async { AxumStatus::UNAUTHORIZED }));
+        let url = format!("{}/mcp", serve(app).await);
+        let mut t = transport(&url);
+        t.set_bearer_refresher(Arc::new(CountingRefresher {
+            calls: calls.clone(),
+            value: String::new(),
+            fail: true,
+        }));
+        let err = t
+            .send_request(&init(), DEFAULT_REQUEST_TIMEOUT)
+            .await
+            .err()
+            .expect("a failed refresh must surface");
+        assert!(err.to_string().contains("refresh boom"), "got: {err}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn the_retry_happens_at_most_once() {
+        let _guard = always_on_tracing_guard();
+        // The server always 401s (even after refresh); the retry must not loop.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route("/mcp", post(|| async { AxumStatus::UNAUTHORIZED }));
+        let url = format!("{}/mcp", serve(app).await);
+        let mut t = transport(&url);
+        t.set_bearer_refresher(Arc::new(CountingRefresher {
+            calls: calls.clone(),
+            value: "Bearer still-bad".to_string(),
+            fail: false,
+        }));
+        assert!(
+            t.send_request(&init(), DEFAULT_REQUEST_TIMEOUT)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "refresh tried once, not in a loop"
+        );
+    }
+
+    #[test]
+    fn set_auth_header_rejects_an_invalid_value() {
+        let _guard = always_on_tracing_guard();
+        // A control character can't be a header value; the update is skipped.
+        let mut t = transport("http://127.0.0.1:1/mcp");
+        t.set_auth_header("Bearer with\nnewline");
+        assert!(t.headers.get("authorization").is_none());
+        // A valid value is stored.
+        t.set_auth_header("Bearer good");
+        assert_eq!(t.headers.get("authorization").unwrap(), "Bearer good");
     }
 }

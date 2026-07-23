@@ -56,11 +56,25 @@ impl ToolRegistry {
                         continue;
                     }
                 };
+                // A resolved bearer means this HTTP server is OAuth-backed (a
+                // static-header or stdio server resolves to `None`).
+                let auth_was_resolved = auth_header.is_some();
                 match discovery
                     .discover_from_config_with_auth(server_cfg, auth_header)
                     .await
                 {
-                    Ok((_tool_metas, client)) => {
+                    Ok((_tool_metas, mut client)) => {
+                        // If this is an OAuth-backed HTTP server, attach a
+                        // refresher so a run that outlives its access token
+                        // re-auths on a 401 instead of failing every later call.
+                        if auth_was_resolved && let Some(path) = store_path.clone() {
+                            client.set_refresher(std::sync::Arc::new(
+                                leviath_mcp::StoredTokenRefresher::new(
+                                    server_cfg.name.clone(),
+                                    path,
+                                ),
+                            ));
+                        }
                         // Advertise under provider-safe, collision-free names,
                         // reserving the built-in names and every MCP name already
                         // advertised so nothing the LLM sees is duplicated or
@@ -342,6 +356,79 @@ for line in sys.stdin:
         // First server keeps `echo`; the second is disambiguated.
         assert!(names.contains(&"echo"), "names: {names:?}");
         assert!(names.contains(&"beta__echo"), "names: {names:?}");
+        registry.shutdown().await;
+    }
+
+    /// A minimal streamable-HTTP MCP server that requires a bearer and lists one
+    /// tool. Returns its base URL.
+    async fn mock_http_mcp_server() -> String {
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::{Json, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route(
+            "/mcp",
+            // The token is validated by the daemon-side resolution, not here;
+            // this mock only needs to speak enough protocol to connect.
+            post(|body: String| async move {
+                let req: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let id = req.get("id").cloned().unwrap_or(serde_json::json!(1));
+                let result = match req.get("method").and_then(|m| m.as_str()) {
+                    Some("initialize") => {
+                        serde_json::json!({"capabilities": {}, "protocolVersion": "2024-11-05"})
+                    }
+                    Some("tools/list") => {
+                        serde_json::json!({"tools": [{"name": "remote_tool", "inputSchema": {}}]})
+                    }
+                    _ => serde_json::json!({}),
+                };
+                (
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    Json(serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}))
+                        .into_response()
+                        .into_body(),
+                )
+                    .into_response()
+            }),
+        );
+        tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
+            listener, app,
+        )));
+        base
+    }
+
+    #[tokio::test]
+    async fn build_attaches_a_refresher_to_an_authenticated_http_server() {
+        // An HTTP server with a live stored token connects, its tool is
+        // advertised, and a refresher is attached (the auth-resolved arm).
+        with_tracing(|| {});
+        let base = mock_http_mcp_server().await;
+        let registry = with_temp_home(|| async {
+            // Seed a non-expired token at the store the daemon reads.
+            let mut store = leviath_mcp::AuthStore::default();
+            store.set(
+                "remote",
+                leviath_mcp::ServerAuth {
+                    access_token: "live-token".to_string(),
+                    expires_at: u64::MAX,
+                    ..Default::default()
+                },
+            );
+            store
+                .save(&leviath_mcp::AuthStore::default_path().unwrap())
+                .unwrap();
+
+            let config = Config {
+                mcp_servers: vec![MCPServerConfig::http("remote", format!("{base}/mcp"))],
+                ..Config::default()
+            };
+            ToolRegistry::build(std::env::temp_dir(), &config).await
+        })
+        .await;
+
+        assert_eq!(registry.mcp_tool_defs.len(), 1);
+        assert_eq!(registry.mcp_tool_defs[0].name, "remote_tool");
         registry.shutdown().await;
     }
 

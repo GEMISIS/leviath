@@ -18,7 +18,7 @@ pub mod transport;
 #[cfg(test)]
 mod test_support;
 
-pub use auth::{AuthStore, BrowserOpener, OAuthClient, ServerAuth};
+pub use auth::{AuthStore, BrowserOpener, OAuthClient, ServerAuth, StoredTokenRefresher};
 pub use client::{
     EmbeddedResource, MCPClient, PREFERRED_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
     ServerCapabilities, ToolResult, ToolResultContent, ToolsCapability,
@@ -27,5 +27,6 @@ pub use discovery::{
     MCPServerConfig, MCPTransport, ResolvedTransport, ToolDiscovery, ToolMetadata,
 };
 pub use execution::{ExecutionResult, ToolExecutor, sanitize_tool_name};
+pub use transport::BearerRefresher;
 pub use transport::stdio::filter_env;
 pub use transport::{DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT};
