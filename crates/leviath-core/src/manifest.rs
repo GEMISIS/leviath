@@ -137,10 +137,17 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                     }
                 }
 
+                let request_timeout_secs =
+                    mt.get("request_timeout_secs").and_then(|v| v.as_integer());
+                let request_timeout_secs = request_timeout_secs
+                    .filter(|&secs| secs >= 0)
+                    .map(|secs| secs as u64);
+
                 ModelConfig {
                     models,
                     allow_user_default,
                     parameters,
+                    request_timeout_secs,
                 }
             } else {
                 ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string())
@@ -2820,6 +2827,57 @@ max_output_tokens = 2048
                 .get("max_output_tokens")
                 .and_then(|v| v.as_u64()),
             Some(2048)
+        );
+    }
+
+    #[test]
+    fn parse_manifest_per_stage_request_timeout() {
+        let toml = r#"
+[agent]
+name = "timeout-test"
+
+[stages.analyze.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+request_timeout_secs = 900
+
+[stages.test_fix.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        // Set on the stage that declares it.
+        assert_eq!(
+            bp.find_stage("analyze").unwrap().model.request_timeout_secs,
+            Some(900)
+        );
+        // Absent → None (default job timeout applies).
+        assert_eq!(
+            bp.find_stage("test_fix")
+                .unwrap()
+                .model
+                .request_timeout_secs,
+            None
+        );
+    }
+
+    #[test]
+    fn parse_manifest_negative_request_timeout_is_ignored() {
+        let toml = r#"
+[agent]
+name = "neg-timeout-test"
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+request_timeout_secs = -5
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        // A nonsensical negative value is dropped rather than wrapping into a
+        // huge u64.
+        assert_eq!(
+            bp.find_stage("main").unwrap().model.request_timeout_secs,
+            None
         );
     }
 

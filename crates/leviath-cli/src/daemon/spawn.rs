@@ -673,6 +673,7 @@ mod tests {
                 .collect(),
             allow_user_default: true,
             parameters: HashMap::new(),
+            request_timeout_secs: None,
         }
     }
 

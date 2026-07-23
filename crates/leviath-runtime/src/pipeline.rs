@@ -192,6 +192,19 @@ fn build_request(
     }
 }
 
+/// Build the [`RetryPolicy`] for a job, applying a stage's per-stage inference
+/// wall-clock cap when configured. Starts from the default policy and, when the
+/// stage set `request_timeout_secs` (from `[stages.<name>.model]`), overrides its
+/// `job_timeout`; otherwise the default job timeout stands. Pure so the override
+/// branch is unit-testable without driving the ECS dispatch.
+fn retry_policy_for(config: Option<&InferenceConfig>) -> crate::inference_bridge::RetryPolicy {
+    let mut policy = crate::inference_bridge::RetryPolicy::default();
+    if let Some(secs) = config.and_then(|c| c.request_timeout_secs) {
+        policy.job_timeout = std::time::Duration::from_secs(secs);
+    }
+    policy
+}
+
 /// Inference-dispatch system: for every `ReadyToInfer` agent, resolve its
 /// provider and, **if a per-model permit is free**, build the request, spawn the
 /// inference job, and move it to `AwaitingInference`. If its provider is missing
@@ -241,7 +254,7 @@ pub fn dispatch_inference(
                 job,
                 stage.outcomes.clone(),
                 stage.wake.clone(),
-                crate::inference_bridge::RetryPolicy::default(),
+                retry_policy_for(config),
             ));
             par_commands.command_scope(|mut commands| {
                 commands
@@ -2476,6 +2489,7 @@ fn stage_setup_from(
             max_output_tokens,
             extra_params,
             batch_tool_hint,
+            request_timeout_secs: stage.model.request_timeout_secs,
         },
         routing: stage.tool_result_routing.clone(),
         accepts_messages: stage.accepts_messages,
@@ -3032,6 +3046,7 @@ mod tests {
             max_output_tokens: Some(42),
             extra_params: Default::default(),
             batch_tool_hint: false,
+            request_timeout_secs: None,
         };
         let si = stage(
             "m",
@@ -3055,6 +3070,7 @@ mod tests {
             max_output_tokens: None,
             extra_params,
             batch_tool_hint: false,
+            request_timeout_secs: None,
         };
         let si = stage("m", vec![], None);
         let req = build_request(&window(), Some(&cfg), &si, &provider(true, 500));
@@ -3078,6 +3094,7 @@ mod tests {
             max_output_tokens: None,
             extra_params: Default::default(),
             batch_tool_hint: true,
+            request_timeout_secs: None,
         };
         let si = stage("m", vec![], None);
         let req = build_request(&window_with_sys(), Some(&cfg), &si, &provider(true, 500));
@@ -3104,6 +3121,7 @@ mod tests {
             max_output_tokens: None,
             extra_params: Default::default(),
             batch_tool_hint: false,
+            request_timeout_secs: None,
         };
         let req = build_request(&window_with_sys(), Some(&cfg), &si, &provider(true, 500));
         assert!(!req.system.is_empty());
@@ -5151,6 +5169,7 @@ mod tests {
                 max_output_tokens: None,
                 extra_params: Default::default(),
                 batch_tool_hint: false,
+                request_timeout_secs: None,
             },
             routing: None,
             accepts_messages: true,
@@ -5459,6 +5478,7 @@ mod tests {
             max_output_tokens: Some(99),
             extra_params: Default::default(),
             batch_tool_hint: false,
+            request_timeout_secs: None,
         };
         s.accepts_messages = false;
         let mut world = World::new();
@@ -5772,6 +5792,57 @@ mod tests {
         assert_eq!(extra["top_p"], serde_json::json!(0.9));
         assert_eq!(extra["seed"], serde_json::json!(11));
         assert!(!extra.contains_key("temperature"));
+    }
+
+    #[test]
+    fn stage_setup_from_threads_request_timeout() {
+        // Unset on the stage → None on the inference config.
+        let s = stage_named("plan", None, false, None);
+        assert_eq!(
+            stage_setup_from(&s, true, None)
+                .inference_config
+                .request_timeout_secs,
+            None
+        );
+
+        // Set on the stage's model → carried onto the inference config verbatim.
+        let mut s2 = stage_named("plan", None, false, None);
+        s2.model.request_timeout_secs = Some(300);
+        assert_eq!(
+            stage_setup_from(&s2, true, None)
+                .inference_config
+                .request_timeout_secs,
+            Some(300)
+        );
+    }
+
+    #[test]
+    fn retry_policy_for_overrides_job_timeout_when_set() {
+        let default = crate::inference_bridge::RetryPolicy::default();
+
+        // No config at all → default policy unchanged.
+        assert_eq!(retry_policy_for(None).job_timeout, default.job_timeout);
+
+        // Config present but no per-stage timeout → default still stands.
+        let cfg_none = InferenceConfig {
+            request_timeout_secs: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            retry_policy_for(Some(&cfg_none)).job_timeout,
+            default.job_timeout
+        );
+
+        // Per-stage timeout set → job_timeout is overridden to that value, other
+        // retry fields left at their defaults.
+        let cfg_some = InferenceConfig {
+            request_timeout_secs: Some(120),
+            ..Default::default()
+        };
+        let policy = retry_policy_for(Some(&cfg_some));
+        assert_eq!(policy.job_timeout, std::time::Duration::from_secs(120));
+        assert_eq!(policy.max_attempts, default.max_attempts);
+        assert_eq!(policy.base_delay, default.base_delay);
     }
 
     #[test]
