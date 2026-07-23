@@ -101,6 +101,10 @@ pub struct InferenceStage {
     pub wake: Arc<Notify>,
     /// Runtime the worker tasks are spawned onto.
     pub runtime: Handle,
+    /// Opt-in: perform an exact pre-inference token count and reject requests
+    /// that would overflow the model's context window (see
+    /// [`InferenceJob::exact_token_counting`]). Off by default.
+    pub exact_token_counting: bool,
 }
 
 /// Truncate `text` to at most `max_chars` characters, never splitting a
@@ -231,6 +235,7 @@ pub fn dispatch_inference(
                 provider,
                 request,
                 permit,
+                exact_token_counting: stage.exact_token_counting,
             };
             stage.runtime.spawn(run_inference_job(
                 job,
@@ -2761,6 +2766,9 @@ pub fn dispatch_transition_choice(
             provider,
             request,
             permit,
+            // Routing responses are tiny (≤256 tokens) and always fit; skip the
+            // extra count call for them.
+            exact_token_counting: false,
         };
         stage.runtime.spawn(run_inference_job(
             job,
@@ -2935,7 +2943,7 @@ mod tests {
                 finish_reason: leviath_providers::FinishReason::Complete,
             })
         }
-        fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+        async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
             1
         }
         fn max_context_tokens(&self, _m: &str) -> usize {
@@ -3091,15 +3099,15 @@ mod tests {
         assert_eq!(req.temperature, 0.0); // model doesn't support temperature
     }
 
-    #[test]
-    fn cfg_provider_metadata_is_exercised() {
+    #[tokio::test]
+    async fn cfg_provider_metadata_is_exercised() {
         // Keep the mock's non-`infer`/`capabilities` trait methods measured.
         let p = Cfg {
             supports_temperature: true,
             max_output: 1,
         };
         assert_eq!(p.name(), "cfg");
-        assert_eq!(p.count_tokens("t", "m"), 1);
+        assert_eq!(p.count_tokens("t", "m").await, 1);
         assert_eq!(p.max_context_tokens("m"), 100_000);
     }
 
@@ -3122,6 +3130,7 @@ mod tests {
             content_summary_outcomes: cstx,
             wake: Arc::new(Notify::new()),
             runtime: Handle::current(),
+            exact_token_counting: false,
         });
         (world, rx)
     }

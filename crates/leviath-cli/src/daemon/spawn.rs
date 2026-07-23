@@ -445,7 +445,7 @@ mod tests {
                 "test provider".to_string(),
             ))
         }
-        fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+        async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
             1
         }
         fn max_context_tokens(&self, _m: &str) -> usize {
@@ -987,7 +987,7 @@ mod tests {
     async fn fake_provider_methods_are_exercised() {
         let p = FakeProvider;
         assert_eq!(p.name(), "fake");
-        assert_eq!(p.count_tokens("t", "m"), 1);
+        assert_eq!(p.count_tokens("t", "m").await, 1);
         assert_eq!(p.max_context_tokens("m"), 1000);
         let _ = p.capabilities("m");
         assert!(

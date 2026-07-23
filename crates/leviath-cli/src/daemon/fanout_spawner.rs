@@ -279,7 +279,7 @@ mod tests {
         ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
             Err(leviath_providers::ProviderError::Other("test".to_string()))
         }
-        fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+        async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
             1
         }
         fn max_context_tokens(&self, _m: &str) -> usize {
@@ -488,12 +488,12 @@ mod tests {
         assert!(err.contains("no worker source"));
     }
 
-    #[test]
-    fn fake_provider_metadata_is_exercised() {
+    #[tokio::test]
+    async fn fake_provider_metadata_is_exercised() {
         use leviath_providers::Provider;
         let p = FakeProvider;
         assert_eq!(p.name(), "fake");
-        assert_eq!(p.count_tokens("t", "m"), 1);
+        assert_eq!(p.count_tokens("t", "m").await, 1);
         assert_eq!(p.max_context_tokens("m"), 100_000);
         let _ = p.capabilities("m");
     }

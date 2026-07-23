@@ -136,6 +136,16 @@ pub struct LimitsConfig {
     /// `Some(50)`. A stage's explicit `max_iterations` always wins.
     #[serde(default = "default_default_max_iterations")]
     pub default_max_iterations: Option<usize>,
+
+    /// Opt-in exact pre-inference token budgeting. When `true`, each agent
+    /// inference is preceded by an exact token count of the assembled request
+    /// (via the provider's `count_tokens`, which uses a remote endpoint for
+    /// Anthropic/Gemini and a local heuristic otherwise) and is rejected before
+    /// sending if it would exceed the model's context window. Off by default:
+    /// normal budgeting uses cheap local estimates, and this adds a network
+    /// round-trip per inference for providers with a remote count endpoint.
+    #[serde(default)]
+    pub exact_token_counting: bool,
 }
 
 impl Default for LimitsConfig {
@@ -143,6 +153,7 @@ impl Default for LimitsConfig {
         Self {
             max_concurrent_inferences: default_max_concurrent_inferences(),
             default_max_iterations: default_default_max_iterations(),
+            exact_token_counting: false,
         }
     }
 }
@@ -650,8 +661,25 @@ mod tests {
         let limits = LimitsConfig::default();
         assert_eq!(limits.max_concurrent_inferences, Some(8));
         assert_eq!(limits.default_max_iterations, Some(50));
+        // Exact token counting is opt-in, off by default.
+        assert!(!limits.exact_token_counting);
         // And the top-level Config carries the same defaults.
         assert_eq!(Config::default().limits.max_concurrent_inferences, Some(8));
+    }
+
+    #[test]
+    fn exact_token_counting_parses_when_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let body = format!(
+            "{}\n[limits]\nexact_token_counting = true\n",
+            config_toml_without_limits()
+        );
+        std::fs::write(&path, body).unwrap();
+        let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
+        assert!(config.limits.exact_token_counting);
+        // The other fields still fall back to their per-field defaults.
+        assert_eq!(config.limits.max_concurrent_inferences, Some(8));
     }
 
     /// A valid full config-file body with the `[limits]` section removed, so
@@ -1682,6 +1710,7 @@ anthropic_api_key = "sk-ant-test-key"
             limits: LimitsConfig {
                 max_concurrent_inferences: Some(4),
                 default_max_iterations: Some(99),
+                exact_token_counting: false,
             },
             batch_tool_hint: true,
         };

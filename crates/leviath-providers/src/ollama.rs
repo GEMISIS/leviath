@@ -394,8 +394,8 @@ impl Provider for OllamaProvider {
         Ok(Box::pin(stream))
     }
 
-    fn count_tokens(&self, text: &str, _model: &str) -> usize {
-        // Approximate counting (model-dependent)
+    async fn count_tokens(&self, text: &str, _model: &str) -> usize {
+        // Ollama exposes no token-count endpoint; approximate locally.
         text.len() / 4
     }
 
@@ -708,19 +708,19 @@ mod tests {
         assert_eq!(caps.max_context_tokens, 131_072);
     }
 
-    #[test]
-    fn test_count_tokens() {
+    #[tokio::test]
+    async fn test_count_tokens() {
         let provider = OllamaProvider::new();
-        let tokens = provider.count_tokens("Hello, world!", "llama3");
+        let tokens = provider.count_tokens("Hello, world!", "llama3").await;
         assert!(tokens > 0);
         // len / 4 = 13 / 4 = 3
         assert_eq!(tokens, 3);
     }
 
-    #[test]
-    fn test_count_tokens_empty() {
+    #[tokio::test]
+    async fn test_count_tokens_empty() {
         let provider = OllamaProvider::new();
-        assert_eq!(provider.count_tokens("", "llama3"), 0);
+        assert_eq!(provider.count_tokens("", "llama3").await, 0);
     }
 
     #[test]

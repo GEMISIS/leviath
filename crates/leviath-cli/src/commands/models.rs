@@ -1327,7 +1327,7 @@ mod tests {
             ))
         }
 
-        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+        async fn count_tokens(&self, text: &str, _model: &str) -> usize {
             text.len() / 4
         }
 
@@ -1654,7 +1654,7 @@ mod tests {
             models: vec![],
             fail: false,
         };
-        assert_eq!(provider.count_tokens("abcd", "mock-model"), 1);
+        assert_eq!(provider.count_tokens("abcd", "mock-model").await, 1);
         assert_eq!(provider.max_context_tokens("mock-model"), 100_000);
         assert_eq!(provider.name(), "mock");
         let _ = provider.capabilities("mock-model");

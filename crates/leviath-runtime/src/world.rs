@@ -116,6 +116,7 @@ impl PipelineWorld {
             content_summary_outcomes: cs_tx,
             wake: wake.clone(),
             runtime,
+            exact_token_counting: false,
         });
         world.insert_resource(crate::context_transform::ContentSummaryResults(cs_rx));
         world.insert_resource(crate::interaction_points::InteractionPointStage {
@@ -220,6 +221,18 @@ impl PipelineWorld {
     /// Read-only access to the underlying ECS world.
     pub fn world(&self) -> &World {
         &self.world
+    }
+
+    /// Enable (or disable) the opt-in exact pre-inference budget guard for this
+    /// world — see [`crate::inference_bridge::InferenceJob::exact_token_counting`].
+    /// Call once at startup when the run config requests it, before serving.
+    pub fn set_exact_token_counting(&mut self, enabled: bool) {
+        if let Some(mut stage) = self
+            .world
+            .get_resource_mut::<crate::pipeline::InferenceStage>()
+        {
+            stage.exact_token_counting = enabled;
+        }
     }
 
     /// Install the shared interaction hub as a world resource and attach this
@@ -530,7 +543,7 @@ mod tests {
             let next = self.responses.lock().unwrap().pop_front();
             next.ok_or_else(|| ProviderError::Other("script exhausted".to_string()))
         }
-        fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+        async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
             1
         }
         fn max_context_tokens(&self, _m: &str) -> usize {
@@ -680,6 +693,25 @@ mod tests {
             std::env::temp_dir(),
             Handle::current(),
         )
+    }
+
+    #[tokio::test]
+    async fn set_exact_token_counting_toggles_the_stage_flag() {
+        let mut world = build_world(ProviderRegistry::new());
+        // Default is off.
+        assert!(
+            !world
+                .world()
+                .resource::<crate::pipeline::InferenceStage>()
+                .exact_token_counting
+        );
+        world.set_exact_token_counting(true);
+        assert!(
+            world
+                .world()
+                .resource::<crate::pipeline::InferenceStage>()
+                .exact_token_counting
+        );
     }
 
     #[tokio::test]
@@ -875,14 +907,14 @@ mod tests {
         assert!(err.is_err());
     }
 
-    #[test]
-    fn script_provider_metadata_is_exercised() {
+    #[tokio::test]
+    async fn script_provider_metadata_is_exercised() {
         // Keep the mock's non-`infer`/`capabilities` methods measured.
         let p = Script {
             responses: Mutex::new(std::collections::VecDeque::new()),
         };
         assert_eq!(p.name(), "script");
-        assert_eq!(p.count_tokens("t", "m"), 1);
+        assert_eq!(p.count_tokens("t", "m").await, 1);
         assert_eq!(p.max_context_tokens("m"), 100_000);
         let _ = p.capabilities("m");
     }

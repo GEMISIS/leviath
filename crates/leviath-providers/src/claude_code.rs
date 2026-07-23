@@ -437,8 +437,9 @@ impl Provider for ClaudeCodeProvider {
         .await
     }
 
-    fn count_tokens(&self, text: &str, _model: &str) -> usize {
-        // ~3.5 characters per token heuristic (same as Anthropic provider)
+    async fn count_tokens(&self, text: &str, _model: &str) -> usize {
+        // Subprocess transport with no token-count endpoint; ~3.5 chars/token
+        // heuristic (same as the Anthropic provider's fallback).
         (text.len() as f64 / 3.5).ceil() as usize
     }
 
@@ -605,12 +606,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn count_tokens_uses_the_character_heuristic() {
+    #[tokio::test]
+    async fn count_tokens_uses_the_character_heuristic() {
         let provider = ClaudeCodeProvider::new();
-        assert_eq!(provider.count_tokens("", "claude-sonnet-4-6"), 0);
+        assert_eq!(provider.count_tokens("", "claude-sonnet-4-6").await, 0);
         assert_eq!(
-            provider.count_tokens(&"a".repeat(350), "claude-sonnet-4-6"),
+            provider
+                .count_tokens(&"a".repeat(350), "claude-sonnet-4-6")
+                .await,
             100
         );
     }

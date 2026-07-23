@@ -121,6 +121,8 @@ pub fn build_host(
         runs_dir.clone(),
         runtime,
     );
+    // Opt-in accurate pre-inference budget guard (off by default).
+    world.set_exact_token_counting(config.limits.exact_token_counting);
     // Share the hub with the tick loop so a blocked agent's open prompt is
     // reflected into its status (Active ↔ Waiting) for the dashboard to surface.
     world.insert_interaction_hub(hub.clone());
@@ -239,7 +241,7 @@ mod tests {
         ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
             Err(leviath_providers::ProviderError::Other("test".to_string()))
         }
-        fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+        async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
             1
         }
         fn max_context_tokens(&self, _m: &str) -> usize {
@@ -319,7 +321,7 @@ mod tests {
         use leviath_providers::Provider;
         let p = FakeProvider;
         assert_eq!(p.name(), "fake");
-        assert_eq!(p.count_tokens("t", "m"), 1);
+        assert_eq!(p.count_tokens("t", "m").await, 1);
         assert_eq!(p.max_context_tokens("m"), 1000);
         let _ = p.capabilities("m");
         assert!(

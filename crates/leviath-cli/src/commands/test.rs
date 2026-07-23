@@ -1152,7 +1152,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             })
         }
 
-        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+        async fn count_tokens(&self, text: &str, _model: &str) -> usize {
             text.len()
         }
 
@@ -1193,7 +1193,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             })
         }
 
-        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+        async fn count_tokens(&self, text: &str, _model: &str) -> usize {
             text.len()
         }
 
@@ -1227,7 +1227,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             ))
         }
 
-        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+        async fn count_tokens(&self, text: &str, _model: &str) -> usize {
             text.len()
         }
 
@@ -1720,11 +1720,11 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         assert!(err.contains("not configured"));
     }
 
-    #[test]
-    fn no_temperature_provider_metadata_is_exercised() {
+    #[tokio::test]
+    async fn no_temperature_provider_metadata_is_exercised() {
         let p = NoTemperatureProvider;
         assert_eq!(p.name(), "no-temperature");
-        assert_eq!(p.count_tokens("abcd", "m"), 4);
+        assert_eq!(p.count_tokens("abcd", "m").await, 4);
         assert_eq!(p.max_context_tokens("m"), 8192);
     }
 
@@ -2335,10 +2335,10 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 
     // ─── ErrorProvider trivial trait methods ─────────────────────────────────
 
-    #[test]
-    fn error_provider_trivial_trait_methods() {
+    #[tokio::test]
+    async fn error_provider_trivial_trait_methods() {
         let provider = ErrorProvider;
-        assert_eq!(provider.count_tokens("hello", "any-model"), 5);
+        assert_eq!(provider.count_tokens("hello", "any-model").await, 5);
         assert_eq!(provider.max_context_tokens("any-model"), 8192);
         assert_eq!(provider.name(), "error-provider");
         let caps = provider.capabilities("any-model");
@@ -2347,13 +2347,13 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 
     // ─── MockProvider trivial trait methods ──────────────────────────────────
 
-    #[test]
-    fn mock_provider_trivial_trait_methods() {
+    #[tokio::test]
+    async fn mock_provider_trivial_trait_methods() {
         let provider = MockProvider {
             content: "x".to_string(),
             tool_calls: vec![],
         };
-        assert_eq!(provider.count_tokens("hello", "any-model"), 5);
+        assert_eq!(provider.count_tokens("hello", "any-model").await, 5);
         assert_eq!(provider.max_context_tokens("any-model"), 8192);
         assert_eq!(provider.name(), "mock");
     }

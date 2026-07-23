@@ -196,7 +196,8 @@ impl Provider for OpenAIProvider {
         Ok(Box::pin(stream))
     }
 
-    fn count_tokens(&self, text: &str, model: &str) -> usize {
+    async fn count_tokens(&self, text: &str, model: &str) -> usize {
+        // tiktoken is exact for OpenAI models and runs locally — no network call.
         crate::tokenizer::count_tokens(text, model)
     }
 
@@ -514,18 +515,18 @@ mod tests {
         assert_eq!(provider.base_url, "https://custom.openai.com");
     }
 
-    #[test]
-    fn test_count_tokens_uses_tiktoken() {
+    #[tokio::test]
+    async fn test_count_tokens_uses_tiktoken() {
         let provider = OpenAIProvider::new("key".to_string());
-        let tokens = provider.count_tokens("Hello, world!", "gpt-5.4-mini");
+        let tokens = provider.count_tokens("Hello, world!", "gpt-5.4-mini").await;
         assert!(tokens > 0);
         assert!(tokens < 20);
     }
 
-    #[test]
-    fn test_count_tokens_empty() {
+    #[tokio::test]
+    async fn test_count_tokens_empty() {
         let provider = OpenAIProvider::new("key".to_string());
-        let tokens = provider.count_tokens("", "gpt-5.4-mini");
+        let tokens = provider.count_tokens("", "gpt-5.4-mini").await;
         assert_eq!(tokens, 0);
     }
 

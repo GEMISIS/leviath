@@ -914,7 +914,7 @@ mod tests {
                 .pop_front()
                 .ok_or_else(|| ProviderError::Other("exhausted".to_string()))
         }
-        fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+        async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
             1
         }
         fn max_context_tokens(&self, _m: &str) -> usize {
@@ -1905,7 +1905,7 @@ mod tests {
             responses: Mutex::new(std::collections::VecDeque::new()),
         };
         assert_eq!(p.name(), "script");
-        assert_eq!(p.count_tokens("t", "m"), 1);
+        assert_eq!(p.count_tokens("t", "m").await, 1);
         assert_eq!(p.max_context_tokens("m"), 100_000);
         let _ = p.capabilities("m");
         let req = InferenceRequest {

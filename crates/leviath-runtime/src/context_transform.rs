@@ -539,7 +539,7 @@ mod tests {
                 finish_reason: FinishReason::Complete,
             })
         }
-        fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+        async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
             1
         }
         fn max_context_tokens(&self, _m: &str) -> usize {
@@ -608,6 +608,7 @@ mod tests {
             content_summary_outcomes: cs_tx,
             wake: Arc::new(Notify::new()),
             runtime: Handle::current(),
+            exact_token_counting: false,
         });
         (world, cs_rx)
     }
@@ -618,14 +619,14 @@ mod tests {
         s.run(world);
     }
 
-    #[test]
-    fn fake_provider_metadata_is_exercised() {
+    #[tokio::test]
+    async fn fake_provider_metadata_is_exercised() {
         let p = FakeProvider {
             reply: String::new(),
             fail: false,
         };
         assert_eq!(p.name(), "fake");
-        assert_eq!(p.count_tokens("t", "m"), 1);
+        assert_eq!(p.count_tokens("t", "m").await, 1);
         assert_eq!(p.max_context_tokens("m"), 100_000);
         let _ = p.capabilities("m");
     }

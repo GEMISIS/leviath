@@ -233,8 +233,9 @@ impl Provider for OpenRouterProvider {
         Ok(Box::pin(stream))
     }
 
-    fn count_tokens(&self, text: &str, _model: &str) -> usize {
-        // Approximate counting (provider-specific tokenizers not available)
+    async fn count_tokens(&self, text: &str, _model: &str) -> usize {
+        // OpenRouter fronts many models and exposes no token-count endpoint;
+        // approximate locally (provider-specific tokenizers not available).
         text.len() / 4
     }
 
@@ -623,17 +624,17 @@ mod tests {
         assert_eq!(provider.name(), "openrouter");
     }
 
-    #[test]
-    fn test_count_tokens() {
+    #[tokio::test]
+    async fn test_count_tokens() {
         let provider = OpenRouterProvider::new("key".to_string());
-        let tokens = provider.count_tokens("Hello, world!", "any-model");
+        let tokens = provider.count_tokens("Hello, world!", "any-model").await;
         assert_eq!(tokens, 3); // 13 / 4 = 3
     }
 
-    #[test]
-    fn test_count_tokens_empty() {
+    #[tokio::test]
+    async fn test_count_tokens_empty() {
         let provider = OpenRouterProvider::new("key".to_string());
-        assert_eq!(provider.count_tokens("", "any-model"), 0);
+        assert_eq!(provider.count_tokens("", "any-model").await, 0);
     }
 
     #[test]

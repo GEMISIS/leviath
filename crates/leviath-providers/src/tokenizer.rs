@@ -8,12 +8,21 @@ use tiktoken_rs::get_bpe_from_model;
 /// Count tokens in text for a specific model.
 ///
 /// Uses tiktoken for OpenAI/GPT models, approximate counting for others.
+///
+/// This is the offline/heuristic path. Providers with an exact remote
+/// token-count endpoint (Anthropic, Gemini) call it only as the fallback when
+/// that endpoint is unavailable; see each provider's `count_tokens`.
 pub fn count_tokens(text: &str, model: &str) -> usize {
     if model.starts_with("gpt-") || model.starts_with("o3-") || model.starts_with("o4-") {
         count_tokens_tiktoken(text, model)
     } else if model.starts_with("claude-") {
         // Anthropic: ~3.5 chars per token (no official Rust tokenizer)
         approximate_count_anthropic(text)
+    } else if model.starts_with("gemini-") {
+        // Gemini: no official Rust tokenizer; ~4 chars per token (SentencePiece,
+        // close to GPT for English). Kept as its own branch so the ratio can be
+        // tuned independently of the generic fallback.
+        approximate_count_gemini(text)
     } else {
         approximate_count(text)
     }
@@ -29,6 +38,11 @@ fn count_tokens_tiktoken(text: &str, model: &str) -> usize {
 /// Approximate token count for Anthropic models (~3.5 chars per token).
 fn approximate_count_anthropic(text: &str) -> usize {
     (text.len() as f32 / 3.5).ceil() as usize
+}
+
+/// Approximate token count for Gemini models (~4 chars per token).
+fn approximate_count_gemini(text: &str) -> usize {
+    text.len().div_ceil(4)
 }
 
 /// Approximate token count based on character length.
@@ -132,6 +146,14 @@ mod tests {
         // "Hello" = 5 chars, 5/3.5 = 1.43, ceil = 2
         let count = count_tokens("Hello", "claude-sonnet-4-6");
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_gemini_model_uses_gemini_approx() {
+        // "12345678" = 8 chars, 8/4 = 2 tokens (gemini branch, not tiktoken)
+        assert_eq!(count_tokens("12345678", "gemini-3.5-flash"), 2);
+        // 9 chars / 4 = 2.25 → ceil = 3
+        assert_eq!(count_tokens("123456789", "gemini-3.1-pro-preview"), 3);
     }
 
     #[test]

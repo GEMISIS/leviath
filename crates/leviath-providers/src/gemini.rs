@@ -15,6 +15,35 @@ use futures_core::Stream;
 use std::collections::HashMap;
 use std::pin::Pin;
 
+/// Gemini model family, classified from a model id, used to pick per-family
+/// capability defaults. Values are identical across families today; the split
+/// exists so a family's limits can diverge without reworking the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeminiFamily {
+    /// Cost-efficient, high-volume variants (`*-flash-lite`).
+    FlashLite,
+    /// Reasoning-first pro variants (`*-pro*`).
+    Pro,
+    /// Standard flash variants (`*-flash*`, excluding flash-lite).
+    Flash,
+    /// Anything else / future models.
+    Other,
+}
+
+impl GeminiFamily {
+    fn classify(model: &str) -> Self {
+        if model.contains("flash-lite") {
+            GeminiFamily::FlashLite
+        } else if model.contains("pro") {
+            GeminiFamily::Pro
+        } else if model.contains("flash") {
+            GeminiFamily::Flash
+        } else {
+            GeminiFamily::Other
+        }
+    }
+}
+
 /// Google Gemini provider using the OpenAI-compatible endpoint.
 pub struct GeminiProvider {
     /// HTTP client
@@ -75,27 +104,83 @@ impl GeminiProvider {
         }
     }
 
-    /// Return built-in capability defaults for a model.
+    /// Return built-in capability defaults for a model, by family.
     ///
-    /// Current model families (all share 1M context, 65K output, full tool/streaming support):
+    /// Current model families all share 1M context / 65K output / full
+    /// tool+streaming support, so the values are identical today. The per-family
+    /// branching exists so a family can diverge (e.g. a smaller flash-lite output
+    /// cap, or a future `supports_thinking` flag) without another refactor.
+    /// `list_models` fetches the *authoritative* per-model limits from the native
+    /// API; this is the offline default used for the sync `capabilities()` path.
     /// - gemini-3.5-flash (latest flash, near-Pro intelligence)
     /// - gemini-3.1-pro-preview (latest pro, reasoning-first)
     /// - gemini-3-flash (complex multimodal/agentic)
     /// - gemini-3.1-flash-lite (cost-efficient, high-volume)
-    ///
-    /// All Gemini models currently expose identical capabilities via the
-    /// OpenAI-compatible endpoint, so a single default covers all families.
-    /// When ModelCapabilities gains a `supports_thinking` field, split the
-    /// flash-lite variants into their own branch.
-    fn builtin_capabilities(&self, _model: &str) -> ModelCapabilities {
+    fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
+        // All families currently share these values; the match keeps them
+        // labelled by family so any one can be adjusted independently (the arms
+        // are intentionally identical today — divergence-readiness scaffolding).
+        #[allow(clippy::match_same_arms)]
+        let (max_context_tokens, max_output_tokens) = match GeminiFamily::classify(model) {
+            GeminiFamily::FlashLite => (1_048_576, 65_535),
+            GeminiFamily::Pro => (1_048_576, 65_535),
+            GeminiFamily::Flash => (1_048_576, 65_535),
+            GeminiFamily::Other => (1_048_576, 65_535),
+        };
         ModelCapabilities {
             supports_temperature: true,
             supports_streaming: true,
             supports_tools: true,
             supports_system_prompt: true,
-            max_context_tokens: 1_048_576,
-            max_output_tokens: 65_535,
+            max_context_tokens,
+            max_output_tokens,
         }
+    }
+
+    /// Derive the native Gemini API base (`.../v1beta`) from the OpenAI-compatible
+    /// base (`.../v1beta/openai`). Native-only endpoints (`:countTokens`, the
+    /// per-model `models` listing) live under the former. Returns `None` when the
+    /// configured base doesn't follow the `/openai` convention (e.g. a custom
+    /// proxy), so callers fall back rather than guessing a wrong URL.
+    fn native_base(&self) -> Option<String> {
+        self.base_url.strip_suffix("/openai").map(|s| s.to_string())
+    }
+
+    /// Call Gemini's exact native `:countTokens` endpoint for `text`.
+    ///
+    /// Wraps the text as a single user content part. Returns the reported
+    /// `totalTokens`, or an error the caller turns into a heuristic fallback.
+    async fn count_tokens_remote(&self, text: &str, model: &str) -> Result<usize> {
+        let native = self.native_base().ok_or_else(|| {
+            ProviderError::Other(
+                "non-standard base_url; native countTokens unavailable".to_string(),
+            )
+        })?;
+        let url = format!("{}/models/{}:countTokens", native, model);
+        let body = serde_json::json!({
+            "contents": [{ "role": "user", "parts": [{ "text": text }] }],
+        });
+        let response = self
+            .client
+            .post(&url)
+            .header("x-goog-api-key", &self.api_key)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+        let response = crate::provider::check_http_response(response, None).await?;
+        let value: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+        value
+            .get("totalTokens")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .ok_or_else(|| {
+                ProviderError::InvalidResponse("countTokens missing totalTokens".to_string())
+            })
     }
 }
 
@@ -172,8 +257,19 @@ impl Provider for GeminiProvider {
         Ok(Box::pin(stream))
     }
 
-    fn count_tokens(&self, text: &str, model: &str) -> usize {
-        crate::tokenizer::count_tokens(text, model)
+    async fn count_tokens(&self, text: &str, model: &str) -> usize {
+        // Prefer Gemini's exact native `:countTokens` endpoint; fall back to the
+        // local heuristic on any error (network, non-2xx, parse, non-standard base).
+        match self.count_tokens_remote(text, model).await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "Gemini countTokens endpoint failed; using heuristic"
+                );
+                crate::tokenizer::count_tokens(text, model)
+            }
+        }
     }
 
     fn max_context_tokens(&self, model: &str) -> usize {
@@ -193,6 +289,71 @@ impl Provider for GeminiProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        // Prefer the native `/v1beta/models` listing: unlike the OpenAI-compat
+        // `/models`, it returns real per-model `inputTokenLimit`/`outputTokenLimit`.
+        // Fall back to the compat listing (with builtin caps) when the base URL
+        // isn't the standard `.../openai` form.
+        match self.native_base() {
+            Some(native) => self.list_models_native(&native).await,
+            None => self.list_models_compat().await,
+        }
+    }
+}
+
+impl GeminiProvider {
+    /// Native `/v1beta/models` listing with authoritative per-model token limits.
+    async fn list_models_native(&self, native_base: &str) -> Result<Vec<ModelInfo>> {
+        let response = self
+            .client
+            .get(format!("{}/models", native_base))
+            .header("x-goog-api-key", &self.api_key)
+            .send()
+            .await
+            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+        let response = crate::provider::check_http_response(response, None).await?;
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+
+        let models = body
+            .get("models")
+            .and_then(|d| d.as_array())
+            .ok_or_else(|| {
+                ProviderError::InvalidResponse("No models field in models response".to_string())
+            })?
+            .iter()
+            .filter_map(|item| {
+                // `name` is like "models/gemini-3.5-flash"; the id drops the prefix.
+                let name = item.get("name")?.as_str()?;
+                let id = name.strip_prefix("models/").unwrap_or(name).to_string();
+                // Start from the family defaults, then override with the API's
+                // authoritative limits where present.
+                let mut capabilities = self.capabilities(&id);
+                if let Some(ctx) = item.get("inputTokenLimit").and_then(|v| v.as_u64()) {
+                    capabilities.max_context_tokens = ctx as usize;
+                }
+                if let Some(out) = item.get("outputTokenLimit").and_then(|v| v.as_u64()) {
+                    capabilities.max_output_tokens = out as usize;
+                }
+                Some(ModelInfo {
+                    id,
+                    display_name: item
+                        .get("displayName")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    provider: "google".into(),
+                    capabilities,
+                })
+            })
+            .collect();
+
+        Ok(models)
+    }
+
+    /// OpenAI-compat `/models` listing (no per-model token limits) used only when
+    /// the configured base URL isn't the standard native-derivable form.
+    async fn list_models_compat(&self) -> Result<Vec<ModelInfo>> {
         let response = self
             .client
             .get(format!("{}/models", self.base_url))
@@ -200,19 +361,7 @@ impl Provider for GeminiProvider {
             .send()
             .await
             .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_string());
-            return Err(ProviderError::ApiError(format!(
-                "HTTP {}: {}",
-                status, error_body
-            )));
-        }
-
+        let response = crate::provider::check_http_response(response, None).await?;
         let body: serde_json::Value = response
             .json()
             .await
@@ -468,18 +617,60 @@ mod tests {
         assert!(provider.rate_limiter.is_some());
     }
 
-    #[test]
-    fn test_count_tokens_uses_tiktoken() {
-        let provider = GeminiProvider::new("key".to_string());
-        let tokens = provider.count_tokens("Hello, world!", "gemini-3.5-flash");
-        assert!(tokens > 0);
+    /// Provider whose native base is a non-standard URL (no `/openai` suffix),
+    /// so `count_tokens` skips the endpoint and uses the local heuristic.
+    fn heuristic_only_provider() -> GeminiProvider {
+        GeminiProvider {
+            client: reqwest::Client::new(),
+            api_key: "key".to_string(),
+            base_url: "http://127.0.0.1:19997".to_string(),
+            rate_limiter: None,
+            capability_overrides: HashMap::new(),
+        }
     }
 
-    #[test]
-    fn test_count_tokens_empty() {
-        let provider = GeminiProvider::new("key".to_string());
-        let tokens = provider.count_tokens("", "gemini-3.5-flash");
+    #[tokio::test]
+    async fn test_count_tokens_heuristic_fallback() {
+        let provider = heuristic_only_provider();
+        // 8 chars / 4 = 2 (gemini heuristic branch)
+        let tokens = provider.count_tokens("12345678", "gemini-3.5-flash").await;
+        assert_eq!(tokens, 2);
+    }
+
+    #[tokio::test]
+    async fn test_count_tokens_empty() {
+        let provider = heuristic_only_provider();
+        let tokens = provider.count_tokens("", "gemini-3.5-flash").await;
         assert_eq!(tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn test_count_tokens_uses_exact_endpoint() {
+        let base = spawn_mock_server(200, "OK", br#"{"totalTokens": 99}"#).await;
+        let provider = GeminiProvider {
+            client: reqwest::Client::new(),
+            api_key: "key".to_string(),
+            base_url: format!("{}/openai", base),
+            rate_limiter: None,
+            capability_overrides: HashMap::new(),
+        };
+        let tokens = provider.count_tokens("anything", "gemini-3.5-flash").await;
+        assert_eq!(tokens, 99);
+    }
+
+    #[tokio::test]
+    async fn test_count_tokens_falls_back_on_error_status() {
+        let base = spawn_mock_server(500, "Internal Server Error", b"boom").await;
+        let provider = GeminiProvider {
+            client: reqwest::Client::new(),
+            api_key: "key".to_string(),
+            base_url: format!("{}/openai", base),
+            rate_limiter: None,
+            capability_overrides: HashMap::new(),
+        };
+        // 8 chars / 4 = 2 (heuristic fallback)
+        let tokens = provider.count_tokens("12345678", "gemini-3.5-flash").await;
+        assert_eq!(tokens, 2);
     }
 
     #[test]
@@ -747,10 +938,106 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_models_non_success_body_read_error_falls_back_to_unknown_error() {
+    async fn list_models_non_success_body_read_error_falls_back_to_status() {
+        // A truncated body makes reading the error text fail; `check_http_response`
+        // still reports the status (falling back to the reqwest error string).
         let url = spawn_mock_server_truncated_body(500, "Internal Server Error").await;
         let provider = provider_with_url(url);
         let err = provider.list_models().await.unwrap_err();
-        assert!(err.to_string().contains("unknown error"));
+        assert!(err.to_string().contains("500"));
+    }
+
+    // ─── Native models listing (real per-model token limits) ──────────────
+
+    /// Provider whose base ends in `/openai`, so `native_base()` resolves and
+    /// `list_models` takes the native path.
+    fn native_provider_with_base(base: &str) -> GeminiProvider {
+        GeminiProvider {
+            client: reqwest::Client::new(),
+            api_key: "test-key".to_string(),
+            base_url: format!("{}/openai", base),
+            rate_limiter: None,
+            capability_overrides: HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_models_native_uses_real_token_limits() {
+        // `name` carries the "models/" prefix; the API returns authoritative
+        // per-model limits that override the builtin family defaults.
+        let body = br#"{"models":[
+            {"name":"models/gemini-3.5-flash","displayName":"Flash","inputTokenLimit":2000000,"outputTokenLimit":8192}
+        ]}"#;
+        let base = spawn_mock_server(200, "OK", body).await;
+        let provider = native_provider_with_base(&base);
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gemini-3.5-flash");
+        assert_eq!(models[0].display_name.as_deref(), Some("Flash"));
+        assert_eq!(models[0].capabilities.max_context_tokens, 2_000_000);
+        assert_eq!(models[0].capabilities.max_output_tokens, 8192);
+    }
+
+    #[tokio::test]
+    async fn list_models_native_falls_back_to_builtin_when_limits_absent() {
+        // No limit fields → builtin family defaults are kept.
+        let body = br#"{"models":[{"name":"models/gemini-3.1-pro-preview"}]}"#;
+        let base = spawn_mock_server(200, "OK", body).await;
+        let provider = native_provider_with_base(&base);
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gemini-3.1-pro-preview");
+        assert_eq!(models[0].capabilities.max_context_tokens, 1_048_576);
+        assert_eq!(models[0].capabilities.max_output_tokens, 65_535);
+    }
+
+    #[tokio::test]
+    async fn list_models_native_missing_models_field_errors() {
+        let base = spawn_mock_server(200, "OK", b"{}").await;
+        let provider = native_provider_with_base(&base);
+        let err = provider.list_models().await.unwrap_err();
+        assert!(err.to_string().contains("Invalid response:"));
+    }
+
+    #[tokio::test]
+    async fn list_models_native_skips_entries_without_name() {
+        let body = br#"{"models":[{"no_name":true},{"name":"models/gemini-3-flash"}]}"#;
+        let base = spawn_mock_server(200, "OK", body).await;
+        let provider = native_provider_with_base(&base);
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gemini-3-flash");
+    }
+
+    #[test]
+    fn native_base_strips_openai_suffix() {
+        let provider = GeminiProvider::new("k".to_string());
+        assert_eq!(
+            provider.native_base().as_deref(),
+            Some("https://generativelanguage.googleapis.com/v1beta")
+        );
+    }
+
+    #[test]
+    fn native_base_none_for_nonstandard_url() {
+        let provider = provider_with_url("http://proxy.local/custom".to_string());
+        assert!(provider.native_base().is_none());
+    }
+
+    #[test]
+    fn gemini_family_classification() {
+        assert_eq!(
+            GeminiFamily::classify("gemini-3.1-flash-lite"),
+            GeminiFamily::FlashLite
+        );
+        assert_eq!(
+            GeminiFamily::classify("gemini-3.1-pro-preview"),
+            GeminiFamily::Pro
+        );
+        assert_eq!(
+            GeminiFamily::classify("gemini-3.5-flash"),
+            GeminiFamily::Flash
+        );
+        assert_eq!(GeminiFamily::classify("gemini-future"), GeminiFamily::Other);
     }
 }
