@@ -52,6 +52,12 @@ pub struct Blueprint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security: Option<crate::taint::SecurityConfig>,
 
+    /// Agent-level override for the batch-tool-calls system-prompt hint. `None`
+    /// inherits the global config toggle; a per-stage `batch_tool_hint` overrides
+    /// this. See [`crate::taint::resolve_batch_tool_hint`] for the cascade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_tool_hint: Option<bool>,
+
     /// Repetition detection configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repetition_detection: Option<RepetitionDetectionConfig>,
@@ -81,6 +87,7 @@ impl Blueprint {
             entry_stage: None,
             metadata: HashMap::new(),
             security: None,
+            batch_tool_hint: None,
             repetition_detection: None,
             file_tracking: None,
         }
@@ -650,6 +657,13 @@ pub struct Stage {
     #[serde(default)]
     pub security: Option<crate::taint::SecurityConfig>,
 
+    /// Per-stage override for the batch-tool-calls system-prompt hint. `None`
+    /// inherits the agent-level `Blueprint.batch_tool_hint` (which in turn
+    /// inherits the global config toggle). Set `false` to opt a sequential stage
+    /// out, or `true` to opt it in independently of the agent/global setting.
+    #[serde(default)]
+    pub batch_tool_hint: Option<bool>,
+
     /// Optional routing configuration for tool results.
     /// When set, tool results are routed to the configured region(s) instead
     /// of the default "conversation" region.
@@ -683,6 +697,7 @@ impl Stage {
             allow_complete: false,
             allow_as_worker: false,
             security: None,
+            batch_tool_hint: None,
             tool_result_routing: None,
         }
     }

@@ -306,7 +306,14 @@ pub fn build_agent(
         .map(|s| format!("{}/{}", s.provider_name, s.model));
 
     // 5. Spawn the agent.
-    let entity = spawn_agent(world, args.run_id.clone(), blueprint, &args.task, stages)?;
+    let entity = spawn_agent(
+        world,
+        args.run_id.clone(),
+        blueprint,
+        &args.task,
+        stages,
+        config.batch_tool_hint,
+    )?;
 
     // 6. Attach run metadata / token totals / persistence watermark (+ optional
     // compaction settings).

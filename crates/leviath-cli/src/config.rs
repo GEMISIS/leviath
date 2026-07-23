@@ -92,6 +92,22 @@ pub struct Config {
     /// Runtime resource limits (inference concurrency + iteration caps).
     #[serde(default)]
     pub limits: LimitsConfig,
+
+    /// Global master switch for the batch-tool-calls system-prompt hint.
+    ///
+    /// **On by default (opt-out).** When `true`, every stage's request carries a
+    /// short hint telling the model it may emit several `tool_use` blocks in one
+    /// response and should batch *independent* operations (but never dependent
+    /// ones) to cut API round trips. Individual agents or stages can opt out by
+    /// setting `batch_tool_hint = false` in their `[agent]` / `[stages.<name>]`
+    /// blocks; when this global is `false`, they opt back *in* by setting it to
+    /// `true` at the narrower scope.
+    #[serde(default = "default_true")]
+    pub batch_tool_hint: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_max_concurrent_inferences() -> Option<usize> {
@@ -191,6 +207,7 @@ impl Default for Config {
             request_timeout_secs: None,
             taint_tracking: false,
             limits: LimitsConfig::default(),
+            batch_tool_hint: true,
         }
     }
 }
@@ -1666,6 +1683,7 @@ anthropic_api_key = "sk-ant-test-key"
                 max_concurrent_inferences: Some(4),
                 default_max_iterations: Some(99),
             },
+            batch_tool_hint: true,
         };
 
         let serialized = toml::to_string_pretty(&config).unwrap();

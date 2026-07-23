@@ -316,6 +316,15 @@ pub fn resolve_security(
     }
 }
 
+/// Resolve whether the batch-tool-calls system-prompt hint is enabled for a
+/// stage, cascading stage → agent → global. A `Some(_)` at a narrower level
+/// overrides broader levels; when neither the stage nor the agent sets it, the
+/// global toggle (on by default) applies. (Same shape as
+/// [`resolve_taint_enabled`], but the global default is on rather than off.)
+pub fn resolve_batch_tool_hint(global: bool, agent: Option<bool>, stage: Option<bool>) -> bool {
+    stage.or(agent).unwrap_or(global)
+}
+
 /// Result of a gate check — whether a tool invocation is allowed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateDecision {
@@ -943,6 +952,19 @@ mod tests {
             Some(&sec(false)),
             Some(&sec(true))
         ));
+    }
+
+    #[test]
+    fn resolve_batch_tool_hint_cascade() {
+        // Nothing set at narrower levels → inherit the global toggle (on default).
+        assert!(resolve_batch_tool_hint(true, None, None));
+        assert!(!resolve_batch_tool_hint(false, None, None));
+        // Agent override beats global (both directions).
+        assert!(!resolve_batch_tool_hint(true, Some(false), None));
+        assert!(resolve_batch_tool_hint(false, Some(true), None));
+        // Stage override beats agent and global (both directions).
+        assert!(!resolve_batch_tool_hint(true, Some(true), Some(false)));
+        assert!(resolve_batch_tool_hint(false, Some(false), Some(true)));
     }
 
     #[test]

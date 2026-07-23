@@ -381,6 +381,13 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                 stage.security = Some(parse_security_config(sec_table));
             }
 
+            // Parse per-stage batch_tool_hint override: opt an individual stage
+            // in/out of the batch-tool-calls system-prompt hint (e.g. `false` for
+            // a sequential validate stage). Absent ⇒ inherit agent/global.
+            if let Some(bth) = stage_value.get("batch_tool_hint").and_then(|v| v.as_bool()) {
+                stage.batch_tool_hint = Some(bth);
+            }
+
             // Parse accepts_messages flag: whether mid-run user messages are
             // injected into context between inference calls. Defaults to true
             // (via the Stage constructor); set false for stages that shouldn't
@@ -688,6 +695,12 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
     // Parse agent-level security config: [security]
     if let Some(security_table) = parsed.get("security").and_then(|v| v.as_table()) {
         blueprint.security = Some(parse_security_config(security_table));
+    }
+
+    // Parse agent-level batch_tool_hint override: `[agent] batch_tool_hint`.
+    // Absent ⇒ inherit the global config toggle; a per-stage value overrides it.
+    if let Some(bth) = agent.get("batch_tool_hint").and_then(|v| v.as_bool()) {
+        blueprint.batch_tool_hint = Some(bth);
     }
 
     // Parse agent-level tool permissions: [tool_permissions]
@@ -1665,6 +1678,55 @@ mode = "autonomous"
         // A stage with no [security] inherits (None).
         let build = bp.find_stage("build").unwrap();
         assert!(build.security.is_none());
+    }
+
+    #[test]
+    fn parse_manifest_agent_and_stage_batch_tool_hint() {
+        let toml = r#"
+[agent]
+name = "batch-test"
+batch_tool_hint = true
+
+[stages.plan]
+mode = "autonomous"
+batch_tool_hint = false
+
+[stages.build]
+mode = "autonomous"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        // Agent-level `[agent] batch_tool_hint` parsed.
+        assert_eq!(bp.batch_tool_hint, Some(true));
+        // Stage-level override opts this stage out.
+        assert_eq!(bp.find_stage("plan").unwrap().batch_tool_hint, Some(false));
+        // A stage with no override inherits (None).
+        assert_eq!(bp.find_stage("build").unwrap().batch_tool_hint, None);
+        // End-to-end cascade: plan resolves off, build inherits the agent's on.
+        assert!(!crate::taint::resolve_batch_tool_hint(
+            true,
+            bp.batch_tool_hint,
+            bp.find_stage("plan").unwrap().batch_tool_hint,
+        ));
+        assert!(crate::taint::resolve_batch_tool_hint(
+            true,
+            bp.batch_tool_hint,
+            bp.find_stage("build").unwrap().batch_tool_hint,
+        ));
+    }
+
+    #[test]
+    fn parse_manifest_no_batch_tool_hint_is_none() {
+        // No `batch_tool_hint` anywhere ⇒ both levels None ⇒ inherit global.
+        let toml = r#"
+[agent]
+name = "no-batch"
+
+[stages.main]
+mode = "autonomous"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        assert_eq!(bp.batch_tool_hint, None);
+        assert_eq!(bp.find_stage("main").unwrap().batch_tool_hint, None);
     }
 
     #[test]
