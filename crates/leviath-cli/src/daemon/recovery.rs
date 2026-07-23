@@ -25,6 +25,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
+use leviath_core::run_archive;
 use leviath_core::run_meta::{ContextSnapshot, RunMeta, RunStatus};
 use leviath_mcp::ToolExecutor;
 use leviath_providers::Tool;
@@ -231,6 +232,17 @@ fn read_meta(run_dir: &Path) -> Option<RunMeta> {
     serde_json::from_str(&text).ok()
 }
 
+/// The cumulative token totals recorded in a run's metadata.
+fn totals_from(meta: &RunMeta) -> TokenTotals {
+    TokenTotals {
+        prompt_tokens: meta.prompt_tokens,
+        completion_tokens: meta.completion_tokens,
+        cached_tokens: meta.cached_tokens,
+        cache_write_tokens: meta.cache_write_tokens,
+        tool_calls: meta.tool_calls,
+    }
+}
+
 /// Whether a run's status means it should not be resumed.
 fn is_terminal(status: &RunStatus) -> bool {
     matches!(
@@ -286,29 +298,54 @@ fn reload_one(
         subagent_tx.clone(),
     )?;
 
-    // Restore the persisted context (if any), stage, iteration, and token totals.
-    let snapshot = std::fs::read_to_string(run_dir.join("context.json"))
+    // Restore the persisted context, stage, iteration, and token totals.
+    //
+    // Prefer the run's atomic journal (`run.lvr`): it records meta + context
+    // together, so a crash between the separate `meta.json` and `context.json`
+    // writes can't leave us with a mismatched pair (new stage/iteration + stale
+    // context). The archive is appended *before* either JSON file, so in that exact
+    // crash window it already holds the newer generation and folds to a consistent
+    // `{meta, context}`. Fall back to the separate JSON files only for runs written
+    // before the archive existed, or an archive that couldn't be read at all — that
+    // pair may be one tick out of sync, but it's the pre-existing behavior.
+    let folded = std::fs::read(run_dir.join("run.lvr"))
         .ok()
-        .and_then(|s| serde_json::from_str::<ContextSnapshot>(&s).ok())
-        .unwrap_or_else(|| ContextSnapshot {
-            stage_name: meta.current_stage.clone(),
-            total_tokens: 0,
-            max_tokens: 0,
-            regions: Vec::new(),
-        });
-    let totals = TokenTotals {
-        prompt_tokens: meta.prompt_tokens,
-        completion_tokens: meta.completion_tokens,
-        cached_tokens: meta.cached_tokens,
-        cache_write_tokens: meta.cache_write_tokens,
-        tool_calls: meta.tool_calls,
+        .and_then(|bytes| run_archive::read_archive_lenient(&mut bytes.as_slice()).ok())
+        .and_then(|(_version, records)| run_archive::fold(&records));
+    let (snapshot, stage_index, iteration, totals) = match folded {
+        Some(folded) => {
+            let totals = totals_from(&folded.meta);
+            (
+                folded.context,
+                folded.meta.stage_index,
+                folded.meta.iteration,
+                totals,
+            )
+        }
+        None => {
+            let snapshot = std::fs::read_to_string(run_dir.join("context.json"))
+                .ok()
+                .and_then(|s| serde_json::from_str::<ContextSnapshot>(&s).ok())
+                .unwrap_or_else(|| ContextSnapshot {
+                    stage_name: meta.current_stage.clone(),
+                    total_tokens: 0,
+                    max_tokens: 0,
+                    regions: Vec::new(),
+                });
+            (
+                snapshot,
+                meta.stage_index,
+                meta.iteration,
+                totals_from(meta),
+            )
+        }
     };
     restore_agent(
         world.world_mut(),
         entity,
         &snapshot,
-        meta.stage_index,
-        meta.iteration,
+        stage_index,
+        iteration,
         totals,
     );
 
@@ -487,6 +524,61 @@ mod tests {
         dir
     }
 
+    /// Write a `<runs_dir>/<run_id>/run.lvr` that folds to the given `stage_index`,
+    /// `iteration`, `prompt_tokens`, and `context` — the run's atomic journal. Used
+    /// to prove recovery prefers this consistent pair over a stale `context.json`.
+    fn write_run_archive(
+        runs_dir: &Path,
+        run_id: &str,
+        agent_path: &str,
+        stage_index: usize,
+        iteration: usize,
+        prompt_tokens: usize,
+        context: &ContextSnapshot,
+    ) {
+        use leviath_core::run_archive::{self, RunIdentity, RunRecord};
+        let dir = runs_dir.join(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut meta = RunMeta::new(
+            run_id.to_string(),
+            "coder".to_string(),
+            agent_path.to_string(),
+            "resume me".to_string(),
+            None,
+            std::env::temp_dir().to_string_lossy().to_string(),
+            1,
+        );
+        meta.status = RunStatus::Running;
+        meta.current_stage = "implement".to_string();
+        meta.stage_index = stage_index;
+        meta.iteration = iteration;
+        meta.prompt_tokens = prompt_tokens;
+        let mut buf = Vec::new();
+        run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION).unwrap();
+        run_archive::write_record(
+            &mut buf,
+            &RunRecord::Header {
+                identity: RunIdentity {
+                    run_id: run_id.to_string(),
+                    machine_id: "m".to_string(),
+                    world_id: "w".to_string(),
+                    created_at: 1,
+                },
+                meta: Box::new(meta),
+            },
+        )
+        .unwrap();
+        run_archive::write_record(
+            &mut buf,
+            &RunRecord::ContextCheckpoint {
+                snapshot: context.clone(),
+                at: 2,
+            },
+        )
+        .unwrap();
+        std::fs::write(dir.join("run.lvr"), &buf).unwrap();
+    }
+
     #[tokio::test]
     async fn reloads_nonterminal_runs_and_restores_state() {
         let agent = agent_dir();
@@ -555,6 +647,136 @@ mod tests {
         let totals = world.world().get::<TokenTotals>(*entity).unwrap();
         assert_eq!(totals.prompt_tokens, 42);
         assert_eq!(totals.tool_calls, 3);
+    }
+
+    /// Fresh + stale differ on every observable field, so the assertions below
+    /// pin down exactly which source recovery restored from.
+    fn assert_restored_from_archive(world: &PipelineWorld, entity: Entity) {
+        use leviath_runtime::components::AgentState;
+        let state = world.world().get::<AgentState>(entity).unwrap();
+        // stage_name comes from the archive's context (not the stale context.json),
+        // iteration from the archive's meta (not meta.json's 5).
+        assert_eq!(state.current_stage, "fresh-stage");
+        assert_eq!(state.iteration, 9);
+        // token totals come from the archive's meta (not meta.json's 42).
+        let totals = world.world().get::<TokenTotals>(entity).unwrap();
+        assert_eq!(totals.prompt_tokens, 99);
+    }
+
+    /// The issue #43 fix: when the atomic journal (`run.lvr`) and the separate
+    /// `context.json` disagree — the crash-window state where a new `meta.json`
+    /// sits next to a stale `context.json` — resume restores the journal's
+    /// consistent `{meta, context}` pair, not the stale JSON.
+    #[tokio::test]
+    async fn reload_prefers_the_atomic_journal_over_a_stale_context_json() {
+        let agent = agent_dir();
+        let manifest = agent.path().join("agent.leviath");
+        let mpath = manifest.to_str().unwrap();
+        let runs = tempfile::tempdir().unwrap();
+
+        // A STALE context.json (older generation) alongside a meta.json whose
+        // iteration/totals are also older than the journal — write_run stamps
+        // iteration 5 / prompt_tokens 42.
+        let stale = ContextSnapshot {
+            stage_name: "stale-stage".to_string(),
+            total_tokens: 1,
+            max_tokens: 100,
+            regions: vec![],
+        };
+        write_run(
+            runs.path(),
+            "run-torn",
+            mpath,
+            RunStatus::Running,
+            Some(&stale),
+        );
+        // The journal at the newer generation: iteration 9, prompt_tokens 99,
+        // context stage "fresh-stage".
+        let fresh = ContextSnapshot {
+            stage_name: "fresh-stage".to_string(),
+            total_tokens: 4,
+            max_tokens: 100_000,
+            regions: vec![],
+        };
+        write_run_archive(runs.path(), "run-torn", mpath, 0, 9, 99, &fresh);
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
+        let restored = reload_persisted_agents(
+            &mut world,
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            runs.path(),
+            999,
+            &sub_tx(),
+        );
+
+        assert_eq!(restored.len(), 1);
+        assert_restored_from_archive(&world, restored[0].1);
+    }
+
+    /// A crash *during* the journal append can leave a torn trailing frame. Recovery
+    /// reads the journal leniently, so the valid prefix still resolves the resume
+    /// state (rather than silently falling back to the possibly-mismatched JSON).
+    #[tokio::test]
+    async fn reload_tolerates_a_torn_journal_tail() {
+        let agent = agent_dir();
+        let manifest = agent.path().join("agent.leviath");
+        let mpath = manifest.to_str().unwrap();
+        let runs = tempfile::tempdir().unwrap();
+
+        let stale = ContextSnapshot {
+            stage_name: "stale-stage".to_string(),
+            total_tokens: 1,
+            max_tokens: 100,
+            regions: vec![],
+        };
+        write_run(
+            runs.path(),
+            "run-torn2",
+            mpath,
+            RunStatus::Running,
+            Some(&stale),
+        );
+        let fresh = ContextSnapshot {
+            stage_name: "fresh-stage".to_string(),
+            total_tokens: 4,
+            max_tokens: 100_000,
+            regions: vec![],
+        };
+        write_run_archive(runs.path(), "run-torn2", mpath, 0, 9, 99, &fresh);
+        // Append a torn frame (length prefix promising bytes that aren't there).
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(runs.path().join("run-torn2/run.lvr"))
+                .unwrap();
+            f.write_all(&[0, 0, 0, 0, 0, 0, 0, 10, 1, 2]).unwrap();
+        }
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
+        let restored = reload_persisted_agents(
+            &mut world,
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            runs.path(),
+            999,
+            &sub_tx(),
+        );
+
+        assert_eq!(restored.len(), 1);
+        // The valid prefix folds → resume still uses the journal's fresh state.
+        assert_restored_from_archive(&world, restored[0].1);
     }
 
     /// A temp agent dir holding the `software-engineer` manifest, whose stage 0

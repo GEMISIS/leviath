@@ -431,6 +431,29 @@ pub fn read_archive(r: &mut dyn Read) -> io::Result<(u16, Vec<RunRecord>)> {
     Ok((version, records))
 }
 
+/// Read the archive tolerantly: validate the preamble strictly, then read records
+/// until a clean end-of-stream **or the first unreadable frame**, returning the
+/// records collected so far.
+///
+/// A crash while the persistence lane is appending a record can leave a partial
+/// final frame (a truncated length prefix or payload). The strict [`read_archive`]
+/// would reject the whole file for that torn tail — and once a fallback-resume
+/// appends fresh records *past* the torn bytes, the archive would stay unreadable
+/// forever. This variant instead stops at the torn tail and keeps everything valid
+/// before it, so recovery can still fold the archive to its last intact point. The
+/// preamble is still validated strictly, so a file that isn't a run archive at all
+/// still errors rather than folding to nothing.
+pub fn read_archive_lenient(r: &mut dyn Read) -> io::Result<(u16, Vec<RunRecord>)> {
+    let version = read_archive_start(r)?;
+    let mut records = Vec::new();
+    // A torn/invalid frame ends the read early with whatever preceded it, rather
+    // than propagating the error.
+    while let Ok(Some(record)) = read_record(r) {
+        records.push(record);
+    }
+    Ok((version, records))
+}
+
 // ─── fold ───────────────────────────────────────────────────────────────────
 
 /// The state reconstructed from a run journal — enough to resume or inspect the
@@ -1017,6 +1040,61 @@ mod tests {
         // Fail on the 8-byte length prefix, and (after it) on the payload.
         assert!(write_record(&mut FailAfter { remaining: 0 }, &rec).is_err());
         assert!(write_record(&mut FailAfter { remaining: 8 }, &rec).is_err());
+    }
+
+    #[test]
+    fn read_archive_lenient_matches_strict_on_a_clean_archive() {
+        // With no torn tail, the lenient reader returns exactly what the strict
+        // reader does.
+        let records = all_record_kinds();
+        let mut buf = Vec::new();
+        write_archive_start(&mut buf, RUN_ARCHIVE_VERSION).unwrap();
+        for r in &records {
+            write_record(&mut buf, r).unwrap();
+        }
+        let (version, read) = read_archive_lenient(&mut buf.as_slice()).unwrap();
+        assert_eq!(version, RUN_ARCHIVE_VERSION);
+        assert_eq!(read, records);
+    }
+
+    #[test]
+    fn read_archive_lenient_keeps_valid_prefix_before_a_torn_tail() {
+        // A valid preamble + two full records, then a truncated frame (a crash
+        // mid-append). The strict reader would reject the whole file; the lenient
+        // reader returns the two intact records and stops at the torn tail.
+        let mut buf = Vec::new();
+        write_archive_start(&mut buf, RUN_ARCHIVE_VERSION).unwrap();
+        write_record(&mut buf, &header()).unwrap();
+        write_record(
+            &mut buf,
+            &RunRecord::ContextCheckpoint {
+                snapshot: snapshot("plan", vec![region("conv", vec![entry("hi", 1)])]),
+                at: 1,
+            },
+        )
+        .unwrap();
+        // A frame claiming 10 payload bytes but only 2 present → torn tail.
+        buf.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 10, 1, 2]);
+
+        // Strict rejects the whole archive.
+        assert!(read_archive(&mut buf.as_slice()).is_err());
+        // Lenient keeps the valid prefix and folds cleanly.
+        let (version, records) = read_archive_lenient(&mut buf.as_slice()).unwrap();
+        assert_eq!(version, RUN_ARCHIVE_VERSION);
+        assert_eq!(records.len(), 2);
+        let folded = fold(&records).expect("prefix starts with a Header");
+        assert_eq!(folded.context.regions[0].entries.len(), 1);
+    }
+
+    #[test]
+    fn read_archive_lenient_still_errors_on_a_bad_preamble() {
+        // The preamble is validated strictly: a file that isn't a run archive at
+        // all errors rather than folding to nothing.
+        let mut bad_magic: &[u8] = b"XXXX\x00\x01";
+        assert!(read_archive_lenient(&mut bad_magic).is_err());
+        // A truncated version (valid magic, no version bytes) also errors.
+        let mut short: &[u8] = b"LVR1";
+        assert!(read_archive_lenient(&mut short).is_err());
     }
 
     #[test]
