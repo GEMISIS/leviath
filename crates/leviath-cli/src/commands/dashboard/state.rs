@@ -83,6 +83,31 @@ pub(crate) struct Dashboard {
     /// (and [`new`](Self::new)) inject a no-op so a `y` keypress never touches
     /// the clipboard or TTY.
     pub(super) yank_fn: fn(&str) -> bool,
+
+    // ── MCP management screen ──────────────────────────────────────────────
+    /// True when the full-screen MCP management view is open.
+    pub(super) mcp_screen: bool,
+    /// True when the add-server line editor is open.
+    pub(super) mcp_add_mode: bool,
+    /// The add-server input line.
+    pub(super) mcp_add_input: String,
+    /// Servers as rendered on the MCP screen, refreshed from config + store.
+    pub(super) mcp_rows: Vec<McpRow>,
+    /// Selected row on the MCP screen.
+    pub(super) mcp_selected: usize,
+    /// Paths + seams for the MCP screen's file/OAuth operations.
+    pub(super) mcp_ctx: McpContext,
+    /// Sends long-running MCP actions (login/test) to the background loop.
+    pub(super) mcp_cmd_tx: mpsc::UnboundedSender<McpCommand>,
+    /// Receives completed MCP action outcomes, drained into toasts each tick.
+    pub(super) mcp_outcome_rx: mpsc::UnboundedReceiver<McpOutcome>,
+    /// The background loop's ends of the MCP channels. `init_dashboard` takes
+    /// them to spawn [`super::mcp::mcp_background_loop`]; tests keep them to
+    /// assert dispatched commands and inject outcomes.
+    pub(super) mcp_bg_ends: Option<(
+        mpsc::UnboundedReceiver<McpCommand>,
+        mpsc::UnboundedSender<McpOutcome>,
+    )>,
 }
 
 impl Dashboard {
@@ -97,7 +122,19 @@ impl Dashboard {
         let log_path = std::env::temp_dir()
             .join("leviath-test-dashboard")
             .join("dashboard.log");
-        Self::new_with_log_path(cmd_tx, log_path, |_| false)
+        // A test MCP context: temp paths, a no-op browser, and a fixed clock so
+        // no test touches the real home directory, a browser, or the wall clock.
+        let ctx = McpContext {
+            config_path: std::env::temp_dir()
+                .join("leviath-test-dashboard")
+                .join("config.toml"),
+            store_path: std::env::temp_dir()
+                .join("leviath-test-dashboard")
+                .join("mcp-auth.json"),
+            opener: |_| false,
+            clock: || 1_000,
+        };
+        Self::new_with_log_path(cmd_tx, log_path, |_| false, ctx)
     }
 
     /// Core of [`new`](Self::new) with the activity-log path and clipboard
@@ -108,9 +145,16 @@ impl Dashboard {
         cmd_tx: mpsc::UnboundedSender<DaemonCommand>,
         log_path: std::path::PathBuf,
         yank_fn: fn(&str) -> bool,
+        mcp_ctx: McpContext,
     ) -> Self {
         let mut table_state = TableState::default();
         table_state.select(Some(0));
+
+        // The MCP action lane: the dashboard keeps the command sender + outcome
+        // receiver; the other ends go to the background loop (production) or are
+        // retained for tests to drive.
+        let (mcp_cmd_tx, mcp_cmd_rx) = mpsc::unbounded_channel();
+        let (mcp_outcome_tx, mcp_outcome_rx) = mpsc::unbounded_channel();
 
         // Seed the in-memory log buffer from the tail of the persistent log so
         // the panel shows recent history immediately on launch (not a blank panel).
@@ -148,7 +192,32 @@ impl Dashboard {
             list_search_query: String::new(),
             display_indices: Vec::new(),
             tree_prefixes: Vec::new(),
+            mcp_screen: false,
+            mcp_add_mode: false,
+            mcp_add_input: String::new(),
+            mcp_rows: Vec::new(),
+            mcp_selected: 0,
+            mcp_ctx,
+            mcp_cmd_tx,
+            mcp_outcome_rx,
+            mcp_bg_ends: Some((mcp_cmd_rx, mcp_outcome_tx)),
         }
+    }
+
+    /// Take the background loop's channel ends, so `init_dashboard` can spawn
+    /// [`super::mcp::mcp_background_loop`]. Returns `None` if already taken.
+    pub(super) fn take_mcp_bg_ends(
+        &mut self,
+    ) -> Option<(
+        mpsc::UnboundedReceiver<super::types::McpCommand>,
+        mpsc::UnboundedSender<super::types::McpOutcome>,
+    )> {
+        self.mcp_bg_ends.take()
+    }
+
+    /// The MCP screen's context, for `init_dashboard` to hand to the loop.
+    pub(super) fn mcp_context(&self) -> McpContext {
+        self.mcp_ctx.clone()
     }
 
     /// Read the last 32 KB of dashboard.log and convert each line into a
@@ -350,6 +419,11 @@ impl Dashboard {
     /// Push a transient toast, capping the on-screen stack at 4 (oldest drops).
     /// An associated fn over `&mut Vec<Toast>` (not `&mut self`) so it can be
     /// called while another field of `self` — e.g. `self.agents` — is borrowed.
+    /// Push a toast onto this dashboard with the standard display duration.
+    pub(super) fn toast(&mut self, msg: impl Into<String>, level: ToastLevel) {
+        Self::push_toast(&mut self.toasts, msg, level, 30);
+    }
+
     pub(super) fn push_toast(
         toasts: &mut Vec<Toast>,
         msg: impl Into<String>,

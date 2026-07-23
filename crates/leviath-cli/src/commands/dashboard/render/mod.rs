@@ -5,6 +5,7 @@
 mod content;
 mod header;
 mod input;
+mod mcp;
 mod overlays;
 mod stages;
 mod table;
@@ -17,6 +18,11 @@ use super::types::*;
 
 impl Dashboard {
     pub(super) fn draw(&mut self, frame: &mut Frame) {
+        if self.mcp_screen {
+            self.draw_mcp_screen(frame, frame.area());
+            self.draw_toasts(frame);
+            return;
+        }
         if self.detail_view {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
