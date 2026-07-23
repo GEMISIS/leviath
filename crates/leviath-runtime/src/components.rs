@@ -131,6 +131,11 @@ pub struct InferenceConfig {
     /// `frequency_penalty`). Passed through to the provider request so models can
     /// be tuned from the manifest. Empty when none are set.
     pub extra_params: serde_json::Map<String, serde_json::Value>,
+    /// Whether to prepend the batch-tool-calls hint to this stage's system
+    /// prompt. Resolved from the global config → agent → stage cascade at spawn
+    /// (see [`leviath_core::taint::resolve_batch_tool_hint`]); `false` by default
+    /// so an unset config is a no-op.
+    pub batch_tool_hint: bool,
 }
 
 /// Per-entity tool result routing configuration.

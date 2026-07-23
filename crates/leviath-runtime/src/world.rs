@@ -249,8 +249,16 @@ impl PipelineWorld {
         blueprint: leviath_core::Blueprint,
         task: &str,
         stages: Vec<crate::pipeline::ResolvedStage>,
+        global_batch_tool_hint: bool,
     ) -> Result<Entity, String> {
-        let e = crate::pipeline::spawn_agent(&mut self.world, agent_id, blueprint, task, stages)?;
+        let e = crate::pipeline::spawn_agent(
+            &mut self.world,
+            agent_id,
+            blueprint,
+            task,
+            stages,
+            global_batch_tool_hint,
+        )?;
         self.wake.notify_one();
         Ok(e)
     }
@@ -461,6 +469,16 @@ fn run_isolated(schedule: &mut Schedule, world: &mut World) -> bool {
 mod tests {
     use super::*;
 
+    /// Serializes the two tests that swap the **process-global** panic hook
+    /// (`run_isolated_catches_a_system_panic` and
+    /// `run_to_fixed_point_survives_a_panicking_system`). Without this, they can
+    /// interleave under the parallel test runner: one test's `set_hook` replaces
+    /// the other's silencing closure before the other's panic fires, so that
+    /// closure never runs and shows as uncovered. Holding this lock across each
+    /// test's set-hook → panic → restore-hook sequence keeps each hook active for
+    /// its own panic. (The guard is only ever held across synchronous work.)
+    static PANIC_HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn run_isolated_catches_a_system_panic() {
         fn ok_system() {}
@@ -477,6 +495,7 @@ mod tests {
         // A panicking system is caught (the daemon would survive).
         let mut bad = Schedule::default();
         bad.add_systems(boom_system);
+        let _hook_guard = PANIC_HOOK_LOCK.lock().expect("panic-hook lock poisoned");
         let prev_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {})); // silence the expected panic
         let survived = run_isolated(&mut bad, &mut world);
@@ -608,6 +627,7 @@ mod tests {
                 temperature: None,
                 max_output_tokens: None,
                 extra_params: Default::default(),
+                batch_tool_hint: false,
             },
             routing: None,
             accepts_messages: true,
@@ -671,6 +691,7 @@ mod tests {
         }
         let mut world = build_world(ProviderRegistry::new());
         world.add_test_system(boom_system);
+        let _hook_guard = PANIC_HOOK_LOCK.lock().expect("panic-hook lock poisoned");
         let prev_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         world.run_to_fixed_point(); // returns (breaks on the caught panic)
@@ -925,6 +946,7 @@ mod tests {
                     model: "m".to_string(),
                     tools: vec![],
                 }],
+                true,
             )
             .unwrap();
 
@@ -1281,6 +1303,7 @@ mod tests {
                 model: "m".to_string(),
                 tools: vec![],
             }],
+            true,
         );
         assert!(err.is_err());
     }

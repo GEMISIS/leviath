@@ -170,6 +170,7 @@ mod tests {
                 temperature: temp,
                 max_output_tokens: None,
                 extra_params: Default::default(),
+                batch_tool_hint: false,
             },
             routing: None,
             accepts_messages: true,

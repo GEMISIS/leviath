@@ -110,6 +110,18 @@ fn truncate_on_char_boundary(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
 }
 
+/// The batch-tool-calls hint, prepended to a stage's system blocks when
+/// `InferenceConfig::batch_tool_hint` is set. Identical across every agent,
+/// stage, and run, so it is a stable cache prefix (`CacheHint::Always`). It tells
+/// the model it may emit several `tool_use` blocks per response and should batch
+/// *independent* operations — while explicitly forbidding batching of dependent
+/// ones. See issue #17.
+const BATCH_TOOL_HINT: &str = "You can call multiple tools in a single response. \
+When operations are independent (reading, editing, or writing different files, or \
+writing a file then running a command that doesn't need its output), batch them in \
+one response to cut round trips. Do NOT batch when a call depends on a previous \
+call's result, or when you must see a command's output before deciding the next step.";
+
 /// Build the [`InferenceRequest`] for an agent from its context window + stage
 /// data. Pure; no `.await`. (Ported from `AgentEngine::build_inference_request`,
 /// with provider resolution lifted into the caller so this stays query-friendly.)
@@ -150,8 +162,23 @@ fn build_request(
         _ => serde_json::Value::Null,
     };
 
+    // Prepend the batch-tool-calls hint as a stable, always-cacheable system
+    // block when this stage opts in. Prepending keeps it at the front of the
+    // `Always`-tier prefix (which `assemble` already sorts first), maximizing
+    // prefix-cache hits since the text never varies across agents/stages/runs.
+    let mut system = assembled.system_blocks;
+    if config.map(|c| c.batch_tool_hint).unwrap_or(false) {
+        system.insert(
+            0,
+            leviath_providers::SystemBlock {
+                text: BATCH_TOOL_HINT.to_string(),
+                cache_hint: leviath_core::CacheHint::Always,
+            },
+        );
+    }
+
     InferenceRequest {
-        system: assembled.system_blocks,
+        system,
         messages: assembled.messages,
         model: stage.model.clone(),
         max_tokens,
@@ -2377,7 +2404,11 @@ pub struct ResolvedStage {
 /// Build a stage's [`StageSetup`] from its blueprint definition: inference config
 /// (from the model parameters), tool-result routing, accepts-messages, layout,
 /// and system prompt.
-fn stage_setup_from(stage: &leviath_core::Stage) -> StageSetup {
+fn stage_setup_from(
+    stage: &leviath_core::Stage,
+    global_batch_tool_hint: bool,
+    agent_batch_tool_hint: Option<bool>,
+) -> StageSetup {
     let temperature = stage
         .model
         .parameters
@@ -2419,11 +2450,18 @@ fn stage_setup_from(stage: &leviath_core::Stage) -> StageSetup {
         }
         _ => base_prompt,
     };
+    // Cascade the batch-tool-hint toggle: stage > agent > global (default on).
+    let batch_tool_hint = leviath_core::taint::resolve_batch_tool_hint(
+        global_batch_tool_hint,
+        agent_batch_tool_hint,
+        stage.batch_tool_hint,
+    );
     StageSetup {
         inference_config: InferenceConfig {
             temperature,
             max_output_tokens,
             extra_params,
+            batch_tool_hint,
         },
         routing: stage.tool_result_routing.clone(),
         accepts_messages: stage.accepts_messages,
@@ -2441,12 +2479,17 @@ fn stage_setup_from(stage: &leviath_core::Stage) -> StageSetup {
 /// its region (the same hard failure the imperative loop raises at stage 0).
 ///
 /// `stages` must be aligned with `blueprint.stages` (one [`ResolvedStage`] each).
+///
+/// `global_batch_tool_hint` is the caller's global config toggle for the
+/// batch-tool-calls system-prompt hint; it is resolved per stage against the
+/// blueprint's agent-level and each stage's `batch_tool_hint`.
 pub fn spawn_agent(
     world: &mut World,
     agent_id: String,
     blueprint: leviath_core::Blueprint,
     task: &str,
     stages: Vec<ResolvedStage>,
+    global_batch_tool_hint: bool,
 ) -> Result<Entity, String> {
     let stage_infs: Vec<StageInference> = stages
         .into_iter()
@@ -2457,7 +2500,12 @@ pub fn spawn_agent(
             tool_filter: None, // tools already resolved to the effective set
         })
         .collect();
-    let setups: Vec<StageSetup> = blueprint.stages.iter().map(stage_setup_from).collect();
+    let agent_batch_tool_hint = blueprint.batch_tool_hint;
+    let setups: Vec<StageSetup> = blueprint
+        .stages
+        .iter()
+        .map(|s| stage_setup_from(s, global_batch_tool_hint, agent_batch_tool_hint))
+        .collect();
 
     // Seed the window from the blueprint layout + task, then apply stage 0's
     // context setup (layout swap + system-prompt injection) just as entering any
@@ -2943,6 +2991,7 @@ mod tests {
             temperature: Some(0.1),
             max_output_tokens: Some(42),
             extra_params: Default::default(),
+            batch_tool_hint: false,
         };
         let si = stage(
             "m",
@@ -2965,10 +3014,64 @@ mod tests {
             temperature: None,
             max_output_tokens: None,
             extra_params,
+            batch_tool_hint: false,
         };
         let si = stage("m", vec![], None);
         let req = build_request(&window(), Some(&cfg), &si, &provider(true, 500));
         assert_eq!(req.extra, serde_json::json!({ "top_p": 0.9 }));
+    }
+
+    /// A window whose pinned region carries a real entry, so `assemble` yields a
+    /// non-empty `system` — required for the batch-hint tests to actually iterate
+    /// the assembled blocks (an empty `system` would skip every closure).
+    fn window_with_sys() -> ContextWindow {
+        let mut w = window();
+        w.add_to_region("sys", "base system instructions".to_string(), 6)
+            .expect("seed pinned region");
+        w
+    }
+
+    #[test]
+    fn build_request_prepends_batch_hint_when_enabled() {
+        let cfg = InferenceConfig {
+            temperature: None,
+            max_output_tokens: None,
+            extra_params: Default::default(),
+            batch_tool_hint: true,
+        };
+        let si = stage("m", vec![], None);
+        let req = build_request(&window_with_sys(), Some(&cfg), &si, &provider(true, 500));
+        // The hint is prepended ahead of the stage's own system block(s).
+        assert_eq!(
+            req.system.first().map(|b| b.text.as_str()),
+            Some(BATCH_TOOL_HINT)
+        );
+        assert_eq!(req.system[0].cache_hint, leviath_core::CacheHint::Always);
+        assert!(
+            req.system[1..]
+                .iter()
+                .any(|b| b.text.contains("base system")),
+            "the stage's own system block is preserved after the hint"
+        );
+    }
+
+    #[test]
+    fn build_request_omits_batch_hint_when_disabled_or_absent() {
+        let si = stage("m", vec![], None);
+        // Disabled via config.
+        let cfg = InferenceConfig {
+            temperature: None,
+            max_output_tokens: None,
+            extra_params: Default::default(),
+            batch_tool_hint: false,
+        };
+        let req = build_request(&window_with_sys(), Some(&cfg), &si, &provider(true, 500));
+        assert!(!req.system.is_empty());
+        assert!(req.system.iter().all(|b| b.text != BATCH_TOOL_HINT));
+        // Absent config → no hint.
+        let req_none = build_request(&window_with_sys(), None, &si, &provider(true, 500));
+        assert!(!req_none.system.is_empty());
+        assert!(req_none.system.iter().all(|b| b.text != BATCH_TOOL_HINT));
     }
 
     #[test]
@@ -3786,6 +3889,7 @@ mod tests {
             bp,
             "task",
             vec![resolved("m"), resolved("m")],
+            true,
         )
         .expect("spawn");
         let led = world.get::<StageLedger>(e).expect("ledger seeded");
@@ -5005,6 +5109,7 @@ mod tests {
                 temperature: None,
                 max_output_tokens: None,
                 extra_params: Default::default(),
+                batch_tool_hint: false,
             },
             routing: None,
             accepts_messages: true,
@@ -5312,6 +5417,7 @@ mod tests {
             temperature: Some(0.3),
             max_output_tokens: Some(99),
             extra_params: Default::default(),
+            batch_tool_hint: false,
         };
         s.accepts_messages = false;
         let mut world = World::new();
@@ -5499,6 +5605,7 @@ mod tests {
             bp,
             "the task",
             vec![resolved("m")],
+            true,
         )
         .unwrap();
 
@@ -5539,7 +5646,15 @@ mod tests {
         // routing component.
         let bp = blueprint(vec![stage_named("only", None, false, None)]);
         let mut world = World::new();
-        let e = spawn_agent(&mut world, "a".to_string(), bp, "t", vec![resolved("m")]).unwrap();
+        let e = spawn_agent(
+            &mut world,
+            "a".to_string(),
+            bp,
+            "t",
+            vec![resolved("m")],
+            true,
+        )
+        .unwrap();
 
         let cfg = world.get::<InferenceConfig>(e).unwrap();
         assert_eq!(cfg.temperature, None);
@@ -5573,21 +5688,21 @@ mod tests {
             "system_prompt".to_string(),
             serde_json::Value::String("base instructions".to_string()),
         );
-        let sp = stage_setup_from(&s).system_prompt.unwrap();
+        let sp = stage_setup_from(&s, true, None).system_prompt.unwrap();
         assert!(sp.contains("base instructions") && sp.contains("SPLIT NOW"));
 
         // Fan-out stage with no base prompt: the split prompt alone.
         let mut s2 = stage_named("fan", None, false, None);
         s2.mode = fanout("ONLY SPLIT");
         assert_eq!(
-            stage_setup_from(&s2).system_prompt,
+            stage_setup_from(&s2, true, None).system_prompt,
             Some("ONLY SPLIT".to_string())
         );
 
         // Fan-out stage with an empty split prompt: base prompt is left as-is.
         let mut s3 = stage_named("fan", None, false, None);
         s3.mode = fanout("   ");
-        assert_eq!(stage_setup_from(&s3).system_prompt, None);
+        assert_eq!(stage_setup_from(&s3, true, None).system_prompt, None);
     }
 
     #[test]
@@ -5608,7 +5723,7 @@ mod tests {
             .parameters
             .insert("seed".to_string(), serde_json::json!(11));
 
-        let setup = stage_setup_from(&s);
+        let setup = stage_setup_from(&s, true, None);
         assert_eq!(setup.inference_config.temperature, Some(0.3));
         assert_eq!(setup.inference_config.max_output_tokens, Some(256));
         let extra = &setup.inference_config.extra_params;
@@ -5639,7 +5754,14 @@ mod tests {
         let bp = leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout);
 
         let mut world = World::new();
-        let err = spawn_agent(&mut world, "a".to_string(), bp, "t", vec![resolved("m")]);
+        let err = spawn_agent(
+            &mut world,
+            "a".to_string(),
+            bp,
+            "t",
+            vec![resolved("m")],
+            true,
+        );
         assert!(err.is_err());
     }
 
