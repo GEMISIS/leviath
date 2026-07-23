@@ -76,8 +76,11 @@ pub struct AwaitingInteraction;
 /// tool-policy `--yolo` wildcard does not cover, so without this a headless run
 /// — e.g. one driven over the Agent Client Protocol, where no human can answer —
 /// would block forever on a gate no one resolves. When present,
-/// [`dispatch_tools`](crate::pipeline::dispatch_tools) skips the gate check for
-/// this agent (taint tracking still records for audit; enforcement is waived).
+/// [`dispatch_tools`](crate::pipeline::dispatch_tools) still evaluates the gate
+/// (so an over-cleared call is recorded in the audit trail as
+/// [`YoloAutoApprove`](leviath_core::taint::GateDecisionSource::YoloAutoApprove))
+/// but auto-approves the call instead of raising a prompt — enforcement is
+/// waived, accountability is kept.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct GateAutoApprove;
 
