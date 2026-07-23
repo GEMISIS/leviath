@@ -92,6 +92,7 @@ pub async fn serve_over<R, W>(
     control: ControlClient,
     args: AgentClientArgs,
     runs_dir: PathBuf,
+    default_cwd: String,
 ) -> anyhow::Result<()>
 where
     R: AsyncBufRead + Send + 'static,
@@ -113,6 +114,7 @@ where
         session: None,
         next_request_id: 0,
         io_alive: true,
+        default_cwd,
     };
     server.run(&mut reader).await;
     Ok(())
@@ -151,6 +153,11 @@ struct Server {
     session: Option<ActiveSession>,
     /// Monotonic id source for agent→client requests.
     next_request_id: i64,
+    /// Working directory to use when a `session/new` omits (or empties) `cwd` —
+    /// the directory `lev agent-client` was launched from. Without this the
+    /// agent's workdir was an empty string, so it ran in the daemon's directory
+    /// rather than the caller's.
+    default_cwd: String,
     /// Whether the output stream is still writable. Output is best-effort: a
     /// failed write means the client is gone, so this flips to `false` and the
     /// server winds down rather than propagating an error per write site (which
@@ -273,13 +280,21 @@ impl Server {
                 "session/new supplied MCP servers; ignoring in favour of the blueprint's own"
             );
         }
-        match resolve_blueprint(self.args.agent.as_deref(), &params.cwd) {
+        // An absent/empty `cwd` falls back to the directory `lev agent-client`
+        // was launched from, so the agent's tools operate there rather than in
+        // the daemon's working directory.
+        let cwd = if params.cwd.trim().is_empty() {
+            self.default_cwd.clone()
+        } else {
+            params.cwd
+        };
+        match resolve_blueprint(self.args.agent.as_deref(), &cwd) {
             Ok(blueprint) => {
                 let session_id = new_session_id(&blueprint.agent_name);
                 self.session = Some(ActiveSession {
                     session_id: session_id.clone(),
                     blueprint,
-                    cwd: params.cwd,
+                    cwd,
                     run_id: None,
                 });
                 self.write(&JsonRpcMessage::response(
