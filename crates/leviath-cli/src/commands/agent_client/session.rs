@@ -71,6 +71,7 @@ pub(super) fn spawn_args(
         workdir: cwd.to_string(),
         metadata: Default::default(),
         callback_url: None,
+        callback_secret: None,
         yolo: args.yolo,
         allow: args.allow.clone(),
         max_depth: args.max_depth,

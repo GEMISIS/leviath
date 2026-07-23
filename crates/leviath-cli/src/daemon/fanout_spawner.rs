@@ -339,6 +339,7 @@ mod tests {
             workdir: std::env::temp_dir().to_string_lossy().to_string(),
             metadata: HashMap::new(),
             callback_url: None,
+            callback_secret: None,
             yolo: false,
             allow: Vec::new(),
             max_depth: None,

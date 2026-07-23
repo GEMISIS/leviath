@@ -544,6 +544,7 @@ mod tests {
                 workdir: "/w".to_string(),
                 metadata: Default::default(),
                 callback_url: None,
+                callback_secret: None,
                 yolo: false,
                 allow: Vec::new(),
                 max_depth: None,

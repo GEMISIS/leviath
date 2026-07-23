@@ -5,9 +5,12 @@
 
 use std::time::Duration;
 
+use hmac::{Hmac, Mac};
 use leviath_runtime::host::WorldEvent;
+use sha2::Sha256;
 
 use super::types::*;
+use crate::config::WebhookConfig;
 use crate::runstate;
 
 /// The reconnect backoff between subscribe passes in production.
@@ -41,7 +44,7 @@ async fn consume_once(state: &AppState, client: &reqwest::Client) {
 /// webhook when a run reaches a terminal status.
 fn handle_event(state: &AppState, client: &reqwest::Client, event: WorldEvent) {
     if let WorldEvent::Completed { run_id, status, .. } = &event {
-        fire_completion_webhook(client, run_id, status);
+        fire_completion_webhook(client, &state.config.webhook, run_id, status);
     }
     let _ = state.event_tx.send(to_server_event(event));
 }
@@ -136,8 +139,14 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
 }
 
 /// POST a completion webhook for `run_id` if its persisted metadata carries a
-/// `callback_url`.
-fn fire_completion_webhook(client: &reqwest::Client, run_id: &str, status: &str) {
+/// `callback_url`. When the metadata also carries a `callback_secret`, the body
+/// is signed with HMAC-SHA256 and the signature travels in `X-Leviath-Signature`.
+fn fire_completion_webhook(
+    client: &reqwest::Client,
+    cfg: &WebhookConfig,
+    run_id: &str,
+    status: &str,
+) {
     let Ok(meta) = runstate::read_meta(run_id) else {
         return; // metadata not yet persisted
     };
@@ -153,21 +162,97 @@ fn fire_completion_webhook(client: &reqwest::Client, run_id: &str, status: &str)
         "metadata": meta.metadata,
         "tokens": { "prompt": meta.prompt_tokens, "completion": meta.completion_tokens },
     });
-    tokio::spawn(fire_webhook(client.clone(), url, payload));
+    // Serialize once so the signature covers the exact bytes we send. `Value`'s
+    // `Display` is infallible and byte-identical to `to_vec`.
+    let body = payload.to_string().into_bytes();
+    let signature = meta.callback_secret.as_deref().map(|s| sign(s, &body));
+    tokio::spawn(fire_webhook(
+        client.clone(),
+        url,
+        body,
+        signature,
+        cfg.clone(),
+    ));
 }
 
-/// Fire a webhook POST and log any delivery failure.
-async fn fire_webhook(client: reqwest::Client, url: String, payload: serde_json::Value) {
-    if let Err(e) = client.post(&url).json(&payload).send().await {
-        let span = tracing::error_span!(
-            "webhook_callback_failed",
-            url = tracing::field::Empty,
-            error = tracing::field::Empty
-        );
-        let _enter = span.enter();
-        span.record("url", tracing::field::display(&url));
-        span.record("error", tracing::field::display(&e));
-        tracing::error!("Webhook callback failed");
+/// Compute the `X-Leviath-Signature` value: `sha256=<hex(HMAC-SHA256(secret, body))>`.
+fn sign(secret: &str, body: &[u8]) -> String {
+    type HmacSha256 = Hmac<Sha256>;
+    // HMAC accepts a key of any length, so this construction never fails.
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(body);
+    format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
+}
+
+/// The backoff before retry `attempt` (1-based): `base * 2^(attempt-1)`, capped
+/// at `max_delay_ms`. Mirrors the exponential shape used for provider rate limits.
+fn backoff_delay(cfg: &WebhookConfig, attempt: u32) -> Duration {
+    let factor = 2u64.saturating_pow(attempt.saturating_sub(1));
+    let millis = cfg
+        .base_delay_ms
+        .saturating_mul(factor)
+        .min(cfg.max_delay_ms);
+    Duration::from_millis(millis)
+}
+
+/// Whether a delivery whose HTTP status was `status` is worth retrying.
+/// Transient server-side conditions (5xx), rate limiting (429) and request
+/// timeout (408) are retryable; any other non-2xx is a permanent rejection.
+fn status_is_retryable(status: reqwest::StatusCode) -> bool {
+    status.is_server_error()
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status == reqwest::StatusCode::REQUEST_TIMEOUT
+}
+
+/// Deliver a webhook POST, retrying transient failures with exponential backoff.
+/// Logs the final failure once the retries are exhausted (or a permanent
+/// rejection is seen); never panics.
+async fn fire_webhook(
+    client: reqwest::Client,
+    url: String,
+    body: Vec<u8>,
+    signature: Option<String>,
+    cfg: WebhookConfig,
+) {
+    let max_attempts = cfg.max_retries.saturating_add(1);
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        let mut req = client
+            .post(&url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .timeout(Duration::from_secs(cfg.timeout_secs))
+            .body(body.clone());
+        if let Some(sig) = &signature {
+            req = req.header("X-Leviath-Signature", sig);
+        }
+        // `outcome` describes this attempt: Ok(status) for a completed request
+        // (2xx = done), Err(message) for a transport failure.
+        let (retryable, outcome) = match req.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    return; // delivered
+                }
+                (status_is_retryable(status), format!("HTTP {status}"))
+            }
+            Err(e) => (true, e.to_string()),
+        };
+        if !retryable || attempt >= max_attempts {
+            let span = tracing::error_span!(
+                "webhook_callback_failed",
+                url = tracing::field::Empty,
+                error = tracing::field::Empty,
+                attempts = attempt,
+            );
+            let _enter = span.enter();
+            span.record("url", tracing::field::display(&url));
+            span.record("error", tracing::field::display(&outcome));
+            tracing::error!("Webhook callback failed");
+            return;
+        }
+        tokio::time::sleep(backoff_delay(&cfg, attempt)).await;
     }
 }
 
@@ -194,6 +279,40 @@ mod tests {
             },
             rx,
         )
+    }
+
+    /// A webhook config with tiny delays so retry tests stay fast.
+    fn fast_cfg() -> WebhookConfig {
+        WebhookConfig {
+            max_retries: 2,
+            base_delay_ms: 1,
+            max_delay_ms: 4,
+            timeout_secs: 2,
+        }
+    }
+
+    /// Spawn a fake webhook receiver that answers the i-th request with
+    /// `statuses[i]` (each on its own connection, `Connection: close`), capturing
+    /// every request's raw bytes. Serves exactly `statuses.len()` requests then
+    /// stops — so a test asserts the attempt count by matching `statuses.len()`
+    /// to the number of requests the receiver's join handle yields.
+    async fn fake_receiver(statuses: Vec<u16>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for code in statuses {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 4096];
+                let n = sock.read(&mut buf).await.unwrap();
+                requests.push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let resp =
+                    format!("HTTP/1.1 {code} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                sock.write_all(resp.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        (format!("http://{addr}/hook"), handle)
     }
 
     /// The `type` tag of a serialized [`ServerEvent`] (avoids `matches!` whose
@@ -344,8 +463,9 @@ mod tests {
             "fire_completion_webhook_skips",
             |_d| async move {
                 let client = reqwest::Client::new();
+                let cfg = fast_cfg();
                 // No meta on disk → no-op.
-                fire_completion_webhook(&client, "ghost", "complete");
+                fire_completion_webhook(&client, &cfg, "ghost", "complete");
                 // Meta without a callback_url → no-op.
                 let meta = RunMeta::new(
                     "no-cb".into(),
@@ -357,46 +477,187 @@ mod tests {
                     1,
                 );
                 create_run(&meta).unwrap();
-                fire_completion_webhook(&client, "no-cb", "complete");
+                fire_completion_webhook(&client, &cfg, "no-cb", "complete");
             },
         )
         .await;
     }
 
-    #[tokio::test]
-    async fn fire_webhook_succeeds_when_the_endpoint_accepts() {
-        // A local listener that accepts the POST and replies 200 exercises the
-        // success (non-error) path of the delivery.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 1024];
-            let _ = sock.read(&mut buf).await;
-            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-                .await
-                .unwrap();
-        });
-        fire_webhook(
-            reqwest::Client::new(),
-            format!("http://{addr}/hook"),
-            serde_json::json!({"x": 1}),
-        )
-        .await;
-        server.await.unwrap();
+    #[test]
+    fn backoff_delay_grows_exponentially_then_caps() {
+        let cfg = WebhookConfig {
+            max_retries: 5,
+            base_delay_ms: 100,
+            max_delay_ms: 350,
+            timeout_secs: 1,
+        };
+        assert_eq!(backoff_delay(&cfg, 1), Duration::from_millis(100));
+        assert_eq!(backoff_delay(&cfg, 2), Duration::from_millis(200));
+        // 400 would exceed the 350ms cap.
+        assert_eq!(backoff_delay(&cfg, 3), Duration::from_millis(350));
+        assert_eq!(backoff_delay(&cfg, 99), Duration::from_millis(350));
+    }
+
+    #[test]
+    fn status_is_retryable_classifies_transient_vs_permanent() {
+        use reqwest::StatusCode;
+        assert!(status_is_retryable(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(status_is_retryable(StatusCode::BAD_GATEWAY));
+        assert!(status_is_retryable(StatusCode::TOO_MANY_REQUESTS));
+        assert!(status_is_retryable(StatusCode::REQUEST_TIMEOUT));
+        assert!(!status_is_retryable(StatusCode::BAD_REQUEST));
+        assert!(!status_is_retryable(StatusCode::NOT_FOUND));
+        assert!(!status_is_retryable(StatusCode::OK));
+    }
+
+    #[test]
+    fn sign_produces_stable_hmac_sha256() {
+        // Known HMAC-SHA256 vector: key "key", message "hi".
+        let sig = sign("key", b"hi");
+        assert_eq!(
+            sig,
+            "sha256=1c9dc82e5f8e5ed5a0180aad33b8204dea12fde2fb62ffb5e963035bf324a7a4"
+        );
+        // Different secret or body ⇒ different signature.
+        assert_ne!(sign("other", b"hi"), sig);
+        assert_ne!(sign("key", b"bye"), sig);
     }
 
     #[tokio::test]
-    async fn fire_webhook_logs_failure_without_panicking() {
-        // An unroutable URL makes the POST fail; it must be logged, not panic.
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(50))
-            .build()
-            .unwrap();
+    async fn fire_webhook_succeeds_on_first_attempt() {
+        let (url, server) = fake_receiver(vec![200]).await;
+        fire_webhook(
+            reqwest::Client::new(),
+            url,
+            b"{}".to_vec(),
+            None,
+            fast_cfg(),
+        )
+        .await;
+        assert_eq!(server.await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fire_webhook_retries_transient_then_succeeds() {
+        // Two 503s then a 200 — delivery must make exactly three attempts.
+        let (url, server) = fake_receiver(vec![503, 503, 200]).await;
+        fire_webhook(
+            reqwest::Client::new(),
+            url,
+            b"{}".to_vec(),
+            None,
+            fast_cfg(),
+        )
+        .await;
+        assert_eq!(server.await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn fire_webhook_gives_up_after_exhausting_retries() {
+        // Always 500; with max_retries = 2 that is exactly 3 attempts.
+        let (url, server) = fake_receiver(vec![500, 500, 500]).await;
+        fire_webhook(
+            reqwest::Client::new(),
+            url,
+            b"{}".to_vec(),
+            None,
+            fast_cfg(),
+        )
+        .await;
+        assert_eq!(server.await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn fire_webhook_does_not_retry_a_permanent_4xx() {
+        // A 400 is a permanent rejection — exactly one attempt, no retries.
+        let (url, server) = fake_receiver(vec![400]).await;
+        fire_webhook(
+            reqwest::Client::new(),
+            url,
+            b"{}".to_vec(),
+            None,
+            fast_cfg(),
+        )
+        .await;
+        assert_eq!(server.await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fire_webhook_sends_signature_header_when_present() {
+        let body = b"{\"event\":\"agent_completed\"}".to_vec();
+        let expected = sign("s3cret", &body);
+        let (url, server) = fake_receiver(vec![200]).await;
+        fire_webhook(
+            reqwest::Client::new(),
+            url,
+            body,
+            Some(expected.clone()),
+            fast_cfg(),
+        )
+        .await;
+        let requests = server.await.unwrap();
+        let header = format!("x-leviath-signature: {expected}");
+        assert!(requests[0].contains(&header));
+    }
+
+    #[tokio::test]
+    async fn fire_webhook_omits_signature_header_when_absent() {
+        let (url, server) = fake_receiver(vec![200]).await;
+        fire_webhook(
+            reqwest::Client::new(),
+            url,
+            b"{}".to_vec(),
+            None,
+            fast_cfg(),
+        )
+        .await;
+        let requests = server.await.unwrap();
+        assert!(!requests[0].to_lowercase().contains("x-leviath-signature"));
+    }
+
+    #[tokio::test]
+    async fn fire_webhook_logs_transport_failure_without_panicking() {
+        // An unroutable URL makes every attempt fail at the transport layer; it
+        // must exhaust retries, log, and return without panicking.
+        let client = reqwest::Client::new();
         fire_webhook(
             client,
             "http://127.0.0.1:1/never".to_string(),
-            serde_json::json!({"x": 1}),
+            b"{}".to_vec(),
+            None,
+            fast_cfg(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn fire_completion_webhook_signs_and_delivers() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "fire_completion_webhook_signs",
+            |_d| async move {
+                let (url, server) = fake_receiver(vec![200]).await;
+                let mut meta = RunMeta::new(
+                    "signed".into(),
+                    "coder".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/w".into(),
+                    1,
+                );
+                meta.callback_url = Some(url);
+                meta.callback_secret = Some("topsecret".into());
+                create_run(&meta).unwrap();
+
+                fire_completion_webhook(&reqwest::Client::new(), &fast_cfg(), "signed", "complete");
+                let requests = server.await.unwrap();
+                assert!(
+                    requests[0]
+                        .to_lowercase()
+                        .contains("x-leviath-signature: sha256=")
+                );
+                assert!(requests[0].contains("agent_completed"));
+            },
         )
         .await;
     }

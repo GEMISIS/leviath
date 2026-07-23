@@ -42,6 +42,8 @@ pub struct RunMetadata {
     pub metadata: std::collections::HashMap<String, String>,
     /// Webhook to POST on completion/error.
     pub callback_url: Option<String>,
+    /// Optional shared secret for HMAC-SHA256 signing the webhook body.
+    pub callback_secret: Option<String>,
     /// Short human-readable title (None until generated).
     pub title: Option<String>,
 }
@@ -179,6 +181,7 @@ pub fn build_run_meta(
         title: md.title.clone(),
         metadata: md.metadata.clone(),
         callback_url: md.callback_url.clone(),
+        callback_secret: md.callback_secret.clone(),
         parent_run_id: md.parent_run_id.clone(),
         // The tree links, so restart can rebuild the exact parent→children graph.
         children: state.spawned_children_ids.clone(),
@@ -218,6 +221,7 @@ mod tests {
             parent_run_id: Some("parent".to_string()),
             metadata: std::collections::HashMap::from([("k".to_string(), "v".to_string())]),
             callback_url: Some("http://cb".to_string()),
+            callback_secret: Some("sekret".to_string()),
             title: Some("Do It".to_string()),
         }
     }
@@ -321,6 +325,8 @@ mod tests {
         assert_eq!(meta.tool_calls, 7);
         assert_eq!(meta.updated_at, 2000);
         assert_eq!(meta.parent_run_id.as_deref(), Some("parent"));
+        assert_eq!(meta.callback_url.as_deref(), Some("http://cb"));
+        assert_eq!(meta.callback_secret.as_deref(), Some("sekret"));
         assert!(meta.error.is_none());
         // The tree links are carried through from the agent's live state.
         assert_eq!(

@@ -58,6 +58,9 @@ pub struct SpawnArgs {
     /// Webhook to POST on completion/error (surfaced in the run metadata).
     #[serde(default)]
     pub callback_url: Option<String>,
+    /// Optional shared secret for HMAC-SHA256 signing the webhook body.
+    #[serde(default)]
+    pub callback_secret: Option<String>,
     /// Approve every tool call for this run (the `--yolo` launch override).
     #[serde(default)]
     pub yolo: bool,
@@ -1601,6 +1604,7 @@ mod tests {
                 parent_run_id: None,
                 metadata: std::collections::HashMap::new(),
                 callback_url: None,
+                callback_secret: None,
                 title: None,
             });
 

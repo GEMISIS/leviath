@@ -51,6 +51,7 @@ pub(super) async fn spawn_agent(
         workdir,
         metadata: body.metadata.clone(),
         callback_url: body.callback_url.clone(),
+        callback_secret: body.callback_secret.clone(),
         yolo: body.yolo,
         allow: body.allow.clone(),
         max_depth: body.max_depth,
@@ -1109,6 +1110,7 @@ prompt = "Plan the work"
         assert!(req.max_depth.is_none());
         assert!(req.metadata.is_empty());
         assert!(req.callback_url.is_none());
+        assert!(req.callback_secret.is_none());
     }
 
     #[test]
@@ -1122,7 +1124,8 @@ prompt = "Plan the work"
             "allow": ["read_file", "bash"],
             "workdir": "/tmp/work",
             "metadata": {"project": "test"},
-            "callback_url": "https://example.com/hook"
+            "callback_url": "https://example.com/hook",
+            "callback_secret": "s3cret"
         }"#;
         let req: SpawnAgentReq = serde_json::from_str(json).unwrap();
         assert_eq!(req.blueprint, "coder");
@@ -1133,6 +1136,7 @@ prompt = "Plan the work"
         assert_eq!(req.workdir.unwrap(), "/tmp/work");
         assert_eq!(req.metadata.get("project").unwrap(), "test");
         assert_eq!(req.callback_url.unwrap(), "https://example.com/hook");
+        assert_eq!(req.callback_secret.unwrap(), "s3cret");
     }
 
     #[test]

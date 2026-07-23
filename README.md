@@ -284,13 +284,17 @@ Ten agents ship out of the box — each a multi-stage graph with model fallback 
 ```bash
 lev serve --port 3000
 
-# spawn an agent
+# spawn an agent (with a completion webhook + signing secret)
 curl -X POST http://localhost:3000/api/agents \
   -H "Content-Type: application/json" \
-  -d '{"blueprint": "coder", "task": "Add input validation", "webhook_url": "https://example.com/hook"}'
+  -d '{"blueprint": "coder", "task": "Add input validation",
+       "callback_url": "https://example.com/hook",
+       "callback_secret": "whsec_…"}'
 ```
 
 Covers agent lifecycle, human-in-the-loop interaction, blueprint management, per-agent WebSocket streaming, and webhook callbacks on completion. [Full API reference →](https://leviath.dev/docs/api)
+
+When a run finishes, Leviath POSTs the completion payload to `callback_url`, retrying transient failures (network errors, timeouts, 5xx, 429) with exponential backoff — tune it under `[webhook]` in your config (`max_retries`, `base_delay_ms`, `max_delay_ms`, `timeout_secs`). If you set `callback_secret`, each delivery carries an `X-Leviath-Signature: sha256=<hex>` header — the HMAC-SHA256 of the exact request body keyed on your secret — so the receiver can verify the payload is authentic.
 
 ## 🔗 Agent Client Protocol (Gas City, Zed, …)
 

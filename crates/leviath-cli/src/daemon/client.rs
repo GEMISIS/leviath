@@ -83,6 +83,7 @@ pub fn resolve_spawn_args(
         workdir: workdir.to_string(),
         metadata: Default::default(),
         callback_url: None,
+        callback_secret: None,
         yolo,
         allow,
         max_depth,
