@@ -206,6 +206,7 @@ impl Provider for GeminiProvider {
             ],
             &body,
             self.rate_limiter.as_ref(),
+            request.request_timeout_secs,
         )
         .await?;
 
@@ -248,6 +249,7 @@ impl Provider for GeminiProvider {
             ],
             &body,
             self.rate_limiter.as_ref(),
+            request.request_timeout_secs,
         )
         .await?;
 
@@ -508,6 +510,7 @@ mod tests {
             temperature: 0.7,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let body = build_openai_request_body(&request);
@@ -818,6 +821,7 @@ mod tests {
             temperature: 0.0,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         }
     }
 

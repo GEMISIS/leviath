@@ -189,6 +189,7 @@ fn build_request(
         temperature,
         tools: filtered_tools,
         extra,
+        request_timeout_secs: config.and_then(|c| c.request_timeout_secs),
     }
 }
 
@@ -1275,6 +1276,7 @@ pub(crate) fn compaction_request(
         temperature: config.temperature,
         tools: Vec::new(),
         extra: serde_json::Value::Null,
+        request_timeout_secs: None,
     }
 }
 
@@ -2805,6 +2807,7 @@ pub fn dispatch_transition_choice(
             temperature: 0.0,               // deterministic routing
             tools: Vec::new(),
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
 
         let job = InferenceJob {
@@ -3059,6 +3062,23 @@ mod tests {
         assert_eq!(req.max_tokens, 42); // config output cap wins
         assert_eq!(req.temperature, 0.1); // config temperature
         assert_eq!(req.extra, serde_json::Value::Null); // no extra params → Null
+        assert_eq!(req.request_timeout_secs, None); // unset config → no per-call cap
+    }
+
+    #[test]
+    fn build_request_threads_per_stage_timeout() {
+        // A stage's request_timeout_secs is carried onto the request so the
+        // provider can bound the call; absent config yields None.
+        let cfg = InferenceConfig {
+            request_timeout_secs: Some(120),
+            ..Default::default()
+        };
+        let si = stage("m", vec![], None);
+        let req = build_request(&window(), Some(&cfg), &si, &provider(true, 500));
+        assert_eq!(req.request_timeout_secs, Some(120));
+
+        let req_none = build_request(&window(), None, &si, &provider(true, 500));
+        assert_eq!(req_none.request_timeout_secs, None);
     }
 
     #[test]

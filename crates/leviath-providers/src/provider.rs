@@ -234,6 +234,14 @@ pub struct InferenceRequest {
 
     /// Additional provider-specific parameters
     pub extra: serde_json::Value,
+
+    /// Optional per-call wall-clock deadline in seconds. When set, providers
+    /// bound this specific call to it (HTTP: a per-request total timeout;
+    /// claude-code: its subprocess timeout). When `None`, the provider's default
+    /// applies (see `DEFAULT_INFERENCE_TIMEOUT_SECS`). Sourced from a stage's
+    /// `[stages.<name>.model] request_timeout_secs`.
+    #[serde(default)]
+    pub request_timeout_secs: Option<u64>,
 }
 
 /// A message in a conversation.
@@ -398,15 +406,39 @@ pub struct RateLimitConfig {
     pub tokens_per_minute: u32,
 }
 
-/// If no byte is received on a connection for this long, the request is
-/// aborted. This is a *stall* timeout, not a total-duration cap: every
-/// successful read resets it, so a legitimately slow streaming response (which
-/// keeps sending bytes) is never cut off, while a connection where the server
-/// accepted the request but produces no response bytes fails instead of hanging
-/// forever. It is the backstop behind the connection-reuse fix in
-/// [`build_http_client`]: if a connection ever goes silent mid-request, this
-/// bounds the wait instead of hanging indefinitely.
-const READ_STALL_TIMEOUT_SECS: u64 = 900;
+/// Default wall-clock deadline, in seconds, for a single inference call when a
+/// stage doesn't set its own `request_timeout_secs`.
+///
+/// This is the one unified inference timeout. It bounds every provider call the
+/// same way: HTTP providers apply it as a per-request total timeout (see
+/// [`apply_request_timeout`]), the claude-code provider as its subprocess
+/// timeout, and the dispatch layer as the `RetryPolicy.job_timeout` backstop
+/// that frees the pool slot even if a provider's own timer is defeated (e.g. by
+/// trickle keep-alive). 15 minutes is generous for any real inference —
+/// including large-prompt Anthropic cache creation, which can take several
+/// minutes to first byte — while still guaranteeing a hung call cannot run
+/// forever. A per-stage `[stages.<name>.model] request_timeout_secs` overrides
+/// it, so a slow stage can wait longer and a fast one can fail sooner.
+pub const DEFAULT_INFERENCE_TIMEOUT_SECS: u64 = 900;
+
+/// Apply the per-call inference deadline to an outbound provider request.
+///
+/// When `request_timeout_secs` is `Some`, sets a hard per-request total timeout
+/// (reqwest's `RequestBuilder::timeout`) so the call is aborted after that many
+/// seconds regardless of connection state — this is what makes a per-stage
+/// timeout *longer* than any global default actually take effect, and a shorter
+/// one fail fast. When `None`, no per-request cap is added and the call is bound
+/// only by the client-level timeout (if any) and the dispatch `job_timeout`
+/// backstop.
+pub fn apply_request_timeout(
+    builder: reqwest::RequestBuilder,
+    request_timeout_secs: Option<u64>,
+) -> reqwest::RequestBuilder {
+    match request_timeout_secs {
+        Some(secs) => builder.timeout(std::time::Duration::from_secs(secs)),
+        None => builder,
+    }
+}
 
 /// Build a `reqwest::Client` for talking to an LLM HTTP API.
 ///
@@ -420,20 +452,23 @@ const READ_STALL_TIMEOUT_SECS: u64 = 900;
 ///   It is transport-independent — it reproduces over both HTTP/2 and HTTP/1.1 —
 ///   so forcing a fresh connection per request, not the protocol, is the fix.
 ///   The cost is a TLS handshake per request, negligible for the sequential
-///   request/response calls these providers make.
-/// - a `read_timeout` (idle/stall timeout — see `READ_STALL_TIMEOUT_SECS`) as
-///   a backstop so a stalled connection can never hang the process forever;
-/// - TCP keep-alive.
+///   request/response calls these providers make. **This** is the real fix for
+///   the never-responding-connection hang; the per-request timeout below is the
+///   time bound on top of it.
+/// - a `connect_timeout` so connection establishment can't hang; and TCP
+///   keep-alive.
 ///
-/// `timeout_secs` (`ProviderConfig::request_timeout_secs`) adds an optional
-/// hard cap on total request duration; when `None`, no total cap is applied and
-/// the stall timeout above is the backstop (so it does not cap legitimately
-/// long streaming responses).
+/// A *stall*/duration bound is deliberately **not** set on the client here.
+/// Inference calls are bounded per-request instead (see [`apply_request_timeout`]
+/// and `DEFAULT_INFERENCE_TIMEOUT_SECS`) so each stage can pick its own deadline,
+/// with the dispatch `job_timeout` as the final backstop. `timeout_secs`
+/// (`ProviderConfig::request_timeout_secs`) still applies an optional
+/// client-level hard cap on total request duration for callers that set it; a
+/// per-request timeout, when present, overrides it.
 pub fn build_http_client(timeout_secs: Option<u64>) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
         .pool_max_idle_per_host(0)
         .connect_timeout(std::time::Duration::from_secs(30))
-        .read_timeout(std::time::Duration::from_secs(READ_STALL_TIMEOUT_SECS))
         .tcp_keepalive(std::time::Duration::from_secs(30));
 
     if let Some(secs) = timeout_secs {
@@ -755,6 +790,7 @@ mod tests {
                 parameters: serde_json::json!({"type": "object"}),
             }],
             extra: serde_json::json!({}),
+            request_timeout_secs: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: InferenceRequest = serde_json::from_str(&json).unwrap();
@@ -905,6 +941,7 @@ mod tests {
             temperature: 0.0,
             tools: vec![],
             extra: serde_json::Value::Null,
+            request_timeout_secs: None,
         };
         let mut stream = provider.infer_stream(request).await.unwrap();
         let chunk = stream.next().await.unwrap().unwrap();
@@ -1100,13 +1137,16 @@ mod tests {
     }
 
     /// Regression for the read_files hang: a connection where the server
-    /// accepts the request but never sends a response must ERROR (via the
-    /// stall/read timeout), not block forever. This is the exact shape of the
-    /// hang the user hit — a large request accepted by Anthropic (h2
-    /// WindowUpdate seen) with no response ever returned. Uses a 2s read
-    /// timeout so the test is fast; the production default is 300s.
+    /// accepts the request but never sends a response must ERROR, not block
+    /// forever. This is the exact shape of the hang the user hit — a large
+    /// request accepted by Anthropic (h2 WindowUpdate seen) with no response
+    /// ever returned. The bound is now the per-request timeout applied by
+    /// [`apply_request_timeout`] (on top of the fresh-connection fix), so this
+    /// exercises the production `build_http_client` + `apply_request_timeout`
+    /// path with a short 2s deadline; production defaults to
+    /// `DEFAULT_INFERENCE_TIMEOUT_SECS`.
     #[tokio::test]
-    async fn read_timeout_aborts_a_connection_that_never_responds() {
+    async fn per_request_timeout_aborts_a_connection_that_never_responds() {
         use std::time::{Duration, Instant};
         use tokio::io::AsyncReadExt;
 
@@ -1126,25 +1166,15 @@ mod tests {
             }
         });
 
-        // Mirror build_http_client's stall protection but with a short read
-        // timeout. If read_timeout were defeated (e.g. by keep-alive) this
+        // The production client (no client-level duration cap) plus a short
+        // per-request deadline. If the per-request timeout were not applied this
         // send would hang and the test would time out instead of asserting.
-        let client = reqwest::Client::builder()
-            .read_timeout(Duration::from_secs(2))
-            .http2_keep_alive_interval(Duration::from_secs(30))
-            .http2_keep_alive_timeout(Duration::from_secs(20))
-            .http2_keep_alive_while_idle(true)
-            .tcp_keepalive(Duration::from_secs(60))
-            .pool_idle_timeout(Duration::from_secs(90))
-            .build()
-            .unwrap();
-
+        let client = build_http_client(None);
         let start = Instant::now();
-        let result = client
+        let builder = client
             .post(format!("http://{addr}/"))
-            .body("request body that never gets a response")
-            .send()
-            .await;
+            .body("request body that never gets a response");
+        let result = apply_request_timeout(builder, Some(2)).send().await;
         let elapsed = start.elapsed();
 
         assert!(
@@ -1153,8 +1183,19 @@ mod tests {
         );
         assert!(
             elapsed < Duration::from_secs(10),
-            "read_timeout should abort at ~2s; took {elapsed:?} (it did not fire)"
+            "per-request timeout should abort at ~2s; took {elapsed:?} (it did not fire)"
         );
+    }
+
+    #[test]
+    fn apply_request_timeout_none_is_a_noop() {
+        // The `None` arm must return the builder unchanged (no per-request cap);
+        // build a request both ways and confirm both are constructible.
+        let client = build_http_client(None);
+        let with_none = apply_request_timeout(client.post("http://example.invalid/"), None);
+        let with_some = apply_request_timeout(client.post("http://example.invalid/"), Some(5));
+        assert!(with_none.build().is_ok());
+        assert!(with_some.build().is_ok());
     }
 
     // ─── MessageContent::as_text for Blocks variant ────────────────────────
