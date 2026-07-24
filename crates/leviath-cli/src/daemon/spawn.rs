@@ -799,11 +799,19 @@ fn build_agent_inner(
             )
         },
     );
-    let script_host: Arc<dyn leviath_scripting::ScriptHost> =
-        Arc::new(crate::daemon::script_host::DaemonScriptHost::new(
+    let script_host: Arc<dyn leviath_scripting::ScriptHost> = Arc::new(
+        crate::daemon::script_host::DaemonScriptHost::new(
             script_allow,
             std::path::PathBuf::from(&args.workdir),
-        ));
+        )
+        // Route a script `shell()` through the agent's per-stage sandbox (so a
+        // script can't escape the isolation the stage declared) and cap it at the
+        // configured wall-clock timeout.
+        .with_shell(
+            sandbox.clone(),
+            std::time::Duration::from_secs(config.limits.script_shell_timeout_secs),
+        ),
+    );
     // Build the dynamic-tools re-resolution context (issue #97 escape hatch) and
     // tag the entity `DynamicTools` so the runtime polls it for mid-run re-scans.
     let dynamic = dynamic_tools.then(|| {
