@@ -35,6 +35,10 @@ pub struct DaemonFanOutSpawner {
     pub config: Config,
     pub shared_mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
     pub mcp_tool_defs: Vec<Tool>,
+    /// Shared MCP pool for per-agent `[[mcp_servers]]` — a fan-out worker
+    /// advertises its blueprint's already-connected servers and lazily warms any
+    /// uncached ones for subsequent workers of the same type (issue #97).
+    pub mcp_pool: Arc<crate::daemon::mcp_pool::McpPool>,
     pub hub: InteractionHub,
     pub subagent_tx: UnboundedSender<SubAgentOp>,
     pub tool_service: Arc<CliToolService>,
@@ -42,6 +46,30 @@ pub struct DaemonFanOutSpawner {
     /// home directory.
     pub agents_dir: Option<PathBuf>,
     pub now_secs: fn() -> i64,
+}
+
+impl DaemonFanOutSpawner {
+    /// A fan-out worker's advertised MCP defs: the global servers' defs plus its
+    /// blueprint's already-cached servers. Any uncached server is warmed on a
+    /// detached task (via the current runtime handle — `spawn_worker` runs inside
+    /// the daemon's tick, on the runtime) so a subsequent worker of the same type
+    /// advertises it. Returns just the global defs when the manifest is unreadable
+    /// or declares no servers.
+    fn worker_mcp_defs(&self, blueprint_path: &str) -> Vec<Tool> {
+        let mut defs = self.mcp_tool_defs.clone();
+        let Ok(toml) = std::fs::read_to_string(blueprint_path) else {
+            return defs;
+        };
+        let servers = crate::daemon::mcp_pool::parse_blueprint_mcp_servers(&toml);
+        if servers.is_empty() {
+            return defs;
+        }
+        defs.extend(self.mcp_pool.cached_defs_for(&servers));
+        // Warm any not-yet-connected servers for the next worker of this type, on
+        // a detached task (we run inside the tick, on the runtime).
+        tokio::runtime::Handle::current().spawn(self.mcp_pool.clone().ensure_all(servers));
+        defs
+    }
 }
 
 impl FanOutSpawner for DaemonFanOutSpawner {
@@ -79,12 +107,18 @@ impl FanOutSpawner for DaemonFanOutSpawner {
         // Nest the worker under its fan-out parent in the run tree.
         args.parent_run_id = Some(parent_run_id);
 
+        // Per-agent MCP (issue #97): advertise the worker blueprint's servers that
+        // are already connected in the shared pool (a `worker_stage` worker shares
+        // the parent's — already warmed by the parent's preprocessor; the first
+        // `worker_agent`/`worker_query` worker warms them here for its siblings).
+        let mcp_defs = self.worker_mcp_defs(&args.blueprint_path);
+
         let child = build_agent(
             world,
             self.tool_service.as_ref(),
             &self.config,
             self.shared_mcp.clone(),
-            &self.mcp_tool_defs,
+            &mcp_defs,
             &self.hub,
             &args,
             (self.now_secs)(),
@@ -304,16 +338,60 @@ mod tests {
     }
 
     fn spawner_with(tool_service: Arc<CliToolService>) -> DaemonFanOutSpawner {
+        let shared_mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         DaemonFanOutSpawner {
             config: Config::default(),
-            shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            shared_mcp: shared_mcp.clone(),
             mcp_tool_defs: vec![],
+            mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(shared_mcp, &[]),
             hub: InteractionHub::new(),
             subagent_tx: tokio::sync::mpsc::unbounded_channel().0,
             tool_service,
             agents_dir: None,
             now_secs: || 100,
         }
+    }
+
+    #[tokio::test]
+    async fn worker_mcp_defs_advertises_cached_servers_and_falls_back_to_global() {
+        let mut spawner = spawner_with(Arc::new(CliToolService::new()));
+        spawner.mcp_tool_defs = vec![Tool {
+            name: "global_tool".to_string(),
+            description: String::new(),
+            parameters: serde_json::json!({}),
+        }];
+        // A worker blueprint declaring an MCP server.
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"w\"\n\n[[mcp_servers]]\nname = \"srv\"\ncommand = \"python3\"\nargs = [\"pass\"]\n",
+        )
+        .unwrap();
+        // Seed the pool so the server's tool is already advertised (and the
+        // detached warm task hits the cache — no real connection).
+        let servers = crate::daemon::mcp_pool::parse_blueprint_mcp_servers(
+            &std::fs::read_to_string(&manifest).unwrap(),
+        );
+        spawner.mcp_pool.seed(
+            &servers[0],
+            vec![Tool {
+                name: "srv_tool".to_string(),
+                description: String::new(),
+                parameters: serde_json::json!({}),
+            }],
+        );
+        let defs = spawner.worker_mcp_defs(&manifest.to_string_lossy());
+        let names: Vec<&str> = defs.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["global_tool", "srv_tool"]);
+        // An unreadable manifest → just the global defs (read-error arm).
+        let only_global = spawner.worker_mcp_defs("/no/such/agent.leviath");
+        assert_eq!(only_global.len(), 1);
+        assert_eq!(only_global[0].name, "global_tool");
+        // A manifest with no [[mcp_servers]] → just the global defs.
+        let empty = dir.path().join("empty.leviath");
+        std::fs::write(&empty, "[agent]\nname = \"e\"\n").unwrap();
+        assert_eq!(spawner.worker_mcp_defs(&empty.to_string_lossy()).len(), 1);
     }
 
     /// Build a world with a live parent agent (from `manifest`) and return the
