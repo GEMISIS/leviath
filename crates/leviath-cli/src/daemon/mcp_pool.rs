@@ -66,9 +66,37 @@ impl McpPool {
         if let Some(defs) = self.connected.lock().unwrap().get(&sig) {
             return defs.clone();
         }
+        // Resolve a stored OAuth bearer for an HTTP server (refreshing it
+        // non-interactively if lapsed); `None` for stdio / unauthenticated /
+        // static-header servers. Mirrors `ToolRegistry::build`.
+        let oauth = leviath_mcp::OAuthClient::new();
+        let store_path = leviath_mcp::AuthStore::default_path();
+        let auth = match crate::tools::resolve_bearer(
+            &oauth,
+            &config.name,
+            store_path.as_deref(),
+            crate::tools::unix_now_secs(),
+        )
+        .await
+        {
+            Ok(header) => header,
+            Err(e) => {
+                let err = e.to_string();
+                tracing::warn!(server = %config.name, error = %err, "MCP auth unavailable — skipping");
+                return Vec::new();
+            }
+        };
+        let auth_was_resolved = auth.is_some();
         let mut discovery = ToolDiscovery::new();
-        match discovery.discover_from_config(config).await {
-            Ok((_metas, client)) => {
+        match discovery.discover_from_config_with_auth(config, auth).await {
+            Ok((_metas, mut client)) => {
+                // Attach a refresher so an OAuth-backed server that outlives its
+                // access token re-auths on a 401 instead of failing every call.
+                if auth_was_resolved && let Some(path) = store_path.clone() {
+                    client.set_refresher(std::sync::Arc::new(
+                        leviath_mcp::StoredTokenRefresher::new(config.name.clone(), path),
+                    ));
+                }
                 let advertised = self.shared.lock().await.add_client_advertised(
                     config.name.clone(),
                     client,
@@ -162,27 +190,141 @@ for line in sys.stdin:
         McpPool::new(Arc::new(Mutex::new(ToolExecutor::new())), HashSet::new())
     }
 
+    /// Run `body` with `LEVIATH_HOME` at a fresh temp dir so the OAuth auth store
+    /// resolves to an empty, hermetic location rather than the real `~/.leviath`.
+    async fn with_temp_home<F, Fut, T>(body: F) -> T
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let dir = tempfile::tempdir().unwrap();
+        temp_env::async_with_vars(
+            [("LEVIATH_HOME", Some(dir.path().to_str().unwrap()))],
+            body(),
+        )
+        .await
+    }
+
     #[tokio::test]
     async fn ensure_connects_and_caches_by_signature() {
         with_tracing(|| {});
-        let pool = pool();
-        let cfg = stub_config("s");
-        let defs = pool.ensure(&cfg).await;
-        assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].name, "echo");
-        // Second ensure of the same signature hits the cache (no reconnect).
-        let again = pool.ensure(&cfg).await;
-        assert_eq!(again.len(), 1);
+        with_temp_home(|| async {
+            let pool = pool();
+            let cfg = stub_config("s");
+            // A stdio server has no OAuth bearer (the `None` auth path).
+            let defs = pool.ensure(&cfg).await;
+            assert_eq!(defs.len(), 1);
+            assert_eq!(defs[0].name, "echo");
+            // Second ensure of the same signature hits the cache (no reconnect).
+            let again = pool.ensure(&cfg).await;
+            assert_eq!(again.len(), 1);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn ensure_failure_returns_empty_and_is_not_cached() {
         with_tracing(|| {});
-        let pool = pool();
-        let bad = MCPServerConfig::stdio("bad", "definitely-not-a-binary-xyz", vec![]);
-        assert!(pool.ensure(&bad).await.is_empty());
-        // Not cached: cached_defs_for finds nothing for it.
-        assert!(pool.cached_defs_for(std::slice::from_ref(&bad)).is_empty());
+        with_temp_home(|| async {
+            let pool = pool();
+            let bad = MCPServerConfig::stdio("bad", "definitely-not-a-binary-xyz", vec![]);
+            assert!(pool.ensure(&bad).await.is_empty());
+            // Not cached: cached_defs_for finds nothing for it.
+            assert!(pool.cached_defs_for(std::slice::from_ref(&bad)).is_empty());
+        })
+        .await;
+    }
+
+    /// A minimal streamable-HTTP MCP server that lists one tool. Returns its base
+    /// URL. Mirrors the `tools.rs` OAuth fixture.
+    async fn mock_http_mcp_server() -> String {
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::{Json, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route(
+            "/mcp",
+            post(|body: String| async move {
+                let req: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let id = req.get("id").cloned().unwrap_or(serde_json::json!(1));
+                let result = match req.get("method").and_then(|m| m.as_str()) {
+                    Some("initialize") => {
+                        serde_json::json!({"capabilities": {}, "protocolVersion": "2024-11-05"})
+                    }
+                    Some("tools/list") => {
+                        serde_json::json!({"tools": [{"name": "remote_tool", "inputSchema": {}}]})
+                    }
+                    _ => serde_json::json!({}),
+                };
+                (
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    Json(serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}))
+                        .into_response()
+                        .into_body(),
+                )
+                    .into_response()
+            }),
+        );
+        tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
+            listener, app,
+        )));
+        base
+    }
+
+    #[tokio::test]
+    async fn ensure_resolves_oauth_bearer_and_attaches_refresher() {
+        // A live stored token → the auth-resolved branch + set_refresher.
+        with_tracing(|| {});
+        let base = mock_http_mcp_server().await;
+        let defs = with_temp_home(|| async {
+            let mut store = leviath_mcp::AuthStore::default();
+            store.set(
+                "remote",
+                leviath_mcp::ServerAuth {
+                    access_token: "live-token".to_string(),
+                    expires_at: u64::MAX,
+                    ..Default::default()
+                },
+            );
+            store
+                .save(&leviath_mcp::AuthStore::default_path().unwrap())
+                .unwrap();
+            let pool = pool();
+            pool.ensure(&MCPServerConfig::http("remote", format!("{base}/mcp")))
+                .await
+        })
+        .await;
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "remote_tool");
+    }
+
+    #[tokio::test]
+    async fn ensure_returns_empty_when_bearer_cannot_be_resolved() {
+        // An expired token with an unreachable refresh endpoint → resolve_bearer
+        // errors → the auth `Err` arm returns no defs.
+        with_tracing(|| {});
+        let defs = with_temp_home(|| async {
+            let mut store = leviath_mcp::AuthStore::default();
+            store.set(
+                "remote",
+                leviath_mcp::ServerAuth {
+                    token_endpoint: "http://127.0.0.1:1/token".to_string(),
+                    access_token: "expired".to_string(),
+                    refresh_token: Some("good".to_string()),
+                    expires_at: 1,
+                    ..Default::default()
+                },
+            );
+            store
+                .save(&leviath_mcp::AuthStore::default_path().unwrap())
+                .unwrap();
+            let pool = pool();
+            pool.ensure(&MCPServerConfig::http("remote", "http://127.0.0.1:1/mcp"))
+                .await
+        })
+        .await;
+        assert!(defs.is_empty());
     }
 
     #[test]
