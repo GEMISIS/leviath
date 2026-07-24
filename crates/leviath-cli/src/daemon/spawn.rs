@@ -786,8 +786,14 @@ fn build_agent_inner(
         .get(entry_index)
         .cloned()
         .unwrap_or_default();
-    let script_allow = crate::daemon::script_host::resolve_script_permissions(
+    // The agent may carry its own `[tool_script_permissions]` (it can ship its own
+    // tool scripts), overlaid per field on the global config.
+    let effective_script_perms = crate::daemon::script_host::effective_script_permissions(
         &config.tool_script_permissions,
+        &content,
+    );
+    let script_allow = crate::daemon::script_host::resolve_script_permissions(
+        &effective_script_perms,
         &|builtin| {
             crate::tools::resolve_policy(
                 builtin,

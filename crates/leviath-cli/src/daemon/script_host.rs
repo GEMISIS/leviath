@@ -81,6 +81,59 @@ pub fn resolve_script_permissions(
     }
 }
 
+/// Map a `[tool_script_permissions]` string to a [`ScriptPermission`]. An
+/// unrecognized value yields `None` (the field is left at the global default) —
+/// parsed by hand (not via `Deserialize`) so every arm is deterministically
+/// covered, without pulling in serde's unexercised visitor machinery.
+fn parse_script_permission_str(s: &str) -> Option<ScriptPermission> {
+    match s {
+        "allow" => Some(ScriptPermission::Allow),
+        "deny" => Some(ScriptPermission::Deny),
+        "inherit" => Some(ScriptPermission::Inherit),
+        _ => None,
+    }
+}
+
+/// The effective `[tool_script_permissions]` for an agent: the global config with
+/// the agent's own blueprint `[tool_script_permissions]` overlaid per field (a
+/// field the agent sets wins; an unset or unrecognized field keeps the global
+/// value). Parsed CLI-side (these types live in the CLI config, not
+/// `leviath-core`), mirroring `parse_blueprint_mcp_servers`. Since agents can
+/// ship their own tool scripts, they can also tighten/loosen the per-function
+/// permissions for their own run.
+pub fn effective_script_permissions(
+    global: &ScriptToolPermissions,
+    manifest_toml: &str,
+) -> ScriptToolPermissions {
+    let mut eff = global.clone();
+    let Ok(value) = manifest_toml.parse::<toml::Value>() else {
+        return eff;
+    };
+    let Some(table) = value
+        .get("tool_script_permissions")
+        .and_then(|v| v.as_table())
+    else {
+        return eff;
+    };
+    // For each key the agent set to a recognized value, override that field.
+    let apply = |key: &str, slot: &mut ScriptPermission| {
+        if let Some(p) = table
+            .get(key)
+            .and_then(|v| v.as_str())
+            .and_then(parse_script_permission_str)
+        {
+            *slot = p;
+        }
+    };
+    apply("http_get", &mut eff.http_get);
+    apply("http_post", &mut eff.http_post);
+    apply("shell", &mut eff.shell);
+    apply("read_file", &mut eff.read_file);
+    apply("write_file", &mut eff.write_file);
+    apply("env_var", &mut eff.env_var);
+    eff
+}
+
 /// The raw I/O a [`DaemonScriptHost`] performs, behind a seam so the host's
 /// permission/confinement logic is testable without real side effects.
 pub trait ScriptIo: Send + Sync {
@@ -438,6 +491,52 @@ mod tests {
         assert!(a.read_file, "read_file inherit → Allow");
         assert!(!a.write_file, "write_file inherit → Ask ⇒ denied");
         assert!(!a.shell, "shell inherit → Ask ⇒ denied");
+    }
+
+    // ── effective_script_permissions (per-agent override) ──
+
+    #[test]
+    fn effective_perms_agent_overrides_win_per_field() {
+        // Global denies everything; the agent's blueprint loosens/sets several
+        // fields (exercising the allow/deny/inherit parse arms) and leaves the
+        // rest at the global value.
+        let global = perms(ScriptPermission::Deny);
+        let manifest = "\
+            [tool_script_permissions]\n\
+            http_get = \"allow\"\n\
+            shell = \"deny\"\n\
+            write_file = \"inherit\"\n";
+        let eff = effective_script_permissions(&global, manifest);
+        assert_eq!(eff.http_get, ScriptPermission::Allow, "allow arm");
+        assert_eq!(eff.shell, ScriptPermission::Deny, "deny arm");
+        assert_eq!(eff.write_file, ScriptPermission::Inherit, "inherit arm");
+        assert_eq!(eff.env_var, ScriptPermission::Deny, "unset keeps global");
+        assert_eq!(eff.read_file, ScriptPermission::Deny);
+        assert_eq!(eff.http_post, ScriptPermission::Deny);
+    }
+
+    #[test]
+    fn effective_perms_absent_section_keeps_global() {
+        let global = perms(ScriptPermission::Deny);
+        // No section at all → global unchanged.
+        let eff = effective_script_permissions(&global, "[agent]\nname = \"x\"");
+        assert_eq!(eff.shell, ScriptPermission::Deny);
+        assert_eq!(eff.http_get, ScriptPermission::Deny);
+    }
+
+    #[test]
+    fn effective_perms_malformed_inputs_fall_back_to_global() {
+        let global = perms(ScriptPermission::Allow);
+        // Unparseable TOML → global unchanged.
+        let eff = effective_script_permissions(&global, "not = valid = toml");
+        assert_eq!(eff.shell, ScriptPermission::Allow);
+        // Present-but-not-a-table → global unchanged.
+        let eff2 = effective_script_permissions(&global, "tool_script_permissions = 5");
+        assert_eq!(eff2.shell, ScriptPermission::Allow);
+        // An unrecognized value inside the table → that field keeps the global.
+        let eff3 =
+            effective_script_permissions(&global, "[tool_script_permissions]\nshell = \"maybe\"");
+        assert_eq!(eff3.shell, ScriptPermission::Allow);
     }
 
     // ── permission gates on the host ──
