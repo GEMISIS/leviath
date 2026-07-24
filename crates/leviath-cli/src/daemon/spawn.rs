@@ -158,9 +158,37 @@ fn reserved_tool_names(builtin_names: &HashSet<String>, mcp_tool_defs: &[Tool]) 
     reserved
 }
 
+/// Map a script's self-declared `@requires` capability name to the platform
+/// [`ToolCapability`] it corresponds to. An unrecognized name returns `None`,
+/// which the discovery pass treats as unsatisfiable (the tool is dropped) so a
+/// typo can't silently slip a tool through the platform gate.
+fn script_cap(name: &str) -> Option<leviath_tools::ToolCapability> {
+    match name {
+        "network" | "net" | "http" => Some(leviath_tools::ToolCapability::Network),
+        "shell" | "process" | "process_spawn" => Some(leviath_tools::ToolCapability::ProcessSpawn),
+        "filesystem" | "file" | "fs" => Some(leviath_tools::ToolCapability::FileSystem),
+        _ => None,
+    }
+}
+
+/// Whether `platform` can satisfy every capability a script `@requires`. An
+/// unknown capability name is never satisfiable.
+fn platform_satisfies_caps(
+    platform: &leviath_tools::PlatformCapabilities,
+    required_caps: &[String],
+) -> bool {
+    required_caps
+        .iter()
+        .all(|c| script_cap(c).is_some_and(|cap| platform.supports(cap)))
+}
+
 /// Discover and compile the script tools in `dirs`, returning the compiled set,
 /// the routable names (collisions against `reserved` excluded), and the
 /// advertised `Tool` defs.
+///
+/// A tool whose `@requires` capabilities the current platform can't satisfy is
+/// dropped here (self-declared platform gating, issue #97) — mirroring how
+/// built-ins filter against [`PlatformCapabilities`].
 pub(crate) fn discover_script_tools_in(
     dirs: &[std::path::PathBuf],
     reserved: &HashSet<String>,
@@ -173,11 +201,17 @@ pub(crate) fn discover_script_tools_in(
         let path = s.path.display().to_string();
         tracing::warn!(tool = %path, reason = %s.reason, "skipping invalid script tool");
     }
+    let platform = leviath_tools::PlatformCapabilities::current();
     let mut names = HashSet::new();
     let mut defs = Vec::new();
     for meta in set.metas() {
         if reserved.contains(&meta.name) {
             tracing::warn!(tool = %meta.name, "script tool name collides with an existing tool — ignoring");
+            continue;
+        }
+        if !platform_satisfies_caps(&platform, &meta.required_caps) {
+            let caps = meta.required_caps.join(", ");
+            tracing::warn!(tool = %meta.name, requires = %caps, "script tool requires a capability this platform lacks — ignoring");
             continue;
         }
         names.insert(meta.name.clone());
@@ -836,6 +870,20 @@ mod tests {
             std::fs::write(tools.join("mcp_tool.rhai"), "// @tool mcp_tool\n1").unwrap();
             // A malformed script is skipped + warned about (the skipped loop).
             std::fs::write(tools.join("bad.rhai"), "no tool directive\nlet").unwrap();
+            // A tool requiring a capability this platform can't provide is dropped
+            // (unknown cap name → never satisfiable). Desktop has every real cap,
+            // so a bogus name is the portable way to exercise the drop branch.
+            std::fs::write(
+                tools.join("needs_gpu.rhai"),
+                "// @tool needs_gpu\n// @requires gpu\n1",
+            )
+            .unwrap();
+            // A tool requiring a capability the desktop platform *does* provide is kept.
+            std::fs::write(
+                tools.join("net_tool.rhai"),
+                "// @tool net_tool\n// @requires network\n1",
+            )
+            .unwrap();
             let blueprint = agent_dir.path().join("agent.leviath");
 
             let builtins: HashSet<String> = ["read_file".to_string()].into_iter().collect();
@@ -846,14 +894,48 @@ mod tests {
             }];
             let (set, names, defs) =
                 discover_script_tools(blueprint.to_str().unwrap(), &builtins, &mcp, None);
-            // Compiled the valid ones; only the non-colliding one is routable.
+            // Compiled the valid ones; only the non-colliding, platform-satisfiable
+            // ones are routable.
             assert!(set.contains("echo") && set.contains("read_file"));
             assert!(names.contains("echo"));
             assert!(!names.contains("read_file"));
             assert!(!names.contains("mcp_tool"));
-            let def_names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-            assert_eq!(def_names, vec!["echo"]);
+            assert!(!names.contains("needs_gpu"), "unsatisfiable cap dropped");
+            assert!(names.contains("net_tool"), "satisfiable cap kept");
+            let mut def_names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+            def_names.sort_unstable();
+            assert_eq!(def_names, vec!["echo", "net_tool"]);
         });
+    }
+
+    #[test]
+    fn script_cap_maps_known_and_unknown_names() {
+        use leviath_tools::ToolCapability::*;
+        assert_eq!(script_cap("network"), Some(Network));
+        assert_eq!(script_cap("http"), Some(Network));
+        assert_eq!(script_cap("shell"), Some(ProcessSpawn));
+        assert_eq!(script_cap("process_spawn"), Some(ProcessSpawn));
+        assert_eq!(script_cap("filesystem"), Some(FileSystem));
+        assert_eq!(script_cap("fs"), Some(FileSystem));
+        assert_eq!(script_cap("gpu"), None);
+    }
+
+    #[test]
+    fn platform_satisfies_caps_gates_on_support() {
+        use leviath_tools::{PlatformCapabilities, ToolCapability};
+        // Empty requirement is always satisfied.
+        let mobile = PlatformCapabilities::mobile();
+        assert!(platform_satisfies_caps(&mobile, &[]));
+        // Mobile has filesystem/network but not process spawning.
+        assert!(platform_satisfies_caps(&mobile, &["network".to_string()]));
+        assert!(!platform_satisfies_caps(&mobile, &["shell".to_string()]));
+        // An unknown cap name is never satisfiable, even on a full desktop.
+        let desktop = PlatformCapabilities::from_capabilities([
+            ToolCapability::Network,
+            ToolCapability::FileSystem,
+            ToolCapability::ProcessSpawn,
+        ]);
+        assert!(!platform_satisfies_caps(&desktop, &["mystery".to_string()]));
     }
 
     #[test]

@@ -49,6 +49,10 @@ pub struct ScriptToolMeta {
     pub description: String,
     /// Declared parameters, in declaration order.
     pub params: Vec<ParamSpec>,
+    /// Platform capabilities the tool declares it needs (e.g. `network`, `shell`,
+    /// `filesystem`). The host drops the tool when the platform can't provide one
+    /// — a script self-declares what it depends on. Empty = always available.
+    pub required_caps: Vec<String>,
 }
 
 impl ScriptToolMeta {
@@ -83,6 +87,8 @@ impl ScriptToolMeta {
 /// - `// @tool <name>` — required; names the tool.
 /// - `// @description <text>` — optional one-liner.
 /// - `// @param <name> <type> <required|optional> "<description>"` — repeatable.
+/// - `// @requires <cap> [<cap>...]` — platform capabilities the tool needs
+///   (`network`, `shell`, `filesystem`); comma/space-separated, repeatable.
 ///
 /// Non-comment / unrecognized lines are ignored, so a script can mix ordinary
 /// comments with directives. A missing `@tool` name is an error.
@@ -90,6 +96,7 @@ pub fn parse_annotations(src: &str) -> Result<ScriptToolMeta> {
     let mut name: Option<String> = None;
     let mut description = String::new();
     let mut params: Vec<ParamSpec> = Vec::new();
+    let mut required_caps: Vec<String> = Vec::new();
 
     for line in src.lines() {
         let trimmed = line.trim();
@@ -116,6 +123,12 @@ pub fn parse_annotations(src: &str) -> Result<ScriptToolMeta> {
             }
             "description" => description = arg.to_string(),
             "param" => params.push(parse_param_directive(arg)?),
+            // `@requires <cap> [<cap>...]` — whitespace/comma-separated, repeatable.
+            "requires" => required_caps.extend(
+                arg.split([' ', ',', '\t'])
+                    .filter(|c| !c.is_empty())
+                    .map(str::to_string),
+            ),
             _ => {} // unknown directive — ignore
         }
     }
@@ -127,6 +140,7 @@ pub fn parse_annotations(src: &str) -> Result<ScriptToolMeta> {
         name,
         description,
         params,
+        required_caps,
     })
 }
 
@@ -182,6 +196,9 @@ struct ToolTomlTool {
     description: String,
     #[serde(default)]
     params: Vec<ToolTomlParam>,
+    /// Platform capabilities the tool requires (`network`, `shell`, `filesystem`).
+    #[serde(default)]
+    requires: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -220,6 +237,7 @@ pub fn parse_tool_toml(src: &str) -> Result<ScriptToolMeta> {
         name: doc.tool.name,
         description: doc.tool.description,
         params,
+        required_caps: doc.tool.requires,
     })
 }
 
@@ -248,6 +266,9 @@ pub trait ScriptHost: Send + Sync {
     fn shell(&self, command: &str) -> std::result::Result<String, String>;
     /// Read a file (confined to the agent workdir by the implementor).
     fn read_file(&self, path: &str) -> std::result::Result<String, String>;
+    /// Write `content` to a file (confined to the agent workdir by the
+    /// implementor), returning a short confirmation.
+    fn write_file(&self, path: &str, content: &str) -> std::result::Result<String, String>;
     /// Read an environment variable.
     fn env_var(&self, name: &str) -> std::result::Result<String, String>;
 }
@@ -482,6 +503,12 @@ fn register_host_functions(engine: &mut Engine, host: Arc<dyn ScriptHost>) {
     let h = host.clone();
     engine.register_fn("read_file", move |path: &str| to_rhai(h.read_file(path)));
 
+    // write_file(path, content)
+    let h = host.clone();
+    engine.register_fn("write_file", move |path: &str, content: &str| {
+        to_rhai(h.write_file(path, content))
+    });
+
     // env_var(name)
     let h = host.clone();
     engine.register_fn("env_var", move |name: &str| to_rhai(h.env_var(name)));
@@ -604,6 +631,9 @@ mod tests {
         fn read_file(&self, _path: &str) -> std::result::Result<String, String> {
             self.read_response.lock().unwrap().clone()
         }
+        fn write_file(&self, path: &str, content: &str) -> std::result::Result<String, String> {
+            Ok(format!("WROTE:{path}={content}"))
+        }
         fn env_var(&self, _name: &str) -> std::result::Result<String, String> {
             self.env_response.lock().unwrap().clone()
         }
@@ -644,6 +674,15 @@ mod tests {
             }
         );
         assert!(!meta.params[1].required);
+        assert!(meta.required_caps.is_empty());
+    }
+
+    #[test]
+    fn annotations_requires_capabilities() {
+        // Space- and comma-separated, repeatable across lines.
+        let src = "// @tool t\n// @requires network, shell\n// @requires filesystem\n1";
+        let meta = parse_annotations(src).unwrap();
+        assert_eq!(meta.required_caps, ["network", "shell", "filesystem"]);
     }
 
     #[test]
@@ -728,10 +767,17 @@ description = "The URL"
     }
 
     #[test]
+    fn tool_toml_requires() {
+        let meta = parse_tool_toml("[tool]\nname = \"t\"\nrequires = [\"network\"]").unwrap();
+        assert_eq!(meta.required_caps, ["network"]);
+    }
+
+    #[test]
     fn tool_toml_defaults() {
         let meta = parse_tool_toml("[tool]\nname = \"t\"").unwrap();
         assert_eq!(meta.description, "");
         assert!(meta.params.is_empty());
+        assert!(meta.required_caps.is_empty());
     }
 
     #[test]
@@ -1011,9 +1057,17 @@ description = "The URL"
             execute(
                 &tool_from("// @tool t\nenv_var(\"A\")"),
                 serde_json::json!({}),
-                host
+                host.clone()
             ),
             "ENV-OK"
+        );
+        assert_eq!(
+            execute(
+                &tool_from("// @tool t\nwrite_file(\"out.txt\", \"body\")"),
+                serde_json::json!({}),
+                host
+            ),
+            "WROTE:out.txt=body"
         );
     }
 
