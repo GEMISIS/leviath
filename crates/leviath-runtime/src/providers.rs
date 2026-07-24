@@ -118,6 +118,40 @@ mod tests {
         assert!(reg.provider_names().is_empty());
     }
 
+    #[test]
+    fn script_layer_resolves_and_native_wins() {
+        use crate::script_provider::ScriptProviderLayer;
+        use std::collections::HashMap;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("groq.rhai"),
+            "fn initialize(config) { #{} }\nfn inference(state, request) { #{ content: \"ok\" } }",
+        )
+        .unwrap();
+        let layer = ScriptProviderLayer::new(
+            dir.path().to_path_buf(),
+            HashMap::new(),
+            HashMap::new(),
+            None,
+        );
+        let mut reg = ProviderRegistry::new().with_script_layer(Arc::new(layer));
+        reg.register("anthropic".to_string(), mock());
+
+        // Native provider still wins and is found by name.
+        assert!(reg.has("anthropic"));
+        assert!(reg.get("anthropic").is_some());
+
+        // A script provider is resolved lazily through the layer by both has/get.
+        assert!(reg.has("groq"));
+        let p = reg.get("groq").expect("script provider resolves");
+        assert_eq!(p.name(), "groq");
+
+        // An unknown name resolves to nothing (layer returns None).
+        assert!(!reg.has("nope"));
+        assert!(reg.get("nope").is_none());
+    }
+
     #[tokio::test]
     async fn stub_provider_methods_are_exercised() {
         let p = StubProvider;

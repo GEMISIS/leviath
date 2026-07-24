@@ -242,6 +242,41 @@ async fn infer_single_http_post() {
 }
 
 #[tokio::test]
+async fn infer_uses_two_arg_http_overloads() {
+    // http_get(url, headers) and http_post(url, body) — the shorter overloads.
+    let src = format!(
+        "{NOOP_INIT}fn inference(state, request) {{ \
+         let a = parse_json(http_get(\"http://a\", #{{ \"H\": \"v\" }})); \
+         let b = parse_json(http_post(\"http://b\", \"{{}}\")); \
+         #{{ content: a.x + b.y }} }}"
+    );
+    let exec = FakeExecutor::with_responses(vec![
+        Ok("{\"x\":\"1\"}".to_string()),
+        Ok("{\"y\":\"2\"}".to_string()),
+    ]);
+    let p = build(&src, exec.clone()).unwrap();
+    let r = p.infer(request("m")).await.unwrap();
+    assert_eq!(r.content, "12");
+    let calls = exec.calls.lock().unwrap();
+    assert_eq!(calls[0].headers.get("H").unwrap(), "v");
+    assert!(calls[1].body.is_some());
+}
+
+#[tokio::test]
+async fn infer_rate_limited_without_limiter() {
+    // A 429 with no configured rate limiter still maps to RateLimitExceeded and
+    // exercises the "no limiter" branch of the broker's rate-limit accounting.
+    let src = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ let x = http_get(\"http://api/x\"); #{{ content: x }} }}"
+    );
+    let exec =
+        FakeExecutor::with_responses(vec![Err(HostHttpError::RateLimited { retry_after: None })]);
+    let p = build(&src, exec).unwrap();
+    let err = p.infer(request("m")).await.err().unwrap();
+    assert!(matches!(err, ProviderError::RateLimitExceeded));
+}
+
+#[tokio::test]
 async fn infer_multiple_http_calls() {
     let src = format!(
         "{NOOP_INIT}fn inference(state, request) {{ \
@@ -426,14 +461,18 @@ async fn list_models_none_is_empty() {
 async fn list_models_parses_and_filters() {
     let src = format!(
         "{NOOP_INIT}fn inference(s, r) {{ #{{}} }}\n\
-         fn list_models(state) {{ [ #{{ id: \"m1\", max_context_tokens: 1000 }}, #{{ nope: 1 }} ] }}"
+         fn list_models(state) {{ [ \
+           #{{ id: \"m1\", display_name: \"Model One\", max_context_tokens: 1000, max_output_tokens: 256 }}, \
+           #{{ nope: 1 }} ] }}"
     );
     let p = build(&src, FakeExecutor::new()).unwrap();
     let models = p.list_models().await.unwrap();
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].id, "m1");
+    assert_eq!(models[0].display_name.as_deref(), Some("Model One"));
     assert_eq!(models[0].provider, "test");
     assert_eq!(models[0].capabilities.max_context_tokens, 1000);
+    assert_eq!(models[0].capabilities.max_output_tokens, 256);
 }
 
 #[tokio::test]
@@ -441,6 +480,18 @@ async fn list_models_non_array_is_empty() {
     let src = format!(
         "{NOOP_INIT}fn inference(s, r) {{ #{{}} }}\n\
          fn list_models(state) {{ #{{ not: \"an array\" }} }}"
+    );
+    let p = build(&src, FakeExecutor::new()).unwrap();
+    assert!(p.list_models().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn list_models_unconvertible_is_empty() {
+    // Returning a value that can't convert to JSON (a function pointer) hits the
+    // from_dynamic error arm of parse_models → empty list.
+    let src = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ #{{}} }}\n\
+         fn list_models(state) {{ [ |x| x ] }}"
     );
     let p = build(&src, FakeExecutor::new()).unwrap();
     assert!(p.list_models().await.unwrap().is_empty());
@@ -567,6 +618,70 @@ async fn task_failed_and_finalize_stream_arms() {
         errs += 1;
     }
     assert_eq!(errs, 2);
+}
+
+#[tokio::test]
+async fn native_stream_callback_throw_becomes_error_item() {
+    // The per-event closure throws → stream_request's callback dispatch errors
+    // and propagates out of stream(), surfacing as a terminal error item.
+    let src = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ #{{}} }}\n\
+         fn stream(state, request, on_chunk) {{ \
+           stream_request(\"http://x\", \"{{}}\", #{{}}, |chunk| {{ throw \"callback boom\"; }}); }}"
+    );
+    let exec = FakeExecutor::with_stream(vec![Ok("{\"d\":\"a\"}".to_string())]);
+    let p = build(&src, exec).unwrap();
+    let chunks = collect_stream(&p, request("m")).await;
+    assert!(chunks.iter().any(|c| c.is_err()));
+}
+
+#[tokio::test]
+async fn count_tokens_script_throw_falls_back() {
+    // A throwing count_tokens makes dispatch return Err (the `.await?` path);
+    // count_tokens then falls back to the heuristic.
+    let src = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ #{{}} }}\n\
+         fn count_tokens(state, text, model) {{ throw #{{ message: \"boom\", transient: false }}; }}"
+    );
+    let p = build(&src, FakeExecutor::new()).unwrap();
+    assert_eq!(p.count_tokens("abcdefgh", "llama").await, 2);
+}
+
+#[tokio::test]
+async fn dispatch_maps_task_panic_to_error() {
+    // A panic inside the blocking script task surfaces as a JoinError, which
+    // dispatch maps to ProviderError::Other (the task_failed path).
+    let src = format!("{NOOP_INIT}fn inference(s, r) {{ #{{}} }}");
+    let p = build(&src, FakeExecutor::new()).unwrap();
+    let r = p
+        .dispatch(
+            None,
+            Box::new(|_engine: &rhai::Engine| -> Result<rhai::Dynamic> {
+                panic!("boom in blocking task")
+            }),
+        )
+        .await;
+    assert!(matches!(r, Err(ProviderError::Other(m)) if m.contains("task failed")));
+}
+
+#[test]
+fn sample_groq_script_compiles_and_initializes() {
+    // The documented example must actually load (compile + offline initialize)
+    // and advertise its optional functions.
+    let src = include_str!("../../../../docs/examples/groq.rhai");
+    let p = RhaiProvider::from_source(
+        "groq".to_string(),
+        src,
+        serde_json::json!({ "api_key": "test-key" }),
+        HashMap::new(),
+        None,
+        None,
+        FakeExecutor::new(),
+    )
+    .unwrap();
+    assert_eq!(p.meta().provider.as_deref(), Some("groq"));
+    assert_eq!(p.max_context_tokens("any"), 131072);
+    assert!(p.has_stream && p.has_count_tokens && p.has_list_models);
 }
 
 #[test]
