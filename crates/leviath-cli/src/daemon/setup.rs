@@ -238,12 +238,20 @@ pub fn build_host(
     // `[[mcp_servers]]` connect lazily through it.
 
     // Preprocessor: before the sync spawner runs, connect the blueprint's declared
-    // MCP servers into the shared pool (lazy, deduped) so they're warm to advertise.
+    // MCP servers into the shared pool (lazy, deduped) so they're warm to advertise
+    // — and pre-warm the servers declared by any `worker_agent`/`worker_query`
+    // fan-out worker this blueprint will spawn, so the *first* such worker already
+    // advertises them (they'd otherwise land one turn late — issue #97).
     let pp_pool = mcp_pool.clone();
+    let pp_agents_dir = leviath_home_dir().map(|h| h.join(".leviath").join("agents"));
     host.set_spawn_preprocessor(Box::new(move |args| {
         let pool = pp_pool.clone();
         let blueprint_path = args.blueprint_path.clone();
-        Box::pin(async move { warm_blueprint_mcp(&pool, &blueprint_path).await })
+        let agents_dir = pp_agents_dir.clone();
+        Box::pin(async move {
+            warm_blueprint_mcp(&pool, &blueprint_path).await;
+            warm_fanout_worker_mcp(&pool, &blueprint_path, agents_dir.as_deref()).await;
+        })
     }));
 
     // The spawner captures everything an agent needs; `now_secs` is called at
@@ -274,6 +282,49 @@ async fn warm_blueprint_mcp(pool: &crate::daemon::mcp_pool::McpPool, blueprint_p
     if let Ok(toml) = std::fs::read_to_string(blueprint_path) {
         for server in crate::daemon::mcp_pool::parse_blueprint_mcp_servers(&toml) {
             pool.ensure(&server).await;
+        }
+    }
+}
+
+/// Pre-warm the MCP servers declared by this blueprint's `worker_agent` /
+/// `worker_query` fan-out workers, so the *first* worker spawned advertises them
+/// immediately instead of one turn late (issue #97). `worker_stage` workers reuse
+/// the parent's own blueprint, already warmed by [`warm_blueprint_mcp`], so they
+/// are skipped here. A worker source that can't be read/resolved is skipped.
+/// Extracted from the preprocessor closure so its body is unit-testable.
+async fn warm_fanout_worker_mcp(
+    pool: &crate::daemon::mcp_pool::McpPool,
+    blueprint_path: &str,
+    agents_dir: Option<&std::path::Path>,
+) {
+    let Ok(content) = std::fs::read_to_string(blueprint_path) else {
+        return;
+    };
+    let Ok(blueprint) = leviath_core::manifest::parse_manifest(&content) else {
+        return;
+    };
+    for stage in &blueprint.stages {
+        let leviath_core::blueprint::StageMode::FanOut { config } = &stage.mode else {
+            continue;
+        };
+        // A `worker_stage` worker runs the parent blueprint (already warmed).
+        if config.worker_stage.is_some() {
+            continue;
+        }
+        let Ok((resolve_path, _)) = crate::daemon::fanout_spawner::resolve_worker_source(
+            config,
+            blueprint_path,
+            agents_dir,
+        ) else {
+            continue;
+        };
+        let Ok(manifest) = crate::commands::run::manifest::find_manifest(&resolve_path) else {
+            continue;
+        };
+        if let Ok(worker_toml) = std::fs::read_to_string(&manifest) {
+            for server in crate::daemon::mcp_pool::parse_blueprint_mcp_servers(&worker_toml) {
+                pool.ensure(&server).await;
+            }
         }
     }
 }
@@ -497,6 +548,110 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
         let pool = empty_pool();
         // Unreadable path → the read-error arm, no panic.
         warm_blueprint_mcp(&pool, "/no/such/agent.leviath").await;
+    }
+
+    /// Write a parent blueprint whose fan-out stage delegates to `worker_source`
+    /// (a `worker_agent` path). Returns the parent manifest path.
+    fn parent_with_fanout_worker_agent(
+        dir: &std::path::Path,
+        worker_source: &str,
+    ) -> std::path::PathBuf {
+        let manifest = dir.join("parent.leviath");
+        std::fs::write(
+            &manifest,
+            format!(
+                "[agent]\nname = \"parent\"\n\n\
+                 [stages.main]\nmode = \"autonomous\"\n\n\
+                 [stages.parallel]\nmode = \"fan_out\"\nworker_agent = \"{worker_source}\"\nsplit_prompt = \"go\"\n"
+            ),
+        )
+        .unwrap();
+        manifest
+    }
+
+    #[tokio::test]
+    async fn warm_fanout_worker_mcp_prewarms_worker_agent_servers() {
+        let (_stub_dir, stub) = stub_server_py();
+        // A worker blueprint declaring an MCP server.
+        let worker_dir = tempfile::tempdir().unwrap();
+        blueprint_with_mcp(worker_dir.path(), &stub);
+        // A parent whose fan-out delegates to that worker directory.
+        let parent_dir = tempfile::tempdir().unwrap();
+        let parent = parent_with_fanout_worker_agent(
+            parent_dir.path(),
+            &worker_dir.path().to_string_lossy(),
+        );
+        let pool = empty_pool();
+        warm_fanout_worker_mcp(&pool, &parent.to_string_lossy(), None).await;
+        // The worker's declared server is now warm (its tool cached), so the first
+        // worker will advertise it immediately.
+        let servers = crate::daemon::mcp_pool::parse_blueprint_mcp_servers(
+            &std::fs::read_to_string(worker_dir.path().join("agent.leviath")).unwrap(),
+        );
+        let defs = pool.cached_defs_for(&servers);
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "stub_search");
+    }
+
+    #[tokio::test]
+    async fn warm_fanout_worker_mcp_skips_and_tolerates_every_arm() {
+        let pool = empty_pool();
+        // Unreadable parent → read-error return.
+        warm_fanout_worker_mcp(&pool, "/no/such/parent.leviath", None).await;
+        // Unparsable parent → parse-error return.
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad.leviath");
+        std::fs::write(&bad, "not : valid : toml").unwrap();
+        warm_fanout_worker_mcp(&pool, &bad.to_string_lossy(), None).await;
+        // A blueprint with only a non-fan-out stage → the `continue` (not FanOut).
+        let plain = dir.path().join("plain.leviath");
+        std::fs::write(
+            &plain,
+            "[agent]\nname = \"p\"\n\n[stages.main]\nmode = \"autonomous\"\n",
+        )
+        .unwrap();
+        warm_fanout_worker_mcp(&pool, &plain.to_string_lossy(), None).await;
+        // A `worker_stage` fan-out → skipped (reuses the parent's own servers).
+        let ws = dir.path().join("ws.leviath");
+        std::fs::write(
+            &ws,
+            "[agent]\nname = \"p\"\n\n\
+             [stages.parallel]\nmode = \"fan_out\"\nworker_stage = \"w\"\nsplit_prompt = \"go\"\n\n\
+             [stages.w]\nmode = \"autonomous\"\nallow_as_worker = true\n",
+        )
+        .unwrap();
+        warm_fanout_worker_mcp(&pool, &ws.to_string_lossy(), None).await;
+        // A `worker_query` with no agents dir → resolve_worker_source errors → skip.
+        let wq = dir.path().join("wq.leviath");
+        std::fs::write(
+            &wq,
+            "[agent]\nname = \"p\"\n\n\
+             [stages.parallel]\nmode = \"fan_out\"\nworker_query = \"x\"\nsplit_prompt = \"go\"\n",
+        )
+        .unwrap();
+        warm_fanout_worker_mcp(&pool, &wq.to_string_lossy(), None).await;
+        // A `worker_agent` pointing at a nonexistent path → find_manifest errors → skip.
+        let miss = parent_with_fanout_worker_agent(dir.path(), "/no/such/worker/xyz");
+        warm_fanout_worker_mcp(&pool, &miss.to_string_lossy(), None).await;
+        // A `worker_agent` whose blueprint declares no [[mcp_servers]] → read-ok,
+        // empty server loop.
+        let worker_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            worker_dir.path().join("agent.leviath"),
+            "[agent]\nname = \"w\"\n\n[stages.main]\nmode = \"autonomous\"\n",
+        )
+        .unwrap();
+        let noservers =
+            parent_with_fanout_worker_agent(dir.path(), &worker_dir.path().to_string_lossy());
+        warm_fanout_worker_mcp(&pool, &noservers.to_string_lossy(), None).await;
+        // A `worker_agent` dir whose `agent.leviath` is itself a directory:
+        // find_manifest resolves it (it `exists()`), but reading it fails → the
+        // inner read-error arm.
+        let dir_manifest = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir_manifest.path().join("agent.leviath")).unwrap();
+        let unreadable =
+            parent_with_fanout_worker_agent(dir.path(), &dir_manifest.path().to_string_lossy());
+        warm_fanout_worker_mcp(&pool, &unreadable.to_string_lossy(), None).await;
     }
 
     #[test]

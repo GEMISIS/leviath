@@ -144,7 +144,7 @@ impl FanOutSpawner for DaemonFanOutSpawner {
 /// `path_to_resolve` is fed to [`resolve_spawn_args`] (which resolves a file,
 /// directory, or installed-agent name); `entry_stage` is `Some` only for
 /// `worker_stage` (self-as-worker).
-fn resolve_worker_source(
+pub(crate) fn resolve_worker_source(
     config: &FanOutConfig,
     parent_path: &str,
     agents_dir: Option<&Path>,
