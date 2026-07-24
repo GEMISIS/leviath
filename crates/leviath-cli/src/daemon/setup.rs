@@ -502,7 +502,7 @@ entry_stage = "work"
 [[mcp_servers]]
 name = "search"
 command = "python3"
-args = ["{}"]
+args = ['{}']
 
 [stages.work]
 mode = "autonomous"
