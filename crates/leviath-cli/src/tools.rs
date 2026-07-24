@@ -140,7 +140,7 @@ impl ToolRegistry {
 /// Current Unix time in seconds, for token-expiry checks. `0` if the clock is
 /// somehow before the epoch — which reads every token as expired and forces a
 /// refresh attempt, the safe direction.
-fn unix_now_secs() -> u64 {
+pub(crate) fn unix_now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -152,7 +152,7 @@ fn unix_now_secs() -> u64 {
 ///
 /// Split out of [`ToolRegistry::build`] so the store-present / store-absent and
 /// refresh-failure paths are unit-testable without the real home directory.
-async fn resolve_bearer(
+pub(crate) async fn resolve_bearer(
     oauth: &leviath_mcp::OAuthClient,
     server_name: &str,
     store_path: Option<&std::path::Path>,
