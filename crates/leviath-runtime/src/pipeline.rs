@@ -529,6 +529,13 @@ pub fn handle_empty_response(
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AwaitingTools;
 
+/// Marker: this agent's advertised tools should be re-resolved before its next
+/// turn — mid-run dynamic tool discovery (issue #97). Consumed by
+/// [`refresh_advertised_tools`], which asks the [`ToolService`] for the stage's
+/// fresh tool defs and writes them into the live [`StageInference`].
+#[derive(Component, Debug, Clone, Copy)]
+pub struct ToolsNeedRefresh;
+
 /// Provides a per-agent tool-execution closure. The concrete implementation
 /// (in the CLI) holds each agent's tool registry, workdir, and permission
 /// policy; the pipeline stays agnostic to *how* tools run. `exec_for` returns a
@@ -542,6 +549,18 @@ pub trait ToolService: Send + Sync {
     /// `stage_name`, so it can re-sync that agent's per-stage tool permissions.
     /// Default no-op for services without per-stage policy.
     fn sync_stage(&self, _entity: Entity, _stage_index: usize, _stage_name: &str) {}
+
+    /// Re-resolve `entity`'s advertised tool defs for the stage at `stage_index`
+    /// — e.g. after new tools were discovered on disk. `None` means "no change"
+    /// (the default, for services without dynamic tools); `Some(tools)` replaces
+    /// the stage's advertised set.
+    fn refresh_tools(
+        &self,
+        _entity: Entity,
+        _stage_index: usize,
+    ) -> Option<Vec<leviath_providers::Tool>> {
+        None
+    }
 }
 
 /// The tool service, as a world resource.
@@ -2961,6 +2980,39 @@ pub fn sync_tool_stages(
     }
 }
 
+/// Re-advertise an agent's tools mid-run: when tagged [`ToolsNeedRefresh`], ask
+/// the tool service for this stage's freshly-resolved tool defs and, if it
+/// returns a set, write it into the live [`StageInference`] (what the next
+/// inference request advertises, read fresh by `build_request`) and the matching
+/// [`StageInferences`] catalog entry (so a later revisit of this stage keeps the
+/// updated set). Always consumes the marker. This is the mechanism behind
+/// mid-run dynamic tool discovery and lazily-listed MCP tools (issue #97).
+pub fn refresh_advertised_tools(
+    service: Res<ToolServiceRes>,
+    mut agents: Query<
+        (
+            Entity,
+            &StageCursor,
+            &mut StageInference,
+            &mut StageInferences,
+        ),
+        With<ToolsNeedRefresh>,
+    >,
+    mut commands: Commands,
+) {
+    for (entity, cursor, mut si, mut sis) in agents.iter_mut() {
+        if let Some(tools) = service.0.refresh_tools(entity, cursor.index) {
+            si.tools = tools.clone();
+            // Keep the catalog entry in sync so re-entering this stage advertises
+            // the same refreshed set.
+            if let Some(slot) = sis.0.get_mut(cursor.index) {
+                slot.tools = tools;
+            }
+        }
+        commands.entity(entity).remove::<ToolsNeedRefresh>();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4259,6 +4311,146 @@ mod tests {
     fn default_sync_stage_is_a_noop() {
         // A service that doesn't override `sync_stage` uses the no-op default.
         EchoService.sync_stage(Entity::from_raw(0), 3, "x");
+    }
+
+    #[tokio::test]
+    async fn default_refresh_tools_returns_none() {
+        // A service that doesn't override `refresh_tools` uses the None default.
+        assert!(EchoService.refresh_tools(Entity::from_raw(0), 0).is_none());
+        // Exercise RefreshService's (unused-by-the-system) exec_for closure too.
+        assert!(
+            RefreshService(vec![]).exec_for(Entity::from_raw(0), Vec::new())()
+                .await
+                .is_empty()
+        );
+    }
+
+    /// A service whose `refresh_tools` returns a fixed set of tool names.
+    struct RefreshService(Vec<&'static str>);
+    impl ToolService for RefreshService {
+        fn exec_for(&self, _e: Entity, _c: Vec<leviath_providers::ToolCall>) -> BoxedToolExec {
+            Box::new(|| Box::pin(async { Vec::new() }))
+        }
+        fn refresh_tools(&self, _e: Entity, _idx: usize) -> Option<Vec<Tool>> {
+            Some(
+                self.0
+                    .iter()
+                    .map(|n| Tool {
+                        name: n.to_string(),
+                        description: String::new(),
+                        parameters: serde_json::json!({}),
+                    })
+                    .collect(),
+            )
+        }
+    }
+
+    fn stage_inf(tools: &[&str]) -> StageInference {
+        StageInference {
+            provider_name: "p".to_string(),
+            model: "m".to_string(),
+            tools: tools
+                .iter()
+                .map(|n| Tool {
+                    name: n.to_string(),
+                    description: String::new(),
+                    parameters: serde_json::json!({}),
+                })
+                .collect(),
+            tool_filter: None,
+        }
+    }
+
+    fn run_refresh(world: &mut World) {
+        let mut schedule = Schedule::default();
+        schedule.add_systems(refresh_advertised_tools);
+        schedule.run(world);
+    }
+
+    #[test]
+    fn refresh_advertised_tools_updates_live_and_catalog() {
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(Arc::new(RefreshService(vec!["new_tool"]))));
+        let entity = world
+            .spawn((
+                StageCursor { index: 0 },
+                stage_inf(&["old"]),
+                StageInferences(vec![stage_inf(&["old"]), stage_inf(&["other"])]),
+                ToolsNeedRefresh,
+            ))
+            .id();
+        run_refresh(&mut world);
+
+        // Live component + the current catalog entry now advertise the new tool.
+        let names: Vec<String> = world
+            .get::<StageInference>(entity)
+            .unwrap()
+            .tools
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        assert_eq!(names, vec!["new_tool".to_string()]);
+        let cat0: Vec<String> = world.get::<StageInferences>(entity).unwrap().0[0]
+            .tools
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        assert_eq!(cat0, vec!["new_tool".to_string()]);
+        // Other stages in the catalog are untouched.
+        assert_eq!(
+            world.get::<StageInferences>(entity).unwrap().0[1].tools[0].name,
+            "other"
+        );
+        // Marker consumed.
+        assert!(world.get::<ToolsNeedRefresh>(entity).is_none());
+    }
+
+    #[test]
+    fn refresh_advertised_tools_none_leaves_tools_but_clears_marker() {
+        // EchoService::refresh_tools returns None → the advertised set is unchanged
+        // but the marker is still consumed (no busy re-tagging).
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+        let entity = world
+            .spawn((
+                StageCursor { index: 0 },
+                stage_inf(&["keep"]),
+                StageInferences(vec![stage_inf(&["keep"])]),
+                ToolsNeedRefresh,
+            ))
+            .id();
+        run_refresh(&mut world);
+        assert_eq!(
+            world.get::<StageInference>(entity).unwrap().tools[0].name,
+            "keep"
+        );
+        assert!(world.get::<ToolsNeedRefresh>(entity).is_none());
+    }
+
+    #[test]
+    fn refresh_advertised_tools_tolerates_cursor_past_catalog() {
+        // A cursor index beyond the catalog updates only the live component
+        // (the `get_mut(index)` None arm), never panicking.
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(Arc::new(RefreshService(vec!["fresh"]))));
+        let entity = world
+            .spawn((
+                StageCursor { index: 5 },
+                stage_inf(&["old"]),
+                StageInferences(vec![stage_inf(&["old"])]),
+                ToolsNeedRefresh,
+            ))
+            .id();
+        run_refresh(&mut world);
+        assert_eq!(
+            world.get::<StageInference>(entity).unwrap().tools[0].name,
+            "fresh"
+        );
+        // The single catalog entry is untouched (index 5 doesn't exist).
+        assert_eq!(
+            world.get::<StageInferences>(entity).unwrap().0[0].tools[0].name,
+            "old"
+        );
     }
 
     #[tokio::test]
