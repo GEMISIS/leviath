@@ -995,6 +995,7 @@ mod tests {
             registry_with(&["anthropic", "openai", "ollama"]),
             cli.clone(),
             InferencePoolConfig::new(),
+            1,
             std::env::temp_dir(),
             Handle::current(),
         );

@@ -46,7 +46,7 @@ use crate::pipeline::{
     require_context_regions, resolve_transition, sync_tool_stages,
 };
 use crate::providers::ProviderRegistry;
-use crate::tool_bridge::tool_worker;
+use crate::tool_bridge::spawn_tool_pool;
 
 /// Counts of agents in each phase-marker — the world's per-tick "fingerprint".
 /// Two consecutive equal fingerprints mean a tick changed nothing (quiescence).
@@ -59,9 +59,10 @@ pub struct PipelineWorld {
     wake: Arc<Notify>,
     shutdown: Arc<Notify>,
     msg_tx: UnboundedSender<AgentMessage>,
-    /// The tool worker task; kept so it lives as long as the world. It exits on
-    /// its own when the world (and thus the [`ToolStage`] sender) is dropped.
-    _tool_task: JoinHandle<()>,
+    /// The tool worker pool tasks; kept so they live as long as the world. Each
+    /// exits on its own when the world (and thus the [`ToolStage`] sender) is
+    /// dropped. The pool size is the tool-lane concurrency cap.
+    _tool_tasks: Vec<JoinHandle<()>>,
     /// The persistence worker task. Retained (rather than detached) so
     /// [`Self::flush_and_stop`] can close its channel and `await` it, guaranteeing
     /// every queued snapshot reaches disk before shutdown. `None` once flushed.
@@ -76,6 +77,7 @@ impl PipelineWorld {
         providers: ProviderRegistry,
         tool_service: Arc<dyn ToolService>,
         pool_config: InferencePoolConfig,
+        tool_concurrency: usize,
         runs_dir: std::path::PathBuf,
         runtime: Handle,
     ) -> Self {
@@ -98,7 +100,13 @@ impl PipelineWorld {
         let (gp_tx, gp_rx) = unbounded_channel();
         let (cs_tx, cs_rx) = unbounded_channel();
 
-        let tool_task = runtime.spawn(tool_worker(tool_job_rx, tool_res_tx, wake.clone()));
+        let tool_tasks = spawn_tool_pool(
+            &runtime,
+            tool_job_rx,
+            tool_res_tx,
+            wake.clone(),
+            tool_concurrency,
+        );
         // Retained so `flush_and_stop` can drain it on shutdown. Left to its own
         // devices otherwise: it exits when the world (and thus its PersistenceStage
         // sender) is dropped.
@@ -207,7 +215,7 @@ impl PipelineWorld {
             wake,
             shutdown,
             msg_tx,
-            _tool_task: tool_task,
+            _tool_tasks: tool_tasks,
             persist_task: Some(persist_task),
         }
     }
@@ -691,6 +699,7 @@ mod tests {
             providers,
             Arc::new(EchoTools),
             InferencePoolConfig::new(),
+            1,
             std::env::temp_dir(),
             Handle::current(),
         )
@@ -997,6 +1006,7 @@ mod tests {
             registry_with(vec![with_tool("c1", "do"), text("done")]),
             Arc::new(EchoTools),
             InferencePoolConfig::new(),
+            1,
             dir.path().to_path_buf(),
             Handle::current(),
         );
@@ -1101,6 +1111,7 @@ mod tests {
             registry_with(vec![with_tool("c1", "read"), text("## Plan\n1. do it")]),
             Arc::new(EchoTools),
             InferencePoolConfig::new(),
+            1,
             dir.path().to_path_buf(),
             Handle::current(),
         );
@@ -1182,6 +1193,7 @@ mod tests {
             registry_with(vec![with_tool("c1", "do"), text("done")]),
             Arc::new(EchoTools),
             InferencePoolConfig::new(),
+            1,
             dir.path().to_path_buf(),
             Handle::current(),
         );
@@ -1246,6 +1258,7 @@ mod tests {
             registry_with(vec![text("unused")]),
             Arc::new(EchoTools),
             InferencePoolConfig::new(),
+            1,
             dir.path().to_path_buf(),
             Handle::current(),
         );

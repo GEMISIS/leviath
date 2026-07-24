@@ -126,6 +126,7 @@ pub fn build_host(
         providers,
         tool_service.clone(),
         pool_config,
+        config.limits.max_concurrent_tools,
         runs_dir.clone(),
         runtime,
     );
@@ -255,6 +256,7 @@ mod tests {
             ProviderRegistry::new(),
             tool_service.clone(),
             InferencePoolConfig::new(),
+            1,
             std::env::temp_dir(),
             Handle::current(),
         );

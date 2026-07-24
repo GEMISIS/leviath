@@ -190,6 +190,10 @@ fn default_default_max_iterations() -> Option<usize> {
     Some(50)
 }
 
+fn default_max_concurrent_tools() -> usize {
+    8
+}
+
 /// Runtime resource limits with safe defaults baked in.
 ///
 /// Both fields default to a bounded value so a fresh install can't accidentally
@@ -202,6 +206,13 @@ pub struct LimitsConfig {
     /// a large number to effectively unbound it.
     #[serde(default = "default_max_concurrent_inferences")]
     pub max_concurrent_inferences: Option<usize>,
+
+    /// Size of the shared tool-execution worker pool — the number of agents whose
+    /// tool batches may run concurrently across the whole daemon (the tool-lane
+    /// counterpart of `max_concurrent_inferences`). Defaults to `8`. Clamped to at
+    /// least 1.
+    #[serde(default = "default_max_concurrent_tools")]
+    pub max_concurrent_tools: usize,
 
     /// Fallback `max_iterations` applied to a stage that does not set its own,
     /// so an agent can't loop forever with no completion signal. Defaults to
@@ -224,6 +235,7 @@ impl Default for LimitsConfig {
     fn default() -> Self {
         Self {
             max_concurrent_inferences: default_max_concurrent_inferences(),
+            max_concurrent_tools: default_max_concurrent_tools(),
             default_max_iterations: default_default_max_iterations(),
             exact_token_counting: false,
         }
@@ -1878,6 +1890,7 @@ anthropic_api_key = "sk-ant-test-key"
             taint_tracking: false,
             limits: LimitsConfig {
                 max_concurrent_inferences: Some(4),
+                max_concurrent_tools: 3,
                 default_max_iterations: Some(99),
                 exact_token_counting: false,
             },
@@ -1908,6 +1921,7 @@ anthropic_api_key = "sk-ant-test-key"
 
         assert_eq!(deserialized.default_provider, "anthropic");
         assert_eq!(deserialized.limits.max_concurrent_inferences, Some(4));
+        assert_eq!(deserialized.limits.max_concurrent_tools, 3);
         assert_eq!(
             deserialized.tool_script_permissions.http_get,
             ScriptPermission::Allow
