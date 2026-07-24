@@ -443,7 +443,9 @@ for line in sys.stdin:
         std::fs::write(
             &manifest,
             format!(
-                "[agent]\nname = \"a\"\n\n[[mcp_servers]]\nname = \"{server}\"\ncommand = \"python3\"\nargs = [\"{}\"]\n",
+                // Single-quoted TOML literal so a Windows path's backslashes
+                // aren't parsed as string escapes (`\\U…` → invalid unicode).
+                "[agent]\nname = \"a\"\n\n[[mcp_servers]]\nname = \"{server}\"\ncommand = \"python3\"\nargs = ['{}']\n",
                 stub.to_string_lossy()
             ),
         )
