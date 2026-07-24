@@ -42,8 +42,9 @@ use crate::pipeline::{
     collect_compaction, collect_inference, collect_tools, collect_transition_choice,
     deliver_messages, dispatch_compaction, dispatch_edge_compact, dispatch_inference,
     dispatch_persistence, dispatch_tools, dispatch_transition_choice, enforce_max_iterations,
-    gate_requires_children, handle_empty_response, process_response, reflect_interaction_status,
-    refresh_advertised_tools, require_context_regions, resolve_transition, sync_tool_stages,
+    gate_requires_children, handle_empty_response, poll_dynamic_tool_refresh, process_response,
+    reflect_interaction_status, refresh_advertised_tools, require_context_regions,
+    resolve_transition, sync_tool_stages,
 };
 use crate::providers::ProviderRegistry;
 use crate::tool_bridge::spawn_tool_pool;
@@ -165,8 +166,10 @@ impl PipelineWorld {
                 dispatch_compaction,
                 // Cap a stage at its max_iterations before running more inference.
                 enforce_max_iterations,
-                // Apply any pending mid-run tool re-advertisement before the next
-                // request is assembled, so a newly-discovered tool is visible.
+                // Tag dynamic_tools agents that have pending tool changes, then
+                // apply the re-advertisement before the next request is assembled
+                // so a newly-discovered tool is visible.
+                poll_dynamic_tool_refresh,
                 refresh_advertised_tools,
                 dispatch_inference,
                 collect_inference,

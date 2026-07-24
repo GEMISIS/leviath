@@ -71,6 +71,13 @@ pub struct Blueprint {
     /// [`crate::resolve_sandbox`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<crate::sandbox::ToolSandboxConfig>,
+
+    /// Opt-in escape hatch (issue #97): when `true`, the agent may add tools to
+    /// its own `tools/` directory mid-run and have them re-discovered and
+    /// re-advertised for its next turn. **Off by default** — tools are otherwise
+    /// discovered once at spawn and an agent cannot grow its own toolchain.
+    #[serde(default)]
+    pub dynamic_tools: bool,
 }
 
 impl Blueprint {
@@ -97,6 +104,7 @@ impl Blueprint {
             repetition_detection: None,
             file_tracking: None,
             sandbox: None,
+            dynamic_tools: false,
         }
     }
 

@@ -536,6 +536,12 @@ pub struct AwaitingTools;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct ToolsNeedRefresh;
 
+/// Marker: this agent opted into `dynamic_tools` (issue #97). Only such agents
+/// are polled by [`poll_dynamic_tool_refresh`] for a pending tool re-scan, so the
+/// default (static) agent pays nothing.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct DynamicTools;
+
 /// Provides a per-agent tool-execution closure. The concrete implementation
 /// (in the CLI) holds each agent's tool registry, workdir, and permission
 /// policy; the pipeline stays agnostic to *how* tools run. `exec_for` returns a
@@ -560,6 +566,13 @@ pub trait ToolService: Send + Sync {
         _stage_index: usize,
     ) -> Option<Vec<leviath_providers::Tool>> {
         None
+    }
+
+    /// Whether `entity` (a `dynamic_tools` agent) has pending tool changes that
+    /// warrant a re-scan + re-advertise. Polled by [`poll_dynamic_tool_refresh`];
+    /// implementors return (and clear) a per-agent dirty flag. Default `false`.
+    fn wants_refresh(&self, _entity: Entity) -> bool {
+        false
     }
 }
 
@@ -3066,6 +3079,22 @@ pub fn refresh_advertised_tools(
     }
 }
 
+/// Poll each `dynamic_tools` agent for a pending tool re-scan and, when the tool
+/// service reports one, tag it [`ToolsNeedRefresh`] so [`refresh_advertised_tools`]
+/// re-advertises before its next turn. Only agents carrying [`DynamicTools`] are
+/// queried, so static agents (the default) cost nothing.
+pub fn poll_dynamic_tool_refresh(
+    service: Res<ToolServiceRes>,
+    agents: Query<Entity, With<DynamicTools>>,
+    mut commands: Commands,
+) {
+    for entity in agents.iter() {
+        if service.0.wants_refresh(entity) {
+            commands.entity(entity).insert(ToolsNeedRefresh);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4687,6 +4716,55 @@ mod tests {
             "keep"
         );
         assert!(world.get::<ToolsNeedRefresh>(entity).is_none());
+    }
+
+    /// A service whose `wants_refresh` returns a fixed value.
+    struct PollService(bool);
+    impl ToolService for PollService {
+        fn exec_for(&self, _e: Entity, _c: Vec<leviath_providers::ToolCall>) -> BoxedToolExec {
+            Box::new(|| Box::pin(async { Vec::new() }))
+        }
+        fn wants_refresh(&self, _e: Entity) -> bool {
+            self.0
+        }
+    }
+
+    #[tokio::test]
+    async fn default_wants_refresh_returns_false() {
+        assert!(!EchoService.wants_refresh(Entity::from_raw(0)));
+        // Exercise PollService's (unused-by-the-system) exec_for closure.
+        assert!(
+            PollService(false).exec_for(Entity::from_raw(0), Vec::new())()
+                .await
+                .is_empty()
+        );
+    }
+
+    fn run_poll(world: &mut World) {
+        let mut schedule = Schedule::default();
+        schedule.add_systems(poll_dynamic_tool_refresh);
+        schedule.run(world);
+    }
+
+    #[test]
+    fn poll_tags_dynamic_agent_when_service_wants_refresh() {
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(Arc::new(PollService(true))));
+        let dyn_e = world.spawn(DynamicTools).id();
+        // A non-dynamic agent is never polled, even if the service wants refresh.
+        let static_e = world.spawn_empty().id();
+        run_poll(&mut world);
+        assert!(world.get::<ToolsNeedRefresh>(dyn_e).is_some());
+        assert!(world.get::<ToolsNeedRefresh>(static_e).is_none());
+    }
+
+    #[test]
+    fn poll_leaves_dynamic_agent_untagged_when_no_refresh_wanted() {
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(Arc::new(PollService(false))));
+        let dyn_e = world.spawn(DynamicTools).id();
+        run_poll(&mut world);
+        assert!(world.get::<ToolsNeedRefresh>(dyn_e).is_none());
     }
 
     #[test]

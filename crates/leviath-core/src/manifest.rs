@@ -48,6 +48,12 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    // Issue #97 escape hatch: `[agent] dynamic_tools` (default false).
+    let dynamic_tools = agent
+        .get("dynamic_tools")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     let mut stages = Vec::new();
     if let Some(stages_table) = parsed.get("stages").and_then(|v| v.as_table()) {
         for (stage_name, stage_value) in stages_table {
@@ -597,6 +603,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
     blueprint.version = version;
     blueprint.max_child_depth = max_child_depth;
     blueprint.entry_stage = entry_stage;
+    blueprint.dynamic_tools = dynamic_tools;
 
     if let Some(compaction_table) = parsed.get("compaction").and_then(|v| v.as_table()) {
         let mut cc = CompactionConfig::default();
@@ -1126,6 +1133,7 @@ version = "2.0.0"
 description = "A fully configured agent"
 max_child_depth = 3
 entry_stage = "start"
+dynamic_tools = true
 
 [stages.start]
 mode = "autonomous"
@@ -1154,6 +1162,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         assert_eq!(bp.description, "A fully configured agent");
         assert_eq!(bp.max_child_depth, Some(3));
         assert_eq!(bp.entry_stage, Some("start".to_string()));
+        assert!(bp.dynamic_tools);
         assert_eq!(bp.stages.len(), 2);
 
         let start = bp.find_stage("start").unwrap();
