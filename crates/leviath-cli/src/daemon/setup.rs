@@ -83,12 +83,21 @@ pub async fn setup_daemon_host(
     // MCP connections are shared across agents; the workdir here only seeds the
     // (discarded) built-ins — each agent gets its own over its own workdir.
     let registry = ToolRegistry::build(std::env::temp_dir(), &config).await;
+    // The shared MCP pool: seed the connected global servers, then reconnect the
+    // per-agent MCP servers of any non-terminal persisted run so a run reloaded on
+    // restart can still execute its blueprint MCP tools (recovery warming — the
+    // async counterpart of the live-spawn preprocessor, done here before the
+    // sync reload inside build_host).
+    let mcp_pool =
+        crate::daemon::mcp_pool::McpPool::for_daemon(registry.mcp.clone(), &config.mcp_servers);
+    mcp_pool.warm_recovered(&runs_dir).await;
     build_host(
         config,
         providers,
         runs_dir,
         registry.mcp,
         registry.mcp_tool_defs,
+        mcp_pool,
         runtime,
         || chrono::Utc::now().timestamp(),
     )
@@ -106,12 +115,14 @@ fn make_reaper(tool_service: Arc<CliToolService>) -> leviath_runtime::host::Reap
 /// service + interaction hub, and a `Spawn`-op spawner that loads blueprints and
 /// registers per-agent tool state. `shared_mcp` / `mcp_tool_defs` are the MCP
 /// connections built once at startup and reused by every agent.
+#[allow(clippy::too_many_arguments)]
 pub fn build_host(
     config: Config,
     providers: ProviderRegistry,
     runs_dir: std::path::PathBuf,
     shared_mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
     mcp_tool_defs: Vec<Tool>,
+    mcp_pool: Arc<crate::daemon::mcp_pool::McpPool>,
     runtime: Handle,
     now_secs: fn() -> i64,
 ) -> WorldHost {
@@ -165,6 +176,7 @@ pub fn build_host(
         config: config.clone(),
         shared_mcp: shared_mcp.clone(),
         mcp_tool_defs: mcp_tool_defs.clone(),
+        mcp_pool: mcp_pool.clone(),
         hub: hub.clone(),
         subagent_tx: subagent_tx.clone(),
         tool_service: tool_service.clone(),
@@ -222,25 +234,8 @@ pub fn build_host(
     // is unit-testable — the daemon only ever drives it from `serve()`.
     host.set_reaper(make_reaper(tool_service.clone()));
 
-    // Shared, lazily-connected MCP pool for per-agent `[[mcp_servers]]` (issue
-    // #97). Reserve built-in / sub-agent names so a server tool can't shadow a
-    // core one, and seed the global servers (already connected into `shared_mcp`
-    // and advertised via `mcp_tool_defs`) with empty defs so a blueprint that
-    // re-declares one doesn't open a duplicate connection.
-    let reserved: std::collections::HashSet<String> = {
-        let bt =
-            leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(std::env::temp_dir()));
-        let mut r: std::collections::HashSet<String> = bt.names().into_iter().collect();
-        r.extend(leviath_tools::BuiltinTools::subagent_tool_names());
-        r
-    };
-    let mcp_pool = Arc::new(crate::daemon::mcp_pool::McpPool::new(
-        shared_mcp.clone(),
-        reserved,
-    ));
-    for server in &config.mcp_servers {
-        mcp_pool.seed(server, Vec::new());
-    }
+    // The shared MCP pool (created + recovery-warmed by the caller). Per-agent
+    // `[[mcp_servers]]` connect lazily through it.
 
     // Preprocessor: before the sync spawner runs, connect the blueprint's declared
     // MCP servers into the shared pool (lazy, deduped) so they're warm to advertise.
@@ -555,6 +550,10 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
             runs.path().to_path_buf(),
             Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             Vec::new(),
+            crate::daemon::mcp_pool::McpPool::for_daemon(
+                Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+                &[],
+            ),
             Handle::current(),
             || 0,
         );
@@ -578,6 +577,10 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
             runs.path().to_path_buf(),
             Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             Vec::new(),
+            crate::daemon::mcp_pool::McpPool::for_daemon(
+                Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+                &[],
+            ),
             Handle::current(),
             || 0,
         );
@@ -658,6 +661,10 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
             runs.path().to_path_buf(),
             mcp,
             vec![],
+            crate::daemon::mcp_pool::McpPool::for_daemon(
+                Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+                &[],
+            ),
             Handle::current(),
             || 100,
         );
@@ -757,6 +764,10 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
             runs.path().to_path_buf(),
             mcp,
             vec![],
+            crate::daemon::mcp_pool::McpPool::for_daemon(
+                Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+                &[],
+            ),
             Handle::current(),
             || 100,
         );
@@ -797,6 +808,10 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
             runs.path().to_path_buf(),
             mcp,
             vec![],
+            crate::daemon::mcp_pool::McpPool::for_daemon(
+                Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+                &[],
+            ),
             Handle::current(),
             || 100,
         );

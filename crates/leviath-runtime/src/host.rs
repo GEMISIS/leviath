@@ -939,7 +939,20 @@ impl WorldHost {
                     }
                 }
                 // The host holds a `subagent_tx`, so this only yields `Some`.
-                Some(sub) = self.subagent_rx.recv() => self.handle_subagent(sub),
+                Some(sub) = self.subagent_rx.recv() => {
+                    // Warm a spawning sub-agent's MCP servers first, same as a
+                    // top-level Spawn (both run in this async loop).
+                    let pre = match &sub {
+                        SubAgentOp::Spawn { args, .. } => {
+                            self.spawn_preprocessor.as_ref().map(|pp| pp(args))
+                        }
+                        _ => None,
+                    };
+                    if let Some(fut) = pre {
+                        fut.await;
+                    }
+                    self.handle_subagent(sub);
+                }
             }
         }
         // Shutting down: drain the persistence lane before the world is dropped.
@@ -1618,6 +1631,64 @@ mod tests {
         handle.await.unwrap();
         assert_eq!(result, Ok("rp".to_string()));
         assert!(ran.load(Ordering::SeqCst), "preprocessor ran");
+    }
+
+    #[tokio::test]
+    async fn serve_awaits_preprocessor_for_subagent_spawn() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let mut host = host_with(vec![]);
+        host.set_spawner(child_spawner());
+        let _parent = spawn(&mut host, "parent", "parent");
+        // Count preprocessor invocations: it must fire for the sub-agent Spawn,
+        // and NOT for the non-Spawn Check op (the `_ => None` arm).
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_pp = calls.clone();
+        host.set_spawn_preprocessor(Box::new(move |_args| {
+            let calls = calls_pp.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+            })
+        }));
+        let sub_tx = host.subagent_sender();
+        let shutdown = host.world_mut().shutdown_handle();
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(async move {
+            host.serve(op_rx).await;
+        });
+
+        // A non-Spawn sub-agent op does not invoke the preprocessor.
+        let (ctx, crx) = oneshot::channel();
+        sub_tx
+            .send(SubAgentOp::Check {
+                run_id: "parent".to_string(),
+                reply: ctx,
+            })
+            .unwrap();
+        let _ = crx.await.unwrap();
+
+        // A sub-agent Spawn does.
+        let (stx, srx) = oneshot::channel();
+        sub_tx
+            .send(SubAgentOp::Spawn {
+                args: Box::new(SpawnArgs {
+                    run_id: "child".to_string(),
+                    ..Default::default()
+                }),
+                parent_run_id: "parent".to_string(),
+                max_depth: 3,
+                reply: stx,
+            })
+            .unwrap();
+        assert_eq!(srx.await.unwrap(), Ok("child".to_string()));
+
+        shutdown.notify_one();
+        drop(op_tx);
+        handle.await.unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "only the Spawn preprocessed"
+        );
     }
 
     #[tokio::test]

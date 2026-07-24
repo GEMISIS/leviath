@@ -4,9 +4,11 @@
 //! dependencies. Rather than spawn a connection per agent, all agents share one
 //! [`leviath_mcp::ToolExecutor`] (the client store) fronted by this pool: a
 //! server is connected **on first use**, deduped by its config signature, and
-//! its tools reused by every agent that declares it. Connection is async and
-//! happens in the daemon's spawn preprocessor (before the sync spawner runs), so
-//! the pool is warm by the time an agent's tools are advertised.
+//! its tools reused by every agent that declares it. Connection is async and is
+//! driven from every spawn path: the spawn preprocessor for top-level and
+//! sub-agent spawns (both run in the serve loop), [`McpPool::warm_recovered`] for
+//! runs reloaded on daemon restart, and a detached warm task for fan-out workers.
+//! So the pool is warm by the time an agent's tools are advertised.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -46,6 +48,27 @@ impl McpPool {
             reserved,
             connected: StdMutex::new(HashMap::new()),
         }
+    }
+
+    /// Build the daemon's shared pool over `shared_mcp`: reserve built-in and
+    /// sub-agent tool names (so a server tool can't shadow a core one) and seed
+    /// the already-connected global `config_servers` with empty defs, so a
+    /// blueprint that re-declares one doesn't open a duplicate connection.
+    pub fn for_daemon(
+        shared_mcp: Arc<Mutex<ToolExecutor>>,
+        config_servers: &[MCPServerConfig],
+    ) -> Arc<Self> {
+        let mut reserved: HashSet<String> =
+            leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(std::env::temp_dir()))
+                .names()
+                .into_iter()
+                .collect();
+        reserved.extend(leviath_tools::BuiltinTools::subagent_tool_names());
+        let pool = Arc::new(Self::new(shared_mcp, reserved));
+        for server in config_servers {
+            pool.seed(server, Vec::new());
+        }
+        pool
     }
 
     /// Seed the cache with an already-connected server's defs (used at startup for
@@ -121,6 +144,51 @@ impl McpPool {
                 let err = e.to_string();
                 tracing::warn!(server = %config.name, error = %err, "failed to connect per-agent MCP server");
                 Vec::new()
+            }
+        }
+    }
+
+    /// Connect every server in `servers` (idempotent). Takes `Arc<Self>` + owned
+    /// `servers` so it can be `tokio::spawn`ed directly as a detached warm task
+    /// (e.g. by the fan-out spawner) without a wrapping closure.
+    pub async fn ensure_all(self: Arc<Self>, servers: Vec<MCPServerConfig>) {
+        for server in servers {
+            self.ensure(&server).await;
+        }
+    }
+
+    /// Warm the per-agent `[[mcp_servers]]` of every non-terminal persisted run in
+    /// `runs_dir`, so a run reloaded on daemon restart can still *execute* its
+    /// blueprint MCP tools (their advertisement is restored from the snapshot;
+    /// only the shared connection is lost across a restart). Blueprint paths are
+    /// collected synchronously, then connected — no fs iterator is held across an
+    /// `.await`.
+    pub async fn warm_recovered(&self, runs_dir: &std::path::Path) {
+        use leviath_core::run_meta::RunStatus;
+        let Ok(entries) = std::fs::read_dir(runs_dir) else {
+            return;
+        };
+        let mut paths: Vec<String> = Vec::new();
+        for entry in entries.flatten() {
+            let Ok(text) = std::fs::read_to_string(entry.path().join("meta.json")) else {
+                continue;
+            };
+            let Ok(meta) = serde_json::from_str::<leviath_core::run_meta::RunMeta>(&text) else {
+                continue;
+            };
+            // Only runs that recovery will actually reload (non-terminal).
+            if matches!(
+                meta.status,
+                RunStatus::Starting | RunStatus::Running | RunStatus::WaitingInput
+            ) {
+                paths.push(meta.agent_path);
+            }
+        }
+        for path in paths {
+            if let Ok(toml) = std::fs::read_to_string(&path) {
+                for server in parse_blueprint_mcp_servers(&toml) {
+                    self.ensure(&server).await;
+                }
             }
         }
     }
@@ -218,6 +286,18 @@ for line in sys.stdin:
             // Second ensure of the same signature hits the cache (no reconnect).
             let again = pool.ensure(&cfg).await;
             assert_eq!(again.len(), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn ensure_all_connects_each_server() {
+        with_tracing(|| {});
+        with_temp_home(|| async {
+            let pool = Arc::new(pool());
+            let cfg = stub_config("s");
+            pool.clone().ensure_all(vec![cfg.clone()]).await;
+            assert_eq!(pool.cached_defs_for(std::slice::from_ref(&cfg)).len(), 1);
         })
         .await;
     }
@@ -345,6 +425,115 @@ for line in sys.stdin:
             .map(|t| t.name)
             .collect();
         assert_eq!(names, vec!["seed_tool".to_string()]);
+    }
+
+    /// Write a python MCP stub to a temp file; returns (tempdir, path).
+    fn stub_py() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stub.py");
+        std::fs::write(&path, STUB).unwrap();
+        (dir, path)
+    }
+
+    /// Write a blueprint declaring one stdio `[[mcp_servers]]` → `stub_py`; returns
+    /// its manifest path.
+    fn blueprint_declaring(server: &str, stub: &std::path::Path) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            format!(
+                "[agent]\nname = \"a\"\n\n[[mcp_servers]]\nname = \"{server}\"\ncommand = \"python3\"\nargs = [\"{}\"]\n",
+                stub.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        (dir, manifest.to_string_lossy().to_string())
+    }
+
+    fn write_run_meta(
+        runs_dir: &std::path::Path,
+        run_id: &str,
+        agent_path: &str,
+        status: leviath_core::run_meta::RunStatus,
+    ) {
+        let dir = runs_dir.join(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut meta = leviath_core::run_meta::RunMeta::new(
+            run_id.to_string(),
+            "a".to_string(),
+            agent_path.to_string(),
+            "t".to_string(),
+            None,
+            std::env::temp_dir().to_string_lossy().to_string(),
+            1,
+        );
+        meta.status = status;
+        std::fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn warm_recovered_connects_only_nonterminal_run_blueprints() {
+        use leviath_core::run_meta::RunStatus;
+        with_tracing(|| {});
+        with_temp_home(|| async {
+            let (_sd, stub) = stub_py();
+            let (_bd_live, live_bp) = blueprint_declaring("liveserver", &stub);
+            let (_bd_done, done_bp) = blueprint_declaring("doneserver", &stub);
+            let runs = tempfile::tempdir().unwrap();
+            write_run_meta(runs.path(), "run-live", &live_bp, RunStatus::Running);
+            write_run_meta(runs.path(), "run-done", &done_bp, RunStatus::Complete);
+            // A non-terminal run whose blueprint file no longer exists → the
+            // "unreadable manifest" arm (skipped, no panic).
+            write_run_meta(
+                runs.path(),
+                "run-gone",
+                "/no/such/agent.leviath",
+                RunStatus::WaitingInput,
+            );
+            // A junk dir with no meta.json is skipped without error.
+            std::fs::create_dir_all(runs.path().join("junk")).unwrap();
+            // A dir with an unparseable meta.json is skipped (the parse-error arm).
+            std::fs::create_dir_all(runs.path().join("garbled")).unwrap();
+            std::fs::write(runs.path().join("garbled/meta.json"), "not json {{").unwrap();
+
+            let pool = pool();
+            pool.warm_recovered(runs.path()).await;
+
+            // The non-terminal run's server is connected; the terminal one is not.
+            let live_servers =
+                parse_blueprint_mcp_servers(&std::fs::read_to_string(&live_bp).unwrap());
+            let done_servers =
+                parse_blueprint_mcp_servers(&std::fs::read_to_string(&done_bp).unwrap());
+            assert_eq!(pool.cached_defs_for(&live_servers).len(), 1);
+            assert!(pool.cached_defs_for(&done_servers).is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn warm_recovered_missing_runs_dir_is_noop() {
+        let pool = pool();
+        pool.warm_recovered(std::path::Path::new("/no/such/runs"))
+            .await;
+    }
+
+    #[test]
+    fn for_daemon_reserves_core_names_and_seeds_globals() {
+        let global =
+            MCPServerConfig::stdio("g", "python3", vec!["-c".to_string(), "pass".to_string()]);
+        let pool = McpPool::for_daemon(
+            Arc::new(Mutex::new(ToolExecutor::new())),
+            std::slice::from_ref(&global),
+        );
+        // The global server is seeded (cached with empty defs → deduped on a
+        // re-declaration).
+        assert!(
+            pool.cached_defs_for(std::slice::from_ref(&global))
+                .is_empty()
+        );
+        // Built-in names are reserved.
+        assert!(pool.reserved.contains("read_file"));
     }
 
     #[test]
