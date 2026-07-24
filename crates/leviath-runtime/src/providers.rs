@@ -1,6 +1,7 @@
 //! The [`ProviderRegistry`]: a name → [`Provider`] lookup shared by the ECS
 //! pipeline (as the `Providers` resource) and the CLI/daemon spawn path.
 
+use crate::script_provider::ScriptProviderLayer;
 use leviath_providers::Provider;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -8,10 +9,15 @@ use std::sync::Arc;
 /// Registry of inference providers, keyed by provider name (e.g. `"anthropic"`).
 ///
 /// The pipeline resolves each agent's stage `ModelConfig` to a concrete
-/// provider through this registry.
+/// provider through this registry. Native providers are registered eagerly;
+/// script providers (issue #101) are resolved lazily — and hot-reloaded — via
+/// an optional [`ScriptProviderLayer`].
 #[derive(Clone, Default)]
 pub struct ProviderRegistry {
     providers: HashMap<String, Arc<dyn Provider>>,
+    /// Lazy, hot-reloading resolver for `.rhai` script providers. Shared across
+    /// registry clones (one compile cache daemon-wide).
+    script_layer: Option<Arc<ScriptProviderLayer>>,
 }
 
 impl ProviderRegistry {
@@ -20,22 +26,41 @@ impl ProviderRegistry {
         Self::default()
     }
 
+    /// Attach a script-provider layer for lazy/hot-reloading `.rhai` providers.
+    pub fn with_script_layer(mut self, layer: Arc<ScriptProviderLayer>) -> Self {
+        self.script_layer = Some(layer);
+        self
+    }
+
     /// Register a provider by name.
     pub fn register(&mut self, name: String, provider: Arc<dyn Provider>) {
         self.providers.insert(name, provider);
     }
 
-    /// Get a provider by name.
-    pub fn get(&self, name: &str) -> Option<&Arc<dyn Provider>> {
-        self.providers.get(name)
+    /// Get a provider by name, returning an owned handle.
+    ///
+    /// A native provider wins; otherwise the script layer is consulted, which
+    /// lazily compiles (or hot-reloads) the matching `.rhai` script.
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Provider>> {
+        if let Some(p) = self.providers.get(name) {
+            return Some(p.clone());
+        }
+        self.script_layer.as_ref()?.get_or_load(name)
     }
 
-    /// Check if a provider is registered.
+    /// Check if a provider is available: registered natively, or resolvable
+    /// (loadable) as a script provider right now. Used at stage-model selection;
+    /// network-free because script `initialize` runs offline.
     pub fn has(&self, name: &str) -> bool {
         self.providers.contains_key(name)
+            || self
+                .script_layer
+                .as_ref()
+                .is_some_and(|l| l.get_or_load(name).is_some())
     }
 
-    /// Get all registered provider names.
+    /// Get all *natively-registered* provider names. Script providers are
+    /// resolved on demand and so are not enumerated here.
     pub fn provider_names(&self) -> Vec<&str> {
         self.providers.keys().map(|k| k.as_str()).collect()
     }

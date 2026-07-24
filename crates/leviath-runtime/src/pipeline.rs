@@ -237,7 +237,7 @@ pub fn dispatch_inference(
             if state.status != AgentStatus::Active {
                 return; // paused / waiting / cancelled — don't start new work
             }
-            let Some(provider) = providers.0.get(&si.provider_name).cloned() else {
+            let Some(provider) = providers.0.get(&si.provider_name) else {
                 return; // provider not registered — leave ready, retry later
             };
             let Some(permit) = stage.pools.try_acquire(&si.model) else {
@@ -1186,7 +1186,7 @@ pub fn dispatch_compaction(
             continue; // sync eviction was enough (or nothing summarizable)
         }
 
-        let Some(provider) = providers.0.get(&config.provider).cloned() else {
+        let Some(provider) = providers.0.get(&config.provider) else {
             continue; // compaction provider not registered — skip, non-fatal
         };
         let Some(permit) = stage.pools.try_acquire(&config.model) else {
@@ -1382,7 +1382,7 @@ pub fn dispatch_edge_compact(
             .and_then(|s| {
                 let config = &s.0;
                 let requests = build_edge_compact_requests(window, &pending.0, config)?;
-                let provider = providers.0.get(&config.provider).cloned()?;
+                let provider = providers.0.get(&config.provider)?;
                 let permit = stage.pools.try_acquire(&config.model)?;
                 stage.runtime.spawn(run_compaction_job(
                     CompactionJob {
@@ -2780,7 +2780,7 @@ pub fn dispatch_transition_choice(
         if state.status != AgentStatus::Active {
             continue; // paused / waiting / cancelled — don't start new work
         }
-        let Some(provider) = providers.0.get(&si.provider_name).cloned() else {
+        let Some(provider) = providers.0.get(&si.provider_name) else {
             continue; // provider not registered — retry later
         };
         let Some(permit) = stage.pools.try_acquire(&si.model) else {

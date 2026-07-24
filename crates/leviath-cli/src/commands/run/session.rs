@@ -395,8 +395,54 @@ pub fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
 ///
 /// Kept as a `fn(&Config) -> ProviderRegistry` so it can be passed as the
 /// registry-builder seam that `run`/`models`/`dashboard` inject for tests.
+///
+/// Native providers are registered eagerly from [`provider_creds_from_config`];
+/// a [`ScriptProviderLayer`](leviath_runtime::script_provider::ScriptProviderLayer)
+/// is then attached so Rhai *script providers* (issue #101) resolve lazily and
+/// hot-reload from `~/.leviath/providers/`.
 pub fn build_provider_registry_from_config(config: &Config) -> ProviderRegistry {
-    build_provider_registry(&provider_creds_from_config(config))
+    let mut registry = build_provider_registry(&provider_creds_from_config(config));
+    if let Some(dir) = crate::config::providers_dir() {
+        let overrides = config
+            .model_providers
+            .iter()
+            .map(|(name, mp)| (name.clone(), script_provider_spec(mp)))
+            .collect();
+        let layer = leviath_runtime::script_provider::ScriptProviderLayer::new(
+            dir,
+            overrides,
+            config.model_capabilities.clone(),
+            config.request_timeout_secs,
+        );
+        registry = registry.with_script_layer(std::sync::Arc::new(layer));
+    }
+    registry
+}
+
+/// Translate a CLI [`ModelProviderConfig`](crate::config::ModelProviderConfig)
+/// into the runtime's plain-data
+/// [`ScriptProviderSpec`](leviath_runtime::script_provider::ScriptProviderSpec):
+/// `base_url`/`api_key`/extra keys become the `initialize(config)` map.
+fn script_provider_spec(
+    mp: &crate::config::ModelProviderConfig,
+) -> leviath_runtime::script_provider::ScriptProviderSpec {
+    let mut cfg = serde_json::Map::new();
+    if let Some(b) = &mp.base_url {
+        cfg.insert("base_url".to_string(), serde_json::Value::String(b.clone()));
+    }
+    if let Some(k) = &mp.api_key {
+        cfg.insert("api_key".to_string(), serde_json::Value::String(k.clone()));
+    }
+    for (k, v) in &mp.extra {
+        if let Ok(jv) = serde_json::to_value(v) {
+            cfg.insert(k.clone(), jv);
+        }
+    }
+    leviath_runtime::script_provider::ScriptProviderSpec {
+        script: mp.script.clone(),
+        rate_limit: mp.rate_limit.clone(),
+        init_config: serde_json::Value::Object(cfg),
+    }
 }
 
 #[cfg(test)]

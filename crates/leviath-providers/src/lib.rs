@@ -21,6 +21,7 @@ pub mod openai_compat;
 pub mod openrouter;
 pub mod provider;
 pub mod rate_limit;
+pub mod rhai_provider;
 pub mod text_tools;
 pub mod tokenizer;
 
@@ -41,3 +42,4 @@ pub use provider::{
     parse_openai_finish_reason,
 };
 pub use rate_limit::RateLimiter;
+pub use rhai_provider::{ProviderMeta, RhaiProvider, parse_provider_annotations};

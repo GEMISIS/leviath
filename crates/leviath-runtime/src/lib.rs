@@ -27,6 +27,7 @@ pub mod provider_creds;
 pub mod providers;
 pub mod repetition;
 pub mod restore;
+pub mod script_provider;
 pub mod taint;
 pub mod tool_bridge;
 pub mod world;
