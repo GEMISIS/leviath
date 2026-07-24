@@ -117,13 +117,27 @@ async fn execute_script_tool(state: &AgentToolState, tc: &ToolCall) -> String {
 
 /// Resolve policy, handle approvals / dynamic interactions, and execute a batch
 /// of tool calls, returning `(tool_call_id, result)` pairs in call order.
+///
+/// Two passes so tool calls within one batch run in parallel where it is safe:
+/// 1. **Sequential resolution** — dynamic interactions (`ask_user_*`), sub-agent
+///    tools, and `ask` approval prompts are inherently interactive and are
+///    resolved one at a time, in order (a user answers one prompt at a time, and
+///    a `Session`-scope approval must be visible to later calls in the batch).
+///    Each call ends up either fully resolved or queued for execution.
+/// 2. **Parallel execution** — every queued call runs concurrently (`join_all`),
+///    then results are stitched back into the original call order.
 pub async fn dispatch_tools(
     state: Arc<AgentToolState>,
     calls: Vec<ToolCall>,
 ) -> Vec<(String, String)> {
     let stage_name = state.stage_name.lock().unwrap().clone();
-    let mut out = Vec::with_capacity(calls.len());
+
+    // Pass 1: sequential resolution. `slots[i].1 == None` means "execute in pass
+    // 2"; the queued `(slot_index, is_builtin, call)` records what to run.
+    let mut slots: Vec<(String, Option<String>)> = Vec::with_capacity(calls.len());
+    let mut queued: Vec<(usize, bool, ToolCall)> = Vec::new();
     for tc in calls {
+        let slot = slots.len();
         // ask_user_* / present_for_review are handled by the interaction backend.
         if let Some(result) = dispatch_dynamic_interaction(
             &state.interaction,
@@ -134,7 +148,7 @@ pub async fn dispatch_tools(
         )
         .await
         {
-            out.push((tc.id, result));
+            slots.push((tc.id, Some(result)));
             continue;
         }
 
@@ -145,7 +159,7 @@ pub async fn dispatch_tools(
                 Some(handle) => crate::daemon::subagent::handle(handle, &tc).await,
                 None => "[error] sub-agent tools are unavailable for this agent".to_string(),
             };
-            out.push((tc.id, result));
+            slots.push((tc.id, Some(result)));
             continue;
         }
 
@@ -164,8 +178,13 @@ pub async fn dispatch_tools(
             )
         };
 
-        let result = match policy {
-            ToolPolicy::Deny => format!("[denied] Tool '{}' is not permitted.", tc.name),
+        match policy {
+            ToolPolicy::Deny => {
+                slots.push((
+                    tc.id.clone(),
+                    Some(format!("[denied] Tool '{}' is not permitted.", tc.name)),
+                ));
+            }
             ToolPolicy::Ask => {
                 let req = InteractionRequest::tool_approval(
                     format!("approve-{}", tc.id),
@@ -178,16 +197,37 @@ pub async fn dispatch_tools(
                     if response.scope == Some(ApprovalScope::Session) {
                         state.session_allows.lock().await.insert(tc.name.clone());
                     }
-                    execute_tool(&state, is_builtin, &tc).await
+                    slots.push((tc.id.clone(), None));
+                    queued.push((slot, is_builtin, tc));
                 } else {
-                    format!("[denied] User declined tool call '{}'.", tc.name)
+                    slots.push((
+                        tc.id.clone(),
+                        Some(format!("[denied] User declined tool call '{}'.", tc.name)),
+                    ));
                 }
             }
-            ToolPolicy::Allow => execute_tool(&state, is_builtin, &tc).await,
-        };
-        out.push((tc.id, result));
+            ToolPolicy::Allow => {
+                slots.push((tc.id.clone(), None));
+                queued.push((slot, is_builtin, tc));
+            }
+        }
     }
-    out
+
+    // Pass 2: run the approved/allowed calls concurrently, then fill their slots.
+    let executed = futures::future::join_all(
+        queued
+            .iter()
+            .map(|(_, is_builtin, tc)| execute_tool(&state, *is_builtin, tc)),
+    )
+    .await;
+    for ((slot, _, _), result) in queued.iter().zip(executed) {
+        slots[*slot].1 = Some(result);
+    }
+
+    slots
+        .into_iter()
+        .map(|(id, result)| (id, result.unwrap_or_default()))
+        .collect()
 }
 
 /// The shared-world tool service: maps entities to their [`AgentToolState`] and
@@ -522,6 +562,59 @@ mod tests {
         let (state, _dir) = script_state(&hub, &[], names, no_script_fields().2, allow);
         let out = dispatch_tools(state, vec![call("c1", "ghost", serde_json::json!({}))]).await;
         assert!(out[0].1.contains("unknown script tool"));
+    }
+
+    #[tokio::test]
+    async fn batch_mixes_denied_and_executed_in_call_order() {
+        // A batch with a denied call between two allowed reads: results must come
+        // back in the original call order even though pass 2 runs them in parallel.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "AAA").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "BBB").unwrap();
+        let hub = InteractionHub::new();
+        let builtins = Arc::new(leviath_tools::BuiltinTools::new(
+            leviath_tools::ToolContext::new(dir.path().to_path_buf()),
+        ));
+        let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
+        let mut global = HashMap::new();
+        global.insert("read_file".to_string(), ToolPolicy::Allow);
+        global.insert("write_file".to_string(), ToolPolicy::Deny);
+        let (script_tools, script_tool_names, script_host) = no_script_fields();
+        let state = Arc::new(AgentToolState {
+            builtins,
+            mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            builtin_names,
+            launch_overrides: Arc::new(HashMap::new()),
+            session_allows: Arc::new(Mutex::new(HashSet::new())),
+            stage_perms: Arc::new(StdMutex::new(HashMap::new())),
+            stage_perms_by_index: Arc::new(Vec::new()),
+            agent_perms: Arc::new(HashMap::new()),
+            global_perms: Arc::new(global),
+            interaction: hub.backend_for("agent-a"),
+            stage_name: Arc::new(StdMutex::new("main".to_string())),
+            subagent: None,
+            sandbox: None,
+            script_tools,
+            script_tool_names,
+            script_host,
+        });
+        let out = dispatch_tools(
+            state,
+            vec![
+                call("c1", "read_file", serde_json::json!({"path": "a.txt"})),
+                call(
+                    "c2",
+                    "write_file",
+                    serde_json::json!({"path": "x", "content": "y"}),
+                ),
+                call("c3", "read_file", serde_json::json!({"path": "b.txt"})),
+            ],
+        )
+        .await;
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0], ("c1".to_string(), "AAA".to_string()));
+        assert!(out[1].0 == "c2" && out[1].1.contains("[denied]"));
+        assert_eq!(out[2], ("c3".to_string(), "BBB".to_string()));
     }
 
     #[tokio::test]
