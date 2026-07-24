@@ -33,11 +33,19 @@ pub struct ParamSpec {
     /// Parameter name (the key the script reads from `params`).
     pub name: String,
     /// JSON-schema type: `string`, `integer`, `number`, `boolean`, `array`, `object`.
+    /// Ignored when [`schema`](Self::schema) is set.
     pub ty: String,
     /// Whether the model must supply this parameter.
     pub required: bool,
-    /// Human description shown to the model.
+    /// Human description shown to the model. Ignored when [`schema`](Self::schema)
+    /// is set (the raw fragment supplies its own).
     pub description: String,
+    /// An optional raw JSON-Schema fragment for this parameter, used verbatim as
+    /// the property's schema instead of the flat `{ type, description }`. Lets a
+    /// `tool.toml` author express what annotations can't — enums, array `items`,
+    /// numeric bounds, nested object shapes, formats, defaults — matching the
+    /// richness built-in and MCP tools advertise. `None` = the flat default.
+    pub schema: Option<serde_json::Value>,
 }
 
 /// Metadata describing a script tool: its name, description, and parameters.
@@ -63,10 +71,15 @@ impl ScriptToolMeta {
         let mut properties = serde_json::Map::new();
         let mut required: Vec<serde_json::Value> = Vec::new();
         for p in &self.params {
-            properties.insert(
-                p.name.clone(),
-                serde_json::json!({ "type": p.ty, "description": p.description }),
-            );
+            // A raw fragment (from `tool.toml`) is used verbatim; otherwise the
+            // flat `{ type, description }` default. `required` is governed by the
+            // param's `required` flag either way (it lives in the parent schema,
+            // not the property).
+            let property = match &p.schema {
+                Some(fragment) => fragment.clone(),
+                None => serde_json::json!({ "type": p.ty, "description": p.description }),
+            };
+            properties.insert(p.name.clone(), property);
             if p.required {
                 required.push(serde_json::Value::String(p.name.clone()));
             }
@@ -180,6 +193,9 @@ fn parse_param_directive(arg: &str) -> Result<ParamSpec> {
         ty: ty.to_string(),
         required,
         description,
+        // Comment annotations have no syntax for a raw schema fragment; that
+        // richness is `tool.toml`-only.
+        schema: None,
     })
 }
 
@@ -204,12 +220,18 @@ struct ToolTomlTool {
 #[derive(Debug, Deserialize)]
 struct ToolTomlParam {
     name: String,
-    #[serde(rename = "type")]
+    /// The scalar type for the flat default. Optional: a param that supplies its
+    /// own `schema` fragment doesn't need it.
+    #[serde(default, rename = "type")]
     ty: String,
     #[serde(default)]
     required: bool,
     #[serde(default)]
     description: String,
+    /// Optional raw JSON-Schema fragment, used verbatim as this param's property
+    /// schema (enums, `items`, bounds, nested objects, …).
+    #[serde(default)]
+    schema: Option<serde_json::Value>,
 }
 
 /// Parse a `tool.toml` manifest into [`ScriptToolMeta`]. When a `tool.toml` sits
@@ -231,6 +253,7 @@ pub fn parse_tool_toml(src: &str) -> Result<ScriptToolMeta> {
             ty: p.ty,
             required: p.required,
             description: p.description,
+            schema: p.schema,
         })
         .collect();
     Ok(ScriptToolMeta {
@@ -670,7 +693,8 @@ mod tests {
                 name: "query".into(),
                 ty: "string".into(),
                 required: true,
-                description: "Search query".into()
+                description: "Search query".into(),
+                schema: None,
             }
         );
         assert!(!meta.params[1].required);
@@ -781,6 +805,27 @@ description = "The URL"
     }
 
     #[test]
+    fn tool_toml_raw_schema_fragment() {
+        // A param supplying its own `schema` fragment (and no `type`) parses the
+        // fragment into ParamSpec.schema for verbatim use.
+        let src = r#"
+[tool]
+name = "export"
+[[tool.params]]
+name = "format"
+required = true
+schema = { type = "string", enum = ["json", "yaml"], description = "Output format" }
+"#;
+        let meta = parse_tool_toml(src).unwrap();
+        assert_eq!(meta.params.len(), 1);
+        assert!(meta.params[0].required);
+        // No `type` key was given → the flat `ty` defaulted to empty.
+        assert_eq!(meta.params[0].ty, "");
+        let frag = meta.params[0].schema.as_ref().unwrap();
+        assert_eq!(frag["enum"][0], "json");
+    }
+
+    #[test]
     fn tool_toml_invalid_syntax_errors() {
         let err = parse_tool_toml("not = valid = toml").unwrap_err();
         assert!(err.to_string().contains("invalid tool.toml"));
@@ -807,6 +852,23 @@ description = "The URL"
         let required = schema["required"].as_array().unwrap();
         assert_eq!(required.len(), 1);
         assert_eq!(required[0], "a");
+    }
+
+    #[test]
+    fn parameters_schema_uses_raw_fragment_verbatim() {
+        // A param carrying a raw fragment: the fragment becomes the property
+        // schema as-is (enum preserved), and `required` still governs the parent
+        // `required` array.
+        let meta = parse_tool_toml(
+            "[tool]\nname = \"t\"\n[[tool.params]]\nname = \"fmt\"\nrequired = true\nschema = { type = \"string\", enum = [\"a\", \"b\"] }\n",
+        )
+        .unwrap();
+        let schema = meta.parameters_schema();
+        assert_eq!(schema["properties"]["fmt"]["type"], "string");
+        assert_eq!(schema["properties"]["fmt"]["enum"][1], "b");
+        // The flat `{type, description}` shape is NOT applied over the fragment.
+        assert!(schema["properties"]["fmt"].get("description").is_none());
+        assert_eq!(schema["required"][0], "fmt");
     }
 
     // ── discover ──
