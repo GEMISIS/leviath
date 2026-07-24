@@ -154,6 +154,7 @@ impl RiskyExecutors for RealExecutors {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
+            tools_dir: leviath_cli::config::leviath_home_dir().map(|h| h.join("tools")),
         };
         commands::mcp::execute_with(args, &env).await
     }

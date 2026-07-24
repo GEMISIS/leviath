@@ -123,7 +123,36 @@ fn execute_reporting_outcome(args: &ValidateArgs) -> anyhow::Result<ValidateOutc
     };
 
     print_success(&blueprint);
+    print_script_tool_report(&path);
     Ok(ValidateOutcome::Success)
+}
+
+/// Validate the agent's own Rhai script tools (issue #97): discover the agent
+/// directory's `tools/` and report how many compiled, warning (non-fatal, like
+/// the daemon's own skip-and-warn) about any that failed. A missing `tools/` dir
+/// prints nothing.
+fn print_script_tool_report(path: &std::path::Path) {
+    // The agent dir is the manifest's parent (file path) or the path itself (dir).
+    let agent_dir = if path.is_file() {
+        path.parent().unwrap_or(path).to_path_buf()
+    } else {
+        path.to_path_buf()
+    };
+    let tools_dir = agent_dir.join("tools");
+    if !tools_dir.is_dir() {
+        return;
+    }
+    let (set, skipped) = leviath_scripting::ScriptToolSet::discover(&[tools_dir]);
+    if !set.is_empty() {
+        println!("  {} script tool(s) in tools/", set.len());
+    }
+    for s in &skipped {
+        println!(
+            "  ⚠ Warning: script tool '{}' skipped: {}",
+            s.path.display(),
+            s.reason
+        );
+    }
 }
 
 pub async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
@@ -710,6 +739,60 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
 
     fn assert_is_success(outcome: &ValidateOutcome) {
         assert!(matches!(outcome, ValidateOutcome::Success));
+    }
+
+    #[test]
+    fn execute_reporting_outcome_reports_agent_script_tools() {
+        // A valid agent whose `tools/` dir holds one good and one broken script:
+        // validation still succeeds, and the script report's count + warning
+        // branches both run.
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = r#"
+[agent]
+name = "with-tools"
+version = "0.1.0"
+description = "has script tools"
+
+[stages.main]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Main"
+max_iterations = 5
+
+[context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+"#;
+        write_manifest(dir.path(), manifest);
+        let tools = dir.path().join("tools");
+        std::fs::create_dir(&tools).unwrap();
+        std::fs::write(tools.join("ok.rhai"), "// @tool ok\nparams.x").unwrap();
+        std::fs::write(tools.join("bad.rhai"), "no directive\nlet").unwrap();
+        let args = ValidateArgs {
+            path: dir.path().to_str().unwrap().to_string(),
+        };
+        let outcome = execute_reporting_outcome(&args).unwrap();
+        assert_is_success(&outcome);
+    }
+
+    #[test]
+    fn print_script_tool_report_no_tools_dir_is_silent() {
+        // No `tools/` dir → the early return (covered by most success tests, but
+        // asserted here directly against a file path, which exercises the
+        // `path.is_file()` → parent arm).
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write_manifest(dir.path(), "unused");
+        print_script_tool_report(&manifest);
+    }
+
+    #[test]
+    fn print_script_tool_report_only_broken_scripts_warns_without_count() {
+        // A `tools/` dir with only a broken script: `set` is empty (no count
+        // line — the `!set.is_empty()` false arm) but the skipped warning runs.
+        let dir = tempfile::tempdir().unwrap();
+        let tools = dir.path().join("tools");
+        std::fs::create_dir(&tools).unwrap();
+        std::fs::write(tools.join("bad.rhai"), "no directive\nlet").unwrap();
+        print_script_tool_report(dir.path());
     }
 
     #[test]
