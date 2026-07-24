@@ -562,7 +562,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
             format!(
                 "[agent]\nname = \"parent\"\n\n\
                  [stages.main]\nmode = \"autonomous\"\n\n\
-                 [stages.parallel]\nmode = \"fan_out\"\nworker_agent = \"{worker_source}\"\nsplit_prompt = \"go\"\n"
+                 [stages.parallel]\nmode = \"fan_out\"\nworker_agent = '{worker_source}'\nsplit_prompt = \"go\"\n"
             ),
         )
         .unwrap();
