@@ -1,0 +1,587 @@
+//! Integration tests for [`RhaiProvider`] driven by a fake [`HttpExecutor`] so
+//! no socket is ever bound. Runs on the default current-thread tokio runtime —
+//! the exact flavor the channel broker must survive.
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
+
+use super::*;
+use crate::provider::{FinishReason, InferenceRequest, RateLimitConfig};
+use host::{EventResult, HostHttpError, HostRequest, HttpExecutor};
+
+// ── Fake executor ────────────────────────────────────────────────────────────
+
+#[derive(Default)]
+struct FakeExecutor {
+    /// Queued unary responses, consumed in order.
+    responses: Mutex<VecDeque<EventResult>>,
+    /// Queued SSE events for the next `execute_stream` call.
+    stream_events: Mutex<VecDeque<EventResult>>,
+    /// Every request the broker performed, for assertions.
+    calls: Mutex<Vec<HostRequest>>,
+}
+
+impl FakeExecutor {
+    fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+    fn with_responses(responses: Vec<EventResult>) -> Arc<Self> {
+        Arc::new(Self {
+            responses: Mutex::new(responses.into()),
+            ..Default::default()
+        })
+    }
+    fn with_stream(events: Vec<EventResult>) -> Arc<Self> {
+        Arc::new(Self {
+            stream_events: Mutex::new(events.into()),
+            ..Default::default()
+        })
+    }
+    fn call_count(&self) -> usize {
+        self.calls.lock().unwrap().len()
+    }
+}
+
+#[async_trait::async_trait]
+impl HttpExecutor for FakeExecutor {
+    async fn execute(&self, req: HostRequest) -> EventResult {
+        self.calls.lock().unwrap().push(req);
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Ok("{}".to_string()))
+    }
+    async fn execute_stream(&self, req: HostRequest, events: mpsc::Sender<EventResult>) {
+        self.calls.lock().unwrap().push(req);
+        let queued: Vec<EventResult> = self.stream_events.lock().unwrap().drain(..).collect();
+        for ev in queued {
+            if events.send(ev).await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+fn request(model: &str) -> InferenceRequest {
+    InferenceRequest {
+        system: Vec::new(),
+        messages: Vec::new(),
+        model: model.to_string(),
+        max_tokens: 100,
+        temperature: 0.0,
+        tools: Vec::new(),
+        extra: serde_json::Value::Null,
+        request_timeout_secs: None,
+    }
+}
+
+fn build(src: &str, executor: Arc<FakeExecutor>) -> Result<RhaiProvider> {
+    RhaiProvider::from_source(
+        "test".to_string(),
+        src,
+        serde_json::json!({}),
+        HashMap::new(),
+        None,
+        None,
+        executor,
+    )
+}
+
+fn build_rl(
+    src: &str,
+    executor: Arc<FakeExecutor>,
+    rate_limit: Option<RateLimitConfig>,
+) -> RhaiProvider {
+    RhaiProvider::from_source(
+        "test".to_string(),
+        src,
+        serde_json::json!({}),
+        HashMap::new(),
+        rate_limit,
+        None,
+        executor,
+    )
+    .unwrap()
+}
+
+const NOOP_INIT: &str = "fn initialize(config) { #{} }\n";
+
+// ── Construction ─────────────────────────────────────────────────────────────
+
+#[test]
+fn from_source_compile_error() {
+    let err = build("fn inference( { oops", FakeExecutor::new())
+        .err()
+        .unwrap();
+    assert!(matches!(err, ProviderError::Other(m) if m.contains("compile")));
+}
+
+#[test]
+fn from_source_initialize_throw() {
+    let src = "fn initialize(config) { throw #{ message: \"no key\", transient: false }; }\n\
+               fn inference(s, r) { #{} }";
+    let err = build(src, FakeExecutor::new()).err().unwrap();
+    assert!(matches!(err, ProviderError::Other(m) if m == "no key"));
+}
+
+#[test]
+fn from_source_missing_initialize() {
+    let err = build("fn inference(s, r) { #{} }", FakeExecutor::new())
+        .err()
+        .unwrap();
+    // call_fn on a missing `initialize` surfaces as a runtime error.
+    assert!(matches!(err, ProviderError::Other(_)));
+}
+
+#[test]
+fn from_source_initialize_receives_config() {
+    let src = "fn initialize(config) { #{ m: config.model } }\n\
+               fn inference(s, r) { #{ content: s.m } }";
+    let p = RhaiProvider::from_source(
+        "test".into(),
+        src,
+        serde_json::json!({ "model": "cfg-model" }),
+        HashMap::new(),
+        None,
+        None,
+        FakeExecutor::new(),
+    )
+    .unwrap();
+    let out = tokio_block(p.infer(request("ignored")));
+    assert_eq!(out.unwrap().content, "cfg-model");
+}
+
+#[test]
+fn from_script_reads_missing_file() {
+    let err = RhaiProvider::from_script(
+        "test".into(),
+        std::path::Path::new("/no/such/provider.rhai"),
+        serde_json::json!({}),
+        HashMap::new(),
+        None,
+        None,
+    )
+    .err()
+    .unwrap();
+    assert!(matches!(err, ProviderError::Other(m) if m.contains("read provider script")));
+}
+
+#[test]
+fn from_script_loads_real_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("p.rhai");
+    std::fs::write(
+        &path,
+        format!("{NOOP_INIT}fn inference(s,r) {{ #{{ content: \"ok\" }} }}"),
+    )
+    .unwrap();
+    let p = RhaiProvider::from_script(
+        "test".into(),
+        &path,
+        serde_json::json!({}),
+        HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(p.name(), "test");
+}
+
+// ── infer ────────────────────────────────────────────────────────────────────
+
+fn tokio_block<F: std::future::Future>(fut: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(fut)
+}
+
+#[tokio::test]
+async fn infer_no_http() {
+    let src = format!(
+        "{NOOP_INIT}fn inference(state, request) {{ \
+         #{{ content: \"hello\", \
+            tokens_used: #{{ prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 }}, \
+            finish_reason: \"Complete\" }} }}"
+    );
+    let exec = FakeExecutor::new();
+    let p = build(&src, exec.clone()).unwrap();
+    let r = p.infer(request("m")).await.unwrap();
+    assert_eq!(r.content, "hello");
+    assert_eq!(r.tokens_used.total_tokens, 5);
+    assert_eq!(r.finish_reason, FinishReason::Complete);
+    assert_eq!(exec.call_count(), 0);
+}
+
+#[tokio::test]
+async fn infer_single_http_post() {
+    let src = format!(
+        "{NOOP_INIT}fn inference(state, request) {{ \
+         let resp = parse_json(http_post(\"http://api/x\", to_json(#{{ model: request.model }}), \
+            #{{ \"Authorization\": \"Bearer k\" }})); \
+         #{{ content: resp.text, tokens_used: #{{ total_tokens: resp.n }} }} }}"
+    );
+    let exec = FakeExecutor::with_responses(vec![Ok("{\"text\":\"hi\",\"n\":7}".to_string())]);
+    let p = build(&src, exec.clone()).unwrap();
+    let r = p.infer(request("gpt-x")).await.unwrap();
+    assert_eq!(r.content, "hi");
+    assert_eq!(r.tokens_used.total_tokens, 7);
+    // The broker performed exactly one request with our header + body.
+    let calls = exec.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].url, "http://api/x");
+    assert_eq!(calls[0].headers.get("Authorization").unwrap(), "Bearer k");
+    assert!(calls[0].body.as_ref().unwrap().contains("gpt-x"));
+}
+
+#[tokio::test]
+async fn infer_multiple_http_calls() {
+    let src = format!(
+        "{NOOP_INIT}fn inference(state, request) {{ \
+         let a = parse_json(http_get(\"http://api/a\")); \
+         let b = parse_json(http_get(\"http://api/b\")); \
+         #{{ content: a.v + b.v }} }}"
+    );
+    let exec = FakeExecutor::with_responses(vec![
+        Ok("{\"v\":\"x\"}".to_string()),
+        Ok("{\"v\":\"y\"}".to_string()),
+    ]);
+    let p = build(&src, exec.clone()).unwrap();
+    let r = p.infer(request("m")).await.unwrap();
+    assert_eq!(r.content, "xy");
+    assert_eq!(exec.call_count(), 2);
+}
+
+#[tokio::test]
+async fn infer_script_throw_maps_transient() {
+    let src = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ throw #{{ message: \"upstream down\", transient: true }}; }}"
+    );
+    let p = build(&src, FakeExecutor::new()).unwrap();
+    let err = p.infer(request("m")).await.err().unwrap();
+    assert!(err.is_transient());
+    assert!(matches!(err, ProviderError::RequestFailed(m) if m == "upstream down"));
+}
+
+#[tokio::test]
+async fn infer_http_429_maps_to_rate_limit() {
+    let src = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ let x = http_post(\"http://api/x\", \"{{}}\", #{{}}); #{{ content: x }} }}"
+    );
+    let exec = FakeExecutor::with_responses(vec![Err(HostHttpError::RateLimited {
+        retry_after: Some(1),
+    })]);
+    let p = build_rl(
+        &src,
+        exec,
+        Some(RateLimitConfig {
+            requests_per_minute: 100,
+            tokens_per_minute: 100_000,
+        }),
+    );
+    let err = p.infer(request("m")).await.err().unwrap();
+    assert!(matches!(err, ProviderError::RateLimitExceeded));
+}
+
+#[tokio::test]
+async fn infer_http_api_error_propagates() {
+    let src = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ let x = http_get(\"http://api/x\"); #{{ content: x }} }}"
+    );
+    let exec = FakeExecutor::with_responses(vec![Err(HostHttpError::Api("HTTP 400: bad".into()))]);
+    // With a rate limiter so the success/reset arms exist elsewhere; here the
+    // Err(_) no-op arm of serve_job is exercised.
+    let p = build_rl(
+        &src,
+        exec,
+        Some(RateLimitConfig {
+            requests_per_minute: 100,
+            tokens_per_minute: 100_000,
+        }),
+    );
+    let err = p.infer(request("m")).await.err().unwrap();
+    assert!(matches!(err, ProviderError::ApiError(_)));
+}
+
+#[tokio::test]
+async fn infer_records_tokens_and_resets_backoff() {
+    // A successful http call with a rate limiter drives serve_job's Ok arm
+    // (reset_backoff) and the record_tokens path.
+    let src = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ let x = parse_json(http_get(\"http://api/x\")); \
+         #{{ content: \"ok\", tokens_used: #{{ total_tokens: x.n }} }} }}"
+    );
+    let exec = FakeExecutor::with_responses(vec![Ok("{\"n\":11}".to_string())]);
+    let p = build_rl(
+        &src,
+        exec,
+        Some(RateLimitConfig {
+            requests_per_minute: 100,
+            tokens_per_minute: 100_000,
+        }),
+    );
+    let r = p.infer(request("m")).await.unwrap();
+    assert_eq!(r.tokens_used.total_tokens, 11);
+}
+
+#[tokio::test]
+async fn infer_rejects_non_map_return() {
+    let src = format!("{NOOP_INIT}fn inference(s, r) {{ [1, 2, 3] }}");
+    let p = build(&src, FakeExecutor::new()).unwrap();
+    let err = p.infer(request("m")).await.err().unwrap();
+    assert!(matches!(err, ProviderError::InvalidResponse(_)));
+}
+
+// ── capabilities / metadata ──────────────────────────────────────────────────
+
+#[test]
+fn capabilities_and_metadata() {
+    let src = format!(
+        "// @provider testp\n// @max_context_tokens 40000\n// @max_output_tokens 8000\n\
+         // @default_model dm\n{NOOP_INIT}fn inference(s, r) {{ #{{}} }}"
+    );
+    let mut caps = HashMap::new();
+    caps.insert(
+        "special".to_string(),
+        crate::provider::ModelCapabilities {
+            max_context_tokens: 999,
+            ..Default::default()
+        },
+    );
+    let p = RhaiProvider::from_source(
+        "test".into(),
+        &src,
+        serde_json::json!({}),
+        caps,
+        None,
+        None,
+        FakeExecutor::new(),
+    )
+    .unwrap();
+
+    assert_eq!(p.name(), "test");
+    assert_eq!(p.meta().default_model.as_deref(), Some("dm"));
+    // override wins
+    assert_eq!(p.max_context_tokens("special"), 999);
+    assert_eq!(p.capabilities("special").max_context_tokens, 999);
+    // metadata default for an unknown model
+    assert_eq!(p.max_context_tokens("other"), 40000);
+    let c = p.capabilities("other");
+    assert_eq!(c.max_context_tokens, 40000);
+    assert_eq!(c.max_output_tokens, 8000);
+    assert!(c.supports_streaming);
+}
+
+// ── count_tokens ─────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn count_tokens_uses_heuristic_without_script_fn() {
+    let src = format!("{NOOP_INIT}fn inference(s, r) {{ #{{}} }}");
+    let p = build(&src, FakeExecutor::new()).unwrap();
+    // "abcdefgh" (8 chars) with a gpt- model → tiktoken; just assert it's > 0.
+    assert!(p.count_tokens("abcdefgh", "gpt-4").await > 0);
+    // non-gpt model → /4 heuristic
+    assert_eq!(p.count_tokens("abcd", "llama").await, 1);
+}
+
+#[tokio::test]
+async fn count_tokens_uses_script_fn() {
+    let src = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ #{{}} }}\n\
+         fn count_tokens(state, text, model) {{ count_tokens_heuristic(text, \"general\") + 100 }}"
+    );
+    let p = build(&src, FakeExecutor::new()).unwrap();
+    // heuristic(abcd)=1, +100 = 101
+    assert_eq!(p.count_tokens("abcd", "m").await, 101);
+}
+
+#[tokio::test]
+async fn count_tokens_script_non_int_falls_back() {
+    let src = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ #{{}} }}\n\
+         fn count_tokens(state, text, model) {{ \"not an int\" }}"
+    );
+    let p = build(&src, FakeExecutor::new()).unwrap();
+    // Falls back to the /4 heuristic for a non-gpt model.
+    assert_eq!(p.count_tokens("abcdefgh", "llama").await, 2);
+}
+
+// ── list_models ──────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn list_models_none_is_empty() {
+    let src = format!("{NOOP_INIT}fn inference(s, r) {{ #{{}} }}");
+    let p = build(&src, FakeExecutor::new()).unwrap();
+    assert!(p.list_models().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn list_models_parses_and_filters() {
+    let src = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ #{{}} }}\n\
+         fn list_models(state) {{ [ #{{ id: \"m1\", max_context_tokens: 1000 }}, #{{ nope: 1 }} ] }}"
+    );
+    let p = build(&src, FakeExecutor::new()).unwrap();
+    let models = p.list_models().await.unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].id, "m1");
+    assert_eq!(models[0].provider, "test");
+    assert_eq!(models[0].capabilities.max_context_tokens, 1000);
+}
+
+#[tokio::test]
+async fn list_models_non_array_is_empty() {
+    let src = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ #{{}} }}\n\
+         fn list_models(state) {{ #{{ not: \"an array\" }} }}"
+    );
+    let p = build(&src, FakeExecutor::new()).unwrap();
+    assert!(p.list_models().await.unwrap().is_empty());
+}
+
+// ── streaming ────────────────────────────────────────────────────────────────
+
+async fn collect_stream(
+    p: &RhaiProvider,
+    req: InferenceRequest,
+) -> Vec<Result<crate::provider::StreamChunk>> {
+    let mut s = p.infer_stream(req).await.unwrap();
+    let mut out = Vec::new();
+    while let Some(item) = s.next().await {
+        out.push(item);
+    }
+    out
+}
+
+const STREAM_SCRIPT: &str = "\
+fn stream(state, request, on_chunk) {
+    stream_request(\"http://api/stream\", \"{}\", #{}, |chunk| {
+        let data = parse_sse(chunk);
+        if data == () { return; }
+        on_chunk.call(#{ delta: data.d });
+    });
+    on_chunk.call(#{ delta: \"\", finish_reason: \"Complete\", tokens: #{ total_tokens: 4 } });
+}
+";
+
+#[tokio::test]
+async fn native_stream_emits_chunks() {
+    let src = format!("{NOOP_INIT}fn inference(s, r) {{ #{{ content: \"x\" }} }}\n{STREAM_SCRIPT}");
+    let exec = FakeExecutor::with_stream(vec![
+        Ok("{\"d\":\"a\"}".to_string()),
+        Ok("{\"d\":\"b\"}".to_string()),
+    ]);
+    let p = build(&src, exec).unwrap();
+    let chunks = collect_stream(&p, request("m")).await;
+    let deltas: Vec<String> = chunks
+        .iter()
+        .map(|c| c.as_ref().unwrap().delta.clone())
+        .collect();
+    assert_eq!(deltas, vec!["a", "b", ""]);
+    let last = chunks.last().unwrap().as_ref().unwrap();
+    assert_eq!(last.finish_reason, Some(FinishReason::Complete));
+    assert_eq!(last.tokens.as_ref().unwrap().total_tokens, 4);
+}
+
+#[tokio::test]
+async fn native_stream_mid_stream_error() {
+    let src = format!("{NOOP_INIT}fn inference(s, r) {{ #{{}} }}\n{STREAM_SCRIPT}");
+    let exec = FakeExecutor::with_stream(vec![
+        Ok("{\"d\":\"a\"}".to_string()),
+        Err(HostHttpError::Transport("reset".into())),
+    ]);
+    let p = build(&src, exec).unwrap();
+    let chunks = collect_stream(&p, request("m")).await;
+    assert_eq!(chunks[0].as_ref().unwrap().delta, "a");
+    assert!(chunks.iter().any(|c| c.is_err()));
+}
+
+#[tokio::test]
+async fn native_stream_script_throw_becomes_error_item() {
+    let src = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ #{{}} }}\n\
+         fn stream(state, request, on_chunk) {{ throw #{{ message: \"boom\", transient: false }}; }}"
+    );
+    let p = build(&src, FakeExecutor::new()).unwrap();
+    let chunks = collect_stream(&p, request("m")).await;
+    assert_eq!(chunks.len(), 1);
+    assert!(matches!(chunks[0], Err(ProviderError::Other(ref m)) if m == "boom"));
+}
+
+#[tokio::test]
+async fn stream_fallback_collapses_infer() {
+    // No `stream` fn → default path collapses infer() into one chunk.
+    let src = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ #{{ content: \"whole\", \
+         tool_calls: [ #{{ id: \"t\", name: \"f\", arguments: #{{ a: 1 }} }} ], \
+         finish_reason: \"ToolCall\" }} }}"
+    );
+    let p = build(&src, FakeExecutor::new()).unwrap();
+    let chunks = collect_stream(&p, request("m")).await;
+    assert_eq!(chunks.len(), 1);
+    let c = chunks[0].as_ref().unwrap();
+    assert_eq!(c.delta, "whole");
+    assert_eq!(c.tool_calls.len(), 1);
+    assert_eq!(c.tool_calls[0].index, 0);
+    assert_eq!(c.finish_reason, Some(FinishReason::ToolCall));
+}
+
+#[tokio::test]
+async fn stream_fallback_propagates_infer_error() {
+    let src = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ throw #{{ message: \"nope\", transient: false }}; }}"
+    );
+    let p = build(&src, FakeExecutor::new()).unwrap();
+    let err = p.infer_stream(request("m")).await.err().unwrap();
+    assert!(matches!(err, ProviderError::Other(m) if m == "nope"));
+}
+
+// ── free-function coverage ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn task_failed_and_finalize_stream_arms() {
+    // Produce a real JoinError from a panicking blocking task.
+    let handle = tokio::task::spawn_blocking(|| panic!("kaboom"));
+    let join_err = handle.await.err().unwrap();
+    let e = task_failed(join_err);
+    assert!(matches!(e, ProviderError::Other(m) if m.contains("task failed")));
+
+    // finalize_stream: Ok(Ok) sends nothing; Ok(Err) and Err(join) each send one.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    finalize_stream(Ok(Ok(())), &tx);
+    finalize_stream(Ok(Err(ProviderError::Other("x".into()))), &tx);
+    let handle2 = tokio::task::spawn_blocking(|| panic!("again"));
+    let je2 = handle2.await.err().unwrap();
+    finalize_stream(Err(je2), &tx);
+    drop(tx);
+    let mut errs = 0;
+    while let Some(item) = rx.recv().await {
+        assert!(item.is_err());
+        errs += 1;
+    }
+    assert_eq!(errs, 2);
+}
+
+#[test]
+fn request_to_dynamic_round_trips() {
+    let d = request_to_dynamic(&request("mymodel"));
+    let json: serde_json::Value = rhai::serde::from_dynamic(&d).unwrap();
+    assert_eq!(json["model"], "mymodel");
+}
+
+#[test]
+fn tokio_block_helper_used() {
+    // Exercise the sync helper (also proves broker works when driven via a
+    // freshly-built current-thread runtime).
+    let src = format!("{NOOP_INIT}fn inference(s, r) {{ #{{ content: \"z\" }} }}");
+    let p = build(&src, FakeExecutor::new()).unwrap();
+    let out = tokio_block(p.infer(request("m"))).unwrap();
+    assert_eq!(out.content, "z");
+}

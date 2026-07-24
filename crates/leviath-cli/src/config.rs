@@ -60,6 +60,15 @@ pub struct Config {
     #[serde(default)]
     pub model_capabilities: HashMap<String, ModelCapabilities>,
 
+    /// Optional overrides for Rhai *script providers* (issue #101). Key is the
+    /// provider name an agent references (e.g. `"groq"`). A script activates by
+    /// being referenced + its `.rhai` file existing in the providers dir; an
+    /// entry here only supplies overrides (an API key not read from env, a
+    /// `base_url`, a `rate_limit`, a differently-named `script`, or extra keys
+    /// forwarded to the script's `initialize`).
+    #[serde(default)]
+    pub model_providers: HashMap<String, ModelProviderConfig>,
+
     /// Global tool permission overrides.
     ///
     /// Keys are tool names (e.g. `"bash"`, `"write_file"`).  Values override
@@ -260,6 +269,36 @@ pub struct ProviderConfig {
     pub claude_code_effort: Option<String>,
 }
 
+/// Optional overrides for a Rhai script provider, from `[model_providers.<name>]`.
+///
+/// Every field is optional. Keys not recognized below flow into [`Self::extra`]
+/// and are forwarded to the script's `initialize(config)` alongside `base_url`
+/// and `api_key`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelProviderConfig {
+    /// Script filename stem or path. Defaults to `<name>.rhai` in the providers
+    /// directory (`~/.leviath/providers/`).
+    #[serde(default)]
+    pub script: Option<String>,
+
+    /// API key forwarded to the script as `config.api_key` (a script may instead
+    /// read its own environment variable).
+    #[serde(default)]
+    pub api_key: Option<String>,
+
+    /// Base URL forwarded to the script as `config.base_url`.
+    #[serde(default)]
+    pub base_url: Option<String>,
+
+    /// Rate limit enforced by the Rust wrapper (requests/tokens per minute).
+    #[serde(default)]
+    pub rate_limit: Option<leviath_providers::RateLimitConfig>,
+
+    /// Any additional keys, forwarded verbatim into the script's `initialize`.
+    #[serde(flatten)]
+    pub extra: HashMap<String, toml::Value>,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -279,6 +318,7 @@ impl Default for Config {
             mcp_servers: Vec::new(),
             default_model: None,
             model_capabilities: HashMap::new(),
+            model_providers: HashMap::new(),
             tool_permissions: HashMap::new(),
             title: TitleConfig::default(),
             request_timeout_secs: None,
@@ -453,6 +493,13 @@ pub fn leviath_home_dir() -> Option<PathBuf> {
         return Some(PathBuf::from(override_home));
     }
     dirs::home_dir()
+}
+
+/// The directory that holds drop-in Rhai *script providers* (issue #101):
+/// `~/.leviath/providers/` (honoring `LEVIATH_HOME`). `None` when no home
+/// directory can be resolved.
+pub fn providers_dir() -> Option<PathBuf> {
+    leviath_home_dir().map(|h| h.join(".leviath").join("providers"))
 }
 
 /// Create the config directory with restrictive permissions.
@@ -1767,6 +1814,7 @@ anthropic_api_key = "sk-ant-test-key"
             mcp_servers: vec![],
             default_model: None,
             model_capabilities: model_caps,
+            model_providers: HashMap::new(),
             tool_permissions: tool_perms,
             title: TitleConfig {
                 enabled: false,

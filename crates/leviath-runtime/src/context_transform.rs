@@ -116,7 +116,7 @@ pub fn dispatch_content_summary(
             continue;
         };
         let config = &settings.0;
-        let Some(provider) = providers.0.get(&config.provider).cloned() else {
+        let Some(provider) = providers.0.get(&config.provider) else {
             // Provider not registered ⇒ keep the raw content.
             commands.entity(entity).remove::<PendingContentSummary>();
             continue;
