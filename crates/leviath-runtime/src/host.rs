@@ -999,6 +999,7 @@ mod tests {
             registry,
             Arc::new(NoTools),
             InferencePoolConfig::new(),
+            1,
             std::env::temp_dir(),
             Handle::current(),
         );

@@ -4,22 +4,28 @@
 //! When the pipeline decides an agent's response has tool calls to run, the
 //! tool-dispatch system builds a [`ToolJob`] (the agent plus a boxed async
 //! closure that executes that agent's batch of calls against its own tool
-//! registry / workdir / policy) and sends it to the tool lane. [`tool_worker`]
-//! processes jobs **one at a time** — tools are sequential for now — and reports
-//! each [`ToolOutcome`] back on the results channel, waking the tick loop; the
-//! tool-collect system applies the results on a later tick.
+//! registry / workdir / policy) and sends it to the tool lane. Each
+//! [`tool_worker`] pulls jobs and reports each [`ToolOutcome`] back on the
+//! results channel, waking the tick loop; the tool-collect system applies the
+//! results on a later tick.
 //!
-//! "Sequential for now" = a single `tool_worker`. It becomes a pool later by
-//! running several workers off the same job channel (e.g. a global tool-
-//! concurrency cap), with no change to the dispatch/collect systems.
+//! **Concurrency**: the lane is a *pool* — [`spawn_tool_pool`] runs N workers off
+//! one shared job channel (`Arc<Mutex<Receiver>>`). A worker holds the receiver
+//! lock only across `recv()`, then releases it and runs `exec().await`, so up to
+//! N agents' tool batches execute concurrently (the receive is serialized; the
+//! execution is not). This is the tool-lane counterpart of the inference pool's
+//! per-model concurrency cap. The dispatch/collect systems are unchanged.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
+use tokio::runtime::Handle;
+use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::task::JoinHandle;
 
 /// The future produced by a boxed tool-execution closure: resolves to
 /// `(tool_call_id, result)` pairs — the same shape the engine's tool executors
@@ -48,15 +54,29 @@ pub struct ToolOutcome {
     pub results: Vec<(String, String)>,
 }
 
-/// The single-lane tool worker: pulls [`ToolJob`]s and runs them **one at a
-/// time**, reporting each outcome and waking the tick loop. Returns when the job
-/// channel is closed (all senders dropped — i.e. the world is shutting down).
+/// A shared, multi-consumer job receiver: several [`tool_worker`]s pull from the
+/// same channel by taking the lock only long enough to `recv()`.
+pub type SharedJobRx = Arc<Mutex<UnboundedReceiver<ToolJob>>>;
+
+/// One tool worker: pulls [`ToolJob`]s from the shared channel and runs them,
+/// reporting each outcome and waking the tick loop. Holds the receiver lock only
+/// across `recv()` (so sibling workers can run their `exec().await` in parallel),
+/// then releases it before executing. Returns when the job channel is closed (all
+/// senders dropped — i.e. the world is shutting down).
 pub async fn tool_worker(
-    mut jobs: UnboundedReceiver<ToolJob>,
+    jobs: SharedJobRx,
     results: UnboundedSender<ToolOutcome>,
     wake: Arc<Notify>,
 ) {
-    while let Some(ToolJob { entity, exec }) = jobs.recv().await {
+    loop {
+        // Serialize only the receive; drop the guard before executing.
+        let next = {
+            let mut rx = jobs.lock().await;
+            rx.recv().await
+        };
+        let Some(ToolJob { entity, exec }) = next else {
+            return; // channel closed → shut down
+        };
         let out = exec().await;
         // Harmless no-op if the collect side has gone away.
         let _ = results.send(ToolOutcome {
@@ -65,6 +85,22 @@ pub async fn tool_worker(
         });
         wake.notify_one();
     }
+}
+
+/// Spawn a pool of `workers` [`tool_worker`] tasks off one shared job channel and
+/// return their handles. `workers` is clamped to at least 1. This is the tool-lane
+/// concurrency cap — the number of agents whose tool batches may run at once.
+pub fn spawn_tool_pool(
+    runtime: &Handle,
+    jobs: UnboundedReceiver<ToolJob>,
+    results: UnboundedSender<ToolOutcome>,
+    wake: Arc<Notify>,
+    workers: usize,
+) -> Vec<JoinHandle<()>> {
+    let shared: SharedJobRx = Arc::new(Mutex::new(jobs));
+    (0..workers.max(1))
+        .map(|_| runtime.spawn(tool_worker(shared.clone(), results.clone(), wake.clone())))
+        .collect()
 }
 
 #[cfg(test)]
@@ -86,6 +122,10 @@ mod tests {
         }
     }
 
+    fn shared(rx: UnboundedReceiver<ToolJob>) -> SharedJobRx {
+        Arc::new(Mutex::new(rx))
+    }
+
     #[tokio::test]
     async fn worker_processes_jobs_in_order_then_exits_on_close() {
         let (jtx, jrx) = mpsc::unbounded_channel();
@@ -96,7 +136,7 @@ mod tests {
         jtx.send(job(2, vec![("c2", "r2")])).unwrap();
         drop(jtx); // close the job channel so the worker loop ends
 
-        tool_worker(jrx, rtx, wake).await;
+        tool_worker(shared(jrx), rtx, wake).await;
 
         let first = rrx.try_recv().unwrap();
         assert_eq!(first.entity, Entity::from_raw(1));
@@ -116,6 +156,71 @@ mod tests {
         jtx.send(job(9, vec![("c", "r")])).unwrap();
         drop(jtx);
         // Must drain the job and not panic despite the failed send.
-        tool_worker(jrx, rtx, wake).await;
+        tool_worker(shared(jrx), rtx, wake).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn pool_runs_batches_concurrently_and_all_exit_on_close() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let (jtx, jrx) = mpsc::unbounded_channel();
+        let (rtx, mut rrx) = mpsc::unbounded_channel();
+        let wake = Arc::new(Notify::new());
+
+        // Three jobs that each block on a barrier: they can only all finish if
+        // they run concurrently (a single-worker lane would deadlock the test's
+        // timeout). A shared counter + Notify serves as the rendezvous.
+        let arrived = Arc::new(AtomicUsize::new(0));
+        let go = Arc::new(Notify::new());
+        for i in 1..=3u32 {
+            let arrived = arrived.clone();
+            let go = go.clone();
+            jtx.send(ToolJob {
+                entity: Entity::from_raw(i),
+                exec: Box::new(move || {
+                    Box::pin(async move {
+                        if arrived.fetch_add(1, Ordering::SeqCst) + 1 == 3 {
+                            go.notify_waiters();
+                        }
+                        // Wait until all three have arrived (proving concurrency).
+                        while arrived.load(Ordering::SeqCst) < 3 {
+                            go.notified().await;
+                        }
+                        vec![("c".to_string(), "r".to_string())]
+                    })
+                }),
+            })
+            .unwrap();
+        }
+        drop(jtx);
+
+        let handles = spawn_tool_pool(&Handle::current(), jrx, rtx, wake, 3);
+        // All three outcomes must arrive; bounded so a serialization bug fails fast.
+        for _ in 0..3 {
+            tokio::time::timeout(Duration::from_secs(5), rrx.recv())
+                .await
+                .expect("all batches complete concurrently")
+                .expect("outcome present");
+        }
+        for h in handles {
+            h.await.unwrap(); // every worker exits once the channel closes
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spawn_tool_pool_clamps_zero_to_one_worker() {
+        let (jtx, jrx) = mpsc::unbounded_channel();
+        let (rtx, mut rrx) = mpsc::unbounded_channel();
+        let wake = Arc::new(Notify::new());
+        jtx.send(job(7, vec![("c", "r")])).unwrap();
+        drop(jtx);
+        let handles = spawn_tool_pool(&Handle::current(), jrx, rtx, wake, 0);
+        assert_eq!(handles.len(), 1); // clamped up to one worker
+        let out = rrx.recv().await.unwrap();
+        assert_eq!(out.entity, Entity::from_raw(7));
+        for h in handles {
+            h.await.unwrap();
+        }
     }
 }
