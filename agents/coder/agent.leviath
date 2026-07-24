@@ -1,6 +1,6 @@
 [agent]
 name = "coder"
-version = "0.2.0"
+version = "0.3.0"
 description = "Multi-stage coding agent — analyze, implement, and review with graph-based error recovery and multi-provider model fallback"
 entry_stage = "analyze"
 
@@ -22,17 +22,30 @@ bash       = "ask"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Understand requirements and plan the implementation"
-available_tools = ["read_file", "list_dir"]
+available_tools = ["read_file", "list_dir", "context_write"]
 max_iterations = 15
 system_prompt = """
 You are analyzing a coding task to produce a concise implementation plan.
-Use list_dir or read_file only if you need to check what already exists in the project.
-For a fresh task with no existing code, skip exploration entirely.
-Output a short bullet-list plan: which files to create/modify, what each does, and any key decisions.
-Be brief — the implement stage will do the actual coding.
+
+Start by categorizing the task — it drives everything downstream:
+- NEW FEATURE: what to build, where it slots in, which existing patterns to follow.
+- BUGFIX: reproduce first, isolate the root cause, then scope the minimal fix.
+- REFACTOR: preserve behavior; identify the seam and what must stay invariant.
+
+Then:
+1. Check the `conventions` and `architecture` regions — they are pre-loaded with
+   the project's style/lint rules and design docs. Follow them; don't rediscover them.
+2. Estimate scope: which files to create/modify, and roughly how large the change is.
+3. Identify dependencies — modules, libraries, config, or tests this touches.
+   Use list_dir/read_file ONLY to fill real gaps. For a fresh task with no existing
+   code, skip exploration entirely.
+
+Output a short bullet-list plan into the `plan` region (via context_write): files to
+create/modify, what each does, key decisions, and the dependencies you found. Be
+brief — the implement stage does the actual coding.
 """
 
-# Route exploration output into the persistent codebase region, not scratch.
+# Exploration output lands in the persistent `codebase` region, not scratch.
 [stages.analyze.tool_routing]
 default_region = "scratch"
 [stages.analyze.tool_routing.overrides]
@@ -56,23 +69,35 @@ available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash", "
 max_iterations = 50
 max_revisits = 3
 system_prompt = """
-You are implementing a coding task. Write working, production-quality code.
-Use write_file to create files and edit_file to modify existing ones.
-Use bash to run tests or verify the build once files are written.
-Do NOT spend iterations reading the codebase unless you need to check something specific.
+You are implementing the plan from the `plan` region. Write working,
+production-quality code that matches the project's `conventions`.
+
+Work incrementally — one coherent file/change at a time, not one giant dump:
+- Use write_file to create files and edit_file to modify existing ones.
+- Handle errors explicitly (validate inputs, propagate/return errors, no silent
+  swallowing) — match the error-handling style already used in this codebase.
+- Write or update tests alongside the code when the task warrants it, then use
+  bash to run them and verify the build. Test output is routed to `test_results`.
+- Do NOT spend iterations re-reading the codebase unless you need something specific.
+
+If a test keeps failing, check the `errors` region — it keeps the recent failures
+so you can spot a repeating pattern instead of chasing the same wall.
 
 If you hit a destructive or hard-to-reverse action you're unsure about, use
 ask_user_confirm before proceeding. Otherwise work autonomously.
 
-Create/modify all files needed, then confirm with a short summary of what changed
-and whether tests passed.
+When all files are written and tests pass, finish with a short summary of what
+changed and the test outcome.
 """
 
 [stages.implement.tool_routing]
 default_region = "scratch"
 [stages.implement.tool_routing.overrides]
-read_file = "codebase"
-list_dir  = "codebase"
+read_file  = "codebase"
+list_dir   = "codebase"
+write_file = "implementation"
+edit_file  = "implementation"
+bash       = "test_results"
 
 [stages.implement.transitions.review]
 hint = "Implementation complete, ready for review"
@@ -90,7 +115,7 @@ transform = "direct"
 mode = "interactive"
 model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "devstral:24b" }] }
 description = "Review the code before finalizing"
-available_tools = ["read_file", "list_dir"]
+available_tools = ["read_file", "list_dir", "bash"]
 max_iterations = 10
 max_revisits = 3
 allow_complete = true
@@ -102,9 +127,15 @@ Review complete. Based on your findings:
 Minor style nits don't warrant another implementation pass.
 """
 system_prompt = """
-You are reviewing the implementation. Use read_file to read the files that were
-just created or modified. Provide concise, actionable feedback: correctness,
-edge cases, error handling, security, and code quality.
+You are reviewing the implementation. Verify it against the ORIGINAL task in the
+`task` region — not just against the plan (the plan can be wrong).
+
+1. Read the files that were created or modified (they are tracked in the
+   `implementation` region; read_file for anything you need to confirm).
+2. Re-run the tests with bash and confirm they pass — output goes to `test_results`.
+   Don't approve on unverified claims that "tests pass".
+3. Check: correctness vs. the task, edge cases, error handling, security, and
+   code quality/conventions.
 
 End with one of:
   APPROVED — no significant issues
@@ -114,16 +145,25 @@ End with one of:
 [stages.review.tool_permissions]
 read_file = "allow"
 list_dir  = "allow"
+bash      = "ask"
 
-# Custom transform: carry the plan/architecture/codebase forward, compact the
-# review conversation into a fix list, and clear scratch before re-implementing.
+[stages.review.tool_routing]
+default_region = "scratch"
+[stages.review.tool_routing.overrides]
+read_file = "codebase"
+list_dir  = "codebase"
+bash      = "test_results"
+
+# Custom transform: carry the plan/architecture/task/codebase forward, compact the
+# review conversation into a fix list, and clear scratch + test_results before
+# re-implementing so stale failures don't confuse the next pass.
 [stages.review.transitions.implement]
 hint = "Issues found — needs another implementation pass"
 transform = "custom"
 [stages.review.transitions.implement.transform_config]
-carry = ["architecture", "task", "codebase"]
+carry = ["architecture", "conventions", "task", "plan", "codebase"]
 compact = ["conversation"]
-clear = ["scratch"]
+clear = ["scratch", "test_results"]
 compact_prompt = "Summarize the review findings as a numbered list of required fixes."
 
 [stages.review.transitions.error_recovery]
@@ -136,14 +176,21 @@ transform = "direct"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Diagnose and resolve errors encountered during implementation"
-available_tools = ["read_file", "bash"]
+available_tools = ["read_file", "bash", "context_append"]
 max_iterations = 10
 max_revisits = 2
 system_prompt = """
-An error occurred. Read the error details from the conversation context, diagnose
-the root cause, and suggest a fix or workaround. Then transition back to implement
-to retry.
+An error occurred. Read the error details from context, diagnose the root cause,
+and note a fix or workaround. Append a one-line summary of the failure to the
+`errors` region (context_append) so repeated failures become visible as a pattern,
+then transition back to implement to retry. If you see the SAME error recurring in
+`errors`, change approach rather than repeating the fix.
 """
+
+[stages.error_recovery.tool_routing]
+default_region = "errors"
+[stages.error_recovery.tool_routing.overrides]
+read_file = "codebase"
 
 [stages.error_recovery.transitions.implement]
 hint = "Error diagnosed — retry implementation"
@@ -155,19 +202,31 @@ provider = "anthropic"
 model = "claude-sonnet-4-6"
 
 # ─── Context layout ───────────────────────────────────────────────────────────
+# Budgets are given as a percentage of the model's context window (issue #100),
+# with an absolute `max_tokens`/`threshold_tokens` guard-rail so the layout is
+# sensible on any model. Percentages are ceilings, not reservations — they may
+# sum past 100% since regions rarely fill at once.
 [context.regions]
-# System-level (pinned, stable, cacheable — combined > 1024 tokens for Anthropic caching)
-architecture   = { kind = "pinned",          max_tokens = 6000 }
-task           = { kind = "pinned",          max_tokens = 4000 }
+# ── Inputs (pinned, stable, cacheable) ──
+task         = { kind = "pinned", budget = "2%", max_tokens = 4000, required = true, required_message = "Describe the coding task via --task (or the API/ACP task field)." }
+# Pre-loaded on startup: coding style, lint rules, contribution guide (missing files skipped).
+conventions  = { kind = "pinned", budget = "2%", max_tokens = 3000, seed = { files = ["CONVENTIONS.md", "CONTRIBUTING.md", "STYLEGUIDE.md", "STYLE.md", ".editorconfig", "rustfmt.toml", ".rustfmt.toml", ".prettierrc", ".eslintrc.json", "ruff.toml", "pyproject.toml"] } }
+# Pre-loaded on startup: architecture / design docs (missing files skipped).
+architecture = { kind = "pinned", budget = "3%", max_tokens = 6000, seed = { files = ["ARCHITECTURE.md", "DESIGN.md", "docs/ARCHITECTURE.md", "docs/architecture.md", "README.md"] } }
+plan         = { kind = "pinned", budget = "3%", max_tokens = 4000 }
 
-# Knowledge (non-volatile, survives message eviction)
-codebase       = { kind = "compacting",      threshold_tokens = 25000, max_tokens = 40000 }
-codebase_history = { kind = "compact_history", source_region = "codebase", max_tokens = 8000 }
-implementation = { kind = "compacting",      threshold_tokens = 25000, max_tokens = 40000 }
-impl_history   = { kind = "compact_history", source_region = "implementation", max_tokens = 8000 }
+# ── Knowledge (non-volatile, survives message eviction; compacts to *_history) ──
+codebase         = { kind = "compacting",      budget = "25%", compact_at = "80%", threshold_tokens = 25000, max_tokens = 40000 }
+codebase_history = { kind = "compact_history", source_region = "codebase",      budget = "2%", max_tokens = 8000 }
+implementation   = { kind = "compacting",      budget = "35%", compact_at = "80%", threshold_tokens = 32000, max_tokens = 40000 }
+impl_history     = { kind = "compact_history", source_region = "implementation", budget = "2%", max_tokens = 8000 }
 
-# Conversation (bulk eviction for caching — 20 iterations of stable prefix between evictions)
-conversation   = { kind = "sliding_window",  max_items = 40, max_tokens = 30000, strategy = "bulk", overflow = 20 }
+# ── Feedback loops ──
+# test_results is clearable so stale failures are wiped between retry passes.
+test_results = { kind = "clearable",      budget = "4%", max_tokens = 5000 }
+# errors is a small sliding window so a repeating failure is visible as a pattern.
+errors       = { kind = "sliding_window", max_items = 5, budget = "2%", max_tokens = 3000 }
 
-# Working memory (volatile)
-scratch        = { kind = "clearable",       max_tokens = 10000 }
+# ── Conversation (bulk eviction for prompt caching) + working memory ──
+conversation = { kind = "sliding_window", max_items = 40, budget = "20%", max_tokens = 30000, strategy = "bulk", overflow = 20 }
+scratch      = { kind = "clearable",      budget = "8%", max_tokens = 10000 }
