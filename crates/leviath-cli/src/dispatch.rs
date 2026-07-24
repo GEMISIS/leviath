@@ -69,6 +69,9 @@ pub enum Commands {
     /// Validate an agent blueprint
     Validate(commands::validate::ValidateArgs),
 
+    /// List and validate the global Rhai script tools
+    Tools(commands::tools::ToolsArgs),
+
     /// Manage taint tracking policy rules
     Policy(commands::policy::PolicyArgs),
 
@@ -159,6 +162,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Dashboard(args) => ex.dashboard(args).await,
         Commands::Models(args) => commands::models::execute(args).await,
         Commands::Validate(args) => commands::validate::execute(args).await,
+        Commands::Tools(args) => commands::tools::execute(args).await,
         Commands::Policy(args) => commands::policy::execute(args).await,
         Commands::Serve(args) => ex.serve(args).await,
         Commands::AgentClient(args) => ex.agent_client(args).await,
@@ -439,6 +443,22 @@ mod tests {
         };
         let result = dispatch(Commands::Validate(args), &MockRisky).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn dispatch_tools_variant_is_routed() {
+        // Point LEVIATH_HOME at a temp dir so the scan is hermetic; an empty
+        // tools dir just lists nothing and returns Ok (routing is exercised).
+        let home = tempfile::tempdir().unwrap();
+        let result = temp_env::async_with_vars(
+            [("LEVIATH_HOME", Some(home.path().to_str().unwrap()))],
+            async {
+                let args = commands::tools::ToolsArgs { json: false };
+                dispatch(Commands::Tools(args), &MockRisky).await
+            },
+        )
+        .await;
+        assert!(result.is_ok());
     }
 
     #[tokio::test]

@@ -94,6 +94,11 @@ pub struct McpEnv {
     pub opener: leviath_mcp::BrowserOpener,
     /// Current Unix time, for token-expiry math.
     pub now: u64,
+    /// The global Rhai script-tools directory (`<leviath-home>/tools/`). `lev mcp
+    /// list` also surfaces these tools (labeled `script`) so the listing covers
+    /// every external tool provider, not only MCP servers (issue #97). `None`
+    /// disables the script scan (used by tests that only care about servers).
+    pub tools_dir: Option<std::path::PathBuf>,
 }
 
 /// Run a `lev mcp` subcommand against the injected environment.
@@ -256,11 +261,14 @@ fn list_servers(list: ListArgs, env: &McpEnv) -> anyhow::Result<()> {
     let config = Config::load_from_path_public(&env.config_path)?;
     let store = AuthStore::load(&env.store_path)?;
 
-    let rows: Vec<ServerRow> = config
+    let mut rows: Vec<ServerRow> = config
         .mcp_servers
         .iter()
         .map(|s| ServerRow::describe(s, &store, env.now))
         .collect();
+    // Also surface the global Rhai script tools (labeled `script`) so the listing
+    // covers every external tool provider, not just MCP servers (issue #97).
+    rows.extend(script_tool_rows(env.tools_dir.as_deref()));
 
     if list.json {
         // `ServerRow` is plain data; serialization is infallible.
@@ -271,17 +279,44 @@ fn list_servers(list: ListArgs, env: &McpEnv) -> anyhow::Result<()> {
     } else {
         for row in &rows {
             println!(
-                "{}\t{}\t{}\t{}",
-                row.name, row.transport, row.auth, row.endpoint
+                "{}\t{}\t{}\t{}\t{}",
+                row.kind, row.name, row.transport, row.auth, row.endpoint
             );
         }
     }
     Ok(())
 }
 
-/// One row of `lev mcp list`, also the JSON shape.
+/// The `script`-kind rows for `lev mcp list`: one per compiled global script
+/// tool. A `None`/absent tools dir yields no rows.
+fn script_tool_rows(tools_dir: Option<&std::path::Path>) -> Vec<ServerRow> {
+    let dirs: Vec<std::path::PathBuf> = tools_dir
+        .map(std::path::Path::to_path_buf)
+        .into_iter()
+        .collect();
+    let (set, _skipped) = leviath_scripting::ScriptToolSet::discover(&dirs);
+    let endpoint = tools_dir
+        .map(|d| d.display().to_string())
+        .unwrap_or_default();
+    let mut metas = set.metas();
+    metas.sort_by(|a, b| a.name.cmp(&b.name));
+    metas
+        .into_iter()
+        .map(|m| ServerRow {
+            kind: "script".to_string(),
+            name: m.name,
+            transport: "rhai".to_string(),
+            endpoint: endpoint.clone(),
+            auth: "n/a".to_string(),
+        })
+        .collect()
+}
+
+/// One row of `lev mcp list`, also the JSON shape. `kind` is `mcp` for a
+/// configured server or `script` for a discovered Rhai script tool.
 #[derive(serde::Serialize)]
 struct ServerRow {
+    kind: String,
     name: String,
     transport: String,
     endpoint: String,
@@ -303,6 +338,7 @@ impl ServerRow {
         };
         let auth = auth_status(server, store, now);
         Self {
+            kind: "mcp".to_string(),
             name: server.name.clone(),
             transport,
             endpoint,
@@ -350,6 +386,9 @@ mod tests {
             store_path: dir.join("mcp-auth.json"),
             opener: std::sync::Arc::new(opener),
             now,
+            // Default: no script scan, so server-focused tests stay hermetic. The
+            // script-row path has its own dedicated test with a seeded dir.
+            tools_dir: None,
         }
     }
 
@@ -900,9 +939,44 @@ for line in sys.stdin:
     fn server_row_describes_an_http_server() {
         let http = MCPServerConfig::http("remote", "https://e.com/mcp");
         let row = ServerRow::describe(&http, &AuthStore::default(), 0);
+        assert_eq!(row.kind, "mcp");
         assert_eq!(row.transport, "http");
         assert_eq!(row.endpoint, "https://e.com/mcp");
         assert_eq!(row.auth, "none");
+    }
+
+    #[test]
+    fn script_tool_rows_lists_compiled_tools() {
+        // None → no rows.
+        assert!(script_tool_rows(None).is_empty());
+        // A tools dir with two valid + a broken script → two `script` rows,
+        // sorted by name (the broken one is silently omitted, like the daemon).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("up.rhai"), "// @tool up\nparams.x").unwrap();
+        std::fs::write(dir.path().join("down.rhai"), "// @tool down\n1").unwrap();
+        std::fs::write(dir.path().join("bad.rhai"), "no directive\nlet").unwrap();
+        let rows = script_tool_rows(Some(dir.path()));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].kind, "script");
+        assert_eq!(rows[0].name, "down", "sorted by name");
+        assert_eq!(rows[1].name, "up");
+        assert_eq!(rows[0].transport, "rhai");
+        assert_eq!(rows[0].auth, "n/a");
+        assert!(rows[0].endpoint.contains(dir.path().to_str().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn list_includes_script_tools_when_tools_dir_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = env_at(dir.path(), never_opens, 0);
+        // Seed a global tools dir with one script.
+        let tools = dir.path().join("tools");
+        std::fs::create_dir(&tools).unwrap();
+        std::fs::write(tools.join("up.rhai"), "// @tool up\nparams.x").unwrap();
+        env.tools_dir = Some(tools);
+        // No MCP servers configured, but the script tool still lists (text + JSON).
+        list_servers(ListArgs { json: false }, &env).unwrap();
+        list_servers(ListArgs { json: true }, &env).unwrap();
     }
 
     #[test]
@@ -929,6 +1003,7 @@ for line in sys.stdin:
             store_path: store,
             opener: std::sync::Arc::new(never_opens),
             now: 0,
+            tools_dir: None,
         }
     }
 
@@ -1005,6 +1080,7 @@ for line in sys.stdin:
             store_path: dir.path().join("s.json"),
             opener: std::sync::Arc::new(never_opens),
             now: 0,
+            tools_dir: None,
         };
         assert!(
             execute_with(
