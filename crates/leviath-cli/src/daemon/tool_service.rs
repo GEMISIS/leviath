@@ -15,6 +15,8 @@
 //! file-tracking whenever its blueprint declares it.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use bevy_ecs::entity::Entity;
@@ -69,12 +71,33 @@ pub struct AgentToolState {
     /// `builtins` as the shell tool's executor.
     pub sandbox: Option<std::sync::Arc<crate::daemon::sandbox_manager::SandboxManager>>,
     /// The agent's discovered Rhai script tools (issue #97), compiled at spawn.
-    pub script_tools: Arc<leviath_scripting::ScriptToolSet>,
+    /// Behind a mutex so a `dynamic_tools` agent's mid-run re-scan can swap the
+    /// set in place; static agents never mutate it.
+    pub script_tools: Arc<StdMutex<leviath_scripting::ScriptToolSet>>,
     /// Names of the script tools, for routing dispatch to the Rhai executor.
-    pub script_tool_names: HashSet<String>,
+    /// Mutable alongside `script_tools` on a dynamic re-scan.
+    pub script_tool_names: Arc<StdMutex<HashSet<String>>>,
     /// The host functions script tools call, with `[tool_script_permissions]`
     /// enforcement (Layer 3) already baked in.
     pub script_host: Arc<dyn leviath_scripting::ScriptHost>,
+    /// Present only for `dynamic_tools` agents: everything needed to re-discover
+    /// and re-advertise this agent's tools mid-run (issue #97).
+    pub dynamic: Option<Arc<DynamicToolCtx>>,
+}
+
+/// Re-resolution inputs for a `dynamic_tools` agent — held so [`CliToolService`]
+/// can re-scan its `tools/` directories and re-filter its stage tool defs mid-run.
+pub struct DynamicToolCtx {
+    /// `tools/` directories to re-scan (agent dir, run workdir, global), in order.
+    pub scan_dirs: Vec<PathBuf>,
+    /// Names reserved by built-in / sub-agent / MCP tools (collision-drop set).
+    pub reserved_names: HashSet<String>,
+    /// Static (non-script) tool defs: built-in + sub-agent + MCP.
+    pub static_defs: Vec<leviath_providers::Tool>,
+    /// Each stage's `available_tools` (Layer-1 allowlist), by stage index.
+    pub stage_available: Vec<Vec<String>>,
+    /// Set when the agent writes a tool file; drained by `wants_refresh`.
+    pub dirty: Arc<AtomicBool>,
 }
 
 /// Execute a single (non-context) tool call against the script-tool, built-in,
@@ -82,11 +105,13 @@ pub struct AgentToolState {
 /// dispatches to the Rhai engine; the compiled script and permission-enforcing
 /// host run on a blocking thread (the engine is synchronous).
 async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -> String {
-    if state.script_tool_names.contains(&tc.name) {
+    if state.script_tool_names.lock().unwrap().contains(&tc.name) {
         return execute_script_tool(state, tc).await;
     }
     if is_builtin {
-        state.builtins.execute(&tc.name, tc.arguments.clone()).await
+        let result = state.builtins.execute(&tc.name, tc.arguments.clone()).await;
+        mark_dirty_on_tool_write(state, tc);
+        result
     } else {
         let mut mcp = state.mcp.lock().await;
         match mcp.execute(&tc.name, tc.arguments.clone()).await {
@@ -97,9 +122,30 @@ async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -
     }
 }
 
+/// For a `dynamic_tools` agent, flag its tool set dirty after it writes a `.rhai`
+/// file (via `write_file`/`edit_file`), so the next tick re-scans + re-advertises.
+/// A no-op for static agents. The path lives in the tool args; the actual
+/// discovery is workdir-confined, so an off-`tools/` write just yields a no-op
+/// re-scan.
+fn mark_dirty_on_tool_write(state: &AgentToolState, tc: &ToolCall) {
+    let Some(ctx) = &state.dynamic else { return };
+    let writes = matches!(
+        leviath_tools::canonical_tool_name(&tc.name),
+        "write_file" | "edit_file"
+    );
+    let is_rhai = tc
+        .arguments
+        .get("path")
+        .and_then(|p| p.as_str())
+        .is_some_and(|p| p.ends_with(".rhai"));
+    if writes && is_rhai {
+        ctx.dirty.store(true, Ordering::SeqCst);
+    }
+}
+
 /// Run a Rhai script tool on a blocking thread and return its result string.
 async fn execute_script_tool(state: &AgentToolState, tc: &ToolCall) -> String {
-    let Some(tool) = state.script_tools.get(&tc.name).cloned() else {
+    let Some(tool) = state.script_tools.lock().unwrap().get(&tc.name).cloned() else {
         // Name was in `script_tool_names` but the tool is gone — treat as unknown.
         return format!("[error] unknown script tool: {}", tc.name);
     };
@@ -302,6 +348,39 @@ impl ToolService for CliToolService {
             })
         })
     }
+
+    fn wants_refresh(&self, entity: Entity) -> bool {
+        // Drain the per-agent dirty flag (set when a dynamic agent wrote a .rhai).
+        self.states
+            .lock()
+            .unwrap()
+            .get(&entity)
+            .and_then(|s| s.dynamic.as_ref())
+            .map(|ctx| ctx.dirty.swap(false, Ordering::SeqCst))
+            .unwrap_or(false)
+    }
+
+    fn refresh_tools(
+        &self,
+        entity: Entity,
+        stage_index: usize,
+    ) -> Option<Vec<leviath_providers::Tool>> {
+        let state = self.states.lock().unwrap().get(&entity).cloned()?;
+        let ctx = state.dynamic.as_ref()?;
+        // Re-discover the agent's script tools from disk and swap them into the
+        // live set so a new tool is both advertised *and* dispatchable.
+        let (set, names, script_defs) =
+            crate::daemon::spawn::discover_script_tools_in(&ctx.scan_dirs, &ctx.reserved_names);
+        *state.script_tools.lock().unwrap() = set;
+        *state.script_tool_names.lock().unwrap() = names;
+        // Re-filter this stage's advertised tools = static defs + fresh script defs.
+        let available = ctx.stage_available.get(stage_index)?;
+        let mut all = ctx.static_defs.clone();
+        all.extend(script_defs);
+        Some(crate::daemon::spawn::filter_tools_by_available(
+            &all, available,
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -310,13 +389,16 @@ mod tests {
     use leviath_core::interaction::{ApprovalScope, InteractionResponse};
     use leviath_runtime::interaction_hub::InteractionHub;
 
+    /// The three script-tool fields of [`AgentToolState`], as a tuple.
+    type ScriptFields = (
+        Arc<StdMutex<leviath_scripting::ScriptToolSet>>,
+        Arc<StdMutex<HashSet<String>>>,
+        Arc<dyn leviath_scripting::ScriptHost>,
+    );
+
     /// Empty script-tool fields (no discovered tools, a deny-all host) for tests
     /// that don't exercise script tools.
-    fn no_script_fields() -> (
-        Arc<leviath_scripting::ScriptToolSet>,
-        HashSet<String>,
-        Arc<dyn leviath_scripting::ScriptHost>,
-    ) {
+    fn no_script_fields() -> ScriptFields {
         let allow = crate::daemon::script_host::ScriptAllow {
             http_get: false,
             http_post: false,
@@ -325,8 +407,8 @@ mod tests {
             env_var: false,
         };
         (
-            Arc::new(leviath_scripting::ScriptToolSet::default()),
-            HashSet::new(),
+            Arc::new(StdMutex::new(leviath_scripting::ScriptToolSet::default())),
+            Arc::new(StdMutex::new(HashSet::new())),
             Arc::new(crate::daemon::script_host::DaemonScriptHost::new(
                 allow,
                 std::env::temp_dir(),
@@ -363,6 +445,7 @@ mod tests {
             script_tools,
             script_tool_names,
             script_host,
+            dynamic: None,
         })
     }
 
@@ -432,9 +515,10 @@ mod tests {
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
-            script_tools: Arc::new(set),
-            script_tool_names,
+            script_tools: Arc::new(StdMutex::new(set)),
+            script_tool_names: Arc::new(StdMutex::new(script_tool_names)),
             script_host: host,
+            dynamic: None,
         });
         (state, dir)
     }
@@ -459,6 +543,241 @@ mod tests {
         .await;
         assert_eq!(out[0].0, "c1");
         assert_eq!(out[0].1, "HI");
+    }
+
+    // ── dynamic_tools (issue #97) ──
+
+    fn tool_def(name: &str) -> leviath_providers::Tool {
+        leviath_providers::Tool {
+            name: name.to_string(),
+            description: String::new(),
+            parameters: serde_json::json!({}),
+        }
+    }
+
+    /// A state with a `DynamicToolCtx` scanning `scan_dir`, over `workdir`.
+    fn dynamic_state(
+        workdir: PathBuf,
+        scan_dir: PathBuf,
+        static_defs: Vec<leviath_providers::Tool>,
+        stage_available: Vec<Vec<String>>,
+    ) -> Arc<AgentToolState> {
+        let hub = InteractionHub::new();
+        let builtins = Arc::new(leviath_tools::BuiltinTools::new(
+            leviath_tools::ToolContext::new(workdir),
+        ));
+        let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
+        let mut allow = HashMap::new();
+        // Both write tools default to Ask; allow them so tests don't block on an
+        // approval prompt no one answers.
+        allow.insert("write_file".to_string(), ToolPolicy::Allow);
+        allow.insert("edit_file".to_string(), ToolPolicy::Allow);
+        Arc::new(AgentToolState {
+            builtins,
+            mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            builtin_names,
+            launch_overrides: Arc::new(HashMap::new()),
+            session_allows: Arc::new(Mutex::new(HashSet::new())),
+            stage_perms: Arc::new(StdMutex::new(HashMap::new())),
+            stage_perms_by_index: Arc::new(Vec::new()),
+            agent_perms: Arc::new(HashMap::new()),
+            global_perms: Arc::new(allow),
+            interaction: hub.backend_for("a"),
+            stage_name: Arc::new(StdMutex::new("main".to_string())),
+            subagent: None,
+            sandbox: None,
+            script_tools: Arc::new(StdMutex::new(leviath_scripting::ScriptToolSet::default())),
+            script_tool_names: Arc::new(StdMutex::new(HashSet::new())),
+            script_host: no_script_fields().2,
+            dynamic: Some(Arc::new(DynamicToolCtx {
+                scan_dirs: vec![scan_dir],
+                reserved_names: HashSet::new(),
+                static_defs,
+                stage_available,
+                dirty: Arc::new(AtomicBool::new(false)),
+            })),
+        })
+    }
+
+    #[test]
+    fn refresh_tools_rediscovers_and_filters() {
+        let workdir = tempfile::tempdir().unwrap();
+        let tools = tempfile::tempdir().unwrap();
+        std::fs::write(tools.path().join("echo.rhai"), "// @tool echo\nparams.x").unwrap();
+        let state = dynamic_state(
+            workdir.path().to_path_buf(),
+            tools.path().to_path_buf(),
+            vec![tool_def("read_file")],
+            vec![vec!["read_file".to_string(), "echo".to_string()]],
+        );
+        let svc = CliToolService::new();
+        let e = Entity::from_raw(1);
+        svc.register(e, state.clone());
+
+        let defs = svc.refresh_tools(e, 0).unwrap();
+        let mut names: Vec<&str> = defs.iter().map(|t| t.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["echo", "read_file"]);
+        // The live script set + names now include the freshly discovered tool.
+        assert!(state.script_tool_names.lock().unwrap().contains("echo"));
+        assert!(state.script_tools.lock().unwrap().contains("echo"));
+    }
+
+    #[test]
+    fn refresh_tools_none_for_out_of_range_stage() {
+        let workdir = tempfile::tempdir().unwrap();
+        let tools = tempfile::tempdir().unwrap();
+        let state = dynamic_state(
+            workdir.path().to_path_buf(),
+            tools.path().to_path_buf(),
+            vec![],
+            vec![vec![]], // only stage 0 exists
+        );
+        let svc = CliToolService::new();
+        let e = Entity::from_raw(2);
+        svc.register(e, state);
+        assert!(svc.refresh_tools(e, 9).is_none());
+    }
+
+    #[test]
+    fn refresh_and_wants_refresh_none_for_non_dynamic_or_unregistered() {
+        let hub = InteractionHub::new();
+        let svc = CliToolService::new();
+        // Non-dynamic agent → both are inert.
+        let e = Entity::from_raw(3);
+        svc.register(
+            e,
+            state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new()),
+        );
+        assert!(svc.refresh_tools(e, 0).is_none());
+        assert!(!svc.wants_refresh(e));
+        // Unregistered entity → both are inert.
+        let ghost = Entity::from_raw(99);
+        assert!(svc.refresh_tools(ghost, 0).is_none());
+        assert!(!svc.wants_refresh(ghost));
+    }
+
+    #[test]
+    fn wants_refresh_drains_dirty_flag() {
+        let workdir = tempfile::tempdir().unwrap();
+        let tools = tempfile::tempdir().unwrap();
+        let state = dynamic_state(
+            workdir.path().to_path_buf(),
+            tools.path().to_path_buf(),
+            vec![],
+            vec![vec![]],
+        );
+        state
+            .dynamic
+            .as_ref()
+            .unwrap()
+            .dirty
+            .store(true, Ordering::SeqCst);
+        let svc = CliToolService::new();
+        let e = Entity::from_raw(4);
+        svc.register(e, state);
+        assert!(svc.wants_refresh(e)); // reads true...
+        assert!(!svc.wants_refresh(e)); // ...and drained it to false
+    }
+
+    #[tokio::test]
+    async fn dynamic_agent_marks_dirty_only_on_rhai_write() {
+        let workdir = tempfile::tempdir().unwrap();
+        let tools = tempfile::tempdir().unwrap();
+        let state = dynamic_state(
+            workdir.path().to_path_buf(),
+            tools.path().to_path_buf(),
+            vec![],
+            vec![vec![]],
+        );
+        let dirty = state.dynamic.as_ref().unwrap().dirty.clone();
+        // Writing a non-.rhai file does not flag a re-scan.
+        dispatch_tools(
+            state.clone(),
+            vec![call(
+                "c1",
+                "write_file",
+                serde_json::json!({"path": "note.txt", "content": "x"}),
+            )],
+        )
+        .await;
+        assert!(!dirty.load(Ordering::SeqCst));
+        // Writing a .rhai file flags a re-scan.
+        dispatch_tools(
+            state.clone(),
+            vec![call(
+                "c2",
+                "write_file",
+                serde_json::json!({"path": "t.rhai", "content": "// @tool t\n1"}),
+            )],
+        )
+        .await;
+        assert!(dirty.load(Ordering::SeqCst));
+        // Editing a .rhai file also flags it (the `edit_file` match arm).
+        dirty.store(false, Ordering::SeqCst);
+        dispatch_tools(
+            state.clone(),
+            vec![call(
+                "c3",
+                "edit_file",
+                serde_json::json!({"path": "t.rhai", "old_str": "1", "new_str": "2"}),
+            )],
+        )
+        .await;
+        assert!(dirty.load(Ordering::SeqCst));
+        // A non-write builtin (list_dir, default Allow) exercises the
+        // `writes == false` short-circuit — no flag.
+        dirty.store(false, Ordering::SeqCst);
+        dispatch_tools(
+            state,
+            vec![call("c4", "list_dir", serde_json::json!({"path": "."}))],
+        )
+        .await;
+        assert!(!dirty.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn static_agent_write_is_a_noop_for_dirty() {
+        // A non-dynamic agent (dynamic: None) never flags dirty on a .rhai write.
+        let workdir = tempfile::tempdir().unwrap();
+        let hub = InteractionHub::new();
+        let mut allow = HashMap::new();
+        allow.insert("write_file".to_string(), ToolPolicy::Allow);
+        let builtins = Arc::new(leviath_tools::BuiltinTools::new(
+            leviath_tools::ToolContext::new(workdir.path().to_path_buf()),
+        ));
+        let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
+        let (script_tools, script_tool_names, script_host) = no_script_fields();
+        let state = Arc::new(AgentToolState {
+            builtins,
+            mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            builtin_names,
+            launch_overrides: Arc::new(HashMap::new()),
+            session_allows: Arc::new(Mutex::new(HashSet::new())),
+            stage_perms: Arc::new(StdMutex::new(HashMap::new())),
+            stage_perms_by_index: Arc::new(Vec::new()),
+            agent_perms: Arc::new(HashMap::new()),
+            global_perms: Arc::new(allow),
+            interaction: hub.backend_for("a"),
+            stage_name: Arc::new(StdMutex::new("main".to_string())),
+            subagent: None,
+            sandbox: None,
+            script_tools,
+            script_tool_names,
+            script_host,
+            dynamic: None,
+        });
+        // Must not panic (the mark_dirty early-return path).
+        let out = dispatch_tools(
+            state,
+            vec![call(
+                "c1",
+                "write_file",
+                serde_json::json!({"path": "t.rhai", "content": "x"}),
+            )],
+        )
+        .await;
+        assert!(out[0].1.contains("Successfully wrote"));
     }
 
     #[tokio::test]
@@ -597,6 +916,7 @@ mod tests {
             script_tools,
             script_tool_names,
             script_host,
+            dynamic: None,
         });
         let out = dispatch_tools(
             state,
@@ -679,6 +999,7 @@ mod tests {
             script_tools,
             script_tool_names,
             script_host,
+            dynamic: None,
         });
         service.register(e, state.clone());
 
@@ -861,6 +1182,7 @@ mod tests {
             script_tools,
             script_tool_names,
             script_host,
+            dynamic: None,
         });
         let out = dispatch_tools(
             state,
