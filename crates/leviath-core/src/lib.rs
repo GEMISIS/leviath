@@ -31,7 +31,7 @@ pub use blueprint::{
 };
 pub use cache::{CacheBreakpoint, CacheHint};
 pub use error::{Error, Result, ValidationError};
-pub use layout::{ContextLayout, RegionDefinition};
+pub use layout::{BudgetSpec, ContextLayout, RegionDefinition};
 pub use lifecycle::{CompactionConfig, CompactionStrategy, EvictionPolicy};
 pub use policy::{AllowlistRule, McpToolOverride, PolicyConfig, ScriptedRule};
 pub use region::{

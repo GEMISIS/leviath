@@ -128,6 +128,27 @@ lev run . --task "Your task here"
 
 This writes an `agent.leviath` config you can customize — models per stage, context regions, tools, and workflow graph. See [agent configuration →](https://leviath.dev/docs/agents)
 
+Region budgets can be expressed as **percentages of the model's context window** so a
+blueprint's intent ("implementation gets the bulk") stays correct across models of
+different sizes. Percentages are ceilings (they may sum past 100%); absolute
+`max_tokens`/`threshold_tokens` act as optional guard-rails, and bare `max_tokens`
+(no `budget`) still works as a fixed count. Each stage may also declare its own
+`[stages.<name>.context.regions]` layout:
+
+```toml
+[context.regions]
+task           = { kind = "pinned",     budget = "2%",  max_tokens = 4000 }   # 2% of the window, capped at 4000
+codebase       = { kind = "compacting", budget = "25%", compact_at = "80%" }  # compact at 80% of the resolved budget
+implementation = { kind = "compacting", budget = "35%", compact_at = "80%" }
+conversation   = { kind = "sliding_window", max_items = 20, budget = "15%" }  # max_items is a count, stays absolute
+scratch        = { kind = "clearable",  budget = "8%",  min_tokens = 2000 }   # floor so small models don't starve it
+
+# Per-stage: the planning stage devotes the window to plan + architecture
+[stages.plan.context.regions]
+architecture = { kind = "pinned", budget = "15%" }
+plan         = { kind = "pinned", budget = "20%" }
+```
+
 ## 🧩 Features
 
 <table>

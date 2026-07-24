@@ -2430,6 +2430,32 @@ pub struct ResolvedStage {
     pub tools: Vec<Tool>,
 }
 
+/// Fallback context window used when a stage's provider isn't registered (so
+/// percentage budgets can't be resolved against a real model). Matches
+/// [`leviath_providers::ModelCapabilities`]'s default `max_context_tokens`.
+const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 8192;
+
+/// Look up a model's context window (for resolving percentage region budgets)
+/// via the registered [`Providers`]. Falls back to
+/// [`DEFAULT_CONTEXT_WINDOW_TOKENS`] with a warning when the provider isn't
+/// registered — non-fatal, and `min_tokens` floors still protect regions.
+fn context_window_tokens(world: &World, provider_name: &str, model: &str) -> usize {
+    match world
+        .get_resource::<Providers>()
+        .and_then(|p| p.0.get(provider_name))
+    {
+        Some(provider) => provider.max_context_tokens(model),
+        None => {
+            tracing::warn!(
+                provider = provider_name,
+                model,
+                "provider not registered; using default context window for percentage budgets"
+            );
+            DEFAULT_CONTEXT_WINDOW_TOKENS
+        }
+    }
+}
+
 /// Build a stage's [`StageSetup`] from its blueprint definition: inference config
 /// (from the model parameters), tool-result routing, accepts-messages, layout,
 /// and system prompt.
@@ -2539,11 +2565,38 @@ pub fn spawn_agent(
 pub fn spawn_agent_seeded(
     world: &mut World,
     agent_id: String,
-    blueprint: leviath_core::Blueprint,
+    mut blueprint: leviath_core::Blueprint,
     seeds: &std::collections::HashMap<String, String>,
     stages: Vec<ResolvedStage>,
     global_batch_tool_hint: bool,
 ) -> Result<Entity, String> {
+    // Resolve any percentage region budgets against each stage's model context
+    // window (the only place the model — and hence the window — is known). The
+    // global layout resolves against the entry stage (stage 0); each per-stage
+    // layout resolves against that stage's own model. Absolute layouts resolve to
+    // themselves, so this is a no-op for legacy blueprints.
+    let stage_windows: Vec<usize> = stages
+        .iter()
+        .map(|rs| context_window_tokens(world, &rs.provider_name, &rs.model))
+        .collect();
+    blueprint.context_layout = blueprint.context_layout.resolved(stage_windows[0]);
+    for (i, stage) in blueprint.stages.iter_mut().enumerate() {
+        if let Some(layout) = &stage.context_layout {
+            stage.context_layout = Some(layout.resolved(stage_windows[i]));
+        }
+    }
+    // Validate the resolved (fully-absolute) layouts, now that percentages are
+    // concrete numbers judged against the real model window.
+    blueprint
+        .context_layout
+        .validate()
+        .map_err(|e| e.to_string())?;
+    for stage in &blueprint.stages {
+        if let Some(layout) = &stage.context_layout {
+            layout.validate().map_err(|e| e.to_string())?;
+        }
+    }
+
     let stage_infs: Vec<StageInference> = stages
         .into_iter()
         .map(|rs| StageInference {
@@ -3982,6 +4035,215 @@ mod tests {
                 .get::<crate::repetition::RepetitionDetector>(e)
                 .is_some()
         );
+    }
+
+    fn percent_region_blueprint(percent: f64) -> leviath_core::Blueprint {
+        let layout = leviath_core::layout::ContextLayout::new(
+            vec![
+                leviath_core::layout::RegionDefinition::new(
+                    "sys".to_string(),
+                    RegionKind::Pinned,
+                    0,
+                )
+                .with_budget(leviath_core::BudgetSpec::Percent {
+                    percent,
+                    min: None,
+                    max: None,
+                }),
+            ],
+            0,
+        );
+        let stages = vec![leviath_core::Stage::new(
+            "main".to_string(),
+            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        )];
+        leviath_core::Blueprint::new("t".to_string(), "d".to_string(), stages, layout)
+    }
+
+    fn world_with_provider() -> World {
+        let mut world = World::new();
+        let mut reg = ProviderRegistry::new();
+        reg.register("p".to_string(), provider(true, 500));
+        world.insert_resource(Providers(reg));
+        world
+    }
+
+    #[test]
+    fn spawn_agent_seeded_resolves_percent_region_against_provider_window() {
+        // Provider "p" (Cfg) reports a 100_000-token window; a 35% region must
+        // resolve to 35_000, and the window total becomes the model window.
+        let mut world = world_with_provider();
+        let e = spawn_agent(
+            &mut world,
+            "run".to_string(),
+            percent_region_blueprint(0.35),
+            "task",
+            vec![resolved("m")],
+            true,
+        )
+        .expect("spawn");
+        let w = world.get::<ContextWindow>(e).expect("window");
+        assert_eq!(w.get_region("sys").unwrap().max_tokens, 35_000);
+        assert_eq!(w.max_tokens, 100_000);
+    }
+
+    #[test]
+    fn spawn_agent_seeded_falls_back_when_provider_missing() {
+        // No Providers resource → percentage resolves against the 8192 default
+        // window (and warns). 35% of 8192 ≈ 2867.
+        crate::test_support::with_tracing(|| {
+            let mut world = World::new();
+            let e = spawn_agent(
+                &mut world,
+                "run".to_string(),
+                percent_region_blueprint(0.35),
+                "task",
+                vec![resolved("m")],
+                true,
+            )
+            .expect("spawn");
+            let w = world.get::<ContextWindow>(e).expect("window");
+            let expected = (8192f64 * 0.35).round() as usize;
+            assert_eq!(w.get_region("sys").unwrap().max_tokens, expected);
+            assert_eq!(w.max_tokens, DEFAULT_CONTEXT_WINDOW_TOKENS);
+        });
+    }
+
+    #[test]
+    fn spawn_agent_seeded_absolute_blueprint_is_unchanged() {
+        // A pure-absolute blueprint resolves to itself: region max_tokens and the
+        // window total match the declared values, provider or not.
+        let mut world = world_with_provider();
+        let bp = blueprint(vec![leviath_core::Stage::new(
+            "main".to_string(),
+            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        )]);
+        let e = spawn_agent(
+            &mut world,
+            "run".to_string(),
+            bp,
+            "task",
+            vec![resolved("m")],
+            true,
+        )
+        .expect("spawn");
+        let w = world.get::<ContextWindow>(e).expect("window");
+        // The `blueprint` helper declares total_budget_tokens = 12_000 (legacy sum
+        // behavior preserved for absolute layouts).
+        assert_eq!(w.max_tokens, 12_000);
+        assert_eq!(w.get_region("conversation").unwrap().max_tokens, 10_000);
+    }
+
+    #[test]
+    fn spawn_agent_seeded_resolves_per_stage_layout() {
+        // Stage 0 carries its own percentage layout; it must be resolved against
+        // that stage's model window and applied on entry (swapping the global one).
+        let mut world = world_with_provider();
+        let global = leviath_core::layout::ContextLayout::new(
+            vec![leviath_core::layout::RegionDefinition::new(
+                "sys".to_string(),
+                RegionKind::Pinned,
+                5000,
+            )],
+            5000,
+        );
+        let mut stage = leviath_core::Stage::new(
+            "main".to_string(),
+            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        );
+        stage.context_layout = Some(leviath_core::layout::ContextLayout::new(
+            vec![
+                leviath_core::layout::RegionDefinition::new(
+                    "sys".to_string(),
+                    RegionKind::Pinned,
+                    0,
+                )
+                .with_budget(leviath_core::BudgetSpec::Percent {
+                    percent: 0.10,
+                    min: None,
+                    max: None,
+                }),
+            ],
+            0,
+        ));
+        let bp =
+            leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![stage], global);
+        let e = spawn_agent(
+            &mut world,
+            "run".to_string(),
+            bp,
+            "task",
+            vec![resolved("m")],
+            true,
+        )
+        .expect("spawn");
+        let w = world.get::<ContextWindow>(e).expect("window");
+        // Stage 0's per-stage layout won: 10% of 100_000 = 10_000.
+        assert_eq!(w.get_region("sys").unwrap().max_tokens, 10_000);
+    }
+
+    #[test]
+    fn spawn_agent_seeded_errors_when_resolved_global_layout_is_invalid() {
+        // A pinned region at 95% of the 100_000 window resolves to 95_000, leaving
+        // only 5_000 working tokens (< MIN_WORKING_TOKENS). Post-resolution
+        // validation must fail the spawn with an actionable message.
+        let mut world = world_with_provider();
+        let err = spawn_agent(
+            &mut world,
+            "run".to_string(),
+            percent_region_blueprint(0.95),
+            "task",
+            vec![resolved("m")],
+            true,
+        )
+        .expect_err("resolved layout should fail validation");
+        assert!(err.contains("working tokens"), "{err}");
+    }
+
+    #[test]
+    fn spawn_agent_seeded_errors_when_resolved_per_stage_layout_is_invalid() {
+        // The global layout is valid, but stage 0's per-stage layout resolves to a
+        // starved working budget → the per-stage validation branch fails the spawn.
+        let mut world = world_with_provider();
+        let global = leviath_core::layout::ContextLayout::new(
+            vec![leviath_core::layout::RegionDefinition::new(
+                "scratch".to_string(),
+                RegionKind::Clearable,
+                5000,
+            )],
+            5000,
+        );
+        let mut stage = leviath_core::Stage::new(
+            "main".to_string(),
+            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        );
+        stage.context_layout = Some(leviath_core::layout::ContextLayout::new(
+            vec![
+                leviath_core::layout::RegionDefinition::new(
+                    "sys".to_string(),
+                    RegionKind::Pinned,
+                    0,
+                )
+                .with_budget(leviath_core::BudgetSpec::Percent {
+                    percent: 0.95,
+                    min: None,
+                    max: None,
+                }),
+            ],
+            0,
+        ));
+        let bp =
+            leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![stage], global);
+        let err = spawn_agent(
+            &mut world,
+            "run".to_string(),
+            bp,
+            "task",
+            vec![resolved("m")],
+            true,
+        )
+        .expect_err("per-stage layout should fail validation");
+        assert!(err.contains("working tokens"), "{err}");
     }
 
     #[test]

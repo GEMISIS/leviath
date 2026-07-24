@@ -109,11 +109,13 @@ system_prompt = """
 Implement the plan. Create all necessary files and verify with bash.
 """
 
+# Region budgets are percentages of the model's context window (ceilings, may
+# sum past 100%); the absolute max_tokens is an optional guard-rail cap.
 [context.regions]
-task         = {{ kind = "pinned",          max_tokens = 2000 }}
-codebase     = {{ kind = "temporary",       max_tokens = 30000 }}
-conversation = {{ kind = "sliding_window",  max_items = 20, max_tokens = 15000 }}
-scratch      = {{ kind = "clearable",       max_tokens = 10000 }}
+task         = {{ kind = "pinned",          budget = "2%",  max_tokens = 2000 }}
+codebase     = {{ kind = "temporary",       budget = "20%", max_tokens = 30000 }}
+conversation = {{ kind = "sliding_window",  max_items = 20, budget = "15%", max_tokens = 15000 }}
+scratch      = {{ kind = "clearable",       budget = "8%",  max_tokens = 10000 }}
 "#,
             name = name
         ),
@@ -138,12 +140,14 @@ description = "Synthesize findings and discuss with user"
 available_tools = ["read_file", "list_dir"]
 max_iterations = 15
 
+# Region budgets are percentages of the model's context window (ceilings, may
+# sum past 100%); the absolute max_tokens / threshold_tokens are guard-rail caps.
 [context.regions]
-objective    = {{ kind = "pinned",          max_tokens = 2000 }}
-sources      = {{ kind = "temporary",       max_tokens = 40000 }}
-findings     = {{ kind = "compacting",      threshold_tokens = 8000, max_tokens = 15000 }}
-conversation = {{ kind = "sliding_window",  max_items = 15, max_tokens = 12000 }}
-scratch      = {{ kind = "clearable",       max_tokens = 8000 }}
+objective    = {{ kind = "pinned",          budget = "2%",  max_tokens = 2000 }}
+sources      = {{ kind = "temporary",       budget = "25%", max_tokens = 40000 }}
+findings     = {{ kind = "compacting",      budget = "12%", compact_at = "53%", threshold_tokens = 8000, max_tokens = 15000 }}
+conversation = {{ kind = "sliding_window",  max_items = 15, budget = "12%", max_tokens = 12000 }}
+scratch      = {{ kind = "clearable",       budget = "6%",  max_tokens = 8000 }}
 "#,
             name = name
         ),
@@ -164,10 +168,12 @@ system_prompt = """
 You are a helpful agent. Complete the task thoroughly.
 """
 
+# Region budgets are percentages of the model's context window (ceilings, may
+# sum past 100%); the absolute max_tokens is an optional guard-rail cap.
 [context.regions]
-system       = {{ kind = "pinned",         max_tokens = 2000 }}
-conversation = {{ kind = "sliding_window", max_items = 10, max_tokens = 10000 }}
-scratch      = {{ kind = "clearable",      max_tokens = 5000 }}
+system       = {{ kind = "pinned",         budget = "2%",  max_tokens = 2000 }}
+conversation = {{ kind = "sliding_window", max_items = 10, budget = "12%", max_tokens = 10000 }}
+scratch      = {{ kind = "clearable",      budget = "6%",  max_tokens = 5000 }}
 "#,
             name = name
         ),
@@ -233,6 +239,25 @@ mod tests {
             agent.get("name").unwrap().as_str().unwrap(),
             "my-researcher"
         );
+    }
+
+    #[test]
+    fn templates_use_percentage_budgets_and_parse_via_manifest() {
+        // Every generated template ships percentage budgets and must parse under
+        // the real manifest parser (which validates `budget`/`compact_at`).
+        for template in ["software-engineer", "coder", "researcher", "other"] {
+            let manifest = create_manifest("pct-agent", template);
+            assert!(
+                manifest.contains("budget = \""),
+                "{template} template should use percentage budgets"
+            );
+            let bp = leviath_core::manifest::parse_manifest(&manifest)
+                .expect("generated template should parse");
+            assert!(
+                bp.context_layout.has_percent_budgets(),
+                "{template} layout should have percentage budgets"
+            );
+        }
     }
 
     #[test]

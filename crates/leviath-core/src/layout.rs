@@ -9,6 +9,101 @@ use crate::error::ValidationError;
 use crate::region::{RegionKind, RegionSchema};
 use serde::{Deserialize, Serialize};
 
+/// How a region's token ceiling is expressed before it is resolved against a
+/// concrete model context window.
+///
+/// Blueprint authors think in **proportions** (`budget = "35%"`) so their intent
+/// stays correct regardless of the model's context size, while power users can
+/// still pin an exact count. The percentage denominator — the model's context
+/// window — is not known at parse time, so the spec is stored unresolved here and
+/// turned into a concrete token count at window-build time (see
+/// [`BudgetSpec::resolve`] and [`ContextLayout::resolved`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetSpec {
+    /// A fixed token ceiling, independent of the model. Resolving is a no-op.
+    Absolute(usize),
+
+    /// A ceiling expressed as a fraction of the model's context window, with
+    /// optional absolute guard-rails. `percent` is a fraction (`0.35` for
+    /// `"35%"`). `max` caps the resolved value (so e.g. 2% of a 1M window can't
+    /// balloon a task region to 20K tokens); `min` floors it (so a small-context
+    /// model doesn't starve the region below a usable size).
+    Percent {
+        /// Fraction of the model context window (0.35 == "35%").
+        percent: f64,
+        /// Absolute floor for the resolved value, if any.
+        min: Option<usize>,
+        /// Absolute cap for the resolved value, if any.
+        max: Option<usize>,
+    },
+}
+
+impl Default for BudgetSpec {
+    /// Only a serde-deserialize fallback for older persisted blueprints; live
+    /// code always sets the budget explicitly via [`RegionDefinition::new`].
+    fn default() -> Self {
+        BudgetSpec::Absolute(0)
+    }
+}
+
+impl BudgetSpec {
+    /// Parse a percentage string like `"35%"` into its fraction (`0.35`).
+    ///
+    /// Surrounding whitespace is trimmed and decimals are allowed (`"0.6%"`).
+    /// Rejects a missing `%`, a non-numeric value, and anything outside the
+    /// `(0, 100]` range — a single region can't sensibly claim ≤0% or more than
+    /// the whole window (region budgets may *sum* past 100%, but each is a
+    /// fraction of one window). Returns the human-readable reason on failure so
+    /// the caller can surface it at load time.
+    pub fn parse_budget(s: &str) -> std::result::Result<f64, String> {
+        let trimmed = s.trim();
+        let Some(num) = trimmed.strip_suffix('%') else {
+            return Err(format!("budget '{s}' must end with '%' (e.g. \"35%\")"));
+        };
+        let value: f64 = num
+            .trim()
+            .parse()
+            .map_err(|_| format!("budget '{s}' is not a valid number"))?;
+        if !(value > 0.0 && value <= 100.0) {
+            return Err(format!(
+                "budget '{s}' must be greater than 0% and at most 100%"
+            ));
+        }
+        Ok(value / 100.0)
+    }
+
+    /// Resolve this spec to a concrete token count against a model context
+    /// `window`.
+    ///
+    /// [`Absolute`](BudgetSpec::Absolute) ignores the window (idempotent — a
+    /// fully-absolute layout resolves to itself). [`Percent`](BudgetSpec::Percent)
+    /// rounds `window * percent`, then applies the `max` cap, then the `min`
+    /// floor. The floor is applied **last** so that when `min > max` the floor
+    /// wins: a region starved below a usable size is worse than one slightly over
+    /// its cap.
+    pub fn resolve(&self, window: usize) -> usize {
+        match self {
+            BudgetSpec::Absolute(n) => *n,
+            BudgetSpec::Percent { percent, min, max } => {
+                let mut v = (window as f64 * percent).round() as usize;
+                if let Some(max) = max {
+                    v = v.min(*max);
+                }
+                if let Some(min) = min {
+                    v = v.max(*min);
+                }
+                v
+            }
+        }
+    }
+
+    /// Whether this is a percentage budget (needs a model window to resolve).
+    pub fn is_percent(&self) -> bool {
+        matches!(self, BudgetSpec::Percent { .. })
+    }
+}
+
 /// A ContextLayout defines the complete memory map for an agent.
 ///
 /// Like SNES VRAM layout — every region has a defined purpose, size, and policy.
@@ -96,6 +191,15 @@ impl ContextLayout {
             );
         }
 
+        // The token-sum warning and the fixed-working-budget hard error below
+        // operate on concrete `max_tokens` values. When percentage budgets are
+        // present those values are provisional placeholders until the layout is
+        // resolved against a model window, so the checks are meaningless here —
+        // skip them and rely on the post-resolution `validate()` call at spawn.
+        if self.has_percent_budgets() {
+            return Ok(());
+        }
+
         let total_max: usize = self.regions.iter().map(|r| r.max_tokens).sum();
         if total_max > self.total_budget_tokens {
             tracing::warn!(
@@ -160,6 +264,97 @@ impl ContextLayout {
     pub fn get_region(&self, name: &str) -> Option<&RegionDefinition> {
         self.regions.iter().find(|r| r.name == name)
     }
+
+    /// Whether any region uses a percentage budget (and therefore needs a model
+    /// context window to resolve to concrete token counts).
+    pub fn has_percent_budgets(&self) -> bool {
+        self.regions.iter().any(|r| r.budget.is_percent())
+    }
+
+    /// Resolve every region's percentage budget against a concrete model context
+    /// `window`, returning a fully-absolute layout.
+    ///
+    /// Each region's `max_tokens` becomes `budget.resolve(window)`, and each
+    /// [`RegionKind::Compacting`] region's `threshold_tokens` is recomputed from
+    /// its [`compact_at`](RegionDefinition::compact_at) fraction (via the private
+    /// `resolve_compacting_threshold` helper). `eviction_order` is preserved. The
+    /// total budget becomes the model `window` when any percentage budget is
+    /// present (percentage ceilings are relative to the whole window and may sum
+    /// past 100%); a pure-absolute layout keeps its legacy summed total unchanged.
+    ///
+    /// Resolving an already-absolute layout is a no-op, so this is safe to call
+    /// unconditionally at window-build time.
+    pub fn resolved(&self, window: usize) -> ContextLayout {
+        let regions = self
+            .regions
+            .iter()
+            .map(|r| {
+                let max_tokens = r.budget.resolve(window);
+                let kind = match &r.kind {
+                    RegionKind::Compacting { threshold_tokens } => RegionKind::Compacting {
+                        threshold_tokens: Self::resolve_compacting_threshold(
+                            r.compact_at,
+                            *threshold_tokens,
+                            max_tokens,
+                        ),
+                    },
+                    other => other.clone(),
+                };
+                // Emit a fully-absolute region: the percentage has been baked
+                // into `max_tokens` and the compaction threshold into `kind`, so
+                // the resolved layout carries no `Percent` budgets. This makes
+                // `has_percent_budgets()` false on the result, so a post-resolution
+                // `validate()` runs the real token/working-budget checks.
+                RegionDefinition {
+                    kind,
+                    max_tokens,
+                    budget: BudgetSpec::Absolute(max_tokens),
+                    compact_at: None,
+                    ..r.clone()
+                }
+            })
+            .collect();
+
+        let total_budget_tokens = if self.has_percent_budgets() {
+            window
+        } else {
+            self.total_budget_tokens
+        };
+
+        ContextLayout {
+            regions,
+            total_budget_tokens,
+            eviction_order: self.eviction_order.clone(),
+        }
+    }
+
+    /// Compute a Compacting region's concrete compaction threshold from its
+    /// `compact_at` fraction, the absolute `threshold_tokens` guard carried on
+    /// the kind, and the region's resolved budget.
+    ///
+    /// - `compact_at = Some(f)` with an explicit `threshold_tokens` cap (any
+    ///   value below the [`usize::MAX`] sentinel) → `min(round(budget * f), cap)`:
+    ///   compact at the percentage, but never later than the absolute guard-rail.
+    /// - `compact_at = Some(f)` with no cap (`threshold_tokens == usize::MAX`
+    ///   sentinel) → `round(budget * f)`.
+    /// - `compact_at = None` → the absolute `threshold_tokens` as-is (back-compat,
+    ///   including the parser's `max_tokens * 8 / 10` default).
+    ///
+    /// The `usize::MAX` sentinel is safe: a layout is always resolved before any
+    /// [`Region::needs_compaction`](crate::region::Region::needs_compaction) check.
+    fn resolve_compacting_threshold(
+        compact_at: Option<f64>,
+        threshold_tokens: usize,
+        resolved_budget: usize,
+    ) -> usize {
+        match compact_at {
+            Some(fraction) => {
+                let pct = (resolved_budget as f64 * fraction).round() as usize;
+                pct.min(threshold_tokens)
+            }
+            None => threshold_tokens,
+        }
+    }
 }
 
 /// Where a region's initial content comes from at run start.
@@ -216,8 +411,26 @@ pub struct RegionDefinition {
     /// Region lifecycle policy
     pub kind: RegionKind,
 
-    /// Maximum tokens for this region
+    /// **Resolved** maximum tokens for this region. This is the concrete ceiling
+    /// every downstream consumer reads; for a percentage budget it is populated
+    /// when the layout is resolved against a model window (see
+    /// [`ContextLayout::resolved`]). [`Self::budget`] is the source of truth for
+    /// how this value is derived.
     pub max_tokens: usize,
+
+    /// How this region's ceiling is expressed. Defaults (via [`Self::new`]) to
+    /// [`BudgetSpec::Absolute`] holding `max_tokens`, so a region built the old
+    /// way behaves exactly as before. A percentage budget is resolved against the
+    /// model context window at window-build time.
+    #[serde(default)]
+    pub budget: BudgetSpec,
+
+    /// For [`RegionKind::Compacting`] regions only: compact when the region
+    /// reaches this fraction of its resolved budget (`0.80` for `compact_at =
+    /// "80%"`). `None` keeps the absolute `threshold_tokens` carried on the kind.
+    /// See [`ContextLayout::resolved`] for how this becomes a concrete threshold.
+    #[serde(default)]
+    pub compact_at: Option<f64>,
 
     /// Optional validation schema
     pub schema: Option<RegionSchema>,
@@ -246,18 +459,39 @@ pub struct RegionDefinition {
 }
 
 impl RegionDefinition {
-    /// Create a new region definition.
+    /// Create a new region definition with an absolute token ceiling.
+    ///
+    /// The `budget` is set to [`BudgetSpec::Absolute`] holding `max_tokens` and
+    /// `compact_at` to `None`, so every existing caller (and every region without
+    /// a percentage budget) is unaffected — resolving such a layout is a no-op.
     pub fn new(name: String, kind: RegionKind, max_tokens: usize) -> Self {
         Self {
             name,
             kind,
             max_tokens,
+            budget: BudgetSpec::Absolute(max_tokens),
+            compact_at: None,
             schema: None,
             description: None,
             required: false,
             required_message: None,
             seed: None,
         }
+    }
+
+    /// Set this region's budget spec (e.g. a percentage of the model window).
+    /// `max_tokens` is left as the provisional/resolved value; it is (re)computed
+    /// from the budget when the owning layout is resolved.
+    pub fn with_budget(mut self, budget: BudgetSpec) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    /// Set the compaction trigger fraction for a [`RegionKind::Compacting`]
+    /// region (`0.80` == compact at 80% of the resolved budget).
+    pub fn with_compact_at(mut self, fraction: f64) -> Self {
+        self.compact_at = Some(fraction);
+        self
     }
 
     /// Set this region's seed source.
@@ -496,6 +730,266 @@ mod tests {
         let def = RegionDefinition::new("a".to_string(), RegionKind::Pinned, 5000)
             .with_description("holds architecture notes".to_string());
         assert_eq!(def.description.as_deref(), Some("holds architecture notes"));
+    }
+
+    #[test]
+    fn parse_budget_accepts_plain_and_decimal_percentages() {
+        assert_eq!(BudgetSpec::parse_budget("35%").unwrap(), 0.35);
+        assert_eq!(BudgetSpec::parse_budget("100%").unwrap(), 1.0);
+        assert!((BudgetSpec::parse_budget("0.6%").unwrap() - 0.006).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_budget_trims_surrounding_and_inner_whitespace() {
+        assert_eq!(BudgetSpec::parse_budget("  35 %  ").unwrap(), 0.35);
+    }
+
+    #[test]
+    fn parse_budget_rejects_missing_percent_sign() {
+        let err = BudgetSpec::parse_budget("35").unwrap_err();
+        assert!(err.contains("must end with '%'"), "{err}");
+    }
+
+    #[test]
+    fn parse_budget_rejects_non_numeric() {
+        let err = BudgetSpec::parse_budget("abc%").unwrap_err();
+        assert!(err.contains("not a valid number"), "{err}");
+    }
+
+    #[test]
+    fn parse_budget_rejects_zero_and_negative() {
+        let zero = BudgetSpec::parse_budget("0%").unwrap_err();
+        assert!(zero.contains("greater than 0%"), "{zero}");
+        let neg = BudgetSpec::parse_budget("-10%").unwrap_err();
+        assert!(neg.contains("greater than 0%"), "{neg}");
+    }
+
+    #[test]
+    fn parse_budget_rejects_over_one_hundred() {
+        let err = BudgetSpec::parse_budget("150%").unwrap_err();
+        assert!(err.contains("at most 100%"), "{err}");
+    }
+
+    #[test]
+    fn resolve_absolute_ignores_window() {
+        assert_eq!(BudgetSpec::Absolute(4000).resolve(1_000_000), 4000);
+        assert!(!BudgetSpec::Absolute(4000).is_percent());
+    }
+
+    #[test]
+    fn resolve_percent_of_window() {
+        let spec = BudgetSpec::Percent {
+            percent: 0.35,
+            min: None,
+            max: None,
+        };
+        assert_eq!(spec.resolve(1_000_000), 350_000);
+        assert!(spec.is_percent());
+    }
+
+    #[test]
+    fn resolve_percent_applies_max_cap() {
+        let spec = BudgetSpec::Percent {
+            percent: 0.02,
+            min: None,
+            max: Some(4000),
+        };
+        // 2% of 1M = 20_000, capped to 4000.
+        assert_eq!(spec.resolve(1_000_000), 4000);
+    }
+
+    #[test]
+    fn resolve_percent_applies_min_floor() {
+        let spec = BudgetSpec::Percent {
+            percent: 0.02,
+            min: Some(2000),
+            max: None,
+        };
+        // 2% of 8000 = 160, floored to 2000.
+        assert_eq!(spec.resolve(8000), 2000);
+    }
+
+    #[test]
+    fn resolve_percent_within_bounds_takes_neither_clamp() {
+        let spec = BudgetSpec::Percent {
+            percent: 0.10,
+            min: Some(1000),
+            max: Some(50_000),
+        };
+        // 10% of 200k = 20_000, between the floor and cap.
+        assert_eq!(spec.resolve(200_000), 20_000);
+    }
+
+    #[test]
+    fn resolve_percent_floor_wins_when_min_exceeds_max() {
+        let spec = BudgetSpec::Percent {
+            percent: 0.10,
+            min: Some(9000),
+            max: Some(4000),
+        };
+        // 10% of 200k = 20_000 → capped to 4000 → floored up to 9000 (floor wins).
+        assert_eq!(spec.resolve(200_000), 9000);
+    }
+
+    #[test]
+    fn has_percent_budgets_detects_percentage_regions() {
+        let absolute = ContextLayout::new(
+            vec![RegionDefinition::new(
+                "a".to_string(),
+                RegionKind::Pinned,
+                5000,
+            )],
+            5000,
+        );
+        assert!(!absolute.has_percent_budgets());
+
+        let percent = ContextLayout::new(
+            vec![
+                RegionDefinition::new("a".to_string(), RegionKind::Pinned, 5000).with_budget(
+                    BudgetSpec::Percent {
+                        percent: 0.05,
+                        min: None,
+                        max: None,
+                    },
+                ),
+            ],
+            5000,
+        );
+        assert!(percent.has_percent_budgets());
+    }
+
+    #[test]
+    fn resolved_is_noop_for_absolute_layout() {
+        let layout = ContextLayout::new(
+            vec![RegionDefinition::new(
+                "a".to_string(),
+                RegionKind::Pinned,
+                5000,
+            )],
+            5000,
+        );
+        let resolved = layout.resolved(1_000_000);
+        assert_eq!(resolved.regions[0].max_tokens, 5000);
+        // Absolute layout keeps its legacy summed total, not the window.
+        assert_eq!(resolved.total_budget_tokens, 5000);
+    }
+
+    #[test]
+    fn resolved_percent_layout_uses_window_as_total() {
+        let layout = ContextLayout::new(
+            vec![
+                RegionDefinition::new("a".to_string(), RegionKind::Pinned, 0).with_budget(
+                    BudgetSpec::Percent {
+                        percent: 0.10,
+                        min: None,
+                        max: None,
+                    },
+                ),
+            ],
+            0,
+        )
+        .with_eviction_order(vec!["a".to_string()]);
+        let resolved = layout.resolved(1_000_000);
+        assert_eq!(resolved.regions[0].max_tokens, 100_000);
+        assert_eq!(resolved.total_budget_tokens, 1_000_000);
+        // eviction order carried through.
+        assert_eq!(resolved.eviction_order, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn resolved_compacting_threshold_all_cases() {
+        // compact_at + explicit threshold cap → min(pct, cap).
+        let both = RegionDefinition::new(
+            "c".to_string(),
+            RegionKind::Compacting {
+                threshold_tokens: 25_000,
+            },
+            0,
+        )
+        .with_budget(BudgetSpec::Percent {
+            percent: 0.20,
+            min: None,
+            max: None,
+        })
+        .with_compact_at(0.80);
+        let r = ContextLayout::new(vec![both], 0).resolved(200_000);
+        // budget = 40_000; 80% = 32_000; capped to 25_000.
+        assert_eq!(
+            r.regions[0].kind,
+            RegionKind::Compacting {
+                threshold_tokens: 25_000
+            }
+        );
+
+        // compact_at with no cap (usize::MAX sentinel) → pct only.
+        let pct_only = RegionDefinition::new(
+            "c".to_string(),
+            RegionKind::Compacting {
+                threshold_tokens: usize::MAX,
+            },
+            0,
+        )
+        .with_budget(BudgetSpec::Percent {
+            percent: 0.20,
+            min: None,
+            max: None,
+        })
+        .with_compact_at(0.80);
+        let r = ContextLayout::new(vec![pct_only], 0).resolved(200_000);
+        assert_eq!(
+            r.regions[0].kind,
+            RegionKind::Compacting {
+                threshold_tokens: 32_000
+            }
+        );
+
+        // compact_at = None → absolute threshold passes through unchanged.
+        let absolute = RegionDefinition::new(
+            "c".to_string(),
+            RegionKind::Compacting {
+                threshold_tokens: 8000,
+            },
+            10_000,
+        );
+        let r = ContextLayout::new(vec![absolute], 10_000).resolved(1_000_000);
+        assert_eq!(
+            r.regions[0].kind,
+            RegionKind::Compacting {
+                threshold_tokens: 8000
+            }
+        );
+    }
+
+    #[test]
+    fn validate_skips_token_checks_for_percent_layouts() {
+        // A percentage layout whose provisional max_tokens are tiny/zero must not
+        // trip the fixed-working-budget hard error — that check is deferred to
+        // post-resolution. Wrap in tracing so no warn-arg lines read uncovered.
+        let regions = vec![
+            RegionDefinition::new("big_pinned".to_string(), RegionKind::Pinned, 0).with_budget(
+                BudgetSpec::Percent {
+                    percent: 0.95,
+                    min: None,
+                    max: None,
+                },
+            ),
+        ];
+        let layout = ContextLayout::new(regions, 100_000);
+        with_tracing(|| {
+            assert!(layout.validate().is_ok());
+        });
+    }
+
+    #[test]
+    fn region_definition_default_budget_matches_max_tokens() {
+        let def = RegionDefinition::new("a".to_string(), RegionKind::Pinned, 5000);
+        assert_eq!(def.budget, BudgetSpec::Absolute(5000));
+        assert_eq!(def.compact_at, None);
+    }
+
+    #[test]
+    fn budget_spec_default_is_absolute_zero() {
+        assert_eq!(BudgetSpec::default(), BudgetSpec::Absolute(0));
     }
 
     #[test]

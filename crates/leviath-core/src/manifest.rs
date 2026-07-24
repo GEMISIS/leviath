@@ -425,6 +425,22 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                 }
             }
 
+            // Parse per-stage context layout: [stages.<name>.context.regions].
+            // Different stages can carry different region sets — the runtime swaps
+            // to a stage's layout on entry (apply_stage_context → apply_layout),
+            // preserving overlapping regions' content by name. Absent ⇒ the stage
+            // inherits the global [context.regions] layout. NOTE (TOML nesting):
+            // like [stages.<name>.model], this must be its own `[...]` section;
+            // don't place `context = ...` inline keys after other sub-tables.
+            if let Some(regions_table) = stage_value
+                .get("context")
+                .and_then(|v| v.get("regions"))
+                .and_then(|v| v.as_table())
+            {
+                let (stage_regions, stage_total) = parse_region_layout(regions_table)?;
+                stage.context_layout = Some(ContextLayout::new(stage_regions, stage_total));
+            }
+
             // Parse max_revisits
             if let Some(mr) = stage_value.get("max_revisits").and_then(|v| v.as_integer()) {
                 stage.max_revisits = Some(mr as usize);
@@ -545,109 +561,14 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
         ));
     }
 
-    let mut regions = Vec::new();
-    let mut total_tokens = 0usize;
-
-    if let Some(regions_table) = parsed
+    let (mut regions, mut total_tokens) = match parsed
         .get("context")
         .and_then(|v| v.get("regions"))
         .and_then(|v| v.as_table())
     {
-        for (region_name, region_value) in regions_table {
-            let max_tokens = region_value
-                .get("max_tokens")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(5000) as usize;
-
-            let kind_str = region_value
-                .get("kind")
-                .and_then(|v| v.as_str())
-                .unwrap_or("temporary");
-
-            let kind = match kind_str {
-                "pinned" => RegionKind::Pinned,
-                "sliding_window" => {
-                    let max_items = region_value
-                        .get("max_items")
-                        .and_then(|v| v.as_integer())
-                        .unwrap_or(10) as usize;
-                    let eviction_strategy =
-                        match region_value.get("strategy").and_then(|v| v.as_str()) {
-                            Some("bulk") => {
-                                let overflow = region_value
-                                    .get("overflow")
-                                    .and_then(|v| v.as_integer())
-                                    .unwrap_or(10)
-                                    as usize;
-                                EvictionStrategy::Bulk { overflow }
-                            }
-                            Some("compact") => {
-                                let compact_count = region_value
-                                    .get("compact_count")
-                                    .and_then(|v| v.as_integer())
-                                    .unwrap_or(10)
-                                    as usize;
-                                EvictionStrategy::Compact { compact_count }
-                            }
-                            _ => EvictionStrategy::PerItem,
-                        };
-                    RegionKind::SlidingWindow {
-                        max_items,
-                        eviction_strategy,
-                    }
-                }
-                "temporary" => RegionKind::Temporary,
-                "compacting" => {
-                    let threshold = region_value
-                        .get("threshold_tokens")
-                        .and_then(|v| v.as_integer())
-                        .unwrap_or((max_tokens as i64) * 8 / 10)
-                        as usize;
-                    RegionKind::Compacting {
-                        threshold_tokens: threshold,
-                    }
-                }
-                "clearable" => RegionKind::Clearable,
-                "compact_history" => {
-                    let source = region_value
-                        .get("source_region")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    RegionKind::CompactHistory {
-                        source_region: source,
-                    }
-                }
-                "hashmap" | "hash_map" => {
-                    let max_entries = region_value
-                        .get("max_entries")
-                        .and_then(|v| v.as_integer())
-                        .map(|v| v as usize);
-                    RegionKind::HashMap { max_entries }
-                }
-                _ => RegionKind::Temporary,
-            };
-
-            let required = region_value
-                .get("required")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let required_message = region_value
-                .get("required_message")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-            let seed = parse_region_seed(region_name, region_value.get("seed"));
-
-            total_tokens += max_tokens;
-            let mut def = RegionDefinition::new(region_name.clone(), kind, max_tokens)
-                .with_required(required, required_message);
-            if let Some(seed) = seed {
-                def = def.with_seed(seed);
-            }
-            regions.push(def);
-        }
-    }
+        Some(regions_table) => parse_region_layout(regions_table)?,
+        None => (Vec::new(), 0usize),
+    };
 
     if regions.is_empty() {
         // 8000 tokens (~32K chars) for the pinned system region so a substantial
@@ -840,6 +761,189 @@ fn parse_region_mapping(v: &toml::Value) -> RegionMapping {
         to_region: str_field(v, "to_region"),
         transform,
     }
+}
+
+/// Parse a `[context.regions]` (or `[stages.<name>.context.regions]`) table into
+/// region definitions plus the summed absolute-budget total.
+///
+/// Each region may express its ceiling as a percentage of the model context
+/// window (`budget = "35%"`) with optional absolute guard-rails (`max_tokens`
+/// caps it, `min_tokens` floors it), or as a plain absolute `max_tokens` (the
+/// legacy form, default 5000). Compacting regions may set `compact_at = "80%"`
+/// (compact at that fraction of the resolved budget) and/or an absolute
+/// `threshold_tokens` cap. Percentage regions carry a provisional `max_tokens`
+/// (the cap, or 0) that is finalized when the layout is resolved against a model
+/// window at spawn — see [`ContextLayout::resolved`]. The returned total sums
+/// only the absolute maxes; percentage regions contribute at resolution time.
+///
+/// Malformed `budget`/`compact_at` strings are a hard error so `leviath validate`
+/// catches them at load.
+fn parse_region_layout(
+    regions_table: &toml::value::Table,
+) -> Result<(Vec<RegionDefinition>, usize)> {
+    let mut regions = Vec::new();
+    let mut total_tokens = 0usize;
+
+    for (region_name, region_value) in regions_table {
+        // `budget = "N%"` opts a region into percentage mode; `max_tokens` then
+        // becomes the absolute cap and `min_tokens` the absolute floor. Without a
+        // `budget`, `max_tokens` is the literal ceiling (legacy behavior).
+        let percent = match region_value.get("budget").and_then(|v| v.as_str()) {
+            Some(s) => Some(crate::BudgetSpec::parse_budget(s).map_err(Error::Other)?),
+            None => None,
+        };
+        let max_tokens_opt = region_value
+            .get("max_tokens")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize);
+        let min_tokens = region_value
+            .get("min_tokens")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize);
+
+        let budget = match percent {
+            Some(percent) => crate::BudgetSpec::Percent {
+                percent,
+                min: min_tokens,
+                max: max_tokens_opt,
+            },
+            None => crate::BudgetSpec::Absolute(max_tokens_opt.unwrap_or(5000)),
+        };
+        // Provisional resolved ceiling: the literal value for absolute regions,
+        // the cap (or 0) for percentage regions until resolution overwrites it.
+        let provisional_max_tokens = match &budget {
+            crate::BudgetSpec::Absolute(n) => *n,
+            crate::BudgetSpec::Percent { max, .. } => max.unwrap_or(0),
+        };
+
+        // Compacting regions carry a compaction trigger. Parse `compact_at` (a
+        // fraction of the resolved budget) and the absolute `threshold_tokens`
+        // guard, and reconcile them into (RegionDefinition.compact_at, the value
+        // stored on RegionKind::Compacting) per the resolution contract in
+        // `ContextLayout::resolve_compacting_threshold`.
+        let compact_at = match region_value.get("compact_at").and_then(|v| v.as_str()) {
+            Some(s) => Some(crate::BudgetSpec::parse_budget(s).map_err(Error::Other)?),
+            None => None,
+        };
+        let explicit_threshold = region_value
+            .get("threshold_tokens")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize);
+
+        let kind_str = region_value
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("temporary");
+
+        let kind = match kind_str {
+            "pinned" => RegionKind::Pinned,
+            "sliding_window" => {
+                let max_items = region_value
+                    .get("max_items")
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(10) as usize;
+                let eviction_strategy = match region_value.get("strategy").and_then(|v| v.as_str())
+                {
+                    Some("bulk") => {
+                        let overflow = region_value
+                            .get("overflow")
+                            .and_then(|v| v.as_integer())
+                            .unwrap_or(10) as usize;
+                        EvictionStrategy::Bulk { overflow }
+                    }
+                    Some("compact") => {
+                        let compact_count = region_value
+                            .get("compact_count")
+                            .and_then(|v| v.as_integer())
+                            .unwrap_or(10) as usize;
+                        EvictionStrategy::Compact { compact_count }
+                    }
+                    _ => EvictionStrategy::PerItem,
+                };
+                RegionKind::SlidingWindow {
+                    max_items,
+                    eviction_strategy,
+                }
+            }
+            "temporary" => RegionKind::Temporary,
+            "compacting" => {
+                // Reconcile compact_at / threshold_tokens into the value stored on
+                // the kind (the absolute cap or the usize::MAX "no cap" sentinel);
+                // resolution turns it into the concrete threshold.
+                let threshold = match (compact_at, explicit_threshold, percent.is_some()) {
+                    (Some(_), Some(cap), _) => cap,
+                    (Some(_), None, _) => usize::MAX,
+                    (None, Some(t), _) => t,
+                    // No compact_at and no threshold: default to 80% of the budget
+                    // for percentage regions (resolved later), else the legacy
+                    // absolute `max_tokens * 8 / 10`.
+                    (None, None, true) => usize::MAX,
+                    (None, None, false) => provisional_max_tokens * 8 / 10,
+                };
+                RegionKind::Compacting {
+                    threshold_tokens: threshold,
+                }
+            }
+            "clearable" => RegionKind::Clearable,
+            "compact_history" => {
+                let source = region_value
+                    .get("source_region")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                RegionKind::CompactHistory {
+                    source_region: source,
+                }
+            }
+            "hashmap" | "hash_map" => {
+                let max_entries = region_value
+                    .get("max_entries")
+                    .and_then(|v| v.as_integer())
+                    .map(|v| v as usize);
+                RegionKind::HashMap { max_entries }
+            }
+            _ => RegionKind::Temporary,
+        };
+
+        // The effective compact_at fraction to store on the region: an explicit
+        // value, or the 80% default for a percentage-budget compacting region
+        // with no explicit threshold (so it resolves relative to the budget).
+        let compact_at_field = match (kind_str, compact_at, explicit_threshold, percent.is_some()) {
+            ("compacting", Some(f), _, _) => Some(f),
+            ("compacting", None, None, true) => Some(0.80),
+            _ => None,
+        };
+
+        let required = region_value
+            .get("required")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let required_message = region_value
+            .get("required_message")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let seed = parse_region_seed(region_name, region_value.get("seed"));
+
+        // Percentage regions contribute their (unknown) size at resolution, so
+        // only absolute budgets add to the summed total here.
+        if percent.is_none() {
+            total_tokens += provisional_max_tokens;
+        }
+
+        let mut def = RegionDefinition::new(region_name.clone(), kind, provisional_max_tokens)
+            .with_budget(budget)
+            .with_required(required, required_message);
+        if let Some(f) = compact_at_field {
+            def = def.with_compact_at(f);
+        }
+        if let Some(seed) = seed {
+            def = def.with_seed(seed);
+        }
+        regions.push(def);
+    }
+
+    Ok((regions, total_tokens))
 }
 
 /// Parse a region's `seed` value from `[context.regions.<name>]`.
@@ -1262,6 +1366,219 @@ hist = { kind = "compact_history", source_region = "conv", max_tokens = 4000 }
                 source_region: "conv".to_string()
             }
         );
+
+        // Back-compat: with no `budget`, every region is an Absolute budget
+        // matching its max_tokens, and compact_at stays None.
+        assert_eq!(sys.budget, crate::BudgetSpec::Absolute(1000));
+        assert_eq!(sys.compact_at, None);
+        assert_eq!(comp.budget, crate::BudgetSpec::Absolute(6000));
+        assert_eq!(comp.compact_at, None);
+    }
+
+    #[test]
+    fn parse_region_percent_budget_with_guards() {
+        let toml = r#"
+[agent]
+name = "pct"
+
+[context.regions]
+task = { kind = "pinned", budget = "2%", max_tokens = 4000, min_tokens = 500 }
+free = { kind = "temporary", budget = "25%" }
+abs  = { kind = "pinned", max_tokens = 3000 }
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let task = bp.context_layout.get_region("task").unwrap();
+        assert_eq!(
+            task.budget,
+            crate::BudgetSpec::Percent {
+                percent: 0.02,
+                min: Some(500),
+                max: Some(4000),
+            }
+        );
+        // Provisional max_tokens is the cap until resolution.
+        assert_eq!(task.max_tokens, 4000);
+
+        let free = bp.context_layout.get_region("free").unwrap();
+        assert_eq!(
+            free.budget,
+            crate::BudgetSpec::Percent {
+                percent: 0.25,
+                min: None,
+                max: None,
+            }
+        );
+        // Percentage with no cap → provisional 0 until resolved.
+        assert_eq!(free.max_tokens, 0);
+
+        let abs = bp.context_layout.get_region("abs").unwrap();
+        assert_eq!(abs.budget, crate::BudgetSpec::Absolute(3000));
+
+        assert!(bp.context_layout.has_percent_budgets());
+        // Only the absolute region contributes to the summed total.
+        assert_eq!(bp.context_layout.total_budget_tokens, 3000);
+    }
+
+    #[test]
+    fn parse_region_compact_at_variants() {
+        let toml = r#"
+[agent]
+name = "compacting"
+
+[context.regions]
+capped   = { kind = "compacting", budget = "35%", compact_at = "80%", threshold_tokens = 32000 }
+uncapped = { kind = "compacting", budget = "35%", compact_at = "80%" }
+pct_only = { kind = "compacting", budget = "35%" }
+absolute = { kind = "compacting", threshold_tokens = 9000 }
+default  = { kind = "compacting", max_tokens = 10000 }
+"#;
+        let bp = parse_manifest(toml).unwrap();
+
+        let capped = bp.context_layout.get_region("capped").unwrap();
+        assert_eq!(capped.compact_at, Some(0.80));
+        assert_eq!(
+            capped.kind,
+            RegionKind::Compacting {
+                threshold_tokens: 32000
+            }
+        );
+
+        let uncapped = bp.context_layout.get_region("uncapped").unwrap();
+        assert_eq!(uncapped.compact_at, Some(0.80));
+        assert_eq!(
+            uncapped.kind,
+            RegionKind::Compacting {
+                threshold_tokens: usize::MAX
+            }
+        );
+
+        // budget but no compact_at / threshold → 80% default (percentage mode).
+        let pct_only = bp.context_layout.get_region("pct_only").unwrap();
+        assert_eq!(pct_only.compact_at, Some(0.80));
+        assert_eq!(
+            pct_only.kind,
+            RegionKind::Compacting {
+                threshold_tokens: usize::MAX
+            }
+        );
+
+        // Absolute threshold, no budget → absolute back-compat, compact_at None.
+        let absolute = bp.context_layout.get_region("absolute").unwrap();
+        assert_eq!(absolute.compact_at, None);
+        assert_eq!(
+            absolute.kind,
+            RegionKind::Compacting {
+                threshold_tokens: 9000
+            }
+        );
+
+        // No budget, no compact_at, no threshold → legacy max_tokens * 8 / 10.
+        let default = bp.context_layout.get_region("default").unwrap();
+        assert_eq!(default.compact_at, None);
+        assert_eq!(
+            default.kind,
+            RegionKind::Compacting {
+                threshold_tokens: 8000
+            }
+        );
+    }
+
+    #[test]
+    fn parse_region_rejects_malformed_budget() {
+        let toml = r#"
+[agent]
+name = "bad"
+
+[context.regions]
+task = { kind = "pinned", budget = "lots" }
+"#;
+        let err = parse_manifest(toml).unwrap_err().to_string();
+        assert!(err.contains("must end with '%'"), "{err}");
+    }
+
+    #[test]
+    fn parse_region_rejects_out_of_range_budget() {
+        let toml = r#"
+[agent]
+name = "bad"
+
+[context.regions]
+task = { kind = "pinned", budget = "150%" }
+"#;
+        let err = parse_manifest(toml).unwrap_err().to_string();
+        assert!(err.contains("at most 100%"), "{err}");
+    }
+
+    #[test]
+    fn parse_region_rejects_malformed_compact_at() {
+        let toml = r#"
+[agent]
+name = "bad"
+
+[context.regions]
+work = { kind = "compacting", budget = "35%", compact_at = "eighty" }
+"#;
+        let err = parse_manifest(toml).unwrap_err().to_string();
+        assert!(err.contains("must end with '%'"), "{err}");
+    }
+
+    #[test]
+    fn parse_manifest_reads_per_stage_context_regions() {
+        let toml = r#"
+[agent]
+name = "per-stage"
+entry_stage = "plan"
+
+[stages.plan]
+
+[stages.plan.context.regions]
+plan     = { kind = "pinned", budget = "20%", max_tokens = 40000 }
+codebase = { kind = "compacting", budget = "30%", compact_at = "70%" }
+
+[stages.implement]
+
+[context.regions]
+task = { kind = "pinned", max_tokens = 4000 }
+"#;
+        let bp = parse_manifest(toml).unwrap();
+
+        // The plan stage has its own layout with percentage budgets.
+        let plan_stage = bp.stages.iter().find(|s| s.name == "plan").unwrap();
+        let plan_layout = plan_stage.context_layout.as_ref().unwrap();
+        assert!(plan_layout.has_percent_budgets());
+        let plan_region = plan_layout.get_region("plan").unwrap();
+        assert_eq!(
+            plan_region.budget,
+            crate::BudgetSpec::Percent {
+                percent: 0.20,
+                min: None,
+                max: Some(40000),
+            }
+        );
+        let codebase = plan_layout.get_region("codebase").unwrap();
+        assert_eq!(codebase.compact_at, Some(0.70));
+
+        // The implement stage declared no regions → inherits the global layout.
+        let implement_stage = bp.stages.iter().find(|s| s.name == "implement").unwrap();
+        assert!(implement_stage.context_layout.is_none());
+    }
+
+    #[test]
+    fn parse_manifest_rejects_malformed_per_stage_budget() {
+        // A bad budget inside a [stages.X.context.regions] table propagates the
+        // parse error just like the global layout does.
+        let toml = r#"
+[agent]
+name = "bad-stage"
+entry_stage = "plan"
+
+[stages.plan]
+
+[stages.plan.context.regions]
+plan = { kind = "pinned", budget = "nope" }
+"#;
+        let err = parse_manifest(toml).unwrap_err().to_string();
+        assert!(err.contains("must end with '%'"), "{err}");
     }
 
     #[test]
