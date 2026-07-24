@@ -1,6 +1,6 @@
 [agent]
 name = "software-engineer"
-version = "0.2.0"
+version = "0.3.0"
 description = "Plan-then-implement agent — mirrors the Claude Code plan→approve→code→review workflow"
 entry_stage = "plan"
 
@@ -42,7 +42,10 @@ You are the planning stage of a code assistant.
 
 Your job:
 1. Explore the codebase to understand relevant structure (list_dir, read_file).
-2. Think through the implementation approach.
+   The `architecture` region is pre-loaded with design docs and `constraints`
+   holds any caller-supplied limits (tech stack, timeline, budget) — read both
+   before exploring so you don't rediscover what's already given.
+2. Think through the implementation approach, respecting the constraints.
 3. Produce a concise, numbered plan:
    - Files to create or modify
    - What each change does
@@ -70,6 +73,13 @@ list_dir  = "allow"
 ask_user_text   = "allow"
 ask_user_choice = "allow"
 edit_document   = "allow"
+
+# Exploration output feeds the persistent codebase region.
+[stages.plan.tool_routing]
+default_region = "scratch"
+[stages.plan.tool_routing.overrides]
+read_file = "codebase"
+list_dir  = "codebase"
 
 [stages.plan.transitions.implement]
 hint = "Plan approved — proceed to implementation"
@@ -117,24 +127,40 @@ edit_options = ["Add detail — expand a section"]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "devstral:24b" }] }
 description = "Write code according to the approved plan"
-available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash", "ask_user_text", "ask_user_confirm"]
+available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash", "ask_user_text", "ask_user_confirm", "context_append"]
 max_iterations = 50
 max_revisits = 5
 system_prompt = """
-You are the implementation stage. The plan has been approved by the user.
-Execute the plan step by step:
-- Use write_file to create new files.
-- Use edit_file to modify existing files.
-- Use bash to run tests or verify the build after writing.
+You are the implementation stage. The plan in the `plan` region has been approved.
+Execute it step by step:
+- Use write_file to create new files and edit_file to modify existing ones.
+- Use bash to run tests or verify the build after writing — output goes to
+  `test_results`.
+
+As you work, keep two running logs so the review stage (and any restart) has
+the full picture without re-scanning:
+- `decisions` (context_append): each non-obvious design/architectural choice and
+  the WHY behind it — invaluable when review questions a call.
+- `changelog` (context_append): one line per file created/modified, so review
+  knows exactly what to check.
 
 If you hit a genuine ambiguity the plan didn't resolve (e.g. conflicting
 requirements, or a destructive/hard-to-reverse action you're unsure about),
 use ask_user_text or ask_user_confirm to check before proceeding — don't
 silently guess on something the user would want a say in.
 
-Work methodically through each plan step. After completing all steps, provide a concise
-summary of what was created/modified and whether tests passed.
+Work methodically through each plan step. After all steps, give a concise summary
+of what was created/modified and whether tests passed.
 """
+
+[stages.implement.tool_routing]
+default_region = "scratch"
+[stages.implement.tool_routing.overrides]
+read_file  = "codebase"
+list_dir   = "codebase"
+write_file = "implementation"
+edit_file  = "implementation"
+bash       = "test_results"
 
 [stages.implement.transitions.review]
 hint = "Implementation complete, ready for review"
@@ -157,7 +183,7 @@ transform = "direct"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "devstral:24b" }] }
 description = "Review the implementation and evaluate code quality"
-available_tools = ["read_file", "list_dir"]
+available_tools = ["read_file", "list_dir", "bash"]
 max_revisits = 3
 # Lets the run end here (via "DONE") when the review approves the work,
 # instead of being forced down the only declared edge back to implement.
@@ -171,11 +197,17 @@ Minor style issues don't warrant another implementation pass.
 """
 system_prompt = """
 You are the review stage. The implementation is complete.
-Read the files that were created or modified and provide a quality review:
-- Correctness: does it match the plan and the original task?
+
+Use the `changelog` region to see exactly which files changed, and `decisions` to
+understand why choices were made before you question them. Read those files and
+provide a quality review:
+- Correctness: does it match the plan AND the original task in `task`?
 - Edge cases: what inputs or conditions could cause failures?
-- Code quality: clarity, naming, error handling.
+- Code quality: clarity, naming, error handling, conventions.
 - Security: any obvious vulnerabilities?
+
+Re-run the tests with bash and confirm they pass (output → `test_results`) — don't
+approve on an unverified claim that tests pass.
 
 End with one of:
   APPROVED — no significant issues
@@ -185,15 +217,23 @@ End with one of:
 [stages.review.tool_permissions]
 read_file = "allow"
 list_dir  = "allow"
+bash      = "ask"
+
+[stages.review.tool_routing]
+default_region = "scratch"
+[stages.review.tool_routing.overrides]
+read_file = "codebase"
+list_dir  = "codebase"
+bash      = "test_results"
 
 [stages.review.transitions.implement]
 hint = "Issues found — needs another implementation pass"
 transform = "custom"
 
 [stages.review.transitions.implement.transform_config]
-carry = ["task", "codebase"]
+carry = ["task", "constraints", "architecture", "plan", "codebase", "changelog", "decisions"]
 compact = ["conversation"]
-clear = ["scratch"]
+clear = ["scratch", "test_results"]
 compact_prompt = "Summarize review findings as a numbered list of required fixes."
 
 [stages.review.transitions.error_recovery]
@@ -230,21 +270,30 @@ provider = "anthropic"
 model    = "claude-sonnet-4-6"
 
 # ─── Context layout ──────────────────────────────────────────────────────────
+# Budgets are a percentage of the model's context window (issue #100) with an
+# absolute `max_tokens`/`threshold_tokens` guard-rail. Percentages are ceilings.
 
 [context.regions]
-# System-level (pinned, stable, cacheable)
-architecture    = { kind = "pinned",          max_tokens = 6000 }
-task            = { kind = "pinned",          max_tokens = 4000 }
-plan            = { kind = "pinned",          max_tokens = 6000 }
+# ── Inputs (pinned, stable, cacheable) ──
+task         = { kind = "pinned", budget = "2%", max_tokens = 4000, required = true, required_message = "Describe the task via --task (or the API/ACP task field)." }
+# Optional caller limits: --constraints "must stay on Node 18, no new deps".
+constraints  = { kind = "pinned", budget = "1%", max_tokens = 2000, seed = "constraints" }
+# Pre-loaded on startup: architecture / design docs (missing files skipped).
+architecture = { kind = "pinned", budget = "3%", max_tokens = 6000, seed = { files = ["ARCHITECTURE.md", "DESIGN.md", "docs/ARCHITECTURE.md", "docs/architecture.md", "README.md"] } }
+plan         = { kind = "pinned", budget = "5%", max_tokens = 6000 }
 
-# Knowledge (non-volatile, survives message eviction)
-codebase        = { kind = "compacting",      threshold_tokens = 25000, max_tokens = 40000 }
-codebase_history = { kind = "compact_history", source_region = "codebase", max_tokens = 8000 }
-implementation  = { kind = "compacting",      threshold_tokens = 25000, max_tokens = 40000 }
-impl_history    = { kind = "compact_history", source_region = "implementation", max_tokens = 8000 }
+# ── Knowledge (non-volatile; compacts to *_history) ──
+codebase         = { kind = "compacting",      budget = "25%", compact_at = "80%", threshold_tokens = 25000, max_tokens = 40000 }
+codebase_history = { kind = "compact_history", source_region = "codebase",      budget = "2%", max_tokens = 8000 }
+implementation   = { kind = "compacting",      budget = "35%", compact_at = "80%", threshold_tokens = 32000, max_tokens = 40000 }
+impl_history     = { kind = "compact_history", source_region = "implementation", budget = "2%", max_tokens = 8000 }
 
-# Conversation (bulk eviction for caching)
-conversation    = { kind = "sliding_window",  max_items = 40, max_tokens = 30000, strategy = "bulk", overflow = 20 }
+# ── Working records (sliding windows) + test feedback ──
+# decisions: WHY choices were made. changelog: which files changed.
+decisions    = { kind = "sliding_window", max_items = 10, budget = "3%", max_tokens = 4000 }
+changelog    = { kind = "sliding_window", max_items = 20, budget = "2%", max_tokens = 3000 }
+test_results = { kind = "clearable",      budget = "4%", max_tokens = 5000 }
 
-# Working memory (volatile)
-scratch         = { kind = "clearable",       max_tokens = 10000 }
+# ── Conversation (bulk eviction for caching) + working memory ──
+conversation = { kind = "sliding_window", max_items = 40, budget = "20%", max_tokens = 30000, strategy = "bulk", overflow = 20 }
+scratch      = { kind = "clearable",      budget = "8%", max_tokens = 10000 }

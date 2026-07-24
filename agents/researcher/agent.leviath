@@ -1,30 +1,43 @@
 [agent]
 name = "researcher"
-version = "0.2.0"
+version = "0.3.0"
 description = "Research assistant — gather, analyze, and summarize with a gather↔analyze refinement loop, error recovery, and multi-provider fallback"
 entry_stage = "gather"
+
+# Read/search agent: it gathers and synthesizes, writing only its final report.
+[tool_permissions]
+read_file  = "allow"
+list_dir   = "allow"
+web_search = "allow"
+web_fetch  = "allow"
+write_file = "ask"
+bash       = "ask"
 
 # ─── Stage 1: Gather ──────────────────────────────────────────────────────────
 [stages.gather]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Gather relevant information on the topic"
-available_tools = ["read_file", "bash"]
+# web_search / web_fetch are provided by the agent's script tools (issue #97).
+available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append"]
 max_iterations = 20
 max_revisits = 3
 system_prompt = """
-You are gathering source material on a topic. Use bash (curl/wget) for web
-sources and read_file for local documents. For each item, note where it came
-from and the key claims it supports. Cast a reasonably wide net, but stay on
-topic — the analyze stage will decide whether it's enough.
+You are gathering source material on the topic in the `query` region, within any
+bounds set in `scope`. Search breadth-first: cover the main sub-topics and a range
+of viewpoints before going deep on any one.
+
+Use web_search to find sources, web_fetch to pull their content, and read_file for
+local documents. Raw source content lands in `raw_findings`.
+
+For every source, append one bibliography line to `sources_index` (context_append):
+`[n] <title> — <url or path> — <date if known> — credibility: <high/med/low + why>`.
+Prefer primary sources and well-established outlets; note when something is a blog,
+forum, or vendor claim. The analyze stage decides whether the coverage is enough.
 """
 
-# Raw source material lands in the findings region, not scratch.
 [stages.gather.tool_routing]
-default_region = "scratch"
-[stages.gather.tool_routing.overrides]
-read_file = "findings"
-bash      = "findings"
+default_region = "raw_findings"
 
 [stages.gather.transitions.analyze]
 hint = "Enough gathered for a first pass of analysis"
@@ -41,7 +54,7 @@ transform = "direct"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "qwen3.6:27b" }] }
 description = "Analyze and synthesize findings"
-available_tools = ["read_file"]
+available_tools = ["read_file", "web_fetch", "context_write", "context_append"]
 max_iterations = 20
 max_revisits = 3
 transition_prompt = """
@@ -50,10 +63,21 @@ You've analyzed the material gathered so far. Decide what happens next:
 - If you have enough to write a useful summary, respond with: summarize
 """
 system_prompt = """
-Analyze the gathered findings: identify themes, note agreements and
-disagreements across sources, evaluate source quality, and flag open
-questions. Distinguish well-supported claims from speculation.
+Analyze the `raw_findings` against the `sources_index`. Do three things:
+
+1. Extract factual claims into the `claims` region (context_append), each with its
+   source reference: `<claim> [n]`. These are what the summary is built from.
+2. When sources DISAGREE, record the conflict in `contradictions` (context_write)
+   — who claims what, with source refs. Don't silently pick a side; surface it.
+3. Judge strength: separate well-supported claims (multiple credible sources) from
+   single-source or speculative ones.
+
+Use web_fetch for a targeted follow-up only when a specific gap blocks a claim.
+Flag open questions you couldn't resolve.
 """
+
+[stages.analyze.tool_routing]
+default_region = "raw_findings"
 
 [stages.analyze.transitions.gather]
 hint = "More information needed on specific sub-topics"
@@ -72,12 +96,20 @@ transform = "direct"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Create a concise, well-organized summary"
-available_tools = ["write_file"]
+available_tools = ["write_file", "read_file"]
 max_iterations = 10
 system_prompt = """
-Write a concise summary of the research: the key findings organized by theme,
-the strength of the evidence for each, notable disagreements, and open
-questions. Cite specific sources. Keep it tight and skimmable.
+Write the research report (write_file), built from the `claims` region and citing
+`sources_index`. Follow the citation/confidence rules in the `format` region.
+
+Structure:
+- Key findings organized by theme, each with a confidence level.
+- Notable disagreements — pull these straight from the `contradictions` region;
+  never drop a recorded conflict.
+- Open questions.
+- Sources — the numbered bibliography from `sources_index`.
+
+Keep it tight and skimmable. Every non-obvious claim must carry a [n] citation.
 """
 
 # Explicit empty transitions table = terminal stage (the run ends here).
@@ -105,9 +137,25 @@ transform = "compact"
 provider = "anthropic"
 model = "claude-sonnet-4-6"
 
+# ─── Context layout ───────────────────────────────────────────────────────────
+# Budgets are a percentage of the model's context window (issue #100) with an
+# absolute `max_tokens`/`threshold_tokens` guard-rail. Percentages are ceilings.
 [context.regions]
-query    = { kind = "pinned",          max_tokens = 1000 }
-findings = { kind = "temporary",       max_tokens = 40000 }
-analysis = { kind = "compacting",      threshold_tokens = 30000, max_tokens = 50000 }
-summary  = { kind = "compact_history", source_region = "analysis", max_tokens = 10000 }
-scratch  = { kind = "clearable",       max_tokens = 5000 }
+# The research question — required. Supplied via --task (or the API/ACP task field).
+query          = { kind = "pinned", budget = "1%", max_tokens = 1000, required = true, seed = "task", required_message = "State the research question via --task." }
+# Optional caller bounds: --scope "peer-reviewed sources since 2020 only".
+scope          = { kind = "pinned", budget = "1%", max_tokens = 1000, seed = "scope" }
+# Growing bibliography with credibility notes (curated by the agent).
+sources_index  = { kind = "pinned", budget = "3%", max_tokens = 3000 }
+# Citation/confidence rules (seeded with a sensible default the agent follows).
+format         = { kind = "pinned", budget = "1%", max_tokens = 500, seed = { literal = "Cite every non-obvious claim as [n], matching a numbered entry in the Sources bibliography (title + URL/path). Mark each finding's confidence as high / medium / low based on source count and credibility." } }
+
+# Raw source material (bulk, evictable).
+raw_findings   = { kind = "temporary", budget = "30%", max_tokens = 40000 }
+# Extracted claims (with source refs) and cross-source conflicts.
+claims         = { kind = "sliding_window", max_items = 30, budget = "7%", max_tokens = 8000 }
+contradictions = { kind = "clearable",      budget = "3%", max_tokens = 3000 }
+
+# Synthesis workspace (compacts to a running history when it grows).
+synthesis         = { kind = "compacting",      budget = "40%", compact_at = "80%", threshold_tokens = 30000, max_tokens = 50000 }
+synthesis_history = { kind = "compact_history", source_region = "synthesis", budget = "3%", max_tokens = 10000 }
