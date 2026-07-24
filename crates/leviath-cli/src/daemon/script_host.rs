@@ -34,6 +34,8 @@ pub struct ScriptAllow {
     pub shell: bool,
     /// Whether `read_file` may run.
     pub read_file: bool,
+    /// Whether `write_file` may run.
+    pub write_file: bool,
     /// Whether `env_var` may run.
     pub env_var: bool,
 }
@@ -41,7 +43,7 @@ pub struct ScriptAllow {
 /// Resolve `[tool_script_permissions]` into concrete allow/deny booleans.
 ///
 /// `Allow`/`Deny` map directly. `Inherit` means:
-/// - `read_file` / `shell`: permitted only when the agent's resolved policy for
+/// - `read_file` / `write_file` / `shell`: permitted only when the agent's resolved policy for
 ///   the equivalent built-in (`resolve_builtin`) is [`ToolPolicy::Allow`]. This
 ///   is evaluated once against the entry stage's permission layers; a later
 ///   stage's `tool_permissions` do not re-gate a script's host calls.
@@ -70,6 +72,7 @@ pub fn resolve_script_permissions(
         http_post: net(perms.http_post),
         env_var: net(perms.env_var),
         read_file: filelike(perms.read_file, "read_file"),
+        write_file: filelike(perms.write_file, "write_file"),
         shell: filelike(perms.shell, "shell"),
     }
 }
@@ -90,6 +93,9 @@ pub trait ScriptIo: Send + Sync {
     fn shell(&self, command: &str, workdir: &Path) -> Result<String, String>;
     /// Read the file at an already-confined absolute `path`.
     fn read_file(&self, path: &Path) -> Result<String, String>;
+    /// Write `content` to an already-confined absolute `path`, creating parent
+    /// directories as needed. Returns a short confirmation.
+    fn write_file(&self, path: &Path, content: &str) -> Result<String, String>;
     /// Read environment variable `name`.
     fn env_var(&self, name: &str) -> Result<String, String>;
 }
@@ -182,6 +188,14 @@ impl ScriptHost for DaemonScriptHost {
         self.io.read_file(&resolved)
     }
 
+    fn write_file(&self, path: &str, content: &str) -> Result<String, String> {
+        if !self.allow.write_file {
+            return Err(denied("write_file"));
+        }
+        let resolved = self.resolve_in_workdir(path)?;
+        self.io.write_file(&resolved, content)
+    }
+
     fn env_var(&self, name: &str) -> Result<String, String> {
         if !self.allow.env_var {
             return Err(denied("env_var"));
@@ -271,6 +285,19 @@ impl ScriptIo for RealScriptIo {
         std::fs::read_to_string(path).map_err(|e| format!("read '{}': {e}", path.display()))
     }
 
+    fn write_file(&self, path: &Path, content: &str) -> Result<String, String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create dir '{}': {e}", parent.display()))?;
+        }
+        std::fs::write(path, content).map_err(|e| format!("write '{}': {e}", path.display()))?;
+        Ok(format!(
+            "wrote {} bytes to {}",
+            content.len(),
+            path.display()
+        ))
+    }
+
     fn env_var(&self, name: &str) -> Result<String, String> {
         std::env::var(name).map_err(|_| format!("environment variable '{name}' is not set"))
     }
@@ -301,6 +328,7 @@ mod tests {
             http_post: all,
             shell: all,
             read_file: all,
+            write_file: all,
             env_var: all,
         }
     }
@@ -315,6 +343,7 @@ mod tests {
                 http_post: true,
                 shell: true,
                 read_file: true,
+                write_file: true,
                 env_var: true,
             }
         );
@@ -330,6 +359,7 @@ mod tests {
                 http_post: false,
                 shell: false,
                 read_file: false,
+                write_file: false,
                 env_var: false,
             }
         );
@@ -344,6 +374,7 @@ mod tests {
         });
         assert!(a.http_get && a.http_post && a.env_var);
         assert!(a.read_file, "read_file inherit → Allow");
+        assert!(!a.write_file, "write_file inherit → Ask ⇒ denied");
         assert!(!a.shell, "shell inherit → Ask ⇒ denied");
     }
 
@@ -387,6 +418,13 @@ mod tests {
                 .push(format!("read:{}", path.display()));
             Ok("r".into())
         }
+        fn write_file(&self, path: &Path, content: &str) -> Result<String, String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("write:{}:{content}", path.display()));
+            Ok("w".into())
+        }
         fn env_var(&self, name: &str) -> Result<String, String> {
             self.calls.lock().unwrap().push(format!("env:{name}"));
             Ok("e".into())
@@ -399,6 +437,7 @@ mod tests {
             http_post: true,
             shell: true,
             read_file: true,
+            write_file: true,
             env_var: true,
         }
     }
@@ -409,6 +448,7 @@ mod tests {
             http_post: false,
             shell: false,
             read_file: false,
+            write_file: false,
             env_var: false,
         }
     }
@@ -423,11 +463,17 @@ mod tests {
             "p"
         );
         assert_eq!(host.shell("ls").unwrap(), "s");
+        assert_eq!(host.write_file("out.txt", "body").unwrap(), "w");
         assert_eq!(host.env_var("HOME").unwrap(), "e");
         let calls = io.calls.lock().unwrap().clone();
         assert!(calls.contains(&"get:http://x".to_string()));
         assert!(calls.iter().any(|c| c.starts_with("post:")));
         assert!(calls.contains(&"shell:ls".to_string()));
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.starts_with("write:") && c.ends_with(":body"))
+        );
         assert!(calls.contains(&"env:HOME".to_string()));
     }
 
@@ -447,6 +493,11 @@ mod tests {
         );
         assert!(host.shell("ls").unwrap_err().contains("shell"));
         assert!(host.read_file("a.txt").unwrap_err().contains("read_file"));
+        assert!(
+            host.write_file("a.txt", "b")
+                .unwrap_err()
+                .contains("write_file")
+        );
         assert!(host.env_var("X").unwrap_err().contains("env_var"));
         assert!(
             io.calls.lock().unwrap().is_empty(),
@@ -462,13 +513,18 @@ mod tests {
         let host = DaemonScriptHost::with_io(all_allowed(), dir.path().to_path_buf(), io.clone());
         // Allowed relative path → delegates.
         assert_eq!(host.read_file("ok.txt").unwrap(), "r");
-        // Escaping path → rejected before any I/O.
+        assert_eq!(host.write_file("ok.txt", "x").unwrap(), "w");
+        // Escaping path → rejected before any I/O (both read and write share the
+        // resolve_in_workdir `?` guard).
         let err = host.read_file("../../etc/passwd").unwrap_err();
         assert!(err.contains("escape"));
-        // Only the ok.txt read reached the io.
+        let werr = host.write_file("../../etc/passwd", "x").unwrap_err();
+        assert!(werr.contains("escape"));
+        // Only the ok.txt read + write reached the io (the escaping calls did not).
         let calls = io.calls.lock().unwrap().clone();
-        assert_eq!(calls.len(), 1);
-        assert!(calls[0].starts_with("read:"));
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().any(|c| c.starts_with("read:")));
+        assert!(calls.iter().any(|c| c.starts_with("write:")));
     }
 
     #[test]
@@ -635,6 +691,44 @@ mod tests {
             .read_file(&dir.path().join("nope"))
             .unwrap_err();
         assert!(err.contains("read '"));
+    }
+
+    #[test]
+    fn real_write_file_creates_parents_and_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        // Nested path exercises the create_dir_all(Some(parent)) branch.
+        let nested = dir.path().join("sub/deep/out.txt");
+        let msg = RealScriptIo.write_file(&nested, "body").unwrap();
+        assert!(msg.contains("wrote 4 bytes"), "got: {msg}");
+        assert_eq!(std::fs::read_to_string(&nested).unwrap(), "body");
+    }
+
+    #[test]
+    fn real_write_file_create_dir_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // A regular file where a parent directory is expected → create_dir_all fails.
+        let blocker = dir.path().join("afile");
+        std::fs::write(&blocker, "x").unwrap();
+        let err = RealScriptIo
+            .write_file(&blocker.join("child.txt"), "b")
+            .unwrap_err();
+        assert!(err.contains("create dir"), "got: {err}");
+    }
+
+    #[test]
+    fn real_write_file_write_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // The path itself is an existing directory → std::fs::write fails.
+        let err = RealScriptIo.write_file(dir.path(), "b").unwrap_err();
+        assert!(err.contains("write '"), "got: {err}");
+    }
+
+    #[test]
+    fn real_write_file_parentless_path() {
+        // An empty path has no parent → the `if let Some(parent)` None arm is
+        // taken (no dir creation), then the write itself fails.
+        let err = RealScriptIo.write_file(Path::new(""), "b").unwrap_err();
+        assert!(err.contains("write '"), "got: {err}");
     }
 
     #[test]

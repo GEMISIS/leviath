@@ -404,6 +404,7 @@ mod tests {
             http_post: false,
             shell: false,
             read_file: false,
+            write_file: false,
             env_var: false,
         };
         (
@@ -844,6 +845,9 @@ mod tests {
             fn read_file(&self, _p: &str) -> Result<String, String> {
                 Ok(String::new())
             }
+            fn write_file(&self, _p: &str, _c: &str) -> Result<String, String> {
+                Ok(String::new())
+            }
             fn env_var(&self, _n: &str) -> Result<String, String> {
                 panic!("boom in host");
             }
@@ -862,6 +866,7 @@ mod tests {
         );
         assert!(host.shell("c").is_ok());
         assert!(host.read_file("p").is_ok());
+        assert!(host.write_file("p", "c").is_ok());
         let hub = InteractionHub::new();
         let mut allow = HashMap::new();
         allow.insert("boom".to_string(), ToolPolicy::Allow);

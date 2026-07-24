@@ -69,6 +69,9 @@ pub struct ScriptToolPermissions {
     /// Permission for `read_file`.
     #[serde(default)]
     pub read_file: ScriptPermission,
+    /// Permission for `write_file`.
+    #[serde(default)]
+    pub write_file: ScriptPermission,
     /// Permission for `env_var`.
     #[serde(default)]
     pub env_var: ScriptPermission,
@@ -1912,6 +1915,7 @@ anthropic_api_key = "sk-ant-test-key"
                 http_post: ScriptPermission::Deny,
                 shell: ScriptPermission::Deny,
                 read_file: ScriptPermission::Inherit,
+                write_file: ScriptPermission::Deny,
                 env_var: ScriptPermission::Allow,
             },
         };
@@ -1928,6 +1932,10 @@ anthropic_api_key = "sk-ant-test-key"
         );
         assert_eq!(
             deserialized.tool_script_permissions.shell,
+            ScriptPermission::Deny
+        );
+        assert_eq!(
+            deserialized.tool_script_permissions.write_file,
             ScriptPermission::Deny
         );
         assert_eq!(deserialized.webhook.max_retries, 5);
