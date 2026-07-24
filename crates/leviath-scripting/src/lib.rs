@@ -9,10 +9,15 @@
 pub mod engine;
 pub mod functions;
 pub mod sandbox;
+pub mod tool;
 pub mod types;
 
 pub use engine::ScriptEngine;
 pub use sandbox::SandboxConfig;
+pub use tool::{
+    ParamSpec, ScriptHost, ScriptTool, ScriptToolMeta, ScriptToolSet, SkippedTool,
+    execute as execute_script_tool,
+};
 
 use thiserror::Error;
 
