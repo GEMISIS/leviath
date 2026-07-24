@@ -99,6 +99,17 @@ pub type Reloader = Box<dyn FnMut(&mut PipelineWorld, &str) -> Option<Entity> + 
 /// Installed with [`WorldHost::set_reaper`]; a no-op when none is set.
 pub type Reaper = Box<dyn FnMut(&mut PipelineWorld, Entity) + Send>;
 
+/// An async hook the host awaits *before* servicing a top-level `Spawn` control
+/// op, so the daemon can do async preparation the sync spawner can't — e.g.
+/// lazily connecting the blueprint's MCP servers into the shared pool (issue #97)
+/// so they're warm by the time [`Spawner`] reads them. The returned future is
+/// `'static` (it must clone anything it needs from the `SpawnArgs`). Installed
+/// with [`WorldHost::set_spawn_preprocessor`]; when none is set, spawns proceed
+/// straight to the spawner.
+pub type SpawnPreprocessor = Box<
+    dyn Fn(&SpawnArgs) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send,
+>;
+
 /// A world-access request from an agent's tool lane. The sub-agent tools
 /// (`spawn_agent`/`check_agent`/`send_to_agent`/`kill_agent`) need the world and
 /// the [`Spawner`], which only the host holds — the tool lane runs async, off the
@@ -358,6 +369,7 @@ pub struct WorldHost {
     by_run_id: HashMap<String, Entity>,
     interactions: InteractionHub,
     spawner: Option<Spawner>,
+    spawn_preprocessor: Option<SpawnPreprocessor>,
     reloader: Option<Reloader>,
     reaper: Option<Reaper>,
     events: broadcast::Sender<WorldEvent>,
@@ -390,6 +402,7 @@ impl WorldHost {
             by_run_id: HashMap::new(),
             interactions,
             spawner: None,
+            spawn_preprocessor: None,
             reloader: None,
             reaper: None,
             events,
@@ -612,6 +625,12 @@ impl WorldHost {
     /// `Spawn` op replies with an error.
     pub fn set_spawner(&mut self, spawner: Spawner) {
         self.spawner = Some(spawner);
+    }
+
+    /// Install the async hook awaited before each top-level `Spawn` (see
+    /// [`SpawnPreprocessor`]).
+    pub fn set_spawn_preprocessor(&mut self, pp: SpawnPreprocessor) {
+        self.spawn_preprocessor = Some(pp);
     }
 
     /// Install the reloader used to page an unloaded run back in on demand.
@@ -901,7 +920,21 @@ impl WorldHost {
                 _ = shutdown.notified() => break 'serve,
                 op = control_rx.recv() => {
                     match op {
-                        Some(op) => self.handle(op),
+                        // Await the spawn preprocessor (e.g. lazy MCP connect) before
+                        // the sync spawner runs, so the pool is warm. The returned
+                        // future is `'static`, so no borrow of `self`/`op` outlives it.
+                        Some(op) => {
+                            let pre = match &op {
+                                ControlOp::Spawn { args, .. } => {
+                                    self.spawn_preprocessor.as_ref().map(|pp| pp(args))
+                                }
+                                _ => None,
+                            };
+                            if let Some(fut) = pre {
+                                fut.await;
+                            }
+                            self.handle(op);
+                        }
                         None => break 'serve, // all control senders dropped
                     }
                 }
@@ -1546,6 +1579,73 @@ mod tests {
         let host = handle.await.unwrap();
         // The agent ran to completion under the serve loop.
         assert_eq!(host.world.agent_status(e), Some(AgentStatus::Complete));
+    }
+
+    #[tokio::test]
+    async fn serve_awaits_spawn_preprocessor_before_spawning() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mut host = host_with(vec![]);
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran_pp = ran.clone();
+        host.set_spawn_preprocessor(Box::new(move |_args| {
+            let ran = ran_pp.clone();
+            Box::pin(async move {
+                ran.store(true, Ordering::SeqCst);
+            })
+        }));
+        let ran_spawn = ran.clone();
+        host.set_spawner(Box::new(move |world, args| {
+            // The preprocessor must have completed before the spawner runs.
+            assert!(ran_spawn.load(Ordering::SeqCst));
+            Ok(world.spawn_agent((agent_state(&args.run_id),)))
+        }));
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(async move {
+            host.serve(op_rx).await;
+        });
+        let (tx, rx) = oneshot::channel();
+        op_tx
+            .send(ControlOp::Spawn {
+                args: Box::new(SpawnArgs {
+                    run_id: "rp".to_string(),
+                    ..Default::default()
+                }),
+                reply: tx,
+            })
+            .unwrap();
+        let result = rx.await.unwrap();
+        drop(op_tx); // close the channel so serve() returns
+        handle.await.unwrap();
+        assert_eq!(result, Ok("rp".to_string()));
+        assert!(ran.load(Ordering::SeqCst), "preprocessor ran");
+    }
+
+    #[tokio::test]
+    async fn serve_spawns_without_a_preprocessor() {
+        // A Spawn op through serve() with no preprocessor installed exercises the
+        // `None` arm of the preprocessor branch.
+        let mut host = host_with(vec![]);
+        host.set_spawner(Box::new(|world, args| {
+            Ok(world.spawn_agent((agent_state(&args.run_id),)))
+        }));
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(async move {
+            host.serve(op_rx).await;
+        });
+        let (tx, rx) = oneshot::channel();
+        op_tx
+            .send(ControlOp::Spawn {
+                args: Box::new(SpawnArgs {
+                    run_id: "np".to_string(),
+                    ..Default::default()
+                }),
+                reply: tx,
+            })
+            .unwrap();
+        let result = rx.await.unwrap();
+        drop(op_tx);
+        handle.await.unwrap();
+        assert_eq!(result, Ok("np".to_string()));
     }
 
     #[tokio::test]
