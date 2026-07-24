@@ -130,10 +130,14 @@ mod tests {
     }
 
     #[test]
-    fn open_url_uses_the_real_launcher() {
-        // Drives the public entry point. Whatever the host OS, this resolves a
-        // launcher and attempts a detached spawn; the return value depends on
-        // whether that launcher exists, so we only require it not to panic.
-        let _ = open_url("https://example.com");
+    fn open_url_runs_the_real_launcher_without_opening_a_browser() {
+        // Drives the real public entry point. The target is a bare, non-existent
+        // name rather than a URL, so whichever launcher the host resolves
+        // (`open`, `xdg-open`, or `cmd /C start`) errors on a missing file
+        // instead of opening a browser. This exercises the real `open_url`
+        // delegation on every platform without launching anything. The return
+        // value is host-dependent (whether the launcher itself is present), so
+        // we only require the call not to panic.
+        let _ = open_url("leviath-open-url-test-target");
     }
 }

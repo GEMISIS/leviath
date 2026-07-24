@@ -40,7 +40,7 @@ impl Default for McpAdmin {
         Self {
             config_path: Config::config_path(),
             store_path: AuthStore::default_path().unwrap_or_default(),
-            opener: leviath_sys::open_url,
+            opener: std::sync::Arc::new(leviath_sys::open_url),
             clock: system_now,
         }
     }
@@ -229,7 +229,7 @@ pub(super) async fn login(
         .login(
             &url,
             &server.headers,
-            admin.opener,
+            admin.opener.clone(),
             (admin.clock)(),
             reuse.as_deref(),
         )
@@ -330,7 +330,10 @@ mod tests {
     }
 
     /// An app state whose MCP admin points at temp paths.
-    fn state_at(dir: &std::path::Path, opener: leviath_mcp::BrowserOpener) -> AppState {
+    fn state_at(
+        dir: &std::path::Path,
+        opener: impl Fn(&str) -> bool + Send + Sync + 'static,
+    ) -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(16);
         AppState {
             config: Arc::new(Config::default()),
@@ -339,7 +342,7 @@ mod tests {
             mcp: McpAdmin {
                 config_path: dir.join("config.toml"),
                 store_path: dir.join("mcp-auth.json"),
-                opener,
+                opener: Arc::new(opener),
                 clock: fixed_clock,
             },
         }
@@ -694,7 +697,7 @@ for line in sys.stdin:
             mcp: McpAdmin {
                 config_path: cfg,
                 store_path: store,
-                opener: never_opens,
+                opener: Arc::new(never_opens),
                 clock: fixed_clock,
             },
         }
@@ -747,7 +750,7 @@ for line in sys.stdin:
             mcp: McpAdmin {
                 config_path: file.join("config.toml"),
                 store_path: dir.path().join("s.json"),
-                opener: never_opens,
+                opener: Arc::new(never_opens),
                 clock: fixed_clock,
             },
         };

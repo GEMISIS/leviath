@@ -196,7 +196,7 @@ fn init_dashboard(control: ControlClient, yank_fn: fn(&str) -> bool) -> Dashboar
     let mcp_ctx = types::McpContext {
         config_path: crate::config::Config::config_path(),
         store_path: leviath_mcp::AuthStore::default_path().unwrap_or_default(),
-        opener: leviath_sys::open_url,
+        opener: std::sync::Arc::new(leviath_sys::open_url),
         clock: mcp_system_now,
     };
     let mut dashboard = Dashboard::new_with_log_path(

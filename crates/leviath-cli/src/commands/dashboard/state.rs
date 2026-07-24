@@ -131,7 +131,7 @@ impl Dashboard {
             store_path: std::env::temp_dir()
                 .join("leviath-test-dashboard")
                 .join("mcp-auth.json"),
-            opener: |_| false,
+            opener: std::sync::Arc::new(|_| false),
             clock: || 1_000,
         };
         Self::new_with_log_path(cmd_tx, log_path, |_| false, ctx)

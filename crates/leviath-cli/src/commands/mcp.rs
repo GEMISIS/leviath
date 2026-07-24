@@ -192,7 +192,13 @@ async fn login(name: &str, env: &McpEnv) -> anyhow::Result<()> {
     // Reuse a prior registration if we have one, so re-login doesn't re-register.
     let reuse = store.get(name).map(|a| a.client_id.clone());
     let auth = OAuthClient::new()
-        .login(&url, &server.headers, env.opener, env.now, reuse.as_deref())
+        .login(
+            &url,
+            &server.headers,
+            env.opener.clone(),
+            env.now,
+            reuse.as_deref(),
+        )
         .await?;
     store.set(name, auth);
     store.save(&env.store_path)?;
@@ -334,11 +340,15 @@ fn find_server<'a>(config: &'a Config, name: &str) -> anyhow::Result<&'a MCPServ
 mod tests {
     use super::*;
 
-    fn env_at(dir: &std::path::Path, opener: leviath_mcp::BrowserOpener, now: u64) -> McpEnv {
+    fn env_at(
+        dir: &std::path::Path,
+        opener: impl Fn(&str) -> bool + Send + Sync + 'static,
+        now: u64,
+    ) -> McpEnv {
         McpEnv {
             config_path: dir.join("config.toml"),
             store_path: dir.join("mcp-auth.json"),
-            opener,
+            opener: std::sync::Arc::new(opener),
             now,
         }
     }
@@ -917,7 +927,7 @@ for line in sys.stdin:
         McpEnv {
             config_path: cfg,
             store_path: store,
-            opener: never_opens,
+            opener: std::sync::Arc::new(never_opens),
             now: 0,
         }
     }
@@ -993,7 +1003,7 @@ for line in sys.stdin:
         let ro_env = McpEnv {
             config_path: file.join("config.toml"),
             store_path: dir.path().join("s.json"),
-            opener: never_opens,
+            opener: std::sync::Arc::new(never_opens),
             now: 0,
         };
         assert!(
