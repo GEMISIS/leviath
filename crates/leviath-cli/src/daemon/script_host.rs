@@ -696,8 +696,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let host =
             DaemonScriptHost::with_io(all_allowed(), dir.path().to_path_buf(), RecordingIo::arc());
-        let err = host.read_file("/etc/hosts").unwrap_err();
-        assert!(err.contains("would escape"));
+        // A path that is *absolute on the current platform* (a leading `/` is not
+        // absolute on Windows — it needs a drive/UNC prefix), and outside the
+        // workdir. `temp_dir()` is absolute everywhere and a sibling of the
+        // workdir tempdir, so it exercises the `is_absolute()` → true branch.
+        let outside = std::env::temp_dir().join("leviath-abs-outside-xyz");
+        assert!(outside.is_absolute(), "test path must be absolute");
+        let err = host.read_file(outside.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("would escape"), "got: {err}");
     }
 
     #[test]
