@@ -27,6 +27,53 @@ pub enum ToolPolicy {
 // dependency. Re-exported here so `crate::config::TitleConfig` paths resolve.
 pub use leviath_core::config::TitleConfig;
 
+/// Permission for one Rhai *script-tool* host function (Layer 3 of the four-layer
+/// model in issue #97). Gates what a registered script may *do*, independent of
+/// whether the tool itself is visible ([`available_tools`]) or approved at
+/// runtime ([`ToolPolicy`]).
+///
+/// [`available_tools`]: leviath_core::blueprint::Stage::available_tools
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptPermission {
+    /// The host function may run.
+    Allow,
+    /// The host function is blocked — the call returns a `[denied]` error.
+    Deny,
+    /// Defer to the agent's own `tool_permissions` for the equivalent built-in
+    /// (`read_file`/`shell`): permitted only when that resolves to
+    /// [`ToolPolicy::Allow`]. For the network/env functions (`http_get`,
+    /// `http_post`, `env_var`), which have no built-in equivalent, `Inherit`
+    /// permits the call (they're needed for tools to be useful, and the tool
+    /// itself is still gated by Layers 1/2/4).
+    #[default]
+    Inherit,
+}
+
+/// Per-host-function permissions for Rhai script tools (`[tool_script_permissions]`).
+///
+/// Every field defaults to [`ScriptPermission::Inherit`], so an unconfigured
+/// install lets network/env functions run while file/shell functions defer to
+/// the agent's own tool permissions.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScriptToolPermissions {
+    /// Permission for `http_get`.
+    #[serde(default)]
+    pub http_get: ScriptPermission,
+    /// Permission for `http_post`.
+    #[serde(default)]
+    pub http_post: ScriptPermission,
+    /// Permission for `shell`.
+    #[serde(default)]
+    pub shell: ScriptPermission,
+    /// Permission for `read_file`.
+    #[serde(default)]
+    pub read_file: ScriptPermission,
+    /// Permission for `env_var`.
+    #[serde(default)]
+    pub env_var: ScriptPermission,
+}
+
 /// CLI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -115,6 +162,11 @@ pub struct Config {
     /// [`leviath_core::resolve_sandbox`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<leviath_core::ToolSandboxConfig>,
+
+    /// Per-host-function permissions for Rhai script tools (Layer 3). Gates what
+    /// a registered script tool may *do* (network, shell, file, env access).
+    #[serde(default)]
+    pub tool_script_permissions: ScriptToolPermissions,
 }
 
 fn default_true() -> bool {
@@ -287,6 +339,7 @@ impl Default for Config {
             batch_tool_hint: true,
             webhook: WebhookConfig::default(),
             sandbox: None,
+            tool_script_permissions: ScriptToolPermissions::default(),
         }
     }
 }
@@ -1793,6 +1846,13 @@ anthropic_api_key = "sk-ant-test-key"
                 network: false,
                 ..Default::default()
             }),
+            tool_script_permissions: ScriptToolPermissions {
+                http_get: ScriptPermission::Allow,
+                http_post: ScriptPermission::Deny,
+                shell: ScriptPermission::Deny,
+                read_file: ScriptPermission::Inherit,
+                env_var: ScriptPermission::Allow,
+            },
         };
 
         let serialized = toml::to_string_pretty(&config).unwrap();
@@ -1800,6 +1860,14 @@ anthropic_api_key = "sk-ant-test-key"
 
         assert_eq!(deserialized.default_provider, "anthropic");
         assert_eq!(deserialized.limits.max_concurrent_inferences, Some(4));
+        assert_eq!(
+            deserialized.tool_script_permissions.http_get,
+            ScriptPermission::Allow
+        );
+        assert_eq!(
+            deserialized.tool_script_permissions.shell,
+            ScriptPermission::Deny
+        );
         assert_eq!(deserialized.webhook.max_retries, 5);
         assert_eq!(deserialized.webhook.base_delay_ms, 250);
         assert_eq!(deserialized.webhook.max_delay_ms, 10_000);

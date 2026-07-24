@@ -68,10 +68,23 @@ pub struct AgentToolState {
     /// `Arc` is also an ECS component (for teardown at reap) and is wired into
     /// `builtins` as the shell tool's executor.
     pub sandbox: Option<std::sync::Arc<crate::daemon::sandbox_manager::SandboxManager>>,
+    /// The agent's discovered Rhai script tools (issue #97), compiled at spawn.
+    pub script_tools: Arc<leviath_scripting::ScriptToolSet>,
+    /// Names of the script tools, for routing dispatch to the Rhai executor.
+    pub script_tool_names: HashSet<String>,
+    /// The host functions script tools call, with `[tool_script_permissions]`
+    /// enforcement (Layer 3) already baked in.
+    pub script_host: Arc<dyn leviath_scripting::ScriptHost>,
 }
 
-/// Execute a single (non-context) tool call against the built-in or MCP executor.
+/// Execute a single (non-context) tool call against the script-tool, built-in,
+/// or MCP executor. Script tools are checked first so a discovered `.rhai` tool
+/// dispatches to the Rhai engine; the compiled script and permission-enforcing
+/// host run on a blocking thread (the engine is synchronous).
 async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -> String {
+    if state.script_tool_names.contains(&tc.name) {
+        return execute_script_tool(state, tc).await;
+    }
     if is_builtin {
         state.builtins.execute(&tc.name, tc.arguments.clone()).await
     } else {
@@ -81,6 +94,24 @@ async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -
             Ok(r) => format!("[error] {}", r.text),
             Err(e) => format!("[error] tool error: {e}"),
         }
+    }
+}
+
+/// Run a Rhai script tool on a blocking thread and return its result string.
+async fn execute_script_tool(state: &AgentToolState, tc: &ToolCall) -> String {
+    let Some(tool) = state.script_tools.get(&tc.name).cloned() else {
+        // Name was in `script_tool_names` but the tool is gone — treat as unknown.
+        return format!("[error] unknown script tool: {}", tc.name);
+    };
+    let host = state.script_host.clone();
+    let args = tc.arguments.clone();
+    match tokio::task::spawn_blocking(move || {
+        leviath_scripting::execute_script_tool(&tool, args, host)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => format!("[error] script tool panicked: {e}"),
     }
 }
 
@@ -239,6 +270,30 @@ mod tests {
     use leviath_core::interaction::{ApprovalScope, InteractionResponse};
     use leviath_runtime::interaction_hub::InteractionHub;
 
+    /// Empty script-tool fields (no discovered tools, a deny-all host) for tests
+    /// that don't exercise script tools.
+    fn no_script_fields() -> (
+        Arc<leviath_scripting::ScriptToolSet>,
+        HashSet<String>,
+        Arc<dyn leviath_scripting::ScriptHost>,
+    ) {
+        let allow = crate::daemon::script_host::ScriptAllow {
+            http_get: false,
+            http_post: false,
+            shell: false,
+            read_file: false,
+            env_var: false,
+        };
+        (
+            Arc::new(leviath_scripting::ScriptToolSet::default()),
+            HashSet::new(),
+            Arc::new(crate::daemon::script_host::DaemonScriptHost::new(
+                allow,
+                std::env::temp_dir(),
+            )),
+        )
+    }
+
     /// A tool state with real built-ins over a temp workdir and an (initially
     /// empty) MCP executor, wired to `hub`.
     fn state_with(
@@ -250,6 +305,7 @@ mod tests {
             leviath_tools::ToolContext::new(std::env::temp_dir()),
         ));
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
+        let (script_tools, script_tool_names, script_host) = no_script_fields();
         Arc::new(AgentToolState {
             builtins,
             mcp: Arc::new(Mutex::new(mcp)),
@@ -264,6 +320,9 @@ mod tests {
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
+            script_tools,
+            script_tool_names,
+            script_host,
         })
     }
 
@@ -293,6 +352,176 @@ mod tests {
         };
         assert!(hub.answer(response));
         task.await.unwrap()
+    }
+
+    /// Build a state whose script tools come from `sources` (name → rhai body,
+    /// with a `// @tool <name>` header prepended) and whose script host is
+    /// `host`. All other layers permit the tool by default via `global`.
+    fn script_state(
+        hub: &InteractionHub,
+        sources: &[(&str, &str)],
+        script_tool_names: HashSet<String>,
+        host: Arc<dyn leviath_scripting::ScriptHost>,
+        global: HashMap<String, ToolPolicy>,
+    ) -> (Arc<AgentToolState>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in sources {
+            std::fs::write(
+                dir.path().join(format!("{name}.rhai")),
+                format!("// @tool {name}\n{body}"),
+            )
+            .unwrap();
+        }
+        let (set, _skipped) =
+            leviath_scripting::ScriptToolSet::discover(&[dir.path().to_path_buf()]);
+        let builtins = Arc::new(leviath_tools::BuiltinTools::new(
+            leviath_tools::ToolContext::new(std::env::temp_dir()),
+        ));
+        let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
+        let state = Arc::new(AgentToolState {
+            builtins,
+            mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            builtin_names,
+            launch_overrides: Arc::new(HashMap::new()),
+            session_allows: Arc::new(Mutex::new(HashSet::new())),
+            stage_perms: Arc::new(StdMutex::new(HashMap::new())),
+            stage_perms_by_index: Arc::new(Vec::new()),
+            agent_perms: Arc::new(HashMap::new()),
+            global_perms: Arc::new(global),
+            interaction: hub.backend_for("agent-a"),
+            stage_name: Arc::new(StdMutex::new("main".to_string())),
+            subagent: None,
+            sandbox: None,
+            script_tools: Arc::new(set),
+            script_tool_names,
+            script_host: host,
+        });
+        (state, dir)
+    }
+
+    #[tokio::test]
+    async fn script_tool_allow_executes() {
+        let hub = InteractionHub::new();
+        let mut allow = HashMap::new();
+        allow.insert("echo".to_string(), ToolPolicy::Allow);
+        let names: HashSet<String> = ["echo".to_string()].into_iter().collect();
+        let (state, _dir) = script_state(
+            &hub,
+            &[("echo", "params.text.to_upper()")],
+            names,
+            no_script_fields().2,
+            allow,
+        );
+        let out = dispatch_tools(
+            state,
+            vec![call("c1", "echo", serde_json::json!({"text": "hi"}))],
+        )
+        .await;
+        assert_eq!(out[0].0, "c1");
+        assert_eq!(out[0].1, "HI");
+    }
+
+    #[tokio::test]
+    async fn script_tool_denied_host_fn_surfaces_denied() {
+        // The script calls env_var, but the (deny-all) host blocks it → [denied].
+        let hub = InteractionHub::new();
+        let mut allow = HashMap::new();
+        allow.insert("readenv".to_string(), ToolPolicy::Allow);
+        let names: HashSet<String> = ["readenv".to_string()].into_iter().collect();
+        let (state, _dir) = script_state(
+            &hub,
+            &[("readenv", "env_var(\"HOME\")")],
+            names,
+            no_script_fields().2, // deny-all host
+            allow,
+        );
+        let out = dispatch_tools(state, vec![call("c1", "readenv", serde_json::json!({}))]).await;
+        assert!(out[0].1.contains("[denied]"));
+    }
+
+    #[tokio::test]
+    async fn script_tool_ask_declined_is_denied() {
+        let hub = InteractionHub::new();
+        let mut ask = HashMap::new();
+        ask.insert("echo".to_string(), ToolPolicy::Ask);
+        let names: HashSet<String> = ["echo".to_string()].into_iter().collect();
+        let (state, _dir) =
+            script_state(&hub, &[("echo", "\"x\"")], names, no_script_fields().2, ask);
+        let out = dispatch_answering(
+            state,
+            vec![call("c1", "echo", serde_json::json!({}))],
+            |req| InteractionResponse::approval(&req.id, false, ApprovalScope::Once),
+            hub,
+        )
+        .await;
+        assert!(out[0].1.contains("User declined"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn script_tool_panic_is_caught() {
+        // A host function that panics propagates a Rust panic through the Rhai
+        // engine; spawn_blocking turns it into a JoinError, which we report as a
+        // tool error instead of aborting the daemon.
+        struct PanicHost;
+        impl leviath_scripting::ScriptHost for PanicHost {
+            fn http_get(
+                &self,
+                _u: &str,
+                _h: std::collections::BTreeMap<String, String>,
+            ) -> Result<String, String> {
+                Ok(String::new())
+            }
+            fn http_post(
+                &self,
+                _u: &str,
+                _b: &str,
+                _h: std::collections::BTreeMap<String, String>,
+            ) -> Result<String, String> {
+                Ok(String::new())
+            }
+            fn shell(&self, _c: &str) -> Result<String, String> {
+                Ok(String::new())
+            }
+            fn read_file(&self, _p: &str) -> Result<String, String> {
+                Ok(String::new())
+            }
+            fn env_var(&self, _n: &str) -> Result<String, String> {
+                panic!("boom in host");
+            }
+        }
+        use leviath_scripting::ScriptHost as _;
+        let host = Arc::new(PanicHost);
+        // Exercise the non-panicking host methods directly (only env_var is
+        // reached via the script below).
+        assert!(
+            host.http_get("u", std::collections::BTreeMap::new())
+                .is_ok()
+        );
+        assert!(
+            host.http_post("u", "b", std::collections::BTreeMap::new())
+                .is_ok()
+        );
+        assert!(host.shell("c").is_ok());
+        assert!(host.read_file("p").is_ok());
+        let hub = InteractionHub::new();
+        let mut allow = HashMap::new();
+        allow.insert("boom".to_string(), ToolPolicy::Allow);
+        let names: HashSet<String> = ["boom".to_string()].into_iter().collect();
+        let (state, _dir) = script_state(&hub, &[("boom", "env_var(\"X\")")], names, host, allow);
+        let out = dispatch_tools(state, vec![call("c1", "boom", serde_json::json!({}))]).await;
+        assert!(out[0].1.contains("panicked"));
+    }
+
+    #[tokio::test]
+    async fn script_tool_name_without_compiled_tool_errors() {
+        // `script_tool_names` claims "ghost" but the set has no such tool.
+        let hub = InteractionHub::new();
+        let mut allow = HashMap::new();
+        allow.insert("ghost".to_string(), ToolPolicy::Allow);
+        let names: HashSet<String> = ["ghost".to_string()].into_iter().collect();
+        let (state, _dir) = script_state(&hub, &[], names, no_script_fields().2, allow);
+        let out = dispatch_tools(state, vec![call("c1", "ghost", serde_json::json!({}))]).await;
+        assert!(out[0].1.contains("unknown script tool"));
     }
 
     #[tokio::test]
@@ -339,6 +568,7 @@ mod tests {
             leviath_tools::ToolContext::new(std::env::temp_dir()),
         ));
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
+        let (script_tools, script_tool_names, script_host) = no_script_fields();
         let state = Arc::new(AgentToolState {
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
@@ -353,6 +583,9 @@ mod tests {
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
+            script_tools,
+            script_tool_names,
+            script_host,
         });
         service.register(e, state.clone());
 
@@ -517,6 +750,7 @@ mod tests {
             leviath_tools::ToolContext::new(std::env::temp_dir()),
         ));
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
+        let (script_tools, script_tool_names, script_host) = no_script_fields();
         let state = Arc::new(AgentToolState {
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
@@ -531,6 +765,9 @@ mod tests {
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: Some(handle),
             sandbox: None,
+            script_tools,
+            script_tool_names,
+            script_host,
         });
         let out = dispatch_tools(
             state,

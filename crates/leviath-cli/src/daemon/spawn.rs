@@ -146,6 +146,55 @@ fn resolve_stages(
         .collect()
 }
 
+/// Discover the agent's Rhai script tools (issue #97) and build their `Tool`
+/// defs. Scans `<agent_dir>/tools/` (the blueprint's own directory) then the
+/// global `~/.leviath/tools/`, earlier winning on a name collision. A discovered
+/// tool whose name collides with a built-in, sub-agent, or MCP tool is dropped
+/// (it never shadows a core tool). Returns the compiled set, the routable names
+/// (collisions excluded), and the advertised defs.
+fn discover_script_tools(
+    blueprint_path: &str,
+    builtin_names: &HashSet<String>,
+    mcp_tool_defs: &[Tool],
+) -> (leviath_scripting::ScriptToolSet, HashSet<String>, Vec<Tool>) {
+    // Per-agent `tools/` (from the blueprint's directory) then global
+    // `~/.leviath/tools/`. `Option`'s iterator flattens the "no parent" / "no
+    // home" cases without a dangling `if let` else region.
+    let dirs: Vec<std::path::PathBuf> = std::path::Path::new(blueprint_path)
+        .parent()
+        .map(|d| d.join("tools"))
+        .into_iter()
+        .chain(crate::config::leviath_home_dir().map(|h| h.join("tools")))
+        .collect();
+    let (set, skipped) = leviath_scripting::ScriptToolSet::discover(&dirs);
+    for s in &skipped {
+        // Pre-format the path to a plain string so the `tracing` field carries no
+        // inline method call (an inline `%s.path.display()` leaves a macro
+        // sub-region llvm-cov can't attribute even with the event enabled).
+        let path = s.path.display().to_string();
+        tracing::warn!(tool = %path, reason = %s.reason, "skipping invalid script tool");
+    }
+    // Names already claimed by a built-in, sub-agent, or MCP tool.
+    let mut reserved: HashSet<String> = builtin_names.clone();
+    reserved.extend(leviath_tools::BuiltinTools::subagent_tool_names());
+    reserved.extend(mcp_tool_defs.iter().map(|t| t.name.clone()));
+    let mut names = HashSet::new();
+    let mut defs = Vec::new();
+    for meta in set.metas() {
+        if reserved.contains(&meta.name) {
+            tracing::warn!(tool = %meta.name, "script tool name collides with an existing tool — ignoring");
+            continue;
+        }
+        names.insert(meta.name.clone());
+        defs.push(Tool {
+            name: meta.name.clone(),
+            description: meta.description.clone(),
+            parameters: meta.parameters_schema(),
+        });
+    }
+    (set, names, defs)
+}
+
 /// Build one agent's [`AgentToolState`] from the shared executors + config.
 ///
 /// `stage_perms_by_index` holds every stage's `[tool_permissions]` (in stage
@@ -166,6 +215,9 @@ fn build_tool_state(
     launch_overrides: HashMap<String, crate::config::ToolPolicy>,
     subagent: Option<SubAgentHandle>,
     sandbox: Option<Arc<crate::daemon::sandbox_manager::SandboxManager>>,
+    script_tools: Arc<leviath_scripting::ScriptToolSet>,
+    script_tool_names: HashSet<String>,
+    script_host: Arc<dyn leviath_scripting::ScriptHost>,
 ) -> Arc<AgentToolState> {
     let entry_perms = stage_perms_by_index
         .get(entry_index)
@@ -185,6 +237,9 @@ fn build_tool_state(
         stage_name: Arc::new(StdMutex::new(entry_stage.to_string())),
         subagent,
         sandbox,
+        script_tools,
+        script_tool_names,
+        script_host,
     })
 }
 
@@ -480,6 +535,17 @@ fn build_agent_inner(
     all_tool_defs.extend(leviath_tools::BuiltinTools::subagent_tool_defs());
     all_tool_defs.extend(mcp_tool_defs.iter().cloned());
 
+    // 2c. Rhai script tools (issue #97): discover and compile the agent's
+    // `tools/` dir plus the global `~/.leviath/tools/` (per-agent wins on a name
+    // collision). Their defs are added to `all_tool_defs` *before* stage
+    // resolution so a stage's `available_tools` (Layer 1) and taint
+    // classification see them. A script tool whose name collides with a built-in,
+    // sub-agent, or MCP tool is ignored (the existing tool wins), so it never
+    // shadows a core tool.
+    let (script_tools, script_tool_names, script_defs) =
+        discover_script_tools(&args.blueprint_path, &builtin_names, mcp_tool_defs);
+    all_tool_defs.extend(script_defs);
+
     // 3. Resolve stages against the world's providers.
     let stages = {
         let registry = &world
@@ -631,6 +697,31 @@ fn build_agent_inner(
         workdir: args.workdir.clone(),
         max_depth: max_child_depth,
     };
+    // Rhai script-tool host (Layer 3): resolve `[tool_script_permissions]` once,
+    // with `read_file`/`shell` `inherit` deferring to the agent's own resolved
+    // policy for that built-in (evaluated against the entry stage).
+    let entry_stage_perms = stage_perms_by_index
+        .get(entry_index)
+        .cloned()
+        .unwrap_or_default();
+    let script_allow = crate::daemon::script_host::resolve_script_permissions(
+        &config.tool_script_permissions,
+        &|builtin| {
+            crate::tools::resolve_policy(
+                builtin,
+                true,
+                &launch_overrides,
+                &entry_stage_perms,
+                &agent_perms,
+                &config.tool_permissions,
+            )
+        },
+    );
+    let script_host: Arc<dyn leviath_scripting::ScriptHost> =
+        Arc::new(crate::daemon::script_host::DaemonScriptHost::new(
+            script_allow,
+            std::path::PathBuf::from(&args.workdir),
+        ));
     let state = build_tool_state(
         builtins,
         builtin_names,
@@ -645,6 +736,9 @@ fn build_agent_inner(
         launch_overrides,
         Some(subagent),
         sandbox,
+        Arc::new(script_tools),
+        script_tool_names,
+        script_host,
     );
     tool_service.register(entity, state);
 
@@ -659,6 +753,67 @@ mod tests {
     /// A throwaway sub-agent op sender for tests that don't exercise the bridge.
     fn sub_tx() -> UnboundedSender<SubAgentOp> {
         tokio::sync::mpsc::unbounded_channel().0
+    }
+
+    #[test]
+    fn discover_script_tools_registers_and_drops_collisions() {
+        crate::test_support::with_tracing(|| {});
+        // Point LEVIATH_HOME at an empty temp dir so the global tools/ scan is
+        // hermetic (no real ~/.leviath/tools leaking in).
+        let home = tempfile::tempdir().unwrap();
+        temp_env::with_var("LEVIATH_HOME", Some(home.path().to_str().unwrap()), || {
+            let agent_dir = tempfile::tempdir().unwrap();
+            let tools = agent_dir.path().join("tools");
+            std::fs::create_dir(&tools).unwrap();
+            std::fs::write(tools.join("echo.rhai"), "// @tool echo\nparams.x").unwrap();
+            // A tool named after a built-in must be dropped (never shadow it).
+            std::fs::write(tools.join("read_file.rhai"), "// @tool read_file\n1").unwrap();
+            // A tool colliding with an MCP tool is also dropped (exercises the
+            // mcp_tool_defs reservation).
+            std::fs::write(tools.join("mcp_tool.rhai"), "// @tool mcp_tool\n1").unwrap();
+            // A malformed script is skipped + warned about (the skipped loop).
+            std::fs::write(tools.join("bad.rhai"), "no tool directive\nlet").unwrap();
+            let blueprint = agent_dir.path().join("agent.leviath");
+
+            let builtins: HashSet<String> = ["read_file".to_string()].into_iter().collect();
+            let mcp = vec![leviath_providers::Tool {
+                name: "mcp_tool".to_string(),
+                description: String::new(),
+                parameters: serde_json::json!({}),
+            }];
+            let (set, names, defs) =
+                discover_script_tools(blueprint.to_str().unwrap(), &builtins, &mcp);
+            // Compiled the valid ones; only the non-colliding one is routable.
+            assert!(set.contains("echo") && set.contains("read_file"));
+            assert!(names.contains("echo"));
+            assert!(!names.contains("read_file"));
+            assert!(!names.contains("mcp_tool"));
+            let def_names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+            assert_eq!(def_names, vec!["echo"]);
+        });
+    }
+
+    #[test]
+    fn discover_script_tools_empty_when_no_tools_dir() {
+        let home = tempfile::tempdir().unwrap();
+        temp_env::with_var("LEVIATH_HOME", Some(home.path().to_str().unwrap()), || {
+            let agent_dir = tempfile::tempdir().unwrap();
+            let blueprint = agent_dir.path().join("agent.leviath");
+            let (set, names, defs) =
+                discover_script_tools(blueprint.to_str().unwrap(), &HashSet::new(), &[]);
+            assert!(set.is_empty() && names.is_empty() && defs.is_empty());
+        });
+    }
+
+    #[test]
+    fn discover_script_tools_handles_pathless_blueprint() {
+        // A blueprint path with no parent exercises the "no agent dir" arm; the
+        // global tools/ scan still runs (empty here).
+        let home = tempfile::tempdir().unwrap();
+        temp_env::with_var("LEVIATH_HOME", Some(home.path().to_str().unwrap()), || {
+            let (set, _n, _d) = discover_script_tools("", &HashSet::new(), &[]);
+            assert!(set.is_empty());
+        });
     }
     use leviath_core::blueprint::ModelEntry;
 
