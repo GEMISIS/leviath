@@ -50,6 +50,11 @@ use host::{BrokerJob, HostHttpError, HttpExecutor, ReqwestExecutor};
 
 pub use meta::{ProviderMeta, parse_provider_annotations};
 
+/// A boxed script-function call: builds the `Scope` and invokes one Rhai
+/// function on the given engine, returning its `Dynamic` result. Boxed (not a
+/// generic) so [`RhaiProvider::dispatch`] has a single instantiation.
+type ScriptCall = Box<dyn FnOnce(&Engine) -> Result<Dynamic> + Send>;
+
 /// A provider whose request/response mapping is implemented by a Rhai script.
 pub struct RhaiProvider {
     name: String,
@@ -153,10 +158,10 @@ impl RhaiProvider {
 
     /// Run a script function on a blocking thread while an async broker services
     /// its HTTP host-function jobs, returning the function's `Dynamic` result.
-    async fn dispatch<F>(&self, timeout_secs: Option<u64>, call: F) -> Result<Dynamic>
-    where
-        F: FnOnce(&Engine) -> Result<Dynamic> + Send + 'static,
-    {
+    ///
+    /// `call` is boxed (not a generic) so this method has a single instantiation:
+    /// every caller's regions merge into one, keeping coverage exact.
+    async fn dispatch(&self, timeout_secs: Option<u64>, call: ScriptCall) -> Result<Dynamic> {
         let (job_tx, mut job_rx) = mpsc::unbounded_channel::<BrokerJob>();
         let mut join: JoinHandle<Result<Dynamic>> = tokio::task::spawn_blocking(move || {
             let engine = build_exec_engine(ExecConfig {
@@ -188,12 +193,15 @@ impl RhaiProvider {
         let text = text.to_string();
         let model = model.to_string();
         let value = self
-            .dispatch(self.request_timeout_secs, move |engine| {
-                let mut scope = Scope::new();
-                engine
-                    .call_fn::<Dynamic>(&mut scope, &ast, "count_tokens", (state, text, model))
-                    .map_err(map_rhai_err)
-            })
+            .dispatch(
+                self.request_timeout_secs,
+                Box::new(move |engine| {
+                    let mut scope = Scope::new();
+                    engine
+                        .call_fn::<Dynamic>(&mut scope, &ast, "count_tokens", (state, text, model))
+                        .map_err(map_rhai_err)
+                }),
+            )
             .await?;
         value
             .as_int()
@@ -303,12 +311,15 @@ impl Provider for RhaiProvider {
         let ast = self.ast.clone();
 
         let dynamic = self
-            .dispatch(timeout, move |engine| {
-                let mut scope = Scope::new();
-                engine
-                    .call_fn::<Dynamic>(&mut scope, &ast, "inference", (state_dyn, request_dyn))
-                    .map_err(map_rhai_err)
-            })
+            .dispatch(
+                timeout,
+                Box::new(move |engine| {
+                    let mut scope = Scope::new();
+                    engine
+                        .call_fn::<Dynamic>(&mut scope, &ast, "inference", (state_dyn, request_dyn))
+                        .map_err(map_rhai_err)
+                }),
+            )
             .await?;
 
         let response = parse_inference_dynamic(dynamic)?;
@@ -422,12 +433,15 @@ impl Provider for RhaiProvider {
         let state = (*self.state).clone();
         let provider = self.name.clone();
         let value = self
-            .dispatch(self.request_timeout_secs, move |engine| {
-                let mut scope = Scope::new();
-                engine
-                    .call_fn::<Dynamic>(&mut scope, &ast, "list_models", (state,))
-                    .map_err(map_rhai_err)
-            })
+            .dispatch(
+                self.request_timeout_secs,
+                Box::new(move |engine| {
+                    let mut scope = Scope::new();
+                    engine
+                        .call_fn::<Dynamic>(&mut scope, &ast, "list_models", (state,))
+                        .map_err(map_rhai_err)
+                }),
+            )
             .await?;
         Ok(parse_models(value, &provider))
     }

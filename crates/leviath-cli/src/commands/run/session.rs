@@ -401,22 +401,34 @@ pub fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
 /// is then attached so Rhai *script providers* (issue #101) resolve lazily and
 /// hot-reload from `~/.leviath/providers/`.
 pub fn build_provider_registry_from_config(config: &Config) -> ProviderRegistry {
-    let mut registry = build_provider_registry(&provider_creds_from_config(config));
-    if let Some(dir) = crate::config::providers_dir() {
-        let overrides = config
-            .model_providers
-            .iter()
-            .map(|(name, mp)| (name.clone(), script_provider_spec(mp)))
-            .collect();
-        let layer = leviath_runtime::script_provider::ScriptProviderLayer::new(
-            dir,
-            overrides,
-            config.model_capabilities.clone(),
-            config.request_timeout_secs,
-        );
-        registry = registry.with_script_layer(std::sync::Arc::new(layer));
-    }
-    registry
+    let registry = build_provider_registry(&provider_creds_from_config(config));
+    attach_script_layer(registry, crate::config::providers_dir(), config)
+}
+
+/// Attach a [`ScriptProviderLayer`](leviath_runtime::script_provider::ScriptProviderLayer)
+/// over `dir` (the providers directory) when one is available; otherwise return
+/// the registry unchanged. Split out so both the with-dir and no-home paths are
+/// unit-testable.
+fn attach_script_layer(
+    registry: ProviderRegistry,
+    dir: Option<std::path::PathBuf>,
+    config: &Config,
+) -> ProviderRegistry {
+    let Some(dir) = dir else {
+        return registry;
+    };
+    let overrides = config
+        .model_providers
+        .iter()
+        .map(|(name, mp)| (name.clone(), script_provider_spec(mp)))
+        .collect();
+    let layer = leviath_runtime::script_provider::ScriptProviderLayer::new(
+        dir,
+        overrides,
+        config.model_capabilities.clone(),
+        config.request_timeout_secs,
+    );
+    registry.with_script_layer(std::sync::Arc::new(layer))
 }
 
 /// Translate a CLI [`ModelProviderConfig`](crate::config::ModelProviderConfig)
@@ -434,9 +446,10 @@ fn script_provider_spec(
         cfg.insert("api_key".to_string(), serde_json::Value::String(k.clone()));
     }
     for (k, v) in &mp.extra {
-        if let Ok(jv) = serde_json::to_value(v) {
-            cfg.insert(k.clone(), jv);
-        }
+        cfg.insert(
+            k.clone(),
+            serde_json::to_value(v).unwrap_or(serde_json::Value::Null),
+        );
     }
     leviath_runtime::script_provider::ScriptProviderSpec {
         script: mp.script.clone(),
@@ -712,6 +725,63 @@ mod tests {
         };
         let registry = build_provider_registry_from_config(&config);
         assert!(registry.has("ollama"));
+    }
+
+    #[test]
+    fn script_provider_spec_assembles_init_config() {
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("region".to_string(), toml::Value::String("us".to_string()));
+        let mp = crate::config::ModelProviderConfig {
+            script: Some("groq".to_string()),
+            api_key: Some("k".to_string()),
+            base_url: Some("http://api".to_string()),
+            rate_limit: Some(leviath_providers::RateLimitConfig {
+                requests_per_minute: 30,
+                tokens_per_minute: 1000,
+            }),
+            extra,
+        };
+        let spec = script_provider_spec(&mp);
+        assert_eq!(spec.script.as_deref(), Some("groq"));
+        assert!(spec.rate_limit.is_some());
+        assert_eq!(spec.init_config["base_url"], "http://api");
+        assert_eq!(spec.init_config["api_key"], "k");
+        assert_eq!(spec.init_config["region"], "us");
+    }
+
+    #[test]
+    fn attach_script_layer_without_home_is_a_noop() {
+        // No providers directory (no resolvable home) → registry unchanged, no
+        // script provider resolves.
+        let registry = attach_script_layer(ProviderRegistry::new(), None, &Config::default());
+        assert!(!registry.has("groq"));
+    }
+
+    #[test]
+    fn build_registry_resolves_a_configured_script_provider() {
+        let home = tempfile::tempdir().unwrap();
+        let providers = home.path().join(".leviath").join("providers");
+        std::fs::create_dir_all(&providers).unwrap();
+        std::fs::write(
+            providers.join("groq.rhai"),
+            "fn initialize(config) { #{} }\nfn inference(state, request) { #{ content: \"ok\" } }",
+        )
+        .unwrap();
+
+        let mut model_providers = std::collections::HashMap::new();
+        model_providers.insert(
+            "groq".to_string(),
+            crate::config::ModelProviderConfig::default(),
+        );
+        let config = Config {
+            model_providers,
+            ..Config::default()
+        };
+        temp_env::with_var("LEVIATH_HOME", Some(home.path().as_os_str()), || {
+            let registry = build_provider_registry_from_config(&config);
+            assert!(registry.has("groq"));
+            assert!(registry.get("groq").is_some());
+        });
     }
 
     // ─── build_provider_registry with all keys ──────────────────────────
