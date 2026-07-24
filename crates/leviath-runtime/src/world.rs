@@ -43,7 +43,7 @@ use crate::pipeline::{
     deliver_messages, dispatch_compaction, dispatch_edge_compact, dispatch_inference,
     dispatch_persistence, dispatch_tools, dispatch_transition_choice, enforce_max_iterations,
     gate_requires_children, handle_empty_response, process_response, reflect_interaction_status,
-    require_context_regions, resolve_transition, sync_tool_stages,
+    refresh_advertised_tools, require_context_regions, resolve_transition, sync_tool_stages,
 };
 use crate::providers::ProviderRegistry;
 use crate::tool_bridge::spawn_tool_pool;
@@ -165,6 +165,9 @@ impl PipelineWorld {
                 dispatch_compaction,
                 // Cap a stage at its max_iterations before running more inference.
                 enforce_max_iterations,
+                // Apply any pending mid-run tool re-advertisement before the next
+                // request is assembled, so a newly-discovered tool is visible.
+                refresh_advertised_tools,
                 dispatch_inference,
                 collect_inference,
                 // Intercept a fan-out stage's split response before normal routing.
