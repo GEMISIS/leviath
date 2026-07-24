@@ -182,6 +182,18 @@ fn platform_satisfies_caps(
         .all(|c| script_cap(c).is_some_and(|cap| platform.supports(cap)))
 }
 
+/// Whether the *current* platform can satisfy a script's `@requires` — the same
+/// gate `discover_script_tools_in` applies at spawn. Exposed so the read-only CLI
+/// surfaces (`lev tools`, `lev validate`, `lev mcp list`) report a tool's real
+/// availability (and flag an unknown/typo'd capability) instead of listing a tool
+/// the daemon would silently drop.
+pub(crate) fn current_platform_satisfies(required_caps: &[String]) -> bool {
+    platform_satisfies_caps(
+        &leviath_tools::PlatformCapabilities::current(),
+        required_caps,
+    )
+}
+
 /// Discover and compile the script tools in `dirs`, returning the compiled set,
 /// the routable names (collisions against `reserved` excluded), and the
 /// advertised `Tool` defs.

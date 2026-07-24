@@ -78,6 +78,7 @@ fn report_json(dir_label: &str, report: &ToolsReport) -> serde_json::Value {
                 "name": m.name,
                 "description": m.description,
                 "requires": m.required_caps,
+                "available": crate::daemon::spawn::current_platform_satisfies(&m.required_caps),
                 "params": params,
             })
         })
@@ -110,7 +111,15 @@ fn print_human(dir_label: &str, report: &ToolsReport) {
         } else {
             format!(" — {}", meta.description)
         };
-        println!("  ✓ {}{desc}", meta.name);
+        // A tool compiles but only loads if the platform satisfies its `@requires`
+        // (the same gate the daemon applies at spawn); flag the ones that won't,
+        // which also catches an unknown/typo'd capability name.
+        let available = crate::daemon::spawn::current_platform_satisfies(&meta.required_caps);
+        let marker = if available { "✓" } else { "⚠" };
+        println!("  {marker} {}{desc}", meta.name);
+        if !available {
+            println!("      unavailable on this platform (unsatisfiable @requires)");
+        }
         let params = params_summary(meta);
         if !params.is_empty() {
             println!("      params: {params}");
@@ -219,6 +228,8 @@ mod tests {
         assert_eq!(v["dir"], "d");
         assert_eq!(v["tools"][0]["name"], "upper");
         assert_eq!(v["tools"][0]["requires"][0], "network");
+        // `network` is satisfiable on this (desktop) platform.
+        assert_eq!(v["tools"][0]["available"], true);
         assert_eq!(v["tools"][0]["params"][0]["required"], true);
         assert!(v["skipped"][0]["reason"].as_str().is_some());
     }
@@ -235,6 +246,12 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.path().join("alpha.rhai"), "// @tool alpha\n1").unwrap();
+        // An unsatisfiable capability → the `⚠` / unavailable branch.
+        std::fs::write(
+            dir.path().join("gpu.rhai"),
+            "// @tool gpu\n// @requires gpu\n1",
+        )
+        .unwrap();
         std::fs::write(dir.path().join("broken.rhai"), "no directive\nlet").unwrap();
         // Text + JSON over the populated dir.
         run(Some(dir.path()), false).unwrap();

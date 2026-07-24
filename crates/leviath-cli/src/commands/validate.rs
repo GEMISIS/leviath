@@ -146,6 +146,17 @@ fn print_script_tool_report(path: &std::path::Path) {
     if !set.is_empty() {
         println!("  {} script tool(s) in tools/", set.len());
     }
+    // A tool that compiles but whose `@requires` the platform can't satisfy won't
+    // load — flag it (this also catches an unknown/typo'd capability name).
+    for meta in set.metas() {
+        if !crate::daemon::spawn::current_platform_satisfies(&meta.required_caps) {
+            println!(
+                "  ⚠ Warning: script tool '{}' won't load here (unsatisfiable @requires: {})",
+                meta.name,
+                meta.required_caps.join(", ")
+            );
+        }
+    }
     for s in &skipped {
         println!(
             "  ⚠ Warning: script tool '{}' skipped: {}",
@@ -767,6 +778,8 @@ system = { kind = "pinned", max_tokens = 1000 }
         std::fs::create_dir(&tools).unwrap();
         std::fs::write(tools.join("ok.rhai"), "// @tool ok\nparams.x").unwrap();
         std::fs::write(tools.join("bad.rhai"), "no directive\nlet").unwrap();
+        // Compiles but requires an unsatisfiable capability → the won't-load warning.
+        std::fs::write(tools.join("gpu.rhai"), "// @tool gpu\n// @requires gpu\n1").unwrap();
         let args = ValidateArgs {
             path: dir.path().to_str().unwrap().to_string(),
         };

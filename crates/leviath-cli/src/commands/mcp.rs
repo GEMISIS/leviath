@@ -302,6 +302,9 @@ fn script_tool_rows(tools_dir: Option<&std::path::Path>) -> Vec<ServerRow> {
     metas.sort_by(|a, b| a.name.cmp(&b.name));
     metas
         .into_iter()
+        // Only tools the platform can actually load (the daemon's own gate), so
+        // the listing reflects what's really usable.
+        .filter(|m| crate::daemon::spawn::current_platform_satisfies(&m.required_caps))
         .map(|m| ServerRow {
             kind: "script".to_string(),
             name: m.name,
@@ -955,8 +958,15 @@ for line in sys.stdin:
         std::fs::write(dir.path().join("up.rhai"), "// @tool up\nparams.x").unwrap();
         std::fs::write(dir.path().join("down.rhai"), "// @tool down\n1").unwrap();
         std::fs::write(dir.path().join("bad.rhai"), "no directive\nlet").unwrap();
+        // A tool requiring an unsatisfiable capability is filtered out (not usable).
+        std::fs::write(
+            dir.path().join("gpu.rhai"),
+            "// @tool gpu\n// @requires gpu\n1",
+        )
+        .unwrap();
         let rows = script_tool_rows(Some(dir.path()));
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 2, "the gpu tool is filtered out");
+        assert!(rows.iter().all(|r| r.name != "gpu"));
         assert_eq!(rows[0].kind, "script");
         assert_eq!(rows[0].name, "down", "sorted by name");
         assert_eq!(rows[1].name, "up");
