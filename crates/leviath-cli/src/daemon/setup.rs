@@ -222,15 +222,47 @@ pub fn build_host(
     // is unit-testable — the daemon only ever drives it from `serve()`.
     host.set_reaper(make_reaper(tool_service.clone()));
 
+    // Shared, lazily-connected MCP pool for per-agent `[[mcp_servers]]` (issue
+    // #97). Reserve built-in / sub-agent names so a server tool can't shadow a
+    // core one, and seed the global servers (already connected into `shared_mcp`
+    // and advertised via `mcp_tool_defs`) with empty defs so a blueprint that
+    // re-declares one doesn't open a duplicate connection.
+    let reserved: std::collections::HashSet<String> = {
+        let bt =
+            leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(std::env::temp_dir()));
+        let mut r: std::collections::HashSet<String> = bt.names().into_iter().collect();
+        r.extend(leviath_tools::BuiltinTools::subagent_tool_names());
+        r
+    };
+    let mcp_pool = Arc::new(crate::daemon::mcp_pool::McpPool::new(
+        shared_mcp.clone(),
+        reserved,
+    ));
+    for server in &config.mcp_servers {
+        mcp_pool.seed(server, Vec::new());
+    }
+
+    // Preprocessor: before the sync spawner runs, connect the blueprint's declared
+    // MCP servers into the shared pool (lazy, deduped) so they're warm to advertise.
+    let pp_pool = mcp_pool.clone();
+    host.set_spawn_preprocessor(Box::new(move |args| {
+        let pool = pp_pool.clone();
+        let blueprint_path = args.blueprint_path.clone();
+        Box::pin(async move { warm_blueprint_mcp(&pool, &blueprint_path).await })
+    }));
+
     // The spawner captures everything an agent needs; `now_secs` is called at
-    // spawn time for the run's start timestamp.
+    // spawn time for the run's start timestamp. Per-agent MCP defs = the global
+    // servers' defs plus this blueprint's declared servers' defs (warmed above).
+    let spawn_pool = mcp_pool.clone();
     host.set_spawner(Box::new(move |world, args| {
+        let defs = per_agent_mcp_defs(&spawn_pool, &mcp_tool_defs, &args.blueprint_path);
         build_agent(
             world.world_mut(),
             tool_service.as_ref(),
             &config,
             shared_mcp.clone(),
-            &mcp_tool_defs,
+            &defs,
             &hub,
             args,
             now_secs(),
@@ -238,6 +270,34 @@ pub fn build_host(
         )
     }));
     host
+}
+
+/// The spawn-preprocessor body: connect the blueprint's declared `[[mcp_servers]]`
+/// into `pool` (lazy, deduped by signature). A missing/unreadable manifest is a
+/// no-op. Extracted from the closure so its body is unit-testable.
+async fn warm_blueprint_mcp(pool: &crate::daemon::mcp_pool::McpPool, blueprint_path: &str) {
+    if let Ok(toml) = std::fs::read_to_string(blueprint_path) {
+        for server in crate::daemon::mcp_pool::parse_blueprint_mcp_servers(&toml) {
+            pool.ensure(&server).await;
+        }
+    }
+}
+
+/// The per-agent MCP tool defs: the global servers' defs plus this blueprint's
+/// declared servers' cached defs (the pool must already be warm — the
+/// preprocessor ran). A missing/unreadable manifest yields just the global defs.
+/// Extracted from the spawner closure so its body is unit-testable.
+fn per_agent_mcp_defs(
+    pool: &crate::daemon::mcp_pool::McpPool,
+    global: &[Tool],
+    blueprint_path: &str,
+) -> Vec<Tool> {
+    let mut defs = global.to_vec();
+    if let Ok(toml) = std::fs::read_to_string(blueprint_path) {
+        let servers = crate::daemon::mcp_pool::parse_blueprint_mcp_servers(&toml);
+        defs.extend(pool.cached_defs_for(&servers));
+    }
+    defs
 }
 
 #[cfg(test)]
@@ -352,6 +412,201 @@ mod tests {
             reply,
         });
         assert_eq!(rx.await.unwrap(), Ok("run-s".to_string()));
+    }
+
+    // ── per-agent MCP (issue #97) ──
+
+    /// A python stub MCP server written to a temp file; returns (tempdir, path).
+    fn stub_server_py() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stub.py");
+        std::fs::write(
+            &path,
+            r#"
+import sys, json
+def respond(i, r):
+    sys.stdout.write(json.dumps({"jsonrpc":"2.0","id":i,"result":r})+"\n"); sys.stdout.flush()
+for line in sys.stdin:
+    line=line.strip()
+    if not line: continue
+    req=json.loads(line); m=req.get("method",""); i=req.get("id")
+    if m=="initialize": respond(i,{"capabilities":{"tools":{"listChanged":True}},"protocolVersion":"2024-11-05"})
+    elif m=="notifications/initialized": pass
+    elif m=="tools/list": respond(i,{"tools":[{"name":"stub_search","description":"s","inputSchema":{"type":"object","properties":{}}}]})
+    elif m=="tools/call": respond(i,{"content":[{"type":"text","text":"ok"}],"isError":False})
+    else: respond(i,{})
+"#,
+        )
+        .unwrap();
+        (dir, path)
+    }
+
+    /// Write a blueprint declaring one stdio `[[mcp_servers]]` → the stub; returns
+    /// its manifest path.
+    fn blueprint_with_mcp(dir: &std::path::Path, stub_py: &std::path::Path) -> std::path::PathBuf {
+        let manifest = dir.join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            format!(
+                r#"
+[agent]
+name = "mcpagent"
+entry_stage = "work"
+
+[[mcp_servers]]
+name = "search"
+command = "python3"
+args = ["{}"]
+
+[stages.work]
+mode = "autonomous"
+model = {{ provider = "fake", model = "m" }}
+available_tools = ["stub_search"]
+system_prompt = "use stub_search"
+
+[context.regions]
+task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} }}
+"#,
+                stub_py.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        manifest
+    }
+
+    fn empty_pool() -> crate::daemon::mcp_pool::McpPool {
+        crate::daemon::mcp_pool::McpPool::new(
+            Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            Default::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn warm_blueprint_mcp_connects_declared_servers() {
+        let (_stub_dir, stub) = stub_server_py();
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = blueprint_with_mcp(dir.path(), &stub);
+        let pool = empty_pool();
+        warm_blueprint_mcp(&pool, &manifest.to_string_lossy()).await;
+        // The declared server is now warm: its tool is cached + advertised.
+        let servers = crate::daemon::mcp_pool::parse_blueprint_mcp_servers(
+            &std::fs::read_to_string(&manifest).unwrap(),
+        );
+        let defs = pool.cached_defs_for(&servers);
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "stub_search");
+    }
+
+    #[tokio::test]
+    async fn warm_blueprint_mcp_missing_manifest_is_noop() {
+        let pool = empty_pool();
+        // Unreadable path → the read-error arm, no panic.
+        warm_blueprint_mcp(&pool, "/no/such/agent.leviath").await;
+    }
+
+    #[test]
+    fn per_agent_mcp_defs_appends_declared_and_falls_back_to_global() {
+        let (_stub_dir, stub) = stub_server_py();
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = blueprint_with_mcp(dir.path(), &stub);
+        let pool = empty_pool();
+        // Warm the pool by seeding the declared server's defs (avoids a live
+        // connect in this sync test).
+        let servers = crate::daemon::mcp_pool::parse_blueprint_mcp_servers(
+            &std::fs::read_to_string(&manifest).unwrap(),
+        );
+        pool.seed(
+            &servers[0],
+            vec![Tool {
+                name: "stub_search".into(),
+                description: String::new(),
+                parameters: serde_json::json!({}),
+            }],
+        );
+        let global = vec![Tool {
+            name: "global_tool".into(),
+            description: String::new(),
+            parameters: serde_json::json!({}),
+        }];
+        let defs = per_agent_mcp_defs(&pool, &global, &manifest.to_string_lossy());
+        let names: Vec<&str> = defs.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["global_tool", "stub_search"]);
+        // Missing manifest → just the global defs (read-error arm).
+        let only_global = per_agent_mcp_defs(&pool, &global, "/no/such/x");
+        assert_eq!(only_global.len(), 1);
+        assert_eq!(only_global[0].name, "global_tool");
+    }
+
+    #[tokio::test]
+    async fn build_host_seeds_global_mcp_servers() {
+        // A config with a (never-connected) global server exercises the seed loop.
+        let config = Config {
+            mcp_servers: vec![leviath_mcp::MCPServerConfig::stdio(
+                "global-srv",
+                "python3",
+                vec!["-c".to_string(), "pass".to_string()],
+            )],
+            ..Config::default()
+        };
+        let runs = tempfile::tempdir().unwrap();
+        let _host = build_host(
+            config,
+            ProviderRegistry::new(),
+            runs.path().to_path_buf(),
+            Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            Vec::new(),
+            Handle::current(),
+            || 0,
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_runs_spawn_preprocessor_for_per_agent_mcp() {
+        // Drive a real spawn through `serve()` so the spawn preprocessor fires
+        // (the only path that invokes it): the agent declares an MCP server, which
+        // gets connected + advertised, and the spawn replies Ok.
+        let (_stub_dir, stub) = stub_server_py();
+        let agent_dir = tempfile::tempdir().unwrap();
+        let manifest = blueprint_with_mcp(agent_dir.path(), &stub);
+        // A `fake` provider so stage resolution succeeds.
+        let mut providers = ProviderRegistry::new();
+        providers.register("fake".to_string(), Arc::new(FakeProvider));
+        let runs = tempfile::tempdir().unwrap();
+        let mut host = build_host(
+            Config::default(),
+            providers,
+            runs.path().to_path_buf(),
+            Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            Vec::new(),
+            Handle::current(),
+            || 0,
+        );
+        let (ctl_tx, ctl_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (reply, reply_rx) = oneshot::channel();
+        ctl_tx
+            .send(ControlOp::Spawn {
+                args: Box::new(SpawnArgs {
+                    run_id: "run-mcp".to_string(),
+                    blueprint_path: manifest.to_string_lossy().to_string(),
+                    task: "t".to_string(),
+                    regions: Default::default(),
+                    model: None,
+                    workdir: std::env::temp_dir().to_string_lossy().to_string(),
+                    metadata: Default::default(),
+                    callback_url: None,
+                    callback_secret: None,
+                    yolo: false,
+                    allow: Vec::new(),
+                    max_depth: None,
+                    parent_run_id: None,
+                }),
+                reply,
+            })
+            .unwrap();
+        // Close the control channel so serve() returns after handling the op.
+        drop(ctl_tx);
+        host.serve(ctl_rx).await;
+        assert_eq!(reply_rx.await.unwrap(), Ok("run-mcp".to_string()));
     }
 
     #[tokio::test]
