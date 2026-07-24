@@ -3,8 +3,9 @@
 //! A registered script tool reaches the outside world only through the host
 //! functions on [`leviath_scripting::ScriptHost`]. This module supplies the real
 //! implementation: it enforces the per-function `[tool_script_permissions]`
-//! (allow / deny / inherit) resolved at agent spawn, confines `read_file` to the
-//! agent workdir, and performs the actual I/O.
+//! (allow / deny / inherit) resolved at agent spawn, confines `read_file` /
+//! `write_file` to the agent workdir, routes `shell()` through the agent's
+//! per-stage sandbox with a wall-clock timeout, and performs the actual I/O.
 //!
 //! The I/O itself lives behind the [`ScriptIo`] seam so the permission and
 //! path-confinement logic is unit-testable with a fake, and the real
@@ -18,8 +19,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use leviath_scripting::ScriptHost;
+use leviath_tools::ShellExecutor;
+use tokio::process::Command as TokioCommand;
 
 use crate::config::{ScriptPermission, ScriptToolPermissions, ToolPolicy};
+use crate::daemon::sandbox_manager::SandboxManager;
 
 /// The resolved allow/deny decision for each of the five side-effecting host
 /// functions, computed once at spawn from the config's `[tool_script_permissions]`
@@ -89,8 +93,9 @@ pub trait ScriptIo: Send + Sync {
         body: &str,
         headers: BTreeMap<String, String>,
     ) -> Result<String, String>;
-    /// Run `command` via the system shell in `workdir`, returning combined output.
-    fn shell(&self, command: &str, workdir: &Path) -> Result<String, String>;
+    /// Run a prepared shell command (already sandbox-wrapped and pointed at the
+    /// workdir by the host), enforcing `timeout`, and return its combined output.
+    fn run_shell(&self, cmd: TokioCommand, timeout: Duration) -> Result<String, String>;
     /// Read the file at an already-confined absolute `path`.
     fn read_file(&self, path: &Path) -> Result<String, String>;
     /// Write `content` to an already-confined absolute `path`, creating parent
@@ -106,17 +111,45 @@ pub struct DaemonScriptHost {
     allow: ScriptAllow,
     workdir: PathBuf,
     io: Arc<dyn ScriptIo>,
+    /// The agent's sandbox manager, if any. When present, a script `shell()`
+    /// call runs inside the *current* stage's sandbox (container / namespace),
+    /// exactly like the built-in `shell` tool — a script can't escape the
+    /// isolation the agent's stage declared. `None` runs on the host.
+    sandbox: Option<Arc<SandboxManager>>,
+    /// Wall-clock cap on a single `shell()` call, so a runaway command can't hang
+    /// the agent (mirrors the built-in shell tool's timeout).
+    shell_timeout: Duration,
 }
 
 impl DaemonScriptHost {
-    /// Build a host with an explicit I/O backend (used by tests).
+    /// Build a host with an explicit I/O backend (used by tests). Defaults to no
+    /// sandbox and the built-in shell tool's 60-second timeout; override with
+    /// [`with_shell`](Self::with_shell).
     pub fn with_io(allow: ScriptAllow, workdir: PathBuf, io: Arc<dyn ScriptIo>) -> Self {
-        Self { allow, workdir, io }
+        Self {
+            allow,
+            workdir,
+            io,
+            sandbox: None,
+            shell_timeout: Duration::from_secs(60),
+        }
     }
 
     /// Build a host wired to the real network/process/filesystem/env backend.
     pub fn new(allow: ScriptAllow, workdir: PathBuf) -> Self {
         Self::with_io(allow, workdir, Arc::new(RealScriptIo))
+    }
+
+    /// Route `shell()` through `sandbox` (the agent's per-stage isolation) and cap
+    /// each call at `shell_timeout`. Consuming builder used at spawn.
+    pub fn with_shell(
+        mut self,
+        sandbox: Option<Arc<SandboxManager>>,
+        shell_timeout: Duration,
+    ) -> Self {
+        self.sandbox = sandbox;
+        self.shell_timeout = shell_timeout;
+        self
     }
 
     /// Resolve a script-supplied `read_file` path against the workdir, rejecting
@@ -177,7 +210,15 @@ impl ScriptHost for DaemonScriptHost {
         if !self.allow.shell {
             return Err(denied("shell"));
         }
-        self.io.shell(command, &self.workdir)
+        let (shell, flag) = default_shell();
+        // With a sandbox, build the command that runs inside the current stage's
+        // container / namespace; otherwise run the shell directly on the host
+        // (both target the agent workdir). Same routing as the built-in shell tool.
+        let cmd = match &self.sandbox {
+            Some(sb) => sb.build_command(shell, flag, command, &self.workdir),
+            None => host_shell_command(shell, flag, command, &self.workdir),
+        };
+        self.io.run_shell(cmd, self.shell_timeout)
     }
 
     fn read_file(&self, path: &str) -> Result<String, String> {
@@ -265,20 +306,22 @@ impl ScriptIo for RealScriptIo {
         ))
     }
 
-    fn shell(&self, command: &str, workdir: &Path) -> Result<String, String> {
-        let (shell, flag) = default_shell();
-        let output = std::process::Command::new(shell)
-            .arg(flag)
-            .arg(command)
-            .current_dir(workdir)
-            .output()
-            .map_err(|e| format!("failed to spawn shell: {e}"))?;
-        let mut out = String::from_utf8_lossy(&output.stdout).into_owned();
-        let err = String::from_utf8_lossy(&output.stderr);
-        if !err.trim().is_empty() {
-            out.push_str(&err);
-        }
-        Ok(out)
+    fn run_shell(&self, mut cmd: TokioCommand, timeout: Duration) -> Result<String, String> {
+        // The script engine drives this from a `spawn_blocking` thread (not a
+        // runtime worker), so blocking on the current runtime is safe here and
+        // lets us reuse tokio's timeout — the same mechanism the built-in shell
+        // tool uses.
+        let handle = tokio::runtime::Handle::current();
+        handle.block_on(async move {
+            match tokio::time::timeout(timeout, cmd.output()).await {
+                Ok(Ok(output)) => Ok(combine_shell_output(&output.stdout, &output.stderr)),
+                Ok(Err(e)) => Err(format!("failed to spawn shell: {e}")),
+                Err(_) => Err(format!(
+                    "shell command timed out after {}s",
+                    timeout.as_secs()
+                )),
+            }
+        })
     }
 
     fn read_file(&self, path: &Path) -> Result<String, String> {
@@ -313,6 +356,25 @@ fn default_shell() -> (&'static str, &'static str) {
     {
         ("/bin/sh", "-c")
     }
+}
+
+/// Build the host (un-sandboxed) shell command pointed at `workdir` — the
+/// no-sandbox arm of [`DaemonScriptHost::shell`].
+fn host_shell_command(shell: &str, flag: &str, command: &str, workdir: &Path) -> TokioCommand {
+    let mut c = TokioCommand::new(shell);
+    c.arg(flag).arg(command).current_dir(workdir);
+    c
+}
+
+/// Combine a finished command's stdout and (non-empty) stderr into one string,
+/// preserving the prior `shell()` contract.
+fn combine_shell_output(stdout: &[u8], stderr: &[u8]) -> String {
+    let mut out = String::from_utf8_lossy(stdout).into_owned();
+    let err = String::from_utf8_lossy(stderr);
+    if !err.trim().is_empty() {
+        out.push_str(&err);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -407,8 +469,10 @@ mod tests {
                 .push(format!("post:{url}:{body}"));
             Ok("p".into())
         }
-        fn shell(&self, cmd: &str, _wd: &Path) -> Result<String, String> {
-            self.calls.lock().unwrap().push(format!("shell:{cmd}"));
+        fn run_shell(&self, cmd: TokioCommand, _timeout: Duration) -> Result<String, String> {
+            // Record the prepared program (host `sh`/`cmd.exe` when un-sandboxed).
+            let prog = cmd.as_std().get_program().to_string_lossy().into_owned();
+            self.calls.lock().unwrap().push(format!("shell:{prog}"));
             Ok("s".into())
         }
         fn read_file(&self, path: &Path) -> Result<String, String> {
@@ -468,7 +532,8 @@ mod tests {
         let calls = io.calls.lock().unwrap().clone();
         assert!(calls.contains(&"get:http://x".to_string()));
         assert!(calls.iter().any(|c| c.starts_with("post:")));
-        assert!(calls.contains(&"shell:ls".to_string()));
+        // Un-sandboxed → the prepared command runs the host shell.
+        assert!(calls.iter().any(|c| c.starts_with("shell:")));
         assert!(
             calls
                 .iter()
@@ -659,26 +724,108 @@ mod tests {
         assert_eq!(out.unwrap(), "hello");
     }
 
-    #[test]
-    fn real_shell_runs_and_captures_output() {
+    /// Build a host command + run it through `run_shell` on a blocking thread
+    /// (so its `Handle::block_on` isn't called from a runtime worker).
+    async fn run_host_shell(
+        command: &'static str,
+        workdir: PathBuf,
+        timeout: Duration,
+    ) -> Result<String, String> {
+        tokio::task::spawn_blocking(move || {
+            let (shell, flag) = default_shell();
+            let cmd = host_shell_command(shell, flag, command, &workdir);
+            RealScriptIo.run_shell(cmd, timeout)
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn real_shell_runs_and_captures_output() {
         let dir = tempfile::tempdir().unwrap();
-        // stdout
-        let out = RealScriptIo.shell("echo hello", dir.path()).unwrap();
+        // stdout (empty-stderr arm of combine_shell_output)
+        let out = run_host_shell(
+            "echo hello",
+            dir.path().to_path_buf(),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
         assert!(out.contains("hello"));
-        // stderr is appended (non-empty stderr branch)
-        let out2 = RealScriptIo.shell("echo oops 1>&2", dir.path()).unwrap();
+        // stderr is appended (non-empty stderr arm)
+        let out2 = run_host_shell(
+            "echo oops 1>&2",
+            dir.path().to_path_buf(),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
         assert!(out2.contains("oops"));
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn real_shell_spawn_failure() {
+        // A non-existent cwd makes the child fail to spawn → the Ok(Err) arm.
+        let missing = PathBuf::from("/no/such/workdir/leviath");
+        let err = run_host_shell("echo hi", missing, Duration::from_secs(30))
+            .await
+            .unwrap_err();
+        assert!(err.contains("failed to spawn shell"), "got: {err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn real_shell_times_out() {
+        // A slow command against a tiny timeout hits the Err(_) (timeout) arm.
+        let dir = tempfile::tempdir().unwrap();
+        let err = run_host_shell(
+            "sleep 5",
+            dir.path().to_path_buf(),
+            Duration::from_millis(50),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("timed out"), "got: {err}");
+    }
+
     #[test]
-    fn real_shell_spawn_failure() {
-        // An unusable shell path is not selectable here, so exercise the spawn
-        // error via a command that cannot run: use a bogus program through the
-        // real shell still succeeds (shell exists). Instead drive the map_err by
-        // pointing at a directory as cwd that doesn't exist.
-        let missing = std::path::Path::new("/no/such/workdir/leviath");
-        let err = RealScriptIo.shell("echo hi", missing).unwrap_err();
-        assert!(err.contains("failed to spawn shell"));
+    fn combine_shell_output_appends_nonempty_stderr_only() {
+        // Empty stderr → stdout unchanged; non-empty stderr → appended.
+        assert_eq!(combine_shell_output(b"out", b"   "), "out");
+        assert_eq!(combine_shell_output(b"out", b"err"), "outerr");
+    }
+
+    #[test]
+    fn host_shell_command_targets_workdir() {
+        let cmd = host_shell_command("sh", "-c", "echo hi", Path::new("/w"));
+        assert_eq!(cmd.as_std().get_program(), "sh");
+    }
+
+    #[test]
+    fn shell_routes_through_sandbox_when_present() {
+        use leviath_core::sandbox::{OnUnavailable, SandboxKind, ToolSandboxConfig};
+        // A namespace sandbox with warn-fallback builds a manager on every
+        // platform. Attaching it exercises the `Some(sandbox)` arm of `shell()`
+        // (the command is built via the manager, not `host_shell_command`).
+        let by_index = vec![ToolSandboxConfig {
+            kind: SandboxKind::Namespace,
+            on_unavailable: OnUnavailable::Warn,
+            ..Default::default()
+        }];
+        let sb = SandboxManager::build("r", by_index, "/w", 0)
+            .unwrap()
+            .map(Arc::new);
+        assert!(sb.is_some(), "namespace warn config yields a manager");
+        let io = RecordingIo::arc();
+        let host = DaemonScriptHost::with_io(all_allowed(), PathBuf::from("/w"), io.clone())
+            .with_shell(sb, Duration::from_secs(5));
+        assert_eq!(host.shell("ls").unwrap(), "s");
+        assert!(
+            io.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.starts_with("shell:"))
+        );
     }
 
     #[test]

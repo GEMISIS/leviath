@@ -188,6 +188,10 @@ fn default_max_concurrent_tools() -> usize {
     8
 }
 
+fn default_script_shell_timeout_secs() -> u64 {
+    60
+}
+
 /// Runtime resource limits with safe defaults baked in.
 ///
 /// Both fields default to a bounded value so a fresh install can't accidentally
@@ -223,6 +227,12 @@ pub struct LimitsConfig {
     /// round-trip per inference for providers with a remote count endpoint.
     #[serde(default)]
     pub exact_token_counting: bool,
+
+    /// Wall-clock timeout (seconds) for a Rhai script tool's `shell()` host call,
+    /// mirroring the built-in shell tool's own 60-second cap so a script can't
+    /// hang an agent on a runaway command. Defaults to `60`.
+    #[serde(default = "default_script_shell_timeout_secs")]
+    pub script_shell_timeout_secs: u64,
 }
 
 impl Default for LimitsConfig {
@@ -232,6 +242,7 @@ impl Default for LimitsConfig {
             max_concurrent_tools: default_max_concurrent_tools(),
             default_max_iterations: default_default_max_iterations(),
             exact_token_counting: false,
+            script_shell_timeout_secs: default_script_shell_timeout_secs(),
         }
     }
 }
@@ -1848,6 +1859,7 @@ anthropic_api_key = "sk-ant-test-key"
                 max_concurrent_tools: 3,
                 default_max_iterations: Some(99),
                 exact_token_counting: false,
+                script_shell_timeout_secs: 45,
             },
             batch_tool_hint: true,
             webhook: WebhookConfig {
@@ -1878,6 +1890,7 @@ anthropic_api_key = "sk-ant-test-key"
         assert_eq!(deserialized.default_provider, "anthropic");
         assert_eq!(deserialized.limits.max_concurrent_inferences, Some(4));
         assert_eq!(deserialized.limits.max_concurrent_tools, 3);
+        assert_eq!(deserialized.limits.script_shell_timeout_secs, 45);
         assert_eq!(
             deserialized.tool_script_permissions.http_get,
             ScriptPermission::Allow
