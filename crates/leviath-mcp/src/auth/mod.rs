@@ -26,10 +26,13 @@ pub use store::{AuthStore, ServerAuth};
 
 /// How the browser gets opened. Injected so tests never launch one.
 ///
-/// A `fn` pointer, not a closure type: production passes
-/// [`leviath_sys::open_url`], tests pass a stub that drives the callback
-/// directly. Returns whether the launcher spawned.
-pub type BrowserOpener = fn(&str) -> bool;
+/// A boxed closure, not a bare `fn` pointer, so a platform binding can capture
+/// context: desktop passes `Arc::new(leviath_sys::open_url)`, a future mobile
+/// entry point passes an `Arc::new(move |url| ...)` closing over its native
+/// handle (an Android `Activity`, an iOS callback), and tests pass a stub that
+/// drives the callback directly. `Send + Sync` because it may be invoked from
+/// an async task. Returns whether the launcher spawned.
+pub type BrowserOpener = std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// How long to wait for the user to finish authorizing in the browser.
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
@@ -132,7 +135,7 @@ impl OAuthClient {
         // Always print the URL: on a headless or SSH session the browser can't
         // open, and the user needs to paste it themselves.
         println!("Opening your browser to authorize:\n  {authorize_url}");
-        if !opener(authorize_url.as_str()) {
+        if !(*opener)(authorize_url.as_str()) {
             println!("(couldn't open a browser automatically — open the link above)");
         }
 
@@ -1097,9 +1100,11 @@ mod tests {
     }
 
     /// A fake browser that consents successfully.
-    fn auto_consent(authorize_url: &str) -> bool {
-        drive_callback(authorize_url, None);
-        true
+    fn auto_consent() -> BrowserOpener {
+        Arc::new(|authorize_url: &str| {
+            drive_callback(authorize_url, None);
+            true
+        })
     }
 
     #[tokio::test]
@@ -1109,7 +1114,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
-                auto_consent,
+                auto_consent(),
                 1_000,
                 None,
             )
@@ -1130,7 +1135,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
-                auto_consent,
+                auto_consent(),
                 0,
                 Some("existing-client"),
             )
@@ -1152,7 +1157,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
-                auto_consent,
+                auto_consent(),
                 0,
                 None,
             )
@@ -1169,7 +1174,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
-                auto_consent,
+                auto_consent(),
                 0,
                 None,
             )
@@ -1185,7 +1190,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
-                auto_consent,
+                auto_consent(),
                 0,
                 None,
             )
@@ -1524,7 +1529,7 @@ mod tests {
             .login(
                 &format!("{base}/mcp"),
                 &HashMap::new(),
-                auto_consent,
+                auto_consent(),
                 0,
                 None,
             )
@@ -1559,7 +1564,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &headers,
-                auto_consent,
+                auto_consent(),
                 0,
                 None,
             )
@@ -1572,10 +1577,10 @@ mod tests {
         // The opener reports failure (headless/SSH), but the user "pastes" the
         // link: the callback is still driven, so login succeeds via the
         // print-the-URL path.
-        fn failing_opener(authorize_url: &str) -> bool {
-            auto_consent(authorize_url);
+        let failing_opener: BrowserOpener = Arc::new(|authorize_url: &str| {
+            drive_callback(authorize_url, None);
             false
-        }
+        });
         let server = mock_auth_server("default").await;
         OAuthClient::new()
             .login(
@@ -1596,7 +1601,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
-                auto_consent,
+                auto_consent(),
                 0,
                 None,
             )
@@ -1611,7 +1616,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
-                auto_consent,
+                auto_consent(),
                 0,
                 None,
             )
@@ -1628,7 +1633,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
-                auto_consent,
+                auto_consent(),
                 0,
                 None,
             )
@@ -1648,7 +1653,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
-                auto_consent,
+                auto_consent(),
                 0,
                 None,
             )
@@ -1667,7 +1672,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
-                auto_consent,
+                auto_consent(),
                 0,
                 None,
             )
@@ -1683,7 +1688,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
-                auto_consent,
+                auto_consent(),
                 0,
                 None,
             )
@@ -1702,7 +1707,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
-                auto_consent,
+                auto_consent(),
                 0,
                 None,
             )
@@ -1721,7 +1726,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
-                auto_consent,
+                auto_consent(),
                 0,
                 None,
             )
@@ -1740,7 +1745,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
-                auto_consent,
+                auto_consent(),
                 0,
                 None,
             )
@@ -1759,7 +1764,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
-                auto_consent,
+                auto_consent(),
                 0,
                 None,
             )
@@ -1778,7 +1783,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
-                auto_consent,
+                auto_consent(),
                 0,
                 None,
             )
@@ -1791,10 +1796,10 @@ mod tests {
     async fn login_fails_when_the_callback_is_forged() {
         // The "browser" returns a mismatched state, so wait_for_callback
         // rejects it and login propagates the failure.
-        fn forge(authorize_url: &str) -> bool {
+        let forge: BrowserOpener = Arc::new(|authorize_url: &str| {
             drive_callback(authorize_url, Some("WRONG"));
             true
-        }
+        });
         let server = mock_auth_server("default").await;
         let err = OAuthClient::new()
             .login(
@@ -1902,7 +1907,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
-                auto_consent,
+                auto_consent(),
                 0,
                 None,
             )
@@ -1921,7 +1926,7 @@ mod tests {
             .login(
                 &format!("{}/mcp", server.base),
                 &HashMap::new(),
-                auto_consent,
+                auto_consent(),
                 0,
                 None,
             )
@@ -1954,7 +1959,7 @@ mod tests {
     #[tokio::test]
     async fn login_rejects_a_bad_mcp_url() {
         let err = OAuthClient::new()
-            .login("not a url", &HashMap::new(), auto_consent, 0, None)
+            .login("not a url", &HashMap::new(), auto_consent(), 0, None)
             .await
             .expect_err("bad url must fail");
         assert!(

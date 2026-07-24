@@ -149,7 +149,7 @@ impl RiskyExecutors for RealExecutors {
             store_path: leviath_mcp::AuthStore::default_path().ok_or_else(|| {
                 anyhow::anyhow!("could not resolve a home directory for the MCP auth store")
             })?,
-            opener: leviath_sys::open_url,
+            opener: std::sync::Arc::new(leviath_sys::open_url),
             now: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())

@@ -249,7 +249,7 @@ async fn run_login(ctx: &McpContext, name: &str) -> McpOutcome {
         .login(
             &url,
             &server.headers,
-            ctx.opener,
+            ctx.opener.clone(),
             (ctx.clock)(),
             reuse.as_deref(),
         )
@@ -604,11 +604,14 @@ mod tests {
 
     // ─── background loop ──────────────────────────────────────────────────
 
-    fn ctx_at(dir: &std::path::Path, opener: leviath_mcp::BrowserOpener) -> McpContext {
+    fn ctx_at(
+        dir: &std::path::Path,
+        opener: impl Fn(&str) -> bool + Send + Sync + 'static,
+    ) -> McpContext {
         McpContext {
             config_path: dir.join("config.toml"),
             store_path: dir.join("mcp-auth.json"),
-            opener,
+            opener: std::sync::Arc::new(opener),
             clock: || 1_000,
         }
     }
