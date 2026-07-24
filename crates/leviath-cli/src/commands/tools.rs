@@ -42,6 +42,20 @@ fn scan_tools(dir: Option<&Path>) -> ToolsReport {
     ToolsReport { valid, skipped }
 }
 
+/// A parameter's type label: the scalar `type` for a flat param, or the `type`
+/// inside a raw `schema` fragment (falling back to `schema` when the fragment has
+/// no top-level `type`, e.g. a `oneOf`).
+fn param_type_label(p: &leviath_scripting::ParamSpec) -> String {
+    match &p.schema {
+        Some(frag) => frag
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("schema")
+            .to_string(),
+        None => p.ty.clone(),
+    }
+}
+
 /// Render one tool's parameters as a compact `name:type[!]` list (`!` marks a
 /// required parameter).
 fn params_summary(meta: &ScriptToolMeta) -> String {
@@ -49,7 +63,7 @@ fn params_summary(meta: &ScriptToolMeta) -> String {
         .iter()
         .map(|p| {
             let req = if p.required { "!" } else { "" };
-            format!("{}:{}{req}", p.name, p.ty)
+            format!("{}:{}{req}", p.name, param_type_label(p))
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -66,12 +80,22 @@ fn report_json(dir_label: &str, report: &ToolsReport) -> serde_json::Value {
                 .params
                 .iter()
                 .map(|p| {
-                    serde_json::json!({
-                        "name": p.name,
-                        "type": p.ty,
-                        "required": p.required,
-                        "description": p.description,
-                    })
+                    // A raw `schema` fragment is surfaced verbatim (so `lev tools`
+                    // shows the enum/bounds the model actually sees); otherwise the
+                    // flat type/description.
+                    match &p.schema {
+                        Some(frag) => serde_json::json!({
+                            "name": p.name,
+                            "required": p.required,
+                            "schema": frag,
+                        }),
+                        None => serde_json::json!({
+                            "name": p.name,
+                            "type": p.ty,
+                            "required": p.required,
+                            "description": p.description,
+                        }),
+                    }
                 })
                 .collect();
             serde_json::json!({
@@ -218,6 +242,53 @@ mod tests {
             required_caps: vec![],
         };
         assert_eq!(params_summary(&meta), "a:string!, b:integer");
+    }
+
+    #[test]
+    fn param_type_label_reads_flat_and_fragment() {
+        let flat = leviath_scripting::ParamSpec {
+            name: "a".into(),
+            ty: "integer".into(),
+            required: false,
+            description: String::new(),
+            schema: None,
+        };
+        assert_eq!(param_type_label(&flat), "integer");
+        // A fragment with a top-level `type`.
+        let typed = leviath_scripting::ParamSpec {
+            schema: Some(serde_json::json!({ "type": "string", "enum": ["a", "b"] })),
+            ..flat.clone()
+        };
+        assert_eq!(param_type_label(&typed), "string");
+        // A fragment without a top-level `type` (e.g. oneOf) → "schema".
+        let typeless = leviath_scripting::ParamSpec {
+            schema: Some(serde_json::json!({ "oneOf": [] })),
+            ..flat
+        };
+        assert_eq!(param_type_label(&typeless), "schema");
+    }
+
+    #[test]
+    fn report_json_surfaces_raw_schema_fragment() {
+        // A `.rhai` with a sibling `.toml` carrying a raw enum schema: the JSON
+        // output shows the fragment verbatim (not a flat `type`).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pick.rhai"), "params.choice").unwrap();
+        std::fs::write(
+            dir.path().join("pick.toml"),
+            "[tool]\nname = \"pick\"\n[[tool.params]]\nname = \"choice\"\nrequired = true\nschema = { type = \"string\", enum = [\"x\", \"y\"] }\n",
+        )
+        .unwrap();
+        let report = scan_tools(Some(dir.path()));
+        // params_summary reads the fragment's type.
+        assert_eq!(params_summary(&report.valid[0]), "choice:string!");
+        let v = report_json("d", &report);
+        let param = &v["tools"][0]["params"][0];
+        assert_eq!(param["schema"]["enum"][1], "y");
+        assert!(
+            param.get("type").is_none(),
+            "no flat type when a fragment is present"
+        );
     }
 
     #[test]
