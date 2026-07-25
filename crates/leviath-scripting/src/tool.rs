@@ -543,6 +543,7 @@ fn register_host_functions(engine: &mut Engine, host: Arc<dyn ScriptHost>) {
     engine.register_fn("parse_json", parse_json_fn);
     engine.register_fn("to_json", to_json_fn);
     engine.register_fn("encode_uri", |s: &str| -> String { percent_encode(s) });
+    engine.register_fn("html_to_text", |s: &str| -> String { html_to_text(s) });
 }
 
 /// `parse_json(str)` host function: JSON string → Rhai value.
@@ -590,6 +591,143 @@ fn hex_digit(nibble: u8) -> char {
         0..=9 => (b'0' + nibble) as char,
         _ => (b'A' + (nibble - 10)) as char,
     }
+}
+
+/// `html_to_text(html)` host function: best-effort HTML → readable plain text.
+/// Drops `<script>`/`<style>` blocks, strips tags, decodes common entities, and
+/// collapses whitespace — so a script tool (e.g. `web_fetch`) can hand the model
+/// prose from a server-rendered page instead of markup. Not a full HTML parser;
+/// content injected by client-side JS is not present in the source and cannot be
+/// recovered here.
+fn html_to_text(html: &str) -> String {
+    let without_raw = strip_raw_text_elements(html);
+    let without_tags = strip_tags(&without_raw);
+    let decoded = decode_entities(&without_tags);
+    collapse_whitespace(&decoded)
+}
+
+/// Remove `<script>…</script>` and `<style>…</style>` element contents (their
+/// text is code/CSS, never prose). Case-insensitive; an unclosed element drops
+/// the remainder.
+fn strip_raw_text_elements(html: &str) -> String {
+    let mut s = html.to_string();
+    for tag in ["script", "style"] {
+        s = strip_element(&s, tag);
+    }
+    s
+}
+
+fn strip_element(html: &str, tag: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let open = format!("<{tag}");
+    let close = format!("</{tag}>");
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    while i < html.len() {
+        if lower[i..].starts_with(&open) {
+            match lower[i..].find(&close) {
+                Some(rel) => {
+                    i += rel + close.len();
+                    continue;
+                }
+                None => break, // unclosed element — drop the rest
+            }
+        }
+        let ch = html[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Strip `<...>` tags. Each tag boundary becomes a space so adjacent words don't
+/// run together. A `<` with no matching `>` drops the remainder (malformed).
+fn strip_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => {
+                in_tag = false;
+                out.push(' ');
+            }
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Decode common HTML entities (named + numeric decimal/hex). Unknown or
+/// unterminated entities are left verbatim.
+fn decode_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp..];
+        let window = after.len().min(12);
+        match after[..window].find(';') {
+            Some(semi) => match decode_one_entity(&after[1..semi]) {
+                Some(ch) => {
+                    out.push(ch);
+                    rest = &after[semi + 1..];
+                }
+                None => {
+                    out.push('&');
+                    rest = &after[1..];
+                }
+            },
+            None => {
+                out.push('&');
+                rest = &after[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn decode_one_entity(e: &str) -> Option<char> {
+    match e {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        "nbsp" => Some(' '),
+        "mdash" => Some('—'),
+        "ndash" => Some('–'),
+        "hellip" => Some('…'),
+        _ => {
+            if let Some(hex) = e.strip_prefix("#x").or_else(|| e.strip_prefix("#X")) {
+                u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+            } else if let Some(dec) = e.strip_prefix('#') {
+                dec.parse::<u32>().ok().and_then(char::from_u32)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Collapse every run of whitespace to a single space and trim.
+fn collapse_whitespace(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_ws = false;
+    for c in s.chars() {
+        if c.is_whitespace() {
+            if !prev_ws {
+                out.push(' ');
+                prev_ws = true;
+            }
+        } else {
+            out.push(c);
+            prev_ws = false;
+        }
+    }
+    out.trim().to_string()
 }
 
 #[cfg(test)]
@@ -1204,5 +1342,61 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
         m.insert("n".into(), Dynamic::from(42_i64));
         let headers = headers_from_map(m);
         assert_eq!(headers.get("n").map(String::as_str), Some("42"));
+    }
+
+    #[test]
+    fn html_to_text_full_pipeline() {
+        let html = "<html><head><style>.a{color:red}</style></head>\
+            <body><h1>Tit&amp;le</h1><script>var x=1<2;</script>\
+            <p>Hello&nbsp;world &#39;quoted&#39; &#x2014; done.</p></body></html>";
+        let text = html_to_text(html);
+        assert!(text.contains("Tit&le"), "entity decoded: {text}");
+        assert!(text.contains("Hello world 'quoted' — done."), "got: {text}");
+        assert!(!text.contains("color:red"), "style content dropped");
+        assert!(!text.contains("var x"), "script content dropped");
+        assert!(!text.contains('<'), "tags stripped");
+    }
+
+    #[test]
+    fn strip_element_handles_case_unclosed_and_utf8() {
+        // Case-insensitive open + close.
+        assert_eq!(strip_element("a<SCRIPT>x</script>b", "script"), "ab");
+        // Unclosed element drops the remainder.
+        assert_eq!(strip_element("keep<style>rest", "style"), "keep");
+        // Non-matching content (incl. multi-byte chars) passes through.
+        assert_eq!(strip_element("café < 3", "script"), "café < 3");
+    }
+
+    #[test]
+    fn strip_tags_edges() {
+        assert_eq!(strip_tags("<b>hi</b>").trim(), "hi");
+        // '>' outside a tag is kept.
+        assert_eq!(strip_tags("2 > 1").trim(), "2 > 1");
+        // Unclosed '<' drops the rest.
+        assert_eq!(strip_tags("ok <broken").trim(), "ok");
+    }
+
+    #[test]
+    fn decode_entities_named_numeric_and_unknown() {
+        assert_eq!(decode_entities("a&amp;b"), "a&b");
+        assert_eq!(decode_entities("&lt;&gt;&quot;&apos;"), "<>\"'");
+        assert_eq!(decode_entities("x&nbsp;y"), "x y");
+        assert_eq!(decode_entities("&mdash;&ndash;&hellip;"), "—–…");
+        assert_eq!(decode_entities("&#65;&#x42;&#X43;"), "ABC");
+        // Unknown entity kept verbatim.
+        assert_eq!(decode_entities("&bogus;"), "&bogus;");
+        // No terminating ';' within the window → '&' kept, scan continues.
+        assert_eq!(decode_entities("a & b"), "a & b");
+        // Invalid numeric → kept verbatim.
+        assert_eq!(decode_entities("&#zz;"), "&#zz;");
+        assert_eq!(decode_entities("&#x110000;"), "&#x110000;"); // out of range
+        // No ampersand at all.
+        assert_eq!(decode_entities("plain"), "plain");
+    }
+
+    #[test]
+    fn collapse_whitespace_runs_and_trims() {
+        assert_eq!(collapse_whitespace("  a \n\t b  "), "a b");
+        assert_eq!(collapse_whitespace(""), "");
     }
 }

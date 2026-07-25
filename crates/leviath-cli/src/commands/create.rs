@@ -89,6 +89,14 @@ name = "{name}"
 version = "0.1.0"
 description = "A coding assistant blueprint"
 
+# Global tool permissions: write/exec require approval unless overridden.
+[tool_permissions]
+read_file = "allow"
+list_dir = "allow"
+write_file = "ask"
+edit_file = "ask"
+bash = "ask"
+
 [stages.analyze]
 mode = "autonomous"
 model = {{ provider = "anthropic", model = "claude-sonnet-4-6" }}
@@ -96,8 +104,19 @@ description = "Understand the task and plan the implementation"
 available_tools = ["read_file", "list_dir"]
 max_iterations = 15
 system_prompt = """
-Analyze the coding task and produce a concise implementation plan.
+Analyze the coding task in the `task` region and produce a concise implementation
+plan: which files to create/modify, what each does, and the key decisions.
 """
+# Large file reads persist in the `codebase` region (a short pointer stays in the
+# conversation); action-tool results stay inline. Never route to a sliding_window
+# other than `conversation`.
+[stages.analyze.tool_routing]
+default_region = "conversation"
+[stages.analyze.tool_routing.overrides]
+read_file = "codebase"
+list_dir = "codebase"
+[stages.analyze.transitions.implement]
+transform = "direct"
 
 [stages.implement]
 mode = "autonomous"
@@ -106,15 +125,23 @@ description = "Write code according to the plan"
 available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash"]
 max_iterations = 50
 system_prompt = """
-Implement the plan. Create all necessary files and verify with bash.
+Implement the plan. Create all necessary files, then use bash to run tests and
+verify the build. Read existing code from the `codebase` region.
 """
+[stages.implement.tool_routing]
+default_region = "conversation"
+[stages.implement.tool_routing.overrides]
+read_file = "codebase"
+list_dir = "codebase"
 
-# Region budgets are percentages of the model's context window (ceilings, may
-# sum past 100%); the absolute max_tokens is an optional guard-rail cap.
+# Region budgets are percentages of the model's context window (ceilings, may sum
+# past 100%); the absolute max_tokens is an optional guard-rail cap. Every
+# blueprint needs an explicit `conversation` sliding_window — it holds the message
+# stream and is carried across stage transitions.
 [context.regions]
-task         = {{ kind = "pinned",          budget = "2%",  max_tokens = 2000 }}
+task         = {{ kind = "pinned",          budget = "2%",  max_tokens = 2000, required = true, seed = "task", required_message = "Describe the coding task via --task." }}
 codebase     = {{ kind = "temporary",       budget = "20%", max_tokens = 30000 }}
-conversation = {{ kind = "sliding_window",  max_items = 20, budget = "15%", max_tokens = 15000 }}
+conversation = {{ kind = "sliding_window",  max_items = 20, budget = "15%", max_tokens = 15000, strategy = "bulk", overflow = 10 }}
 scratch      = {{ kind = "clearable",       budget = "8%",  max_tokens = 10000 }}
 "#,
             name = name
@@ -126,12 +153,32 @@ name = "{name}"
 version = "0.1.0"
 description = "A research assistant blueprint"
 
+[tool_permissions]
+read_file = "allow"
+list_dir = "allow"
+bash = "ask"
+
 [stages.gather]
 mode = "autonomous"
 model = {{ provider = "anthropic", model = "claude-sonnet-4-6" }}
 description = "Gather relevant information"
 available_tools = ["read_file", "list_dir", "bash"]
 max_iterations = 20
+system_prompt = """
+Gather source material on the topic in the `query` region. Use read_file/list_dir
+for local material and bash for anything else; raw content lands in `sources`.
+Note where each item came from and the claims it supports.
+"""
+# (Tip: drop web_search.rhai / web_fetch.rhai into a `tools/` dir beside this file
+# and add them to available_tools for real web research — see the researcher agent.)
+[stages.gather.tool_routing]
+default_region = "conversation"
+[stages.gather.tool_routing.overrides]
+read_file = "sources"
+list_dir = "sources"
+bash = "sources"
+[stages.gather.transitions.synthesize]
+transform = "compact"
 
 [stages.synthesize]
 mode = "interactive"
@@ -139,15 +186,21 @@ model = {{ provider = "anthropic", model = "claude-sonnet-4-6" }}
 description = "Synthesize findings and discuss with user"
 available_tools = ["read_file", "list_dir"]
 max_iterations = 15
+system_prompt = """
+Synthesize the `sources` into `findings`: themes, agreements/disagreements, and
+well-supported vs speculative claims. Cite specific sources.
+"""
 
-# Region budgets are percentages of the model's context window (ceilings, may
-# sum past 100%); the absolute max_tokens / threshold_tokens are guard-rail caps.
+# Region budgets are percentages of the model's context window (ceilings, may sum
+# past 100%); absolute max_tokens / threshold_tokens are guard-rail caps. A
+# `compacting` region needs a paired `compact_history` region for its summaries.
 [context.regions]
-objective    = {{ kind = "pinned",          budget = "2%",  max_tokens = 2000 }}
-sources      = {{ kind = "temporary",       budget = "25%", max_tokens = 40000 }}
-findings     = {{ kind = "compacting",      budget = "12%", compact_at = "53%", threshold_tokens = 8000, max_tokens = 15000 }}
-conversation = {{ kind = "sliding_window",  max_items = 15, budget = "12%", max_tokens = 12000 }}
-scratch      = {{ kind = "clearable",       budget = "6%",  max_tokens = 8000 }}
+query           = {{ kind = "pinned",          budget = "2%",  max_tokens = 2000, required = true, seed = "task", required_message = "State the research question via --task." }}
+sources         = {{ kind = "temporary",       budget = "25%", max_tokens = 40000 }}
+findings        = {{ kind = "compacting",      budget = "12%", compact_at = "80%", threshold_tokens = 12000, max_tokens = 15000 }}
+findings_history = {{ kind = "compact_history", source_region = "findings", budget = "3%", max_tokens = 6000 }}
+conversation    = {{ kind = "sliding_window",  max_items = 15, budget = "12%", max_tokens = 12000, strategy = "bulk", overflow = 10 }}
+scratch         = {{ kind = "clearable",       budget = "6%",  max_tokens = 8000 }}
 "#,
             name = name
         ),
@@ -158,6 +211,12 @@ name = "{name}"
 version = "0.1.0"
 description = "A simple agent blueprint"
 
+[tool_permissions]
+read_file = "allow"
+list_dir = "allow"
+write_file = "ask"
+bash = "ask"
+
 [stages.main]
 mode = "autonomous"
 model = {{ provider = "anthropic", model = "claude-sonnet-4-6" }}
@@ -165,14 +224,16 @@ description = "Main execution stage"
 available_tools = ["read_file", "list_dir", "write_file", "bash"]
 max_iterations = 30
 system_prompt = """
-You are a helpful agent. Complete the task thoroughly.
+You are a helpful agent. Complete the task described in the `task` region
+thoroughly.
 """
 
-# Region budgets are percentages of the model's context window (ceilings, may
-# sum past 100%); the absolute max_tokens is an optional guard-rail cap.
+# Region budgets are percentages of the model's context window (ceilings, may sum
+# past 100%); the absolute max_tokens is an optional guard-rail cap. Every
+# blueprint needs an explicit `conversation` sliding_window region.
 [context.regions]
-system       = {{ kind = "pinned",         budget = "2%",  max_tokens = 2000 }}
-conversation = {{ kind = "sliding_window", max_items = 10, budget = "12%", max_tokens = 10000 }}
+task         = {{ kind = "pinned",         budget = "2%",  max_tokens = 2000, required = true, seed = "task", required_message = "Describe the task via --task." }}
+conversation = {{ kind = "sliding_window", max_items = 10, budget = "12%", max_tokens = 10000, strategy = "bulk", overflow = 10 }}
 scratch      = {{ kind = "clearable",      budget = "6%",  max_tokens = 5000 }}
 "#,
             name = name
@@ -257,6 +318,66 @@ mod tests {
                 bp.context_layout.has_percent_budgets(),
                 "{template} layout should have percentage budgets"
             );
+        }
+    }
+
+    #[test]
+    fn every_template_satisfies_context_layout_invariants() {
+        use leviath_core::RegionKind;
+        for template in ["software-engineer", "coder", "researcher", "other"] {
+            let manifest = create_manifest("inv-agent", template);
+            let bp = leviath_core::manifest::parse_manifest(&manifest).unwrap();
+            let regions = &bp.context_layout.regions;
+
+            // Explicit conversation sliding_window.
+            assert!(
+                matches!(
+                    regions
+                        .iter()
+                        .find(|r| r.name == "conversation")
+                        .map(|r| &r.kind),
+                    Some(RegionKind::SlidingWindow { .. })
+                ),
+                "{template} template needs an explicit conversation sliding_window"
+            );
+
+            // No routing targets a non-conversation sliding_window.
+            let sliding: std::collections::HashSet<&str> = regions
+                .iter()
+                .filter(|r| matches!(r.kind, RegionKind::SlidingWindow { .. }))
+                .map(|r| r.name.as_str())
+                .collect();
+            for stage in &bp.stages {
+                if let Some(routing) = &stage.tool_result_routing {
+                    let mut targets = vec![routing.default_region.as_str()];
+                    targets.extend(routing.tool_overrides.values().map(String::as_str));
+                    for t in targets {
+                        assert!(
+                            t == "conversation" || !sliding.contains(t),
+                            "{template} stage '{}' routes to non-conversation sliding_window '{t}'",
+                            stage.name
+                        );
+                    }
+                }
+            }
+
+            // Every compacting region has a compact_history pair.
+            let hist: std::collections::HashSet<&str> = regions
+                .iter()
+                .filter_map(|r| match &r.kind {
+                    RegionKind::CompactHistory { source_region } => Some(source_region.as_str()),
+                    _ => None,
+                })
+                .collect();
+            for r in regions {
+                if matches!(r.kind, RegionKind::Compacting { .. }) {
+                    assert!(
+                        hist.contains(r.name.as_str()),
+                        "{template} compacting region '{}' has no compact_history pair",
+                        r.name
+                    );
+                }
+            }
         }
     }
 
