@@ -5389,6 +5389,42 @@ mod tests {
     }
 
     #[test]
+    fn routing_away_pointer_previews_and_truncates_long_results() {
+        // A routed result longer than the 160-char preview gets an ellipsis in the
+        // conversation pointer; the full text still lands in the region.
+        let mut w = ctx(&[("conversation", 10_000), ("codebase", 10_000)]);
+        let long = "L".repeat(500);
+        let r = routing("conversation", &[("read_file", "codebase")], true, None);
+        apply_tool_results(
+            &mut w,
+            "read",
+            &[tc("c1", "read_file")],
+            &[("c1".to_string(), long.clone())],
+            Some(&r),
+            None,
+        );
+        let conv_txt: String = w
+            .get_region("conversation")
+            .unwrap()
+            .content
+            .iter()
+            .map(|e| e.content.clone())
+            .collect();
+        assert!(
+            conv_txt.contains('…'),
+            "long result pointer should be elided"
+        );
+        assert!(
+            w.get_region("codebase")
+                .unwrap()
+                .content
+                .iter()
+                .any(|e| e.content.contains(&long)),
+            "full result stored in the region"
+        );
+    }
+
+    #[test]
     fn routing_away_keeps_pair_in_conversation_and_text_in_region() {
         // Regression: routing a tool result to a knowledge region must keep the
         // tool_use/tool_result PAIR in `conversation` (a pointer) and store the full
@@ -5409,6 +5445,15 @@ mod tests {
             },
             10_000,
         ));
+        // A plain user message renders as a non-Blocks message (exercises the
+        // other arm of the assemble scan below).
+        w.add_typed_entry(
+            "conversation",
+            leviath_core::EntryKind::UserMessage,
+            "please read a.rs".to_string(),
+            5,
+        )
+        .unwrap();
         let r = routing("conversation", &[("read_file", "codebase")], true, None);
         apply_tool_results(
             &mut w,
