@@ -1,35 +1,45 @@
 [agent]
 name = "daily-briefer"
-version = "0.2.0"
-description = "Morning summary agent — gathers from multiple sources, prioritizes, and delivers a concise briefing, with a prioritize→collect gap-filling loop and error recovery"
+version = "0.3.0"
+description = "Morning summary agent — gathers from local + web sources, prioritizes into a running index, and delivers a concise briefing"
 entry_stage = "collect"
+
+[tool_permissions]
+read_file  = "allow"
+list_dir   = "allow"
+web_search = "allow"
+web_fetch  = "allow"
+bash       = "ask"
+write_file = "ask"
 
 # ─── Stage 1: Collect ─────────────────────────────────────────────────────────
 [stages.collect]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
-description = "Gather information from configured sources"
-available_tools = ["read_file", "bash"]
+description = "Gather information from configured local + web sources"
+available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "bash", "context_append"]
 max_iterations = 20
-# Prioritize can send us back here to fill a gap; cap the round-trips.
 max_revisits = 2
 system_prompt = """
-You are gathering information for a daily briefing. Check each configured source:
-- Read local files (notes, logs, task lists)
-- Use bash to fetch web content (curl for APIs, RSS feeds, etc.)
-- Check for new items since the last briefing
+Gather material for a daily briefing per the request in `task` (which sources,
+what to watch). Check each source:
+- read_file / list_dir for local files (notes, logs, task lists)
+- web_search + web_fetch for news/topics; bash (curl) for a specific API or feed
+- Focus on what's NEW/actionable, not a full dump.
 
-Collect raw data. Don't analyze yet — just gather everything relevant.
-Tag each item with its source and timestamp. If you were sent back to fill a
-specific gap, focus only on that gap.
+Collect raw items into `raw_data`. Don't analyze yet. For each item, append a
+one-line source note to `sources_index` (context_append): `[n] <source> — <what>
+— <date/time if known>`. If sent back to fill a specific gap, focus only on it.
 """
 
-# Raw pulls go into the raw_data region.
 [stages.collect.tool_routing]
-default_region = "scratch"
+default_region = "conversation"
 [stages.collect.tool_routing.overrides]
-read_file = "raw_data"
-bash      = "raw_data"
+web_search = "raw_data"
+web_fetch  = "raw_data"
+read_file  = "raw_data"
+list_dir   = "raw_data"
+bash       = "raw_data"
 
 [stages.collect.transitions.prioritize]
 hint = "Sources checked — rank what was found"
@@ -40,12 +50,11 @@ condition = "error"
 transform = "direct"
 
 # ─── Stage 2: Prioritize ──────────────────────────────────────────────────────
-# Branches: usually → brief, but can loop back to collect if a critical source
-# turned up nothing and a gap needs filling.
 [stages.prioritize]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "qwen3.6:27b" }] }
-description = "Rank items by urgency and relevance"
+description = "Rank items by urgency and relevance into the priorities index"
+available_tools = ["context_write", "context_append"]
 max_iterations = 12
 max_revisits = 3
 transition_prompt = """
@@ -54,14 +63,15 @@ You've triaged everything collected. Decide what happens next:
 - Otherwise, respond with: brief
 """
 system_prompt = """
-Review everything collected and prioritize:
-1. **Action required** — needs a decision or response today
-2. **Important updates** — significant changes or news worth knowing
-3. **FYI** — interesting but not urgent
-4. **Skip** — noise, duplicates, or irrelevant items
+Triage everything in `raw_data` and write each kept item to the `priorities`
+region (context_append) as `<TIER> | <one-sentence summary> | <source ref>`,
+using these tiers:
+1. ACTION — needs a decision or response today
+2. UPDATE — significant change or news worth knowing
+3. FYI    — interesting but not urgent
 
-For each item, write a one-sentence summary and assign a priority tier.
-Drop anything in the Skip tier entirely.
+Drop noise, duplicates, and irrelevant items entirely (don't write them). If a
+critical configured source came back empty, consider one more collect pass.
 """
 
 [stages.prioritize.transitions.brief]
@@ -81,24 +91,25 @@ transform = "direct"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Compose the final briefing"
-available_tools = ["write_file"]
+available_tools = ["write_file", "read_file"]
 max_iterations = 10
 system_prompt = """
-Write a concise daily briefing. Format:
+Write a concise daily briefing (write_file) from the `priorities` region, citing
+`sources_index` where relevant. Format:
 
 ## Daily Briefing — [Date]
 
 ### 🔴 Action Required
-(items needing decisions/responses today)
+(ACTION-tier items needing decisions/responses today)
 
 ### 📌 Key Updates
-(significant changes worth knowing)
+(UPDATE-tier significant changes)
 
 ### 📎 Worth Noting
-(interesting but non-urgent items)
+(FYI-tier items)
 
-Keep each item to 1-2 sentences. Link to sources where relevant.
-The entire briefing should be readable in under 2 minutes.
+Keep each item to 1-2 sentences. The whole briefing should read in under 2 minutes.
+If a source failed, add a short "⚠️ Gaps" note listing what couldn't be checked.
 """
 
 # Explicit empty transitions = terminal.
@@ -113,8 +124,8 @@ available_tools = ["read_file", "bash"]
 max_iterations = 8
 max_revisits = 1
 system_prompt = """
-A source fetch or parse failed. Read the error from context, note which source
-is unavailable, and record that gap so the briefing can flag it. Then return to
+A source fetch or parse failed. Read the error from context, note which source is
+unavailable, and record that gap so the briefing can flag it. Then return to
 prioritize with whatever was successfully collected.
 """
 
@@ -126,8 +137,13 @@ transform = "compact"
 provider = "anthropic"
 model = "claude-sonnet-4-6"
 
+# ─── Context layout ───────────────────────────────────────────────────────────
 [context.regions]
-task        = { kind = "pinned",         max_tokens = 1000 }
-raw_data    = { kind = "temporary",      max_tokens = 40000 }
-prioritized = { kind = "sliding_window", max_tokens = 15000, strategy = "bulk", overflow = 10 }
-scratch     = { kind = "clearable",      max_tokens = 5000 }
+task        = { kind = "pinned", budget = "2%", max_tokens = 2000, required = true, seed = "task", required_message = "Describe the briefing (which sources, what to watch) via --task." }
+sources_index = { kind = "pinned", budget = "3%", max_tokens = 3000 }
+
+raw_data    = { kind = "temporary",      budget = "30%", max_tokens = 40000 }
+priorities  = { kind = "sliding_window", max_items = 25, budget = "10%", max_tokens = 15000, strategy = "bulk", overflow = 10 }
+brief       = { kind = "clearable",      budget = "5%", max_tokens = 6000 }
+
+conversation = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }

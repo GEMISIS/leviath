@@ -1,36 +1,39 @@
 [agent]
 name = "log-analyzer"
-version = "0.2.0"
-description = "Analyzes log files — identifies anomalies, trends, and error patterns via a scripted analyze↔script loop, with error recovery and multi-provider fallback"
+version = "0.3.0"
+description = "Analyzes log files — identifies anomalies, trends, and error patterns via a scripted analyze⇄script loop, maintaining a severity-ranked findings index"
 entry_stage = "ingest"
 
 [tool_permissions]
 read_file = "allow"
 list_dir  = "allow"
 bash      = "ask"
+write_file = "ask"
 
 # ─── Stage 1: Ingest ──────────────────────────────────────────────────────────
 [stages.ingest]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Read log files, identify format and structure"
-available_tools = ["read_file", "list_dir", "bash"]
+available_tools = ["read_file", "list_dir", "bash", "context_write"]
 max_iterations = 15
 system_prompt = """
-You are ingesting log files for analysis. Your job:
-1. Read the provided log files or directories
-2. Identify the log format (JSON, syslog, Apache, custom, etc.)
-3. Note the time range covered and total volume
-4. Identify the fields/columns available
-5. Look for obvious structural issues (corrupted lines, encoding problems)
+Ingest the log files named in `task`. Determine:
+1. Log format (JSON, syslog, Apache, custom, etc.)
+2. Time range covered and total volume
+3. Available fields/columns
+4. Obvious structural issues (corrupted lines, encoding problems)
 
-Store your findings about format and structure in context for the next stage.
+Use bash (head/wc/file) to sample rather than reading whole huge files. Write a
+short format/structure summary to `findings` (context_write) so the analyze stage
+starts oriented. Raw sampled content lands in `logs`.
 """
 
 [stages.ingest.tool_routing]
-default_region = "scratch"
+default_region = "conversation"
 [stages.ingest.tool_routing.overrides]
 read_file = "logs"
+bash      = "logs"
 
 [stages.ingest.transitions.analyze]
 hint = "Log format identified, ready to analyze"
@@ -45,29 +48,34 @@ transform = "direct"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "qwen3.6:27b" }] }
 description = "Identify anomalies, trends, and error patterns"
-available_tools = ["read_file", "bash"]
+available_tools = ["read_file", "bash", "context_write", "context_append"]
 max_iterations = 25
 max_revisits = 3
 transition_prompt = """
-You've analyzed the logs. Decide what happens next:
+Decide what happens next:
 - If you need a script to parse/filter/aggregate the data more precisely, respond with: script
 - If you have enough findings to produce a report, respond with: report
 """
 system_prompt = """
-Analyze the log data. Look for:
+Analyze the log data for:
 1. Error patterns — recurring errors, error spikes, cascading failures
 2. Anomalies — unusual request rates, latency outliers, unexpected status codes
 3. Trends — gradual degradation, growing queue depths, memory creep
 4. Correlations — errors that co-occur, time-based patterns
-5. Security signals — auth failures, unusual access patterns, injection attempts
+5. Security signals — auth failures, unusual access, injection attempts
 
-Quantify everything. Note timestamps and frequencies. Rank findings by severity.
+Quantify everything (timestamps, counts, rates). For each finding, append to
+`findings` (context_append): `<SEVERITY> | <finding> | <evidence: counts/timestamps>`
+with SEVERITY in {critical, warning, info}. Keep a running tally in `severity_index`
+(context_write), e.g. "critical: 2, warning: 5, info: 3". Use the `script` stage
+when you need precise parsing/aggregation you can't eyeball.
 """
 
 [stages.analyze.tool_routing]
-default_region = "scratch"
+default_region = "conversation"
 [stages.analyze.tool_routing.overrides]
 read_file = "logs"
+bash      = "scratch"
 
 [stages.analyze.transitions.script]
 hint = "Need a script to parse/filter/aggregate log data"
@@ -82,8 +90,6 @@ condition = "error"
 transform = "direct"
 
 # ─── Stage 3: Script ──────────────────────────────────────────────────────────
-# Self-loops for iterative script refinement (capped by max_revisits), and
-# hands results back to analyze.
 [stages.script]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
@@ -97,16 +103,15 @@ Your script has produced results. Decide what happens next:
 - If the results answer the analysis questions, respond with: analyze
 """
 system_prompt = """
-You are writing scripts to process log data. Use bash to run your scripts
-against the log files. Common tasks:
-- Parse structured fields from log lines
-- Filter by time range, severity, or pattern
+Write scripts (awk/grep/python via bash) to process the logs:
+- Parse structured fields, filter by time/severity/pattern
 - Aggregate counts, rates, percentiles
-- Detect anomalies using statistical thresholds
-- Extract and correlate events across log sources
+- Detect anomalies via statistical thresholds
+- Correlate events across sources
 
-Write small, focused scripts. Test each one before building on it.
-Iterate until the output answers the analysis questions.
+Write small, focused scripts; test each before building on it. Script code and
+output land in `scripts`. Iterate until the output answers the analysis questions,
+then return to analyze.
 """
 
 [stages.script.tool_routing]
@@ -131,21 +136,23 @@ transform = "direct"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "qwen3.6:27b" }] }
 description = "Produce a structured analysis report with findings"
-available_tools = ["write_file"]
+available_tools = ["write_file", "read_file"]
 max_iterations = 10
 # Generating the final report — don't inject mid-run user messages into it.
 accepts_messages = false
 system_prompt = """
-Write a structured log analysis report. Include:
+Write a structured log analysis report (write_file) from the `findings` region,
+structured by the `severity_index` tally. Include:
 - Executive summary (top findings in 3-5 bullets)
 - Log source overview (files, format, time range, volume)
-- Findings by severity (critical, warning, info)
-  - For each finding: description, evidence, frequency, impact
+- Findings by severity (🔴 critical / 🟡 warning / 🔵 info)
+  - For each: description, evidence (counts/timestamps), impact
 - Trends and patterns observed
 - Recommendations (what to fix, what to monitor)
-- Raw data appendix (key log excerpts, script outputs)
+- Appendix: key log excerpts and script outputs
 
-Be precise. Include timestamps, counts, and percentages. Reference specific log lines.
+Be precise — timestamps, counts, percentages, specific log lines. The report's
+severity counts must match `severity_index`.
 """
 
 # Explicit empty transitions = terminal.
@@ -161,8 +168,8 @@ max_iterations = 10
 max_revisits = 1
 system_prompt = """
 A read or script execution failed. Read the error from context, diagnose it
-(e.g. a malformed log line, a script bug, a missing file), note a workaround,
-then return to analyze to continue with the data available.
+(a malformed log line, a script bug, a missing file), note a workaround, then
+return to analyze to continue with the data available.
 """
 
 [stages.error_recovery.transitions.analyze]
@@ -173,8 +180,15 @@ transform = "compact"
 provider = "anthropic"
 model = "claude-sonnet-4-6"
 
+# ─── Context layout ───────────────────────────────────────────────────────────
 [context.regions]
-logs    = { kind = "temporary",  max_tokens = 50000 }
-scripts = { kind = "compacting", threshold_tokens = 20000, max_tokens = 30000 }
-findings = { kind = "pinned",    max_tokens = 15000 }
-scratch = { kind = "clearable",  max_tokens = 5000 }
+task            = { kind = "pinned", budget = "2%", max_tokens = 3000, required = true, seed = "task", required_message = "Name the log file(s)/dir and what to look for via --task." }
+severity_index  = { kind = "pinned", budget = "2%", max_tokens = 2000 }
+findings        = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }
+
+logs            = { kind = "temporary",       budget = "30%", max_tokens = 50000 }
+scripts         = { kind = "compacting",      budget = "20%", compact_at = "80%", threshold_tokens = 20000, max_tokens = 30000 }
+scripts_history = { kind = "compact_history", source_region = "scripts", budget = "3%", max_tokens = 10000 }
+
+conversation    = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }
+scratch         = { kind = "clearable", budget = "6%", max_tokens = 6000 }
