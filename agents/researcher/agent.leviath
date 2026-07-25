@@ -20,20 +20,25 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { p
 description = "Gather relevant information on the topic"
 # web_search / web_fetch are provided by the agent's script tools (issue #97).
 available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append"]
-max_iterations = 20
-max_revisits = 3
+max_iterations = 8
+max_revisits = 2
 system_prompt = """
 You are gathering source material on the topic in the `query` region, within any
-bounds set in `scope`. Search breadth-first: cover the main sub-topics and a range
-of viewpoints before going deep on any one.
+bounds set in `scope`.
 
-Use web_search to find sources, web_fetch to pull their content, and read_file for
-local documents. Raw source content lands in `raw_findings`.
+Be efficient — do not search exhaustively:
+1. Run a FOCUSED first round of 3-5 web_search calls covering the distinct
+   sub-topics of the question (not many rephrasings of the same query).
+2. web_fetch only the 2-3 most promising sources for detail; the search snippets
+   in `raw_findings` are usually enough on their own.
+3. As you go, append one bibliography line per source you actually use to the
+   `sources_index` region with context_append:
+   `[n] <title> — <url or path> — credibility: <high/med/low + why>`.
 
-For every source, append one bibliography line to `sources_index` (context_append):
-`[n] <title> — <url or path> — <date if known> — credibility: <high/med/low + why>`.
 Prefer primary sources and well-established outlets; note when something is a blog,
-forum, or vendor claim. The analyze stage decides whether the coverage is enough.
+forum, or vendor claim. Once you have solid coverage of the sub-topics, transition
+to analyze — don't keep searching for marginal additions. The analyze stage will
+send you back if it finds a real gap.
 """
 
 [stages.gather.tool_routing]
@@ -159,3 +164,8 @@ contradictions = { kind = "clearable",      budget = "3%", max_tokens = 3000 }
 # Synthesis workspace (compacts to a running history when it grows).
 synthesis         = { kind = "compacting",      budget = "40%", compact_at = "80%", threshold_tokens = 30000, max_tokens = 50000 }
 synthesis_history = { kind = "compact_history", source_region = "synthesis", budget = "3%", max_tokens = 10000 }
+
+# The message stream. An explicit sliding_window `conversation` region is required —
+# the per-stage layout is rebuilt from this table on each transition, so an
+# auto-added one would be dropped after the first stage.
+conversation      = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }

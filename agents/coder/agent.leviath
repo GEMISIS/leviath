@@ -22,7 +22,7 @@ bash       = "ask"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Understand requirements and plan the implementation"
-available_tools = ["read_file", "list_dir", "context_write"]
+available_tools = ["read_file", "list_dir"]
 max_iterations = 15
 system_prompt = """
 You are analyzing a coding task to produce a concise implementation plan.
@@ -40,14 +40,15 @@ Then:
    Use list_dir/read_file ONLY to fill real gaps. For a fresh task with no existing
    code, skip exploration entirely.
 
-Output a short bullet-list plan into the `plan` region (via context_write): files to
-create/modify, what each does, key decisions, and the dependencies you found. Be
-brief — the implement stage does the actual coding.
+Output a short bullet-list plan: which files to create/modify, what each does, key
+decisions, and the dependencies you found. Be brief — the implement stage does the
+actual coding and reads this plan from the conversation.
 """
 
-# Exploration output lands in the persistent `codebase` region, not scratch.
+# Only passive reads route to the persistent `codebase` region; everything else
+# stays in conversation.
 [stages.analyze.tool_routing]
-default_region = "scratch"
+default_region = "conversation"
 [stages.analyze.tool_routing.overrides]
 read_file = "codebase"
 list_dir  = "codebase"
@@ -90,14 +91,14 @@ When all files are written and tests pass, finish with a short summary of what
 changed and the test outcome.
 """
 
+# Only passive reads route to a knowledge region. Action-tool results (write_file,
+# edit_file, bash) MUST stay in conversation: routing them away strips the
+# tool_result, so the model can't see the action landed and repeats it in a loop.
 [stages.implement.tool_routing]
-default_region = "scratch"
+default_region = "conversation"
 [stages.implement.tool_routing.overrides]
 read_file  = "codebase"
 list_dir   = "codebase"
-write_file = "implementation"
-edit_file  = "implementation"
-bash       = "test_results"
 
 [stages.implement.transitions.review]
 hint = "Implementation complete, ready for review"
@@ -147,12 +148,12 @@ read_file = "allow"
 list_dir  = "allow"
 bash      = "ask"
 
+# bash (test runs) stays in conversation so the reviewer sees the results.
 [stages.review.tool_routing]
-default_region = "scratch"
+default_region = "conversation"
 [stages.review.tool_routing.overrides]
 read_file = "codebase"
 list_dir  = "codebase"
-bash      = "test_results"
 
 # Custom transform: carry the plan/architecture/task/codebase forward, compact the
 # review conversation into a fix list, and clear scratch + test_results before
@@ -187,8 +188,12 @@ then transition back to implement to retry. If you see the SAME error recurring 
 `errors`, change approach rather than repeating the fix.
 """
 
+# Route tool chatter to scratch (clearable), not `errors`: `errors` is a
+# sliding_window and only `conversation` may hold routed ToolResult blocks
+# (a second sliding_window desyncs the result from its tool_use → API 400).
+# The agent still records failures to `errors` explicitly via context_append.
 [stages.error_recovery.tool_routing]
-default_region = "errors"
+default_region = "conversation"
 [stages.error_recovery.tool_routing.overrides]
 read_file = "codebase"
 

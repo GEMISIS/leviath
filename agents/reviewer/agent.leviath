@@ -32,10 +32,12 @@ Append the flagged areas (file + one line each) to the `findings` region via
 context_append — this is the worklist the deep review scrutinizes.
 """
 
+# Passive reads go to `findings`; everything else stays in conversation.
 [stages.scan.tool_routing]
-default_region = "analysis"
+default_region = "conversation"
 [stages.scan.tool_routing.overrides]
 read_file = "findings"
+list_dir  = "findings"
 
 [stages.scan.transitions.deep_review]
 hint = "First pass complete — scrutinize the flagged areas"
@@ -74,10 +76,12 @@ has the totals.
 Use bash only to CONFIRM a hypothesis (e.g. run a test), never to modify anything.
 """
 
+# Passive reads go to `findings`; bash (hypothesis checks) stays in conversation.
 [stages.deep_review.tool_routing]
-default_region = "analysis"
+default_region = "conversation"
 [stages.deep_review.tool_routing.overrides]
 read_file = "findings"
+list_dir  = "findings"
 
 [stages.deep_review.transitions.report]
 hint = "Analysis complete — write the report"
@@ -149,5 +153,13 @@ findings        = { kind = "temporary", budget = "20%", max_tokens = 25000 }
 severity_index  = { kind = "pinned",    budget = "2%",  max_tokens = 2000 }
 report          = { kind = "clearable", budget = "7%",  max_tokens = 8000 }
 
-# Bulk-evicting scratch for tool chatter (stable prefix for prompt caching).
-analysis        = { kind = "sliding_window", max_items = 15, budget = "15%", max_tokens = 20000, strategy = "bulk", overflow = 10 }
+# Scratch for tool chatter. Must NOT be a sliding_window: tool-result routing
+# targets this region, and only `conversation` may hold ToolResult message blocks
+# (a routed result in a second sliding_window desyncs from its tool_use → API 400).
+# Temporary renders as a plain-text system block, which is safe.
+analysis        = { kind = "temporary", budget = "15%", max_tokens = 20000 }
+
+# The message stream. Every blueprint needs an explicit sliding_window
+# `conversation` region — the layout that replaces it on each stage transition is
+# rebuilt from this table, so an auto-added one would be dropped after stage 1.
+conversation    = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }
