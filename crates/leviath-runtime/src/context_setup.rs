@@ -102,6 +102,7 @@ pub fn init_window(window: &mut ContextWindow, blueprint: &Blueprint, task: &str
 /// stage-entry can share it.
 pub fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
     let mut new_regions = Vec::new();
+    let mut kept: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for region_def in &layout.regions {
         let mut new_region = Region::new(
             region_def.name.clone(),
@@ -115,7 +116,30 @@ pub fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
             }
         }
 
+        kept.insert(region_def.name.as_str());
         new_regions.push(new_region);
+    }
+
+    // Carry the message-stream regions across the transition even when the new
+    // stage layout doesn't declare them. Dropping `conversation` (the sole
+    // SlidingWindow that holds typed turns) would strand the whole message history
+    // — the next stage would assemble with no messages, and its typed tool_use/
+    // tool_result turns would have nowhere to land. `tool_results` likewise. A
+    // blueprint that DOES declare them keeps its own budget (handled above).
+    for infra in ["conversation", "tool_results"] {
+        if !kept.contains(infra)
+            && let Some(existing) = window.get_region(infra)
+        {
+            let mut carried = Region::new(
+                existing.name.clone(),
+                existing.kind.clone(),
+                existing.max_tokens,
+            );
+            for entry in &existing.content {
+                let _ = carried.add_entry(entry.content.clone(), entry.tokens);
+            }
+            new_regions.push(carried);
+        }
     }
 
     window.regions = new_regions;
@@ -332,7 +356,12 @@ mod tests {
 
         apply_layout(&mut window, &new_layout);
 
-        assert_eq!(window.regions.len(), 2);
+        // system + scratch from the new layout, PLUS the auto-added message-stream
+        // regions (conversation, tool_results) carried across the transition so the
+        // message history survives even though the new layout doesn't declare them.
+        assert_eq!(window.regions.len(), 4);
+        assert!(window.get_region("conversation").is_some());
+        assert!(window.get_region("tool_results").is_some());
         assert!(
             window
                 .get_region("system")
@@ -345,5 +374,47 @@ mod tests {
         // Token total recomputed from the surviving content.
         assert_eq!(window.current_tokens, window.calculate_tokens());
         assert!(window.current_tokens > 0);
+    }
+
+    #[test]
+    fn apply_layout_carries_conversation_when_new_layout_omits_it() {
+        // A blueprint whose stage layout has NO conversation region. The auto-added
+        // conversation (with typed history) must survive the transition, else the
+        // next stage assembles with no messages.
+        let bp = blueprint_with(vec![RegionDefinition::new(
+            "task".to_string(),
+            RegionKind::Pinned,
+            5000,
+        )]);
+        let mut window = seeded_window(&bp, "the task");
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::UserMessage,
+                "hello from stage 0".to_string(),
+                10,
+            )
+            .unwrap();
+
+        // Transition to a layout that omits conversation entirely.
+        let next = ContextLayout::new(
+            vec![RegionDefinition::new(
+                "task".to_string(),
+                RegionKind::Pinned,
+                5000,
+            )],
+            8000,
+        );
+        apply_layout(&mut window, &next);
+
+        let conv = window
+            .get_region("conversation")
+            .expect("conversation carried across transition");
+        assert!(
+            conv.content
+                .iter()
+                .any(|e| e.content.contains("hello from stage 0")),
+            "carried conversation must retain its history"
+        );
     }
 }
