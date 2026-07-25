@@ -1133,6 +1133,15 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
     }
 
     #[test]
+    fn execute_html_to_text_host_fn_via_script() {
+        // Exercises the registered `html_to_text` engine binding (not just the
+        // free function): a script strips markup to prose.
+        let tool = tool_from("// @tool t\nhtml_to_text(\"<p>Hi&amp;<b>bye</b></p>\")");
+        let out = execute(&tool, serde_json::json!({}), FakeHost::arc());
+        assert_eq!(out, "Hi& bye");
+    }
+
+    #[test]
     fn execute_missing_optional_param_reads_as_unit() {
         // Mirrors the issue's `params.count == ()` idiom.
         let tool = tool_from("// @tool t\nif params.count == () { \"default\" } else { \"set\" }");
@@ -1388,8 +1397,10 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
         // No terminating ';' within the window → '&' kept, scan continues.
         assert_eq!(decode_entities("a & b"), "a & b");
         // Invalid numeric → kept verbatim.
-        assert_eq!(decode_entities("&#zz;"), "&#zz;");
-        assert_eq!(decode_entities("&#x110000;"), "&#x110000;"); // out of range
+        assert_eq!(decode_entities("&#zz;"), "&#zz;"); // decimal parse Err
+        assert_eq!(decode_entities("&#xZZ;"), "&#xZZ;"); // hex from_str_radix Err
+        assert_eq!(decode_entities("&#x110000;"), "&#x110000;"); // hex out of range (from_u32 None)
+        assert_eq!(decode_entities("&#99999999;"), "&#99999999;"); // decimal out of range (from_u32 None)
         // No ampersand at all.
         assert_eq!(decode_entities("plain"), "plain");
     }

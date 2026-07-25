@@ -329,15 +329,14 @@ mod tests {
             let bp = leviath_core::manifest::parse_manifest(&manifest).unwrap();
             let regions = &bp.context_layout.regions;
 
-            // Explicit conversation sliding_window.
+            // Explicit conversation sliding_window. (matches! is the FIRST operand
+            // so it's evaluated for every region — non-sliding regions exercise its
+            // false arm, the conversation region its true arm.)
+            let has_conv_sliding = regions.iter().any(|r| {
+                matches!(r.kind, RegionKind::SlidingWindow { .. }) && r.name == "conversation"
+            });
             assert!(
-                matches!(
-                    regions
-                        .iter()
-                        .find(|r| r.name == "conversation")
-                        .map(|r| &r.kind),
-                    Some(RegionKind::SlidingWindow { .. })
-                ),
+                has_conv_sliding,
                 "{template} template needs an explicit conversation sliding_window"
             );
 
