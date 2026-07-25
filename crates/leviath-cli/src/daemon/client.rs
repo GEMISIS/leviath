@@ -116,11 +116,7 @@ mod tests {
     fn write_manifest(dir: &std::path::Path) -> std::path::PathBuf {
         std::fs::write(
             dir.join("agent.leviath"),
-            std::fs::read_to_string(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../agents/coder/agent.leviath"),
-            )
-            .unwrap(),
+            crate::test_support::inline_coder_manifest(),
         )
         .unwrap();
         dir.join("agent.leviath")

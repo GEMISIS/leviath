@@ -429,15 +429,7 @@ mod tests {
         // (including the now_secs timestamp closure).
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("agent.leviath");
-        std::fs::write(
-            &manifest,
-            std::fs::read_to_string(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../agents/coder/agent.leviath"),
-            )
-            .unwrap(),
-        )
-        .unwrap();
+        std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
         let (reply, rx) = oneshot::channel();
         host.handle(ControlOp::Spawn {
             args: Box::new(SpawnArgs {
@@ -795,15 +787,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
     async fn build_host_spawns_agents_through_the_installed_spawner() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("agent.leviath");
-        std::fs::write(
-            &manifest,
-            std::fs::read_to_string(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../agents/coder/agent.leviath"),
-            )
-            .unwrap(),
-        )
-        .unwrap();
+        std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
 
         let mut registry = ProviderRegistry::new();
         registry.register("anthropic".to_string(), Arc::new(FakeProvider));
@@ -861,15 +845,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
         // by `build_host` (exercising the recovery register loop).
         let agent = tempfile::tempdir().unwrap();
         let manifest = agent.path().join("agent.leviath");
-        std::fs::write(
-            &manifest,
-            std::fs::read_to_string(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../agents/coder/agent.leviath"),
-            )
-            .unwrap(),
-        )
-        .unwrap();
+        std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
 
         let runs = tempfile::tempdir().unwrap();
         let run_dir = runs.path().join("resumed");
@@ -943,15 +919,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
         // reloader, which pages it into the world on demand.
         let agent = tempfile::tempdir().unwrap();
         let manifest = agent.path().join("agent.leviath");
-        std::fs::write(
-            &manifest,
-            std::fs::read_to_string(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../agents/coder/agent.leviath"),
-            )
-            .unwrap(),
-        )
-        .unwrap();
+        std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
 
         let runs = tempfile::tempdir().unwrap();
         let mut registry = ProviderRegistry::new();

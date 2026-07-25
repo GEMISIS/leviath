@@ -1153,11 +1153,9 @@ mod tests {
     use tokio::runtime::Handle;
 
     fn coder_manifest() -> String {
-        std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../agents/coder/agent.leviath"),
-        )
-        .expect("read coder manifest")
+        // Self-contained fixture — not the shipped blueprint, so these spawn-logic
+        // tests stay isolated from agents/coder edits.
+        crate::test_support::inline_coder_manifest()
     }
 
     fn test_world() -> (PipelineWorld, Arc<CliToolService>) {

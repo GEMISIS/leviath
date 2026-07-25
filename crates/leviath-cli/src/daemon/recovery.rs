@@ -434,11 +434,8 @@ mod tests {
     }
 
     fn coder_manifest() -> String {
-        std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../agents/coder/agent.leviath"),
-        )
-        .expect("read coder manifest")
+        // Self-contained fixture — not the shipped blueprint (see test_support).
+        crate::test_support::inline_coder_manifest()
     }
 
     /// Write a `<runs_dir>/<run_id>/meta.json` (+ optional context.json) for a run
@@ -784,12 +781,11 @@ mod tests {
     /// (`plan`) is an `interactive_points` stage with a `plan_approval` point.
     fn interactive_agent_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../agents/software-engineer/agent.leviath"),
+        std::fs::write(
+            dir.path().join("agent.leviath"),
+            crate::test_support::inline_interactive_manifest(),
         )
-        .expect("read software-engineer manifest");
-        std::fs::write(dir.path().join("agent.leviath"), manifest).unwrap();
+        .unwrap();
         dir
     }
 
