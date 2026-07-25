@@ -153,13 +153,7 @@ findings        = { kind = "temporary", budget = "20%", max_tokens = 25000 }
 severity_index  = { kind = "pinned",    budget = "2%",  max_tokens = 2000 }
 report          = { kind = "clearable", budget = "7%",  max_tokens = 8000 }
 
-# Scratch for tool chatter. Must NOT be a sliding_window: tool-result routing
-# targets this region, and only `conversation` may hold ToolResult message blocks
-# (a routed result in a second sliding_window desyncs from its tool_use → API 400).
-# Temporary renders as a plain-text system block, which is safe.
-analysis        = { kind = "temporary", budget = "15%", max_tokens = 20000 }
-
 # The message stream. Every blueprint needs an explicit sliding_window
 # `conversation` region — the layout that replaces it on each stage transition is
 # rebuilt from this table, so an auto-added one would be dropped after stage 1.
-conversation    = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }
+conversation    = { kind = "sliding_window", max_items = 30, budget = "15%", max_tokens = 18000, strategy = "bulk", overflow = 10 }
