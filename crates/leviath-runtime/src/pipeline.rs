@@ -926,11 +926,17 @@ fn apply_tool_results(
         let result_tokens = result_text.len() / 4 + 1;
 
         let base_region = match routing {
-            Some(r) => r
-                .tool_overrides
-                .get(&tool_name)
-                .map(String::as_str)
-                .unwrap_or(r.default_region.as_str()),
+            Some(r) => {
+                // Match overrides by CANONICAL tool name so a `bash = "..."` override
+                // routes the `shell` tool (bash is an alias — the model calls the
+                // canonical `shell`, so a literal-key lookup would silently miss).
+                let canon = leviath_tools::canonical_tool_name(&tool_name);
+                r.tool_overrides
+                    .iter()
+                    .find(|(k, _)| leviath_tools::canonical_tool_name(k) == canon)
+                    .map(|(_, v)| v.as_str())
+                    .unwrap_or(r.default_region.as_str())
+            }
             None => "conversation",
         };
         let target_region = match routing {
@@ -943,37 +949,85 @@ fn apply_tool_results(
                 .copied()
                 .unwrap_or(leviath_core::TaintLevel::Public)
         });
-        let add = |window: &mut ContextWindow, region: &str, content: String, tokens: usize| {
-            let kind = leviath_core::EntryKind::ToolResult {
-                tool_call_id: tool_call_id.clone(),
-                tool_name: tool_name.clone(),
-                is_error: false,
+        // Add `content` (with entry `kind`) to `region`, honoring taint and falling
+        // back to a truncated (then omitted) entry if the region is full.
+        let add_kind = |window: &mut ContextWindow,
+                        region: &str,
+                        kind: leviath_core::EntryKind,
+                        content: String,
+                        tokens: usize| {
+            let put = |w: &mut ContextWindow, c: String, t: usize| match taint_level {
+                Some(level) => w.add_typed_tainted_to_region(region, kind.clone(), c, t, level),
+                None => w.add_typed_entry(region, kind.clone(), c, t),
             };
-            match taint_level {
-                Some(level) => {
-                    window.add_typed_tainted_to_region(region, kind, content, tokens, level)
+            if put(window, content.clone(), tokens).is_err() {
+                let available = window
+                    .get_region(region)
+                    .map(|r| r.max_tokens.saturating_sub(r.current_tokens))
+                    .unwrap_or(0);
+                let truncated = if available > 100 {
+                    let char_budget = (available - 10) * 4;
+                    let prefix = truncate_on_char_boundary(&content, char_budget);
+                    let omitted = content.len().saturating_sub(prefix.len());
+                    format!("{}... [truncated, {} chars omitted]", prefix, omitted)
+                } else {
+                    "[tool result truncated — context window full]".to_string()
+                };
+                let trunc_tokens = truncated.len() / 4 + 1;
+                if put(window, truncated, trunc_tokens).is_err() {
+                    let _ = put(window, "[result omitted]".to_string(), 5);
                 }
-                None => window.add_typed_entry(region, kind, content, tokens),
             }
         };
+        let result_kind = || leviath_core::EntryKind::ToolResult {
+            tool_call_id: tool_call_id.clone(),
+            tool_name: tool_name.clone(),
+            is_error: false,
+        };
 
-        if add(window, target_region, result_text.clone(), result_tokens).is_err() {
-            let available = window
-                .get_region(target_region)
-                .map(|r| r.max_tokens.saturating_sub(r.current_tokens))
-                .unwrap_or(0);
-            let truncated = if available > 100 {
-                let char_budget = (available - 10) * 4;
-                let prefix = truncate_on_char_boundary(&result_text, char_budget);
-                let omitted = result_text.len().saturating_sub(prefix.len());
-                format!("{}... [truncated, {} chars omitted]", prefix, omitted)
+        if target_region == "conversation" {
+            // Not routed (or routed back to the message stream): the tool_result
+            // lives in `conversation`, paired with its tool_use.
+            add_kind(
+                window,
+                "conversation",
+                result_kind(),
+                result_text,
+                result_tokens,
+            );
+        } else {
+            // Routed to a knowledge region. Anthropic requires each tool_result to sit
+            // in the message immediately after its tool_use, so the PAIR must stay in
+            // `conversation`: we keep a short pointer tool_result there (valid + cheap)
+            // and store the FULL output in the target region as TEXT. Text renders as a
+            // stable knowledge block for any region kind — a ToolResult block in a
+            // second sliding_window would desync from its tool_use (→ API 400), and
+            // dropping the conversation tool_result would orphan the tool_use (the
+            // assembler strips it, so the model can't see its own call landed → loops).
+            let preview: String = result_text.chars().take(160).collect();
+            let ellipsis = if result_text.len() > preview.len() {
+                "…"
             } else {
-                "[tool result truncated — context window full]".to_string()
+                ""
             };
-            let trunc_tokens = truncated.len() / 4 + 1;
-            if add(window, target_region, truncated, trunc_tokens).is_err() {
-                let _ = add(window, target_region, "[result omitted]".to_string(), 5);
-            }
+            let pointer = format!(
+                "[output stored in context region '{target_region}' ({result_tokens} tokens) — read that region for the full result. Preview: {preview}{ellipsis}]"
+            );
+            let pointer_tokens = pointer.len() / 4 + 1;
+            add_kind(
+                window,
+                "conversation",
+                result_kind(),
+                pointer,
+                pointer_tokens,
+            );
+            add_kind(
+                window,
+                target_region,
+                leviath_core::EntryKind::Text,
+                result_text,
+                result_tokens,
+            );
         }
     }
 }
@@ -5332,6 +5386,111 @@ mod tests {
             None,
         );
         assert!(w.get_region("special").unwrap().current_tokens > 0);
+    }
+
+    #[test]
+    fn routing_away_keeps_pair_in_conversation_and_text_in_region() {
+        // Regression: routing a tool result to a knowledge region must keep the
+        // tool_use/tool_result PAIR in `conversation` (a pointer) and store the full
+        // output in the region as TEXT — so assemble() produces a valid, orphan-free
+        // message sequence (no ToolResult block outside conversation → no API 400;
+        // no orphaned tool_use → no write-loop).
+        let mut w = ContextWindow::new(100_000);
+        w.add_region(Region::new(
+            "codebase".to_string(),
+            RegionKind::Temporary,
+            10_000,
+        ));
+        w.add_region(Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
+            10_000,
+        ));
+        let r = routing("conversation", &[("read_file", "codebase")], true, None);
+        apply_tool_results(
+            &mut w,
+            "I'll read it.",
+            &[tc("c1", "read_file")],
+            &[("c1".to_string(), "FULL FILE BODY".to_string())],
+            Some(&r),
+            None,
+        );
+
+        // Full output landed in the knowledge region as text.
+        let cb = w.get_region("codebase").unwrap();
+        assert!(
+            cb.content
+                .iter()
+                .any(|e| e.content.contains("FULL FILE BODY"))
+        );
+        assert!(
+            cb.content
+                .iter()
+                .all(|e| matches!(e.kind, leviath_core::EntryKind::Text)),
+            "routed content must be stored as Text, not a ToolResult block"
+        );
+
+        // Conversation holds the tool_use AND a paired tool_result (pointer).
+        let conv = w.get_region("conversation").unwrap();
+        assert!(conv.content.iter().any(
+            |e| matches!(&e.kind, leviath_core::EntryKind::AssistantTurn { tool_calls } if tool_calls.iter().any(|c| c.id == "c1"))
+        ));
+        assert!(conv.content.iter().any(
+            |e| matches!(&e.kind, leviath_core::EntryKind::ToolResult { tool_call_id, .. } if tool_call_id == "c1")
+        ));
+
+        // The assembled request is valid: every tool_use has a matching tool_result
+        // and nothing gets stripped as orphaned.
+        let a = w.assemble();
+        let mut uses = std::collections::HashSet::new();
+        let mut results = std::collections::HashSet::new();
+        for m in &a.messages {
+            if let leviath_providers::MessageContent::Blocks(blocks) = &m.content {
+                for b in blocks {
+                    match b {
+                        leviath_providers::ContentBlock::ToolUse { id, .. } => {
+                            uses.insert(id.clone());
+                        }
+                        leviath_providers::ContentBlock::ToolResult { tool_use_id, .. } => {
+                            results.insert(tool_use_id.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            uses, results,
+            "every tool_use must have a matching tool_result"
+        );
+        assert!(uses.contains("c1"), "the read_file tool_use must survive");
+    }
+
+    #[test]
+    fn routing_override_matches_bash_alias_to_shell() {
+        // Blueprint routes `bash`, but the model calls the canonical `shell`
+        // (bash is an alias). The override must still match.
+        let mut w = ctx(&[("conversation", 10_000), ("test_results", 10_000)]);
+        let r = routing("conversation", &[("bash", "test_results")], true, None);
+        apply_tool_results(
+            &mut w,
+            "run tests",
+            &[tc("c1", "shell")],
+            &[("c1".to_string(), "All tests passed".to_string())],
+            Some(&r),
+            None,
+        );
+        assert!(
+            w.get_region("test_results")
+                .unwrap()
+                .content
+                .iter()
+                .any(|e| e.content.contains("All tests passed")),
+            "a `bash` override must route the canonical `shell` tool's result"
+        );
     }
 
     #[test]

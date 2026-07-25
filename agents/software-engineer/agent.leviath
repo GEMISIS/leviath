@@ -154,14 +154,16 @@ Work methodically through each plan step. After all steps, give a concise summar
 of what was created/modified and whether tests passed.
 """
 
-# Only passive reads route to a knowledge region. Action-tool results (write_file,
-# edit_file, bash) MUST stay in conversation: routing them away strips the
-# tool_result, so the model can't see the action landed and repeats it in a loop.
+# Large read output persists in `codebase`; test output persists in `test_results`
+# (the review stage reads it). Routed results leave a short pointer in conversation
+# (paired with their tool_use) with the full output as text in the region. Small
+# write/edit confirmations stay inline.
 [stages.implement.tool_routing]
 default_region = "conversation"
 [stages.implement.tool_routing.overrides]
 read_file  = "codebase"
 list_dir   = "codebase"
+bash       = "test_results"
 
 [stages.implement.transitions.review]
 hint = "Implementation complete, ready for review"
@@ -220,12 +222,13 @@ read_file = "allow"
 list_dir  = "allow"
 bash      = "ask"
 
-# bash (test runs) stays in conversation so the reviewer sees the results.
+# Test re-runs persist to `test_results` (a pointer + preview stays in conversation).
 [stages.review.tool_routing]
 default_region = "conversation"
 [stages.review.tool_routing.overrides]
 read_file = "codebase"
 list_dir  = "codebase"
+bash      = "test_results"
 
 [stages.review.transitions.implement]
 hint = "Issues found — needs another implementation pass"

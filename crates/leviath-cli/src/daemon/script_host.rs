@@ -331,13 +331,32 @@ impl RealScriptIo {
     fn send(req: reqwest::blocking::RequestBuilder) -> Result<String, String> {
         let resp = req.send().map_err(|e| format!("request failed: {e}"))?;
         let status = resp.status();
-        let text = resp.text().map_err(|e| format!("read body: {e}"))?;
+        let text = cap_script_io(resp.text().map_err(|e| format!("read body: {e}"))?);
         if status.is_success() {
             Ok(text)
         } else {
             Err(format!("http {status}: {text}"))
         }
     }
+}
+
+/// Cap a host-I/O string below the tool engine's 1 MB `max_string_size`
+/// (`build_tool_engine`) so an oversized fetch/read/shell result can't raise the
+/// NON-CATCHABLE `ErrorDataTooLarge` inside a Rhai tool script (it aborts the tool
+/// even inside try/catch). This is only a crash guard — context-size truncation is
+/// handled downstream by region budgets and any in-script truncation.
+const MAX_SCRIPT_IO_BYTES: usize = 900_000;
+
+fn cap_script_io(mut s: String) -> String {
+    if s.len() > MAX_SCRIPT_IO_BYTES {
+        let mut end = MAX_SCRIPT_IO_BYTES;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
+        s.push_str("\n[...truncated by leviath: response exceeded 900 KB]");
+    }
+    s
 }
 
 impl ScriptIo for RealScriptIo {
@@ -367,7 +386,10 @@ impl ScriptIo for RealScriptIo {
         let handle = tokio::runtime::Handle::current();
         handle.block_on(async move {
             match tokio::time::timeout(timeout, cmd.output()).await {
-                Ok(Ok(output)) => Ok(combine_shell_output(&output.stdout, &output.stderr)),
+                Ok(Ok(output)) => Ok(cap_script_io(combine_shell_output(
+                    &output.stdout,
+                    &output.stderr,
+                ))),
                 Ok(Err(e)) => Err(format!("failed to spawn shell: {e}")),
                 Err(_) => Err(format!(
                     "shell command timed out after {}s",
@@ -378,7 +400,9 @@ impl ScriptIo for RealScriptIo {
     }
 
     fn read_file(&self, path: &Path) -> Result<String, String> {
-        std::fs::read_to_string(path).map_err(|e| format!("read '{}': {e}", path.display()))
+        std::fs::read_to_string(path)
+            .map(cap_script_io)
+            .map_err(|e| format!("read '{}': {e}", path.display()))
     }
 
     fn write_file(&self, path: &Path, content: &str) -> Result<String, String> {
@@ -1013,5 +1037,30 @@ mod tests {
         temp_env::with_var_unset("LEVIATH_DEFINITELY_UNSET_XYZ", || {
             assert!(host.env_var("LEVIATH_DEFINITELY_UNSET_XYZ").is_err());
         });
+    }
+
+    #[test]
+    fn cap_script_io_leaves_small_strings_untouched() {
+        let s = "small".to_string();
+        assert_eq!(cap_script_io(s.clone()), s);
+    }
+
+    #[test]
+    fn cap_script_io_truncates_oversized_strings_below_the_rhai_limit() {
+        let big = "x".repeat(MAX_SCRIPT_IO_BYTES + 5_000);
+        let capped = cap_script_io(big);
+        assert!(capped.len() < 1_000_000, "must stay under the 1MB Rhai cap");
+        assert!(capped.contains("[...truncated by leviath"));
+    }
+
+    #[test]
+    fn cap_script_io_truncates_on_a_char_boundary() {
+        // A multi-byte char straddling the cap must not be split mid-codepoint.
+        let mut s = "a".repeat(MAX_SCRIPT_IO_BYTES - 1);
+        s.push('é'); // 2 bytes, crossing the boundary
+        s.push_str(&"b".repeat(10));
+        let capped = cap_script_io(s);
+        // Valid UTF-8 (would panic on construction if a codepoint were split).
+        assert!(capped.contains("[...truncated by leviath"));
     }
 }
