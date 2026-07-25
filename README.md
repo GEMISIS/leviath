@@ -298,18 +298,23 @@ At 10 concurrent agents, Leviath uses **18 MB** of device RAM vs. **3,209 MB** f
 
 Ten agents ship out of the box — each a multi-stage directed graph with structured context regions, per-stage model fallback (Anthropic → OpenAI → local), and error recovery. The research and writing agents also carry drop-in `web_search`/`web_fetch` script tools.
 
-Every agent also has an `error_recovery` stage (omitted from the graphs) that catches failed tool calls and hands back into the main flow. Diamonds are LLM-routed or human-in-the-loop decisions.
+| Agent | Workflow | Best for |
+|-------|----------|----------|
+| **software-engineer** | plan ⇄ implement ⇄ review | Full coding workflow with human-approved planning *(default)* |
+| **coder** | analyze → implement ⇄ review | Focused implementation with a review loop |
+| **reviewer** | scan → deep_review → report | Code review and audit |
+| **parallel-fixer** | validate → fan-out → merge → verify | Fixing many failing tests at once — one worker per failure |
+| **deep-researcher** | gather ⇄ analyze ⇄ follow_citations → synthesize | Thorough single-topic investigation |
+| **wide-researcher** | survey ⇄ compare ⇄ deep_dive → summarize | Broad multi-topic landscape survey |
+| **researcher** | gather ⇄ analyze → summarize | General-purpose research |
+| **log-analyzer** | ingest → analyze ⇄ script → report | Log analysis with scripted aggregation |
+| **daily-briefer** | collect ⇄ prioritize → brief | Morning summaries from multiple sources |
+| **writing-assistant** | research → outline ⇄ draft ⇄ edit → proofread | Blog posts, reports, documentation |
 
-<table>
-<tr><th>Agent</th><th>Workflow</th></tr>
+Every agent also has an `error_recovery` stage (omitted from the diagrams below) that catches failed tool calls and hands back into the main flow. Diamonds are LLM-routed or human-in-the-loop decisions.
 
-<tr><td valign="top">
-
-**software-engineer** *(default)*
-
-Full coding workflow with human-approved planning
-
-</td><td>
+<details>
+<summary><b>software-engineer</b> — plan → approve → implement → review</summary>
 
 ```mermaid
 flowchart LR
@@ -320,16 +325,10 @@ flowchart LR
   review -->|rethink| plan
   review -->|DONE| done([done])
 ```
+</details>
 
-</td></tr>
-
-<tr><td valign="top">
-
-**coder**
-
-Focused implementation with a review loop
-
-</td><td>
+<details>
+<summary><b>coder</b> — analyze → implement ⇄ review</summary>
 
 ```mermaid
 flowchart LR
@@ -338,52 +337,34 @@ flowchart LR
   review -->|needs changes| implement
   review -->|DONE| done([done])
 ```
+</details>
 
-</td></tr>
-
-<tr><td valign="top">
-
-**reviewer**
-
-Code review and audit
-
-</td><td>
+<details>
+<summary><b>reviewer</b> — scan → deep_review → report</summary>
 
 ```mermaid
 flowchart LR
   scan --> deep_review --> report([report])
 ```
+</details>
 
-</td></tr>
-
-<tr><td valign="top">
-
-**parallel-fixer**
-
-Fixing many failing tests at once — one worker per failure
-
-</td><td>
+<details>
+<summary><b>parallel-fixer</b> — validate → fan-out → merge → verify</summary>
 
 ```mermaid
 flowchart LR
   validate --> parallel_fix
-  subgraph parallel_fix["fan-out (one worker per file)"]
+  subgraph parallel_fix["fan-out (one worker per failing file)"]
     w1[fix_worker] & w2[fix_worker] & w3[fix_worker]
   end
   parallel_fix --> merge_fixes --> verify{verify}
   verify -->|failures remain| validate
   verify -->|all green| done([done])
 ```
+</details>
 
-</td></tr>
-
-<tr><td valign="top">
-
-**deep-researcher**
-
-Thorough single-topic investigation
-
-</td><td>
+<details>
+<summary><b>deep-researcher</b> — gather ⇄ analyze ⇄ follow_citations → synthesize</summary>
 
 ```mermaid
 flowchart LR
@@ -392,16 +373,10 @@ flowchart LR
   analyze -->|chase a citation| follow_citations --> analyze
   analyze -->|enough| synthesize([synthesize])
 ```
+</details>
 
-</td></tr>
-
-<tr><td valign="top">
-
-**wide-researcher**
-
-Broad multi-topic landscape survey
-
-</td><td>
+<details>
+<summary><b>wide-researcher</b> — survey ⇄ compare ⇄ deep_dive → summarize</summary>
 
 ```mermaid
 flowchart LR
@@ -410,16 +385,10 @@ flowchart LR
   compare -->|dive on a thread| deep_dive --> compare
   compare -->|enough| summarize([summarize])
 ```
+</details>
 
-</td></tr>
-
-<tr><td valign="top">
-
-**researcher**
-
-General-purpose research
-
-</td><td>
+<details>
+<summary><b>researcher</b> — gather ⇄ analyze → summarize</summary>
 
 ```mermaid
 flowchart LR
@@ -427,16 +396,10 @@ flowchart LR
   analyze -->|need more| gather
   analyze -->|enough| summarize([summarize])
 ```
+</details>
 
-</td></tr>
-
-<tr><td valign="top">
-
-**log-analyzer**
-
-Log analysis with scripted aggregation
-
-</td><td>
+<details>
+<summary><b>log-analyzer</b> — ingest → analyze ⇄ script → report</summary>
 
 ```mermaid
 flowchart LR
@@ -446,33 +409,21 @@ flowchart LR
   script -->|results ready| analyze
   analyze -->|findings ready| report([report])
 ```
+</details>
 
-</td></tr>
-
-<tr><td valign="top">
-
-**daily-briefer**
-
-Morning summaries from multiple sources
-
-</td><td>
+<details>
+<summary><b>daily-briefer</b> — collect ⇄ prioritize → brief</summary>
 
 ```mermaid
 flowchart LR
   collect --> prioritize{prioritize}
-  prioritize -->|source empty| collect
+  prioritize -->|source came back empty| collect
   prioritize -->|ready| brief([brief])
 ```
+</details>
 
-</td></tr>
-
-<tr><td valign="top">
-
-**writing-assistant**
-
-Blog posts, reports, documentation
-
-</td><td>
+<details>
+<summary><b>writing-assistant</b> — research → outline → draft ⇄ edit → proofread</summary>
 
 ```mermaid
 flowchart LR
@@ -486,10 +437,7 @@ flowchart LR
   proofread -->|substantive fix| edit
   proofread -->|DONE| done([done])
 ```
-
-</td></tr>
-
-</table>
+</details>
 
 ## 🖥️ Dashboard
 
