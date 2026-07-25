@@ -105,6 +105,22 @@ fn builtin_table() -> Vec<BuiltinEntry> {
         // ── Anthropic ──────────────────────────────────────────────────────────
         entry!(
             "anthropic",
+            "claude-opus-5",
+            "Claude Opus 5",
+            temp = false,
+            ctx = 1_000_000,
+            out = 128_000
+        ),
+        entry!(
+            "anthropic",
+            "claude-sonnet-5",
+            "Claude Sonnet 5",
+            temp = false,
+            ctx = 1_000_000,
+            out = 128_000
+        ),
+        entry!(
+            "anthropic",
             "claude-fable-5",
             "Claude Fable 5",
             temp = false,
