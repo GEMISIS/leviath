@@ -150,6 +150,74 @@ fn specific_agent_researcher_has_graph_transitions() {
     );
 }
 
+/// Enforce the context-layout invariants that keep tool_routing + message
+/// assembly sound (see the runtime fixes in pipeline.rs / context_setup.rs):
+///   1. every agent declares an explicit `conversation` SlidingWindow region
+///      (an auto-added one is dropped on the first stage transition);
+///   2. no tool-routing target is a SlidingWindow OTHER than `conversation`
+///      (only `conversation` may hold ToolResult message blocks — a routed
+///      result elsewhere desyncs from its tool_use → Anthropic 400);
+///   3. every Compacting region has a paired CompactHistory region.
+#[test]
+fn all_builtin_agents_have_sound_context_layout() {
+    use leviath_core::RegionKind;
+
+    for (name, path) in &discover_agent_manifests() {
+        let content = std::fs::read_to_string(path).unwrap();
+        let bp = leviath_core::manifest::parse_manifest(&content).unwrap();
+        let regions = &bp.context_layout.regions;
+
+        // (1) explicit conversation sliding_window
+        let conv = regions.iter().find(|r| r.name == "conversation");
+        assert!(
+            matches!(
+                conv.map(|r| &r.kind),
+                Some(RegionKind::SlidingWindow { .. })
+            ),
+            "agent '{name}' must declare an explicit `conversation` sliding_window region"
+        );
+
+        // (2) no routing targets a non-conversation sliding_window
+        let sliding: std::collections::HashSet<&str> = regions
+            .iter()
+            .filter(|r| matches!(r.kind, RegionKind::SlidingWindow { .. }))
+            .map(|r| r.name.as_str())
+            .collect();
+        for stage in &bp.stages {
+            if let Some(routing) = &stage.tool_result_routing {
+                let mut targets = vec![routing.default_region.as_str()];
+                targets.extend(routing.tool_overrides.values().map(String::as_str));
+                for t in targets {
+                    assert!(
+                        t == "conversation" || !sliding.contains(t),
+                        "agent '{name}' stage '{}' routes tool results to non-conversation \
+                         sliding_window region '{t}' (would desync tool_result from tool_use)",
+                        stage.name
+                    );
+                }
+            }
+        }
+
+        // (3) every compacting region has a compact_history pair
+        let hist_sources: std::collections::HashSet<&str> = regions
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RegionKind::CompactHistory { source_region } => Some(source_region.as_str()),
+                _ => None,
+            })
+            .collect();
+        for r in regions {
+            if matches!(r.kind, RegionKind::Compacting { .. }) {
+                assert!(
+                    hist_sources.contains(r.name.as_str()),
+                    "agent '{name}': compacting region '{}' has no paired compact_history region",
+                    r.name
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn at_least_nine_builtin_agents_exist() {
     let manifests = discover_agent_manifests();
