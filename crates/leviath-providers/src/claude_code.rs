@@ -466,6 +466,8 @@ impl Provider for ClaudeCodeProvider {
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
         let models = [
+            ("claude-opus-5", "Claude Opus 5"),
+            ("claude-sonnet-5", "Claude Sonnet 5"),
             ("claude-opus-4-8", "Claude Opus 4.8"),
             ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
             ("claude-haiku-4-5", "Claude Haiku 4.5"),
@@ -630,7 +632,9 @@ mod tests {
     async fn list_models_covers_the_current_families() {
         let provider = ClaudeCodeProvider::new();
         let models = provider.list_models().await.unwrap();
-        assert_eq!(models.len(), 3);
+        assert_eq!(models.len(), 5);
+        assert!(models.iter().any(|m| m.id == "claude-opus-5"));
+        assert!(models.iter().any(|m| m.id == "claude-sonnet-5"));
         assert!(models.iter().any(|m| m.id == "claude-sonnet-4-6"));
         assert!(models.iter().any(|m| m.id == "claude-opus-4-8"));
         assert!(models.iter().any(|m| m.id == "claude-haiku-4-5"));

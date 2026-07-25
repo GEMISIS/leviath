@@ -16,7 +16,7 @@ bash = "ask"
 # Run the test suite and record the set of failing tests + their diagnoses.
 [stages.validate]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Run the tests and diagnose each failure"
 available_tools = ["read_file", "read_files", "list_dir", "shell", "context_write"]
 max_iterations = 20
@@ -50,7 +50,7 @@ transform = "direct"
 # locking prevents concurrent writes to the same file from clobbering.
 [stages.parallel_fix]
 mode = "fan_out"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 description = "Fix each failing test in parallel"
 worker_stage = "fix_worker"
 merge_stage = "merge_fixes"
@@ -69,7 +69,7 @@ If `diagnosis` is exactly "NO FAILURES" (or lists none), output exactly: []
 # ─── Worker stage: fix one failing test ──────────────────────────────────────
 [stages.fix_worker]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }] }
 description = "Fix a single failing test"
 available_tools = ["read_file", "read_files", "edit_file", "shell"]
 max_iterations = 50
@@ -90,7 +90,7 @@ files in parallel.
 # ─── Stage 3: Merge ──────────────────────────────────────────────────────────
 [stages.merge_fixes]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Reconcile the workers' fixes and resolve conflicts"
 available_tools = ["read_file", "read_files", "edit_file", "shell", "context_append"]
 max_iterations = 30
@@ -119,7 +119,7 @@ transform = "compact"
 # residual/interacting failures remain (bounded by validate's max_revisits).
 [stages.verify]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Run the full suite and decide: done, or another fix round"
 available_tools = ["read_file", "read_files", "shell"]
 max_iterations = 10
@@ -149,7 +149,7 @@ transform = "compact"
 # ─── Compaction ──────────────────────────────────────────────────────────────
 [compaction]
 provider = "anthropic"
-model = "claude-sonnet-4-6"
+model = "claude-sonnet-5"
 
 # ─── Context layout ──────────────────────────────────────────────────────────
 [context.regions]

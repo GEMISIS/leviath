@@ -13,7 +13,7 @@ bash      = "ask"
 # ─── Stage 1: Scan ────────────────────────────────────────────────────────────
 [stages.scan]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Fast first pass for obvious issues"
 available_tools = ["read_file", "list_dir", "context_append"]
 max_iterations = 12
@@ -50,7 +50,7 @@ transform = "direct"
 # ─── Stage 2: Deep review ─────────────────────────────────────────────────────
 [stages.deep_review]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "devstral:24b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "devstral:24b" }] }
 description = "In-depth analysis of correctness, security, and architecture"
 available_tools = ["read_file", "list_dir", "bash", "context_write", "context_append"]
 max_iterations = 25
@@ -94,7 +94,7 @@ transform = "direct"
 # ─── Stage 3: Report (terminal) ───────────────────────────────────────────────
 [stages.report]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Produce an actionable, ranked review report"
 available_tools = ["read_file"]
 max_iterations = 10
@@ -117,7 +117,7 @@ matches the severity_index totals.
 # ─── Stage 4: Error handler ───────────────────────────────────────────────────
 [stages.error_handler]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Handle errors encountered during scanning or review"
 available_tools = ["read_file", "bash"]
 max_iterations = 10
@@ -134,7 +134,7 @@ transform = "compact"
 
 [compaction]
 provider = "anthropic"
-model = "claude-sonnet-4-6"
+model = "claude-sonnet-5"
 
 # ─── Context layout ───────────────────────────────────────────────────────────
 # Budgets are a percentage of the model's context window (issue #100) with an

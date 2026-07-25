@@ -19,7 +19,7 @@ bash       = "ask"
 
 [stages.plan]
 mode = "interactive_points"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Explore the codebase and produce a step-by-step implementation plan"
 available_tools = ["read_file", "list_dir", "ask_user_text", "ask_user_choice", "edit_document"]
 max_iterations = 20
@@ -126,7 +126,7 @@ edit_options = ["Add detail — expand a section"]
 
 [stages.implement]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "devstral:24b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "devstral:24b" }] }
 description = "Write code according to the approved plan"
 available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash", "ask_user_text", "ask_user_confirm", "context_append"]
 max_iterations = 50
@@ -184,7 +184,7 @@ transform = "direct"
 
 [stages.review]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "devstral:24b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "devstral:24b" }] }
 description = "Review the implementation and evaluate code quality"
 available_tools = ["read_file", "list_dir", "bash"]
 max_revisits = 3
@@ -249,7 +249,7 @@ transform = "direct"
 
 [stages.error_recovery]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Diagnose and resolve errors encountered during implementation"
 available_tools = ["read_file", "bash"]
 max_iterations = 10
@@ -271,7 +271,7 @@ transform = "compact"
 
 [compaction]
 provider = "anthropic"
-model    = "claude-sonnet-4-6"
+model    = "claude-sonnet-5"
 
 # ─── Context layout ──────────────────────────────────────────────────────────
 # Budgets are a percentage of the model's context window (issue #100) with an

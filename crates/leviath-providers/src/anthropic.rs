@@ -168,6 +168,17 @@ impl AnthropicProvider {
 
     /// Return built-in capabilities for a model based on its name pattern.
     fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
+        // Opus 5 — top-tier, 1M context, 128K output, no temperature
+        if model.contains("claude-opus-5") {
+            return ModelCapabilities {
+                supports_temperature: false,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 1_000_000,
+                max_output_tokens: 128_000,
+            };
+        }
         // Sonnet 5 — 1M context, 128K output, no temperature
         if model.contains("claude-sonnet-5") {
             return ModelCapabilities {
@@ -1169,6 +1180,17 @@ mod tests {
     fn test_builtin_capabilities_opus48() {
         let provider = AnthropicProvider::new("test-key".to_string());
         let caps = provider.builtin_capabilities("claude-opus-4-8");
+        assert!(!caps.supports_temperature);
+        assert!(caps.supports_streaming);
+        assert!(caps.supports_tools);
+        assert_eq!(caps.max_context_tokens, 1_000_000);
+        assert_eq!(caps.max_output_tokens, 128_000);
+    }
+
+    #[test]
+    fn test_builtin_capabilities_opus5() {
+        let provider = AnthropicProvider::new("test-key".to_string());
+        let caps = provider.builtin_capabilities("claude-opus-5");
         assert!(!caps.supports_temperature);
         assert!(caps.supports_streaming);
         assert!(caps.supports_tools);
