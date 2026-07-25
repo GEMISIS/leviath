@@ -1,34 +1,45 @@
 [agent]
 name = "writing-assistant"
-version = "0.2.0"
-description = "Research-backed writing — from topic to polished draft, with an interactive outline checkpoint, a draft↔edit polish loop, and error recovery"
+version = "0.3.0"
+description = "Research-backed writing — topic to polished draft, with a web-research stage, an interactive outline checkpoint, a draft⇄edit loop, and a final proofread pass"
 entry_stage = "research"
+
+[tool_permissions]
+read_file  = "allow"
+list_dir   = "allow"
+web_search = "allow"
+web_fetch  = "allow"
+write_file = "ask"
+bash       = "ask"
 
 # ─── Stage 1: Research ────────────────────────────────────────────────────────
 [stages.research]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Research the topic and gather supporting material"
-available_tools = ["read_file", "bash"]
+available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append"]
 max_iterations = 20
 max_revisits = 2
 system_prompt = """
-You are researching a topic to prepare for writing. Gather:
-- Key facts, data points, and statistics
+Research the topic in `task` to prepare for writing. Gather:
+- Key facts, data points, statistics
 - Expert opinions and notable quotes
-- Existing coverage (what's already been written about this)
-- Counterarguments and alternative perspectives
+- Existing coverage; counterarguments and alternative perspectives
 
-Organize your findings by theme. Note which points are well-supported vs
-speculative. Flag anything that needs verification. If you were sent back to
-research more, focus on the gap the user or outline identified.
+Use web_search + web_fetch for sources and read_file for local material; findings
+land in `research`. For each source you'll rely on, append a bibliography line to
+`sources_index` (context_append): `[n] <title> — <url/path>`. Organize by theme;
+mark points well-supported vs speculative; flag anything needing verification. If
+sent back, focus on the gap the user or outline identified.
 """
 
 [stages.research.tool_routing]
-default_region = "scratch"
+default_region = "conversation"
 [stages.research.tool_routing.overrides]
-read_file = "research"
-bash      = "research"
+web_search = "research"
+web_fetch  = "research"
+read_file  = "research"
+list_dir   = "research"
 
 [stages.research.transitions.outline]
 hint = "Enough material to structure the piece"
@@ -39,14 +50,11 @@ condition = "error"
 transform = "direct"
 
 # ─── Stage 2: Outline (human-in-the-loop) ─────────────────────────────────────
-# The user reviews the proposed outline and chooses how to proceed. The choice
-# is fed into the transition decision (multiple outgoing edges force LLM
-# routing); allow_complete lets the user abort the piece entirely.
 [stages.outline]
 mode = "interactive_points"
 model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "qwen3.6:27b" }] }
 description = "Create and refine an outline with user input"
-available_tools = ["ask_user_text"]
+available_tools = ["ask_user_text", "read_file"]
 max_iterations = 15
 max_revisits = 4
 allow_complete = true
@@ -59,14 +67,19 @@ You've shown the outline and asked the user what to do:
 - If they want to gather more material first, transition to 'research'.
 """
 system_prompt = """
-Based on your research, propose an outline for the piece:
+Propose an OUTLINE for the piece based on `research` — do NOT write the article
+itself and do NOT create any files here. The draft stage writes the piece AFTER
+the user approves this outline; your job is only to get the structure right.
+
+Present, as your response text:
 - Thesis / main argument
 - Section structure with key points per section
-- Where specific evidence or examples will go
+- Where specific evidence or examples (with [n] source refs) will go
 - Estimated length
 
-Present the outline, then let the user steer. If they revise or expand, produce
-an updated outline grounded in their actual feedback before asking again.
+Then let the user steer via the approval prompt. If they revise or expand, produce
+an updated outline grounded in their actual feedback before asking again. Keep it
+to an outline — no prose paragraphs of the finished piece.
 """
 
 [stages.outline.transitions.draft]
@@ -107,19 +120,19 @@ abort_options = ["Abort — cancel this piece"]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "qwen3.6:27b" }] }
 description = "Write the full draft"
-available_tools = ["write_file"]
+available_tools = ["write_file", "read_file"]
 max_iterations = 25
 max_revisits = 2
 system_prompt = """
-Write the full draft based on the approved outline. Guidelines:
+Write the full draft (write_file) from the approved `outline`, backing claims with
+evidence from `research` (cite [n] where relevant). Guidelines:
 - Strong opening that hooks the reader
 - Each section flows logically to the next
-- Claims backed by evidence from your research
 - Concrete examples over abstract statements
 - Clear, direct prose — no filler or hedging
 - Strong conclusion that ties back to the thesis
 
-Write the complete piece. Don't leave placeholders or TODO markers.
+Write the complete piece. No placeholders or TODO markers.
 """
 
 [stages.draft.transitions.edit]
@@ -130,52 +143,88 @@ transform = "compact"
 condition = "error"
 transform = "direct"
 
-# ─── Stage 4: Edit ────────────────────────────────────────────────────────────
-# allow_complete lets the editor ship the piece (DONE) instead of being forced
-# into another rewrite pass.
+# ─── Stage 4: Edit (structural) ───────────────────────────────────────────────
 [stages.edit]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "qwen3.6:27b" }] }
-description = "Self-edit for clarity, accuracy, and flow"
-available_tools = ["read_file", "write_file"]
+description = "Structural edit for clarity, accuracy, and flow"
+available_tools = ["read_file", "write_file", "context_append"]
 max_iterations = 15
 max_revisits = 2
-allow_complete = true
 transition_prompt = """
-Review your edits. Decide what happens next:
-- If there are structural problems that need a significant rewrite, respond with: draft
-- If the piece is ready for the reader, respond with: DONE
-
-Be honest — if it's good, ship it. Don't over-polish.
+Decide what happens next:
+- If there are STRUCTURAL problems needing a significant rewrite, respond with: draft
+- If the structure and argument are sound and it's ready for a line-level pass,
+  respond with: proofread
 """
 system_prompt = """
-Edit the draft with fresh eyes. Check for:
-1. **Accuracy** — are all claims supported? Any overstatements?
-2. **Clarity** — can every sentence be understood on first read?
-3. **Flow** — does each paragraph lead naturally to the next?
-4. **Concision** — cut anything that doesn't earn its place
-5. **Voice** — is the tone consistent and appropriate for the audience?
-6. **Opening/closing** — do they land?
+Edit the draft for structure and substance (not line-level polish yet):
+1. Accuracy — are claims supported by `research`? Any overstatements?
+2. Clarity — is each idea understandable on first read?
+3. Flow — does each section lead naturally to the next?
+4. Concision — cut anything that doesn't earn its place
+5. Voice — consistent, appropriate for the audience?
+6. Opening/closing — do they land?
 
-Make the edits directly. Write the improved version to the output file.
+Make the edits directly (write the improved version). Note any substantive changes
+in `revisions` (context_append). Hand to proofread only once the structure is sound.
 """
 
-# Custom transform: keep the task/outline/research pinned, compact the draft
-# discussion into a rewrite brief, and clear scratch before rewriting.
+# Custom transform: keep task/outline/research/sources pinned, compact the draft
+# discussion into a rewrite brief, clear scratch before rewriting.
 [stages.edit.transitions.draft]
 hint = "Structural issues found — needs a significant rewrite"
 transform = "custom"
 [stages.edit.transitions.draft.transform_config]
-carry = ["task", "outline", "research"]
+carry = ["task", "style_guide", "outline", "research", "sources_index"]
 compact = ["draft"]
 clear = ["scratch"]
 compact_prompt = "Summarize the structural problems as a numbered rewrite brief."
+
+[stages.edit.transitions.proofread]
+hint = "Structure is sound — do the final line-level pass"
+transform = "compact"
 
 [stages.edit.transitions.error_recovery]
 condition = "error"
 transform = "direct"
 
-# ─── Stage 5: Error recovery ──────────────────────────────────────────────────
+# ─── Stage 5: Proofread (terminal) ────────────────────────────────────────────
+# Final line-level pass. allow_complete lets it ship; can bounce back to edit if
+# it turns up a substantive problem.
+[stages.proofread]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Final line-level proofread and fact-check"
+available_tools = ["read_file", "write_file", "web_fetch"]
+max_iterations = 10
+max_revisits = 1
+allow_complete = true
+transition_prompt = """
+Final pass done. Decide:
+- If you found a SUBSTANTIVE problem (a wrong fact, a broken argument) that needs
+  a structural fix, respond with: edit
+- If the piece is clean and ready for the reader, respond with: DONE
+"""
+system_prompt = """
+Final line-level pass following `style_guide`:
+- Grammar, spelling, punctuation, consistent terminology and formatting
+- Every citation resolves to a `sources_index` entry; spot-check any shaky fact
+  with web_fetch and correct or hedge it
+- Tighten wording; kill remaining filler
+Write the final polished version. Don't introduce new claims. Ship it (DONE) once
+clean — don't over-polish.
+"""
+
+[stages.proofread.transitions.edit]
+hint = "A substantive problem surfaced — back to structural editing"
+transform = "compact"
+
+[stages.proofread.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# ─── Stage 6: Error recovery ──────────────────────────────────────────────────
 [stages.error_recovery]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
@@ -184,9 +233,8 @@ available_tools = ["read_file", "bash"]
 max_iterations = 8
 max_revisits = 1
 system_prompt = """
-Something failed (a research fetch or a file write). Read the error from
-context, note a workaround, then return to draft to continue with the material
-available.
+Something failed (a research fetch or a file write). Read the error from context,
+note a workaround, then return to draft to continue with the material available.
 """
 
 [stages.error_recovery.transitions.draft]
@@ -197,10 +245,17 @@ transform = "compact"
 provider = "anthropic"
 model = "claude-sonnet-4-6"
 
+# ─── Context layout ───────────────────────────────────────────────────────────
 [context.regions]
-task          = { kind = "pinned",          max_tokens = 2000 }
-research      = { kind = "temporary",       max_tokens = 40000 }
-outline       = { kind = "pinned",          max_tokens = 3000 }
-draft         = { kind = "compacting",      threshold_tokens = 35000, max_tokens = 50000 }
-draft_history = { kind = "compact_history", source_region = "draft", max_tokens = 10000 }
-scratch       = { kind = "clearable",       max_tokens = 5000 }
+task          = { kind = "pinned", budget = "2%", max_tokens = 2000, required = true, seed = "task", required_message = "Describe what to write (topic, audience, length) via --task." }
+style_guide   = { kind = "pinned", budget = "1%", max_tokens = 1500, seed = "style" }
+sources_index = { kind = "pinned", budget = "3%", max_tokens = 4000 }
+outline       = { kind = "pinned", budget = "4%", max_tokens = 4000 }
+
+research      = { kind = "temporary",      budget = "25%", max_tokens = 40000 }
+draft         = { kind = "compacting",      budget = "30%", compact_at = "80%", threshold_tokens = 35000, max_tokens = 50000 }
+draft_history = { kind = "compact_history", source_region = "draft", budget = "3%", max_tokens = 10000 }
+revisions     = { kind = "sliding_window", max_items = 15, budget = "4%", max_tokens = 5000 }
+
+conversation  = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }
+scratch       = { kind = "clearable", budget = "5%", max_tokens = 6000 }

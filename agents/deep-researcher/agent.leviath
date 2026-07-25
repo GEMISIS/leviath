@@ -1,39 +1,54 @@
 [agent]
 name = "deep-researcher"
-version = "0.2.0"
-description = "Thorough investigation of a single topic — follows citations, reads sources, and produces a structured report, with a gather↔analyze loop and error recovery"
+version = "0.3.0"
+description = "Thorough single-topic investigation — searches, follows citation chains, cross-checks claims, and produces a structured cited report"
 entry_stage = "gather"
+
+# Read/search agent: writes only its final report.
+[tool_permissions]
+read_file  = "allow"
+list_dir   = "allow"
+web_search = "allow"
+web_fetch  = "allow"
+write_file = "ask"
+bash       = "ask"
 
 # ─── Stage 1: Gather ──────────────────────────────────────────────────────────
 [stages.gather]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Gather primary sources and key references on the topic"
-available_tools = ["read_file", "bash"]
-max_iterations = 30
+# web_search / web_fetch are provided by this agent's tools/ (issue #97).
+available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append"]
+max_iterations = 25
 max_revisits = 3
 system_prompt = """
-You are researching a topic in depth. Find primary sources, key papers, official
-documentation, and authoritative references. Use bash (curl/wget) for web sources
-or read_file for local documents.
+You are investigating the topic in the `query` region in DEPTH, within any bounds
+in `scope`. This is a single-topic deep dive — go for primary sources and
+authoritative references, not a broad skim.
 
-For each source found:
-- Note the author/organization and date
-- Extract key claims with direct quotes
-- Note any citations worth following
+- Run a focused first round of web_search calls across the distinct facets of the
+  question, then web_fetch the most authoritative results for detail. Prefer
+  primary sources (papers, standards, official docs) over summaries. read_file for
+  local documents. Raw content lands in `sources`.
+- For every source you actually use, append one bibliography line to
+  `sources_index` (context_append): `[n] <title> — <url/path> — <date> —
+  credibility: <high/med/low + why>`.
+- Note citations worth chasing — the analyze stage can send you to follow them.
 
-Be thorough. Follow citation chains. Prefer primary sources over summaries.
-If you were sent back to fill a gap, focus on the specific sub-topic named.
+Once you have solid primary coverage of the core facets, hand off to analyze.
 """
 
 [stages.gather.tool_routing]
-default_region = "scratch"
+default_region = "conversation"
 [stages.gather.tool_routing.overrides]
-read_file = "sources"
-bash      = "sources"
+web_search = "sources"
+web_fetch  = "sources"
+read_file  = "sources"
+list_dir   = "sources"
 
 [stages.gather.transitions.analyze]
-hint = "Enough sources gathered for meaningful analysis"
+hint = "Enough primary sources gathered for meaningful analysis"
 transform = "direct"
 
 [stages.gather.transitions.error_recovery]
@@ -41,65 +56,113 @@ condition = "error"
 transform = "direct"
 
 # ─── Stage 2: Analyze ─────────────────────────────────────────────────────────
+# Three open edges: more breadth (gather), chase a specific citation
+# (follow_citations), or write the report (synthesize).
 [stages.analyze]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "qwen3.6:27b" }] }
-description = "Analyze findings, identify patterns, and synthesize insights"
-available_tools = ["read_file"]
+description = "Analyze findings, cross-reference claims, and decide the next move"
+available_tools = ["read_file", "web_fetch", "context_write", "context_append"]
 max_iterations = 20
-max_revisits = 2
+max_revisits = 3
 transition_prompt = """
-You've analyzed the gathered material. Decide what happens next:
-- If there are gaps that need more sources on specific sub-topics, respond with: gather
-- If you have enough evidence to write a comprehensive report, respond with: synthesize
+Decide the next move:
+- Broad gaps that need new sources on a sub-topic → respond with: gather
+- A specific cited source you should pull and read before concluding →
+  respond with: follow_citations
+- Enough well-supported evidence to write the report → respond with: synthesize
 """
 system_prompt = """
-Analyze the research findings:
-1. Identify key themes and patterns across sources
-2. Note areas of consensus and disagreement
-3. Evaluate source quality and potential biases
-4. Identify gaps — what questions remain unanswered?
-5. Form preliminary conclusions supported by evidence
+Analyze the `sources` against `sources_index`. Be rigorous:
+1. Extract factual claims into `claims` (context_append), each with its source
+   ref: `<claim> [n]`. Separate well-supported (multiple credible sources) from
+   single-source or speculative.
+2. Record source disagreements in `contradictions` (context_write) — who claims
+   what, with refs. Never silently pick a side.
+3. Evaluate source quality and bias; note gaps and the specific citations worth
+   chasing next.
 
-Be rigorous. Distinguish well-supported claims from speculation.
+Prefer following a key citation (follow_citations) over re-searching when a claim
+hinges on a source you haven't read directly.
 """
 
 [stages.analyze.transitions.gather]
-hint = "Gaps identified — need more sources on specific sub-topics"
+hint = "Broad gaps — need new sources on specific sub-topics"
+transform = "compact"
+
+[stages.analyze.transitions.follow_citations]
+hint = "A specific cited source should be pulled and read directly"
 transform = "compact"
 
 [stages.analyze.transitions.synthesize]
-hint = "Analysis complete — ready to write the report"
+hint = "Evidence is sufficient — write the report"
 transform = "compact"
 
 [stages.analyze.transitions.error_recovery]
 condition = "error"
 transform = "direct"
 
-# ─── Stage 3: Synthesize (terminal) ───────────────────────────────────────────
+# ─── Stage 3: Follow citations ────────────────────────────────────────────────
+# The "follows citation chains" behavior as a real stage: pull the specific
+# sources analyze flagged, then hand back.
+[stages.follow_citations]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Pull and read specific cited sources flagged during analysis"
+available_tools = ["web_fetch", "web_search", "read_file", "context_append"]
+max_iterations = 12
+max_revisits = 3
+system_prompt = """
+Analysis flagged specific citations to chase. For each: web_fetch the source
+directly (or web_search for it by title/author first), read it, and append the
+new material to `sources` plus a bibliography line to `sources_index`. Extract
+any new or corrected claims to `claims`. Then hand back to analyze.
+
+Stay focused on the flagged citations — this is a targeted deep read, not a new
+broad search.
+"""
+
+[stages.follow_citations.tool_routing]
+default_region = "conversation"
+[stages.follow_citations.tool_routing.overrides]
+web_fetch  = "sources"
+web_search = "sources"
+read_file  = "sources"
+
+[stages.follow_citations.transitions.analyze]
+hint = "Cited sources read — resume analysis"
+transform = "compact"
+
+[stages.follow_citations.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# ─── Stage 4: Synthesize (terminal) ───────────────────────────────────────────
 [stages.synthesize]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "qwen3.6:27b" }] }
-description = "Produce a structured research report with citations"
-available_tools = ["write_file"]
+description = "Produce a structured, cited research report"
+available_tools = ["write_file", "read_file"]
 max_iterations = 15
 system_prompt = """
-Write a structured research report based on your analysis. Include:
-- Executive summary (key findings in 3-5 sentences)
+Write the report (write_file), built from `claims` and citing `sources_index`,
+following the citation/confidence rules in `format`. Structure:
+- Executive summary (key findings in 3-5 sentences, each with a confidence level)
 - Background and context
-- Methodology (what sources were consulted)
-- Findings organized by theme
+- Findings organized by theme, every non-obvious claim carrying a [n] citation
+- Disagreements — pull these straight from `contradictions`; never drop a
+  recorded conflict
 - Analysis and implications
-- Open questions and areas for further research
-- References with links/citations
+- Open questions
+- References — the numbered bibliography from `sources_index`
 
-Write for a technical audience. Be precise. Cite specific sources for claims.
+Write for a technical audience. Be precise. Distinguish evidence from inference.
 """
 
 # Explicit empty transitions = terminal.
 [stages.synthesize.transitions]
 
-# ─── Stage 4: Error recovery ──────────────────────────────────────────────────
+# ─── Stage 5: Error recovery ──────────────────────────────────────────────────
 [stages.error_recovery]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
@@ -108,9 +171,9 @@ available_tools = ["read_file", "bash"]
 max_iterations = 8
 max_revisits = 1
 system_prompt = """
-A source fetch or parse failed. Read the error from context, note which source
-is unavailable and why, and record the gap. Then return to analyze to continue
-with the sources you do have.
+A source fetch or parse failed. Read the error from context, record which source
+is unavailable and why (as a gap), and hand back to analyze to continue with the
+material you do have.
 """
 
 [stages.error_recovery.transitions.analyze]
@@ -121,9 +184,18 @@ transform = "compact"
 provider = "anthropic"
 model = "claude-sonnet-4-6"
 
+# ─── Context layout ───────────────────────────────────────────────────────────
+# Percentage budgets (issue #100) with absolute guard-rails.
 [context.regions]
-query            = { kind = "pinned",          max_tokens = 1500 }
-sources          = { kind = "temporary",       max_tokens = 50000 }
-analysis         = { kind = "compacting",      threshold_tokens = 30000, max_tokens = 40000 }
-analysis_history = { kind = "compact_history", source_region = "analysis", max_tokens = 15000 }
-scratch          = { kind = "clearable",       max_tokens = 5000 }
+query          = { kind = "pinned", budget = "1%", max_tokens = 1500, required = true, seed = "task", required_message = "State the research topic via --task." }
+scope          = { kind = "pinned", budget = "1%", max_tokens = 1500, seed = "scope" }
+sources_index  = { kind = "pinned", budget = "4%", max_tokens = 4000 }
+format         = { kind = "pinned", budget = "1%", max_tokens = 500, seed = { literal = "Cite every non-obvious claim as [n], matching a numbered entry in the References bibliography (title + URL/path). Mark each key finding's confidence as high / medium / low based on source count and credibility." } }
+
+sources        = { kind = "temporary",      budget = "30%", max_tokens = 50000 }
+claims         = { kind = "sliding_window", max_items = 40, budget = "8%", max_tokens = 9000 }
+contradictions = { kind = "clearable",      budget = "3%", max_tokens = 3000 }
+analysis         = { kind = "compacting",      budget = "30%", compact_at = "80%", threshold_tokens = 30000, max_tokens = 40000 }
+analysis_history = { kind = "compact_history", source_region = "analysis", budget = "3%", max_tokens = 15000 }
+
+conversation   = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }
