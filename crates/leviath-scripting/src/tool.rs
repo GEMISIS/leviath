@@ -430,6 +430,11 @@ pub const SCRIPT_TOOL_MAX_OPERATIONS: u64 = 500_000;
 /// `params` object-map. The returned Rhai value is serialized to JSON unless it
 /// is already a string (returned verbatim). Any script error becomes an
 /// `[error] …` string.
+///
+/// The eval is wrapped in [`std::panic::catch_unwind`] so a panic in a host
+/// function (e.g. a TLS-backend failure) is caught cleanly — without unwinding
+/// through Rhai's stack. This prevents a double-panic abort when a `Drop` impl
+/// panics during unwinding (issue #109).
 pub fn execute(tool: &ScriptTool, args: serde_json::Value, host: Arc<dyn ScriptHost>) -> String {
     let engine = build_tool_engine(host);
     // Converting a `serde_json::Value` to a Rhai `Dynamic` is infallible (any
@@ -438,9 +443,25 @@ pub fn execute(tool: &ScriptTool, args: serde_json::Value, host: Arc<dyn ScriptH
     let params = rhai::serde::to_dynamic(args).unwrap_or(Dynamic::UNIT);
     let mut scope = Scope::new();
     scope.push_dynamic("params", params);
-    match engine.eval_ast_with_scope::<Dynamic>(&mut scope, &tool.ast) {
-        Ok(value) => dynamic_to_result_string(value),
-        Err(e) => format!("[error] {}: {}", tool.meta.name, e),
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        engine.eval_ast_with_scope::<Dynamic>(&mut scope, &tool.ast)
+    }));
+    match result {
+        Ok(Ok(value)) => dynamic_to_result_string(value),
+        Ok(Err(e)) => format!("[error] {}: {}", tool.meta.name, e),
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            tracing::warn!(
+                tool = %tool.meta.name,
+                panic = msg,
+                "script tool panicked during execution (issue #109)"
+            );
+            format!("[error] {}: script panicked: {msg}", tool.meta.name)
+        }
     }
 }
 
@@ -1155,6 +1176,163 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
         let out = execute(&tool, serde_json::json!({}), FakeHost::arc());
         assert!(out.starts_with("[error] t:"), "got: {out}");
         assert!(out.contains("boom"));
+    }
+
+    /// Controls what kind of panic payload a [`PanickingHost`] produces.
+    enum PanicPayload {
+        /// `panic!("{}", msg)` → `String` payload (downcast_ref::<String>).
+        Formatted(&'static str),
+        /// `panic!("…")` → `&'static str` payload (downcast_ref::<&str>).
+        Literal,
+        /// `panic_any(42i32)` → non-string payload (falls through to
+        /// "unknown panic").
+        NonString,
+    }
+
+    /// A [`ScriptHost`] where every method panics unconditionally, using
+    /// the payload kind specified by `payload`. This avoids dead
+    /// `Ok(…)` branches that would show up as uncovered.
+    struct PanickingHost {
+        payload: PanicPayload,
+    }
+
+    impl PanickingHost {
+        fn do_panic(&self) -> ! {
+            match &self.payload {
+                PanicPayload::Formatted(msg) => panic!("{}", msg),
+                PanicPayload::Literal => panic!("literal str panic"),
+                PanicPayload::NonString => std::panic::panic_any(42_i32),
+            }
+        }
+    }
+
+    impl ScriptHost for PanickingHost {
+        fn http_get(
+            &self,
+            _u: &str,
+            _h: BTreeMap<String, String>,
+        ) -> std::result::Result<String, String> {
+            self.do_panic();
+        }
+        fn http_post(
+            &self,
+            _u: &str,
+            _b: &str,
+            _h: BTreeMap<String, String>,
+        ) -> std::result::Result<String, String> {
+            self.do_panic();
+        }
+        fn shell(&self, _c: &str) -> std::result::Result<String, String> {
+            self.do_panic();
+        }
+        fn read_file(&self, _p: &str) -> std::result::Result<String, String> {
+            self.do_panic();
+        }
+        fn write_file(&self, _p: &str, _c: &str) -> std::result::Result<String, String> {
+            self.do_panic();
+        }
+        fn env_var(&self, _n: &str) -> std::result::Result<String, String> {
+            self.do_panic();
+        }
+    }
+
+    #[test]
+    fn execute_host_panic_is_caught_by_catch_unwind() {
+        // A host function that panics is caught by catch_unwind in execute(),
+        // preventing a double-panic abort when a Drop impl also panics during
+        // unwinding (issue #109).
+        let host: Arc<dyn ScriptHost> = Arc::new(PanickingHost {
+            payload: PanicPayload::Formatted("TLS init failed"),
+        });
+        let tool = tool_from("// @tool t\nhttp_get(\"http://x\")");
+        let out = execute(&tool, serde_json::json!({}), host);
+        assert!(out.contains("[error]"), "got: {out}");
+        assert!(out.contains("script panicked"), "got: {out}");
+        assert!(out.contains("TLS init failed"), "got: {out}");
+    }
+
+    #[test]
+    fn execute_shell_panic_is_caught_by_catch_unwind() {
+        let host: Arc<dyn ScriptHost> = Arc::new(PanickingHost {
+            payload: PanicPayload::Formatted("sandbox init exploded"),
+        });
+        let tool = tool_from("// @tool sh\nshell(\"ls\")");
+        let out = execute(&tool, serde_json::json!({}), host);
+        assert!(out.contains("[error] sh:"), "got: {out}");
+        assert!(out.contains("script panicked"), "got: {out}");
+        assert!(out.contains("sandbox init exploded"), "got: {out}");
+    }
+
+    #[test]
+    fn execute_read_file_panic_is_caught_by_catch_unwind() {
+        let host: Arc<dyn ScriptHost> = Arc::new(PanickingHost {
+            payload: PanicPayload::Formatted("filesystem corrupted"),
+        });
+        let tool = tool_from("// @tool rf\nread_file(\"x.txt\")");
+        let out = execute(&tool, serde_json::json!({}), host);
+        assert!(out.contains("[error] rf:"), "got: {out}");
+        assert!(out.contains("script panicked"), "got: {out}");
+        assert!(out.contains("filesystem corrupted"), "got: {out}");
+    }
+
+    #[test]
+    fn execute_http_post_panic_is_caught_by_catch_unwind() {
+        let host: Arc<dyn ScriptHost> = Arc::new(PanickingHost {
+            payload: PanicPayload::Formatted("post failed"),
+        });
+        let tool = tool_from("// @tool t\nhttp_post(\"http://x\", \"body\")");
+        let out = execute(&tool, serde_json::json!({}), host);
+        assert!(out.contains("[error]"), "got: {out}");
+        assert!(out.contains("script panicked"), "got: {out}");
+        assert!(out.contains("post failed"), "got: {out}");
+    }
+
+    #[test]
+    fn execute_write_file_panic_is_caught_by_catch_unwind() {
+        let host: Arc<dyn ScriptHost> = Arc::new(PanickingHost {
+            payload: PanicPayload::Formatted("write failed"),
+        });
+        let tool = tool_from("// @tool t\nwrite_file(\"out.txt\", \"data\")");
+        let out = execute(&tool, serde_json::json!({}), host);
+        assert!(out.contains("[error]"), "got: {out}");
+        assert!(out.contains("script panicked"), "got: {out}");
+        assert!(out.contains("write failed"), "got: {out}");
+    }
+
+    #[test]
+    fn execute_env_var_panic_is_caught_by_catch_unwind() {
+        let host: Arc<dyn ScriptHost> = Arc::new(PanickingHost {
+            payload: PanicPayload::Formatted("env exploded"),
+        });
+        let tool = tool_from("// @tool t\nenv_var(\"HOME\")");
+        let out = execute(&tool, serde_json::json!({}), host);
+        assert!(out.contains("[error]"), "got: {out}");
+        assert!(out.contains("script panicked"), "got: {out}");
+        assert!(out.contains("env exploded"), "got: {out}");
+    }
+
+    #[test]
+    fn execute_panic_with_str_payload() {
+        let host: Arc<dyn ScriptHost> = Arc::new(PanickingHost {
+            payload: PanicPayload::Literal,
+        });
+        let tool = tool_from("// @tool t\nhttp_get(\"http://x\")");
+        let out = execute(&tool, serde_json::json!({}), host);
+        assert!(out.contains("[error]"), "got: {out}");
+        assert!(out.contains("script panicked"), "got: {out}");
+        assert!(out.contains("literal str panic"), "got: {out}");
+    }
+
+    #[test]
+    fn execute_panic_with_non_string_payload() {
+        let host: Arc<dyn ScriptHost> = Arc::new(PanickingHost {
+            payload: PanicPayload::NonString,
+        });
+        let tool = tool_from("// @tool t\nhttp_get(\"http://x\")");
+        let out = execute(&tool, serde_json::json!({}), host);
+        assert!(out.contains("[error]"), "got: {out}");
+        assert!(out.contains("script panicked"), "got: {out}");
+        assert!(out.contains("unknown panic"), "got: {out}");
     }
 
     #[test]
