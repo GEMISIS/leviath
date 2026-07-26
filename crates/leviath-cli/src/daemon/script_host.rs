@@ -307,8 +307,9 @@ pub struct RealScriptIo;
 
 impl RealScriptIo {
     /// Build a short-timeout blocking HTTP client for a single request. The
-    /// builder only fails on TLS-backend init, which never happens in practice
-    /// (mirrors `leviath_providers::build_http_client`'s `.expect`).
+    /// builder only fails on TLS-backend init, which never happens in practice.
+    /// If it ever does panic, `leviath_scripting::execute`'s `catch_unwind`
+    /// catches it cleanly (issue #109).
     fn client() -> reqwest::blocking::Client {
         reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(30))
