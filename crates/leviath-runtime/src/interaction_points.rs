@@ -560,6 +560,18 @@ pub fn collect_interaction_point(
             continue; // stale: agent cancelled/despawned since dispatch
         };
         crate::tick_scope::enter(out.entity);
+        // A run cancelled while its prompt was open is finished, and the arms
+        // below all set `Active`/`ResolveTransition` unconditionally — so without
+        // this, answering the orphaned prompt (from `lev respond`, the dashboard,
+        // or the neutral response a cancel itself delivers) walked the run
+        // straight back to `Active` and it carried on as if it had never been
+        // cancelled. Drop the outcome and let the reaper take the entity.
+        if crate::pipeline::is_terminal_status(&state.status) {
+            commands
+                .entity(out.entity)
+                .remove::<AwaitingInteractionPoint>();
+            continue;
+        }
         let idx = pc.map_or(0, |c| c.0);
         let round = rounds.map_or(0, |r| r.0);
         let (name, npoints) = match stage_points(bp, cursor) {
@@ -1286,6 +1298,55 @@ mod tests {
             AgentStatus::Cancelled
         );
         assert!(world.get::<ResolveTransition>(e).is_none());
+    }
+
+    /// Answering the prompt of a run that was cancelled while it waited must not
+    /// bring the run back. Every non-`Abort` arm sets `Active` unconditionally, so
+    /// without the terminal guard an answer — including the neutral response a
+    /// cancel itself delivers to release the blocked `ask` — walked a cancelled
+    /// run straight back into the pipeline.
+    #[test]
+    fn collect_does_not_resurrect_a_cancelled_run() {
+        for decision in [
+            PointOutcome::Approve {
+                user_text: "ok".to_string(),
+            },
+            PointOutcome::Directive {
+                user_text: "go".to_string(),
+                directive: "d".to_string(),
+            },
+            PointOutcome::Edit {
+                user_text: "go".to_string(),
+                edited: "body".to_string(),
+            },
+        ] {
+            let (mut world, tx) = collect_world();
+            let e = spawn_awaiting(&mut world, vec![plan_point()]);
+            world.get_mut::<AgentState>(e).unwrap().status = AgentStatus::Cancelled;
+
+            tx.send(InteractionPointOutcome {
+                entity: e,
+                decision,
+            })
+            .unwrap();
+            run_collect(&mut world);
+
+            assert_eq!(
+                world.get::<AgentState>(e).unwrap().status,
+                AgentStatus::Cancelled,
+                "the run stays cancelled"
+            );
+            assert!(
+                world.get::<AwaitingInteractionPoint>(e).is_none(),
+                "the awaiting marker is still cleared, so nothing re-collects it"
+            );
+            assert!(
+                world.get::<ResolveTransition>(e).is_none()
+                    && world.get::<ReadyToInfer>(e).is_none()
+                    && world.get::<ReadyForInteractionPoint>(e).is_none(),
+                "and it is not queued for any further work"
+            );
+        }
     }
 
     #[test]
