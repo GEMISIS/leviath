@@ -603,6 +603,7 @@ a = "true"
                 hint: None,
                 transform: Default::default(),
                 gate: None,
+                stuck: None,
             },
         );
         let mut stage_a = Stage::new("a".to_string(), make_model());

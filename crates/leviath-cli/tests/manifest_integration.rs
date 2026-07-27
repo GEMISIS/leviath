@@ -297,6 +297,104 @@ fn all_builtin_agents_have_sound_context_layout() {
     }
 }
 
+/// Every `condition = "stuck"` edge in every built-in agent must be armed with
+/// a threshold AND point at a `max_revisits`-capped stage.
+///
+/// The arming half is also enforced by `Blueprint::validate`, but the revisit
+/// cap cannot be: an uncapped stuck target is a perfectly valid graph, it just
+/// lets the source stage bounce out to it on every re-entry for the life of the
+/// run. That's an authoring invariant for the shipped agents, so it lives here.
+#[test]
+fn all_builtin_stuck_edges_are_armed_and_bounded() {
+    use leviath_core::TransitionCondition;
+
+    for (name, path) in &discover_agent_manifests() {
+        let content = std::fs::read_to_string(path).unwrap();
+        let bp = leviath_core::manifest::parse_manifest(&content).unwrap();
+
+        for stage in &bp.stages {
+            let Some(transitions) = &stage.transitions else {
+                continue;
+            };
+            for (target, edge) in transitions {
+                if edge.condition != TransitionCondition::Stuck {
+                    continue;
+                }
+                assert!(
+                    edge.stuck.is_some_and(|c| c.is_armed()),
+                    "agent '{name}' stage '{}': stuck edge → '{target}' has no threshold, \
+                     so it could never fire",
+                    stage.name
+                );
+                assert!(
+                    bp.find_stage(target)
+                        .is_some_and(|s| s.max_revisits.is_some()),
+                    "agent '{name}' stage '{}': stuck edge → '{target}' is unbounded — \
+                     '{target}' needs max_revisits or the two can ping-pong all run",
+                    stage.name
+                );
+            }
+        }
+    }
+}
+
+/// A stage with two or more *choosable* outgoing edges is routed by an LLM
+/// (`resolve_transition_sync` returns `Choose`, and `build_transition_prompt`
+/// asks the model to name a stage). Without a `transition_prompt` the model gets
+/// only the bare stage names plus whatever `hint`s exist, and has to guess the
+/// selection criteria — so a branching stage must either explain the choice in a
+/// prompt or label every branch with a hint.
+///
+/// `allow_complete` stages are included: they reach the same lane with a single
+/// edge, since DONE is itself one of the choices.
+#[test]
+fn branching_stages_explain_how_to_choose() {
+    use leviath_core::TransitionCondition;
+
+    for (name, path) in &discover_agent_manifests() {
+        let content = std::fs::read_to_string(path).unwrap();
+        let bp = leviath_core::manifest::parse_manifest(&content).unwrap();
+
+        for stage in &bp.stages {
+            let Some(transitions) = &stage.transitions else {
+                continue;
+            };
+            // Only Always/LlmChoice edges are offered to the model; conditioned
+            // edges (error/max_iterations/stuck) fire from the runtime instead.
+            let choosable: Vec<&str> = transitions
+                .values()
+                .filter(|e| {
+                    matches!(
+                        e.condition,
+                        TransitionCondition::Always | TransitionCondition::LlmChoice
+                    )
+                })
+                .map(|e| e.target.as_str())
+                .collect();
+            if choosable.len() < 2 {
+                continue;
+            }
+            let unlabeled: Vec<&str> = transitions
+                .values()
+                .filter(|e| {
+                    matches!(
+                        e.condition,
+                        TransitionCondition::Always | TransitionCondition::LlmChoice
+                    ) && e.hint.is_none()
+                })
+                .map(|e| e.target.as_str())
+                .collect();
+            assert!(
+                stage.transition_prompt.is_some() || unlabeled.is_empty(),
+                "agent '{name}' stage '{}' branches to {choosable:?} but has no \
+                 transition_prompt, and {unlabeled:?} carry no hint either — the \
+                 model is left to guess which branch to take",
+                stage.name
+            );
+        }
+    }
+}
+
 #[test]
 fn at_least_nine_builtin_agents_exist() {
     let manifests = discover_agent_manifests();

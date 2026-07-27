@@ -425,18 +425,33 @@ pub struct StageProgress {
     /// How many times a transition gate has already sent this stage back for
     /// another pass. Bounded by the gate's `max_attempts`.
     pub gate_reentries: usize,
+    /// Unix seconds of the first tick this agent was ready to infer in the
+    /// stage — the clock a `stuck_after_minutes` threshold reads. Stamped
+    /// lazily by [`detect_stuck_stage`] so spawn, `enter_stage` and
+    /// [`force_transition`] all get a fresh clock from the `Default` reset
+    /// without threading a clock through their signatures.
+    pub stage_started_at: Option<i64>,
+    /// `write_file`/`edit_file` calls made in this stage, keyed by target path.
+    /// Feeds the `stuck_after_same_file_edits` threshold.
+    pub edits_by_path: std::collections::HashMap<String, usize>,
+    /// A `stuck` edge has already fired in this stage. One-shot per stage entry:
+    /// without it a stuck interrupt whose edge became unavailable would ping-pong
+    /// between [`detect_stuck_stage`] and [`resolve_transition`]'s resume arm.
+    pub stuck_fired: bool,
 }
 
 /// How a stage ended, when that governs the transition. Absent ⇒ the stage
 /// completed normally. Read by [`resolve_transition`] to follow an
-/// `error`/`max_iterations`-conditioned edge (e.g. → error_recovery) when the
-/// stage errored or hit its iteration cap.
+/// `error`/`max_iterations`/`stuck`-conditioned edge (e.g. → error_recovery)
+/// when the stage errored, hit its iteration cap, or stopped making progress.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub enum StageOutcome {
     /// The stage errored (carries the error message for the terminal case).
     Errored(String),
     /// The stage hit its `max_iterations` cap.
     MaxIterations,
+    /// A `stuck` edge tripped mid-stage; carries the human-readable reason.
+    Stuck(String),
 }
 
 /// One [`StageRecord`](leviath_core::run_meta::StageRecord) per blueprint stage,
@@ -488,12 +503,27 @@ pub fn process_response(
             e.insert(ReadyForTransition);
         } else {
             progress.total_tool_calls += result.tool_calls.len();
+            // Per-path edit churn, for `stuck` edges armed on same-file edits.
+            // Counted from the *requested* calls: a model asking to edit the
+            // same wrong file five times is stuck whether or not each call ran.
+            for path in result.tool_calls.iter().filter_map(edited_path) {
+                *progress.edits_by_path.entry(path.to_string()).or_insert(0) += 1;
+            }
             if let Some(mut totals) = totals {
                 totals.tool_calls += result.tool_calls.len();
             }
             e.insert(ReadyForTools);
         }
     }
+}
+
+/// The path a tool call targets, for per-stage edit-churn tracking. Only the two
+/// mutating file tools count: both carry the path in their `path` argument. A
+/// call without a string `path` (or any other tool) contributes nothing.
+fn edited_path(call: &crate::components::ToolCall) -> Option<&str> {
+    matches!(call.name.as_str(), "write_file" | "edit_file")
+        .then(|| call.arguments.get("path").and_then(|v| v.as_str()))
+        .flatten()
 }
 
 /// The "use your tools" nudge injected when a model responds with text before
@@ -2026,16 +2056,21 @@ enum StageResolution {
     ),
     /// Multiple candidate edges — an LLM must choose among them.
     Choose(Vec<leviath_core::blueprint::TransitionEdge>),
+    /// Not a transition after all — put the agent back to work in its current
+    /// stage. Only a stuck interrupt produces this: it fires mid-stage, so when
+    /// its escape edge is no longer available the stage must simply continue
+    /// (falling through would end a stage the agent never said it had finished).
+    Resume,
 }
 
 /// Find the first available edge with the given `condition` (e.g. `Error` or
 /// `MaxIterations`) whose target exists and hasn't exhausted its revisit budget.
-fn find_conditioned_edge(
+fn find_conditioned_edge_ref<'a>(
     blueprint: &leviath_core::Blueprint,
-    stage: &leviath_core::Stage,
+    stage: &'a leviath_core::Stage,
     visits: &std::collections::HashMap<String, usize>,
     condition: leviath_core::blueprint::TransitionCondition,
-) -> Option<(usize, leviath_core::blueprint::EdgeTransform)> {
+) -> Option<(usize, &'a leviath_core::blueprint::TransitionEdge)> {
     let transitions = stage.transitions.as_ref()?;
     transitions.values().find_map(|edge| {
         if edge.condition != condition {
@@ -2049,8 +2084,20 @@ fn find_conditioned_edge(
             Some(max) => visits.get(&edge.target).copied().unwrap_or(0) <= max,
             None => true,
         };
-        within_budget.then(|| (idx, edge.transform.clone()))
+        within_budget.then_some((idx, edge))
     })
+}
+
+/// As [`find_conditioned_edge_ref`], projected to the target index and a cloned
+/// edge transform — what the transition systems need.
+fn find_conditioned_edge(
+    blueprint: &leviath_core::Blueprint,
+    stage: &leviath_core::Stage,
+    visits: &std::collections::HashMap<String, usize>,
+    condition: leviath_core::blueprint::TransitionCondition,
+) -> Option<(usize, leviath_core::blueprint::EdgeTransform)> {
+    find_conditioned_edge_ref(blueprint, stage, visits, condition)
+        .map(|(idx, edge)| (idx, edge.transform.clone()))
 }
 
 /// How often (in per-stage iterations) [`check_workspace_health`] stats the
@@ -2145,6 +2192,169 @@ pub fn enforce_max_iterations(
                 .insert(ResolveTransition)
                 .insert(StageOutcome::MaxIterations);
         }
+    }
+}
+
+/// The context region a stuck diagnosis is written to when the blueprint declares
+/// one. Pinned by convention, so the note survives the edge transform into the
+/// stage that has to act on it.
+const STUCK_REPORT_REGION: &str = "stuck_report";
+
+/// The per-stage numbers a [`StuckConfig`](leviath_core::blueprint::StuckConfig)
+/// is evaluated against.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct StuckMetrics {
+    /// Inferences run in this stage.
+    pub iterations: usize,
+    /// Wall-clock seconds since the stage clock was stamped.
+    pub elapsed_secs: u64,
+    /// Total tool calls made in this stage.
+    pub tool_calls: usize,
+    /// The most-churned path this stage and how many write/edit calls it took.
+    pub hottest_edit: Option<(String, usize)>,
+}
+
+/// Evaluate a stage's metrics against a stuck edge's thresholds, returning a
+/// human-readable reason for the first one that trips.
+///
+/// Ordered most-diagnostic first: file churn names the actual mistake, while
+/// iterations, tool calls and wall clock are only symptoms of it.
+pub(crate) fn detect_stuck(
+    cfg: &leviath_core::blueprint::StuckConfig,
+    m: &StuckMetrics,
+) -> Option<String> {
+    if let (Some(limit), Some((path, hits))) = (cfg.after_same_file_edits, m.hottest_edit.as_ref())
+        && *hits >= limit
+    {
+        return Some(format!(
+            "you have written or edited '{path}' {hits} times in this stage without \
+             resolving the task — the problem is very likely not in that file"
+        ));
+    }
+    if let Some(limit) = cfg.after_iterations
+        && m.iterations >= limit
+    {
+        return Some(format!(
+            "you have run {} inference turns in this stage without finishing it",
+            m.iterations
+        ));
+    }
+    if let Some(limit) = cfg.after_tool_calls
+        && m.tool_calls >= limit
+    {
+        return Some(format!(
+            "you have made {} tool calls in this stage without finishing it",
+            m.tool_calls
+        ));
+    }
+    if let Some(limit) = cfg.after_minutes
+        && m.elapsed_secs >= limit as u64 * 60
+    {
+        return Some(format!(
+            "you have spent {} minutes in this stage without finishing it",
+            m.elapsed_secs / 60
+        ));
+    }
+    None
+}
+
+/// The single most-edited path in a stage. Ties break on path name so the
+/// diagnosis is deterministic regardless of `HashMap` iteration order.
+fn hottest_edit(edits: &std::collections::HashMap<String, usize>) -> Option<(String, usize)> {
+    edits
+        .iter()
+        .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+        .map(|(path, n)| (path.clone(), *n))
+}
+
+/// Write the "why you're stuck" note where the next stage will read it: the
+/// blueprint's `stuck_report` region when it declares one, else `conversation`
+/// (which every blueprint is required to declare). Best-effort, like the
+/// repetition nudge — an overflowing region silently drops the note.
+fn note_stuck(window: &mut ContextWindow, stage: &str, reason: &str) {
+    let region = if window.get_region(STUCK_REPORT_REGION).is_some() {
+        STUCK_REPORT_REGION
+    } else {
+        "conversation"
+    };
+    let content = format!(
+        "[Stuck detected in stage '{stage}'] {reason}. Stop repeating what you have been \
+         doing. Re-read the original task, separate what you have actually verified from \
+         what you assumed, and take a different approach — including reverting changes \
+         that made things worse."
+    );
+    let tokens = content.len() / 4 + 1;
+    let _ = window.add_to_region(region, content, tokens);
+}
+
+/// Stuck-detection guard: for each `ReadyToInfer` agent whose current stage
+/// declares a `stuck`-conditioned edge, evaluate that edge's thresholds against
+/// the stage's progress. When one trips, write the diagnosis into context and
+/// route the agent down the stuck edge (`ResolveTransition` +
+/// [`StageOutcome::Stuck`]) instead of running another inference.
+///
+/// Fires at most once per stage entry (`StageProgress::stuck_fired`, cleared by
+/// `enter_stage`'s progress reset), and never once the stuck edge's target has
+/// spent its `max_revisits` — an exhausted escape hatch must leave the agent
+/// working the stage normally (its `max_iterations` is still the hard cap) rather
+/// than kick it out down an unrelated edge.
+#[allow(clippy::type_complexity)]
+pub fn detect_stuck_stage(
+    mut agents: Query<
+        (
+            Entity,
+            &AgentState,
+            &AgentBlueprint,
+            &StageCursor,
+            &mut StageProgress,
+            &VisitCounts,
+            &mut ContextWindow,
+            Option<&mut StageIoBuffer>,
+        ),
+        With<ReadyToInfer>,
+    >,
+    mut commands: Commands,
+) {
+    use leviath_core::blueprint::TransitionCondition;
+    let now = chrono::Utc::now().timestamp();
+    crate::tick_scope::clear();
+    for (entity, state, bp, cursor, mut progress, visits, mut window, buffer) in agents.iter_mut() {
+        crate::tick_scope::enter(entity);
+        if state.status != AgentStatus::Active || progress.stuck_fired {
+            continue; // paused/waiting, or this stage already used its escape
+        }
+        let stage = &bp.0.stages[cursor.index];
+        let Some(cfg) =
+            find_conditioned_edge_ref(&bp.0, stage, &visits.0, TransitionCondition::Stuck)
+                .and_then(|(_, edge)| edge.stuck)
+        else {
+            continue; // no stuck edge here, or its escape hatch is spent
+        };
+        // Lazy stamp: one place covers spawn, `enter_stage`, `force_transition`
+        // and snapshot restore, and it measures time the agent was actually
+        // runnable rather than time spent queued behind other work.
+        let started = *progress.stage_started_at.get_or_insert(now);
+        let metrics = StuckMetrics {
+            iterations: progress.iterations,
+            elapsed_secs: (now - started).max(0) as u64,
+            tool_calls: progress.total_tool_calls,
+            hottest_edit: hottest_edit(&progress.edits_by_path),
+        };
+        let Some(reason) = detect_stuck(&cfg, &metrics) else {
+            continue;
+        };
+        progress.stuck_fired = true;
+        note_stuck(&mut window, &stage.name, &reason);
+        if let Some(mut buffer) = buffer {
+            buffer
+                .logs
+                .push((cursor.index, format!("[stuck] {reason}")));
+        }
+        commands
+            .entity(entity)
+            .remove::<ReadyToInfer>()
+            .insert(ResolveTransition)
+            .insert(StageOutcome::Stuck(reason));
     }
 }
 
@@ -2606,6 +2816,17 @@ pub fn resolve_transition(
                         resolve_transition_sync(&bp.0, stage, cursor.index, &visits.0)
                     })
             }
+            Some(StageOutcome::Stuck(_)) => {
+                // A stuck interrupt is mid-stage, not a stage end. If the escape
+                // hatch went away between detection and here (its target spent
+                // its last revisit), resume — falling through to
+                // `resolve_transition_sync` would end a stage the agent never
+                // said it had finished, e.g. shunting `implement` into `review`
+                // with the work half-done.
+                find_conditioned_edge(&bp.0, stage, &visits.0, TransitionCondition::Stuck)
+                    .map(|(i, t)| StageResolution::Next(i, t, None))
+                    .unwrap_or(StageResolution::Resume)
+            }
             None => resolve_transition_sync(&bp.0, stage, cursor.index, &visits.0),
         };
         match resolution {
@@ -2682,6 +2903,16 @@ pub fn resolve_transition(
                     .remove::<ResolveTransition>()
                     .remove::<StageOutcome>()
                     .insert(AwaitingTransitionChoice(edges));
+            }
+            StageResolution::Resume => {
+                // `StageProgress::stuck_fired` is already set, so this cannot
+                // ping-pong with `detect_stuck_stage`; the stage now simply runs
+                // out to its ordinary `max_iterations`.
+                commands
+                    .entity(entity)
+                    .remove::<ResolveTransition>()
+                    .remove::<StageOutcome>()
+                    .insert(ReadyToInfer);
             }
         }
     }
@@ -4893,6 +5124,47 @@ mod tests {
         );
     }
 
+    /// Per-path churn is counted from the REQUESTED calls, which is what feeds
+    /// the `stuck_after_same_file_edits` threshold (#106).
+    #[test]
+    fn process_response_counts_edits_by_path() {
+        let call = |name: &str, path: Option<&str>| crate::components::ToolCall {
+            tool_id: "t".to_string(),
+            name: name.to_string(),
+            arguments: match path {
+                Some(p) => serde_json::json!({ "path": p }),
+                None => serde_json::Value::Null,
+            },
+        };
+        let mut world = World::new();
+        let e = world
+            .spawn((
+                crate::components::InferenceResult {
+                    response: "r".to_string(),
+                    tool_calls: vec![
+                        call("edit_file", Some("where.py")),
+                        call("write_file", Some("where.py")),
+                        call("edit_file", Some("other.py")),
+                        // Neither of these is a mutation of a known path.
+                        call("read_file", Some("where.py")),
+                        call("bash", None),
+                    ],
+                    tokens_used: 0,
+                    timestamp: 0,
+                },
+                StageProgress::default(),
+                ProcessResponse,
+            ))
+            .id();
+        run_process(&mut world);
+
+        let progress = world.get::<StageProgress>(e).unwrap();
+        assert_eq!(progress.edits_by_path.get("where.py"), Some(&2));
+        assert_eq!(progress.edits_by_path.get("other.py"), Some(&1));
+        assert_eq!(progress.edits_by_path.len(), 2);
+        assert_eq!(progress.total_tool_calls, 5);
+    }
+
     #[test]
     fn process_routes_no_tools_to_ready_for_transition() {
         let mut world = World::new();
@@ -6275,6 +6547,7 @@ mod tests {
                 hint: None,
                 transform: leviath_core::blueprint::EdgeTransform::Direct,
                 gate: None,
+                stuck: None,
             },
         )
     }
@@ -7489,6 +7762,7 @@ mod tests {
             hint: None,
             transform: EdgeTransform::Clear,
             gate: None,
+            stuck: None,
         }
     }
 
@@ -7643,6 +7917,363 @@ mod tests {
         for e in [below, unlimited, zero, paused] {
             assert!(world.get::<ReadyToInfer>(e).is_some());
             assert!(world.get::<ResolveTransition>(e).is_none());
+        }
+    }
+
+    // ── stuck detection (#106) ──────────────────────────────────────────────
+
+    fn stuck_cfg(
+        iterations: Option<usize>,
+        minutes: Option<usize>,
+        edits: Option<usize>,
+        tool_calls: Option<usize>,
+    ) -> leviath_core::blueprint::StuckConfig {
+        leviath_core::blueprint::StuckConfig {
+            after_iterations: iterations,
+            after_minutes: minutes,
+            after_same_file_edits: edits,
+            after_tool_calls: tool_calls,
+        }
+    }
+
+    fn edits(pairs: &[(&str, usize)]) -> std::collections::HashMap<String, usize> {
+        pairs.iter().map(|(p, n)| ((*p).to_string(), *n)).collect()
+    }
+
+    #[test]
+    fn detect_stuck_returns_none_when_no_threshold_trips() {
+        // Every threshold set, every metric below it.
+        let cfg = stuck_cfg(Some(20), Some(10), Some(5), Some(60));
+        let m = StuckMetrics {
+            iterations: 19,
+            elapsed_secs: 9 * 60,
+            tool_calls: 59,
+            hottest_edit: Some(("a.rs".to_string(), 4)),
+        };
+        assert!(detect_stuck(&cfg, &m).is_none());
+        // An unarmed config never trips, however bad the metrics look.
+        let wild = StuckMetrics {
+            iterations: 999,
+            elapsed_secs: 999_999,
+            tool_calls: 999,
+            hottest_edit: Some(("a.rs".to_string(), 999)),
+        };
+        assert!(detect_stuck(&Default::default(), &wild).is_none());
+    }
+
+    /// File churn wins over the other triggers because it names the actual
+    /// mistake ("you are editing the wrong file") rather than a symptom.
+    #[test]
+    fn detect_stuck_reports_same_file_churn_first() {
+        let cfg = stuck_cfg(Some(1), Some(0), Some(3), Some(1));
+        let m = StuckMetrics {
+            iterations: 50,
+            elapsed_secs: 3600,
+            tool_calls: 50,
+            hottest_edit: Some(("where.py".to_string(), 4)),
+        };
+        let reason = detect_stuck(&cfg, &m).expect("churn trips");
+        assert!(reason.contains("where.py"), "got: {reason}");
+        assert!(reason.contains('4'), "got: {reason}");
+    }
+
+    /// The churn threshold must not fire when no file was edited at all —
+    /// `hottest_edit` is `None` and the next trigger takes over.
+    #[test]
+    fn detect_stuck_falls_through_churn_when_nothing_was_edited() {
+        let cfg = stuck_cfg(Some(20), None, Some(3), None);
+        let m = StuckMetrics {
+            iterations: 20,
+            hottest_edit: None,
+            ..Default::default()
+        };
+        let reason = detect_stuck(&cfg, &m).expect("iterations trip");
+        assert!(reason.contains("20 inference turns"), "got: {reason}");
+    }
+
+    #[test]
+    fn detect_stuck_reports_iterations_tool_calls_and_minutes() {
+        let iters = detect_stuck(
+            &stuck_cfg(Some(20), None, None, None),
+            &StuckMetrics {
+                iterations: 20,
+                ..Default::default()
+            },
+        )
+        .expect("iterations trip");
+        assert!(iters.contains("20 inference turns"), "got: {iters}");
+
+        let calls = detect_stuck(
+            &stuck_cfg(None, None, None, Some(60)),
+            &StuckMetrics {
+                tool_calls: 61,
+                ..Default::default()
+            },
+        )
+        .expect("tool calls trip");
+        assert!(calls.contains("61 tool calls"), "got: {calls}");
+
+        let mins = detect_stuck(
+            &stuck_cfg(None, Some(10), None, None),
+            &StuckMetrics {
+                elapsed_secs: 11 * 60,
+                ..Default::default()
+            },
+        )
+        .expect("minutes trip");
+        assert!(mins.contains("11 minutes"), "got: {mins}");
+    }
+
+    #[test]
+    fn hottest_edit_is_none_when_empty_and_deterministic_on_ties() {
+        assert!(hottest_edit(&std::collections::HashMap::new()).is_none());
+        assert_eq!(
+            hottest_edit(&edits(&[("a.rs", 1), ("b.rs", 3)])),
+            Some(("b.rs".to_string(), 3))
+        );
+        // Equal counts must resolve the same way every run, whatever order the
+        // HashMap iterates in.
+        let tie = edits(&[("a.rs", 2), ("b.rs", 2), ("c.rs", 2)]);
+        for _ in 0..8 {
+            assert_eq!(hottest_edit(&tie), Some(("a.rs".to_string(), 2)));
+        }
+    }
+
+    #[test]
+    fn edited_path_matches_only_mutating_tools_with_a_string_path() {
+        let call = |name: &str, args: serde_json::Value| crate::components::ToolCall {
+            tool_id: "1".to_string(),
+            name: name.to_string(),
+            arguments: args,
+        };
+        let with_path = serde_json::json!({ "path": "src/main.rs" });
+        assert_eq!(
+            edited_path(&call("write_file", with_path.clone())),
+            Some("src/main.rs")
+        );
+        assert_eq!(
+            edited_path(&call("edit_file", with_path.clone())),
+            Some("src/main.rs")
+        );
+        // Reads don't count as churn, and a mutating call without a usable
+        // path contributes nothing rather than panicking.
+        assert!(edited_path(&call("read_file", with_path)).is_none());
+        assert!(edited_path(&call("write_file", serde_json::json!({}))).is_none());
+        assert!(edited_path(&call("write_file", serde_json::json!({ "path": 7 }))).is_none());
+    }
+
+    #[test]
+    fn note_stuck_prefers_the_stuck_report_region_then_conversation() {
+        let mut with_report = ctx(&[("conversation", 10_000), ("stuck_report", 10_000)]);
+        note_stuck(&mut with_report, "implement", "you are looping");
+        assert!(
+            with_report
+                .get_region("stuck_report")
+                .unwrap()
+                .current_tokens
+                > 0
+        );
+        assert_eq!(
+            with_report
+                .get_region("conversation")
+                .unwrap()
+                .current_tokens,
+            0
+        );
+
+        // Blueprints that declare no stuck_report still get the diagnosis —
+        // every blueprint is required to declare `conversation`.
+        let mut fallback = ctx(&[("conversation", 10_000)]);
+        note_stuck(&mut fallback, "implement", "you are looping");
+        let conv = fallback.get_region("conversation").unwrap();
+        let text: String = conv.content.iter().map(|e| e.content.as_str()).collect();
+        assert!(
+            text.contains("Stuck detected in stage 'implement'"),
+            "{text}"
+        );
+        assert!(text.contains("you are looping"), "{text}");
+    }
+
+    /// Build a world holding one `ReadyToInfer` agent whose stage `a` carries a
+    /// `stuck` edge to `b` armed on `cfg`.
+    fn spawn_stuck_agent(
+        world: &mut World,
+        cfg: Option<leviath_core::blueprint::StuckConfig>,
+        progress: StageProgress,
+        status: AgentStatus,
+        target_max_revisits: Option<usize>,
+        visits: VisitCounts,
+    ) -> Entity {
+        let edges = cfg.map(|cfg| {
+            let mut e = conditioned_edge("b", TransitionCondition::Stuck);
+            e.stuck = Some(cfg);
+            vec![("b".to_string(), e)]
+        });
+        let a = stage_named("a", edges, false, None);
+        let b = stage_named("b", None, false, target_max_revisits);
+        world
+            .spawn((
+                AgentBlueprint(blueprint(vec![a, b])),
+                StageCursor { index: 0 },
+                AgentState {
+                    status,
+                    ..agent_state()
+                },
+                progress,
+                visits,
+                ctx(&[("conversation", 10_000)]),
+                ReadyToInfer,
+            ))
+            .id()
+    }
+
+    /// The reason carried by a `Stuck` outcome, or `None` for any other (or
+    /// absent) outcome.
+    fn stuck_reason_of(outcome: Option<&StageOutcome>) -> Option<&str> {
+        match outcome {
+            Some(StageOutcome::Stuck(reason)) => Some(reason),
+            _ => None,
+        }
+    }
+
+    fn run_detect_stuck(world: &mut World) {
+        let mut s = Schedule::default();
+        s.add_systems(detect_stuck_stage);
+        s.run(world);
+    }
+
+    #[test]
+    fn detect_stuck_stage_fires_once_and_routes_to_resolve_transition() {
+        let mut world = World::new();
+        let e = spawn_stuck_agent(
+            &mut world,
+            Some(stuck_cfg(None, None, Some(3), None)),
+            StageProgress {
+                edits_by_path: edits(&[("where.py", 3)]),
+                ..Default::default()
+            },
+            AgentStatus::Active,
+            Some(2),
+            VisitCounts::default(),
+        );
+        // Opt this agent into a stage log; agents without one (test worlds,
+        // `lev run`) still fire, they just don't get the operator line.
+        world.entity_mut(e).insert(StageIoBuffer::default());
+        run_detect_stuck(&mut world);
+
+        assert!(world.get::<ReadyToInfer>(e).is_none());
+        assert!(world.get::<ResolveTransition>(e).is_some());
+        let reason = stuck_reason_of(world.get::<StageOutcome>(e)).expect("a Stuck outcome");
+        assert!(reason.contains("where.py"), "got: {reason}");
+        // The operator sees why, in the stage log the dashboard renders.
+        let logs = &world.get::<StageIoBuffer>(e).unwrap().logs;
+        assert!(
+            logs.iter().any(|(_, line)| line.starts_with("[stuck]")),
+            "expected a [stuck] log line, got: {logs:?}"
+        );
+        // The diagnosis is in context for the stage that has to act on it.
+        let window = world.get::<ContextWindow>(e).unwrap();
+        let conv = window.get_region("conversation").unwrap();
+        assert!(
+            conv.content.iter().any(|c| c.content.contains("where.py")),
+            "the diagnosis must reach the next stage's context"
+        );
+        assert!(world.get::<StageProgress>(e).unwrap().stuck_fired);
+
+        // One-shot: re-arming the agent must not fire a second time, which is
+        // what stops a ping-pong with resolve_transition's resume arm.
+        world.entity_mut(e).insert(ReadyToInfer);
+        world.entity_mut(e).remove::<ResolveTransition>();
+        run_detect_stuck(&mut world);
+        assert!(world.get::<ResolveTransition>(e).is_none());
+    }
+
+    #[test]
+    fn detect_stuck_stage_stamps_the_stage_clock_on_first_sight() {
+        let mut world = World::new();
+        // Armed on wall clock only: the lazy stamp means turn zero is 0 seconds
+        // in, so a fresh agent must NOT trip.
+        let e = spawn_stuck_agent(
+            &mut world,
+            Some(stuck_cfg(None, Some(10), None, None)),
+            StageProgress::default(),
+            AgentStatus::Active,
+            Some(2),
+            VisitCounts::default(),
+        );
+        assert!(
+            world
+                .get::<StageProgress>(e)
+                .unwrap()
+                .stage_started_at
+                .is_none()
+        );
+        run_detect_stuck(&mut world);
+        assert!(
+            world
+                .get::<StageProgress>(e)
+                .unwrap()
+                .stage_started_at
+                .is_some()
+        );
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert!(world.get::<ResolveTransition>(e).is_none());
+
+        // Backdate the stamp past the threshold and it trips.
+        let mut progress = world.get_mut::<StageProgress>(e).unwrap();
+        progress.stage_started_at = Some(chrono::Utc::now().timestamp() - 11 * 60);
+        run_detect_stuck(&mut world);
+        let reason = stuck_reason_of(world.get::<StageOutcome>(e)).expect("a Stuck outcome");
+        assert!(reason.contains("minutes"), "got: {reason}");
+    }
+
+    #[test]
+    fn detect_stuck_stage_is_a_noop_without_an_available_stuck_edge() {
+        let mut world = World::new();
+        let hot = || StageProgress {
+            iterations: 99,
+            edits_by_path: edits(&[("a.rs", 99)]),
+            ..Default::default()
+        };
+        let cfg = || Some(stuck_cfg(Some(1), None, Some(1), None));
+
+        // (a) the stage declares no stuck edge at all.
+        let no_edge = spawn_stuck_agent(
+            &mut world,
+            None,
+            hot(),
+            AgentStatus::Active,
+            Some(2),
+            VisitCounts::default(),
+        );
+        // (b) the agent is paused/waiting rather than actively working.
+        let paused = spawn_stuck_agent(
+            &mut world,
+            cfg(),
+            hot(),
+            AgentStatus::Idle,
+            Some(2),
+            VisitCounts::default(),
+        );
+        // (c) the escape hatch is spent — the agent must keep working the stage
+        //     (bounded by max_iterations) rather than be kicked out elsewhere.
+        let mut spent = VisitCounts::default();
+        spent.0.insert("b".to_string(), 5);
+        let exhausted = spawn_stuck_agent(
+            &mut world,
+            cfg(),
+            hot(),
+            AgentStatus::Active,
+            Some(2),
+            spent,
+        );
+
+        run_detect_stuck(&mut world);
+        for e in [no_edge, paused, exhausted] {
+            assert!(world.get::<ReadyToInfer>(e).is_some());
+            assert!(world.get::<ResolveTransition>(e).is_none());
+            assert!(stuck_reason_of(world.get::<StageOutcome>(e)).is_none());
+            assert!(!world.get::<StageProgress>(e).unwrap().stuck_fired);
         }
     }
 
@@ -7810,6 +8441,63 @@ mod tests {
         run_transition(&mut world2);
         assert_eq!(world2.get::<StageCursor>(e2).unwrap().index, 1); // linear fall-through
         assert!(world2.get::<StageOutcome>(e2).is_none());
+    }
+
+    #[test]
+    fn resolve_transition_routes_stuck_down_the_stuck_edge() {
+        let mut stuck = conditioned_edge("reassess", TransitionCondition::Stuck);
+        stuck.stuck = Some(stuck_cfg(Some(20), None, None, None));
+        let a = stage_named("a", Some(vec![("s".to_string(), stuck)]), false, None);
+        let reassess = stage_named("reassess", None, false, Some(2));
+        let bp = blueprint(vec![a, reassess]);
+        let mut world = World::new();
+        let e = spawn_outcome_agent(
+            &mut world,
+            bp,
+            StageOutcome::Stuck("looping".to_string()),
+            AgentStatus::Active,
+        );
+        run_transition(&mut world);
+        assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1); // entered reassess
+        assert!(world.get::<StageOutcome>(e).is_none());
+    }
+
+    /// A stuck interrupt fires MID-stage, so when its escape edge is gone the
+    /// agent must go back to work — falling through to a normal transition
+    /// would end a stage the agent never said it had finished (e.g. shunting
+    /// `implement` into `review` with the work half-done).
+    #[test]
+    fn resolve_transition_resumes_the_stage_when_the_stuck_edge_is_gone() {
+        // Stage 'a' has only an ordinary edge to 'b' — no stuck edge at all,
+        // which is what an exhausted revisit budget looks like from here.
+        let a = stage_named(
+            "a",
+            Some(vec![("n".to_string(), plain_edge("b"))]),
+            false,
+            None,
+        );
+        let b = stage_named("b", None, false, None);
+        let bp = blueprint(vec![a, b]);
+        let mut world = World::new();
+        let e = spawn_outcome_agent(
+            &mut world,
+            bp,
+            StageOutcome::Stuck("looping".to_string()),
+            AgentStatus::Active,
+        );
+        run_transition(&mut world);
+
+        assert_eq!(
+            world.get::<StageCursor>(e).unwrap().index,
+            0,
+            "the agent must stay in its current stage"
+        );
+        assert!(
+            world.get::<ReadyToInfer>(e).is_some(),
+            "and go back to work"
+        );
+        assert!(world.get::<ResolveTransition>(e).is_none());
+        assert!(world.get::<StageOutcome>(e).is_none());
     }
 
     // ── required-region gating (#5) ──
@@ -8049,6 +8737,7 @@ mod tests {
                 hint: None,
                 transform: leviath_core::blueprint::EdgeTransform::Direct,
                 gate,
+                stuck: None,
             },
         )
     }
@@ -9333,6 +10022,7 @@ mod tests {
             hint: None,
             transform: leviath_core::blueprint::EdgeTransform::Direct,
             gate: None,
+            stuck: None,
         }
     }
 

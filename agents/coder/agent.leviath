@@ -1,7 +1,7 @@
 [agent]
 name = "coder"
-version = "0.3.0"
-description = "Multi-stage coding agent — discover, analyze, implement, and review with graph-based error recovery and multi-provider model fallback"
+version = "0.4.0"
+description = "Multi-stage coding agent — discover, analyze, optionally prototype, implement, and review, with stuck detection and graph-based error recovery"
 entry_stage = "discover"
 
 # Model selection is an ordered fallback list per stage: the first provider
@@ -97,6 +97,24 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { pro
 description = "Understand requirements and plan the implementation"
 available_tools = ["read_file", "list_dir"]
 max_iterations = 15
+# The prototype back-edge makes analyze re-enterable, so it needs a revisit cap.
+max_revisits = 2
+# Two Always edges out of analyze put it in the LLM-choice lane, so this prompt
+# is what decides whether a task detours through `prototype`. Most tasks should
+# not — the spike is for when the APPROACH is genuinely unknown.
+transition_prompt = """
+Plan ready. Choose where to go next:
+- Respond with `prototype` when the APPROACH is uncertain — you are not sure the
+  API/library/algorithm behaves the way the plan assumes, or you could not pin
+  down where the behavior you need to change actually lives. A ten-line spike
+  settles that far more cheaply than discovering it forty edits into `implement`.
+- Respond with `implement` when the plan is a straightforward application of a
+  pattern that already exists in this codebase, or `discovery` already told you
+  where the change belongs.
+
+Prototyping is not free — only take it when you expect to learn something that
+would change what you write.
+"""
 system_prompt = """
 You are analyzing a coding task to produce a concise implementation plan.
 
@@ -131,10 +149,85 @@ read_file = "codebase"
 list_dir  = "codebase"
 
 [stages.analyze.transitions.implement]
-hint = "Plan ready — begin implementation"
+hint = "The fix location and approach are clear — begin implementation"
+transform = "direct"
+
+[stages.analyze.transitions.prototype]
+hint = "The approach is uncertain — spike it before committing to a full implementation"
 transform = "direct"
 
 [stages.analyze.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# ─── Stage 2b: Prototype (elective) ───────────────────────────────────────────
+# NOT a mandatory hop — `analyze` only routes here when it judges the approach
+# uncertain. The point is to buy information cheaply: prove or kill the riskiest
+# assumption, write down what was ruled out, and REPLACE the plan with one that
+# rests on something that actually ran. `implement` then executes evidence
+# rather than a guess.
+[stages.prototype]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "devstral:24b" }] }
+description = "Spike the riskiest assumption in the plan before committing to it"
+available_tools = ["read_file", "list_dir", "write_file", "edit_file", "bash", "context_write", "context_append"]
+max_iterations = 15
+max_revisits = 2
+transition_prompt = """
+Spike complete. Based on what you actually observed:
+- Respond with `implement` if a hypothesis held up — you now know where the
+  change belongs and what it should do.
+- Respond with `analyze` if every hypothesis failed. The plan rests on a wrong
+  premise, so it needs rewriting rather than executing; what you ruled out is in
+  `prototypes` and will inform the new plan.
+"""
+system_prompt = """
+You are spiking, not implementing. Pick the ONE assumption in the plan that
+would cost the most to discover was wrong, and settle it with the smallest thing
+that actually runs.
+
+1. State the assumption in a sentence.
+2. Prove or disprove it: a throwaway script, a failing test that reproduces the
+   bug, a bash one-liner that greps for where the behavior really lives. Use the
+   VERIFY command from `workflow` — do not invent your own. For a BUGFIX the
+   spike IS the reproduction; do not move on without one.
+3. Append the result to the `prototypes` region (context_append): the
+   assumption, the verdict, the exact command or snippet that settled it, and
+   the file paths you confirmed. Record what you RULED OUT as carefully as what
+   worked — a dead end you don't write down gets retried.
+4. Before you leave, write the corrected approach to the `plan` region
+   (context_write, key "plan") so `implement` executes what you learned.
+
+Keep this to a handful of iterations. You are buying information, not shipping
+code — do not start the real implementation here, and throw away scaffolding you
+created purely to test a hypothesis.
+"""
+
+[stages.prototype.tool_routing]
+default_region = "conversation"
+[stages.prototype.tool_routing.overrides]
+read_file  = "codebase"
+list_dir   = "codebase"
+bash       = "test_results"
+write_file = "implementation"
+edit_file  = "implementation"
+
+[stages.prototype.transitions.implement]
+hint = "A hypothesis held up — implement it properly"
+transform = "compact"
+
+[stages.prototype.transitions.analyze]
+hint = "Every hypothesis failed — the plan's premise is wrong, re-plan"
+transform = "compact"
+
+[stages.prototype.transitions.reassess]
+condition = "stuck"
+stuck_after_iterations = 12
+stuck_after_same_file_edits = 4
+hint = "The spike is going in circles — step back"
+transform = "direct"
+
+[stages.prototype.transitions.error_recovery]
 condition = "error"
 transform = "direct"
 
@@ -220,6 +313,27 @@ hint = "Implementation complete, ready for review"
 transform = "compact"
 gate = { require_modifications = true, region = "implementation" }
 
+# Runtime escape hatch (issue #106). This is the fix for the observed failure
+# mode: ~100 iterations spent editing the wrong file, a working fix broken and
+# never recovered, with no exception ever raised for `error_recovery` to catch.
+# `stuck_after_same_file_edits` is the trigger that actually catches it; the
+# other two are backstops. Bounded by reassess's max_revisits.
+[stages.implement.transitions.reassess]
+condition = "stuck"
+stuck_after_iterations = 20
+stuck_after_minutes = 15
+stuck_after_same_file_edits = 5
+hint = "No forward progress — step back and reassess"
+transform = "custom"
+# `custom`, not `compact`: a plain compact edge would summarize EVERY
+# stage-specific region including `test_results`, which is the raw evidence
+# reassess most needs. Compact only the conversation and leave the rest intact.
+[stages.implement.transitions.reassess.transform_config]
+carry = ["discovery", "workflow", "architecture", "conventions", "task", "plan", "codebase", "implementation", "prototypes", "errors", "test_results", "stuck_report"]
+compact = ["conversation"]
+clear = ["scratch"]
+compact_prompt = "Summarize what was attempted in this stage: which files were edited and how often, which tests were run and their outcome, and the last point at which anything demonstrably worked."
+
 [stages.implement.transitions.error_recovery]
 condition = "error"
 transform = "direct"
@@ -295,6 +409,71 @@ compact_prompt = "Summarize the review findings as a numbered list of required f
 condition = "error"
 transform = "direct"
 
+# ─── Stage 4b: Reassess ───────────────────────────────────────────────────────
+# Reached ONLY via a `stuck` edge (issue #106) — invisible during normal flow,
+# exactly like error_recovery. Deliberately has NO write tools: the whole point
+# is to stop editing and start thinking. It reads the runtime's `stuck_report`
+# (which threshold tripped and why), finds the wrong assumption, and REPLACES
+# the plan before handing back to implement.
+[stages.reassess]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "devstral:24b" }] }
+description = "Step back after no progress: diagnose the dead end and re-plan"
+available_tools = ["read_file", "list_dir", "bash", "context_write", "context_append"]
+max_iterations = 8
+max_revisits = 2
+system_prompt = """
+You are NOT here to write code — you have no write tools on purpose. You were
+pulled out of implementation because you stopped making progress. The
+`stuck_report` region says which threshold tripped and why.
+
+Work through this in order:
+1. Re-read the ORIGINAL task in `task`. State in one sentence what "done" means.
+   Not what the plan says — what the task says. Check it against the DONE WHEN
+   line in `workflow`.
+2. Separate what you have VERIFIED (a command you ran and an output you saw)
+   from what you ASSUMED. `test_results`, `errors` and `implementation` are your
+   evidence. Be honest: the bug is almost always in the assumed column.
+3. Find the wrong assumption. The most common one by far is that you have been
+   editing the wrong file. Use list_dir/read_file and bash (grep) to confirm
+   WHERE the behavior under test actually lives before changing anything else.
+4. If an earlier version worked and a later edit broke it, say so explicitly and
+   make reverting to that state step 1 of the new plan. Use bash (git diff /
+   git status) to see everything this run has changed. A working fix you broke
+   is worth more than a fresh idea.
+
+Then REPLACE the `plan` region (context_write, key "plan") with a corrected
+numbered plan whose FIRST step is the smallest change you can verify with one
+command, and which names explicitly what NOT to touch again. Append one line to
+`errors` naming the dead end so it is not retried.
+"""
+
+[stages.reassess.tool_permissions]
+read_file = "allow"
+list_dir  = "allow"
+bash      = "ask"
+
+# Diagnostic bash output (git diff, greps, test re-runs) persists to test_results.
+[stages.reassess.tool_routing]
+default_region = "conversation"
+[stages.reassess.tool_routing.overrides]
+read_file = "codebase"
+list_dir  = "codebase"
+bash      = "test_results"
+
+[stages.reassess.transitions.implement]
+hint = "Corrected plan in hand — retry implementation"
+transform = "custom"
+[stages.reassess.transitions.implement.transform_config]
+carry = ["discovery", "workflow", "architecture", "conventions", "task", "plan", "codebase", "implementation", "prototypes", "errors", "stuck_report"]
+compact = ["conversation"]
+clear = ["scratch", "test_results"]
+compact_prompt = "Summarize the reassessment as three things: the wrong assumption, the corrected approach, and what must be reverted first."
+
+[stages.reassess.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
 # ─── Stage 5: Error recovery ──────────────────────────────────────────────────
 # Only reachable via error edges — invisible during normal flow.
 [stages.error_recovery]
@@ -349,6 +528,13 @@ conventions  = { kind = "pinned", budget = "2%", max_tokens = 3000, seed = { fil
 # Pre-loaded on startup: architecture / design docs (missing files skipped).
 architecture = { kind = "pinned", budget = "3%", max_tokens = 6000, seed = { files = ["ARCHITECTURE.md", "DESIGN.md", "docs/ARCHITECTURE.md", "docs/architecture.md", "README.md"] } }
 plan         = { kind = "pinned", budget = "3%", max_tokens = 4000 }
+# Verified findings from a `prototype` spike: the assumption, the verdict, and
+# the command that settled it — including what was RULED OUT. Pinned so neither
+# implement nor reassess redoes the spike.
+prototypes   = { kind = "pinned", budget = "4%", max_tokens = 6000 }
+# Written by the RUNTIME when a `stuck` edge fires (issue #106): which threshold
+# tripped and why. Pinned so it survives the edge transform into `reassess`.
+stuck_report = { kind = "pinned", budget = "1%", max_tokens = 2000 }
 
 # ── Discovery (issue #108): written by the discover stage, read by every later
 # stage. Pinned, so no edge transform can clear or compact them. `required` puts
