@@ -22,7 +22,9 @@ use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use bevy_ecs::entity::Entity;
 use leviath_core::interaction::{ApprovalScope, InteractionRequest};
 use leviath_providers::ToolCall;
-use leviath_runtime::dynamic_interaction::{InteractionBackend, dispatch_dynamic_interaction};
+use leviath_runtime::dynamic_interaction::{
+    InteractionBackend, UnattendedInteraction, dispatch_dynamic_interaction,
+};
 use leviath_runtime::interaction_hub::HubInteractionBackend;
 use leviath_runtime::pipeline::ToolService;
 use leviath_runtime::tool_bridge::BoxedToolExec;
@@ -60,6 +62,10 @@ pub struct AgentToolState {
     pub global_perms: Arc<HashMap<String, ToolPolicy>>,
     /// The agent's interaction backend (ask_user + tool approvals).
     pub interaction: HubInteractionBackend,
+    /// `--yolo`: nobody is watching this run, so `ask_user_*` /
+    /// `present_for_review` / `edit_document` are answered by
+    /// [`UnattendedInteraction`] rather than parked on the hub forever.
+    pub unattended: bool,
     /// The current stage name, for tagging interactions (re-synced on stage change).
     pub stage_name: Arc<StdMutex<String>>,
     /// Handle for the sub-agent tools (spawn/check/wait/send/kill), or `None`
@@ -207,15 +213,16 @@ pub async fn dispatch_tools(
     let mut queued: Vec<(usize, bool, ToolCall)> = Vec::new();
     for tc in calls {
         let slot = slots.len();
-        // ask_user_* / present_for_review are handled by the interaction backend.
-        if let Some(result) = dispatch_dynamic_interaction(
-            &state.interaction,
-            &tc.name,
-            &tc.id,
-            &tc.arguments,
-            &stage_name,
-        )
-        .await
+        // ask_user_* / present_for_review are handled by the interaction backend
+        // — the hub (a real person answers) or, for an unattended `--yolo` run,
+        // the auto-answering one.
+        let interaction: &dyn InteractionBackend = match state.unattended {
+            true => &UnattendedInteraction,
+            false => &state.interaction,
+        };
+        if let Some(result) =
+            dispatch_dynamic_interaction(interaction, &tc.name, &tc.id, &tc.arguments, &stage_name)
+                .await
         {
             slots.push((tc.id, Some(result)));
             continue;
@@ -510,6 +517,7 @@ mod tests {
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(global),
             interaction: hub.backend_for("agent-a"),
+            unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
@@ -583,6 +591,7 @@ mod tests {
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(global),
             interaction: hub.backend_for("agent-a"),
+            unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
@@ -654,6 +663,7 @@ mod tests {
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(allow),
             interaction: hub.backend_for("a"),
+            unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
@@ -860,6 +870,7 @@ mod tests {
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(allow),
             interaction: hub.backend_for("a"),
+            unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
@@ -1036,6 +1047,7 @@ mod tests {
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(global),
             interaction: hub.backend_for("agent-a"),
+            unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
@@ -1119,6 +1131,7 @@ mod tests {
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(HashMap::new()),
             interaction: hub.backend_for("a"),
+            unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
             sandbox: None,
@@ -1302,6 +1315,7 @@ mod tests {
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(HashMap::new()),
             interaction: hub.backend_for("agent-a"),
+            unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: Some(handle),
             sandbox: None,
@@ -1362,6 +1376,28 @@ mod tests {
         assert_eq!(out[0].0, "c1");
         // Once-scope approval does not persist.
         assert!(!state.session_allows.lock().await.contains("read_file"));
+    }
+
+    #[tokio::test]
+    async fn unattended_run_answers_ask_user_itself_instead_of_opening_a_prompt() {
+        // `--yolo` sets `unattended`, so `ask_user_confirm` resolves inline. With
+        // a live hub and nobody answering, the attended path would block here
+        // forever — this test finishing at all is the assertion (#107).
+        let hub = InteractionHub::new();
+        let mut state =
+            (*state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new())).clone();
+        state.unattended = true;
+        let out = dispatch_tools(
+            Arc::new(state),
+            vec![call(
+                "c1",
+                "ask_user_confirm",
+                serde_json::json!({"prompt": "proceed?"}),
+            )],
+        )
+        .await;
+        assert_eq!(out[0].1, "User answered: Yes");
+        assert!(hub.pending().is_empty(), "no prompt was opened");
     }
 
     #[tokio::test]

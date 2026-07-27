@@ -440,6 +440,7 @@ pub fn dispatch_interaction_point(
             Option<&InteractionPointCursor>,
             Option<&InteractionPointRounds>,
             Option<&PlanBodyOverride>,
+            Option<&crate::components::InteractionAutoApprove>,
         ),
         With<ReadyForInteractionPoint>,
     >,
@@ -451,7 +452,7 @@ pub fn dispatch_interaction_point(
     let (Some(hub), Some(stage)) = (hub, stage) else {
         return; // no lane wired (test world)
     };
-    for (entity, state, bp, cursor, infer, mut window, pc, rounds, plan_override) in
+    for (entity, state, bp, cursor, infer, mut window, pc, rounds, plan_override, auto_approve) in
         agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
@@ -488,6 +489,29 @@ pub fn dispatch_interaction_point(
             };
             let tokens = content.len() / 4 + 1;
             window.replace_region(region, content, tokens);
+        }
+        // An unattended run (`--yolo`) approves the checkpoint instead of
+        // opening a prompt nobody will answer. The document was published to its
+        // region above, so what was approved is still on the record.
+        if auto_approve.is_some() {
+            tracing::info!(
+                agent = %state.agent_id,
+                point = %point.name,
+                "auto-approving interaction point (unattended run)"
+            );
+            let _ = stage.outcomes.send(InteractionPointOutcome {
+                entity,
+                decision: PointOutcome::Approve {
+                    user_text: String::new(),
+                },
+            });
+            stage.wake.notify_one();
+            commands
+                .entity(entity)
+                .remove::<ReadyForInteractionPoint>()
+                .remove::<PlanBodyOverride>()
+                .insert(AwaitingInteractionPoint);
+            continue;
         }
         stage.runtime.spawn(run_interaction_point(
             entity,
@@ -1031,6 +1055,57 @@ mod tests {
             .get_region("plan")
             .unwrap();
         assert_eq!(plan.content.len(), 1);
+        assert_eq!(plan.content[0].content, "the plan");
+    }
+
+    #[tokio::test]
+    async fn dispatch_auto_approves_an_unattended_run_without_asking() {
+        // `--yolo` means nobody is watching, so a stage-boundary checkpoint must
+        // resolve itself rather than park the run on the hub forever (#107).
+        let hub = InteractionHub::new();
+        let (tx, mut rx) = unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(hub.clone());
+        world.insert_resource(InteractionPointStage {
+            outcomes: tx,
+            wake: Arc::new(Notify::new()),
+            runtime: Handle::current(),
+        });
+        let e = world
+            .spawn((
+                agent_state(AgentStatus::Active),
+                blueprint_with(vec![plan_point()]),
+                window_with_plan(),
+                StageCursor { index: 0 },
+                infer("the plan"),
+                ReadyForInteractionPoint,
+                crate::components::InteractionAutoApprove,
+            ))
+            .id();
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_interaction_point);
+        s.run(&mut world);
+
+        assert!(world.get::<AwaitingInteractionPoint>(e).is_some());
+        assert!(world.get::<ReadyForInteractionPoint>(e).is_none());
+        // Approved straight onto the outcome lane; no prompt was ever opened.
+        let outcome = rx.try_recv().expect("an outcome was published");
+        assert_eq!(outcome.entity, e);
+        assert!(matches!(
+            outcome.decision,
+            PointOutcome::Approve { ref user_text } if user_text.is_empty()
+        ));
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(hub.pending().is_empty(), "no human was asked");
+        // The approved document still landed in its region, so what was waved
+        // through is on the record.
+        let plan = world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .get_region("plan")
+            .unwrap();
         assert_eq!(plan.content[0].content, "the plan");
     }
 
