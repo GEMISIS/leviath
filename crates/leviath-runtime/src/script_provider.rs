@@ -92,55 +92,85 @@ impl ScriptProviderLayer {
 
     /// Get (or lazily load / reload) the provider named `name`, or `None` when
     /// there is no such script or it fails to load.
+    ///
+    /// The cache lock is taken three times — a read, then a write on whichever
+    /// arm the compile lands on — and is **never held across
+    /// `RhaiProvider::from_script`**, which parses and initializes an arbitrary
+    /// user-authored `.rhai` file. That call is the slowest and least
+    /// trustworthy thing this layer does; holding a process-wide lock across it
+    /// serialized every agent's provider lookup behind one compile, and a panic
+    /// inside it poisoned the cache for the whole daemon (issue #109).
+    ///
+    /// The cost is that two callers racing on the same cold name may both
+    /// compile it. Both get a working provider and the later `insert` wins —
+    /// wasted work, never a wrong answer, and it self-corrects on the next
+    /// lookup because entries are validated by mtime.
     pub fn get_or_load(&self, name: &str) -> Option<Arc<dyn Provider>> {
         let path = self.resolve_path(name);
-        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let Some(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()).ok() else {
+            // File gone (or unreadable): drop any stale entry, no provider.
+            self.evict(name);
+            return None;
+        };
+        if let Some(cached) = self.cached_fresh(name, mtime) {
+            return Some(cached);
+        }
 
-        let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
-        match mtime {
-            None => {
-                // File gone (or unreadable): drop any stale entry, no provider.
-                cache.remove(name);
+        let spec = self.overrides.get(name);
+        let init_config = spec
+            .map(|s| s.init_config.clone())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let rate_limit = spec.and_then(|s| s.rate_limit.clone());
+        // No lock held here — see the note above.
+        match RhaiProvider::from_script(
+            name.to_string(),
+            &path,
+            init_config,
+            self.default_caps.clone(),
+            rate_limit,
+            self.request_timeout_secs,
+        ) {
+            Ok(p) => {
+                let provider: Arc<dyn Provider> = Arc::new(p);
+                self.cache
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(
+                        name.to_string(),
+                        Cached {
+                            mtime,
+                            provider: provider.clone(),
+                        },
+                    );
+                Some(provider)
+            }
+            Err(e) => {
+                self.evict(name);
+                tracing::warn!(provider = %name, error = %e, "script provider load failed");
                 None
             }
-            Some(mtime) => {
-                if let Some(c) = cache.get(name)
-                    && c.mtime == mtime
-                {
-                    return Some(c.provider.clone());
-                }
-                let spec = self.overrides.get(name);
-                let init_config = spec
-                    .map(|s| s.init_config.clone())
-                    .unwrap_or_else(|| serde_json::json!({}));
-                let rate_limit = spec.and_then(|s| s.rate_limit.clone());
-                match RhaiProvider::from_script(
-                    name.to_string(),
-                    &path,
-                    init_config,
-                    self.default_caps.clone(),
-                    rate_limit,
-                    self.request_timeout_secs,
-                ) {
-                    Ok(p) => {
-                        let provider: Arc<dyn Provider> = Arc::new(p);
-                        cache.insert(
-                            name.to_string(),
-                            Cached {
-                                mtime,
-                                provider: provider.clone(),
-                            },
-                        );
-                        Some(provider)
-                    }
-                    Err(e) => {
-                        cache.remove(name);
-                        tracing::warn!(provider = %name, error = %e, "script provider load failed");
-                        None
-                    }
-                }
-            }
         }
+    }
+
+    /// The cached provider for `name`, but only if it was built from the script
+    /// as it is on disk right now. Holds the lock just long enough to clone an
+    /// `Arc`.
+    fn cached_fresh(&self, name: &str, mtime: SystemTime) -> Option<Arc<dyn Provider>> {
+        let cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
+        let cached = cache.get(name)?;
+        if cached.mtime == mtime {
+            Some(cached.provider.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Drop any cached entry for `name`.
+    fn evict(&self, name: &str) {
+        self.cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(name);
     }
 }
 

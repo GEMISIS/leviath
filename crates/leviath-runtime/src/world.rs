@@ -425,12 +425,12 @@ impl PipelineWorld {
     /// every wake and panic again indefinitely (issue #109).
     pub fn tick(&mut self) -> TickOutcome {
         let Err(panicked) = run_isolated(&mut self.schedule, &mut self.world) else {
-            return TickOutcome::Clean;
+            // A clean unwind doesn't mean a clean tick: work that ran on the
+            // compute pool catches its own panics, since they can't unwind back
+            // here, and leaves a marker instead.
+            return self.fail_agents_panicked_in_parallel();
         };
-        let message = format!(
-            "internal error: a pipeline system panicked: {}",
-            panicked.message
-        );
+        let message = panic_status_message(&panicked.message);
         match panicked.entity {
             Some(entity) if self.set_status(entity, AgentStatus::Error { message }) => {
                 tracing::error!(
@@ -450,6 +450,38 @@ impl PipelineWorld {
                 TickOutcome::Unattributed
             }
         }
+    }
+
+    /// Fail every agent that a compute-pool body marked
+    /// [`PanickedInParallel`](crate::tick_scope::PanickedInParallel), and report
+    /// whether there were any.
+    ///
+    /// These panics were caught on a task-pool thread rather than unwinding into
+    /// `tick`, so the marker component is how they reach the driver — but from
+    /// here on they are handled exactly like an attributed unwind: the agent is
+    /// failed, stops being driven, and its run persists as errored.
+    fn fail_agents_panicked_in_parallel(&mut self) -> TickOutcome {
+        let mut query = self
+            .world
+            .query::<(Entity, &crate::tick_scope::PanickedInParallel)>();
+        let failed: Vec<(Entity, String)> = query
+            .iter(&self.world)
+            .map(|(entity, p)| (entity, p.message.clone()))
+            .collect();
+        if failed.is_empty() {
+            return TickOutcome::Clean;
+        }
+        for (entity, message) in failed {
+            self.world
+                .entity_mut(entity)
+                .remove::<crate::tick_scope::PanickedInParallel>();
+            let status = AgentStatus::Error {
+                message: panic_status_message(&message),
+            };
+            // The entity came straight out of the query above, so it exists.
+            let _ = self.set_status(entity, status);
+        }
+        TickOutcome::AgentFailed
     }
 
     /// Append a system to the schedule (test-only, for panic-isolation tests).
@@ -555,6 +587,13 @@ impl PipelineWorld {
             }
         }
     }
+}
+
+/// How a caught panic is recorded on the agent it is blamed on. Shared by the
+/// unwind path and the compute-pool path so a run's `error` reads the same
+/// either way.
+fn panic_status_message(panic: &str) -> String {
+    format!("internal error: a pipeline system panicked: {panic}")
 }
 
 /// A panic caught while ticking the schedule, and the agent it belongs to.
@@ -883,6 +922,53 @@ mod tests {
         world.add_test_system(boom_system);
         // Unattributed: nothing to fail, so the round stops immediately.
         with_silent_panics(|| world.run_to_fixed_point());
+    }
+
+    #[tokio::test]
+    async fn a_panic_on_the_compute_pool_is_attributed_to_its_agent() {
+        // `dispatch_inference` fans its per-agent work out over the compute task
+        // pool, where the thread-local scope can't reach the driver thread that
+        // catches unwinds. Those bodies run under `run_agent_parallel`, which
+        // catches on the pool thread and marks the agent instead — this proves
+        // the marker makes it back and fails the right run (issue #109).
+        fn boom_in_parallel(
+            agents: Query<(Entity, &AgentState)>,
+            par_commands: bevy_ecs::system::ParallelCommands,
+        ) {
+            agents.par_iter().for_each(|(entity, state)| {
+                if state.status != AgentStatus::Active {
+                    return; // already failed — nothing left to blow up
+                }
+                // Clear the thread-local first: whatever attributes this panic,
+                // it is demonstrably not the `enter`/`current` mechanism.
+                crate::tick_scope::clear();
+                crate::tick_scope::run_agent_parallel(entity, &par_commands, &mut || {
+                    panic!("blew up on the compute pool");
+                });
+            });
+        }
+
+        let mut world = build_world(ProviderRegistry::new());
+        let entity = spawn(&mut world);
+        world.add_test_system(boom_in_parallel);
+        with_silent_panics(|| world.run_to_fixed_point());
+
+        let status = world.agent_status(entity);
+        assert!(
+            matches!(status, Some(AgentStatus::Error { ref message })
+                if message.contains("a pipeline system panicked")
+                    && message.contains("blew up on the compute pool")),
+            "got: {status:?}"
+        );
+        // The marker is consumed, so a later tick doesn't re-fail the agent.
+        assert!(
+            world
+                .world()
+                .entity(entity)
+                .get::<crate::tick_scope::PanickedInParallel>()
+                .is_none(),
+            "the marker must be drained once acted on"
+        );
     }
 
     #[tokio::test]
