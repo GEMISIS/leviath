@@ -64,6 +64,11 @@ fn ensure_private_with(
     }
 }
 
+/// The calling user's real numeric id.
+pub(crate) fn current_uid() -> u32 {
+    nix::unistd::getuid().as_raw()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

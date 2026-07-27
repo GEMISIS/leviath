@@ -33,6 +33,11 @@ pub enum DaemonAction {
     Status,
     /// Restart the daemon (stop, then start) — reloading persisted agents.
     Restart,
+    /// Register the daemon with the OS supervisor (launchd / systemd --user) so
+    /// it starts at login and is restarted automatically if it ever dies.
+    Install,
+    /// Deregister the daemon from the OS supervisor.
+    Uninstall,
 }
 
 /// Ask the daemon to shut down and report the outcome.

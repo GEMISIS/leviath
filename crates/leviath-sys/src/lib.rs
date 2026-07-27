@@ -37,7 +37,7 @@ pub mod tty;
 
 pub use browser::{open_url, open_url_via};
 pub use perms::{ensure_file_private, secure_dir_perms, secure_file_perms};
-pub use process::configure_detached;
+pub use process::{configure_detached, current_uid};
 pub use sandbox::{
     ContainerRunSpec, KNOWN_ENGINES, container_exec_argv, container_rm_argv, container_run_argv,
     detect_container_engine, namespace_argv, namespace_supported,
