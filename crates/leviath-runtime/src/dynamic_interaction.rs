@@ -110,6 +110,50 @@ pub trait InteractionBackend: Send + Sync {
     }
 }
 
+/// What an unattended run tells the model when a question needed a person.
+pub const UNATTENDED_NO_ANSWER: &str =
+    "[unattended run] No user was available to answer (--yolo). Decide for yourself and continue.";
+
+/// The answer an unattended run (`--yolo`) gives a request nobody is there to
+/// see.
+///
+/// `--yolo` means "run without a human", so a prompt that blocks on one would
+/// park the run forever — a headless run would hang at the first
+/// `ask_user_confirm` (issue #107).
+///
+/// A confirmation is approved: that is exactly what the flag promises. A
+/// *choice* is deliberately **not** made — picking option 0 unseen could select
+/// "Abort" or a destructive branch — so the model is told no one answered and
+/// left to decide. An edit submits the document unchanged, and a document put up
+/// for review is acknowledged without comment (a review is a `FreeText` request
+/// carrying a `body`; a question is one without).
+pub fn unattended_answer(req: &InteractionRequest) -> InteractionResponse {
+    use leviath_core::interaction::InteractionKind;
+    match req.kind {
+        InteractionKind::Confirm | InteractionKind::ToolApproval => {
+            InteractionResponse::approval(&req.id, true, ApprovalScope::Once)
+        }
+        InteractionKind::EditText => {
+            InteractionResponse::text(&req.id, req.body.clone().unwrap_or_default())
+        }
+        InteractionKind::FreeText if req.body.is_some() => InteractionResponse::text(&req.id, ""),
+        InteractionKind::FreeText | InteractionKind::MultipleChoice => {
+            InteractionResponse::text(&req.id, UNATTENDED_NO_ANSWER)
+        }
+    }
+}
+
+/// An [`InteractionBackend`] for unattended runs: answers every request from
+/// [`unattended_answer`] instead of opening a prompt on the hub.
+pub struct UnattendedInteraction;
+
+#[async_trait]
+impl InteractionBackend for UnattendedInteraction {
+    async fn ask(&self, req: InteractionRequest) -> InteractionResponse {
+        unattended_answer(&req)
+    }
+}
+
 /// Dispatch a single dynamic-interaction tool call.
 ///
 /// Returns `Some(result_string)` if `tool_name` is one of
@@ -879,5 +923,87 @@ mod tests {
             text_asker,
         );
         assert_eq!(r, GateResolution::AllowOnce);
+    }
+
+    // ── unattended (--yolo) answers ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn unattended_answers_every_prompt_without_a_hub() {
+        // Issue #107: `--yolo` means "run without a human", so a prompt that
+        // waits for one parks the run forever. Every dynamic-interaction tool
+        // must come back with something the model can act on.
+        let backend = UnattendedInteraction;
+
+        // A confirmation is approved — that is what the flag promises.
+        let confirmed = dispatch_dynamic_interaction(
+            &backend,
+            "ask_user_confirm",
+            "c1",
+            &serde_json::json!({"prompt": "Delete the branch?"}),
+            "implement",
+        )
+        .await
+        .unwrap();
+        assert_eq!(confirmed, "User answered: Yes");
+
+        // A *choice* is deliberately left unmade: picking an option unseen could
+        // select "Abort" or a destructive branch, so the model is told nobody
+        // answered and decides for itself.
+        let chosen = dispatch_dynamic_interaction(
+            &backend,
+            "ask_user_choice",
+            "c2",
+            &serde_json::json!({"prompt": "Which?", "options": ["Ship it", "Abort"]}),
+            "implement",
+        )
+        .await
+        .unwrap();
+        assert!(chosen.contains(UNATTENDED_NO_ANSWER), "got: {chosen}");
+        assert!(!chosen.contains("Abort"), "no option may be picked blind");
+
+        // Free text says so plainly.
+        let answered = dispatch_dynamic_interaction(
+            &backend,
+            "ask_user_text",
+            "c3",
+            &serde_json::json!({"prompt": "Which database?"}),
+            "implement",
+        )
+        .await
+        .unwrap();
+        assert_eq!(answered, UNATTENDED_NO_ANSWER);
+
+        // A review is acknowledged, and an edit submits the document unchanged.
+        let reviewed = dispatch_dynamic_interaction(
+            &backend,
+            "present_for_review",
+            "c4",
+            &serde_json::json!({"title": "Plan", "markdown": "# Plan"}),
+            "plan",
+        )
+        .await
+        .unwrap();
+        assert!(reviewed.contains("acknowledged"), "got: {reviewed}");
+
+        let edited = dispatch_dynamic_interaction(
+            &backend,
+            "edit_document",
+            "c5",
+            &serde_json::json!({"content": "keep me"}),
+            "plan",
+        )
+        .await
+        .unwrap();
+        assert!(edited.contains("keep me"), "got: {edited}");
+    }
+
+    #[test]
+    fn unattended_answer_approves_a_tool_approval() {
+        // The tool-policy layer normally short-circuits these under --yolo, so
+        // cover the arm directly.
+        let req = InteractionRequest::tool_approval("t1", "shell", serde_json::json!({}), "impl");
+        let resp = unattended_answer(&req);
+        assert!(leviath_core::interaction::response_approved(&resp));
+        assert_eq!(resp.scope, Some(ApprovalScope::Once));
     }
 }

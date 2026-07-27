@@ -703,6 +703,24 @@ impl BuiltinTools {
         }
     }
 
+    /// Refuse to create anything when the working directory itself is gone.
+    ///
+    /// `write_file` calls `create_dir_all`, which would otherwise silently
+    /// resurrect a workspace an external harness deleted mid-run — leaving the
+    /// agent writing into an empty tree that no longer resembles the checkout it
+    /// reasoned about, and masking the loss from the runtime's health check
+    /// (issue #107). Creating *sub*directories inside a live workspace is
+    /// untouched; only a missing workspace root is refused.
+    fn ensure_workspace(&self) -> Result<(), String> {
+        if std::fs::metadata(&self.ctx.workdir).is_ok_and(|m| m.is_dir()) {
+            return Ok(());
+        }
+        Err(format!(
+            "[error] workspace '{}' is no longer accessible",
+            self.ctx.workdir.display()
+        ))
+    }
+
     /// Resolve a requested path to an absolute path inside the workdir.
     ///
     /// Rejects paths that would escape the working directory via `../` components.
@@ -800,6 +818,9 @@ impl BuiltinTools {
             Some(c) => c,
             None => return "[error] missing 'content' argument".to_string(),
         };
+        if let Err(e) = self.ensure_workspace() {
+            return e;
+        }
 
         let path = match self.resolve(path_str) {
             Ok(p) => p,
@@ -845,6 +866,9 @@ impl BuiltinTools {
             Some(s) => s,
             None => return "[error] missing 'new_str' argument".to_string(),
         };
+        if let Err(e) = self.ensure_workspace() {
+            return e;
+        }
 
         let path = match self.resolve(path_str) {
             Ok(p) => p,
@@ -1390,6 +1414,36 @@ mod tests {
             .await;
         assert!(result.contains("Successfully wrote"));
         assert!(dir.path().join("sub/dir/file.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn write_tools_refuse_to_resurrect_a_deleted_workspace() {
+        // Issue #107: an external harness deletes the workspace mid-run.
+        // `create_dir_all` would happily recreate it and let the agent write
+        // into an empty tree that no longer resembles the checkout it reasoned
+        // about — and the runtime's health check, which just stats the workdir,
+        // would never see it was gone.
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().join("workspace");
+        fs::create_dir(&workdir).unwrap();
+        fs::write(workdir.join("a.txt"), "before").unwrap();
+        let tools = make_tools(&workdir);
+        fs::remove_dir_all(&workdir).unwrap();
+
+        for (tool, args) in [
+            ("write_file", json!({"path": "a.txt", "content": "after"})),
+            (
+                "edit_file",
+                json!({"path": "a.txt", "old_str": "before", "new_str": "after"}),
+            ),
+        ] {
+            let result = tools.execute(tool, args).await;
+            assert!(
+                result.contains("workspace") && result.contains("no longer accessible"),
+                "{tool} got: {result}"
+            );
+        }
+        assert!(!workdir.exists(), "the workspace must stay gone");
     }
 
     #[tokio::test]

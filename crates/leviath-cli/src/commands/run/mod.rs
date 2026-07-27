@@ -34,7 +34,8 @@ pub struct RunArgs {
     #[arg(short, long)]
     pub model: Option<String>,
 
-    /// Approve every tool call without prompting.
+    /// Run unattended: approve every tool call, and answer the agent's own
+    /// prompts (ask_user_*, plan approvals) instead of waiting for a person.
     #[arg(long)]
     pub yolo: bool,
 

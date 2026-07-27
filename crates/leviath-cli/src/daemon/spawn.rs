@@ -291,6 +291,7 @@ fn build_tool_state(
     script_tool_names: HashSet<String>,
     script_host: Arc<dyn leviath_scripting::ScriptHost>,
     dynamic: Option<Arc<crate::daemon::tool_service::DynamicToolCtx>>,
+    unattended: bool,
 ) -> Arc<AgentToolState> {
     let entry_perms = stage_perms_by_index
         .get(entry_index)
@@ -307,6 +308,7 @@ fn build_tool_state(
         agent_perms: Arc::new(agent_perms),
         global_perms: Arc::new(config.tool_permissions.clone()),
         interaction: hub.backend_for(run_id),
+        unattended,
         stage_name: Arc::new(StdMutex::new(entry_stage.to_string())),
         subagent,
         sandbox,
@@ -761,6 +763,16 @@ fn build_agent_inner(
             // by `recovery::reload_persisted_agents`.
             leviath_runtime::persistence::RunOutcomeFlags::default(),
         ));
+        // `--yolo` means run unattended, so a blueprint's stage-boundary
+        // checkpoints are approved rather than parked on a hub nobody is
+        // watching. (`.then_some(..).into_iter()` keeps the non-yolo path
+        // branch-free, matching the taint-gate marker below.)
+        args.yolo
+            .then_some(leviath_runtime::components::InteractionAutoApprove)
+            .into_iter()
+            .for_each(|marker| {
+                entity_mut.insert(marker);
+            });
         // `Option`'s iterator inserts compaction settings when present without a
         // dangling `if let` block-end region.
         compaction.into_iter().for_each(|cc| {
@@ -876,6 +888,7 @@ fn build_agent_inner(
         script_tool_names,
         script_host,
         dynamic,
+        args.yolo,
     );
     tool_service.register(entity, state);
 
@@ -1442,6 +1455,49 @@ mod tests {
                 .get::<leviath_runtime::components::GateAutoApprove>(entity)
                 .is_some()
         );
+        // ...and likewise for the blueprint's own stage-boundary checkpoints and
+        // the agent's `ask_user_*` tools (#107): unattended means unattended.
+        assert!(
+            world
+                .world()
+                .get::<leviath_runtime::components::InteractionAutoApprove>(entity)
+                .is_some()
+        );
+        assert!(cli.take(entity).expect("tool state registered").unattended);
+    }
+
+    #[tokio::test]
+    async fn build_agent_without_yolo_keeps_prompts_interactive() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"plain\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let entity = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+            sub_tx(),
+        )
+        .expect("spawn succeeds");
+        assert!(
+            world
+                .world()
+                .get::<leviath_runtime::components::InteractionAutoApprove>(entity)
+                .is_none()
+        );
+        assert!(!cli.take(entity).expect("tool state registered").unattended);
     }
 
     #[tokio::test]

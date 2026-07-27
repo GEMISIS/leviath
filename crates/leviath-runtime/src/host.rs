@@ -61,7 +61,10 @@ pub struct SpawnArgs {
     /// Optional shared secret for HMAC-SHA256 signing the webhook body.
     #[serde(default)]
     pub callback_secret: Option<String>,
-    /// Approve every tool call for this run (the `--yolo` launch override).
+    /// Run this agent unattended (the `--yolo` launch override): approve every
+    /// tool call, waive the taint gate, and auto-answer the agent's own prompts
+    /// (`ask_user_*`, blueprint interaction points) rather than parking on the
+    /// interaction hub for a person who isn't there.
     #[serde(default)]
     pub yolo: bool,
     /// Tools to allow outright for this run (the `--allow` launch override).

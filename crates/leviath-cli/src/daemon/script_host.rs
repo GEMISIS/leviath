@@ -286,6 +286,14 @@ impl ScriptHost for DaemonScriptHost {
         if !self.allow.write_file {
             return Err(denied("write_file"));
         }
+        // Same rule as the built-in write tools: never let `create_dir_all`
+        // resurrect a workspace that disappeared mid-run (issue #107).
+        if !std::fs::metadata(&self.workdir).is_ok_and(|m| m.is_dir()) {
+            return Err(format!(
+                "workspace '{}' is no longer accessible",
+                self.workdir.display()
+            ));
+        }
         let resolved = self.resolve_in_workdir(path)?;
         self.io.write_file(&resolved, content)
     }
@@ -659,6 +667,25 @@ mod tests {
             write_file: false,
             env_var: false,
         }
+    }
+
+    #[test]
+    fn script_write_refuses_a_deleted_workspace() {
+        // Same rule as the built-in write tools (#107): a script may not
+        // resurrect a workspace that disappeared out from under the run.
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().join("gone");
+        let io = RecordingIo::arc();
+        let host = DaemonScriptHost::with_io(all_allowed(), workdir.clone(), io.clone());
+        let err = host.write_file("out.txt", "body").unwrap_err();
+        assert!(err.contains("no longer accessible"), "got: {err}");
+        assert!(
+            io.calls.lock().unwrap().is_empty(),
+            "the io layer never ran"
+        );
+        // A live workspace still writes.
+        std::fs::create_dir(&workdir).unwrap();
+        assert_eq!(host.write_file("out.txt", "body").unwrap(), "w");
     }
 
     #[test]
