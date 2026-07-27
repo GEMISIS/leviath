@@ -13,7 +13,7 @@
 //! agents, which is acceptable (the lane becomes a pool later).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use bevy_ecs::prelude::Resource;
 use leviath_core::interaction::{InteractionRequest, InteractionResponse};
@@ -69,14 +69,17 @@ impl InteractionHub {
     async fn submit(&self, agent_id: &str, request: InteractionRequest) -> InteractionResponse {
         let id = request.id.clone();
         let (responder, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(
-            id.clone(),
-            PendingEntry {
-                agent_id: agent_id.to_string(),
-                request,
-                responder,
-            },
-        );
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                id.clone(),
+                PendingEntry {
+                    agent_id: agent_id.to_string(),
+                    request,
+                    responder,
+                },
+            );
         // Wake the driver so it ticks and reflects this open request into the
         // agent's status (Active → Waiting) for the dashboard to surface.
         self.nudge();
@@ -90,7 +93,7 @@ impl InteractionHub {
     pub fn pending(&self) -> Vec<(String, InteractionRequest)> {
         self.pending
             .lock()
-            .unwrap()
+            .unwrap_or_else(PoisonError::into_inner)
             .values()
             .map(|e| (e.agent_id.clone(), e.request.clone()))
             .collect()
@@ -99,7 +102,11 @@ impl InteractionHub {
     /// Answer an open request. Returns `false` if no request with that id is
     /// open (already answered, cancelled, or never existed).
     pub fn answer(&self, response: InteractionResponse) -> bool {
-        let entry = self.pending.lock().unwrap().remove(&response.request_id);
+        let entry = self
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&response.request_id);
         match entry {
             Some(entry) => {
                 // The awaiting `submit` may have gone away (agent despawned); a
@@ -118,7 +125,12 @@ impl InteractionHub {
     /// Returns `false` if no such request is open.
     pub fn cancel(&self, request_id: &str) -> bool {
         // Dropping the entry drops its responder, waking `submit` with an error.
-        let removed = self.pending.lock().unwrap().remove(request_id).is_some();
+        let removed = self
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(request_id)
+            .is_some();
         if removed {
             self.nudge();
         }
@@ -164,6 +176,27 @@ mod tests {
         for _ in 0..8 {
             tokio::task::yield_now().await;
         }
+    }
+
+    #[test]
+    fn a_poisoned_registry_still_serves_every_other_agent() {
+        // `pending` holds *every* agent's open prompt. A panic while holding it
+        // used to poison it, after which `pending()`/`answer()`/`cancel()`
+        // panicked for all agents and the dashboard (issue #109).
+        let hub = InteractionHub::new();
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {})); // silence the deliberate panic
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = hub.pending.lock().expect("fresh lock");
+            panic!("a panic while holding the interaction registry");
+        }));
+        std::panic::set_hook(prev);
+        assert!(poisoned.is_err());
+        assert!(hub.pending.is_poisoned(), "the lock really is poisoned");
+
+        assert!(hub.pending().is_empty());
+        assert!(!hub.cancel("nope"));
+        assert!(!hub.answer(InteractionResponse::text("nope", "x")));
     }
 
     #[tokio::test]

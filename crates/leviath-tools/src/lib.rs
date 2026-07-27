@@ -6,7 +6,7 @@ use leviath_providers::Tool;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
@@ -141,7 +141,10 @@ impl ToolContext {
     /// briefly to look up / insert; the returned per-file lock is what callers
     /// `.await` on across their read-modify-write.
     fn lock_for(&self, path: &Path) -> Arc<tokio::sync::Mutex<()>> {
-        let mut map = self.file_locks.lock().unwrap();
+        let mut map = self
+            .file_locks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         map.entry(path.to_path_buf())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
