@@ -106,12 +106,17 @@ fn print_agent_listing(
     exe_dir: Option<&Path>,
     config: &Config,
 ) -> anyhow::Result<()> {
-    let mut found_anything = false;
+    // Tracks whether the user has any agent they can actually *run*. The
+    // bundled catalog deliberately does not count: it is always non-empty, and
+    // treating it as "you have agents" would suppress the get-started guidance
+    // for exactly the person who needs it — someone with a fresh install and
+    // nothing installed yet.
+    let mut found_runnable = false;
 
     // 1. Installed agents (~/.leviath/agents/)
     let installed = scan_directory_for_agents(agents_dir);
     if !installed.is_empty() {
-        found_anything = true;
+        found_runnable = true;
         println!("Installed agents (~/.leviath/agents/):");
         for (_path, info) in &installed {
             let desc = if info.description.is_empty() {
@@ -129,7 +134,7 @@ fn print_agent_listing(
     if local_manifest.exists()
         && let Some(info) = read_agent_info(&local_manifest)
     {
-        found_anything = true;
+        found_runnable = true;
         let desc = if info.description.is_empty() {
             String::new()
         } else {
@@ -147,7 +152,7 @@ fn print_agent_listing(
         config_agents.extend(found);
     }
     if !config_agents.is_empty() {
-        found_anything = true;
+        found_runnable = true;
         println!("From configured paths:");
         for (_path, info) in &config_agents {
             let desc = if info.description.is_empty() {
@@ -160,27 +165,41 @@ fn print_agent_listing(
         println!();
     }
 
-    // 4. Built-in agents (relative to the binary or known locations)
+    // 4. Bundled agents — the blueprints embedded in this binary.
+    //
+    // This used to scan `<exe_dir>/agents`, a directory no real install has, so
+    // the section never printed outside a git checkout. It now reports the
+    // embedded catalog, which is what `lev setup` installs from; the on-disk
+    // scan stays as a second source so a checkout or a packaging layout that
+    // *does* ship an `agents/` dir next to the binary still shows up.
+    let mut builtin_names: Vec<String> = crate::bundled::BUNDLED_AGENTS
+        .iter()
+        .map(|a| format!("{} (v{})", a.name, a.version))
+        .collect();
     if let Some(exe_dir) = exe_dir {
-        let builtin_dir = exe_dir.join("agents");
-        let builtins = scan_directory_for_agents(&builtin_dir);
-        if !builtins.is_empty() {
-            found_anything = true;
-            let names: Vec<&str> = builtins.iter().map(|(_, i)| i.name.as_str()).collect();
-            println!("Built-in agents:");
-            println!("  {}", names.join(", "));
-            println!();
+        for (_path, info) in scan_directory_for_agents(&exe_dir.join("agents")) {
+            let entry = format!("{} (v{})", info.name, info.version);
+            if !builtin_names.contains(&entry) {
+                builtin_names.push(entry);
+            }
         }
     }
+    // No emptiness guard: the embedded catalog is always populated (a build
+    // that found no blueprints fails `bundled`'s own invariant test), so an
+    // `if !builtin_names.is_empty()` here would be a branch that can never be
+    // false — unreachable code dressed up as a handled case.
+    println!("Bundled agents (install with `lev setup`):");
+    println!("  {}", builtin_names.join(", "));
+    println!();
 
-    if !found_anything {
-        println!("No agents found.");
+    if !found_runnable {
+        println!("No agents installed yet.");
         println!();
-        println!("To create a new agent:");
-        println!("  lev init my-agent");
+        println!("To install the bundled agents:");
+        println!("  lev setup");
         println!();
-        println!("To install an agent:");
-        println!("  lev add <package>");
+        println!("To create your own:");
+        println!("  lev create my-agent");
     }
 
     Ok(())
@@ -564,7 +583,10 @@ system = { kind = "pinned", max_tokens = 1000 }
     // ─── print_agent_listing (fully injectable) ─────────────────────────
 
     #[test]
-    fn print_agent_listing_nothing_found() {
+    fn print_agent_listing_nothing_installed() {
+        // The bundled catalog is always non-empty, so it must not count as
+        // "you have agents" -- otherwise the get-started guidance would be
+        // suppressed for exactly the fresh install that needs it.
         let agents_dir = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
         let config = Config::default();
@@ -634,6 +656,8 @@ system = { kind = "pinned", max_tokens = 1000 }
 
     #[test]
     fn print_agent_listing_finds_builtin_agents() {
+        // An `agents/` directory beside the executable contributes a blueprint
+        // the embedded catalog doesn't have, so it is appended to the list.
         let agents_dir = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
         let exe_dir = tempfile::tempdir().unwrap();
@@ -646,6 +670,35 @@ system = { kind = "pinned", max_tokens = 1000 }
         let result =
             print_agent_listing(agents_dir.path(), cwd.path(), Some(exe_dir.path()), &config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn print_agent_listing_does_not_list_a_bundled_agent_twice() {
+        // Running from a git checkout puts the *same* blueprints both in the
+        // embedded catalog and in `<exe_dir>/agents`. Listing each one twice
+        // would be pure noise, so the on-disk scan only appends what the
+        // catalog doesn't already carry.
+        let bundled = &crate::bundled::BUNDLED_AGENTS[0];
+        let agents_dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let exe_dir = tempfile::tempdir().unwrap();
+        let sub = exe_dir.path().join("agents").join(bundled.name);
+        fs::create_dir_all(&sub).unwrap();
+        crate::bundled::install_bundled(bundled, &exe_dir.path().join("agents")).unwrap();
+        let config = Config::default();
+
+        let result =
+            print_agent_listing(agents_dir.path(), cwd.path(), Some(exe_dir.path()), &config);
+
+        assert!(result.is_ok());
+        // The same name+version pair the catalog already holds resolves to one
+        // entry, not two.
+        let entry = format!("{} (v{})", bundled.name, bundled.version);
+        let names: Vec<String> = crate::bundled::BUNDLED_AGENTS
+            .iter()
+            .map(|a| format!("{} (v{})", a.name, a.version))
+            .collect();
+        assert_eq!(names.iter().filter(|n| **n == entry).count(), 1);
     }
 
     #[test]
