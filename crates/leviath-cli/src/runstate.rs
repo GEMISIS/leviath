@@ -234,7 +234,12 @@ pub fn write_meta(meta: &RunMeta) -> anyhow::Result<()> {
     write_meta_to(&run_dir(&meta.run_id), meta)
 }
 
-fn write_meta_to(dir: &std::path::Path, meta: &RunMeta) -> anyhow::Result<()> {
+/// Atomically write `meta.json` into an explicit run directory.
+///
+/// Callers that already know the directory should prefer this over
+/// [`write_meta`], which resolves it from the home directory — the daemon's
+/// recovery pass works from its configured `runs_dir` instead.
+pub(crate) fn write_meta_to(dir: &std::path::Path, meta: &RunMeta) -> anyhow::Result<()> {
     let json =
         serde_json::to_string_pretty(meta).expect("infallible: RunMeta always serializes to JSON");
     write_json_atomic(&dir.join("meta.json"), &json)

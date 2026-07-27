@@ -93,6 +93,7 @@ pub fn reload_persisted_agents(
             Ok(entity) => reloaded.push((meta, entity)),
             Err(e) => {
                 tracing::warn!(run_id = %meta.run_id, error = %e, "skipping un-reloadable run");
+                mark_crashed(&run_dir, meta, &e.to_string(), now_secs);
             }
         }
     }
@@ -240,6 +241,35 @@ fn totals_from(meta: &RunMeta) -> TokenTotals {
         cached_tokens: meta.cached_tokens,
         cache_write_tokens: meta.cache_write_tokens,
         tool_calls: meta.tool_calls,
+    }
+}
+
+/// Record a run that could not be reloaded as terminally errored.
+///
+/// The daemon is the sole owner of these runs, so anything still marked
+/// `running` at startup is by definition not running. Runs that *can* be
+/// reloaded are resumed (that is the whole point of this module); this is only
+/// for the ones that can't — which used to be logged and then left claiming
+/// `"status": "running"` on disk forever, so `lev ps` and the dashboard showed
+/// a live run that no longer existed (issue #109).
+///
+/// Best-effort: a write failure here is logged, never fatal — the daemon is
+/// mid-startup and the rest of the recovery pass must still run.
+fn mark_crashed(run_dir: &Path, meta: RunMeta, reason: &str, now_secs: i64) {
+    let crashed = RunMeta {
+        status: RunStatus::Error,
+        error: Some(format!(
+            "the daemon exited while this run was active and it could not be recovered: {reason}"
+        )),
+        updated_at: now_secs,
+        ..meta
+    };
+    if let Err(e) = crate::runstate::write_meta_to(run_dir, &crashed) {
+        tracing::warn!(
+            run_id = %crashed.run_id,
+            error = %e,
+            "could not record an un-reloadable run as crashed"
+        );
     }
 }
 
@@ -1289,6 +1319,42 @@ mod tests {
             &sub_tx(),
         );
         assert!(restored.is_empty()); // all skipped, none fatal
+
+        // The un-reloadable run is recorded as crashed rather than left claiming
+        // it is still running (issue #109) — `lev ps` and the dashboard would
+        // otherwise show a live run that no longer exists.
+        let meta: RunMeta = serde_json::from_str(
+            &std::fs::read_to_string(runs.path().join("run-badpath").join("meta.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(meta.status, RunStatus::Error);
+        let error = meta.error.unwrap_or_default();
+        assert!(error.contains("could not be recovered"), "got: {error}");
+        assert_eq!(meta.updated_at, 1);
+        // Junk that never parsed as a run has nothing to rewrite.
+        assert!(!runs.path().join("no-meta").join("meta.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(corrupt.join("meta.json")).unwrap(),
+            "not json"
+        );
+    }
+
+    #[test]
+    fn marking_a_crash_is_best_effort() {
+        // The run directory can vanish between the scan and the rewrite (a
+        // concurrent `lev rm`, a wiped runs dir). Recovery must log and carry
+        // on — the daemon is mid-startup and the other runs still need it.
+        let runs = tempfile::tempdir().unwrap();
+        write_run(
+            runs.path(),
+            "run-x",
+            "/no/such/agent.leviath",
+            RunStatus::Running,
+            None,
+        );
+        let meta = read_meta(&runs.path().join("run-x")).expect("written above");
+        mark_crashed(&runs.path().join("gone"), meta, "boom", 7);
+        assert!(!runs.path().join("gone").exists());
     }
 
     #[tokio::test]
