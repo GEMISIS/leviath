@@ -1748,6 +1748,16 @@ fn build_edge_compact_requests(
 
 // ─── Persistence (per-agent snapshot writing) ────────────────────────────────
 
+/// How long an agent may go without a snapshot before one is written purely to
+/// refresh `updated_at`.
+///
+/// The watermark below debounces on *progress*, which means a run that is busy
+/// but not progressing (one long inference, or a genuinely wedged one) writes
+/// nothing at all. Observers then cannot tell "working" from "dead", because
+/// `updated_at` looks equally old in both cases. A periodic beat makes a stale
+/// timestamp mean something.
+const PERSIST_HEARTBEAT_SECS: i64 = 30;
+
 /// Debounce watermark: the (iteration, stage index, status) last persisted for an
 /// agent. A snapshot is written only when one of these changes, so the world
 /// writes on meaningful progress rather than every tick. `None` until the first
@@ -1755,6 +1765,8 @@ fn build_edge_compact_requests(
 #[derive(Component, Default)]
 pub struct PersistWatermark {
     last: Option<(usize, usize, leviath_core::run_meta::RunStatus)>,
+    /// When the last snapshot was written, for the heartbeat above.
+    last_written_at: Option<i64>,
 }
 
 /// The sending end of the persistence I/O lane (the receiving end is drained by
@@ -1922,12 +1934,18 @@ pub fn dispatch_persistence(
         let status = crate::persistence::run_status_from(&state.status);
         let current = (state.iteration, cursor.index, status);
         let watermark_changed = watermark.last.as_ref() != Some(&current);
-        if !watermark_changed && !has_appends {
-            continue; // nothing meaningful changed and nothing buffered
+        // Beat even when nothing changed, so `updated_at` distinguishes a run
+        // that is slow from one that nothing is driving.
+        let due_for_heartbeat = watermark
+            .last_written_at
+            .is_none_or(|at| now.saturating_sub(at) >= PERSIST_HEARTBEAT_SECS);
+        if !watermark_changed && !has_appends && !due_for_heartbeat {
+            continue; // nothing meaningful changed, nothing buffered, beat not due
         }
         if watermark_changed {
             watermark.last = Some(current);
         }
+        watermark.last_written_at = Some(now);
 
         // Stream each buffered line to WS subscribers as a `Log` event (in
         // addition to the disk append below). No-op in worlds without the sink

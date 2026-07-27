@@ -414,10 +414,7 @@ impl Dashboard {
 
     fn handle_kill_from_detail(&mut self) {
         if let Some(agent) = self.selected_agent()
-            && matches!(
-                agent.status,
-                AgentDisplayStatus::Active | AgentDisplayStatus::Waiting
-            )
+            && agent.status.is_killable()
         {
             let agent_id = agent.id.clone();
             let _ = self.cmd_tx.send(DaemonCommand::Cancel {
@@ -441,7 +438,7 @@ impl Dashboard {
             a.pending_request = None;
             self.input_mode = false;
             self.input_textarea = tui_textarea::TextArea::default();
-            self.add_log(format!("{}: Killed", agent_id));
+            self.add_log(format!("{}: kill requested", agent_id));
         }
     }
 
@@ -574,10 +571,7 @@ impl Dashboard {
 
     fn handle_cancel_from_list(&mut self) {
         if let Some(agent) = self.selected_agent()
-            && matches!(
-                agent.status,
-                AgentDisplayStatus::Active | AgentDisplayStatus::Waiting
-            )
+            && agent.status.is_killable()
         {
             let agent_id = agent.id.clone();
             let _ = self.cmd_tx.send(DaemonCommand::Cancel {
@@ -602,10 +596,7 @@ impl Dashboard {
 
     fn handle_kill_from_list(&mut self) {
         if let Some(agent) = self.selected_agent()
-            && matches!(
-                agent.status,
-                AgentDisplayStatus::Active | AgentDisplayStatus::Waiting
-            )
+            && agent.status.is_killable()
         {
             let agent_id = agent.id.clone();
             let _ = self.cmd_tx.send(DaemonCommand::Cancel {
@@ -624,7 +615,7 @@ impl Dashboard {
             a.status = AgentDisplayStatus::Cancelled;
             a.waiting_prompt = None;
             a.pending_request = None;
-            self.add_log(format!("{}: Killed", agent_id));
+            self.add_log(format!("{}: kill requested", agent_id));
         }
     }
 
@@ -1424,6 +1415,58 @@ mod tests {
         dash.handle_key(key(KeyCode::Char('c')));
         // Should remain Complete
         assert_complete(&dash.agents[0].status);
+    }
+
+    /// Every state that is not a finished one can be killed. The gate used to be
+    /// `Active | Waiting`, so a run showing IDLE or STALE — exactly the states a
+    /// user reaches for the kill key in — could not be killed at all.
+    #[test]
+    fn every_unfinished_state_can_be_killed() {
+        for status in [
+            AgentDisplayStatus::Active,
+            AgentDisplayStatus::Waiting,
+            AgentDisplayStatus::Idle,
+            AgentDisplayStatus::Stale,
+        ] {
+            for key_code in ['c', 'k'] {
+                let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+                let mut dash = Dashboard::new(cmd_tx);
+                dash.agents.push(make_test_agent("run-1", status.clone()));
+                dash.update_display_indices();
+                dash.handle_key(key(KeyCode::Char(key_code)));
+
+                assert_eq!(
+                    cmd_rx.try_recv().unwrap(),
+                    DaemonCommand::Cancel {
+                        run_id: "run-1".to_string()
+                    },
+                    "{status:?} must be killable via '{key_code}'"
+                );
+            }
+        }
+    }
+
+    /// …and a finished run is left alone: there is nothing to kill, and asking
+    /// the daemon would just produce a spurious failure toast.
+    #[test]
+    fn a_finished_run_is_not_killed() {
+        for status in [
+            AgentDisplayStatus::Complete,
+            AgentDisplayStatus::CompleteInteractive,
+            AgentDisplayStatus::Cancelled,
+            AgentDisplayStatus::Error("boom".to_string()),
+        ] {
+            let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+            let mut dash = Dashboard::new(cmd_tx);
+            dash.agents.push(make_test_agent("run-1", status.clone()));
+            dash.update_display_indices();
+            dash.handle_key(key(KeyCode::Char('k')));
+
+            assert!(
+                cmd_rx.try_recv().is_err(),
+                "{status:?} must not be re-killed"
+            );
+        }
     }
 
     #[test]
