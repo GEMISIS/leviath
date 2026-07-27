@@ -305,16 +305,32 @@ impl ScriptHost for DaemonScriptHost {
 /// are safe here.
 pub struct RealScriptIo;
 
-impl RealScriptIo {
-    /// Build a short-timeout blocking HTTP client for a single request. The
-    /// builder only fails on TLS-backend init, which never happens in practice.
-    /// If it ever does panic, `leviath_scripting::execute`'s `catch_unwind`
-    /// catches it cleanly (issue #109).
-    fn client() -> reqwest::blocking::Client {
+/// The one process-wide blocking HTTP client for script tools.
+///
+/// Built once, then cloned per request. A `reqwest::blocking::Client` owns a
+/// dedicated OS thread running a current-thread tokio runtime, so the previous
+/// build-one-per-request shape spawned (and tore down) a thread plus a runtime
+/// plus a TLS root-store load for *every* `http_get` — a researcher agent
+/// fanning out over dozens of pages could exhaust thread/FD limits, at which
+/// point `build()` fails and the `.expect` panics inside a Rhai native call
+/// (issue #109). One shared client also gives connection reuse across calls.
+///
+/// The builder can still only fail on TLS-backend init, and that failure is now
+/// contained: `leviath_scripting`'s native-function guards turn a panic here
+/// into an ordinary script error instead of aborting the daemon.
+static HTTP_CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
+    std::sync::LazyLock::new(|| {
         reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
             .expect("failed to build blocking reqwest client")
+    });
+
+impl RealScriptIo {
+    /// A handle on the shared [`HTTP_CLIENT`] (cloning a `Client` shares its
+    /// connection pool; it does not build a new one).
+    fn client() -> reqwest::blocking::Client {
+        HTTP_CLIENT.clone()
     }
 
     /// Apply a header map to a blocking request builder.
@@ -383,8 +399,12 @@ impl ScriptIo for RealScriptIo {
         // The script engine drives this from a `spawn_blocking` thread (not a
         // runtime worker), so blocking on the current runtime is safe here and
         // lets us reuse tokio's timeout — the same mechanism the built-in shell
-        // tool uses.
-        let handle = tokio::runtime::Handle::current();
+        // tool uses. `try_current` rather than `current`: a blocking thread can
+        // outlive runtime shutdown, and `current` would *panic* there — which,
+        // inside a Rhai native call, used to abort the daemon (issue #109).
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return Err("shell is unavailable: no tokio runtime on this thread".to_string());
+        };
         handle.block_on(async move {
             match tokio::time::timeout(timeout, cmd.output()).await {
                 Ok(Ok(output)) => Ok(cap_script_io(combine_shell_output(
@@ -868,6 +888,25 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[test]
+    fn real_shell_off_a_runtime_errors_instead_of_panicking() {
+        // A blocking thread can outlive runtime shutdown; `Handle::current()`
+        // would panic there, and a panic inside a Rhai native call aborted the
+        // whole daemon before issue #109 was fixed. A plain `std::thread` is
+        // the same "no reactor on this thread" condition.
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().to_path_buf();
+        let err = std::thread::spawn(move || {
+            let (shell, flag) = default_shell();
+            let cmd = host_shell_command(shell, flag, "echo hi", &workdir);
+            RealScriptIo.run_shell(cmd, Duration::from_secs(5))
+        })
+        .join()
+        .unwrap()
+        .unwrap_err();
+        assert!(err.contains("no tokio runtime"), "got: {err}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
