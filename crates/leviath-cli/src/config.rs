@@ -179,6 +179,41 @@ pub struct Config {
     /// a registered script tool may *do* (network, shell, file, env access).
     #[serde(default)]
     pub tool_script_permissions: ScriptToolPermissions,
+
+    /// Machine-wide security switches that aren't part of the per-tool
+    /// permission cascade. (The global taint master switch stays the top-level
+    /// [`Self::taint_tracking`] key for back-compat.)
+    #[serde(default)]
+    pub security: SecurityConfig,
+}
+
+/// `[security]` in `~/.leviath/config.toml`.
+///
+/// Distinct from a *blueprint's* `[security]` block, which configures taint
+/// tracking for one agent — this one holds machine-wide switches.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecurityConfig {
+    /// Whether a blueprint's `seed = { command = "..." }` regions may run
+    /// (issue #108).
+    ///
+    /// **On by default.** A command seed executes at spawn — before the first
+    /// inference, and therefore before any tool-approval prompt — so it is the
+    /// one place a manifest can run something without the user being asked.
+    /// It is still confined to the run's workdir, routed through the entry
+    /// stage's sandbox when the agent declares one, and capped by
+    /// `[limits] script_shell_timeout_secs`. Set this to `false` to refuse them
+    /// machine-wide, or pass `--no-seed-commands` for a single run. Inspect an
+    /// agent's command seeds before installing it with `lev validate <path>`.
+    #[serde(default = "default_true")]
+    pub allow_seed_commands: bool,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            allow_seed_commands: true,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -406,6 +441,7 @@ impl Default for Config {
             webhook: WebhookConfig::default(),
             sandbox: None,
             tool_script_permissions: ScriptToolPermissions::default(),
+            security: SecurityConfig::default(),
         }
     }
 }
@@ -1930,6 +1966,9 @@ anthropic_api_key = "sk-ant-test-key"
                 write_file: ScriptPermission::Deny,
                 env_var: ScriptPermission::Allow,
             },
+            security: SecurityConfig {
+                allow_seed_commands: false,
+            },
         };
 
         let serialized = toml::to_string_pretty(&config).unwrap();
@@ -1951,6 +1990,7 @@ anthropic_api_key = "sk-ant-test-key"
             deserialized.tool_script_permissions.write_file,
             ScriptPermission::Deny
         );
+        assert!(!deserialized.security.allow_seed_commands);
         assert_eq!(deserialized.webhook.max_retries, 5);
         assert_eq!(deserialized.webhook.base_delay_ms, 250);
         assert_eq!(deserialized.webhook.max_delay_ms, 10_000);

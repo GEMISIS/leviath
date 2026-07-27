@@ -397,6 +397,18 @@ pub enum RegionSeed {
         /// Script path, resolved relative to the run's workdir.
         script: String,
     },
+    /// The combined stdout/stderr of a shell command run in the workdir at spawn.
+    ///
+    /// Unlike every other variant this *executes* something, and it does so
+    /// before the first inference — so before any tool-approval prompt. The
+    /// daemon runs it inside the entry stage's sandbox when one is configured,
+    /// caps its runtime and output, and honours the `[security]
+    /// allow_seed_commands` kill switch. A failure is non-fatal unless the
+    /// owning region is `required`.
+    Command {
+        /// The shell command line, run with the platform shell in the workdir.
+        command: String,
+    },
 }
 
 /// Definition of a region in a layout.

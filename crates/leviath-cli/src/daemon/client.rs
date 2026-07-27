@@ -32,6 +32,7 @@ pub fn resolve_spawn_args(
     allow: Vec<String>,
     max_depth: Option<usize>,
     regions: HashMap<String, String>,
+    no_seed_commands: bool,
 ) -> anyhow::Result<SpawnArgs> {
     let manifest = find_manifest(path)?;
     let agent_name = manifest
@@ -85,6 +86,7 @@ pub fn resolve_spawn_args(
         callback_url: None,
         callback_secret: None,
         yolo,
+        no_seed_commands,
         allow,
         max_depth,
         // A top-level run (sub-agents/fan-out set this on the host side).
@@ -138,6 +140,7 @@ mod tests {
             Vec::new(),
             None,
             HashMap::new(),
+            false,
         )
         .unwrap();
         assert!(args.run_id.contains("my-agent"));
@@ -159,6 +162,7 @@ mod tests {
                 Vec::new(),
                 None,
                 HashMap::new(),
+                false,
             )
             .is_err()
         );
@@ -211,6 +215,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             Vec::new(),
             None,
             regions,
+            false,
         )
         .unwrap();
         // `@path` was read and trimmed.
@@ -256,6 +261,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             Vec::new(),
             None,
             regions,
+            false,
         )
         .unwrap_err();
         assert!(err.to_string().contains("(none)"), "got: {err}");
@@ -278,6 +284,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             Vec::new(),
             None,
             regions,
+            false,
         )
         .unwrap_err();
         assert!(err.to_string().contains("read manifest"), "got: {err}");
@@ -303,6 +310,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             Vec::new(),
             None,
             regions,
+            false,
         )
         .unwrap_err();
         assert!(err.to_string().contains("parse manifest"), "got: {err}");
@@ -324,6 +332,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             Vec::new(),
             None,
             regions,
+            false,
         )
         .unwrap_err();
         assert!(
@@ -346,6 +355,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             Vec::new(),
             None,
             regions,
+            false,
         )
         .unwrap_err();
         assert!(

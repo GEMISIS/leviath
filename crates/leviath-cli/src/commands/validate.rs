@@ -97,8 +97,52 @@ fn print_success(blueprint: &leviath_core::Blueprint) {
         );
     }
 
+    // Command seeds execute at spawn — surface them before anything else, so
+    // `lev validate` is a real audit step before `lev add`.
+    for line in command_seed_report(blueprint) {
+        println!("{line}");
+    }
+
     // Warnings (non-fatal)
     print_warnings(blueprint);
+}
+
+/// The report lines for a blueprint's `seed = { command = "..." }` regions.
+///
+/// Split out from the printer so it is directly assertable. Empty when the
+/// blueprint declares none — the overwhelmingly common case, which should print
+/// nothing at all.
+fn command_seed_report(blueprint: &leviath_core::Blueprint) -> Vec<String> {
+    let seeds: Vec<(&str, &str)> = blueprint
+        .context_layout
+        .regions
+        .iter()
+        .filter_map(|r| match &r.seed {
+            Some(leviath_core::layout::RegionSeed::Command { command }) => {
+                Some((r.name.as_str(), command.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    if seeds.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![format!(
+        "  ⚠ {} region(s) run a shell command at spawn, before the first \
+         inference and before any tool-approval prompt:",
+        seeds.len()
+    )];
+    lines.extend(
+        seeds
+            .iter()
+            .map(|(region, command)| format!("      {region}: {command}")),
+    );
+    lines.push(
+        "    Disable with `--no-seed-commands`, or machine-wide via \
+         `[security] allow_seed_commands = false`."
+            .to_string(),
+    );
+    lines
 }
 
 /// Outcome of the real, testable logic in [`execute`]. Kept distinct from
@@ -265,6 +309,50 @@ conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
 
     fn parse(toml: &str) -> leviath_core::Blueprint {
         leviath_core::manifest::parse_manifest(toml).unwrap()
+    }
+
+    #[test]
+    fn command_seed_report_is_empty_without_command_seeds() {
+        let bp = parse(&make_blueprint_toml(
+            r#"
+[stages.main]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-5" }
+description = "Main stage"
+"#,
+        ));
+        assert!(command_seed_report(&bp).is_empty());
+    }
+
+    #[test]
+    fn command_seed_report_names_every_region_and_command() {
+        let toml = r#"
+[agent]
+name = "scanner"
+version = "0.1.0"
+
+[stages.main]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-5" }
+description = "Main stage"
+
+[context.regions]
+facts = { kind = "pinned", max_tokens = 1000, seed = { command = "git ls-files" } }
+tests = { kind = "pinned", max_tokens = 1000, seed = { command = "ls tests" } }
+plain = { kind = "pinned", max_tokens = 1000 }
+conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
+"#;
+        let report = command_seed_report(&parse(toml)).join("\n");
+        assert!(report.contains("2 region(s)"), "got: {report}");
+        assert!(report.contains("facts: git ls-files"), "got: {report}");
+        assert!(report.contains("tests: ls tests"), "got: {report}");
+        // The escape hatches are named so the reader knows how to refuse.
+        assert!(report.contains("--no-seed-commands"), "got: {report}");
+        assert!(report.contains("allow_seed_commands"), "got: {report}");
+        // A region without a command seed is not reported.
+        assert!(!report.contains("plain"), "got: {report}");
+        // And the printer itself runs.
+        print_success(&parse(toml));
     }
 
     #[test]

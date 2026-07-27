@@ -372,7 +372,7 @@ impl RealScriptIo {
 /// handled downstream by region budgets and any in-script truncation.
 const MAX_SCRIPT_IO_BYTES: usize = 900_000;
 
-fn cap_script_io(mut s: String) -> String {
+pub(crate) fn cap_script_io(mut s: String) -> String {
     if s.len() > MAX_SCRIPT_IO_BYTES {
         let mut end = MAX_SCRIPT_IO_BYTES;
         while !s.is_char_boundary(end) {
@@ -453,7 +453,7 @@ impl ScriptIo for RealScriptIo {
 }
 
 /// The system shell + command flag for the current platform.
-fn default_shell() -> (&'static str, &'static str) {
+pub(crate) fn default_shell() -> (&'static str, &'static str) {
     #[cfg(windows)]
     {
         ("cmd.exe", "/C")
@@ -466,7 +466,12 @@ fn default_shell() -> (&'static str, &'static str) {
 
 /// Build the host (un-sandboxed) shell command pointed at `workdir` — the
 /// no-sandbox arm of [`DaemonScriptHost::shell`].
-fn host_shell_command(shell: &str, flag: &str, command: &str, workdir: &Path) -> TokioCommand {
+pub(crate) fn host_shell_command(
+    shell: &str,
+    flag: &str,
+    command: &str,
+    workdir: &Path,
+) -> TokioCommand {
     let mut c = TokioCommand::new(shell);
     c.arg(flag).arg(command).current_dir(workdir);
     c
@@ -474,7 +479,7 @@ fn host_shell_command(shell: &str, flag: &str, command: &str, workdir: &Path) ->
 
 /// Combine a finished command's stdout and (non-empty) stderr into one string,
 /// preserving the prior `shell()` contract.
-fn combine_shell_output(stdout: &[u8], stderr: &[u8]) -> String {
+pub(crate) fn combine_shell_output(stdout: &[u8], stderr: &[u8]) -> String {
     let mut out = String::from_utf8_lossy(stdout).into_owned();
     let err = String::from_utf8_lossy(stderr);
     if !err.trim().is_empty() {

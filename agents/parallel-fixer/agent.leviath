@@ -1,8 +1,8 @@
 [agent]
 name = "parallel-fixer"
 version = "0.2.0"
-description = "Fixes failing tests in parallel: validate → fan out one worker per failure → merge → verify (re-round until the suite is green)"
-entry_stage = "validate"
+description = "Fixes failing tests in parallel: discover → validate → fan out one worker per failure → merge → verify (re-round until the suite is green)"
+entry_stage = "discover"
 
 [tool_permissions]
 read_file = "allow"
@@ -12,7 +12,51 @@ write_file = "ask"
 edit_file = "ask"
 bash = "ask"
 
-# ─── Stage 1: Validate ───────────────────────────────────────────────────────
+# ─── Stage 1: Discover ───────────────────────────────────────────────────────
+# Derive the test commands instead of making the caller spell them out in --task.
+# Cheap model, hard iteration cap, one outgoing edge (auto-followed, no routing
+# call). This agent has no error_recovery stage, so there is no error edge.
+[stages.discover]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Work out how this project runs its tests"
+available_tools = ["read_file", "read_files", "list_dir", "shell", "context_write"]
+max_iterations = 6
+max_revisits = 2
+system_prompt = """
+Work out how THIS project runs its tests. Do not fix anything, and do not run
+the full suite yet — the validate stage does that.
+
+Start from what you already have — do not rediscover it:
+- `repo_files` holds the tracked file list (empty if this isn't a git repo).
+- `task` may already name the test command; if so, trust it and just confirm the
+  single-test form.
+- If `CLAUDE.md`, `AGENTS.md` or `CONTRIBUTING.md` exist, read them — they
+  usually state the test command outright.
+
+Fill gaps with list_dir/read_file and read-only shell probes (e.g.
+`pytest --collect-only -q`, `cargo test --list`, `npm run`).
+
+Write `discovery` (context_write): language, build system, test runner, where
+tests live, and the fixture conventions a fix would have to respect.
+
+Write `workflow` (context_write) ending with these two literal lines. The
+SINGLE-TEST line matters most — each parallel worker runs one test, not the
+suite, and it is copied into every work item:
+  SUITE: <command to run the whole test suite>
+  SINGLE: <command to run ONE named test, with a placeholder for the name>
+"""
+
+[stages.discover.tool_routing]
+default_region = "conversation"
+[stages.discover.tool_routing.overrides]
+shell = "scratch"
+
+[stages.discover.transitions.validate]
+hint = "Test commands known — run the suite and diagnose"
+transform = "direct"
+
+# ─── Stage 2: Validate ───────────────────────────────────────────────────────
 # Run the test suite and record the set of failing tests + their diagnoses.
 [stages.validate]
 mode = "autonomous"
@@ -25,9 +69,10 @@ system_prompt = """
 DIAGNOSE ONLY — do NOT edit any files or fix anything here. The parallel workers
 do the fixing; your job is to run the tests read-only and describe the failures.
 
-Run the project's test suite (per the command/instructions in `task`) with shell.
-For each failing test, record: the test name, the source file most likely
-responsible, and a one-line diagnosis with the intended fix.
+Run the project's test suite with shell, using `workflow`'s SUITE command (the
+discover stage derived it; anything in `task` overrides it). For each failing
+test, record: the test name, the source file most likely responsible, and a
+one-line diagnosis with the intended fix.
 
 Write the collected failures into the `diagnosis` region with context_write, as a
 list the next stage can split into per-test work items. Group failures that touch
@@ -44,7 +89,7 @@ shell = "test_results"
 hint = "Tests were run and failures diagnosed"
 transform = "direct"
 
-# ─── Stage 2: Parallel fix (fan-out) ─────────────────────────────────────────
+# ─── Stage 3: Parallel fix (fan-out) ─────────────────────────────────────────
 # Split the diagnosis into one work item per failing test and fix each in a
 # parallel in-process sub-agent worker. Workers share the workdir; file-level
 # locking prevents concurrent writes to the same file from clobbering.
@@ -57,11 +102,18 @@ merge_stage = "merge_fixes"
 max_workers = 5
 on_worker_failure = "continue"
 split_prompt = """
-Read the `diagnosis` region. Output ONLY a JSON array — start with '[' and end
-with ']', no prose, no markdown fences, nothing else. One work item per DISTINCT
-source file (group tests that share a file). Shape:
+Read the `diagnosis` region and the SINGLE line of the `workflow` region.
 
-[{"id": "mathx.py", "context": {"tests": "test_factorial, test_fib", "source_file": "mathx.py", "diagnosis": "..."}}]
+Output ONLY a JSON array — start with '[' and end with ']', no prose, no markdown
+fences, nothing else. One work item per DISTINCT source file (group tests that
+share a file). Shape:
+
+[{"id": "mathx.py", "context": {"tests": "test_factorial, test_fib", "source_file": "mathx.py", "diagnosis": "...", "verify": "pytest tests/test_mathx.py::test_factorial"}}]
+
+Every item MUST carry a "verify" field: the SINGLE-test command from `workflow`
+with the placeholder filled in for that item's test. Workers run their own
+blueprint and do NOT inherit this agent's context regions — the work item is all
+they get, so a worker with no "verify" has no way to check its own fix.
 
 If `diagnosis` is exactly "NO FAILURES" (or lists none), output exactly: []
 """
@@ -75,19 +127,21 @@ available_tools = ["read_file", "read_files", "edit_file", "shell"]
 max_iterations = 50
 allow_as_worker = true
 system_prompt = """
-You are fixing ONE failing test. Your work item (test name, source file, and
-diagnosis) is in your pinned context.
+You are fixing ONE failing test. Your work item (test name, source file,
+diagnosis, and the `verify` command for this exact test) is in your pinned
+context — it is ALL the context you get, so work from it.
 
 1. Read the test and the implicated source file.
 2. Make the MINIMAL edit that fixes the failure — don't refactor unrelated code.
-3. Re-run just this test to confirm it passes.
+3. Run the work item's `verify` command to confirm this test now passes. Don't
+   claim a fix you haven't run.
 4. Report exactly which file(s) you changed and what you changed.
 
 Only touch the source file for your work item — other workers are fixing other
 files in parallel.
 """
 
-# ─── Stage 3: Merge ──────────────────────────────────────────────────────────
+# ─── Stage 4: Merge ──────────────────────────────────────────────────────────
 [stages.merge_fixes]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
@@ -97,7 +151,7 @@ max_iterations = 30
 system_prompt = """
 The parallel workers' results are in your conversation context. Your job:
 1. Reconcile the fixes — if two touched related code, make them consistent.
-2. Run the full test suite once.
+2. Run the full test suite once, using `workflow`'s SUITE command.
 3. Record what changed in the `fixes` region (context_append): one line per file
    touched and the net effect.
 
@@ -114,7 +168,7 @@ shell = "test_results"
 hint = "Fixes reconciled — verify the full suite"
 transform = "compact"
 
-# ─── Stage 4: Verify ─────────────────────────────────────────────────────────
+# ─── Stage 5: Verify ─────────────────────────────────────────────────────────
 # Authoritative green gate. Loops back to validate for another parallel round if
 # residual/interacting failures remain (bounded by validate's max_revisits).
 [stages.verify]
@@ -131,7 +185,8 @@ Based on the full suite result:
   another parallel round is worthwhile, respond with: validate
 """
 system_prompt = """
-Run the full test suite one more time (output goes to `test_results`). Summarize:
+Run the full test suite one more time with `workflow`'s SUITE command (output
+goes to `test_results`). Summarize:
 total / passed / failed, and name any still-failing tests. If everything passes,
 finish (DONE). If failures remain, hand back to validate to re-diagnose the
 remaining set and fan out another round.
@@ -153,7 +208,22 @@ model = "claude-sonnet-5"
 
 # ─── Context layout ──────────────────────────────────────────────────────────
 [context.regions]
-task         = { kind = "pinned", budget = "3%", max_tokens = 4000, required = true, seed = "task", required_message = "Describe the project + how to run its tests via --task." }
+task         = { kind = "pinned", budget = "3%", max_tokens = 4000, required = true, seed = "task", required_message = "Describe what to fix via --task. The discover stage works out how to run the tests, so you no longer have to spell that out here." }
+# Deterministic repo scan, run once at spawn (issue #108) — the discover stage
+# starts from facts instead of burning iterations on `ls`. `git ls-files` behaves
+# identically on POSIX and Windows shells; outside a git repo it fails and this is
+# simply left empty (non-fatal), and oversized output is trimmed to the budget.
+# Refuse it with `--no-seed-commands` or `[security] allow_seed_commands = false`.
+repo_files   = { kind = "pinned", budget = "3%", max_tokens = 4000, seed = { command = "git ls-files" } }
+
+# ── Discovery (issue #108): written by the discover stage, read by every later
+# stage. Pinned, so no edge transform can clear or compact them. `required` puts
+# the runtime's own gate behind them (`require_context_regions`): the discover
+# stage is re-run with a nudge until it actually fills them. NOTE: fan-out workers
+# run the same blueprint and therefore inherit NO region content, so `workflow`'s
+# SINGLE command is copied into each work item by `split_prompt` instead.
+discovery    = { kind = "pinned", budget = "4%", max_tokens = 5000, required = true, required_message = "Populate `discovery` (context_write) with this project's test runner, test locations and fixture conventions before leaving the discover stage." }
+workflow     = { kind = "pinned", budget = "2%", max_tokens = 2000, required = true, required_message = "Populate `workflow` (context_write) with the literal SUITE / SINGLE lines before leaving the discover stage." }
 diagnosis    = { kind = "pinned", budget = "8%", max_tokens = 8000 }
 fixes        = { kind = "sliding_window", max_items = 20, budget = "8%", max_tokens = 6000 }
 test_results = { kind = "clearable", budget = "6%", max_tokens = 8000 }

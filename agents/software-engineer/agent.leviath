@@ -1,8 +1,8 @@
 [agent]
 name = "software-engineer"
 version = "0.3.0"
-description = "Plan-then-implement agent — mirrors the Claude Code plan→approve→code→review workflow"
-entry_stage = "plan"
+description = "Plan-then-implement agent — mirrors the Claude Code discover→plan→approve→code→review workflow"
+entry_stage = "discover"
 
 # Global tool permissions for this agent: write tools require approval by default.
 # Use `lev run default --yolo` to skip all approvals, or `--allow bash` for selective override.
@@ -13,7 +13,80 @@ write_file = "ask"
 edit_file  = "ask"
 bash       = "ask"
 
-# ─── Stage 1: Plan ───────────────────────────────────────────────────────────
+# ─── Stage 1: Discover ───────────────────────────────────────────────────────
+# Orient before planning: map the codebase and synthesize the verification
+# workflow the later stages must follow. Runs before the human sees anything, so
+# the plan they approve is grounded in what this repo actually is. Cheap model,
+# hard iteration cap, and a single non-error edge (auto-followed, no routing call).
+[stages.discover]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Map the codebase and synthesize a verification workflow"
+available_tools = ["read_file", "list_dir", "bash", "context_write"]
+max_iterations = 8
+max_revisits = 2
+system_prompt = """
+Before any planning, answer two questions about THIS repository: what is it, and
+how do I verify work in it? Do not plan or edit here.
+
+Start from what you already have — do not rediscover it:
+- `repo_files` holds the tracked file list (empty if this isn't a git repo).
+- `architecture` is pre-loaded with design docs, `constraints` with any
+  caller-supplied limits.
+- If `.leviath/discovery.md`, `CLAUDE.md`, `AGENTS.md` or
+  `.github/copilot-instructions.md` exist, read them and treat them as
+  authoritative — they were written for exactly this purpose.
+
+Then fill the gaps with list_dir/read_file, and use bash ONLY to interrogate the
+build/test tooling read-only (e.g. `pytest --collect-only -q`, `cargo test
+--list`, `npm run`). Do not modify anything. You have few iterations — spend
+them on the area the task touches, not a full tour.
+
+Write `discovery` (context_write) covering:
+- language, build system, and how to build
+- the test runner, the command to run the WHOLE suite, and the command to run a
+  SINGLE test or file (this one matters most downstream)
+- directory layout and where the code for this task lives
+- conventions worth obeying
+
+Then classify the project into exactly one tier and write `workflow`
+(context_write) with the tier, the concrete commands, and the completion bar:
+
+- TIER 1 — no tests, no CI, nothing to verify against. The plan must include
+  BUILDING verification: name the smoke test or assertion to write, and how to
+  run it. Say plainly that there is no baseline to compare against.
+- TIER 2 — some tests exist but coverage is patchy. Name the tests that already
+  cover the area being changed, and the gap a new test should fill.
+- TIER 3 — rich test suite. Name the exact subset to run for this task (a full
+  suite run per edit is too slow) and the full-suite command for the final pass.
+
+`workflow` must end with three literal lines the later stages execute verbatim:
+  BASELINE: <command to run BEFORE any edit>
+  VERIFY: <command to re-run after each change>
+  DONE WHEN: <the completion bar, including "no regressions vs baseline">
+
+If there is genuinely no way to verify (tier 1 with no runnable code yet), say
+so explicitly in `workflow` rather than inventing a command that won't run.
+"""
+
+# Scan output is bulky and single-use — park it in clearable scratch, not the
+# knowledge regions the later stages read.
+[stages.discover.tool_routing]
+default_region = "conversation"
+[stages.discover.tool_routing.overrides]
+read_file = "codebase"
+list_dir  = "codebase"
+bash      = "scratch"
+
+[stages.discover.transitions.plan]
+hint = "Codebase mapped and verification workflow synthesized"
+transform = "direct"
+
+[stages.discover.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# ─── Stage 2: Plan ───────────────────────────────────────────────────────────
 # Read-only exploration culminating in a structured plan.
 # The user is shown the plan and must approve, request revisions, or add detail.
 
@@ -41,15 +114,17 @@ system_prompt = """
 You are the planning stage of a code assistant.
 
 Your job:
-1. Explore the codebase to understand relevant structure (list_dir, read_file).
-   The `architecture` region is pre-loaded with design docs and `constraints`
-   holds any caller-supplied limits (tech stack, timeline, budget) — read both
-   before exploring so you don't rediscover what's already given.
+1. Read `discovery` and `workflow` first — the discover stage already mapped this
+   codebase and chose how the work will be verified. `architecture` holds design
+   docs and `constraints` any caller-supplied limits (tech stack, timeline,
+   budget). Explore with list_dir/read_file only to fill real gaps left by those.
 2. Think through the implementation approach, respecting the constraints.
 3. Produce a concise, numbered plan:
    - Files to create or modify
    - What each change does
    - Key decisions and trade-offs
+   - How the change will be verified, using `workflow`'s VERIFY command. If
+     `workflow` is TIER 1, the plan must include writing that verification.
 
 If the task is genuinely ambiguous (e.g. missing requirements, or a real
 fork in approach you can't resolve yourself), use ask_user_text or
@@ -120,7 +195,7 @@ edit_options = ["Add detail — expand a section"]
 [stages.plan.interaction_points.directives]
 "Revise — I'll describe changes" = "The user wants to revise the plan. Call the ask_user_text tool to ask exactly what they want changed. Then start from the CURRENT plan (in the 'plan' section of your context — it already includes any edits the user made directly) and apply ONLY the requested change, preserving every other detail verbatim (wording, file names, and exact strings the user chose). Do not revert earlier user edits or 'correct' them back to defaults. End with the '## Plan' and '## Files' sections so it can be re-approved."
 
-# ─── Stage 2: Implement ──────────────────────────────────────────────────────
+# ─── Stage 3: Implement ──────────────────────────────────────────────────────
 # Executes the approved plan. Write/edit/bash require tool-approval unless
 # the user passes --yolo or stage-level overrides.
 
@@ -142,6 +217,24 @@ Execute it step by step:
 - Use bash to run tests or verify the build after writing — output goes to
   `test_results`.
 
+Follow the workflow the discover stage synthesized in `workflow`. It ends with
+three literal lines — BASELINE, VERIFY and DONE WHEN. Execute them:
+
+1. BASELINE, before your FIRST edit. Run the BASELINE command and context_write
+   the result to `baseline`: which tests pass and which already fail. You cannot
+   tell a regression from a pre-existing failure without this. (TIER 1 / no
+   runnable suite: write "no baseline — nothing to run yet" and build the
+   verification the plan calls for as your first change.)
+2. VERIFY after each logical change, not just at the end.
+3. Compare every VERIFY against `baseline`. If a test that passed in `baseline`
+   now fails, you broke it: say so explicitly — "I broke <test> with my change to
+   <file>, investigating" — and fix it before writing anything else.
+4. Before finishing, run the full-suite command from `workflow` once.
+
+You are NOT done because most tests pass. You are done when DONE WHEN is met:
+the target tests pass AND nothing that passed in `baseline` fails now. If tests
+are still failing, say how many and keep going — do not stop early.
+
 As you work, keep two running logs so the review stage (and any restart) has
 the full picture without re-scanning:
 - `decisions` (context_append): each non-obvious design/architectural choice and
@@ -155,7 +248,8 @@ use ask_user_text or ask_user_confirm to check before proceeding — don't
 silently guess on something the user would want a say in.
 
 Work methodically through each plan step. After all steps, give a concise summary
-of what was created/modified and whether tests passed.
+of what was created/modified, the final test counts, and an explicit statement
+that nothing regressed against `baseline`.
 """
 
 # Large read output persists in `codebase`; test output persists in `test_results`
@@ -196,7 +290,7 @@ gate = { require_modifications = true, region = "implementation", max_attempts =
 condition = "error"
 transform = "direct"
 
-# ─── Stage 3: Review ─────────────────────────────────────────────────────────
+# ─── Stage 4: Review ─────────────────────────────────────────────────────────
 # Autonomous review. Transitions back to implement if issues found, ends the
 # run (allow_complete + "DONE") when the code is clean, or routes to
 # error_recovery if the review itself errors out.
@@ -229,8 +323,13 @@ were made before you question them. Read those files and provide a quality revie
 - Code quality: clarity, naming, error handling, conventions.
 - Security: any obvious vulnerabilities?
 
-Re-run the tests with bash and confirm they pass (output → `test_results`) — don't
-approve on an unverified claim that tests pass.
+Re-run the tests with bash — use the commands in `workflow`, which the implement
+stage was told to follow (output → `test_results`). Don't approve on an
+unverified claim that tests pass. Then diff what you ran against `baseline`:
+anything that passed there and fails now is a regression, and is grounds for
+NEEDS CHANGES on its own. Hold the work to `workflow`'s DONE WHEN line, and say
+so if the implement stage skipped its own stated workflow (no baseline captured,
+verification never run).
 
 End with one of:
   APPROVED — no significant issues
@@ -255,7 +354,7 @@ hint = "Issues found — needs another implementation pass"
 transform = "custom"
 
 [stages.review.transitions.implement.transform_config]
-carry = ["task", "constraints", "architecture", "plan", "codebase", "changelog", "decisions"]
+carry = ["task", "constraints", "architecture", "plan", "codebase", "changelog", "decisions", "discovery", "workflow", "baseline"]
 compact = ["conversation"]
 clear = ["scratch", "test_results"]
 compact_prompt = "Summarize review findings as a numbered list of required fixes."
@@ -264,7 +363,7 @@ compact_prompt = "Summarize review findings as a numbered list of required fixes
 condition = "error"
 transform = "direct"
 
-# ─── Stage 4: Error Recovery ────────────────────────────────────────────────
+# ─── Stage 5: Error Recovery ────────────────────────────────────────────────
 # Only reachable via error condition edges — invisible during normal flow.
 
 [stages.error_recovery]
@@ -305,6 +404,23 @@ constraints  = { kind = "pinned", budget = "1%", max_tokens = 2000, seed = "cons
 # Pre-loaded on startup: architecture / design docs (missing files skipped).
 architecture = { kind = "pinned", budget = "3%", max_tokens = 6000, seed = { files = ["ARCHITECTURE.md", "DESIGN.md", "docs/ARCHITECTURE.md", "docs/architecture.md", "README.md"] } }
 plan         = { kind = "pinned", budget = "5%", max_tokens = 6000 }
+# Deterministic repo scan, run once at spawn — the discover stage starts from
+# facts instead of burning iterations on `ls`. `git ls-files` behaves identically
+# on POSIX and Windows shells; outside a git repo it fails and this is simply
+# left empty (non-fatal), and oversized output is trimmed to the budget.
+# Refuse it with `--no-seed-commands` or `[security] allow_seed_commands = false`.
+repo_files   = { kind = "pinned", budget = "3%", max_tokens = 4000, seed = { command = "git ls-files" } }
+
+# ── Discovery (issue #108): written by the discover stage, read by every later
+# stage. Pinned, so no edge transform can clear or compact them. `required` puts
+# the runtime's own gate behind them (`require_context_regions`): the discover
+# stage is re-run with a nudge until it actually fills them, so the synthesized
+# workflow is a commitment the review stage can hold the run to, not a suggestion.
+discovery    = { kind = "pinned", budget = "4%", max_tokens = 6000, required = true, required_message = "Populate `discovery` (context_write) with this project's build system, test runner, layout and conventions before leaving the discover stage." }
+workflow     = { kind = "pinned", budget = "2%", max_tokens = 3000, required = true, required_message = "Populate `workflow` (context_write) with the tier and the literal BASELINE / VERIFY / DONE WHEN lines before leaving the discover stage." }
+# Pre-change test state, captured by implement before its first edit. Without it
+# a regression is indistinguishable from a pre-existing failure.
+baseline     = { kind = "pinned", budget = "3%", max_tokens = 4000 }
 
 # ── Knowledge (non-volatile; compacts to *_history) ──
 codebase         = { kind = "compacting",      budget = "25%", compact_at = "80%", threshold_tokens = 25000, max_tokens = 40000 }

@@ -102,6 +102,11 @@ impl FanOutSpawner for DaemonFanOutSpawner {
             None,
             // Fan-out workers get their split of the parent task via `task`.
             std::collections::HashMap::new(),
+            // Workers share the parent's workdir and are splits of a task the
+            // parent already scoped, so re-running a repo-scan command seed once
+            // per worker would be pure waste (and up to `max_workers` copies of
+            // the same output).
+            true,
         )
         .map_err(|e| format!("resolve worker blueprint: {e}"))?;
         // Nest the worker under its fan-out parent in the run tree.
@@ -420,6 +425,7 @@ mod tests {
             callback_url: None,
             callback_secret: None,
             yolo: false,
+            no_seed_commands: false,
             allow: Vec::new(),
             max_depth: None,
             parent_run_id: None,

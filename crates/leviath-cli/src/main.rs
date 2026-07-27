@@ -186,6 +186,7 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
         args.allow,
         args.max_depth,
         args.regions,
+        args.no_seed_commands,
     )?;
     leviath_cli::daemon::client::send_spawn(&control_client()?, spawn_args).await
 }

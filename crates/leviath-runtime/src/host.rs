@@ -67,6 +67,12 @@ pub struct SpawnArgs {
     /// interaction hub for a person who isn't there.
     #[serde(default)]
     pub yolo: bool,
+    /// Refuse this run's `seed = { command = ... }` regions (the
+    /// `--no-seed-commands` launch override). Command seeds execute at spawn,
+    /// before any approval prompt, so this is the per-run counterpart to the
+    /// `[security] allow_seed_commands` config switch.
+    #[serde(default)]
+    pub no_seed_commands: bool,
     /// Tools to allow outright for this run (the `--allow` launch override).
     #[serde(default)]
     pub allow: Vec<String>,
