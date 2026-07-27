@@ -64,6 +64,14 @@ pub struct TokenTotals {
     pub tool_calls: usize,
 }
 
+/// Run-scoped productivity flags, mirrored into `meta.json` so an empty run can
+/// be recognized (and explained) from disk. Unlike [`StageProgress`], this is
+/// never reset on a stage transition — it describes the whole run.
+///
+/// [`StageProgress`]: crate::pipeline::StageProgress
+#[derive(Component, Clone, Default, Debug, PartialEq)]
+pub struct RunOutcomeFlags(pub leviath_core::run_meta::RunFlags);
+
 impl TokenTotals {
     /// Add one inference response's usage to the running totals.
     pub fn add_usage(&mut self, usage: &leviath_providers::TokenUsage) {
@@ -145,15 +153,25 @@ pub fn build_context_snapshot(window: &ContextWindow, stage_name: &str) -> Conte
 /// Build the run metadata (`meta.json`) from an agent's live components, stamping
 /// `updated_at` with `now_secs`. `stage_index` is the agent's current stage
 /// position within its blueprint.
+#[allow(clippy::too_many_arguments)]
 pub fn build_run_meta(
     md: &RunMetadata,
     state: &AgentState,
     totals: &TokenTotals,
+    flags: &RunOutcomeFlags,
     stage_index: usize,
     now_secs: i64,
     depth: usize,
     max_child_depth: usize,
 ) -> RunMeta {
+    // `empty_output` is only meaningful once the run has stopped: a running
+    // agent that hasn't written anything *yet* is not an empty run.
+    let status = run_status_from(&state.status);
+    let mut flags = flags.0.clone();
+    flags.empty_output = matches!(
+        status,
+        RunStatus::Complete | RunStatus::Error | RunStatus::Cancelled
+    ) && flags.modified_file_count == 0;
     RunMeta {
         run_id: md.run_id.clone(),
         agent_name: md.agent_name.clone(),
@@ -161,7 +179,7 @@ pub fn build_run_meta(
         task: md.task.clone(),
         model: md.model.clone(),
         pid: 0, // no per-run worker process in the shared world
-        status: run_status_from(&state.status),
+        status,
         current_stage: state.current_stage.clone(),
         stage_index,
         num_stages: md.num_stages,
@@ -187,6 +205,7 @@ pub fn build_run_meta(
         children: state.spawned_children_ids.clone(),
         depth,
         max_child_depth,
+        flags,
     }
 }
 
@@ -314,7 +333,16 @@ mod tests {
         };
         let mut st = state(AgentStatus::Active);
         st.spawned_children_ids = vec!["child-a".to_string(), "child-b".to_string()];
-        let meta = build_run_meta(&md, &st, &totals, 1, 2000, 1, 4);
+        let meta = build_run_meta(
+            &md,
+            &st,
+            &totals,
+            &RunOutcomeFlags::default(),
+            1,
+            2000,
+            1,
+            4,
+        );
 
         assert_eq!(meta.run_id, "run-1");
         assert_eq!(meta.status, RunStatus::Running);
@@ -338,6 +366,62 @@ mod tests {
     }
 
     #[test]
+    fn build_run_meta_flags_empty_output_only_once_the_run_has_stopped() {
+        let mut flags = RunOutcomeFlags::default();
+        flags.0.gates_forced = 2;
+        // Still running with nothing written: not (yet) an empty run.
+        let running = build_run_meta(
+            &metadata(),
+            &state(AgentStatus::Active),
+            &TokenTotals::default(),
+            &flags,
+            0,
+            1000,
+            0,
+            0,
+        );
+        assert!(!running.flags.empty_output);
+        assert_eq!(running.flags.gates_forced, 2);
+
+        // Finished with nothing written: that is the #107 signature.
+        for status in [
+            AgentStatus::Complete,
+            AgentStatus::Cancelled,
+            AgentStatus::Error {
+                message: "x".to_string(),
+            },
+        ] {
+            let meta = build_run_meta(
+                &metadata(),
+                &state(status),
+                &TokenTotals::default(),
+                &flags,
+                0,
+                1000,
+                0,
+                0,
+            );
+            assert!(meta.flags.empty_output);
+        }
+
+        // Finished having written something: not empty.
+        let mut wrote = RunOutcomeFlags::default();
+        wrote.0.record_modification("src/a.rs");
+        let meta = build_run_meta(
+            &metadata(),
+            &state(AgentStatus::Complete),
+            &TokenTotals::default(),
+            &wrote,
+            0,
+            1000,
+            0,
+            0,
+        );
+        assert!(!meta.flags.empty_output);
+        assert_eq!(meta.flags.modified_files, vec!["src/a.rs".to_string()]);
+    }
+
+    #[test]
     fn build_run_meta_carries_error_message() {
         let meta = build_run_meta(
             &metadata(),
@@ -345,6 +429,7 @@ mod tests {
                 message: "boom".to_string(),
             }),
             &TokenTotals::default(),
+            &RunOutcomeFlags::default(),
             2,
             3000,
             0,

@@ -102,6 +102,56 @@ pub struct RunMeta {
     /// (0 when it has none). Restores `SubAgentChildren::max_child_depth`.
     #[serde(default)]
     pub max_child_depth: usize,
+    /// Why this run may have produced nothing useful — see [`RunFlags`].
+    #[serde(default)]
+    pub flags: RunFlags,
+}
+
+/// Post-hoc diagnosis of a run's productivity, persisted in `meta.json` so a
+/// harness (or the dashboard) can tell an empty run from a successful one
+/// without inspecting the workspace or parsing logs.
+///
+/// Issue #107: 13/300 SWE-bench runs completed their whole stage pipeline and
+/// produced no file changes at all. Nothing on disk said so, or said why.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RunFlags {
+    /// Paths passed to file-modifying tools that succeeded, in first-touch
+    /// order. Capped at [`MAX_TRACKED_MODIFIED_FILES`]; `modified_file_count`
+    /// keeps the true total.
+    #[serde(default)]
+    pub modified_files: Vec<String>,
+    /// Total successful file-modifying tool calls across the run (uncapped).
+    #[serde(default)]
+    pub modified_file_count: usize,
+    /// The run reached a terminal status having modified nothing.
+    #[serde(default)]
+    pub empty_output: bool,
+    /// How many stages exhausted their `max_iterations`.
+    #[serde(default)]
+    pub max_iterations_hit: usize,
+    /// How many transitions proceeded past an unsatisfied gate because the
+    /// gate's re-run budget ran out.
+    #[serde(default)]
+    pub gates_forced: usize,
+    /// The working directory disappeared mid-run.
+    #[serde(default)]
+    pub workspace_lost: bool,
+}
+
+/// How many distinct modified paths [`RunFlags`] records before it stops
+/// growing (the count keeps rising). Bounds `meta.json` for a long run.
+pub const MAX_TRACKED_MODIFIED_FILES: usize = 200;
+
+impl RunFlags {
+    /// Record a successful modifying tool call on `path`.
+    pub fn record_modification(&mut self, path: &str) {
+        self.modified_file_count += 1;
+        if self.modified_files.len() < MAX_TRACKED_MODIFIED_FILES
+            && !self.modified_files.iter().any(|p| p == path)
+        {
+            self.modified_files.push(path.to_string());
+        }
+    }
 }
 
 impl RunMeta {
@@ -144,6 +194,7 @@ impl RunMeta {
             children: Vec::new(),
             depth: 0,
             max_child_depth: 0,
+            flags: RunFlags::default(),
         }
     }
 
@@ -419,6 +470,44 @@ mod tests {
         assert_eq!(StageRunStatus::WaitingInput.to_string(), "WaitingInput");
         assert_eq!(StageRunStatus::Complete.to_string(), "Complete");
         assert_eq!(StageRunStatus::Error.to_string(), "Error");
+    }
+
+    #[test]
+    fn run_flags_record_modification_dedups_paths_and_caps_the_list() {
+        let mut flags = RunFlags::default();
+        flags.record_modification("src/a.rs");
+        flags.record_modification("src/a.rs");
+        flags.record_modification("src/b.rs");
+        assert_eq!(flags.modified_file_count, 3);
+        assert_eq!(flags.modified_files, vec!["src/a.rs", "src/b.rs"]);
+
+        // Past the cap the count keeps rising but the list stops growing, so a
+        // long run can't bloat meta.json.
+        for i in 0..MAX_TRACKED_MODIFIED_FILES {
+            flags.record_modification(&format!("f{i}.rs"));
+        }
+        assert_eq!(flags.modified_files.len(), MAX_TRACKED_MODIFIED_FILES);
+        assert_eq!(flags.modified_file_count, 3 + MAX_TRACKED_MODIFIED_FILES);
+    }
+
+    #[test]
+    fn run_meta_flags_default_for_older_files() {
+        // meta.json written before #107 has no `flags` key at all.
+        let mut meta = RunMeta::new(
+            "r".to_string(),
+            "a".to_string(),
+            "/p".to_string(),
+            "t".to_string(),
+            None,
+            "/w".to_string(),
+            1,
+        );
+        meta.flags.empty_output = true;
+        let json = serde_json::to_string(&meta).unwrap();
+        let stripped = json.replace(r#","flags":{"modified_files":[],"modified_file_count":0,"empty_output":true,"max_iterations_hit":0,"gates_forced":0,"workspace_lost":false}"#, "");
+        assert!(!stripped.contains("flags"));
+        let back: RunMeta = serde_json::from_str(&stripped).unwrap();
+        assert_eq!(back.flags, RunFlags::default());
     }
 
     #[test]

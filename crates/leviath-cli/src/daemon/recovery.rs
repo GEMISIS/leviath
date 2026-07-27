@@ -392,6 +392,16 @@ fn reload_one(
         // `parent_run_id` was already restored via `args` into build_agent's metadata.
     }
 
+    // Carry the run's productivity flags across the restart, so a resumed run
+    // doesn't report itself as having modified nothing (issue #107).
+    {
+        let mut flags = world
+            .world_mut()
+            .get_mut::<leviath_runtime::persistence::RunOutcomeFlags>(entity)
+            .expect("build_agent attached run outcome flags");
+        flags.0 = meta.flags.clone();
+    }
+
     // If this run was parked at a stage-boundary interaction point (e.g.
     // plan_approval), re-present it in the *waiting* state rather than the default
     // `Active` + `ReadyToInfer` restore — so the open prompt survives the restart
@@ -535,6 +545,13 @@ mod tests {
             children: children.iter().map(|s| s.to_string()).collect(),
             depth,
             max_child_depth,
+            // Non-default on purpose: proves reload restores the run's
+            // productivity flags rather than starting them over (issue #107).
+            flags: leviath_core::run_meta::RunFlags {
+                modified_files: vec!["src/a.rs".to_string()],
+                modified_file_count: 1,
+                ..Default::default()
+            },
         };
         std::fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
         if let Some(ctx) = context {
@@ -675,6 +692,14 @@ mod tests {
         let totals = world.world().get::<TokenTotals>(*entity).unwrap();
         assert_eq!(totals.prompt_tokens, 42);
         assert_eq!(totals.tool_calls, 3);
+        // ...as are the run's productivity flags, so a resumed run doesn't report
+        // itself as having modified nothing.
+        let flags = world
+            .world()
+            .get::<leviath_runtime::persistence::RunOutcomeFlags>(*entity)
+            .unwrap();
+        assert_eq!(flags.0.modified_files, vec!["src/a.rs".to_string()]);
+        assert_eq!(flags.0.modified_file_count, 1);
     }
 
     /// Fresh + stale differ on every observable field, so the assertions below

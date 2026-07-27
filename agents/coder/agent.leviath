@@ -74,7 +74,12 @@ You are implementing the plan from the `plan` region. Write working,
 production-quality code that matches the project's `conventions`.
 
 Work incrementally — one coherent file/change at a time, not one giant dump:
-- Use write_file to create files and edit_file to modify existing ones.
+- Use write_file to create files and edit_file to modify existing ones. Do NOT
+  edit files through bash — no `sed -i`, no `tee`, no `>`/`>>` redirection, no
+  here-docs. Bash is for running tests and builds and for read-only exploration.
+  Only write_file/edit_file are recorded in the `implementation` region the
+  reviewer reads, and this stage will not hand off to review until at least one
+  of them has landed.
 - Handle errors explicitly (validate inputs, propagate/return errors, no silent
   swallowing) — match the error-handling style already used in this codebase.
 - Write or update tests alongside the code when the task warrants it, then use
@@ -94,17 +99,28 @@ changed and the test outcome.
 # Large read output persists in `codebase`; test output persists in `test_results`
 # (the review stage reads it). Routed results leave a short pointer in conversation
 # (paired with their tool_use) and the full output as text in the region, so the
-# model still sees each action landed. Small write/edit confirmations stay inline.
+# model still sees each action landed.
+#
+# write_file/edit_file confirmations persist in `implementation`, which makes it
+# the run's changelog: it is what the review stage is told to read, it survives
+# `conversation` eviction, and — being persisted context — it also satisfies the
+# transition gate below after a daemon restart, when per-stage counters are gone.
 [stages.implement.tool_routing]
 default_region = "conversation"
 [stages.implement.tool_routing.overrides]
 read_file  = "codebase"
 list_dir   = "codebase"
 bash       = "test_results"
+write_file = "implementation"
+edit_file  = "implementation"
 
+# The gate refuses this edge until the stage has actually written something, so an
+# agent that explored the codebase through bash and changed nothing gets sent back
+# instead of handing an untouched workspace to review (issue #107).
 [stages.implement.transitions.review]
 hint = "Implementation complete, ready for review"
 transform = "compact"
+gate = { require_modifications = true, region = "implementation" }
 
 [stages.implement.transitions.error_recovery]
 condition = "error"

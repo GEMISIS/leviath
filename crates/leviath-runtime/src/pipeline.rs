@@ -414,6 +414,17 @@ pub struct StageProgress {
     /// Inferences run in this stage (per-stage, unlike the run-cumulative
     /// `AgentState.iteration`), for enforcing the stage's `max_iterations`.
     pub iterations: usize,
+    /// Successful file-modifying tool calls (`write_file`/`edit_file`, plus any
+    /// tool named by an outgoing gate) made in this stage. Read by the
+    /// transition gate to enforce `require_modifications`.
+    pub modifying_tool_calls: usize,
+    /// Modifying tool calls the permission layer refused (`[denied] ...`). A
+    /// gate lets the transition through when this is non-zero: the agent is
+    /// trying to write and cannot, so re-running the stage only burns budget.
+    pub blocked_modification_calls: usize,
+    /// How many times a transition gate has already sent this stage back for
+    /// another pass. Bounded by the gate's `max_attempts`.
+    pub gate_reentries: usize,
 }
 
 /// How a stage ended, when that governs the transition. Absent ⇒ the stage
@@ -1118,6 +1129,82 @@ fn apply_file_tracking(
     }
 }
 
+/// The tool names that count as a file modification for the agent's current
+/// stage: the built-in [`MODIFYING_TOOLS`](leviath_core::blueprint::MODIFYING_TOOLS)
+/// plus any extra names declared by that stage's outgoing transition gates (for
+/// agents whose writes go through MCP or script tools). All canonical, so a
+/// `bash`-style alias in a gate's `tools` list still matches its real tool.
+fn stage_modifying_tools(
+    blueprint: Option<&AgentBlueprint>,
+    cursor: Option<&StageCursor>,
+) -> Vec<String> {
+    let mut names: Vec<String> = leviath_core::blueprint::MODIFYING_TOOLS
+        .iter()
+        .map(|t| (*t).to_string())
+        .collect();
+    let (Some(bp), Some(cursor)) = (blueprint, cursor) else {
+        return names;
+    };
+    let Some(stage) = bp.0.stages.get(cursor.index) else {
+        return names;
+    };
+    let Some(transitions) = &stage.transitions else {
+        return names;
+    };
+    for edge in transitions.values() {
+        let Some(gate) = &edge.gate else { continue };
+        for tool in &gate.tools {
+            let canonical = leviath_tools::canonical_tool_name(tool).to_string();
+            if !names.contains(&canonical) {
+                names.push(canonical);
+            }
+        }
+    }
+    names
+}
+
+/// Tally this batch's file-modifying tool calls onto the stage's progress and the
+/// run's outcome flags. A result prefixed `[denied]` (permission layer) counts as
+/// *blocked* rather than successful — the agent tried and was refused, which a
+/// gate treats differently from never having tried. `[error]` results (the write
+/// itself failed) count as neither.
+fn record_modifications(
+    tool_calls: &[crate::components::ToolCall],
+    merged: &[(String, String)],
+    modifying: &[String],
+    progress: Option<bevy_ecs::prelude::Mut<'_, StageProgress>>,
+    flags: Option<bevy_ecs::prelude::Mut<'_, crate::persistence::RunOutcomeFlags>>,
+) {
+    let mut progress = progress;
+    let mut flags = flags;
+    for (call, (_id, result)) in tool_calls.iter().zip(merged.iter()) {
+        let canonical = leviath_tools::canonical_tool_name(&call.name);
+        if !modifying.iter().any(|t| t == canonical) {
+            continue;
+        }
+        if result.starts_with("[denied]") {
+            if let Some(progress) = progress.as_mut() {
+                progress.blocked_modification_calls += 1;
+            }
+            continue;
+        }
+        if result.starts_with("[error]") {
+            continue;
+        }
+        if let Some(progress) = progress.as_mut() {
+            progress.modifying_tool_calls += 1;
+        }
+        if let Some(flags) = flags.as_mut() {
+            let path = call
+                .arguments
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown>");
+            flags.0.record_modification(path);
+        }
+    }
+}
+
 /// Tool-collect system: drain finished tool batches and apply them. Results are
 /// written into the agent's context window (routing/truncation/taint honored)
 /// and the agent loops back to `ReadyToInfer`. Outcomes for agents no longer
@@ -1136,6 +1223,8 @@ pub fn collect_tools(
             Option<&mut StageIoBuffer>,
             Option<&AgentBlueprint>,
             Option<&mut crate::repetition::RepetitionDetector>,
+            Option<&mut StageProgress>,
+            Option<&mut crate::persistence::RunOutcomeFlags>,
         ),
         With<AwaitingTools>,
     >,
@@ -1153,6 +1242,8 @@ pub fn collect_tools(
             buffer,
             blueprint,
             repetition,
+            progress,
+            flags,
         )) = agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
@@ -1165,6 +1256,17 @@ pub fn collect_tools(
             parts.extend(ctx.0.iter().cloned());
         }
         let mut merged = merge_in_call_order(&infer.tool_calls, &parts);
+        // Modification accounting (issue #107): count the file-writing calls this
+        // stage actually landed, so a `require_modifications` transition gate can
+        // tell "analyzed the code and wrote nothing" from "made the change".
+        // Done before file tracking, which rewrites successful results.
+        record_modifications(
+            &infer.tool_calls,
+            &merged,
+            &stage_modifying_tools(blueprint, cursor),
+            progress,
+            flags,
+        );
         // File tracking: sync read/write results into the configured HashMap
         // region and replace the inline result with a reference (de-dup context).
         if let Some(ft) = blueprint.and_then(|bp| bp.0.file_tracking.as_ref()) {
@@ -1672,6 +1774,7 @@ pub fn dispatch_persistence(
             Option<&crate::interaction_points::AwaitingInteractionPoint>,
             Option<&crate::interaction_points::InteractionPointCursor>,
             Option<&crate::interaction_points::InteractionPointRounds>,
+            Option<&crate::persistence::RunOutcomeFlags>,
         ),
     )>,
     stage: Res<PersistenceStage>,
@@ -1693,7 +1796,7 @@ pub fn dispatch_persistence(
         parent_ref,
         children,
         fan_out_waiting,
-        (awaiting_point, ip_cursor, ip_rounds),
+        (awaiting_point, ip_cursor, ip_rounds, outcome_flags),
     ) in agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
@@ -1741,7 +1844,17 @@ pub fn dispatch_persistence(
         // Tree links, for a deterministic restart-time rebuild of the graph.
         let depth = parent_ref.map(|p| p.depth).unwrap_or(0);
         let max_child_depth = children.map(|c| c.max_child_depth).unwrap_or(0);
-        let meta = build_run_meta(md, state, totals, cursor.index, now, depth, max_child_depth);
+        let flags = outcome_flags.cloned().unwrap_or_default();
+        let meta = build_run_meta(
+            md,
+            state,
+            totals,
+            &flags,
+            cursor.index,
+            now,
+            depth,
+            max_child_depth,
+        );
         let context = build_context_snapshot(window, &state.current_stage);
         let stages = ledger.as_deref().map(|l| l.0.clone()).unwrap_or_default();
         // Persist the taint gate's audit log (per-stage) when it has events, so
@@ -1904,8 +2017,13 @@ enum StageResolution {
     /// The stage errored and has no `error` edge — terminate the run as errored,
     /// preserving the error status the collect system already set.
     TerminalError,
-    /// Advance to this stage index, applying the edge's context transform.
-    Next(usize, leviath_core::blueprint::EdgeTransform),
+    /// Advance to this stage index, applying the edge's context transform once
+    /// the edge's gate (if any) is satisfied.
+    Next(
+        usize,
+        leviath_core::blueprint::EdgeTransform,
+        Option<leviath_core::blueprint::TransitionGate>,
+    ),
     /// Multiple candidate edges — an LLM must choose among them.
     Choose(Vec<leviath_core::blueprint::TransitionEdge>),
 }
@@ -1935,31 +2053,92 @@ fn find_conditioned_edge(
     })
 }
 
-/// Max-iterations guard: for each `ReadyToInfer` agent whose per-stage inference
-/// count has reached the stage's `max_iterations`, end the stage (routing to a
-/// `max_iterations` edge if one exists, else a normal transition) instead of
-/// running another inference. Ported from the imperative `run_autonomous` cap.
-pub fn enforce_max_iterations(
-    agents: Query<
+/// How often (in per-stage iterations) [`check_workspace_health`] stats the
+/// agent's working directory. One `metadata` call every few iterations is far
+/// cheaper than the tool failures it replaces.
+pub const WORKSPACE_CHECK_INTERVAL: usize = 5;
+
+/// Workspace health guard: fail a run whose working directory has disappeared.
+///
+/// Issue #107: an external harness deleted the workspace out from under running
+/// agents, which then spent every remaining iteration collecting
+/// `No such file or directory` from their tools — 16-17 of them in the observed
+/// runs — with no way back. Nothing can recreate a deleted checkout from inside
+/// the agent, so this stops immediately with a message that names the real
+/// problem, instead of routing to error recovery to flail more cheaply.
+#[allow(clippy::type_complexity)]
+pub fn check_workspace_health(
+    mut agents: Query<
         (
             Entity,
-            &AgentState,
-            &AgentBlueprint,
-            &StageCursor,
+            &RunMetadata,
             &StageProgress,
+            &mut AgentState,
+            Option<&mut crate::persistence::RunOutcomeFlags>,
         ),
         With<ReadyToInfer>,
     >,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, state, bp, cursor, progress) in agents.iter() {
+    for (entity, md, progress, mut state, flags) in agents.iter_mut() {
+        crate::tick_scope::enter(entity);
+        if state.status != AgentStatus::Active {
+            continue;
+        }
+        if progress.iterations % WORKSPACE_CHECK_INTERVAL != 0 {
+            continue;
+        }
+        if std::fs::metadata(&md.workdir).is_ok_and(|m| m.is_dir()) {
+            continue;
+        }
+        tracing::error!(
+            run_id = %md.run_id,
+            workdir = %md.workdir,
+            "working directory is gone; failing the run"
+        );
+        state.status = AgentStatus::Error {
+            message: format!("workspace '{}' is no longer accessible", md.workdir),
+        };
+        if let Some(mut flags) = flags {
+            flags.0.workspace_lost = true;
+        }
+        commands.entity(entity).remove::<ReadyToInfer>();
+    }
+}
+
+/// Max-iterations guard: for each `ReadyToInfer` agent whose per-stage inference
+/// count has reached the stage's `max_iterations`, end the stage (routing to a
+/// `max_iterations` edge if one exists, else a normal transition) instead of
+/// running another inference. Ported from the imperative `run_autonomous` cap.
+#[allow(clippy::type_complexity)]
+pub fn enforce_max_iterations(
+    mut agents: Query<
+        (
+            Entity,
+            &AgentState,
+            &AgentBlueprint,
+            &StageCursor,
+            &StageProgress,
+            Option<&mut crate::persistence::RunOutcomeFlags>,
+        ),
+        With<ReadyToInfer>,
+    >,
+    mut commands: Commands,
+) {
+    crate::tick_scope::clear();
+    for (entity, state, bp, cursor, progress, flags) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue;
         }
         let max = bp.0.stages[cursor.index].max_iterations.unwrap_or(0);
         if max > 0 && progress.iterations >= max {
+            // Record it on the run: a stage that ran out of iterations is one of
+            // the ways a run ends up with nothing to show (issue #107).
+            if let Some(mut flags) = flags {
+                flags.0.max_iterations_hit += 1;
+            }
             commands
                 .entity(entity)
                 .remove::<ReadyToInfer>()
@@ -1983,10 +2162,12 @@ fn resolve_transition_sync(
     match &stage.transitions {
         None => {
             if stage_idx + 1 < blueprint.stages.len() {
-                // A linear fall-through carries context as-is (Direct).
+                // A linear fall-through carries context as-is (Direct), and has
+                // no edge to hang a gate on.
                 StageResolution::Next(
                     stage_idx + 1,
                     leviath_core::blueprint::EdgeTransform::Direct,
+                    None,
                 )
             } else {
                 StageResolution::Terminal
@@ -2025,7 +2206,11 @@ fn resolve_transition_sync(
                         .iter()
                         .position(|s| s.name == choosable[0].target)
                         .unwrap_or(0);
-                    StageResolution::Next(idx, choosable[0].transform.clone())
+                    StageResolution::Next(
+                        idx,
+                        choosable[0].transform.clone(),
+                        choosable[0].gate.clone(),
+                    )
                 }
                 _ => StageResolution::Choose(choosable.into_iter().cloned().collect()),
             }
@@ -2247,6 +2432,119 @@ pub fn require_context_regions(
     }
 }
 
+/// What a chosen edge's gate says about the transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GateDecision {
+    /// The gate is satisfied (or absent) — follow the edge.
+    Pass,
+    /// The gate is unsatisfied but out of re-run budget — follow the edge and
+    /// record it in the run's flags so the run explains itself afterwards.
+    Forced,
+    /// Hold the agent in this stage and show it this nudge.
+    Block(String),
+}
+
+/// Decide whether a chosen edge's [gate](leviath_core::blueprint::TransitionGate)
+/// blocks the transition.
+///
+/// Issue #107: an agent can read and reason about a codebase entirely through
+/// `shell` and arrive at the review stage having changed nothing, producing a run
+/// with no output. A `require_modifications` gate keeps it in the stage until it
+/// has actually written something.
+///
+/// The gate passes when any of these hold:
+/// - the stage advertises no file-modifying tool (it could never pass, so gating
+///   it would only burn iterations);
+/// - a modifying tool call succeeded in this stage;
+/// - one was refused by the permission layer (the agent is trying and cannot);
+/// - the gate names a region and that region is non-empty (the durable signal:
+///   per-stage counters don't survive a daemon restart, but regions do).
+///
+/// When the gate's re-run budget is spent it gives up loudly, as
+/// [`GateDecision::Forced`].
+fn gate_blocks(
+    gate: Option<&leviath_core::blueprint::TransitionGate>,
+    stage: &leviath_core::Stage,
+    progress: &StageProgress,
+    window: &ContextWindow,
+) -> GateDecision {
+    let Some(gate) = gate else {
+        return GateDecision::Pass;
+    };
+    if !gate.require_modifications {
+        return GateDecision::Pass;
+    }
+    let can_modify = stage.available_tools.iter().any(|t| {
+        let canonical = leviath_tools::canonical_tool_name(t);
+        leviath_core::blueprint::MODIFYING_TOOLS.contains(&canonical)
+            || gate
+                .tools
+                .iter()
+                .any(|extra| leviath_tools::canonical_tool_name(extra) == canonical)
+    });
+    if !can_modify {
+        return GateDecision::Pass;
+    }
+    if progress.modifying_tool_calls > 0 {
+        return GateDecision::Pass;
+    }
+    if progress.blocked_modification_calls > 0 {
+        tracing::warn!(
+            stage = %stage.name,
+            blocked = progress.blocked_modification_calls,
+            "file modifications were denied by policy; letting the gated transition through"
+        );
+        return GateDecision::Pass;
+    }
+    if let Some(region) = &gate.region
+        && window
+            .get_region(region)
+            .is_some_and(|r| !r.content.is_empty())
+    {
+        return GateDecision::Pass;
+    }
+    let cap = gate
+        .max_attempts
+        .unwrap_or(leviath_core::blueprint::DEFAULT_GATE_ATTEMPTS);
+    if progress.gate_reentries >= cap {
+        tracing::warn!(
+            stage = %stage.name,
+            attempts = cap,
+            "stage still has no file modifications after re-run attempts; proceeding"
+        );
+        return GateDecision::Forced;
+    }
+    GateDecision::Block(gate.message.clone().unwrap_or_else(|| {
+        "No file modifications were recorded in this stage. Changes made through the shell \
+         (sed -i, tee, >, >>) are not tracked by the framework. Re-apply your changes with \
+         edit_file or write_file before moving on."
+            .to_string()
+    }))
+}
+
+/// Hold an agent in its current stage after a gate refused the transition: inject
+/// the nudge, count the re-entry, and put it back in front of the model. The
+/// stage is *not* re-entered — `StageProgress` is deliberately preserved so the
+/// stage's `max_iterations` still bounds the loop.
+fn hold_for_gate(
+    entity: Entity,
+    nudge: &str,
+    progress: &mut StageProgress,
+    window: &mut ContextWindow,
+    commands: &mut Commands,
+) {
+    let content = format!("[System] {nudge}");
+    let tokens = content.len() / 4 + 1;
+    let _ = window.add_to_region("conversation", content, tokens);
+    progress.gate_reentries += 1;
+    commands
+        .entity(entity)
+        .remove::<ResolveTransition>()
+        .remove::<AwaitingTransitionResponse>()
+        .remove::<StageOutcome>()
+        .insert(ReadyToInfer);
+}
+
 /// Transition-resolution system: for each `ResolveTransition` agent, resolve the
 /// next stage. Terminal ⇒ mark the agent `Complete`. A single/linear target ⇒
 /// enter the new stage (swap its `StageInference`, reset stage progress, bump the
@@ -2266,6 +2564,7 @@ pub fn resolve_transition(
             &mut VisitCounts,
             &mut ContextWindow,
             Option<&StageOutcome>,
+            Option<&mut crate::persistence::RunOutcomeFlags>,
         ),
         With<ResolveTransition>,
     >,
@@ -2284,6 +2583,7 @@ pub fn resolve_transition(
         mut visits,
         mut window,
         outcome,
+        mut flags,
     ) in agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
@@ -2291,14 +2591,17 @@ pub fn resolve_transition(
         // How the stage ended governs the transition: an error/max-iterations
         // outcome follows its conditioned edge (e.g. → error_recovery) if present.
         let resolution = match outcome {
+            // An error/max-iterations edge is never gated: the stage already
+            // failed, and holding it back to demand file changes would strand a
+            // run that can't make any.
             Some(StageOutcome::Errored(_)) => {
                 find_conditioned_edge(&bp.0, stage, &visits.0, TransitionCondition::Error)
-                    .map(|(i, t)| StageResolution::Next(i, t))
+                    .map(|(i, t)| StageResolution::Next(i, t, None))
                     .unwrap_or(StageResolution::TerminalError)
             }
             Some(StageOutcome::MaxIterations) => {
                 find_conditioned_edge(&bp.0, stage, &visits.0, TransitionCondition::MaxIterations)
-                    .map(|(i, t)| StageResolution::Next(i, t))
+                    .map(|(i, t)| StageResolution::Next(i, t, None))
                     .unwrap_or_else(|| {
                         resolve_transition_sync(&bp.0, stage, cursor.index, &visits.0)
                     })
@@ -2320,7 +2623,22 @@ pub fn resolve_transition(
                     .remove::<ResolveTransition>()
                     .remove::<StageOutcome>();
             }
-            StageResolution::Next(idx, transform) => {
+            StageResolution::Next(idx, transform, gate) => {
+                // Check the edge's gate BEFORE the transform runs: the transform
+                // compacts/clears regions, and a held stage must keep its context.
+                let gate = outcome.is_none().then_some(gate).flatten();
+                match gate_blocks(gate.as_ref(), stage, &progress, &window) {
+                    GateDecision::Block(nudge) => {
+                        hold_for_gate(entity, &nudge, &mut progress, &mut window, &mut commands);
+                        continue;
+                    }
+                    GateDecision::Forced => {
+                        if let Some(flags) = flags.as_mut() {
+                            flags.0.gates_forced += 1;
+                        }
+                    }
+                    GateDecision::Pass => {}
+                }
                 // Reshape the outgoing context per the edge transform before the
                 // new stage's layout/prompt setup.
                 let to_compact = apply_edge_transform(&mut window, &transform);
@@ -3036,6 +3354,7 @@ pub fn collect_transition_choice(
         &mut VisitCounts,
         &mut ContextWindow,
         &AwaitingTransitionResponse,
+        Option<&mut crate::persistence::RunOutcomeFlags>,
     )>,
     mut commands: Commands,
 ) {
@@ -3051,6 +3370,7 @@ pub fn collect_transition_choice(
             mut visits,
             mut window,
             resp,
+            mut flags,
         )) = agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
@@ -3086,14 +3406,36 @@ pub fn collect_transition_choice(
                         .iter()
                         .position(|s| s.name == target)
                         .unwrap_or(0);
-                // Apply the chosen edge's context transform (Direct when the
-                // matched target has no explicit edge, e.g. a fallback).
-                let transform = resp
-                    .0
-                    .iter()
-                    .find(|e| e.target == target)
-                    .map(|e| e.transform.clone())
-                    .unwrap_or_default();
+                // The chosen edge (absent when the matched target has no explicit
+                // edge, e.g. a fallback — then Direct, ungated).
+                let edge = resp.0.iter().find(|e| e.target == target);
+                let transform = edge.map(|e| e.transform.clone()).unwrap_or_default();
+                // The edge's gate is checked BEFORE its transform runs, so a
+                // held stage keeps the context it still needs.
+                let stage = &bp.0.stages[cursor.index];
+                match gate_blocks(
+                    edge.and_then(|e| e.gate.as_ref()),
+                    stage,
+                    &progress,
+                    &window,
+                ) {
+                    GateDecision::Block(nudge) => {
+                        hold_for_gate(
+                            outcome.entity,
+                            &nudge,
+                            &mut progress,
+                            &mut window,
+                            &mut commands,
+                        );
+                        continue;
+                    }
+                    GateDecision::Forced => {
+                        if let Some(flags) = flags.as_mut() {
+                            flags.0.gates_forced += 1;
+                        }
+                    }
+                    GateDecision::Pass => {}
+                }
                 let to_compact = apply_edge_transform(&mut window, &transform);
                 let setup = &setups.0[idx];
                 match enter_stage(
@@ -4581,6 +4923,7 @@ mod tests {
             total_tool_calls: 2,
             text_only_nudges: 0,
             iterations: 0,
+            ..Default::default()
         };
         let e = world
             .spawn((
@@ -4602,6 +4945,7 @@ mod tests {
             total_tool_calls: 0,
             text_only_nudges: MAX_TEXT_ONLY_NUDGES,
             iterations: 0,
+            ..Default::default()
         };
         let e = world
             .spawn((
@@ -5930,6 +6274,7 @@ mod tests {
                 condition: cond,
                 hint: None,
                 transform: leviath_core::blueprint::EdgeTransform::Direct,
+                gate: None,
             },
         )
     }
@@ -6010,6 +6355,7 @@ mod tests {
                     total_tool_calls: 3,
                     text_only_nudges: 1,
                     iterations: 0,
+                    ..Default::default()
                 },
                 StageInferences(stage_infs),
                 setups(n),
@@ -7142,6 +7488,7 @@ mod tests {
             condition: leviath_core::blueprint::TransitionCondition::Always,
             hint: None,
             transform: EdgeTransform::Clear,
+            gate: None,
         }
     }
 
@@ -7259,12 +7606,29 @@ mod tests {
     fn enforce_max_iterations_caps_at_the_limit() {
         let mut world = World::new();
         let e = spawn_ready_agent(&mut world, Some(3), 3, AgentStatus::Active);
+        world
+            .entity_mut(e)
+            .insert(crate::persistence::RunOutcomeFlags::default());
+        // An agent with no flags component still gets capped; there's just
+        // nowhere to record it.
+        let unflagged = spawn_ready_agent(&mut world, Some(3), 3, AgentStatus::Active);
         run_enforce(&mut world);
+        assert!(world.get::<ResolveTransition>(unflagged).is_some());
         assert!(world.get::<ResolveTransition>(e).is_some());
         assert!(world.get::<ReadyToInfer>(e).is_none());
         assert_eq!(
             world.get::<StageOutcome>(e).unwrap(),
             &StageOutcome::MaxIterations
+        );
+        // The run records it: a stage that ran out of iterations is one way a
+        // run ends up with nothing to show (issue #107).
+        assert_eq!(
+            world
+                .get::<crate::persistence::RunOutcomeFlags>(e)
+                .unwrap()
+                .0
+                .max_iterations_hit,
+            1
         );
     }
 
@@ -7648,6 +8012,304 @@ mod tests {
         }
     }
 
+    // ── transition gates: require_modifications (#107) ──
+
+    fn gate(
+        region: Option<&str>,
+        message: Option<&str>,
+    ) -> leviath_core::blueprint::TransitionGate {
+        leviath_core::blueprint::TransitionGate {
+            require_modifications: true,
+            message: message.map(str::to_string),
+            region: region.map(str::to_string),
+            tools: Vec::new(),
+            max_attempts: None,
+        }
+    }
+
+    /// A stage that can write files, with `edges` attached.
+    fn writing_stage(
+        name: &str,
+        edges: Vec<(String, leviath_core::blueprint::TransitionEdge)>,
+    ) -> leviath_core::Stage {
+        let mut s = stage_named(name, Some(edges), false, None);
+        s.available_tools = vec!["write_file".to_string(), "bash".to_string()];
+        s
+    }
+
+    fn gated_edge(
+        target: &str,
+        gate: Option<leviath_core::blueprint::TransitionGate>,
+    ) -> (String, leviath_core::blueprint::TransitionEdge) {
+        (
+            target.to_string(),
+            leviath_core::blueprint::TransitionEdge {
+                target: target.to_string(),
+                condition: leviath_core::blueprint::TransitionCondition::Always,
+                hint: None,
+                transform: leviath_core::blueprint::EdgeTransform::Direct,
+                gate,
+            },
+        )
+    }
+
+    /// The nudge a gate would show, or `None` when it let the transition
+    /// through. A named helper rather than an inline `matches!` so both arms are
+    /// exercised by the assertions below.
+    fn block_message(decision: GateDecision) -> Option<String> {
+        match decision {
+            GateDecision::Block(msg) => Some(msg),
+            GateDecision::Pass | GateDecision::Forced => None,
+        }
+    }
+
+    fn progress_with(modifying: usize, blocked: usize, reentries: usize) -> StageProgress {
+        StageProgress {
+            modifying_tool_calls: modifying,
+            blocked_modification_calls: blocked,
+            gate_reentries: reentries,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn gate_blocks_only_an_unsatisfied_require_modifications_edge() {
+        let stage = writing_stage("impl", vec![gated_edge("review", Some(gate(None, None)))]);
+        let window = conv_window();
+        let zero = progress_with(0, 0, 0);
+        // Unsatisfied ⇒ blocked, with the default explanation.
+        let g = gate(None, None);
+        let msg = block_message(gate_blocks(Some(&g), &stage, &zero, &window))
+            .expect("an unsatisfied require_modifications gate blocks");
+        assert!(msg.contains("edit_file or write_file"));
+        // No gate at all, and a gate that doesn't require modifications, both pass.
+        assert_eq!(
+            gate_blocks(None, &stage, &zero, &window),
+            GateDecision::Pass
+        );
+        let off = leviath_core::blueprint::TransitionGate::default();
+        assert_eq!(
+            gate_blocks(Some(&off), &stage, &zero, &window),
+            GateDecision::Pass
+        );
+        // A landed write satisfies it.
+        assert_eq!(
+            gate_blocks(Some(&g), &stage, &progress_with(1, 0, 0), &window),
+            GateDecision::Pass
+        );
+        // So does a write the permission layer refused: the agent is trying and
+        // cannot, so another pass would only burn iterations.
+        assert_eq!(
+            gate_blocks(Some(&g), &stage, &progress_with(0, 1, 0), &window),
+            GateDecision::Pass
+        );
+    }
+
+    #[test]
+    fn gate_uses_a_custom_message_when_given() {
+        let stage = writing_stage("impl", vec![]);
+        let g = gate(None, Some("write something!"));
+        assert_eq!(
+            gate_blocks(Some(&g), &stage, &progress_with(0, 0, 0), &conv_window()),
+            GateDecision::Block("write something!".to_string())
+        );
+    }
+
+    #[test]
+    fn gate_passes_on_a_non_empty_evidence_region() {
+        // The resume case: per-stage counters are gone after a daemon restart,
+        // but the region the write tools are routed into is restored from disk.
+        let stage = writing_stage("impl", vec![]);
+        let g = gate(Some("implementation"), None);
+        let zero = progress_with(0, 0, 0);
+
+        let mut empty = conv_window();
+        empty.add_region(Region::new(
+            "implementation".to_string(),
+            RegionKind::Clearable,
+            10_000,
+        ));
+        // Region present but empty ⇒ still gated; region missing entirely ⇒ gated.
+        assert!(block_message(gate_blocks(Some(&g), &stage, &zero, &empty)).is_some());
+        assert!(block_message(gate_blocks(Some(&g), &stage, &zero, &conv_window())).is_some());
+
+        let mut filled = empty.clone();
+        filled
+            .add_to_region("implementation", "wrote src/lib.rs".to_string(), 5)
+            .unwrap();
+        assert!(block_message(gate_blocks(Some(&g), &stage, &zero, &filled)).is_none());
+    }
+
+    #[test]
+    fn gate_passes_a_stage_that_cannot_modify_anything() {
+        // Gating a stage with no write tool would loop pointlessly; the blueprint
+        // validator rejects that combination, but the runtime never relies on it.
+        let mut stage = writing_stage("review", vec![]);
+        stage.available_tools = vec!["read_file".to_string()];
+        let g = gate(None, None);
+        assert_eq!(
+            gate_blocks(Some(&g), &stage, &progress_with(0, 0, 0), &conv_window()),
+            GateDecision::Pass
+        );
+        // ...unless the gate itself names the tool the stage does have.
+        let mut custom = gate(None, None);
+        custom.tools = vec!["read_file".to_string()];
+        assert!(
+            block_message(gate_blocks(
+                Some(&custom),
+                &stage,
+                &progress_with(0, 0, 0),
+                &conv_window()
+            ))
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn gate_gives_up_after_its_attempt_budget() {
+        let stage = writing_stage("impl", vec![]);
+        let zero_window = conv_window();
+        // Default budget is 3 re-runs.
+        let g = gate(None, None);
+        assert!(
+            block_message(gate_blocks(
+                Some(&g),
+                &stage,
+                &progress_with(0, 0, 2),
+                &zero_window
+            ))
+            .is_some()
+        );
+        assert_eq!(
+            gate_blocks(Some(&g), &stage, &progress_with(0, 0, 3), &zero_window),
+            GateDecision::Forced
+        );
+        // ...and is overridable per edge.
+        let mut once = gate(None, None);
+        once.max_attempts = Some(1);
+        assert_eq!(
+            gate_blocks(Some(&once), &stage, &progress_with(0, 0, 1), &zero_window),
+            GateDecision::Forced
+        );
+    }
+
+    #[test]
+    fn resolve_transition_holds_the_stage_when_a_gate_blocks() {
+        let bp = blueprint(vec![
+            writing_stage("impl", vec![gated_edge("review", Some(gate(None, None)))]),
+            stage_named("review", None, false, None),
+        ]);
+        let mut world = World::new();
+        let e = spawn_transition_agent(
+            &mut world,
+            bp,
+            vec![si("m0"), si("m1")],
+            VisitCounts::default(),
+        );
+        world
+            .entity_mut(e)
+            .insert(progress_with(0, 0, 0))
+            .insert(crate::persistence::RunOutcomeFlags::default());
+
+        run_transition(&mut world);
+
+        // Still in `impl`, re-armed for another inference, nudged, and counted.
+        assert_eq!(world.get::<StageCursor>(e).unwrap().index, 0);
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert!(world.get::<ResolveTransition>(e).is_none());
+        assert_eq!(world.get::<StageProgress>(e).unwrap().gate_reentries, 1);
+        let conv = world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .get_region("conversation")
+            .unwrap()
+            .content
+            .iter()
+            .map(|entry| entry.content.clone())
+            .collect::<String>();
+        assert!(conv.contains("[System] No file modifications"));
+        // Not yet forced — the budget hasn't run out.
+        assert_eq!(
+            world
+                .get::<crate::persistence::RunOutcomeFlags>(e)
+                .unwrap()
+                .0
+                .gates_forced,
+            0
+        );
+    }
+
+    #[test]
+    fn resolve_transition_records_a_forced_gate_and_advances() {
+        let bp = blueprint(vec![
+            writing_stage("impl", vec![gated_edge("review", Some(gate(None, None)))]),
+            stage_named("review", None, false, None),
+        ]);
+        let mut world = World::new();
+        let e = spawn_transition_agent(
+            &mut world,
+            bp.clone(),
+            vec![si("m0"), si("m1")],
+            VisitCounts::default(),
+        );
+        world
+            .entity_mut(e)
+            // Budget already spent.
+            .insert(progress_with(0, 0, 3))
+            .insert(crate::persistence::RunOutcomeFlags::default());
+        // An agent with no flags component (fan-out workers, older runs) still
+        // transitions — it just has nowhere to record the forced gate.
+        let unflagged = spawn_transition_agent(
+            &mut world,
+            bp,
+            vec![si("m0"), si("m1")],
+            VisitCounts::default(),
+        );
+        world.entity_mut(unflagged).insert(progress_with(0, 0, 3));
+
+        run_transition(&mut world);
+
+        assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+        assert_eq!(world.get::<StageCursor>(unflagged).unwrap().index, 1);
+        assert_eq!(
+            world
+                .get::<crate::persistence::RunOutcomeFlags>(e)
+                .unwrap()
+                .0
+                .gates_forced,
+            1
+        );
+    }
+
+    #[test]
+    fn resolve_transition_skips_the_gate_on_an_error_edge() {
+        use leviath_core::blueprint::TransitionCondition;
+        // The error edge is followed even with zero modifications: a failed stage
+        // must be able to reach recovery.
+        let mut error_edge = gated_edge("recover", Some(gate(None, None)));
+        error_edge.1.condition = TransitionCondition::Error;
+        let bp = blueprint(vec![
+            writing_stage("impl", vec![error_edge]),
+            stage_named("recover", None, false, None),
+        ]);
+        let mut world = World::new();
+        let e = spawn_transition_agent(
+            &mut world,
+            bp,
+            vec![si("m0"), si("m1")],
+            VisitCounts::default(),
+        );
+        world
+            .entity_mut(e)
+            .insert(progress_with(0, 0, 0))
+            .insert(StageOutcome::Errored("boom".to_string()));
+
+        run_transition(&mut world);
+
+        assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+        assert_eq!(world.get::<StageProgress>(e).unwrap().gate_reentries, 0);
+    }
+
     // ── file tracking (#6) ──
 
     fn ftc(
@@ -7825,6 +8487,307 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    // ── modification accounting (#107) ──
+
+    /// Drive `collect_tools` over one batch of `(tool, result)` pairs against a
+    /// stage whose outgoing edge names `extra_tools` as modifying, returning the
+    /// resulting per-stage progress and run flags.
+    fn count_modifications(
+        calls: &[(&str, serde_json::Value, &str)],
+        extra_tools: &[&str],
+    ) -> (StageProgress, leviath_core::run_meta::RunFlags) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolResults(rx));
+        let mut g = gate(None, None);
+        g.tools = extra_tools.iter().map(|t| (*t).to_string()).collect();
+        let bp = blueprint(vec![writing_stage(
+            "impl",
+            vec![gated_edge("review", Some(g))],
+        )]);
+        let e = world
+            .spawn((
+                conv_window(),
+                infer_with(
+                    calls
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (name, args, _))| fcall(&format!("c{i}"), name, args.clone()))
+                        .collect(),
+                ),
+                AwaitingTools,
+                AgentBlueprint(bp),
+                StageCursor { index: 0 },
+                StageProgress::default(),
+                crate::persistence::RunOutcomeFlags::default(),
+            ))
+            .id();
+        tx.send(ToolOutcome {
+            entity: e,
+            results: calls
+                .iter()
+                .enumerate()
+                .map(|(i, (_, _, result))| (format!("c{i}"), (*result).to_string()))
+                .collect(),
+        })
+        .unwrap();
+        run_collect_tools(&mut world);
+        (
+            world.get::<StageProgress>(e).unwrap().clone(),
+            world
+                .get::<crate::persistence::RunOutcomeFlags>(e)
+                .unwrap()
+                .0
+                .clone(),
+        )
+    }
+
+    #[test]
+    fn collect_tools_counts_successful_writes_and_their_paths() {
+        let (progress, flags) = count_modifications(
+            &[
+                (
+                    "write_file",
+                    serde_json::json!({"path": "src/a.rs"}),
+                    "Successfully wrote 12 bytes to 'src/a.rs'",
+                ),
+                (
+                    "edit_file",
+                    serde_json::json!({"path": "src/b.rs"}),
+                    "Successfully edited 'src/b.rs'",
+                ),
+                // Same path twice: counted twice, listed once.
+                (
+                    "edit_file",
+                    serde_json::json!({"path": "src/b.rs"}),
+                    "Successfully edited 'src/b.rs'",
+                ),
+            ],
+            &[],
+        );
+        assert_eq!(progress.modifying_tool_calls, 3);
+        assert_eq!(progress.blocked_modification_calls, 0);
+        assert_eq!(flags.modified_file_count, 3);
+        assert_eq!(flags.modified_files, vec!["src/a.rs", "src/b.rs"]);
+    }
+
+    #[test]
+    fn collect_tools_separates_failed_denied_and_non_modifying_calls() {
+        let (progress, flags) = count_modifications(
+            &[
+                // Read-only work through the shell is exactly what #107 is about:
+                // it must not read as a modification.
+                ("shell", serde_json::json!({"command": "cat a.rs"}), "…"),
+                (
+                    "write_file",
+                    serde_json::json!({"path": "a.rs"}),
+                    "[error] Failed to write 'a.rs': permission denied",
+                ),
+                (
+                    "edit_file",
+                    serde_json::json!({"path": "b.rs"}),
+                    "[denied] User declined tool call 'edit_file'.",
+                ),
+            ],
+            &[],
+        );
+        assert_eq!(progress.modifying_tool_calls, 0);
+        assert_eq!(progress.blocked_modification_calls, 1);
+        assert_eq!(flags.modified_file_count, 0);
+        assert!(flags.modified_files.is_empty());
+    }
+
+    #[test]
+    fn collect_tools_counts_a_gates_extra_tools_by_canonical_name() {
+        // `bash` is an alias for `shell`; a gate naming either one counts the
+        // canonical tool the agent actually calls.
+        let (progress, flags) = count_modifications(
+            &[("shell", serde_json::json!({"command": "make"}), "ok")],
+            &["bash"],
+        );
+        assert_eq!(progress.modifying_tool_calls, 1);
+        // No `path` argument to record; the count still rises.
+        assert_eq!(flags.modified_file_count, 1);
+        assert_eq!(flags.modified_files, vec!["<unknown>"]);
+    }
+
+    #[test]
+    fn collect_tools_still_applies_results_without_stage_components() {
+        // Agents spawned without StageProgress/RunOutcomeFlags (fan-out workers
+        // mid-setup, and much of this test suite) must not have their tool
+        // results silently dropped by the accounting query.
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolResults(rx));
+        let e = world
+            .spawn((
+                conv_window(),
+                infer_with(vec![
+                    fcall("c1", "write_file", serde_json::json!({"path": "a.rs"})),
+                    fcall("c2", "edit_file", serde_json::json!({"path": "b.rs"})),
+                ]),
+                AwaitingTools,
+            ))
+            .id();
+        tx.send(ToolOutcome {
+            entity: e,
+            results: vec![
+                ("c1".to_string(), "wrote it".to_string()),
+                // Both the counted and the blocked path must tolerate the
+                // missing components.
+                (
+                    "c2".to_string(),
+                    "[denied] User declined tool call 'edit_file'.".to_string(),
+                ),
+            ],
+        })
+        .unwrap();
+        run_collect_tools(&mut world);
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert!(
+            world
+                .get::<ContextWindow>(e)
+                .unwrap()
+                .get_region("conversation")
+                .unwrap()
+                .current_tokens
+                > 0
+        );
+    }
+
+    #[test]
+    fn stage_modifying_tools_defaults_without_a_blueprint_or_stage() {
+        let defaults = vec!["write_file".to_string(), "edit_file".to_string()];
+        // No blueprint / no cursor.
+        assert_eq!(stage_modifying_tools(None, None), defaults);
+        // A cursor pointing past the end of the blueprint's stages.
+        let bp = AgentBlueprint(blueprint(vec![stage_named("a", None, false, None)]));
+        assert_eq!(
+            stage_modifying_tools(Some(&bp), Some(&StageCursor { index: 9 })),
+            defaults
+        );
+        // A stage with no transitions at all.
+        assert_eq!(
+            stage_modifying_tools(Some(&bp), Some(&StageCursor { index: 0 })),
+            defaults
+        );
+        // An edge with no gate.
+        let ungated = AgentBlueprint(blueprint(vec![writing_stage(
+            "a",
+            vec![gated_edge("b", None)],
+        )]));
+        assert_eq!(
+            stage_modifying_tools(Some(&ungated), Some(&StageCursor { index: 0 })),
+            defaults
+        );
+        // A gate that re-lists a built-in doesn't duplicate it.
+        let mut dup = gate(None, None);
+        dup.tools = vec!["write_file".to_string()];
+        let deduped = AgentBlueprint(blueprint(vec![writing_stage(
+            "a",
+            vec![gated_edge("b", Some(dup))],
+        )]));
+        assert_eq!(
+            stage_modifying_tools(Some(&deduped), Some(&StageCursor { index: 0 })),
+            defaults
+        );
+    }
+
+    // ── workspace health (#107) ──
+
+    fn run_workspace_check(world: &mut World) {
+        let mut s = Schedule::default();
+        s.add_systems(check_workspace_health);
+        s.run(world);
+    }
+
+    fn spawn_workspace_agent(world: &mut World, workdir: &str, iterations: usize) -> Entity {
+        let mut md = run_metadata();
+        md.workdir = workdir.to_string();
+        world
+            .spawn((
+                md,
+                StageProgress {
+                    iterations,
+                    ..Default::default()
+                },
+                agent_state(),
+                crate::persistence::RunOutcomeFlags::default(),
+                ReadyToInfer,
+            ))
+            .id()
+    }
+
+    #[test]
+    fn workspace_check_fails_a_run_whose_directory_is_gone() {
+        let mut world = World::new();
+        let e = spawn_workspace_agent(&mut world, "/definitely/not/a/real/dir", 0);
+        run_workspace_check(&mut world);
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Error {
+                message: "workspace '/definitely/not/a/real/dir' is no longer accessible"
+                    .to_string()
+            }
+        );
+        assert!(
+            world
+                .get::<crate::persistence::RunOutcomeFlags>(e)
+                .unwrap()
+                .0
+                .workspace_lost
+        );
+        assert!(world.get::<ReadyToInfer>(e).is_none());
+    }
+
+    #[test]
+    fn workspace_check_rejects_a_workdir_that_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, "x").unwrap();
+        let mut world = World::new();
+        let e = spawn_workspace_agent(&mut world, &file.to_string_lossy(), 0);
+        run_workspace_check(&mut world);
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Error {
+                message: format!("workspace '{}' is no longer accessible", file.display())
+            }
+        );
+    }
+
+    #[test]
+    fn workspace_check_is_a_no_op_when_healthy_off_interval_or_inactive() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().to_string_lossy().to_string();
+        let mut world = World::new();
+        // Healthy workspace.
+        let healthy = spawn_workspace_agent(&mut world, &live, 0);
+        // Missing workspace, but this iteration isn't a check point.
+        let off_interval = spawn_workspace_agent(&mut world, "/gone", 1);
+        // Missing workspace, but the agent isn't running.
+        let idle = spawn_workspace_agent(&mut world, "/gone", 0);
+        world.get_mut::<AgentState>(idle).unwrap().status = AgentStatus::Waiting;
+
+        run_workspace_check(&mut world);
+
+        assert_eq!(
+            world.get::<AgentState>(healthy).unwrap().status,
+            AgentStatus::Active
+        );
+        assert_eq!(
+            world.get::<AgentState>(off_interval).unwrap().status,
+            AgentStatus::Active
+        );
+        assert_eq!(
+            world.get::<AgentState>(idle).unwrap().status,
+            AgentStatus::Waiting
+        );
+        for e in [healthy, off_interval, idle] {
+            assert!(world.get::<ReadyToInfer>(e).is_some());
+        }
     }
 
     // ── repetition detection (#8) ──
@@ -8369,6 +9332,7 @@ mod tests {
             condition: leviath_core::blueprint::TransitionCondition::LlmChoice,
             hint: None,
             transform: leviath_core::blueprint::EdgeTransform::Direct,
+            gate: None,
         }
     }
 
@@ -8723,6 +9687,85 @@ mod tests {
         assert_eq!(
             world.get::<PendingEdgeCompact>(e).unwrap().0,
             vec!["conversation".to_string()]
+        );
+    }
+
+    #[test]
+    fn collect_choice_holds_the_stage_when_the_chosen_edge_is_gated() {
+        // The LLM-choice path enforces the same gate as the linear path — and
+        // must do so before the edge transform reshapes the context it needs.
+        let (mut world, tx) = world_with_transition_results();
+        let bp = blueprint(vec![
+            writing_stage("impl", vec![]),
+            stage_named("review", None, false, None),
+        ]);
+        let mut edge = plain_edge("review");
+        edge.transform = EdgeTransform::Compact { prompt: None };
+        edge.gate = Some(gate(None, None));
+        let e = spawn_responding_agent(&mut world, bp, vec![si("m0"), si("m1")], vec![edge]);
+        world
+            .entity_mut(e)
+            .insert(crate::persistence::RunOutcomeFlags::default());
+        tx.send(InferenceOutcome {
+            entity: e,
+            result: Ok(resp("review")),
+        })
+        .unwrap();
+
+        run_collect_transition(&mut world);
+
+        assert_eq!(world.get::<StageCursor>(e).unwrap().index, 0);
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert!(world.get::<AwaitingTransitionResponse>(e).is_none());
+        assert_eq!(world.get::<StageProgress>(e).unwrap().gate_reentries, 1);
+        // The transform did NOT run.
+        assert!(world.get::<PendingEdgeCompact>(e).is_none());
+    }
+
+    #[test]
+    fn collect_choice_records_a_forced_gate_and_enters_the_stage() {
+        let (mut world, tx) = world_with_transition_results();
+        let bp = blueprint(vec![
+            writing_stage("impl", vec![]),
+            stage_named("review", None, false, None),
+        ]);
+        let mut edge = plain_edge("review");
+        edge.gate = Some(gate(None, None));
+        let e = spawn_responding_agent(
+            &mut world,
+            bp.clone(),
+            vec![si("m0"), si("m1")],
+            vec![edge.clone()],
+        );
+        world
+            .entity_mut(e)
+            // Budget already spent.
+            .insert(progress_with(0, 0, 3))
+            .insert(crate::persistence::RunOutcomeFlags::default());
+        // An agent with no flags component still transitions — it just has
+        // nowhere to record the forced gate.
+        let unflagged =
+            spawn_responding_agent(&mut world, bp, vec![si("m0"), si("m1")], vec![edge]);
+        world.entity_mut(unflagged).insert(progress_with(0, 0, 3));
+        for entity in [e, unflagged] {
+            tx.send(InferenceOutcome {
+                entity,
+                result: Ok(resp("review")),
+            })
+            .unwrap();
+        }
+
+        run_collect_transition(&mut world);
+
+        assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+        assert_eq!(world.get::<StageCursor>(unflagged).unwrap().index, 1);
+        assert_eq!(
+            world
+                .get::<crate::persistence::RunOutcomeFlags>(e)
+                .unwrap()
+                .0
+                .gates_forced,
+            1
         );
     }
 

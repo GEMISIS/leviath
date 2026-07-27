@@ -31,6 +31,27 @@ impl tracing::Subscriber for AlwaysOnSubscriber {
     }
 }
 
+/// Serializes every test that swaps the global panic hook. Without it two such
+/// tests interleave under the parallel test runner: one test's `set_hook`
+/// replaces the other's silencing closure before the other's panic fires, so
+/// that closure never runs and shows as uncovered. Hold this across each test's
+/// set-hook → panic → restore-hook sequence. (Only ever held across synchronous
+/// work.) One lock per test binary, so it must live here rather than in any one
+/// module's test block.
+pub(crate) static PANIC_HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Run `f` with the panic hook silenced, restoring the previous hook after.
+/// Returns whatever `f` returns; `f` is expected to swallow the panic itself
+/// (e.g. via `catch_unwind`).
+pub(crate) fn with_silenced_panics<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = PANIC_HOOK_LOCK.lock().expect("panic-hook lock poisoned");
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let out = f();
+    std::panic::set_hook(prev);
+    out
+}
+
 pub(crate) fn with_tracing<T>(f: impl FnOnce() -> T) -> T {
     static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INSTALLED.get_or_init(|| {

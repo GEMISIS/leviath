@@ -39,12 +39,12 @@ use crate::pipeline::{
     AwaitingTransitionResponse, CompactionResults, InferenceResults, InferenceStage, MessageIntake,
     PersistenceStage, ProcessResponse, Providers, ReadyForTools, ReadyForTransition, ReadyToInfer,
     ResolveTransition, ToolResults, ToolService, ToolServiceRes, ToolStage, TransitionResults,
-    collect_compaction, collect_inference, collect_tools, collect_transition_choice,
-    deliver_messages, dispatch_compaction, dispatch_edge_compact, dispatch_inference,
-    dispatch_persistence, dispatch_tools, dispatch_transition_choice, enforce_max_iterations,
-    gate_requires_children, handle_empty_response, poll_dynamic_tool_refresh, process_response,
-    reflect_interaction_status, refresh_advertised_tools, require_context_regions,
-    resolve_transition, sync_tool_stages,
+    check_workspace_health, collect_compaction, collect_inference, collect_tools,
+    collect_transition_choice, deliver_messages, dispatch_compaction, dispatch_edge_compact,
+    dispatch_inference, dispatch_persistence, dispatch_tools, dispatch_transition_choice,
+    enforce_max_iterations, gate_requires_children, handle_empty_response,
+    poll_dynamic_tool_refresh, process_response, reflect_interaction_status,
+    refresh_advertised_tools, require_context_regions, resolve_transition, sync_tool_stages,
 };
 use crate::providers::ProviderRegistry;
 use crate::tool_bridge::spawn_tool_pool;
@@ -199,6 +199,9 @@ impl PipelineWorld {
                 dispatch_compaction,
                 // Cap a stage at its max_iterations before running more inference.
                 enforce_max_iterations,
+                // Stop a run whose working directory vanished, rather than let
+                // every tool fail with ENOENT for the rest of the run.
+                check_workspace_health,
                 // Tag dynamic_tools agents that have pending tool changes, then
                 // apply the re-advertisement before the next request is assembled
                 // so a newly-discovered tool is visible.
@@ -647,15 +650,9 @@ fn reset_executor(schedule: &mut Schedule) {
 mod tests {
     use super::*;
 
-    /// Serializes the two tests that swap the **process-global** panic hook
-    /// (`run_isolated_catches_a_system_panic` and
-    /// `run_to_fixed_point_survives_a_panicking_system`). Without this, they can
-    /// interleave under the parallel test runner: one test's `set_hook` replaces
-    /// the other's silencing closure before the other's panic fires, so that
-    /// closure never runs and shows as uncovered. Holding this lock across each
-    /// test's set-hook → panic → restore-hook sequence keeps each hook active for
-    /// its own panic. (The guard is only ever held across synchronous work.)
-    static PANIC_HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Serializes every test in this binary that swaps the **process-global**
+    /// panic hook — see the definition for why they can't run concurrently.
+    use crate::test_support::PANIC_HOOK_LOCK;
 
     /// Run `f` with the process panic hook silenced (the panic is expected), and
     /// serialized against the other hook-swapping tests.
@@ -1310,7 +1307,8 @@ mod tests {
                 agent_path: "/p".to_string(),
                 task: "t".to_string(),
                 model: None,
-                workdir: "/w".to_string(),
+                // A real directory: the tick chain fails a run whose workspace is gone.
+                workdir: std::env::temp_dir().to_string_lossy().to_string(),
                 num_stages: 1,
                 started_at: 0,
                 parent_run_id: None,
@@ -1494,7 +1492,8 @@ mod tests {
                 agent_path: "/p".to_string(),
                 task: "t".to_string(),
                 model: None,
-                workdir: "/w".to_string(),
+                // A real directory: the tick chain fails a run whose workspace is gone.
+                workdir: std::env::temp_dir().to_string_lossy().to_string(),
                 num_stages: 1,
                 started_at: 0,
                 parent_run_id: None,
@@ -1575,7 +1574,8 @@ mod tests {
                 agent_path: "/p".to_string(),
                 task: "t".to_string(),
                 model: None,
-                workdir: "/w".to_string(),
+                // A real directory: the tick chain fails a run whose workspace is gone.
+                workdir: std::env::temp_dir().to_string_lossy().to_string(),
                 num_stages: 1,
                 started_at: 0,
                 parent_run_id: None,

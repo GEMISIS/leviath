@@ -259,6 +259,13 @@ pub fn build_host(
     // servers' defs plus this blueprint's declared servers' defs (warmed above).
     let spawn_pool = mcp_pool.clone();
     host.set_spawner(Box::new(move |world, args| {
+        // Stake out the run directory before anything that can fail: blueprint
+        // parsing, sandbox creation, provider resolution and seed validation all
+        // come later, and until now a failure at any of them left no trace on
+        // disk at all — no run dir, no meta.json, nothing to diagnose (#107).
+        // The reload path deliberately doesn't do this: it must not overwrite a
+        // recovering run's own metadata.
+        write_placeholder_meta(args);
         let defs = per_agent_mcp_defs(&spawn_pool, &mcp_tool_defs, &args.blueprint_path);
         build_agent(
             world.world_mut(),
@@ -273,6 +280,36 @@ pub fn build_host(
         )
     }));
     host
+}
+
+/// Create the run directory and write a `Starting` `meta.json` for a run that is
+/// about to be built, so a spawn that dies partway through still leaves something
+/// on disk to explain itself (issue #107: 3/13 empty runs crashed before any
+/// state existed). Everything the agent hasn't resolved yet — model, stage names,
+/// stage count — is left blank; the first persistence tick overwrites the file
+/// with the real thing. Best-effort: a failure here must not block the spawn.
+fn write_placeholder_meta(args: &leviath_runtime::host::SpawnArgs) {
+    // The real agent name lives in the blueprint, which hasn't been parsed yet —
+    // but the run id is `<agent>-<unix-secs>-<hex4>`, so its prefix is the name
+    // (dashes inside the agent name included).
+    let agent_name = args
+        .run_id
+        .rsplitn(3, '-')
+        .nth(2)
+        .unwrap_or(&args.run_id)
+        .to_string();
+    let meta = leviath_core::run_meta::RunMeta::new(
+        args.run_id.clone(),
+        agent_name,
+        args.blueprint_path.clone(),
+        args.task.clone(),
+        None,
+        args.workdir.clone(),
+        0,
+    );
+    if let Err(e) = crate::runstate::create_run(&meta) {
+        tracing::warn!(run_id = %args.run_id, error = %e, "could not pre-create run directory");
+    }
 }
 
 /// The spawn-preprocessor body: connect the blueprint's declared `[[mcp_servers]]`
@@ -450,6 +487,89 @@ mod tests {
             reply,
         });
         assert_eq!(rx.await.unwrap(), Ok("run-s".to_string()));
+    }
+
+    /// Issue #107: 3/13 empty runs died before any state existed, leaving nothing
+    /// on disk to diagnose. The spawner stakes out the run directory first, so a
+    /// spawn that fails at *any* later step still leaves a `meta.json`.
+    #[tokio::test]
+    async fn spawner_pre_creates_the_run_dir_even_when_the_spawn_fails() {
+        crate::runstate::with_isolated_runs_dir_async("spawn-placeholder", |_base| async {
+            let runs = tempfile::tempdir().unwrap();
+            let mut host = setup_daemon_host(
+                Config::default(),
+                runs.path().to_path_buf(),
+                Handle::current(),
+            )
+            .await;
+            let (reply, rx) = oneshot::channel();
+            host.handle(ControlOp::Spawn {
+                args: Box::new(SpawnArgs {
+                    // A blueprint path that doesn't exist: the spawn fails at the
+                    // very first step inside build_agent.
+                    run_id: "my-agent-1234-ab12".to_string(),
+                    blueprint_path: "/no/such/agent.leviath".to_string(),
+                    task: "t".to_string(),
+                    regions: Default::default(),
+                    model: None,
+                    workdir: std::env::temp_dir().to_string_lossy().to_string(),
+                    metadata: Default::default(),
+                    callback_url: None,
+                    callback_secret: None,
+                    yolo: false,
+                    allow: Vec::new(),
+                    max_depth: None,
+                    parent_run_id: None,
+                }),
+                reply,
+            });
+            assert!(rx.await.unwrap().is_err());
+
+            let meta = crate::runstate::read_meta("my-agent-1234-ab12")
+                .expect("a failed spawn still leaves meta.json behind");
+            assert_eq!(meta.status, leviath_core::run_meta::RunStatus::Starting);
+            assert_eq!(meta.task, "t");
+            // The agent name is recovered from the run id's prefix, dashes and all.
+            assert_eq!(meta.agent_name, "my-agent");
+        })
+        .await;
+    }
+
+    #[test]
+    fn placeholder_meta_falls_back_to_the_whole_run_id_as_the_agent_name() {
+        crate::runstate::with_isolated_runs_dir("spawn-placeholder-odd-id", |_base| {
+            let args = SpawnArgs {
+                // Not the `<agent>-<secs>-<hex>` shape the run-id minter makes.
+                run_id: "odd".to_string(),
+                task: "t".to_string(),
+                ..Default::default()
+            };
+            write_placeholder_meta(&args);
+            assert_eq!(crate::runstate::read_meta("odd").unwrap().agent_name, "odd");
+        });
+    }
+
+    #[test]
+    fn placeholder_meta_failure_is_logged_not_fatal() {
+        // An unwritable runs dir (here: a path *under a regular file*) must not
+        // stop the spawn — the placeholder is a diagnostic, not a prerequisite.
+        crate::test_support::with_tracing(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let blocker = dir.path().join("not-a-dir");
+            std::fs::write(&blocker, "x").unwrap();
+            temp_env::with_var(
+                "LEVIATH_RUNS_DIR",
+                Some(blocker.join("runs").to_string_lossy().to_string()),
+                || {
+                    let args = SpawnArgs {
+                        run_id: "blocked".to_string(),
+                        ..Default::default()
+                    };
+                    write_placeholder_meta(&args);
+                    assert!(crate::runstate::read_meta("blocked").is_err());
+                },
+            );
+        });
     }
 
     // ── per-agent MCP (issue #97) ──
@@ -879,6 +999,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
             children: Vec::new(),
             depth: 0,
             max_child_depth: 0,
+            flags: Default::default(),
         };
         std::fs::write(
             run_dir.join("meta.json"),
@@ -972,6 +1093,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
             children: Vec::new(),
             depth: 0,
             max_child_depth: 0,
+            flags: Default::default(),
         };
         std::fs::write(
             run_dir.join("meta.json"),
