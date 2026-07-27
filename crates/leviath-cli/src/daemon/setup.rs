@@ -518,6 +518,7 @@ mod tests {
                     callback_url: None,
                     callback_secret: None,
                     yolo: false,
+                    no_seed_commands: false,
                     allow: Vec::new(),
                     max_depth: None,
                     parent_run_id: None,
