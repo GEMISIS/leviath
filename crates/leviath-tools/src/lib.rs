@@ -1025,6 +1025,12 @@ impl BuiltinTools {
                 c
             }
         };
+        // Kill the child if this future is dropped. Dropping a `Command` future
+        // detaches the process by default, so a cancelled agent (or an elapsed
+        // timeout, which drops the future the same way) would leave its shell
+        // running — the run is gone from every listing while its command carries
+        // on writing to the workspace.
+        cmd.kill_on_drop(true);
         let run = cmd.output();
 
         match timeout(timeout_duration, run).await {

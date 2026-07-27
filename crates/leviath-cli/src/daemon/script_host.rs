@@ -477,6 +477,9 @@ impl ScriptIo for RealScriptIo {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return Err("shell is unavailable: no tokio runtime on this thread".to_string());
         };
+        // Reap the child if the future is dropped (timeout, or the whole batch
+        // dropped because the agent was cancelled) rather than detaching it.
+        cmd.kill_on_drop(true);
         handle.block_on(async move {
             match tokio::time::timeout(timeout, cmd.output()).await {
                 Ok(Ok(output)) => Ok(cap_script_io(combine_shell_output(

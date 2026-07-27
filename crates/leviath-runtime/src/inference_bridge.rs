@@ -126,6 +126,7 @@ pub async fn run_inference_job(
     results: UnboundedSender<InferenceOutcome>,
     wake: Arc<Notify>,
     retry: RetryPolicy,
+    cancel: crate::cancel::CancelToken,
 ) {
     let InferenceJob {
         entity,
@@ -169,13 +170,25 @@ pub async fn run_inference_job(
             }
         }
     };
-    let result = match tokio::time::timeout(retry.job_timeout, attempts).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(leviath_providers::ProviderError::Other(format!(
-            "inference exceeded the {}s job timeout and was aborted to free the \
-             pool slot (a stalled or never-completing response)",
-            retry.job_timeout.as_secs()
-        ))),
+    // A cancel drops the whole retry-and-backoff future — aborting the in-flight
+    // HTTP request rather than waiting out the job timeout (up to 15 minutes) —
+    // and reports nothing: the agent is already terminal, so there is no outcome
+    // to apply. Releasing the permit here is the point; a cancelled run used to
+    // hold its model's pool slot for as long as the provider took to answer.
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            drop(permit);
+            return;
+        }
+        outcome = tokio::time::timeout(retry.job_timeout, attempts) => match outcome {
+            Ok(result) => result,
+            Err(_elapsed) => Err(leviath_providers::ProviderError::Other(format!(
+                "inference exceeded the {}s job timeout and was aborted to free the \
+                 pool slot (a stalled or never-completing response)",
+                retry.job_timeout.as_secs()
+            ))),
+        },
     };
     drop(permit); // free the pool slot before the collect system runs
     let _ = results.send(InferenceOutcome { entity, result });
@@ -259,6 +272,61 @@ mod tests {
         }
     }
 
+    /// Cancelling releases the pool slot immediately instead of waiting out the
+    /// job timeout (15 minutes by default), and reports no outcome — the agent is
+    /// already terminal, so there is nothing to apply.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancelled_job_frees_its_pool_slot_without_reporting() {
+        let mut cfg = InferencePoolConfig::new();
+        cfg.set_limit("m", 1);
+        let pools = InferencePools::new(cfg);
+        let permit = pools.try_acquire("m").expect("free pool");
+        assert!(pools.try_acquire("m").is_none(), "pool should be full");
+
+        // A provider that never answers — the stalled-call case a cancel exists
+        // to escape.
+        let provider = Arc::new(Scripted {
+            steps: std::sync::Mutex::new(vec![Step::Hang].into()),
+            calls: std::sync::Mutex::new(0),
+        });
+        let job = InferenceJob {
+            entity: Entity::from_raw(7),
+            provider,
+            request: test_request(),
+            permit,
+            exact_token_counting: false,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let cancel = crate::cancel::CancelToken::new();
+        let running = tokio::spawn(run_inference_job(
+            job,
+            tx,
+            Arc::new(Notify::new()),
+            // A job timeout far longer than the test: only the cancel can end it.
+            RetryPolicy {
+                max_attempts: 1,
+                base_delay: Duration::ZERO,
+                job_timeout: Duration::from_secs(3600),
+            },
+            cancel.clone(),
+        ));
+        tokio::task::yield_now().await;
+        cancel.cancel();
+
+        tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .expect("the cancel ended the job")
+            .unwrap();
+        assert!(
+            pools.try_acquire("m").is_some(),
+            "the pool slot is free for the next agent"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "and no outcome is reported for a cancelled run"
+        );
+    }
+
     #[tokio::test]
     async fn run_job_aborts_a_hung_call_and_frees_the_pool_slot() {
         // A model pool of one slot, taken by the (hung) job under test.
@@ -285,7 +353,14 @@ mod tests {
             base_delay: Duration::ZERO,
             job_timeout: Duration::from_millis(50),
         };
-        run_inference_job(job, tx, Arc::new(Notify::new()), policy).await;
+        run_inference_job(
+            job,
+            tx,
+            Arc::new(Notify::new()),
+            policy,
+            crate::cancel::CancelToken::new(),
+        )
+        .await;
 
         // The hung call was aborted with a timeout error…
         let outcome = rx.try_recv().expect("outcome sent");
@@ -307,6 +382,7 @@ mod tests {
             tx,
             wake.clone(),
             RetryPolicy::default(),
+            crate::cancel::CancelToken::new(),
         )
         .await;
 
@@ -322,7 +398,14 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let wake = Arc::new(Notify::new());
         let err = Arc::new(Fixed::Err("boom".to_string()));
-        run_inference_job(job(err), tx, wake, RetryPolicy::default()).await;
+        run_inference_job(
+            job(err),
+            tx,
+            wake,
+            RetryPolicy::default(),
+            crate::cancel::CancelToken::new(),
+        )
+        .await;
 
         let outcome = rx.try_recv().expect("outcome sent");
         assert!(outcome.result.is_err());
@@ -413,6 +496,7 @@ mod tests {
             tx,
             Arc::new(Notify::new()),
             RetryPolicy::default(),
+            crate::cancel::CancelToken::new(),
         )
         .await;
         let outcome = rx.try_recv().expect("outcome sent");
@@ -435,6 +519,7 @@ mod tests {
             tx,
             Arc::new(Notify::new()),
             RetryPolicy::default(),
+            crate::cancel::CancelToken::new(),
         )
         .await;
         let outcome = rx.try_recv().expect("outcome sent");
@@ -464,6 +549,7 @@ mod tests {
             tx,
             Arc::new(Notify::new()),
             RetryPolicy::default(),
+            crate::cancel::CancelToken::new(),
         )
         .await;
         let outcome = rx.try_recv().expect("outcome sent");
@@ -492,6 +578,7 @@ mod tests {
             tx,
             wake,
             RetryPolicy::default(),
+            crate::cancel::CancelToken::new(),
         )
         .await;
     }
@@ -571,6 +658,7 @@ mod tests {
             tx,
             Arc::new(Notify::new()),
             no_delay(4),
+            crate::cancel::CancelToken::new(),
         )
         .await;
         let outcome = rx.try_recv().expect("outcome sent");
@@ -598,6 +686,7 @@ mod tests {
             tx,
             Arc::new(Notify::new()),
             no_delay(3),
+            crate::cancel::CancelToken::new(),
         )
         .await;
         let outcome = rx.try_recv().expect("outcome sent");
@@ -617,6 +706,7 @@ mod tests {
             tx,
             Arc::new(Notify::new()),
             no_delay(4),
+            crate::cancel::CancelToken::new(),
         )
         .await;
         let outcome = rx.try_recv().expect("outcome sent");

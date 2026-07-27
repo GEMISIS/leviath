@@ -206,6 +206,52 @@ fn retry_policy_for(config: Option<&InferenceConfig>) -> crate::inference_bridge
     policy
 }
 
+/// The cancellation handles for an agent's currently in-flight async work (its
+/// inference request, its tool batch). Attached when the work is dispatched,
+/// removed when it lands — so the presence of this component means "there is
+/// something running for this agent that a cancel needs to stop".
+///
+/// Without it, cancelling only stopped *new* work from being dispatched: a
+/// request already handed to the async lanes ran to completion, holding its
+/// inference-pool permit or tool-lane worker the whole time.
+#[derive(Component, Default, Debug)]
+pub struct InFlightWork(pub Vec<crate::cancel::CancelToken>);
+
+/// Stop the in-flight work of every agent that has reached a terminal state, and
+/// drop the handles. Runs before the dispatch systems each tick, so a cancel
+/// takes effect on the very next tick rather than whenever the provider or tool
+/// happens to answer.
+pub fn abort_terminal_work(
+    agents: Query<(Entity, &AgentState, &InFlightWork)>,
+    mut commands: Commands,
+) {
+    crate::tick_scope::clear();
+    for (entity, state, in_flight) in agents.iter() {
+        if !is_terminal_status(&state.status) {
+            continue;
+        }
+        crate::tick_scope::enter(entity);
+        for token in &in_flight.0 {
+            token.cancel();
+        }
+        commands.entity(entity).remove::<InFlightWork>();
+    }
+}
+
+/// Record `token` as in-flight work for `entity`, keeping any already attached
+/// (an agent can have both a tool batch and an inference outstanding across a
+/// tick boundary).
+fn track_in_flight(
+    commands: &mut Commands,
+    entity: Entity,
+    existing: Option<&InFlightWork>,
+    token: crate::cancel::CancelToken,
+) {
+    let mut tokens = existing.map(|w| w.0.clone()).unwrap_or_default();
+    tokens.push(token);
+    commands.entity(entity).insert(InFlightWork(tokens));
+}
+
 /// Inference-dispatch system: for every `ReadyToInfer` agent, resolve its
 /// provider and, **if a per-model permit is free**, build the request, spawn the
 /// inference job, and move it to `AwaitingInference`. If its provider is missing
@@ -220,6 +266,7 @@ pub fn dispatch_inference(
             &ContextWindow,
             Option<&InferenceConfig>,
             &StageInference,
+            Option<&InFlightWork>,
         ),
         With<ReadyToInfer>,
     >,
@@ -242,7 +289,7 @@ pub fn dispatch_inference(
     crate::tick_scope::clear();
     agents
         .par_iter()
-        .for_each(|(entity, state, window, config, si)| {
+        .for_each(|(entity, state, window, config, si, in_flight)| {
             crate::tick_scope::run_agent_parallel(entity, &par_commands, &mut || {
                 if state.status != AgentStatus::Active {
                     return; // paused / waiting / cancelled — don't start new work
@@ -261,13 +308,16 @@ pub fn dispatch_inference(
                     permit,
                     exact_token_counting: stage.exact_token_counting,
                 };
+                let cancel = crate::cancel::CancelToken::new();
                 stage.runtime.spawn(run_inference_job(
                     job,
                     stage.outcomes.clone(),
                     stage.wake.clone(),
                     retry_policy_for(config),
+                    cancel.clone(),
                 ));
                 par_commands.command_scope(|mut commands| {
+                    track_in_flight(&mut commands, entity, in_flight, cancel);
                     commands
                         .entity(entity)
                         .remove::<ReadyToInfer>()
@@ -341,7 +391,8 @@ pub fn collect_inference(
         if is_terminal_status(&state.status) {
             commands
                 .entity(outcome.entity)
-                .remove::<AwaitingInference>();
+                .remove::<AwaitingInference>()
+                .remove::<InFlightWork>();
             continue;
         }
         let idx = cursor.map_or(0, |c| c.index);
@@ -376,6 +427,7 @@ pub fn collect_inference(
                     .entity(outcome.entity)
                     .insert(result)
                     .remove::<AwaitingInference>()
+                    .remove::<InFlightWork>()
                     .insert(ProcessResponse);
             }
             Err(err) => {
@@ -391,6 +443,7 @@ pub fn collect_inference(
                 commands
                     .entity(outcome.entity)
                     .remove::<AwaitingInference>()
+                    .remove::<InFlightWork>()
                     .insert(StageOutcome::Errored(err.to_string()))
                     .insert(ResolveTransition);
             }
@@ -709,6 +762,7 @@ pub fn dispatch_tools(
             Option<&mut crate::taint::TaintGate>,
             Option<&crate::gate_prompt::GateResolved>,
             Option<&crate::components::GateAutoApprove>,
+            Option<&InFlightWork>,
         ),
         With<ReadyForTools>,
     >,
@@ -738,6 +792,7 @@ pub fn dispatch_tools(
         mut gate,
         resolved,
         auto_gate,
+        in_flight,
     ) in agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
@@ -884,9 +939,15 @@ pub fn dispatch_tools(
         }
 
         let exec = service.0.exec_for(entity, lane_calls);
+        let cancel = crate::cancel::CancelToken::new();
         // The lane worker is alive for the world's lifetime; a failed send would
         // only happen during shutdown, where dropping the job is fine.
-        let _ = stage.0.send(ToolJob { entity, exec });
+        let _ = stage.0.send(ToolJob {
+            entity,
+            exec,
+            cancel: cancel.clone(),
+        });
+        track_in_flight(&mut commands, entity, in_flight, cancel);
         commands
             .entity(entity)
             .remove::<ReadyForTools>()
@@ -1348,6 +1409,7 @@ pub fn collect_tools(
             .entity(outcome.entity)
             .remove::<AwaitingTools>()
             .remove::<ContextToolResults>()
+            .remove::<InFlightWork>()
             .insert(ReadyToInfer);
     }
 }
@@ -3516,6 +3578,7 @@ pub fn dispatch_transition_choice(
             &AgentBlueprint,
             &StageCursor,
             &AwaitingTransitionChoice,
+            Option<&InFlightWork>,
         ),
         With<AwaitingTransitionChoice>,
     >,
@@ -3524,7 +3587,7 @@ pub fn dispatch_transition_choice(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, state, mut window, si, bp, cursor, choice) in agents.iter_mut() {
+    for (entity, state, mut window, si, bp, cursor, choice, in_flight) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue; // paused / waiting / cancelled — don't start new work
@@ -3568,12 +3631,15 @@ pub fn dispatch_transition_choice(
             // extra count call for them.
             exact_token_counting: false,
         };
+        let cancel = crate::cancel::CancelToken::new();
         stage.runtime.spawn(run_inference_job(
             job,
             stage.transition_outcomes.clone(),
             stage.wake.clone(),
             crate::inference_bridge::RetryPolicy::default(),
+            cancel.clone(),
         ));
+        track_in_flight(&mut commands, entity, in_flight, cancel);
         commands
             .entity(entity)
             .remove::<AwaitingTransitionChoice>()
@@ -3626,7 +3692,8 @@ pub fn collect_transition_choice(
         if is_terminal_status(&state.status) {
             commands
                 .entity(outcome.entity)
-                .remove::<AwaitingTransitionResponse>();
+                .remove::<AwaitingTransitionResponse>()
+                .remove::<InFlightWork>();
             continue;
         }
         let response = match outcome.result {
@@ -4320,6 +4387,59 @@ mod tests {
         assert_eq!(led.0[1].prompt_tokens, 5);
         assert_eq!(led.0[1].completion_tokens, 3);
         assert_eq!(led.0[1].cached_tokens, 2);
+    }
+
+    // ─── abort_terminal_work ───
+
+    fn run_abort(world: &mut World) {
+        let mut s = Schedule::default();
+        s.add_systems(abort_terminal_work);
+        s.run(world);
+    }
+
+    #[test]
+    fn abort_terminal_work_stops_a_cancelled_agents_in_flight_work() {
+        for status in [
+            AgentStatus::Cancelled,
+            AgentStatus::Complete,
+            AgentStatus::Error {
+                message: "boom".to_string(),
+            },
+        ] {
+            let mut world = World::new();
+            let tokens = vec![
+                crate::cancel::CancelToken::new(),
+                crate::cancel::CancelToken::new(),
+            ];
+            let mut state = agent_state();
+            state.status = status.clone();
+            let e = world.spawn((state, InFlightWork(tokens.clone()))).id();
+
+            run_abort(&mut world);
+
+            assert!(
+                tokens.iter().all(|t| t.is_cancelled()),
+                "{status:?} stops every in-flight job"
+            );
+            assert!(
+                world.get::<InFlightWork>(e).is_none(),
+                "and the handles are dropped"
+            );
+        }
+    }
+
+    #[test]
+    fn abort_terminal_work_leaves_a_running_agent_alone() {
+        let mut world = World::new();
+        let token = crate::cancel::CancelToken::new();
+        let e = world
+            .spawn((agent_state(), InFlightWork(vec![token.clone()])))
+            .id();
+
+        run_abort(&mut world);
+
+        assert!(!token.is_cancelled(), "an Active agent keeps working");
+        assert!(world.get::<InFlightWork>(e).is_some());
     }
 
     /// A response that lands after the run was cancelled is discarded. The
