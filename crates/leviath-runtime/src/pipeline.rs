@@ -4415,6 +4415,38 @@ mod tests {
         s.run(world);
     }
 
+    /// `track_in_flight` accumulates rather than replaces, so an agent that has
+    /// something outstanding when a second job is dispatched keeps both handles
+    /// — dropping the first would make that job uncancellable.
+    #[test]
+    fn track_in_flight_accumulates_across_dispatches() {
+        fn add_one(agents: Query<(Entity, Option<&InFlightWork>)>, mut commands: Commands) {
+            for (entity, existing) in agents.iter() {
+                track_in_flight(
+                    &mut commands,
+                    entity,
+                    existing,
+                    crate::cancel::CancelToken::new(),
+                );
+            }
+        }
+
+        let mut world = World::new();
+        let e = world.spawn(agent_state()).id();
+        let mut schedule = Schedule::default();
+        schedule.add_systems(add_one);
+
+        schedule.run(&mut world); // no existing component yet
+        assert_eq!(world.get::<InFlightWork>(e).unwrap().0.len(), 1);
+
+        schedule.run(&mut world); // one already attached
+        assert_eq!(
+            world.get::<InFlightWork>(e).unwrap().0.len(),
+            2,
+            "the earlier job's handle is kept"
+        );
+    }
+
     #[test]
     fn abort_terminal_work_stops_a_cancelled_agents_in_flight_work() {
         for status in [

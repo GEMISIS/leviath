@@ -1070,16 +1070,21 @@ impl BuiltinTools {
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        let child = match cmd.spawn() {
-            Ok(child) => child,
-            Err(e) => return format!("[error] Failed to spawn shell '{}': {}", shell, e),
+        // Spawn *inside* the timed future so the reaper guard lives exactly as
+        // long as the command does: dropping this future (timeout, or the whole
+        // batch dropped because the agent was cancelled) drops the guard, which
+        // signals the group. Keeping spawn and wait in one fallible block also
+        // keeps a single error arm, as `Command::output()` had.
+        let run = async {
+            let child = cmd.spawn()?;
+            // The child leads its own group, so its pid is the group id.
+            let _reaper = child.id().map(ProcessGroupReaper);
+            child.wait_with_output().await
         };
-        // The child leads its own group, so its pid is the group id.
-        let _reaper = child.id().map(ProcessGroupReaper);
 
-        match timeout(timeout_duration, child.wait_with_output()).await {
+        match timeout(timeout_duration, run).await {
             Err(_) => format!("[timed out] Command exceeded 60s: {}", command),
-            Ok(Err(e)) => format!("[error] Failed to run shell '{}': {}", shell, e),
+            Ok(Err(e)) => format!("[error] Failed to spawn shell '{}': {}", shell, e),
             Ok(Ok(output)) => Self::format_command_output(
                 &output.stdout,
                 &output.stderr,

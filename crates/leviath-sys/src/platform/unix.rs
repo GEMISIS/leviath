@@ -119,6 +119,46 @@ mod tests {
         assert_eq!(ensure_private_with(&path, 0o600, set_mode).unwrap(), None);
     }
 
+    /// Signalling a real group tears down the leader *and* its children — the
+    /// whole point, since killing a shell alone leaves what it started
+    /// reparented to init and running.
+    #[test]
+    fn kill_process_group_reaps_the_leader_and_its_children() {
+        use std::process::{Command, Stdio};
+
+        // A shell that leads its own group and starts a long-lived child.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("sleep 60 & sleep 60")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        configure_detached(&mut cmd);
+        let mut child = cmd.spawn().expect("sh is available");
+        let pgid = child.id();
+
+        // Let the shell get as far as starting its own child.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        kill_process_group(pgid).expect("the group is ours to signal");
+
+        // The leader is gone (and reaped, so it leaves no zombie).
+        let status = child.wait().expect("leader is waitable");
+        assert!(!status.success(), "killed, not a clean exit");
+        // And so is the group as a whole: a second signal finds nothing left.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            kill_process_group(pgid).is_err(),
+            "the whole group is gone, so there is nothing left to signal"
+        );
+    }
+
+    #[test]
+    fn kill_process_group_errors_for_a_group_that_does_not_exist() {
+        // The ordinary case when reaping — the command already finished — so it
+        // must surface as an error the caller can ignore, not a panic.
+        let err = kill_process_group(0x7FFF_FFFF).expect_err("no such group");
+        assert!(err.raw_os_error().is_some());
+    }
+
     #[test]
     fn configure_detached_sets_process_group_without_spawning() {
         // Configuring the process group must not fork/exec or panic; it only

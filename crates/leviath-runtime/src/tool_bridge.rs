@@ -149,6 +149,64 @@ mod tests {
         }
     }
 
+    /// A job whose batch blocks until `release` fires, signalling `started` once
+    /// it is running. Used both for the cancel case (where it is dropped
+    /// mid-flight) and for the released case, so the batch body is exercised.
+    fn held_job(
+        entity: u32,
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+        cancel: crate::cancel::CancelToken,
+    ) -> ToolJob {
+        ToolJob {
+            entity: Entity::from_raw(entity),
+            exec: Box::new(move || {
+                Box::pin(async move {
+                    started.notify_waiters();
+                    release.notified().await;
+                    vec![("held".to_string(), "done".to_string())]
+                })
+            }),
+            cancel,
+        }
+    }
+
+    /// The released counterpart of [`held_job`]: with no cancel, the batch runs
+    /// to completion and reports its results.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_released_batch_completes_normally() {
+        let (jtx, jrx) = mpsc::unbounded_channel();
+        let (rtx, mut rrx) = mpsc::unbounded_channel();
+        let wake = Arc::new(Notify::new());
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+
+        jtx.send(held_job(
+            7,
+            started.clone(),
+            release.clone(),
+            crate::cancel::CancelToken::new(),
+        ))
+        .unwrap();
+        drop(jtx);
+
+        let handles = spawn_tool_pool(&Handle::current(), jrx, rtx, wake, 1);
+        let running = started.notified();
+        tokio::pin!(running);
+        running.as_mut().enable();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), running).await;
+        release.notify_waiters();
+
+        let out = tokio::time::timeout(std::time::Duration::from_secs(5), rrx.recv())
+            .await
+            .expect("the batch finished")
+            .expect("an outcome arrived");
+        assert_eq!(out.results, vec![("held".to_string(), "done".to_string())]);
+        for h in handles {
+            let _ = h.await;
+        }
+    }
+
     fn shared(rx: UnboundedReceiver<ToolJob>) -> SharedJobRx {
         Arc::new(Mutex::new(rx))
     }
@@ -187,20 +245,15 @@ mod tests {
         let wake = Arc::new(Notify::new());
         let cancel = crate::cancel::CancelToken::new();
 
-        // A batch that never finishes on its own — the unbounded-prompt case.
+        // A batch that only finishes when released — the unbounded-prompt case.
         let started = Arc::new(Notify::new());
-        let started_tx = started.clone();
-        jtx.send(ToolJob {
-            entity: Entity::from_raw(1),
-            exec: Box::new(move || {
-                Box::pin(async move {
-                    started_tx.notify_waiters();
-                    std::future::pending::<()>().await;
-                    unreachable!("the batch is dropped before it can finish")
-                })
-            }),
-            cancel: cancel.clone(),
-        })
+        let release = Arc::new(Notify::new());
+        jtx.send(held_job(
+            1,
+            started.clone(),
+            release.clone(),
+            cancel.clone(),
+        ))
         .unwrap();
         // Queued behind it: only reachable once the worker is released.
         jtx.send(job(2, vec![("c2", "r2")])).unwrap();

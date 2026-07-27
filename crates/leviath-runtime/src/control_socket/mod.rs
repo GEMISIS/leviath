@@ -945,13 +945,18 @@ mod tests {
     #[tokio::test]
     async fn client_times_out_on_a_daemon_that_never_answers() {
         let (mut listener, id, _dir) = test_listener();
-        let server = tokio::spawn(async move {
+        // The server reads the request, then hands both halves back and exits.
+        // The test holds them, so the connection stays open with no reply ever
+        // sent — a daemon that accepted the work and went quiet. Handing them
+        // over (rather than parking the task on a future that never resolves)
+        // lets the task actually finish.
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
             let stream = listener.accept().await.unwrap();
-            // Read the request, then never reply and hold the connection open.
-            let (read_half, _write_half) = tokio::io::split(stream);
+            let (read_half, write_half) = tokio::io::split(stream);
             let mut lines = BufReader::new(read_half).lines();
             let _ = lines.next_line().await;
-            std::future::pending::<()>().await;
+            let _ = tx.send((lines, write_half));
         });
 
         let err = temp_env::async_with_vars([("LEVIATH_CONTROL_TIMEOUT_SECS", Some("1"))], async {
@@ -960,7 +965,8 @@ mod tests {
         .await;
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
         assert!(err.to_string().contains("did not respond"), "got: {err}");
-        server.abort();
+        // Held until now so the connection outlived the client's deadline.
+        drop(rx);
     }
 
     #[test]

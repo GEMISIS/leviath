@@ -590,7 +590,11 @@ mod tests {
     #[tokio::test]
     async fn spawner_writes_the_placeholder_under_the_hosts_runs_dir() {
         let runs = tempfile::tempdir().unwrap();
-        let global_before = existing_global_run_ids();
+        // Resolve the global dir once: sibling tests redirect it via the
+        // process-global `LEVIATH_RUNS_DIR`, so resolving it twice could compare
+        // two different directories.
+        let global = crate::runstate::runs_dir();
+        let global_before = run_ids_in(&global);
 
         let mut host = setup_daemon_host(
             Config::default(),
@@ -619,7 +623,7 @@ mod tests {
             "the placeholder lands in the host's configured runs dir"
         );
         assert_eq!(
-            existing_global_run_ids(),
+            run_ids_in(&global),
             global_before,
             "spawning through a host must not write into the home-resolved runs dir"
         );
@@ -683,16 +687,30 @@ mod tests {
         assert!(!rx.await.unwrap());
     }
 
-    /// The run ids currently present in the home-resolved (global) runs dir.
-    /// Used to assert a test added nothing there; an unreadable/absent dir is an
-    /// empty set, which is the same assertion.
-    fn existing_global_run_ids() -> std::collections::BTreeSet<String> {
-        std::fs::read_dir(crate::runstate::runs_dir())
+    /// The run ids present in `dir`. An unreadable or absent directory is an
+    /// empty set, which is the same assertion for the isolation check.
+    fn run_ids_in(dir: &std::path::Path) -> std::collections::BTreeSet<String> {
+        std::fs::read_dir(dir)
             .into_iter()
             .flatten()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn run_ids_in_lists_entries_and_tolerates_a_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("run-one")).unwrap();
+        std::fs::create_dir_all(dir.path().join("run-two")).unwrap();
+        assert_eq!(
+            run_ids_in(dir.path()),
+            ["run-one".to_string(), "run-two".to_string()]
+                .into_iter()
+                .collect()
+        );
+        // A dir that doesn't exist reads as "nothing there", not a panic.
+        assert!(run_ids_in(&dir.path().join("nope")).is_empty());
     }
 
     // ── per-agent MCP (issue #97) ──

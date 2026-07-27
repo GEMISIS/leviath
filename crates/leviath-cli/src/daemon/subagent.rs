@@ -474,6 +474,26 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         );
     }
 
+    /// A caller the host no longer knows about (daemon shutting down, or the
+    /// run already reaped) also ends the wait — there is nothing left to wait
+    /// for either way.
+    #[tokio::test]
+    async fn wait_gives_up_when_the_caller_is_unknown_to_the_host() {
+        let (h, _seen, _t) = fake_host_with_parent(
+            Ok("child-1".to_string()),
+            vec![Some(AgentStatus::Active); 8],
+            false,
+            None, // the host has no such caller
+        );
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            handle(&h, &tc("wait_for_agent", json!({ "agent_id": "child-1" }))),
+        )
+        .await
+        .expect("the wait returns instead of polling forever");
+        assert!(out.contains("cancelled while waiting"), "got: {out}");
+    }
+
     #[tokio::test]
     async fn spawn_requires_blueprint_and_task_and_reports_resolve_errors() {
         let (h, _seen, _t) = fake_host(Ok(String::new()), vec![], false);

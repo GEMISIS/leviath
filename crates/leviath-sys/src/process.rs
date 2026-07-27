@@ -46,6 +46,15 @@ mod tests {
     }
 
     #[test]
+    fn kill_process_group_public_wrapper_reports_a_missing_group() {
+        // Exercises the public shim (distinct from the platform impl its own
+        // tests cover). A group that cannot exist errors on Unix and is a no-op
+        // where the platform has no process groups — both are outcomes the
+        // caller ignores, so either result is acceptable here.
+        let _ = kill_process_group(0x7FFF_FFFF);
+    }
+
+    #[test]
     fn configure_detached_public_wrapper_registers_without_spawning() {
         // Exercises the public `process::configure_detached` shim (distinct
         // from the platform impl its own tests cover); registering the hook

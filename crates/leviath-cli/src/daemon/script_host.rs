@@ -489,17 +489,21 @@ impl ScriptIo for RealScriptIo {
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         handle.block_on(async move {
-            let child = match cmd.spawn() {
-                Ok(child) => child,
-                Err(e) => return Err(format!("failed to spawn shell: {e}")),
+            // Spawn inside the timed future so the reaper guard lives exactly as
+            // long as the command: dropping the future drops the guard, which
+            // signals the group. One fallible block also keeps a single error
+            // arm, as `Command::output()` had.
+            let run = async {
+                let child = cmd.spawn()?;
+                let _reaper = child.id().map(leviath_tools::ProcessGroupReaper);
+                child.wait_with_output().await
             };
-            let _reaper = child.id().map(leviath_tools::ProcessGroupReaper);
-            match tokio::time::timeout(timeout, child.wait_with_output()).await {
+            match tokio::time::timeout(timeout, run).await {
                 Ok(Ok(output)) => Ok(cap_script_io(combine_shell_output(
                     &output.stdout,
                     &output.stderr,
                 ))),
-                Ok(Err(e)) => Err(format!("failed to run shell: {e}")),
+                Ok(Err(e)) => Err(format!("failed to spawn shell: {e}")),
                 Err(_) => Err(format!(
                     "shell command timed out after {}s",
                     timeout.as_secs()

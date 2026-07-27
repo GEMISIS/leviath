@@ -360,6 +360,95 @@ mod tests {
         (ControlClient::new(id), handle)
     }
 
+    /// A daemon that replies with `reply` (verbatim, newline added) to one
+    /// request. `None` closes the connection without replying.
+    fn replying_daemon(
+        dir: &std::path::Path,
+        reply: Option<&'static str>,
+    ) -> (ControlClient, tokio::task::JoinHandle<()>) {
+        use leviath_runtime::control_socket::{bind_control_listener, control_id};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let id = control_id(dir);
+        let mut listener = bind_control_listener(&id).unwrap();
+        let handle = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = tokio::io::split(stream);
+            let mut lines = BufReader::new(read_half).lines();
+            let _ = lines.next_line().await;
+            if let Some(reply) = reply {
+                let _ = write_half.write_all(format!("{reply}\n").as_bytes()).await;
+            }
+        });
+        (ControlClient::new(id), handle)
+    }
+
+    /// Drive one cancel through the loop and return the reported outcome.
+    async fn cancel_outcome(reply: Option<&'static str>) -> types::DaemonOutcome {
+        let dir = tempfile::tempdir().unwrap();
+        let (control, server) = replying_daemon(dir.path(), reply);
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<DaemonCommand>();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        tokio::spawn(daemon_background_loop(control, cmd_rx, out_tx));
+        cmd_tx
+            .send(DaemonCommand::Cancel {
+                run_id: "run-1".to_string(),
+            })
+            .unwrap();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("an outcome was reported")
+            .expect("the loop is alive");
+        let _ = server.await;
+        outcome
+    }
+
+    /// Every response shape the daemon can give is reported back, so the
+    /// dashboard can tell a kill that worked from one that did not.
+    #[tokio::test]
+    async fn daemon_background_loop_reports_each_outcome() {
+        let ok = cancel_outcome(Some(r#"{"result":"ok","ok":true}"#)).await;
+        assert!(ok.ok, "an applied cancel is reported as success");
+        assert_eq!(ok.run_id, "run-1");
+
+        let missing = cancel_outcome(Some(r#"{"result":"ok","ok":false}"#)).await;
+        assert!(!missing.ok);
+        assert!(missing.message.contains("no such run to cancel"));
+
+        let odd = cancel_outcome(Some(r#"{"result":"spawned","run_id":"x"}"#)).await;
+        assert!(!odd.ok);
+        assert!(odd.message.contains("unexpected daemon response"));
+
+        // Connection closed with no reply → a transport error, surfaced as such.
+        let broken = cancel_outcome(None).await;
+        assert!(!broken.ok);
+        assert!(
+            broken.message.contains("cancel failed"),
+            "got: {}",
+            broken.message
+        );
+    }
+
+    /// The loop stops when the dashboard has gone away, rather than spinning on
+    /// a channel nobody reads.
+    #[tokio::test]
+    async fn daemon_background_loop_exits_when_the_dashboard_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (control, _server) = replying_daemon(dir.path(), Some(r#"{"result":"ok","ok":true}"#));
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<DaemonCommand>();
+        let (out_tx, out_rx) = mpsc::unbounded_channel();
+        drop(out_rx); // the dashboard exited
+        let handle = tokio::spawn(daemon_background_loop(control, cmd_rx, out_tx));
+        cmd_tx
+            .send(DaemonCommand::Cancel {
+                run_id: "run-1".to_string(),
+            })
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("the loop returned")
+            .unwrap();
+    }
+
     // ─── init_dashboard ──────────────────────────────────────────────────
 
     #[tokio::test]
