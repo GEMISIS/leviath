@@ -1,18 +1,65 @@
-//! `lev setup` - Interactive configuration wizard
+//! `lev setup` — the guided path from "just installed Leviath" to "ready to run
+//! an agent".
+//!
+//! The previous version was nine `print!`/`read_line` prompts in a fixed order:
+//! it asked every user for four API keys whether they had them or not, echoed
+//! them in plaintext, touched about eight of `Config`'s twenty-odd fields, and
+//! knew nothing about MCP servers or agent blueprints. It also ended by
+//! claiming "All API keys look valid" on the strength of a `starts_with`
+//! check. A fresh install came out the other side with a config file and no
+//! agents.
+//!
+//! This is a ratatui wizard instead: pick the providers you actually use,
+//! configure and verify each, set defaults and limits, install the bundled
+//! blueprints, and import MCP servers already configured in other harnesses.
+//!
+//! ## Shape
+//!
+//! * [`state`] — what step we're on and what's been chosen. Pure data.
+//! * [`input`] — key handling.
+//! * [`render`] — drawing.
+//! * [`plan`] — the decisions as plain data, and the only code that writes.
+//! * [`catalog`] — which providers exist and how each is configured.
+//! * [`import`] — MCP servers found in other tools.
+//! * [`verify`] — proving a credential works.
+//!
+//! The terminal is a *front-end*, not the feature: everything it collects lands
+//! in a [`plan::SetupPlan`], and `--non-interactive` builds the same struct
+//! from flags. A future mobile or web host would be a third builder with
+//! nothing downstream changing — which is why none of the platform-shaped parts
+//! (scanning a home directory, taking over a TTY) are prescribed anywhere but
+//! here.
 
+pub mod catalog;
 pub mod import;
+pub mod input;
+pub mod plan;
+pub mod render;
+pub mod state;
 pub mod verify;
 
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
 use clap::Args;
-use std::io::{self, Write};
+use ratatui::Terminal;
+use tokio::sync::mpsc;
 
 use crate::config::Config;
+use crate::tui::{EventSource, TerminalSetup};
+use crossterm::event::{Event, KeyEventKind};
+use state::{VerifyReply, VerifyRequest, Wizard};
+use verify::ProviderVerifier;
 
 #[derive(Args)]
 pub struct SetupArgs {
     /// Run non-interactively using only flag values (useful for scripting)
     #[arg(long)]
     pub non_interactive: bool,
+
+    /// Skip checking credentials against the provider APIs
+    #[arg(long)]
+    pub no_verify: bool,
 
     /// Anthropic API key
     #[arg(long)]
@@ -48,178 +95,77 @@ pub struct SetupArgs {
     /// (low, medium, high, xhigh, max)
     #[arg(long)]
     pub claude_code_effort: Option<String>,
+
+    /// Install the bundled agent blueprints without asking
+    #[arg(long)]
+    pub install_agents: bool,
 }
 
-/// `lev setup`: load the config, then either apply flags non-interactively or
-/// run the interactive prompt sequence, saving to `Config::config_path()`.
+/// Reads an environment variable. Injected so a test can hand the wizard a
+/// fixed environment instead of the developer's real one.
+pub type EnvLookup = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+/// Everything the wizard needs from the outside world, injected so tests point
+/// it at tempdirs and a fake environment instead of the developer's real home.
+pub struct SetupEnv {
+    pub config_path: PathBuf,
+    pub agents_dir: PathBuf,
+    /// Roots for the harness scan.
+    pub roots: import::Roots,
+    /// Reads an environment variable.
+    pub env_lookup: EnvLookup,
+    /// Opens a URL in a browser.
+    pub opener: leviath_mcp::BrowserOpener,
+}
+
+// The real `SetupEnv` -- the user's actual home, a real `std::env` lookup, and
+// a real browser -- is built in the binary, where those leaves belong. Nothing
+// in the library reaches the real environment, so no test can either.
+
+/// The non-interactive arm: apply flags to the config on disk and save.
 ///
-/// The reader is a lazily-constructed factory so the interactive arm can take
-/// the process's real `stdin().lock()` (the un-unit-testable leaf, supplied by
-/// the binary) while the non-interactive arm never builds it. Tests drive both
-/// arms with an isolated config path and an in-memory `Cursor`.
-pub fn execute_with<R: io::BufRead>(
-    args: &SetupArgs,
-    make_reader: impl FnOnce() -> R,
-) -> anyhow::Result<()> {
-    let mut config = Config::load().unwrap_or_default();
-    let save_path = Config::config_path();
-    if args.non_interactive {
-        return run_non_interactive_setup(&mut config, args, &save_path);
-    }
-    run_interactive_setup(&mut config, &mut make_reader(), &save_path)
-}
+/// Kept working byte-for-byte because it is the documented headless path and an
+/// integration test spawns the real binary through it.
+pub fn run_non_interactive(args: &SetupArgs, env: &SetupEnv) -> anyhow::Result<()> {
+    let mut config = Config::load_from_path_public(&env.config_path).unwrap_or_default();
+    apply_flags(&mut config, args);
 
-/// Core of the `--non-interactive` path, with an explicit `save_path` so tests
-/// can target a tempfile instead of the real config.
-fn run_non_interactive_setup(
-    config: &mut Config,
-    args: &SetupArgs,
-    save_path: &std::path::Path,
-) -> anyhow::Result<()> {
-    apply_flags(config, args);
-    config.save_to_path(save_path)?;
-    println!("Config saved to {}", save_path.display());
+    let agents = if args.install_agents {
+        crate::bundled::plan_agent_actions(&env.agents_dir)
+            .into_iter()
+            .filter(|(_, action)| action.is_change())
+            .map(|(agent, _)| agent)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let applied = plan::apply(
+        &plan::SetupPlan { config, agents },
+        &env.config_path,
+        &env.agents_dir,
+    )?;
+    report(&applied);
     Ok(())
 }
 
-/// The interactive prompt sequence, reading from any [`io::BufRead`] and saving
-/// to an explicit `save_path` so tests can drive it with an in-memory reader and
-/// a tempfile instead of blocking on real stdin and writing the real config.
-fn run_interactive_setup<R: io::BufRead>(
-    config: &mut Config,
-    reader: &mut R,
-    save_path: &std::path::Path,
-) -> anyhow::Result<()> {
-    println!("Leviath Setup");
-    println!("─────────────────────────────────────────");
-    println!("Press Enter to keep the current value shown in [brackets].");
-    println!("Type a value and press Enter to update it.");
-    println!("Type 'clear' to remove a stored value.");
-    println!();
-
-    // Anthropic API key
-    let current_anthropic = config.providers.anthropic_api_key.as_deref().map(redact);
-    config.providers.anthropic_api_key = prompt_secret(
-        reader,
-        "Anthropic API key",
-        "sk-ant-...",
-        config.providers.anthropic_api_key.as_deref(),
-        current_anthropic.as_deref(),
-    );
-
-    // OpenAI API key
-    let current_openai = config.providers.openai_api_key.as_deref().map(redact);
-    config.providers.openai_api_key = prompt_secret(
-        reader,
-        "OpenAI API key",
-        "sk-...",
-        config.providers.openai_api_key.as_deref(),
-        current_openai.as_deref(),
-    );
-
-    // Google AI (Gemini) API key
-    let current_google = config.providers.google_api_key.as_deref().map(redact);
-    config.providers.google_api_key = prompt_secret(
-        reader,
-        "Google AI (Gemini) API key",
-        "AIza...",
-        config.providers.google_api_key.as_deref(),
-        current_google.as_deref(),
-    );
-
-    // OpenRouter API key
-    let current_or = config.openrouter_api_key.as_deref().map(redact);
-    config.openrouter_api_key = prompt_secret(
-        reader,
-        "OpenRouter API key",
-        "sk-or-...",
-        config.openrouter_api_key.as_deref(),
-        current_or.as_deref(),
-    );
-
-    // Ollama URL
-    let default_ollama = "http://localhost:11434";
-    let current_ollama = config.ollama_base_url.as_deref().unwrap_or(default_ollama);
-    let ollama_input = prompt_plain(reader, "Ollama base URL", current_ollama);
-    config.ollama_base_url = if ollama_input == default_ollama {
-        None // store None so the default takes effect
-    } else if ollama_input.is_empty() {
-        config.ollama_base_url.clone()
-    } else {
-        Some(ollama_input)
-    };
-
-    // Claude Code transport — offered, never selected for the user. The shown
-    // default is the stored value, so on a fresh install this reads `[no]` and
-    // pressing Enter through the whole wizard leaves it disabled.
-    println!();
-    println!("  Claude Code transport: run Leviath on your Claude subscription, no API key.");
-    println!("  Caveat: the CLI adds ~130 tokens of its own context to every call, including");
-    println!("  your account email address and the current date. This cannot be disabled.");
-    let enabled_before = config.providers.claude_code_enabled;
-    let cc_input = prompt_plain(
-        reader,
-        "Enable Claude Code provider",
-        yes_no(enabled_before),
-    );
-    config.providers.claude_code_enabled = parse_yes_no(&cc_input, enabled_before);
-
-    if config.providers.claude_code_enabled {
-        let current_effort = config
-            .providers
-            .claude_code_effort
-            .as_deref()
-            .unwrap_or(leviath_providers::claude_code::DEFAULT_EFFORT);
-        let effort_input = prompt_plain(
-            reader,
-            "  Claude Code effort (low/medium/high/xhigh/max)",
-            current_effort,
+/// Print what happened. Shared by both arms so the closing summary reads the
+/// same however setup was driven.
+fn report(applied: &plan::Applied) {
+    println!("Config saved to {}", applied.config_path.display());
+    if !applied.agents_installed.is_empty() {
+        println!(
+            "Installed {} agent(s): {}",
+            applied.agents_installed.len(),
+            applied.agents_installed.join(", ")
         );
-        if !effort_input.is_empty() {
-            config.providers.claude_code_effort = Some(effort_input);
-        }
-        if !enabled_before {
-            println!("  Enabled. Sign in with `claude` if you haven't already.");
-        }
     }
-
-    // Default model
-    let current_model = config
-        .default_model
-        .as_deref()
-        .unwrap_or("(provider default)");
-    let model_input = prompt_plain(reader, "Default model override", current_model);
-    config.default_model = if model_input.is_empty() || model_input == "(provider default)" {
-        config.default_model.clone()
-    } else if model_input == "clear" {
-        None
-    } else {
-        Some(model_input)
-    };
-
-    // Default provider
-    let provider_input = prompt_plain(reader, "Default provider", &config.default_provider);
-    if !provider_input.is_empty() {
-        config.default_provider = provider_input;
+    for warning in &applied.warnings {
+        println!("  Warning: {warning}");
     }
-
-    println!();
-    config.save_to_path(save_path)?;
-    println!("Config saved to {}", save_path.display());
-
-    // Validate and warn about keys
-    let warnings = config.validate_keys();
-    for w in &warnings {
-        println!("  Warning: {}", w);
-    }
-
-    if warnings.is_empty() {
-        println!("All API keys look valid.");
-    }
-
-    Ok(())
 }
 
+/// Copy the flag values onto a config.
 fn apply_flags(config: &mut Config, args: &SetupArgs) {
     if let Some(ref k) = args.anthropic_key {
         config.providers.anthropic_api_key = Some(k.clone());
@@ -247,1070 +193,710 @@ fn apply_flags(config: &mut Config, args: &SetupArgs) {
     }
 }
 
-/// Prompt for a secret value. Returns `None` if the user clears the value;
-/// preserves the existing value on empty input. I/O errors are swallowed and
-/// treated as empty input so the caller only needs to handle save failure.
-fn prompt_secret<R: io::BufRead>(
-    reader: &mut R,
-    label: &str,
-    hint: &str,
-    current: Option<&str>,
-    display: Option<&str>,
-) -> Option<String> {
-    let shown = display.unwrap_or("(not set)");
-    print!("  {} [{}] ({}): ", label, shown, hint);
-    let _ = io::stdout().flush();
-    let mut input = String::new();
-    let _ = reader.read_line(&mut input);
-    let input = input.trim();
-    if input == "clear" {
-        None
-    } else if input.is_empty() {
-        current.map(|s| s.to_string())
-    } else {
-        Some(input.to_string())
-    }
-}
-
-/// Prompt for a plain (non-secret) value. I/O errors are swallowed and
-/// treated as empty input so the caller only needs to handle save failure.
-fn prompt_plain<R: io::BufRead>(reader: &mut R, label: &str, current: &str) -> String {
-    print!("  {} [{}]: ", label, current);
-    let _ = io::stdout().flush();
-    let mut input = String::new();
-    let _ = reader.read_line(&mut input);
-    input.trim().to_string()
-}
-
-/// The bracketed default shown for a yes/no prompt.
-fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
-}
-
-/// Interpret a yes/no answer, keeping `current` on empty or unrecognized input.
+/// Build a wizard against `env`.
 ///
-/// Unrecognized input keeps the current value rather than guessing: for a prompt
-/// whose default is "off", a typo must never read as consent.
-fn parse_yes_no(input: &str, current: bool) -> bool {
-    match input.trim().to_ascii_lowercase().as_str() {
-        "y" | "yes" | "true" | "1" | "on" => true,
-        "n" | "no" | "false" | "0" | "off" => false,
-        _ => current,
+/// The base config comes from reading the *file*, deliberately not from
+/// `Config::load()`: `load` folds `$ANTHROPIC_API_KEY` and friends in, and the
+/// old wizard re-serialized the whole struct — quietly writing into
+/// `~/.leviath/config.toml` a key the user had chosen to keep in their
+/// environment. Those are tracked separately and shown as such.
+pub fn build_wizard(env: &SetupEnv) -> Wizard {
+    let base = Config::load_from_path_public(&env.config_path).unwrap_or_default();
+    let (candidates, errors) = state::candidates_from_scans(import::scan(&env.roots));
+    Wizard::new(
+        base,
+        &env.env_lookup,
+        candidates,
+        errors,
+        &env.agents_dir,
+        env.opener.clone(),
+    )
+}
+
+/// Answer verification requests until the wizard drops its sender.
+///
+/// Sequential rather than fanned out: the answers land on separate provider
+/// cards a user reads one at a time, and firing six requests at once buys
+/// nothing but a chance to trip a rate limiter with what is supposed to be a
+/// harmless check.
+pub async fn verification_loop<V: ProviderVerifier>(
+    verifier: V,
+    mut requests: mpsc::UnboundedReceiver<VerifyRequest>,
+    replies: mpsc::UnboundedSender<VerifyReply>,
+) {
+    while let Some(request) = requests.recv().await {
+        let outcome = verifier.verify(&request.creds).await;
+        // A closed receiver means the wizard exited; nothing left to report to.
+        if replies
+            .send(VerifyReply {
+                provider_id: request.provider_id,
+                outcome,
+            })
+            .is_err()
+        {
+            return;
+        }
     }
 }
 
-/// Redact an API key for display: show the first 8 characters + "...".
+/// The wizard's draw/input loop.
 ///
-/// Counts *characters*, not bytes. A byte-based version both panicked on a key
-/// containing a multi-byte character straddling byte 8 (the shape of issue #115)
-/// and, worse, leaked: a 3-character 9-byte key is longer than 8 bytes, so the
-/// byte branch would print every character of it followed by an "I truncated
-/// this" marker.
-fn redact(key: &str) -> String {
-    if key.chars().count() <= 8 {
-        "***".to_string()
-    } else {
-        format!("{}...", key.chars().take(8).collect::<String>())
+/// Generic over the backend and event source so it runs against a
+/// `TestBackend` and canned keys; the real crossterm bindings live in the
+/// binary. Returns the plan to apply, or `None` if the user quit.
+pub async fn run_wizard_loop<B: ratatui::backend::Backend>(
+    wizard: &mut Wizard,
+    terminal: &mut Terminal<B>,
+    events: &mut impl EventSource,
+    tick_rate: Duration,
+) -> anyhow::Result<Option<plan::SetupPlan>> {
+    loop {
+        wizard.ticks += 1;
+        wizard.drain_verifications();
+        terminal.draw(|frame| render::draw(frame, wizard))?;
+
+        if let Some(Event::Key(key)) = events.poll_event(tick_rate)?
+            && key.kind == KeyEventKind::Press
+            && wizard.handle_key(key) == input::Action::Save
+        {
+            wizard.finished = true;
+        }
+
+        if wizard.finished {
+            return Ok(Some(wizard.build_plan()));
+        }
+        if wizard.should_quit {
+            return Ok(None);
+        }
     }
+}
+
+/// Set up the terminal, run the loop, tear the terminal down, then apply.
+///
+/// The teardown happens before anything is printed: writing a summary while the
+/// alternate screen is still up puts it somewhere the user will never see.
+pub async fn execute_core<S: TerminalSetup, E: EventSource>(
+    wizard: &mut Wizard,
+    env: &SetupEnv,
+    setup: &mut S,
+    events: &mut E,
+) -> anyhow::Result<()> {
+    setup.enable()?;
+    let mut terminal = setup.create_terminal()?;
+    let result = run_wizard_loop(wizard, &mut terminal, events, Duration::from_millis(120)).await;
+    setup.disable();
+
+    match result? {
+        Some(plan) => {
+            let applied = plan::apply(&plan, &env.config_path, &env.agents_dir)?;
+            report(&applied);
+            print_next_steps(&applied);
+        }
+        None => println!("Setup cancelled. Nothing was written."),
+    }
+    Ok(())
+}
+
+/// What to do now that setup is done.
+fn print_next_steps(applied: &plan::Applied) {
+    println!();
+    match applied.agents_installed.first() {
+        Some(agent) => println!("Try it:  lev run {agent} --task \"...\""),
+        None => println!("Install an agent with `lev setup`, then `lev run <agent>`."),
+    }
+}
+
+/// `lev setup`: the flags path, or the wizard.
+///
+/// `is_terminal` is injected because the answer is a property of the real
+/// process's stdout, and a wizard that starts on a pipe would take over a
+/// terminal that isn't there.
+pub async fn execute_with<S: TerminalSetup, E: EventSource>(
+    args: &SetupArgs,
+    env: &SetupEnv,
+    setup: &mut S,
+    events: &mut E,
+    is_terminal: bool,
+) -> anyhow::Result<()> {
+    if args.non_interactive {
+        return run_non_interactive(args, env);
+    }
+    if !is_terminal {
+        anyhow::bail!(
+            "lev setup needs a terminal. For scripted use:\n  \
+             lev setup --non-interactive --anthropic-key sk-ant-... --install-agents"
+        );
+    }
+    let mut wizard = build_wizard(env);
+    execute_core(&mut wizard, env, setup, events).await
+}
+
+/// Resolve `~/.leviath/agents` for the real environment.
+pub fn real_agents_dir(home: Option<&Path>) -> PathBuf {
+    home.unwrap_or(Path::new(""))
+        .join(".leviath")
+        .join("agents")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bundled::BUNDLED_AGENTS;
+    use crate::tui::{TestEventSource, TestSetup, key, key_with, test_terminal};
+    use crossterm::event::{KeyCode, KeyModifiers};
 
-    // ─── redact ────────────────────────────────────────────────────────────
-
-    #[test]
-    fn redact_short_key() {
-        assert_eq!(redact("abc"), "***");
-        assert_eq!(redact("12345678"), "***");
-    }
-
-    #[test]
-    fn redact_long_key() {
-        assert_eq!(redact("sk-ant-api-key-12345"), "sk-ant-a...");
-        assert_eq!(redact("123456789"), "12345678...");
-    }
-
-    #[test]
-    fn redact_empty() {
-        assert_eq!(redact(""), "***");
-    }
-
-    #[test]
-    fn redact_multibyte_key() {
-        // Issue #115: byte 8 falls inside the third '日' (bytes 6..9), which used
-        // to panic.
-        assert_eq!(redact("日本語日本語日本語"), "日本語日本語日本...");
-        // 3 characters but 9 bytes — the byte-length guard would have classified
-        // this as "long" and printed the whole key. Character counting redacts it.
-        assert_eq!(redact("日本語"), "***");
-        // Exactly 8 characters is still fully redacted.
-        assert_eq!(redact("日本語日本語日本"), "***");
-    }
-
-    // ─── apply_flags ───────────────────────────────────────────────────────
-
-    #[test]
-    fn apply_flags_sets_anthropic_key() {
-        let mut config = Config::default();
-        let args = SetupArgs {
-            non_interactive: true,
-            anthropic_key: Some("sk-ant-test".to_string()),
-            openai_key: None,
-            google_key: None,
-            openrouter_key: None,
-            ollama_url: None,
-            default_model: None,
-            claude_code: None,
-            claude_code_effort: None,
-        };
-        apply_flags(&mut config, &args);
-        assert_eq!(
-            config.providers.anthropic_api_key.as_deref(),
-            Some("sk-ant-test")
-        );
-    }
-
-    #[test]
-    fn apply_flags_sets_all_keys() {
-        let mut config = Config::default();
-        let args = SetupArgs {
-            non_interactive: true,
-            anthropic_key: Some("ant-key".to_string()),
-            openai_key: Some("oai-key".to_string()),
-            google_key: Some("goog-key".to_string()),
-            openrouter_key: Some("or-key".to_string()),
-            ollama_url: Some("http://my-ollama:11434".to_string()),
-            default_model: Some("my-model".to_string()),
-            claude_code: None,
-            claude_code_effort: None,
-        };
-        apply_flags(&mut config, &args);
-        assert_eq!(
-            config.providers.anthropic_api_key.as_deref(),
-            Some("ant-key")
-        );
-        assert_eq!(config.providers.openai_api_key.as_deref(), Some("oai-key"));
-        assert_eq!(config.providers.google_api_key.as_deref(), Some("goog-key"));
-        assert_eq!(config.openrouter_api_key.as_deref(), Some("or-key"));
-        assert_eq!(
-            config.ollama_base_url.as_deref(),
-            Some("http://my-ollama:11434")
-        );
-        assert_eq!(config.default_model.as_deref(), Some("my-model"));
-    }
-
-    #[test]
-    fn apply_flags_sets_claude_code_enable_and_effort() {
-        // The non-interactive `--claude-code`/`--claude-code-effort` arms.
-        let mut config = Config::default();
-        let args = SetupArgs {
-            non_interactive: true,
+    /// Args with everything off, so each test names only what it exercises.
+    fn args() -> SetupArgs {
+        SetupArgs {
+            non_interactive: false,
+            no_verify: false,
             anthropic_key: None,
             openai_key: None,
             google_key: None,
             openrouter_key: None,
             ollama_url: None,
             default_model: None,
+            claude_code: None,
+            claude_code_effort: None,
+            install_agents: false,
+        }
+    }
+
+    /// A `SetupEnv` rooted entirely in a tempdir, with a browser opener that
+    /// records instead of launching and an environment that is simply empty.
+    fn env_in(dir: &Path) -> SetupEnv {
+        SetupEnv {
+            config_path: dir.join("config.toml"),
+            agents_dir: dir.join("agents"),
+            roots: import::Roots {
+                home: dir.join("home"),
+                os_config: dir.join("os-config"),
+                xdg_config: dir.join("home").join(".config"),
+                cwd: dir.join("cwd"),
+            },
+            env_lookup: Box::new(|_| None),
+            opener: std::sync::Arc::new(|_| true),
+        }
+    }
+
+    // ─── the non-interactive path ───────────────────────────────────────────
+
+    #[test]
+    fn flags_are_written_to_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env_in(dir.path());
+        let args = SetupArgs {
+            non_interactive: true,
+            anthropic_key: Some("sk-ant-x".to_string()),
+            openai_key: Some("sk-oai".to_string()),
+            google_key: Some("goog".to_string()),
+            openrouter_key: Some("sk-or".to_string()),
+            ollama_url: Some("http://box:11434".to_string()),
+            default_model: Some("m".to_string()),
             claude_code: Some(true),
             claude_code_effort: Some("xhigh".to_string()),
+            ..args()
         };
-        apply_flags(&mut config, &args);
-        assert!(config.providers.claude_code_enabled);
+
+        run_non_interactive(&args, &env).unwrap();
+
+        let written = Config::load_from_path_public(&env.config_path).unwrap();
         assert_eq!(
-            config.providers.claude_code_effort.as_deref(),
+            written.providers.anthropic_api_key.as_deref(),
+            Some("sk-ant-x")
+        );
+        assert_eq!(written.providers.openai_api_key.as_deref(), Some("sk-oai"));
+        assert_eq!(written.providers.google_api_key.as_deref(), Some("goog"));
+        assert_eq!(written.openrouter_api_key.as_deref(), Some("sk-or"));
+        assert_eq!(written.ollama_base_url.as_deref(), Some("http://box:11434"));
+        assert_eq!(written.default_model.as_deref(), Some("m"));
+        assert!(written.providers.claude_code_enabled);
+        assert_eq!(
+            written.providers.claude_code_effort.as_deref(),
             Some("xhigh")
         );
     }
 
     #[test]
-    fn apply_flags_can_disable_claude_code() {
-        // `--claude-code false` turns an enabled provider back off.
-        let mut config = Config::default();
-        config.providers.claude_code_enabled = true;
-        let args = SetupArgs {
-            non_interactive: true,
-            anthropic_key: None,
-            openai_key: None,
-            google_key: None,
-            openrouter_key: None,
-            ollama_url: None,
-            default_model: None,
-            claude_code: Some(false),
-            claude_code_effort: None,
-        };
-        apply_flags(&mut config, &args);
-        assert!(!config.providers.claude_code_enabled);
-    }
-
-    #[test]
-    fn apply_flags_preserves_existing_on_none() {
-        let mut config = Config::default();
-        config.providers.anthropic_api_key = Some("existing-key".to_string());
-        let args = SetupArgs {
-            non_interactive: true,
-            anthropic_key: None,
-            openai_key: None,
-            google_key: None,
-            openrouter_key: None,
-            ollama_url: None,
-            default_model: None,
-            claude_code: None,
-            claude_code_effort: None,
-        };
-        apply_flags(&mut config, &args);
-        assert_eq!(
-            config.providers.anthropic_api_key.as_deref(),
-            Some("existing-key")
-        );
-    }
-
-    // ─── non-interactive mode save/load ────────────────────────────────────
-
-    #[test]
-    fn config_save_and_load_roundtrip() {
+    fn the_non_interactive_path_installs_agents_only_when_asked() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.toml");
+        let env = env_in(dir.path());
 
-        let config = Config {
-            default_provider: "anthropic".to_string(),
-            providers: crate::config::ProviderConfig {
-                anthropic_api_key: Some("sk-ant-test-key".to_string()),
-                openai_api_key: None,
-                google_api_key: None,
-                claude_code_enabled: false,
-                claude_code_binary: None,
-                claude_code_effort: None,
+        run_non_interactive(&args(), &env).unwrap();
+        assert!(!env.agents_dir.exists(), "nothing was asked for");
+
+        run_non_interactive(
+            &SetupArgs {
+                install_agents: true,
+                ..args()
             },
-            ..Config::default()
-        };
-
-        let content = toml::to_string_pretty(&config).unwrap();
-        std::fs::write(&config_path, &content).unwrap();
-        let loaded_content = std::fs::read_to_string(&config_path).unwrap();
-        let loaded: Config = toml::from_str(&loaded_content).unwrap();
-
-        assert_eq!(loaded.default_provider, "anthropic");
-        assert_eq!(
-            loaded.providers.anthropic_api_key.as_deref(),
-            Some("sk-ant-test-key")
+            &env,
+        )
+        .unwrap();
+        assert!(
+            env.agents_dir.join(BUNDLED_AGENTS[0].name).exists(),
+            "every bundled blueprint should land"
         );
-    }
 
-    // ─── apply_flags partial updates ──────────────────────────────────────
-
-    #[test]
-    fn apply_flags_only_openai() {
-        let mut config = Config::default();
-        let args = SetupArgs {
-            non_interactive: true,
-            anthropic_key: None,
-            openai_key: Some("sk-openai".to_string()),
-            google_key: None,
-            openrouter_key: None,
-            ollama_url: None,
-            default_model: None,
-            claude_code: None,
-            claude_code_effort: None,
-        };
-        apply_flags(&mut config, &args);
-        assert!(config.providers.anthropic_api_key.is_none());
-        assert_eq!(
-            config.providers.openai_api_key.as_deref(),
-            Some("sk-openai")
-        );
-    }
-
-    #[test]
-    fn apply_flags_only_google() {
-        let mut config = Config::default();
-        let args = SetupArgs {
-            non_interactive: true,
-            anthropic_key: None,
-            openai_key: None,
-            google_key: Some("AIza-test".to_string()),
-            openrouter_key: None,
-            ollama_url: None,
-            default_model: None,
-            claude_code: None,
-            claude_code_effort: None,
-        };
-        apply_flags(&mut config, &args);
-        assert_eq!(
-            config.providers.google_api_key.as_deref(),
-            Some("AIza-test")
-        );
-    }
-
-    #[test]
-    fn apply_flags_only_openrouter() {
-        let mut config = Config::default();
-        let args = SetupArgs {
-            non_interactive: true,
-            anthropic_key: None,
-            openai_key: None,
-            google_key: None,
-            openrouter_key: Some("sk-or-key".to_string()),
-            ollama_url: None,
-            default_model: None,
-            claude_code: None,
-            claude_code_effort: None,
-        };
-        apply_flags(&mut config, &args);
-        assert_eq!(config.openrouter_api_key.as_deref(), Some("sk-or-key"));
-    }
-
-    #[test]
-    fn apply_flags_only_ollama_url() {
-        let mut config = Config::default();
-        let args = SetupArgs {
-            non_interactive: true,
-            anthropic_key: None,
-            openai_key: None,
-            google_key: None,
-            openrouter_key: None,
-            ollama_url: Some("http://custom:1234".to_string()),
-            default_model: None,
-            claude_code: None,
-            claude_code_effort: None,
-        };
-        apply_flags(&mut config, &args);
-        assert_eq!(
-            config.ollama_base_url.as_deref(),
-            Some("http://custom:1234")
-        );
-    }
-
-    #[test]
-    fn apply_flags_only_default_model() {
-        let mut config = Config::default();
-        let args = SetupArgs {
-            non_interactive: true,
-            anthropic_key: None,
-            openai_key: None,
-            google_key: None,
-            openrouter_key: None,
-            ollama_url: None,
-            default_model: Some("gpt-5".to_string()),
-            claude_code: None,
-            claude_code_effort: None,
-        };
-        apply_flags(&mut config, &args);
-        assert_eq!(config.default_model.as_deref(), Some("gpt-5"));
-    }
-
-    // ─── redact edge cases ────────────────────────────────────────────────
-
-    #[test]
-    fn redact_exactly_8_chars() {
-        assert_eq!(redact("12345678"), "***");
-    }
-
-    #[test]
-    fn redact_9_chars() {
-        assert_eq!(redact("123456789"), "12345678...");
-    }
-
-    #[test]
-    fn redact_typical_anthropic_key() {
-        let key = "sk-ant-api03-abcdefghijklmnop";
-        let redacted = redact(key);
-        assert!(redacted.ends_with("..."));
-        assert!(redacted.starts_with("sk-ant-a"));
-    }
-
-    // ─── apply_flags overwrites existing keys ────────────────────────────
-
-    #[test]
-    fn apply_flags_overwrites_existing_key() {
-        let mut config = Config::default();
-        config.providers.anthropic_api_key = Some("old-key".to_string());
-        let args = SetupArgs {
-            non_interactive: true,
-            anthropic_key: Some("new-key".to_string()),
-            openai_key: None,
-            google_key: None,
-            openrouter_key: None,
-            ollama_url: None,
-            default_model: None,
-            claude_code: None,
-            claude_code_effort: None,
-        };
-        apply_flags(&mut config, &args);
-        assert_eq!(
-            config.providers.anthropic_api_key.as_deref(),
-            Some("new-key")
-        );
-    }
-
-    // ─── apply_flags sets multiple keys simultaneously ───────────────────
-
-    #[test]
-    fn apply_flags_partial_preserves_unrelated() {
-        let mut config = Config::default();
-        config.providers.anthropic_api_key = Some("ant-key".to_string());
-        config.default_model = Some("old-model".to_string());
-        let args = SetupArgs {
-            non_interactive: true,
-            anthropic_key: None,
-            openai_key: Some("oai-key".to_string()),
-            google_key: None,
-            openrouter_key: None,
-            ollama_url: None,
-            default_model: Some("new-model".to_string()),
-            claude_code: None,
-            claude_code_effort: None,
-        };
-        apply_flags(&mut config, &args);
-        // Anthropic key preserved
-        assert_eq!(
-            config.providers.anthropic_api_key.as_deref(),
-            Some("ant-key")
-        );
-        // OpenAI key set
-        assert_eq!(config.providers.openai_api_key.as_deref(), Some("oai-key"));
-        // Model updated
-        assert_eq!(config.default_model.as_deref(), Some("new-model"));
-    }
-
-    #[test]
-    fn redact_special_characters() {
-        let key = "!@#$%^&*()_+";
-        let redacted = redact(key);
-        assert!(redacted.ends_with("..."));
-    }
-
-    // ─── prompt_secret / prompt_plain (mocked stdin) ───────────────────────
-
-    use std::io::Cursor;
-
-    fn reader_from(input: &str) -> Cursor<Vec<u8>> {
-        Cursor::new(input.as_bytes().to_vec())
-    }
-
-    #[test]
-    fn prompt_secret_clear_returns_none() {
-        let mut reader = reader_from("clear\n");
-        let result = prompt_secret(
-            &mut reader,
-            "Anthropic API key",
-            "sk-ant-...",
-            Some("existing-key"),
-            Some("existin..."),
-        );
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn prompt_secret_empty_input_preserves_current() {
-        let mut reader = reader_from("\n");
-        let result = prompt_secret(
-            &mut reader,
-            "Anthropic API key",
-            "sk-ant-...",
-            Some("existing-key"),
-            Some("existin..."),
-        );
-        assert_eq!(result, Some("existing-key".to_string()));
-    }
-
-    #[test]
-    fn prompt_secret_empty_input_with_no_current_stays_none() {
-        let mut reader = reader_from("\n");
-        let result = prompt_secret(&mut reader, "Anthropic API key", "sk-ant-...", None, None);
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn prompt_secret_new_value_overwrites() {
-        let mut reader = reader_from("sk-ant-brand-new\n");
-        let result = prompt_secret(
-            &mut reader,
-            "Anthropic API key",
-            "sk-ant-...",
-            Some("old-key"),
-            Some("old-k..."),
-        );
-        assert_eq!(result, Some("sk-ant-brand-new".to_string()));
-    }
-
-    #[test]
-    fn prompt_secret_eof_behaves_like_empty_input() {
-        // Closed/exhausted stdin: read_line leaves the buffer empty, which
-        // is handled the same as a plain empty-input Enter press.
-        let mut reader = reader_from("");
-        let result = prompt_secret(
-            &mut reader,
-            "Anthropic API key",
-            "sk-ant-...",
-            Some("existing-key"),
-            Some("existin..."),
-        );
-        assert_eq!(result, Some("existing-key".to_string()));
-    }
-
-    #[test]
-    fn prompt_plain_returns_trimmed_new_value() {
-        let mut reader = reader_from("  http://custom:1234  \n");
-        let result = prompt_plain(&mut reader, "Ollama base URL", "http://localhost:11434");
-        assert_eq!(result, "http://custom:1234");
-    }
-
-    #[test]
-    fn prompt_plain_empty_input_returns_empty_string() {
-        let mut reader = reader_from("\n");
-        let result = prompt_plain(&mut reader, "Default provider", "anthropic");
-        assert_eq!(result, "");
-    }
-
-    #[test]
-    fn prompt_plain_eof_returns_empty_string() {
-        let mut reader = reader_from("");
-        let result = prompt_plain(&mut reader, "Default provider", "anthropic");
-        assert_eq!(result, "");
-    }
-
-    // ─── run_interactive_setup (mocked stdin + tempfile save path) ─────────
-
-    /// One line per prompt, in order: anthropic, openai, google, openrouter,
-    /// ollama URL, enable-claude-code, default model, default provider.
-    /// (Answering yes to claude-code adds an effort prompt after it.)
-    fn all_prompts_input(lines: &[&str]) -> Cursor<Vec<u8>> {
-        reader_from(&lines.join("\n"))
-    }
-
-    #[test]
-    fn run_interactive_setup_all_defaults_kept() {
-        let dir = tempfile::tempdir().unwrap();
-        let save_path = dir.path().join("config.toml");
-        let mut config = Config::default();
-
-        // 7 prompts: anthropic, openai, google, openrouter, ollama, model, provider.
-        // Empty answers to all of them.
-        let mut reader = all_prompts_input(&["", "", "", "", "", "", "", ""]);
-        run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
-
-        assert!(save_path.exists());
-        assert!(config.providers.anthropic_api_key.is_none());
-        assert!(config.ollama_base_url.is_none());
-        assert_eq!(config.default_provider, "anthropic");
-        // The requirement that motivated the prompt's shape: pressing Enter
-        // through the whole wizard must never turn Claude Code on, because
-        // doing so starts sending the user's account email to Anthropic.
-        assert!(!config.providers.claude_code_enabled);
-    }
-
-    // ─── Claude Code opt-in prompt ──────────────────────────────────────────
-
-    /// Run the wizard answering only the claude-code prompt (index 5); everything
-    /// else is left at its default. Returns the resulting config.
-    fn setup_answering_claude_code(answers: &[&str]) -> Config {
-        let dir = tempfile::tempdir().unwrap();
-        let save_path = dir.path().join("config.toml");
-        let mut config = Config::default();
-        let mut lines = vec!["", "", "", "", ""];
-        lines.extend_from_slice(answers);
-        lines.extend_from_slice(&["", ""]); // model, provider
-        let mut reader = all_prompts_input(&lines);
-        run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
-        config
-    }
-
-    #[test]
-    fn answering_yes_enables_claude_code_with_the_default_effort() {
-        // "yes" then Enter at the effort prompt.
-        let config = setup_answering_claude_code(&["yes", ""]);
-        assert!(config.providers.claude_code_enabled);
-        // Enter keeps the shown default rather than storing it explicitly.
-        assert!(config.providers.claude_code_effort.is_none());
-        // Enabling the transport must not hijack the default provider.
-        assert_eq!(config.default_provider, "anthropic");
-    }
-
-    #[test]
-    fn answering_yes_can_set_an_effort_level() {
-        let config = setup_answering_claude_code(&["y", "xhigh"]);
-        assert!(config.providers.claude_code_enabled);
-        assert_eq!(
-            config.providers.claude_code_effort.as_deref(),
-            Some("xhigh")
-        );
-    }
-
-    #[test]
-    fn declining_leaves_claude_code_off_and_skips_the_effort_prompt() {
-        // Only one answer consumed: no effort prompt is shown when declined.
-        let config = setup_answering_claude_code(&["no"]);
-        assert!(!config.providers.claude_code_enabled);
-        assert!(config.providers.claude_code_effort.is_none());
-    }
-
-    #[test]
-    fn an_unrecognized_answer_keeps_the_current_setting() {
-        // A typo at a prompt whose default is "off" must not read as consent.
-        let config = setup_answering_claude_code(&["mabye"]);
-        assert!(!config.providers.claude_code_enabled);
-    }
-
-    #[test]
-    fn an_enabled_provider_can_be_turned_back_off() {
-        let dir = tempfile::tempdir().unwrap();
-        let save_path = dir.path().join("config.toml");
-        let mut config = Config {
-            providers: crate::config::ProviderConfig {
-                claude_code_enabled: true,
-                claude_code_effort: Some("high".to_string()),
-                ..Config::default().providers
+        // Second time round there is nothing left to do.
+        run_non_interactive(
+            &SetupArgs {
+                install_agents: true,
+                ..args()
             },
-            ..Config::default()
-        };
-        let mut reader = all_prompts_input(&["", "", "", "", "", "n", "", ""]);
-        run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
-        assert!(!config.providers.claude_code_enabled);
+            &env,
+        )
+        .unwrap();
+        assert!(env.agents_dir.join(BUNDLED_AGENTS[0].name).exists());
     }
 
     #[test]
-    fn an_enabled_provider_keeps_its_settings_on_enter() {
+    fn the_non_interactive_path_keeps_settings_it_was_not_given() {
         let dir = tempfile::tempdir().unwrap();
-        let save_path = dir.path().join("config.toml");
-        let mut config = Config {
-            providers: crate::config::ProviderConfig {
-                claude_code_enabled: true,
-                claude_code_effort: Some("high".to_string()),
-                ..Config::default().providers
+        let env = env_in(dir.path());
+        run_non_interactive(
+            &SetupArgs {
+                anthropic_key: Some("sk-ant-first".to_string()),
+                ..args()
             },
-            ..Config::default()
-        };
-        // Enter at both the enable prompt and the effort prompt.
-        let mut reader = all_prompts_input(&["", "", "", "", "", "", "", "", ""]);
-        run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
-        assert!(config.providers.claude_code_enabled);
-        assert_eq!(config.providers.claude_code_effort.as_deref(), Some("high"));
+            &env,
+        )
+        .unwrap();
+
+        run_non_interactive(
+            &SetupArgs {
+                openai_key: Some("sk-oai".to_string()),
+                ..args()
+            },
+            &env,
+        )
+        .unwrap();
+
+        let written = Config::load_from_path_public(&env.config_path).unwrap();
+        assert_eq!(
+            written.providers.anthropic_api_key.as_deref(),
+            Some("sk-ant-first")
+        );
+        assert_eq!(written.providers.openai_api_key.as_deref(), Some("sk-oai"));
     }
 
     #[test]
-    fn yes_no_rendering_and_parsing_round_trip() {
-        assert_eq!(yes_no(true), "yes");
-        assert_eq!(yes_no(false), "no");
-        for affirmative in ["y", "YES", "true", "1", "on", " Yes "] {
-            assert!(parse_yes_no(affirmative, false), "{affirmative}");
+    fn a_config_that_cannot_be_written_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("not-a-dir");
+        std::fs::write(&blocked, "").unwrap();
+        let mut env = env_in(dir.path());
+        env.config_path = blocked.join("config.toml");
+
+        assert!(run_non_interactive(&args(), &env).is_err());
+    }
+
+    // ─── building the wizard from the environment ───────────────────────────
+
+    #[test]
+    fn the_wizard_reads_the_config_file_and_scans_for_harnesses() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env_in(dir.path());
+        std::fs::create_dir_all(&env.roots.home).unwrap();
+        std::fs::write(
+            env.roots.home.join(".claude.json"),
+            r#"{"mcpServers":{"fs":{"command":"npx"}}}"#,
+        )
+        .unwrap();
+        run_non_interactive(
+            &SetupArgs {
+                anthropic_key: Some("sk-ant-stored".to_string()),
+                ..args()
+            },
+            &env,
+        )
+        .unwrap();
+
+        let wizard = build_wizard(&env);
+
+        assert_eq!(
+            wizard.base.providers.anthropic_api_key.as_deref(),
+            Some("sk-ant-stored")
+        );
+        assert_eq!(wizard.mcp.len(), 1);
+        assert_eq!(wizard.mcp[0].candidate.config.name, "fs");
+    }
+
+    #[test]
+    fn a_missing_config_file_starts_from_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let wizard = build_wizard(&env_in(dir.path()));
+
+        assert_eq!(
+            wizard.base.default_provider,
+            Config::default().default_provider
+        );
+    }
+
+    // ─── the verification background loop ───────────────────────────────────
+
+    #[tokio::test]
+    async fn the_verification_loop_answers_every_request_then_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = build_wizard(&env_in(dir.path()));
+        let (requests, replies) = wizard.take_verify_ends().expect("first take");
+        wizard.providers[0].selected = true;
+        wizard.providers[0].value = "sk-ant".to_string();
+        wizard.request_verification(0);
+
+        let handle = tokio::spawn(verification_loop(verify::SkipVerifier, requests, replies));
+        // Dropping the wizard's sender ends the loop.
+        let sender = wizard.verify_tx.clone();
+        drop(sender);
+
+        // Give the loop a turn, then confirm the answer arrived.
+        for _ in 0..50 {
+            wizard.drain_verifications();
+            if !wizard.providers[0].checking {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
-        for negative in ["n", "NO", "false", "0", "off"] {
-            assert!(!parse_yes_no(negative, true), "{negative}");
-        }
-        // Empty and unrecognized both keep the current value.
-        assert!(parse_yes_no("", true));
-        assert!(!parse_yes_no("", false));
-        assert!(parse_yes_no("wat", true));
-        assert!(!parse_yes_no("wat", false));
+        assert!(!wizard.providers[0].checking);
+        assert_eq!(wizard.providers[0].outcome, verify::Outcome::Skipped);
+
+        drop(wizard);
+        handle.await.expect("the loop exits cleanly");
     }
 
-    #[test]
-    fn run_interactive_setup_sets_new_values() {
-        let dir = tempfile::tempdir().unwrap();
-        let save_path = dir.path().join("config.toml");
-        let mut config = Config::default();
+    #[tokio::test]
+    async fn the_verification_loop_stops_when_nobody_is_listening() {
+        // The wizard exited mid-check; there is nothing left to report to.
+        let (request_tx, request_rx) = mpsc::unbounded_channel();
+        let (reply_tx, reply_rx) = mpsc::unbounded_channel::<VerifyReply>();
+        request_tx
+            .send(VerifyRequest {
+                provider_id: "anthropic".to_string(),
+                creds: leviath_runtime::provider_creds::ProviderCreds {
+                    name: "anthropic".to_string(),
+                    api_key: Some("sk-ant".to_string()),
+                    base_url: None,
+                    model_capabilities: std::collections::HashMap::new(),
+                    request_timeout_secs: Some(1),
+                    options: std::collections::HashMap::new(),
+                },
+            })
+            .unwrap();
+        drop(reply_rx);
 
-        let mut reader = all_prompts_input(&[
-            "sk-ant-new",
-            "sk-oai-new",
-            "AIza-new",
-            "sk-or-new",
-            "http://custom-ollama:9999",
-            "", // claude-code: declined
-            "gpt-5",
-            "openai",
+        verification_loop(verify::SkipVerifier, request_rx, reply_tx).await;
+    }
+
+    // ─── the wizard loop ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn quitting_returns_no_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = build_wizard(&env_in(dir.path()));
+        let mut terminal = test_terminal();
+        let mut events = TestEventSource::new(vec![key(KeyCode::Char('q'))]);
+
+        let plan = run_wizard_loop(
+            &mut wizard,
+            &mut terminal,
+            &mut events,
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap();
+
+        assert!(plan.is_none());
+    }
+
+    #[tokio::test]
+    async fn saving_returns_the_plan_the_wizard_describes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = build_wizard(&env_in(dir.path()));
+        let mut terminal = test_terminal();
+        // A tick with no input, then save -- covering the poll-timeout path.
+        let mut events = TestEventSource::new_with_nones(vec![
+            None,
+            Some(key_with(KeyCode::Char('s'), KeyModifiers::CONTROL)),
         ]);
-        run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
 
-        assert_eq!(
-            config.providers.anthropic_api_key.as_deref(),
-            Some("sk-ant-new")
-        );
-        assert_eq!(
-            config.providers.openai_api_key.as_deref(),
-            Some("sk-oai-new")
-        );
-        assert_eq!(config.providers.google_api_key.as_deref(), Some("AIza-new"));
-        assert_eq!(config.openrouter_api_key.as_deref(), Some("sk-or-new"));
-        assert_eq!(
-            config.ollama_base_url.as_deref(),
-            Some("http://custom-ollama:9999")
-        );
-        assert_eq!(config.default_model.as_deref(), Some("gpt-5"));
-        assert_eq!(config.default_provider, "openai");
+        let plan = run_wizard_loop(
+            &mut wizard,
+            &mut terminal,
+            &mut events,
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap()
+        .expect("a plan was produced");
 
-        // Verify it was actually persisted to the injected path.
-        let saved = std::fs::read_to_string(&save_path).unwrap();
-        assert!(saved.contains("sk-ant-new"));
+        assert_eq!(plan.agents.len(), BUNDLED_AGENTS.len());
     }
 
-    #[test]
-    fn run_interactive_setup_clear_removes_secrets() {
+    #[tokio::test]
+    async fn non_press_and_non_key_events_are_ignored() {
         let dir = tempfile::tempdir().unwrap();
-        let save_path = dir.path().join("config.toml");
-        let mut config = Config {
-            providers: crate::config::ProviderConfig {
-                anthropic_api_key: Some("old-ant".to_string()),
-                openai_api_key: Some("old-oai".to_string()),
-                google_api_key: Some("old-goog".to_string()),
-                claude_code_enabled: false,
-                claude_code_binary: None,
-                claude_code_effort: None,
-            },
-            openrouter_api_key: Some("old-or".to_string()),
-            ..Config::default()
-        };
+        let mut wizard = build_wizard(&env_in(dir.path()));
+        let mut terminal = test_terminal();
+        let release = crossterm::event::Event::Key(crossterm::event::KeyEvent::new_with_kind(
+            KeyCode::Char('q'),
+            KeyModifiers::empty(),
+            KeyEventKind::Release,
+        ));
+        let mut events = TestEventSource::new(vec![
+            release,
+            crossterm::event::Event::FocusGained,
+            crossterm::event::Event::Resize(80, 24),
+            key(KeyCode::Char('q')),
+        ]);
 
-        let mut reader = all_prompts_input(&["clear", "clear", "clear", "clear", "", "", "", ""]);
-        run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
+        let plan = run_wizard_loop(
+            &mut wizard,
+            &mut terminal,
+            &mut events,
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap();
 
-        assert!(config.providers.anthropic_api_key.is_none());
-        assert!(config.providers.openai_api_key.is_none());
-        assert!(config.providers.google_api_key.is_none());
-        assert!(config.openrouter_api_key.is_none());
+        assert!(plan.is_none(), "only the real press quit");
     }
 
-    #[test]
-    fn run_interactive_setup_ollama_url_matching_default_stores_none() {
+    #[tokio::test]
+    async fn a_draw_failure_propagates() {
         let dir = tempfile::tempdir().unwrap();
-        let save_path = dir.path().join("config.toml");
-        let mut config = Config {
-            ollama_base_url: Some("http://something-else:1111".to_string()),
-            ..Config::default()
-        };
+        let mut wizard = build_wizard(&env_in(dir.path()));
+        let mut terminal =
+            ratatui::Terminal::new(crate::tui::TestBackendHarness::failing(80, 24)).unwrap();
+        let mut events = TestEventSource::new(vec![]);
 
-        let mut reader = all_prompts_input(&["", "", "", "", "http://localhost:11434", "", "", ""]);
-        run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
+        let result = run_wizard_loop(
+            &mut wizard,
+            &mut terminal,
+            &mut events,
+            Duration::from_millis(1),
+        )
+        .await;
 
-        assert!(config.ollama_base_url.is_none());
-    }
-
-    #[test]
-    fn run_interactive_setup_default_model_clear() {
-        let dir = tempfile::tempdir().unwrap();
-        let save_path = dir.path().join("config.toml");
-        let mut config = Config {
-            default_model: Some("old-model".to_string()),
-            ..Config::default()
-        };
-
-        let mut reader = all_prompts_input(&["", "", "", "", "", "", "clear", ""]);
-        run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
-
-        assert!(config.default_model.is_none());
-    }
-
-    #[test]
-    fn run_interactive_setup_default_model_provider_default_string_preserves() {
-        // Exercises the right-hand side of `is_empty() || == "(provider default)"`.
-        // When the user types the literal string "(provider default)" it is treated
-        // the same as pressing Enter — the existing model is preserved.
-        let dir = tempfile::tempdir().unwrap();
-        let save_path = dir.path().join("config.toml");
-        let mut config = Config {
-            default_model: Some("existing-model".to_string()),
-            ..Config::default()
-        };
-
-        let mut reader = all_prompts_input(&["", "", "", "", "", "", "(provider default)", ""]);
-        run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
-
-        assert_eq!(config.default_model.as_deref(), Some("existing-model"));
-    }
-
-    #[test]
-    fn run_interactive_setup_warns_on_invalid_key_format() {
-        let dir = tempfile::tempdir().unwrap();
-        let save_path = dir.path().join("config.toml");
-        let mut config = Config::default();
-
-        // Anthropic key that doesn't start with "sk-ant-" triggers a warning.
-        let mut reader =
-            all_prompts_input(&["not-a-valid-anthropic-key", "", "", "", "", "", "", ""]);
-        run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
-
-        let warnings = config.validate_keys();
-        assert!(!warnings.is_empty());
-    }
-
-    #[test]
-    fn run_interactive_setup_eof_treated_as_all_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        let save_path = dir.path().join("config.toml");
-        let mut config = Config::default();
-
-        // Closed stdin: every read_line call returns 0 bytes immediately.
-        let mut reader = reader_from("");
-        run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
-
-        assert!(save_path.exists());
-        assert!(config.providers.anthropic_api_key.is_none());
-    }
-
-    #[test]
-    fn run_interactive_setup_save_failure_returns_error() {
-        // Make save_to_path fail by putting a file where the parent dir must be.
-        let dir = tempfile::tempdir().unwrap();
-        let blocking = dir.path().join("not-a-dir");
-        std::fs::write(&blocking, "").unwrap();
-        let bad_save = blocking.join("config.toml");
-        let mut config = Config::default();
-        let mut reader = all_prompts_input(&["", "", "", "", "", "", "", ""]);
-        let result = run_interactive_setup(&mut config, &mut reader, &bad_save);
         assert!(result.is_err());
     }
 
-    // ─── run_non_interactive_setup (tempfile save path) ────────────────────
-
-    #[test]
-    fn run_non_interactive_setup_applies_flags_and_saves() {
+    #[tokio::test]
+    async fn an_event_source_failure_propagates() {
         let dir = tempfile::tempdir().unwrap();
-        let save_path = dir.path().join("config.toml");
-        let mut config = Config::default();
-        let args = SetupArgs {
-            non_interactive: true,
-            anthropic_key: Some("sk-ant-cli".to_string()),
-            openai_key: None,
-            google_key: None,
-            openrouter_key: None,
-            ollama_url: None,
-            default_model: None,
-            claude_code: None,
-            claude_code_effort: None,
-        };
+        let mut wizard = build_wizard(&env_in(dir.path()));
+        let mut terminal = test_terminal();
+        let mut events = TestEventSource::failing();
 
-        run_non_interactive_setup(&mut config, &args, &save_path).unwrap();
+        let result = run_wizard_loop(
+            &mut wizard,
+            &mut terminal,
+            &mut events,
+            Duration::from_millis(1),
+        )
+        .await;
 
-        assert_eq!(
-            config.providers.anthropic_api_key.as_deref(),
-            Some("sk-ant-cli")
-        );
-        let saved = std::fs::read_to_string(&save_path).unwrap();
-        assert!(saved.contains("sk-ant-cli"));
-    }
-
-    #[test]
-    fn run_non_interactive_setup_save_failure_returns_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let blocking = dir.path().join("not-a-dir");
-        std::fs::write(&blocking, "").unwrap();
-        let bad_save = blocking.join("config.toml");
-        let mut config = Config::default();
-        let args = SetupArgs {
-            non_interactive: true,
-            anthropic_key: None,
-            openai_key: None,
-            google_key: None,
-            openrouter_key: None,
-            ollama_url: None,
-            default_model: None,
-            claude_code: None,
-            claude_code_effort: None,
-        };
-        let result = run_non_interactive_setup(&mut config, &args, &bad_save);
         assert!(result.is_err());
     }
 
-    // ─── redact edge ──────────────────────────────────────────────────────
+    // ─── the composed command ───────────────────────────────────────────────
 
-    #[test]
-    fn redact_exactly_8_chars_is_redacted() {
-        // "12345678" has len == 8, which is <= 8, so should return "***"
-        let result = redact("12345678");
-        assert_eq!(result, "***");
-    }
-
-    #[test]
-    fn redact_very_long_key() {
-        let key = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz12345";
-        let redacted = redact(key);
-        assert!(redacted.ends_with("..."));
-        assert!(redacted.starts_with("sk-ant-a"));
-        assert!(!redacted.contains("xyz12345"));
-    }
-
-    // ─── non-interactive execute path (file-based) ─────────────────────────
-
-    #[test]
-    fn apply_flags_all_none_does_not_change_config() {
-        let mut config = Config {
-            default_provider: "openai".to_string(),
-            providers: crate::config::ProviderConfig {
-                anthropic_api_key: Some("existing".to_string()),
-                openai_api_key: None,
-                google_api_key: None,
-                claude_code_enabled: false,
-                claude_code_binary: None,
-                claude_code_effort: None,
-            },
-            ..Config::default()
-        };
-        let args = SetupArgs {
-            non_interactive: true,
-            anthropic_key: None,
-            openai_key: None,
-            google_key: None,
-            openrouter_key: None,
-            ollama_url: None,
-            default_model: None,
-            claude_code: None,
-            claude_code_effort: None,
-        };
-        apply_flags(&mut config, &args);
-        assert_eq!(
-            config.providers.anthropic_api_key.as_deref(),
-            Some("existing")
-        );
-        assert_eq!(config.default_provider, "openai");
-    }
-
-    #[test]
-    fn redact_unicode_chars() {
-        // Unicode characters where len() gives bytes
-        let key = "abcdefghi"; // 9 chars, > 8
-        let redacted = redact(key);
-        assert_eq!(redacted, "abcdefgh...");
-    }
-
-    // ─── config roundtrip with all keys ──────────────────────────────────
-
-    #[test]
-    fn config_roundtrip_all_providers() {
+    #[tokio::test]
+    async fn saving_writes_the_config_and_installs_the_agents() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.toml");
+        let env = env_in(dir.path());
+        let mut wizard = build_wizard(&env);
+        let mut setup = TestSetup::new();
+        let mut events =
+            TestEventSource::new(vec![key_with(KeyCode::Char('s'), KeyModifiers::CONTROL)]);
 
-        let config = Config {
-            default_provider: "openai".to_string(),
-            providers: crate::config::ProviderConfig {
-                anthropic_api_key: Some("sk-ant-key".to_string()),
-                openai_api_key: Some("sk-oai-key".to_string()),
-                google_api_key: Some("AIza-key".to_string()),
-                claude_code_enabled: false,
-                claude_code_binary: None,
-                claude_code_effort: None,
-            },
-            openrouter_api_key: Some("sk-or-key".to_string()),
-            ollama_base_url: Some("http://custom:11434".to_string()),
-            default_model: Some("my-model".to_string()),
-            ..Config::default()
-        };
+        execute_core(&mut wizard, &env, &mut setup, &mut events)
+            .await
+            .unwrap();
 
-        let content = toml::to_string_pretty(&config).unwrap();
-        std::fs::write(&config_path, &content).unwrap();
-        let loaded_content = std::fs::read_to_string(&config_path).unwrap();
-        let loaded: Config = toml::from_str(&loaded_content).unwrap();
-
-        assert_eq!(loaded.default_provider, "openai");
-        assert_eq!(
-            loaded.providers.anthropic_api_key.as_deref(),
-            Some("sk-ant-key")
-        );
-        assert_eq!(
-            loaded.providers.openai_api_key.as_deref(),
-            Some("sk-oai-key")
-        );
-        assert_eq!(loaded.providers.google_api_key.as_deref(), Some("AIza-key"));
-        assert_eq!(loaded.openrouter_api_key.as_deref(), Some("sk-or-key"));
-        assert_eq!(
-            loaded.ollama_base_url.as_deref(),
-            Some("http://custom:11434")
-        );
-        assert_eq!(loaded.default_model.as_deref(), Some("my-model"));
+        assert!(env.config_path.exists());
+        assert!(env.agents_dir.join(BUNDLED_AGENTS[0].name).exists());
     }
 
-    // ─── config-path write-through ───────────────────────────────────────
-    //
-    // The `execute()` entrypoint (branch on `non_interactive`, and the real
-    // stdin read for the interactive path) lives in the binary's `real_setup`;
-    // the library keeps the two fully-tested cores. This test pins the
-    // guarantee that `run_non_interactive_setup` writes through
-    // `Config::config_path()`, exercised directly against the core with an
-    // isolated config path.
+    #[tokio::test]
+    async fn quitting_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env_in(dir.path());
+        let mut wizard = build_wizard(&env);
+        let mut setup = TestSetup::new();
+        let mut events = TestEventSource::new(vec![key(KeyCode::Char('q'))]);
 
-    #[test]
-    fn run_non_interactive_setup_writes_through_config_path() {
-        crate::config::with_isolated_config_path("setup-non-interactive-configpath", |_fake_dir| {
-            let mut config = Config::load().unwrap_or_default();
-            let args = SetupArgs {
+        execute_core(&mut wizard, &env, &mut setup, &mut events)
+            .await
+            .unwrap();
+
+        assert!(
+            !env.config_path.exists(),
+            "nothing should have been written"
+        );
+        assert!(!env.agents_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn a_terminal_that_will_not_start_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env_in(dir.path());
+        let mut wizard = build_wizard(&env);
+        let mut events = TestEventSource::new(vec![]);
+
+        let mut enable_fails = TestSetup {
+            enable_should_fail: true,
+            create_should_fail: false,
+        };
+        assert!(
+            execute_core(&mut wizard, &env, &mut enable_fails, &mut events)
+                .await
+                .is_err()
+        );
+
+        let mut create_fails = TestSetup {
+            enable_should_fail: false,
+            create_should_fail: true,
+        };
+        assert!(
+            execute_core(&mut wizard, &env, &mut create_fails, &mut events)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_loop_failure_is_surfaced_after_the_terminal_is_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env_in(dir.path());
+        let mut wizard = build_wizard(&env);
+        let mut setup = TestSetup::new();
+        let mut events = TestEventSource::failing();
+
+        let result = execute_core(&mut wizard, &env, &mut setup, &mut events).await;
+
+        assert!(result.is_err());
+        assert!(!env.config_path.exists());
+    }
+
+    #[tokio::test]
+    async fn a_write_failure_after_the_wizard_is_surfaced() {
+        // The terminal must already be restored, or the error would be printed
+        // onto an alternate screen the user never sees again.
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = env_in(dir.path());
+        let blocked = dir.path().join("not-a-dir");
+        std::fs::write(&blocked, "").unwrap();
+        let mut wizard = build_wizard(&env);
+        env.config_path = blocked.join("config.toml");
+        let mut setup = TestSetup::new();
+        let mut events =
+            TestEventSource::new(vec![key_with(KeyCode::Char('s'), KeyModifiers::CONTROL)]);
+
+        let result = execute_core(&mut wizard, &env, &mut setup, &mut events).await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_with_routes_to_the_flags_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env_in(dir.path());
+        let mut setup = TestSetup::new();
+        let mut events = TestEventSource::new(vec![]);
+
+        execute_with(
+            &SetupArgs {
                 non_interactive: true,
-                anthropic_key: Some("sk-ant-execute-test".to_string()),
-                openai_key: None,
-                google_key: None,
-                openrouter_key: None,
-                ollama_url: None,
-                default_model: None,
-                claude_code: None,
-                claude_code_effort: None,
-            };
-
-            run_non_interactive_setup(&mut config, &args, &Config::config_path()).unwrap();
-
-            // Config::load() re-reads via the same (isolated) LEVIATH_CONFIG_PATH,
-            // proving the setup core wrote through Config::config_path().
-            let reloaded = Config::load().unwrap();
-            assert_eq!(
-                reloaded.providers.anthropic_api_key.as_deref(),
-                Some("sk-ant-execute-test")
-            );
-        });
-    }
-
-    /// Reader factory shared by both `execute_with` tests below: 7 empty lines,
-    /// one per interactive prompt (so every value keeps its default). Using one
-    /// named `fn` in both call sites gives `execute_with` a single
-    /// monomorphization whose two arms are covered across the two tests, and
-    /// keeps this factory's body covered (the interactive test calls it).
-    fn seven_blank_lines() -> Cursor<Vec<u8>> {
-        Cursor::new(b"\n\n\n\n\n\n\n".to_vec())
-    }
-
-    #[test]
-    fn execute_with_non_interactive_applies_flags_and_never_builds_the_reader() {
-        crate::config::with_isolated_config_path(
-            "setup-execute-with-noninteractive",
-            |_fake_dir| {
-                let args = SetupArgs {
-                    non_interactive: true,
-                    anthropic_key: Some("sk-ant-ew".to_string()),
-                    openai_key: None,
-                    google_key: None,
-                    openrouter_key: None,
-                    ollama_url: None,
-                    default_model: None,
-                    claude_code: None,
-                    claude_code_effort: None,
-                };
-                // `--non-interactive` short-circuits before the reader factory runs.
-                execute_with(&args, seven_blank_lines).unwrap();
-                assert_eq!(
-                    Config::load()
-                        .unwrap()
-                        .providers
-                        .anthropic_api_key
-                        .as_deref(),
-                    Some("sk-ant-ew")
-                );
+                anthropic_key: Some("sk-ant-x".to_string()),
+                ..args()
             },
+            &env,
+            &mut setup,
+            &mut events,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let written = Config::load_from_path_public(&env.config_path).unwrap();
+        assert_eq!(
+            written.providers.anthropic_api_key.as_deref(),
+            Some("sk-ant-x")
         );
     }
 
+    #[tokio::test]
+    async fn without_a_terminal_the_wizard_refuses_and_says_what_to_run_instead() {
+        // Starting ratatui on a pipe would take over a terminal that isn't
+        // there.
+        let dir = tempfile::tempdir().unwrap();
+        let env = env_in(dir.path());
+        let mut setup = TestSetup::new();
+        let mut events = TestEventSource::new(vec![]);
+
+        let error = execute_with(&args(), &env, &mut setup, &mut events, false)
+            .await
+            .expect_err("a pipe is not a terminal");
+
+        let message = error.to_string();
+        assert!(message.contains("needs a terminal"), "{message}");
+        assert!(message.contains("--non-interactive"), "{message}");
+        assert!(!env.config_path.exists());
+    }
+
+    #[tokio::test]
+    async fn with_a_terminal_execute_with_runs_the_wizard() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env_in(dir.path());
+        let mut setup = TestSetup::new();
+        let mut events =
+            TestEventSource::new(vec![key_with(KeyCode::Char('s'), KeyModifiers::CONTROL)]);
+
+        execute_with(&args(), &env, &mut setup, &mut events, true)
+            .await
+            .unwrap();
+
+        assert!(env.config_path.exists());
+    }
+
+    // ─── reporting ──────────────────────────────────────────────────────────
+
     #[test]
-    fn execute_with_interactive_reads_from_the_injected_factory() {
-        crate::config::with_isolated_config_path("setup-execute-with-interactive", |_fake_dir| {
-            let args = SetupArgs {
-                non_interactive: false,
-                anthropic_key: None,
-                openai_key: None,
-                google_key: None,
-                openrouter_key: None,
-                ollama_url: None,
-                default_model: None,
-                claude_code: None,
-                claude_code_effort: None,
-            };
-            execute_with(&args, seven_blank_lines).unwrap();
+    fn the_summary_covers_agents_warnings_and_the_empty_case() {
+        report(&plan::Applied {
+            config_path: PathBuf::from("/tmp/config.toml"),
+            agents_installed: vec!["coder".to_string()],
+            warnings: vec!["could not install x".to_string()],
         });
+        report(&plan::Applied {
+            config_path: PathBuf::from("/tmp/config.toml"),
+            agents_installed: Vec::new(),
+            warnings: Vec::new(),
+        });
+    }
+
+    #[test]
+    fn the_next_step_names_an_installed_agent_when_there_is_one() {
+        print_next_steps(&plan::Applied {
+            config_path: PathBuf::from("/tmp/config.toml"),
+            agents_installed: vec!["coder".to_string()],
+            warnings: Vec::new(),
+        });
+        print_next_steps(&plan::Applied {
+            config_path: PathBuf::from("/tmp/config.toml"),
+            agents_installed: Vec::new(),
+            warnings: Vec::new(),
+        });
+    }
+
+    #[test]
+    fn the_real_agents_directory_sits_under_the_leviath_home() {
+        assert_eq!(
+            real_agents_dir(Some(Path::new("/home/u"))),
+            PathBuf::from("/home/u/.leviath/agents")
+        );
+        // No home directory resolvable: a relative path, not a panic.
+        assert_eq!(real_agents_dir(None), PathBuf::from(".leviath/agents"));
     }
 }

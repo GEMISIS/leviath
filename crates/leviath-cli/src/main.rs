@@ -88,9 +88,7 @@ impl RiskyExecutors for RealExecutors {
     }
 
     async fn setup(&self, args: commands::setup::SetupArgs) -> anyhow::Result<()> {
-        // The interactive arm reads the process's real stdin; the branch +
-        // config wiring is the tested `setup::execute_with`.
-        commands::setup::execute_with(&args, || io::stdin().lock())
+        real_setup(args).await
     }
 
     async fn dashboard(&self, args: DashboardArgs) -> anyhow::Result<()> {
@@ -469,6 +467,61 @@ fn open_controlling_tty() -> io::Result<File> {
 #[cfg(not(unix))]
 fn open_controlling_tty() -> io::Result<File> {
     Err(io::Error::other("no controlling terminal on this platform"))
+}
+
+/// Real `lev setup`: the real config paths, the real environment, a real
+/// browser for the "open the signup page" key, a real TTY check, and the real
+/// network-backed provider verifier — everything the library's tested
+/// `execute_with` takes as a seam.
+///
+/// The verification task is spawned here rather than inside `execute_with`
+/// because `LiveVerifier` is the one piece that opens a socket; the library
+/// never instantiates it, so no unit test can reach the network through it.
+async fn real_setup(args: commands::setup::SetupArgs) -> anyhow::Result<()> {
+    use commands::setup::{SetupEnv, import, verification_loop};
+    use leviath_cli::commands::setup::verify::{LiveVerifier, SkipVerifier};
+
+    let home = leviath_cli::config::leviath_home_dir().unwrap_or_default();
+    let env = SetupEnv {
+        config_path: leviath_cli::config::Config::config_path(),
+        agents_dir: commands::setup::real_agents_dir(Some(&home)),
+        roots: import::Roots::new(
+            home,
+            dirs::config_dir().unwrap_or_default(),
+            std::env::current_dir().unwrap_or_default(),
+        ),
+        env_lookup: Box::new(|name| std::env::var(name).ok()),
+        opener: std::sync::Arc::new(leviath_sys::open_url),
+    };
+    if args.non_interactive {
+        return commands::setup::run_non_interactive(&args, &env);
+    }
+    if !std::io::IsTerminal::is_terminal(&io::stdout()) {
+        return commands::setup::execute_with(
+            &args,
+            &env,
+            &mut CrosstermSetup {
+                viewport: Viewport::Fullscreen,
+            },
+            &mut CrosstermEventSource::new(),
+            false,
+        )
+        .await;
+    }
+
+    let mut wizard = commands::setup::build_wizard(&env);
+    if let Some((requests, replies)) = wizard.take_verify_ends() {
+        if args.no_verify {
+            tokio::spawn(verification_loop(SkipVerifier, requests, replies));
+        } else {
+            tokio::spawn(verification_loop(LiveVerifier, requests, replies));
+        }
+    }
+    let mut setup = CrosstermSetup {
+        viewport: Viewport::Fullscreen,
+    };
+    let mut events = CrosstermEventSource::new();
+    commands::setup::execute_core(&mut wizard, &env, &mut setup, &mut events).await
 }
 
 /// Real [`TerminalSetup`]: enables raw mode, enters/leaves the real alternate

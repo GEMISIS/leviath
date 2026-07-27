@@ -173,6 +173,24 @@ mod test_doubles {
                 fail_draw: true,
             }
         }
+
+        /// The cells last drawn, so a test can assert on what a user would
+        /// actually read rather than only that drawing did not panic.
+        pub(crate) fn buffer(&self) -> &ratatui::buffer::Buffer {
+            self.inner.buffer()
+        }
+
+        /// The drawn frame as newline-separated rows of text.
+        pub(crate) fn text(&self) -> String {
+            let buffer = self.buffer();
+            let width = buffer.area.width as usize;
+            buffer
+                .content
+                .chunks(width)
+                .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
     }
 
     impl ratatui::backend::Backend for TestBackendHarness {
