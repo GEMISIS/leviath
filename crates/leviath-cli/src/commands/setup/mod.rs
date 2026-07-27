@@ -1,5 +1,7 @@
 //! `lev setup` - Interactive configuration wizard
 
+pub mod import;
+
 use clap::Args;
 use std::io::{self, Write};
 
