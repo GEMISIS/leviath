@@ -23,10 +23,23 @@
 //!
 //! And plainly set/cleared rather than a `Drop` guard: a guard would clear the
 //! slot *while unwinding*, destroying the very evidence the catch needs.
+//!
+//! ## Work that runs off the driver thread
+//!
+//! One system fans its per-agent work out over the compute task pool
+//! ([`dispatch_inference`](crate::pipeline::dispatch_inference)'s `par_iter`).
+//! A thread-local set inside that closure lives on a pool thread and is
+//! invisible to the driver thread that catches the unwind, so the mechanism
+//! above cannot see it. Those bodies run under [`run_agent_parallel`] instead,
+//! which catches the panic where the entity *is* known and leaves a
+//! [`PanickedInParallel`] marker for
+//! [`PipelineWorld::tick`](crate::world::PipelineWorld::tick) to act on.
 
 use std::cell::Cell;
 
 use bevy_ecs::entity::Entity;
+use bevy_ecs::prelude::Component;
+use bevy_ecs::system::ParallelCommands;
 
 thread_local! {
     /// The agent this thread's schedule is currently processing, if any.
@@ -47,6 +60,46 @@ pub fn clear() {
 /// The agent recorded by the last [`enter`] that has not been [`clear`]ed.
 pub fn current() -> Option<Entity> {
     CURRENT.with(Cell::get)
+}
+
+/// Left on an agent whose per-agent work panicked on a compute-pool thread.
+///
+/// [`PipelineWorld::tick`](crate::world::PipelineWorld::tick) drains these after
+/// the schedule returns and fails each marked agent, exactly as it would for a
+/// panic caught on the driver thread.
+#[derive(Component, Debug, Clone)]
+pub struct PanickedInParallel {
+    /// The panic payload, rendered as text.
+    pub message: String,
+}
+
+/// Run one agent's share of a parallel system body, containing a panic to that
+/// agent.
+///
+/// Catching *here* — inside the closure, where `entity` is in hand — is what
+/// makes a compute-pool panic attributable at all: the thread-local scope can't
+/// cross back to the driver thread, and letting the panic unwind out of the task
+/// pool would take down the whole fan-out rather than one agent. The remaining
+/// agents in the batch finish normally.
+///
+/// `body` is a `&mut dyn FnMut` rather than a generic so every caller shares one
+/// instantiation — the workspace gates a hard 100%, and a generic would give
+/// each call site its own panic arm to cover.
+pub fn run_agent_parallel(entity: Entity, par_commands: &ParallelCommands, body: &mut dyn FnMut()) {
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+    if let Err(payload) = caught {
+        let message = leviath_core::panic_message(payload.as_ref());
+        tracing::error!(
+            ?entity,
+            panic = %message,
+            "an agent's parallel work panicked on the compute pool; failing that agent"
+        );
+        par_commands.command_scope(|mut commands| {
+            commands
+                .entity(entity)
+                .insert(PanickedInParallel { message });
+        });
+    }
 }
 
 #[cfg(test)]

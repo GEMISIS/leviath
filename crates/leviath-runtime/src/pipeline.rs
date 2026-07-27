@@ -232,43 +232,47 @@ pub fn dispatch_inference(
     // compute pool. Permit acquisition (an atomic semaphore) and the tokio spawn
     // are thread-safe; the marker swap is batched via `ParallelCommands`.
     //
-    // This is the one system whose body runs off the driver thread, so
-    // `tick_scope` (a thread-local) can't attribute a panic raised in here to
-    // the agent that caused it. Clear it so such a panic is reported
-    // unattributed rather than blamed on whichever agent a previous system
-    // happened to leave recorded (issue #109).
+    // This is the one system whose per-agent body runs off the driver thread, so
+    // the thread-local `tick_scope` can't carry an entity back to the catcher.
+    // Each agent's share runs under `run_agent_parallel`, which catches there —
+    // where the entity is known — and marks that agent for `tick` to fail
+    // (issue #109). Clearing the thread-local keeps a panic in the fan-out
+    // machinery *itself* unattributed rather than blamed on whichever agent a
+    // previous system left recorded.
     crate::tick_scope::clear();
     agents
         .par_iter()
         .for_each(|(entity, state, window, config, si)| {
-            if state.status != AgentStatus::Active {
-                return; // paused / waiting / cancelled — don't start new work
-            }
-            let Some(provider) = providers.0.get(&si.provider_name) else {
-                return; // provider not registered — leave ready, retry later
-            };
-            let Some(permit) = stage.pools.try_acquire(&si.model) else {
-                return; // pool full — leave ready, retry next tick
-            };
-            let request = build_request(window, config, si, &provider);
-            let job = InferenceJob {
-                entity,
-                provider,
-                request,
-                permit,
-                exact_token_counting: stage.exact_token_counting,
-            };
-            stage.runtime.spawn(run_inference_job(
-                job,
-                stage.outcomes.clone(),
-                stage.wake.clone(),
-                retry_policy_for(config),
-            ));
-            par_commands.command_scope(|mut commands| {
-                commands
-                    .entity(entity)
-                    .remove::<ReadyToInfer>()
-                    .insert(AwaitingInference);
+            crate::tick_scope::run_agent_parallel(entity, &par_commands, &mut || {
+                if state.status != AgentStatus::Active {
+                    return; // paused / waiting / cancelled — don't start new work
+                }
+                let Some(provider) = providers.0.get(&si.provider_name) else {
+                    return; // provider not registered — leave ready, retry later
+                };
+                let Some(permit) = stage.pools.try_acquire(&si.model) else {
+                    return; // pool full — leave ready, retry next tick
+                };
+                let request = build_request(window, config, si, &provider);
+                let job = InferenceJob {
+                    entity,
+                    provider,
+                    request,
+                    permit,
+                    exact_token_counting: stage.exact_token_counting,
+                };
+                stage.runtime.spawn(run_inference_job(
+                    job,
+                    stage.outcomes.clone(),
+                    stage.wake.clone(),
+                    retry_policy_for(config),
+                ));
+                par_commands.command_scope(|mut commands| {
+                    commands
+                        .entity(entity)
+                        .remove::<ReadyToInfer>()
+                        .insert(AwaitingInference);
+                });
             });
         });
 }
