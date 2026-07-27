@@ -162,7 +162,11 @@ mod tests {
             entity: Entity::from_raw(entity),
             exec: Box::new(move || {
                 Box::pin(async move {
-                    started.notify_waiters();
+                    // `notify_one` (not `notify_waiters`) on both signals: it
+                    // stores a permit when nobody is waiting yet, so neither the
+                    // test nor the batch can lose the other's wakeup by being
+                    // slow to arm — a real flake on a loaded runner.
+                    started.notify_one();
                     release.notified().await;
                     vec![("held".to_string(), "done".to_string())]
                 })
@@ -191,11 +195,10 @@ mod tests {
         drop(jtx);
 
         let handles = spawn_tool_pool(&Handle::current(), jrx, rtx, wake, 1);
-        let running = started.notified();
-        tokio::pin!(running);
-        running.as_mut().enable();
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), running).await;
-        release.notify_waiters();
+        tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+            .await
+            .expect("the batch started");
+        release.notify_one();
 
         let out = tokio::time::timeout(std::time::Duration::from_secs(5), rrx.recv())
             .await
@@ -261,10 +264,9 @@ mod tests {
 
         let handles = spawn_tool_pool(&Handle::current(), jrx, rtx, wake, 1);
         // Wait until the stuck batch is actually executing, then cancel it.
-        let waiting = started.notified();
-        tokio::pin!(waiting);
-        waiting.as_mut().enable();
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), waiting).await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+            .await
+            .expect("the batch started");
         cancel.cancel();
 
         // The single worker moves on to the next job rather than staying parked.
