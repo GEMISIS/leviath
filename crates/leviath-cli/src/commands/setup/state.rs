@@ -543,6 +543,7 @@ impl Wizard {
 
     /// Take whatever the background verifier has answered.
     pub fn drain_verifications(&mut self) {
+        let mut landed = false;
         while let Ok(reply) = self.reply_rx.try_recv() {
             if let Some(row) = self
                 .providers
@@ -551,7 +552,16 @@ impl Wizard {
             {
                 row.checking = false;
                 row.outcome = reply.outcome;
+                landed = true;
             }
+        }
+        // A reply carries the model list, and the picker was built from
+        // whatever had arrived when the screen opened. Without this, moving on
+        // from a credential and straight into Defaults shows an empty picker
+        // for the provider that was verified half a second ago. Rebuilding
+        // keeps the current selection, so nothing the user chose is lost.
+        if landed && self.step == Step::Defaults {
+            self.rebuild_defaults();
         }
     }
 
@@ -625,6 +635,12 @@ impl Wizard {
                 value: FieldValue::Number(timeout),
             },
         ];
+        // Re-pick the concurrency default now that the provider choice is
+        // settled. Doing this only on an arrow press missed the commonest
+        // Ollama case entirely: when it is the *only* provider selected it is
+        // already at index 0, nobody ever presses an arrow, and the limit
+        // stayed at the hosted-API default of 8.
+        self.apply_provider_concurrency_default();
     }
 
     /// The default provider as it currently stands in the form, or the base
@@ -1465,6 +1481,64 @@ pub(super) mod tests {
         assert_eq!(wizard.discovered_models(), vec!["claude-opus-5"]);
     }
 
+    #[tokio::test]
+    async fn a_late_reply_refills_the_model_picker() {
+        // Moving straight from a credential into Defaults gets there before the
+        // check comes back, so the picker was built from an empty model list
+        // and stayed that way -- caught by driving the real TUI against a live
+        // API key.
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = test_wizard(dir.path());
+        let (_requests, replies) = wizard.take_verify_ends().expect("first take");
+        wizard.providers[0].selected = true;
+        wizard.enter(Step::Defaults);
+        assert_eq!(
+            wizard.defaults[1].value.options(),
+            ["(provider default)".to_string()],
+            "nothing has been reported yet"
+        );
+
+        replies
+            .send(VerifyReply {
+                provider_id: "anthropic".to_string(),
+                outcome: Outcome::Reachable {
+                    models: vec!["claude-opus-5".to_string()],
+                },
+            })
+            .unwrap();
+        wizard.drain_verifications();
+
+        assert!(
+            wizard.defaults[1]
+                .value
+                .options()
+                .contains(&"claude-opus-5".to_string()),
+            "the picker should have refilled"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_late_reply_does_not_disturb_another_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = test_wizard(dir.path());
+        let (_requests, replies) = wizard.take_verify_ends().expect("first take");
+        wizard.providers[0].selected = true;
+        wizard.enter(Step::Limits);
+        wizard.limits[0].value = FieldValue::Number(Some(3));
+
+        replies
+            .send(VerifyReply {
+                provider_id: "anthropic".to_string(),
+                outcome: Outcome::Reachable {
+                    models: vec!["m".to_string()],
+                },
+            })
+            .unwrap();
+        wizard.drain_verifications();
+
+        assert_eq!(wizard.limits[0].value, FieldValue::Number(Some(3)));
+    }
+
     #[test]
     fn the_verification_channel_ends_can_only_be_taken_once() {
         let dir = tempfile::tempdir().unwrap();
@@ -1605,6 +1679,30 @@ pub(super) mod tests {
         assert_eq!(
             wizard.limits[0].value,
             FieldValue::Number(Some(catalog::OLLAMA_MAX_CONCURRENT_INFERENCES as u64))
+        );
+    }
+
+    #[test]
+    fn ollama_as_the_only_provider_still_lowers_the_concurrency_limit() {
+        // Regression: the default used to be re-picked only when an arrow key
+        // moved the provider choice. With Ollama the sole selection it is
+        // already at index 0, no arrow is ever pressed, and the limit stayed at
+        // the hosted-API default of 8 -- caught by driving the real TUI.
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = test_wizard(dir.path());
+        let ollama = wizard
+            .providers
+            .iter()
+            .position(|r| r.provider.id == "ollama")
+            .expect("ollama is offered");
+        wizard.providers[ollama].selected = true;
+
+        wizard.enter(Step::Defaults);
+
+        assert_eq!(wizard.defaults[0].value.display(), "ollama");
+        assert_eq!(
+            wizard.build_config().limits.max_concurrent_inferences,
+            Some(catalog::OLLAMA_MAX_CONCURRENT_INFERENCES)
         );
     }
 
