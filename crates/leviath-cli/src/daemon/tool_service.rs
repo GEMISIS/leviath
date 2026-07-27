@@ -17,7 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 
 use bevy_ecs::entity::Entity;
 use leviath_core::interaction::{ApprovalScope, InteractionRequest};
@@ -105,7 +105,12 @@ pub struct DynamicToolCtx {
 /// dispatches to the Rhai engine; the compiled script and permission-enforcing
 /// host run on a blocking thread (the engine is synchronous).
 async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -> String {
-    if state.script_tool_names.lock().unwrap().contains(&tc.name) {
+    if state
+        .script_tool_names
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(&tc.name)
+    {
         return execute_script_tool(state, tc).await;
     }
     if is_builtin {
@@ -145,7 +150,13 @@ fn mark_dirty_on_tool_write(state: &AgentToolState, tc: &ToolCall) {
 
 /// Run a Rhai script tool on a blocking thread and return its result string.
 async fn execute_script_tool(state: &AgentToolState, tc: &ToolCall) -> String {
-    let Some(tool) = state.script_tools.lock().unwrap().get(&tc.name).cloned() else {
+    let Some(tool) = state
+        .script_tools
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&tc.name)
+        .cloned()
+    else {
         // Name was in `script_tool_names` but the tool is gone — treat as unknown.
         return format!("[error] unknown script tool: {}", tc.name);
     };
@@ -184,7 +195,11 @@ pub async fn dispatch_tools(
     state: Arc<AgentToolState>,
     calls: Vec<ToolCall>,
 ) -> Vec<(String, String)> {
-    let stage_name = state.stage_name.lock().unwrap().clone();
+    let stage_name = state
+        .stage_name
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
 
     // Pass 1: sequential resolution. `slots[i].1 == None` means "execute in pass
     // 2"; the queued `(slot_index, is_builtin, call)` records what to run.
@@ -221,7 +236,11 @@ pub async fn dispatch_tools(
         let policy = if state.session_allows.lock().await.contains(&tc.name) {
             ToolPolicy::Allow
         } else {
-            let stage_snap = state.stage_perms.lock().unwrap().clone();
+            let stage_snap = state
+                .stage_perms
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
             resolve_policy(
                 &tc.name,
                 is_builtin,
@@ -299,19 +318,28 @@ impl CliToolService {
 
     /// Register an agent's tool state (called when the agent is spawned).
     pub fn register(&self, entity: Entity, state: Arc<AgentToolState>) {
-        self.states.lock().unwrap().insert(entity, state);
+        self.states
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(entity, state);
     }
 
     /// Drop an agent's tool state (called when the agent is reaped).
     pub fn unregister(&self, entity: Entity) {
-        self.states.lock().unwrap().remove(&entity);
+        self.states
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&entity);
     }
 
     /// Remove an agent's tool state and return it, so the caller can run any
     /// teardown it holds (e.g. sandbox destruction) before it is dropped. Used
     /// by the daemon's reap hook.
     pub fn take(&self, entity: Entity) -> Option<Arc<AgentToolState>> {
-        self.states.lock().unwrap().remove(&entity)
+        self.states
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&entity)
     }
 
     /// Reap an agent: drop its tool state (fixing the prior leak) and tear down
@@ -328,20 +356,43 @@ impl CliToolService {
 
 impl ToolService for CliToolService {
     fn sync_stage(&self, entity: Entity, stage_index: usize, stage_name: &str) {
-        if let Some(state) = self.states.lock().unwrap().get(&entity) {
-            if let Some(perms) = state.stage_perms_by_index.get(stage_index) {
-                *state.stage_perms.lock().unwrap() = perms.clone();
-            }
-            *state.stage_name.lock().unwrap() = stage_name.to_string();
-            // Point the shell tool at this stage's sandbox (per-stage override).
-            if let Some(sandbox) = &state.sandbox {
-                sandbox.set_stage(stage_index);
-            }
+        // Take a handle and drop the `states` guard before touching anything
+        // else. `states` is the process-wide map of *every* agent's tool state,
+        // and the work below reaches three more mutexes (including the sandbox
+        // manager's); holding the global guard across all of that means one
+        // agent's panic poisons the map every other agent depends on (#109).
+        let Some(state) = self
+            .states
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&entity)
+            .cloned()
+        else {
+            return;
+        };
+        if let Some(perms) = state.stage_perms_by_index.get(stage_index) {
+            *state
+                .stage_perms
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = perms.clone();
+        }
+        *state
+            .stage_name
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = stage_name.to_string();
+        // Point the shell tool at this stage's sandbox (per-stage override).
+        if let Some(sandbox) = &state.sandbox {
+            sandbox.set_stage(stage_index);
         }
     }
 
     fn exec_for(&self, entity: Entity, calls: Vec<ToolCall>) -> BoxedToolExec {
-        let state = self.states.lock().unwrap().get(&entity).cloned();
+        let state = self
+            .states
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&entity)
+            .cloned();
         Box::new(move || {
             Box::pin(async move {
                 match state {
@@ -361,7 +412,7 @@ impl ToolService for CliToolService {
         // Drain the per-agent dirty flag (set when a dynamic agent wrote a .rhai).
         self.states
             .lock()
-            .unwrap()
+            .unwrap_or_else(PoisonError::into_inner)
             .get(&entity)
             .and_then(|s| s.dynamic.as_ref())
             .map(|ctx| ctx.dirty.swap(false, Ordering::SeqCst))
@@ -373,14 +424,25 @@ impl ToolService for CliToolService {
         entity: Entity,
         stage_index: usize,
     ) -> Option<Vec<leviath_providers::Tool>> {
-        let state = self.states.lock().unwrap().get(&entity).cloned()?;
+        let state = self
+            .states
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&entity)
+            .cloned()?;
         let ctx = state.dynamic.as_ref()?;
         // Re-discover the agent's script tools from disk and swap them into the
         // live set so a new tool is both advertised *and* dispatchable.
         let (set, names, script_defs) =
             crate::daemon::spawn::discover_script_tools_in(&ctx.scan_dirs, &ctx.reserved_names);
-        *state.script_tools.lock().unwrap() = set;
-        *state.script_tool_names.lock().unwrap() = names;
+        *state
+            .script_tools
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = set;
+        *state
+            .script_tool_names
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = names;
         // Re-filter this stage's advertised tools = static defs + fresh script defs.
         let available = ctx.stage_available.get(stage_index)?;
         let mut all = ctx.static_defs.clone();
@@ -630,6 +692,36 @@ mod tests {
         // The live script set + names now include the freshly discovered tool.
         assert!(state.script_tool_names.lock().unwrap().contains("echo"));
         assert!(state.script_tools.lock().unwrap().contains("echo"));
+    }
+
+    #[test]
+    fn a_poisoned_state_map_does_not_wedge_every_other_agent() {
+        // `states` holds *every* agent's tool state. A panic while holding it
+        // used to poison it, so from then on `.lock().unwrap()` panicked for all
+        // agents — one bad agent taking the whole daemon's tool dispatch with it
+        // (issue #109). Recovering the guard keeps the map usable.
+        let svc = CliToolService::new();
+        let e = Entity::from_raw(1);
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {})); // silence the deliberate panic
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = svc.states.lock().expect("fresh lock");
+            panic!("a panic while holding the global state map");
+        }));
+        std::panic::set_hook(prev);
+        assert!(poisoned.is_err());
+        assert!(svc.states.is_poisoned(), "the lock really is poisoned");
+
+        // Every entry point still works over the poisoned lock.
+        let hub = InteractionHub::new();
+        svc.register(
+            e,
+            state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new()),
+        );
+        assert!(svc.take(e).is_some());
+        svc.unregister(e);
+        svc.sync_stage(e, 0, "stage"); // unregistered ⇒ no-op, must not panic
+        assert!(!svc.wants_refresh(e));
     }
 
     #[test]

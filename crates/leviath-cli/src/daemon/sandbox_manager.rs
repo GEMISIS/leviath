@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::process::Command as StdCommand;
-use std::sync::Mutex as StdMutex;
+use std::sync::{Mutex as StdMutex, PoisonError};
 
 use leviath_core::sandbox::{OnUnavailable, SandboxKind, ToolSandboxConfig};
 use leviath_sys::ContainerRunSpec;
@@ -218,7 +218,7 @@ impl SandboxManager {
     /// service's `sync_stage` on every stage change).
     pub fn set_stage(&self, index: usize) {
         if let Some(cfg) = self.by_index.get(index) {
-            *self.current.lock().unwrap() = cfg.clone();
+            *self.current.lock().unwrap_or_else(PoisonError::into_inner) = cfg.clone();
         }
     }
 
@@ -281,7 +281,11 @@ impl ShellExecutor for SandboxManager {
         command: &str,
         workdir: &Path,
     ) -> TokioCommand {
-        let cfg = self.current.lock().unwrap().clone();
+        let cfg = self
+            .current
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
         match cfg.kind {
             SandboxKind::None => host_command(shell, flag, command, workdir),
             SandboxKind::Namespace => {

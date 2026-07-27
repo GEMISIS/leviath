@@ -11,7 +11,7 @@
 //! So the pool is warm by the time an agent's tools are advertised.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 
 use leviath_mcp::{MCPServerConfig, ToolDiscovery, ToolExecutor};
 use leviath_providers::Tool;
@@ -76,7 +76,7 @@ impl McpPool {
     pub fn seed(&self, config: &MCPServerConfig, defs: Vec<Tool>) {
         self.connected
             .lock()
-            .unwrap()
+            .unwrap_or_else(PoisonError::into_inner)
             .insert(signature(config), defs);
     }
 
@@ -86,7 +86,12 @@ impl McpPool {
     /// spawn retries.
     pub async fn ensure(&self, config: &MCPServerConfig) -> Vec<Tool> {
         let sig = signature(config);
-        if let Some(defs) = self.connected.lock().unwrap().get(&sig) {
+        if let Some(defs) = self
+            .connected
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&sig)
+        {
             return defs.clone();
         }
         // Resolve a stored OAuth bearer for an HTTP server (refreshing it
@@ -133,7 +138,10 @@ impl McpPool {
                         parameters: m.schema,
                     })
                     .collect();
-                self.connected.lock().unwrap().insert(sig, defs.clone());
+                self.connected
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(sig, defs.clone());
                 // Pre-format the count so the tracing field carries no inline
                 // method call (an uncoverable macro sub-region otherwise).
                 let count = defs.len();
@@ -197,7 +205,10 @@ impl McpPool {
     /// for them — call [`Self::ensure`] first). Unknown/unconnected configs
     /// contribute nothing. This is the sync read the spawner uses.
     pub fn cached_defs_for(&self, configs: &[MCPServerConfig]) -> Vec<Tool> {
-        let cache = self.connected.lock().unwrap();
+        let cache = self
+            .connected
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         configs
             .iter()
             .filter_map(|c| cache.get(&signature(c)))

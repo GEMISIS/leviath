@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 
 use leviath_providers::{ModelCapabilities, Provider, RateLimitConfig, RhaiProvider};
@@ -96,7 +96,7 @@ impl ScriptProviderLayer {
         let path = self.resolve_path(name);
         let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
 
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
         match mtime {
             None => {
                 // File gone (or unreadable): drop any stale entry, no provider.
