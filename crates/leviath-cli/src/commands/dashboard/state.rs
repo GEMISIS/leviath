@@ -12,6 +12,14 @@ use super::types::*;
 use crate::runstate::{self, RunStatus};
 use leviath_core::interaction;
 
+/// Production clock for staleness checks: wall-clock Unix seconds.
+fn system_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// The interactive dashboard state.
 pub(crate) struct Dashboard {
     pub(super) agents: Vec<DashboardAgent>,
@@ -101,6 +109,21 @@ pub(crate) struct Dashboard {
     pub(super) mcp_cmd_tx: mpsc::UnboundedSender<McpCommand>,
     /// Receives completed MCP action outcomes, drained into toasts each tick.
     pub(super) mcp_outcome_rx: mpsc::UnboundedReceiver<McpOutcome>,
+    /// Receives the daemon's answer to each [`DaemonCommand`], drained each tick
+    /// so a refused cancel is surfaced instead of silently reverting.
+    pub(super) daemon_outcome_rx: mpsc::UnboundedReceiver<DaemonOutcome>,
+    /// The background loop's sender for [`DaemonOutcome`]s; taken by
+    /// `init_dashboard`, retained by tests to inject outcomes.
+    pub(super) daemon_outcome_tx: Option<mpsc::UnboundedSender<DaemonOutcome>>,
+    /// Run ids the daemon reported it could not act on, so the disk sync doesn't
+    /// quietly restore them to ACTIVE without saying why.
+    pub(super) failed_cancels: std::collections::HashSet<String>,
+    /// The run ids the daemon currently holds, refreshed each tick. `None` when
+    /// the daemon did not answer — the disk view is then taken at face value
+    /// rather than declaring every run stale.
+    pub(super) daemon_run_ids: Option<std::collections::HashSet<String>>,
+    /// Wall-clock source, injected so staleness is testable without sleeping.
+    pub(super) clock: fn() -> i64,
     /// The background loop's ends of the MCP channels. `init_dashboard` takes
     /// them to spawn [`super::mcp::mcp_background_loop`]; tests keep them to
     /// assert dispatched commands and inject outcomes.
@@ -155,6 +178,7 @@ impl Dashboard {
         // retained for tests to drive.
         let (mcp_cmd_tx, mcp_cmd_rx) = mpsc::unbounded_channel();
         let (mcp_outcome_tx, mcp_outcome_rx) = mpsc::unbounded_channel();
+        let (daemon_outcome_tx, daemon_outcome_rx) = mpsc::unbounded_channel();
 
         // Seed the in-memory log buffer from the tail of the persistent log so
         // the panel shows recent history immediately on launch (not a blank panel).
@@ -201,6 +225,11 @@ impl Dashboard {
             mcp_cmd_tx,
             mcp_outcome_rx,
             mcp_bg_ends: Some((mcp_cmd_rx, mcp_outcome_tx)),
+            daemon_outcome_rx,
+            daemon_outcome_tx: Some(daemon_outcome_tx),
+            failed_cancels: std::collections::HashSet::new(),
+            daemon_run_ids: None,
+            clock: system_now_secs,
         }
     }
 
@@ -213,6 +242,34 @@ impl Dashboard {
         mpsc::UnboundedSender<super::types::McpOutcome>,
     )> {
         self.mcp_bg_ends.take()
+    }
+
+    /// Take the daemon-outcome sender, so `init_dashboard` can hand it to
+    /// [`super::daemon_background_loop`]. Returns `None` if already taken.
+    pub(super) fn take_daemon_outcome_tx(
+        &mut self,
+    ) -> Option<mpsc::UnboundedSender<DaemonOutcome>> {
+        self.daemon_outcome_tx.take()
+    }
+
+    /// Drain the daemon's answers to this tick's commands. A refused command
+    /// becomes a toast and a log line; the run is remembered so the next disk
+    /// sync can show it truthfully rather than just flipping it back.
+    pub(super) fn drain_daemon_outcomes(&mut self) {
+        while let Ok(outcome) = self.daemon_outcome_rx.try_recv() {
+            if outcome.ok {
+                self.failed_cancels.remove(&outcome.run_id);
+                continue;
+            }
+            self.failed_cancels.insert(outcome.run_id.clone());
+            Self::push_toast(
+                &mut self.toasts,
+                outcome.message.clone(),
+                ToastLevel::Error,
+                50,
+            );
+            self.add_log(format!("{}: {}", outcome.run_id, outcome.message));
+        }
     }
 
     /// The MCP screen's context, for `init_dashboard` to hand to the loop.
@@ -265,6 +322,9 @@ impl Dashboard {
                 AgentDisplayStatus::Error(_) => 4,
                 AgentDisplayStatus::Idle => 5,
                 AgentDisplayStatus::Cancelled => 6,
+                // Above the finished states: a stale run is unfinished business
+                // the user probably wants to clear.
+                AgentDisplayStatus::Stale => 2,
             }
         };
         let mut indices: Vec<usize> = (0..self.agents.len())
@@ -449,6 +509,34 @@ impl Dashboard {
         });
     }
 
+    /// The current wall-clock time in Unix seconds, via the injected clock.
+    fn now_secs(&self) -> i64 {
+        (self.clock)()
+    }
+
+    /// How long a run's metadata may go untouched, while the daemon does not
+    /// hold it, before the dashboard stops calling it ACTIVE.
+    ///
+    /// Comfortably longer than the persistence heartbeat, so a live-but-slow run
+    /// (a long inference writes nothing else) is never mistaken for a dead one.
+    pub(super) const STALE_AFTER_SECS: i64 = 300;
+
+    /// Whether a run that claims to be live on disk actually has nothing driving
+    /// it: the daemon does not hold it *and* its metadata has not been touched
+    /// in [`STALE_AFTER_SECS`].
+    ///
+    /// Both halves are needed. The daemon's list alone is not enough — it is
+    /// empty whenever the daemon is unreachable, which would flip every healthy
+    /// run to STALE. The timestamp alone is not enough either — a run mid-request
+    /// legitimately writes nothing for a while.
+    fn looks_stale(&self, run: &runstate::RunMeta) -> bool {
+        let Some(live) = &self.daemon_run_ids else {
+            return false; // no answer from the daemon this tick; assume nothing
+        };
+        !live.contains(&run.run_id)
+            && self.now_secs().saturating_sub(run.updated_at) > Self::STALE_AFTER_SECS
+    }
+
     /// Sync agent list from on-disk run-state dir (background workers).
     pub(super) fn sync_from_run_state(&mut self) {
         let runs = runstate::list_runs();
@@ -464,6 +552,8 @@ impl Dashboard {
                 RunStatus::Starting | RunStatus::Running => {
                     if pending_request.is_some() {
                         AgentDisplayStatus::Waiting
+                    } else if self.looks_stale(&run) {
+                        AgentDisplayStatus::Stale
                     } else {
                         AgentDisplayStatus::Active
                     }
@@ -697,6 +787,22 @@ impl Dashboard {
         }
     }
 
+    /// Refresh which runs the daemon actually holds.
+    ///
+    /// The dashboard lists runs from disk and the daemon lists them from memory,
+    /// and nothing reconciled the two — so a run whose daemon had died sat at
+    /// ACTIVE with a ticking timer forever. On any transport error this is set
+    /// back to `None`, meaning "unknown", so an unreachable daemon does not make
+    /// every run look dead.
+    pub(super) async fn sync_daemon_runs(&mut self, control: &ControlClient) {
+        self.daemon_run_ids = match control.request(&ControlRequest::List).await {
+            Ok(ControlResponse::List { runs }) => {
+                Some(runs.into_iter().map(|(run_id, _)| run_id).collect())
+            }
+            _ => None,
+        };
+    }
+
     /// Cancel (via the daemon) then delete all on-disk state for the selected
     /// agent.
     pub(super) fn delete_selected_agent(&mut self) {
@@ -704,8 +810,16 @@ impl Dashboard {
             Some(i) => (i, self.agents[i].id.clone()),
             None => return,
         };
-        // Ask the daemon to cancel the run first (a no-op if already terminal),
-        // so it stops writing state before we remove the directory.
+        // Record the run terminal on disk *before* removing it, and ask the
+        // daemon to cancel it too.
+        //
+        // The daemon command is asynchronous while the removal below is not, so
+        // an in-flight persist job can `create_dir_all` the directory straight
+        // back. Writing the terminal status first means that if it does
+        // reappear, it reappears as a finished run rather than as a live one the
+        // user just tried to delete. (The daemon cancel is what actually stops
+        // it writing; this only bounds what a lost race looks like.)
+        let _ = crate::runstate::force_cancel(&id);
         let _ = self
             .cmd_tx
             .send(DaemonCommand::Cancel { run_id: id.clone() });
@@ -1851,6 +1965,151 @@ mod tests {
 
             cleanup_run(run_id);
         });
+    }
+
+    // ─── staleness: disk says live, but nothing is driving it ───
+
+    /// The reported bug's shape: a run whose `meta.json` claims `starting` /
+    /// `running`, which the daemon does not hold and which has not been touched
+    /// in a long time, is not ACTIVE — nothing is driving it.
+    #[test]
+    fn a_run_the_daemon_does_not_hold_and_has_not_moved_shows_as_stale() {
+        crate::runstate::with_isolated_runs_dir("sync-stale-run", |_d| {
+            for status in [RunStatus::Starting, RunStatus::Running] {
+                let run_id = &format!("test-stale-{status}");
+                cleanup_run(run_id);
+                let mut meta = make_run_meta(run_id, status.clone());
+                meta.updated_at = 1_000;
+                runstate::create_run(&meta).unwrap();
+
+                let mut dash = make_test_dashboard();
+                dash.clock = || 1_000 + Dashboard::STALE_AFTER_SECS + 1;
+                // The daemon answered, and knows nothing about this run.
+                dash.daemon_run_ids = Some(std::collections::HashSet::new());
+                dash.sync_from_run_state();
+
+                let agent = dash.agents.iter().find(|a| a.id == *run_id).unwrap();
+                assert_eq!(agent.status, AgentDisplayStatus::Stale, "{status}");
+                assert!(agent.status.is_killable(), "and it can still be killed");
+                cleanup_run(run_id);
+            }
+        });
+    }
+
+    /// A run the daemon *does* hold is active however old its metadata looks —
+    /// one long inference legitimately writes nothing for a while.
+    #[test]
+    fn a_run_the_daemon_holds_is_never_stale() {
+        crate::runstate::with_isolated_runs_dir("sync-held-run", |_d| {
+            let run_id = "test-held-run";
+            cleanup_run(run_id);
+            let mut meta = make_run_meta(run_id, RunStatus::Running);
+            meta.updated_at = 1_000;
+            runstate::create_run(&meta).unwrap();
+
+            let mut dash = make_test_dashboard();
+            dash.clock = || 1_000 + Dashboard::STALE_AFTER_SECS * 100;
+            dash.daemon_run_ids = Some([run_id.to_string()].into_iter().collect());
+            dash.sync_from_run_state();
+
+            let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+            assert_eq!(agent.status, AgentDisplayStatus::Active);
+            cleanup_run(run_id);
+        });
+    }
+
+    /// An unreachable daemon means "unknown", not "everything is dead" — the
+    /// list is empty in both cases, so treating them alike would flip every
+    /// healthy run to STALE the moment the socket blipped.
+    #[test]
+    fn an_unreachable_daemon_does_not_make_runs_look_stale() {
+        crate::runstate::with_isolated_runs_dir("sync-daemon-unknown", |_d| {
+            let run_id = "test-daemon-unknown";
+            cleanup_run(run_id);
+            let mut meta = make_run_meta(run_id, RunStatus::Running);
+            meta.updated_at = 1_000;
+            runstate::create_run(&meta).unwrap();
+
+            let mut dash = make_test_dashboard();
+            dash.clock = || 1_000 + Dashboard::STALE_AFTER_SECS * 100;
+            dash.daemon_run_ids = None; // no answer this tick
+            dash.sync_from_run_state();
+
+            let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+            assert_eq!(agent.status, AgentDisplayStatus::Active);
+            cleanup_run(run_id);
+        });
+    }
+
+    /// A run the daemon doesn't hold but which is still writing is active — it
+    /// may simply not be registered yet (a just-spawned run, a fan-out worker).
+    #[test]
+    fn a_recently_updated_run_is_not_stale_even_if_unregistered() {
+        crate::runstate::with_isolated_runs_dir("sync-recent-run", |_d| {
+            let run_id = "test-recent-run";
+            cleanup_run(run_id);
+            let mut meta = make_run_meta(run_id, RunStatus::Running);
+            meta.updated_at = 1_000;
+            runstate::create_run(&meta).unwrap();
+
+            let mut dash = make_test_dashboard();
+            dash.clock = || 1_000 + Dashboard::STALE_AFTER_SECS - 1;
+            dash.daemon_run_ids = Some(std::collections::HashSet::new());
+            dash.sync_from_run_state();
+
+            let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+            assert_eq!(agent.status, AgentDisplayStatus::Active);
+            cleanup_run(run_id);
+        });
+    }
+
+    // ─── daemon outcomes are surfaced ───
+
+    /// A refused command becomes a visible toast + log line. Discarding it is
+    /// what made a failed kill look like a successful one.
+    #[test]
+    fn a_refused_daemon_command_is_surfaced() {
+        let mut dash = make_test_dashboard();
+        let tx = dash
+            .take_daemon_outcome_tx()
+            .expect("a fresh dashboard has its outcome sender");
+        tx.send(DaemonOutcome {
+            run_id: "run-x".to_string(),
+            message: "the daemon has no such run to cancel".to_string(),
+            ok: false,
+        })
+        .unwrap();
+
+        dash.drain_daemon_outcomes();
+
+        assert!(
+            dash.toasts
+                .iter()
+                .any(|t| t.message.contains("no such run")),
+            "the failure is toasted"
+        );
+        assert!(
+            dash.log.iter().any(|l| l.message.contains("run-x")),
+            "and recorded in the activity log"
+        );
+        assert!(dash.failed_cancels.contains("run-x"));
+    }
+
+    #[test]
+    fn a_successful_daemon_command_is_not_toasted() {
+        let mut dash = make_test_dashboard();
+        let tx = dash.take_daemon_outcome_tx().unwrap();
+        tx.send(DaemonOutcome {
+            run_id: "run-y".to_string(),
+            message: String::new(),
+            ok: true,
+        })
+        .unwrap();
+
+        dash.drain_daemon_outcomes();
+
+        assert!(dash.toasts.is_empty(), "success is silent");
+        assert!(!dash.failed_cancels.contains("run-y"));
     }
 
     #[test]

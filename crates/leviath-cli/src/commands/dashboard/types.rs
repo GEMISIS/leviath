@@ -33,6 +33,13 @@ pub enum AgentDisplayStatus {
     Error(String),
     Idle,
     Cancelled,
+    /// On disk the run claims to be live, but the daemon has no such run and its
+    /// metadata has not been touched in a long time — so nothing is driving it.
+    ///
+    /// Shown distinctly rather than as ACTIVE because the two are not the same
+    /// thing to the user: an ACTIVE row implies work is happening. Killable, like
+    /// every other non-finished state.
+    Stale,
 }
 
 impl std::fmt::Display for AgentDisplayStatus {
@@ -45,11 +52,27 @@ impl std::fmt::Display for AgentDisplayStatus {
             Self::Error(msg) => write!(f, "{}ERROR: {}", GLYPH_ERROR, msg),
             Self::Idle => write!(f, "{}IDLE", GLYPH_PENDING),
             Self::Cancelled => write!(f, "⊘CANCEL"),
+            Self::Stale => write!(f, "{}STALE", GLYPH_ERROR),
         }
     }
 }
 
 impl AgentDisplayStatus {
+    /// Whether this run has finished, one way or another.
+    pub(super) fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Complete | Self::CompleteInteractive | Self::Error(_) | Self::Cancelled
+        )
+    }
+
+    /// Whether the run can be killed. Anything that has not finished can be —
+    /// including `Idle` and `Stale`, which the kill action used to skip, leaving
+    /// a run the dashboard showed as live with no way to get rid of it.
+    pub(super) fn is_killable(&self) -> bool {
+        !self.is_terminal()
+    }
+
     pub(super) fn color(&self) -> Color {
         match self {
             Self::Active => C_ACTIVE,
@@ -58,6 +81,7 @@ impl AgentDisplayStatus {
             Self::Error(_) => C_ERROR,
             Self::Idle => C_DIM,
             Self::Cancelled => C_DIM,
+            Self::Stale => C_WARN,
         }
     }
 }
@@ -136,6 +160,21 @@ pub(super) enum DaemonCommand {
     },
     /// Deliver a mid-run message to a running agent.
     Message { agent_id: String, content: String },
+}
+
+/// The result of a [`DaemonCommand`], drained each tick.
+///
+/// The dashboard used to discard these. A cancel that the daemon refused looked
+/// identical to one that worked: the row flashed CANCEL, the log said "Killed",
+/// and the next disk sync put it back to ACTIVE with no explanation.
+#[derive(Debug, PartialEq)]
+pub(super) struct DaemonOutcome {
+    /// The run the command targeted.
+    pub(super) run_id: String,
+    /// Human-readable result, shown as a toast when it failed.
+    pub(super) message: String,
+    /// Whether the daemon applied it.
+    pub(super) ok: bool,
 }
 
 /// A long-running MCP action dispatched from the (sync) MCP screen to the async

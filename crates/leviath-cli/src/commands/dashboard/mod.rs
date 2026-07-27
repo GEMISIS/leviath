@@ -15,7 +15,7 @@ pub use helpers::yank_to_clipboard_via;
 pub use types::{AgentDisplayStatus, DashboardAgent, DashboardArgs};
 
 use crossterm::event::{Event, KeyEventKind};
-use leviath_runtime::control_socket::{ControlClient, ControlRequest};
+use leviath_runtime::control_socket::{ControlClient, ControlRequest, ControlResponse};
 use ratatui::Terminal;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -29,26 +29,55 @@ use types::DaemonCommand;
 async fn daemon_background_loop(
     control: ControlClient,
     mut cmd_rx: mpsc::UnboundedReceiver<DaemonCommand>,
+    outcomes: mpsc::UnboundedSender<types::DaemonOutcome>,
 ) {
     while let Some(cmd) = cmd_rx.recv().await {
-        match cmd {
+        let (run_id, request, what) = match cmd {
             DaemonCommand::Cancel { run_id } => {
-                let _ = control.request(&ControlRequest::Cancel { run_id }).await;
+                (run_id.clone(), ControlRequest::Cancel { run_id }, "cancel")
             }
-            DaemonCommand::Answer { response } => {
-                let _ = control
-                    .request(&ControlRequest::AnswerInteraction { response })
-                    .await;
-            }
-            DaemonCommand::Message { agent_id, content } => {
-                let _ = control
-                    .request(&ControlRequest::Message {
-                        agent_id,
-                        content,
-                        target_region: None,
-                    })
-                    .await;
-            }
+            DaemonCommand::Answer { response } => (
+                response.request_id.clone(),
+                ControlRequest::AnswerInteraction { response },
+                "answer",
+            ),
+            DaemonCommand::Message { agent_id, content } => (
+                agent_id.clone(),
+                ControlRequest::Message {
+                    agent_id,
+                    content,
+                    target_region: None,
+                },
+                "message",
+            ),
+        };
+        // Report what actually happened. This used to be discarded, so a cancel
+        // the daemon refused was indistinguishable from one that worked.
+        let outcome = match control.request(&request).await {
+            Ok(ControlResponse::Ok { ok: true }) => types::DaemonOutcome {
+                run_id,
+                message: String::new(),
+                ok: true,
+            },
+            Ok(ControlResponse::Ok { ok: false }) => types::DaemonOutcome {
+                run_id,
+                message: format!("the daemon has no such run to {what}"),
+                ok: false,
+            },
+            Ok(other) => types::DaemonOutcome {
+                run_id,
+                message: format!("unexpected daemon response to {what}: {other:?}"),
+                ok: false,
+            },
+            Err(e) => types::DaemonOutcome {
+                run_id,
+                message: format!("{what} failed: {e}"),
+                ok: false,
+            },
+        };
+        // A closed receiver means the dashboard has exited; nothing to report to.
+        if outcomes.send(outcome).is_err() {
+            return;
         }
     }
 }
@@ -156,12 +185,19 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
         // is unreachable) so waiting agents show their prompt.
         dashboard.sync_interactions(control).await;
 
+        // …and which runs it actually holds, so a run on disk that nothing is
+        // driving can be shown as stale rather than ACTIVE.
+        dashboard.sync_daemon_runs(control).await;
+
         // Sync background runs from on-disk run-state dir (the daemon persists
         // meta/context/stages there).
         dashboard.sync_from_run_state();
 
         // Surface any completed MCP login/test as a toast.
         dashboard.drain_mcp_outcomes();
+
+        // Report what the daemon did with this tick's commands.
+        dashboard.drain_daemon_outcomes();
 
         // Draw
         terminal.draw(|frame| dashboard.draw(frame))?;
@@ -206,8 +242,13 @@ fn init_dashboard(control: ControlClient, yank_fn: fn(&str) -> bool) -> Dashboar
         mcp_ctx,
     );
 
-    // Forward the dashboard's control commands to the daemon.
-    tokio::spawn(daemon_background_loop(control, cmd_rx));
+    // Forward the dashboard's control commands to the daemon, and report each
+    // result back so a refused command is surfaced rather than swallowed. A
+    // freshly-built dashboard always has its outcome sender.
+    let daemon_outcome_tx = dashboard
+        .take_daemon_outcome_tx()
+        .expect("a fresh dashboard has its daemon outcome sender");
+    tokio::spawn(daemon_background_loop(control, cmd_rx, daemon_outcome_tx));
 
     // Run MCP logins/tests off the UI loop. A freshly-built dashboard always
     // has its background channel ends.
@@ -354,7 +395,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (control, server) = recording_daemon(dir.path());
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<DaemonCommand>();
-        tokio::spawn(daemon_background_loop(control, cmd_rx));
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        tokio::spawn(daemon_background_loop(control, cmd_rx, out_tx));
         cmd_tx
             .send(DaemonCommand::Cancel {
                 run_id: "run-1".to_string(),
@@ -370,7 +412,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (control, server) = recording_daemon(dir.path());
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<DaemonCommand>();
-        tokio::spawn(daemon_background_loop(control, cmd_rx));
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        tokio::spawn(daemon_background_loop(control, cmd_rx, out_tx));
         cmd_tx
             .send(DaemonCommand::Answer {
                 response: leviath_core::interaction::InteractionResponse::text("q1", "yes"),
@@ -386,7 +429,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (control, server) = recording_daemon(dir.path());
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<DaemonCommand>();
-        tokio::spawn(daemon_background_loop(control, cmd_rx));
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        tokio::spawn(daemon_background_loop(control, cmd_rx, out_tx));
         cmd_tx
             .send(DaemonCommand::Message {
                 agent_id: "a1".to_string(),
@@ -401,7 +445,8 @@ mod tests {
     #[tokio::test]
     async fn daemon_background_loop_exits_when_channel_dropped() {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<DaemonCommand>();
-        let handle = tokio::spawn(daemon_background_loop(no_daemon_control(), cmd_rx));
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(daemon_background_loop(no_daemon_control(), cmd_rx, out_tx));
         drop(cmd_tx);
         let result = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
         assert!(result.is_ok());
