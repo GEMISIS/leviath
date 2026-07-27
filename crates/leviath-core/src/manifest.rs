@@ -543,6 +543,13 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                         }
                     };
 
+                    // Parse the edge gate: `gate = { require_modifications = true, ... }`
+                    // (or a `[stages.<name>.transitions.<target>.gate]` sub-table).
+                    let gate = edge_value
+                        .get("gate")
+                        .and_then(|v| v.as_table())
+                        .map(parse_transition_gate);
+
                     transitions.insert(
                         target_name.clone(),
                         TransitionEdge {
@@ -550,6 +557,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                             condition,
                             hint,
                             transform,
+                            gate,
                         },
                     );
                 }
@@ -1018,6 +1026,37 @@ fn parse_region_seed(region_name: &str, value: Option<&toml::Value>) -> Option<R
 /// A present block defaults `taint_tracking` to `true` (block presence implies
 /// intent to configure security); omit the block entirely to inherit the
 /// broader (agent/global) setting.
+/// Parse a transition edge's `gate = { ... }` table. Every key is optional; an
+/// empty table yields a gate that blocks nothing (`require_modifications` off).
+fn parse_transition_gate(table: &toml::value::Table) -> crate::blueprint::TransitionGate {
+    let mut gate = crate::blueprint::TransitionGate::default();
+    if let Some(rm) = table.get("require_modifications").and_then(|v| v.as_bool()) {
+        gate.require_modifications = rm;
+    }
+    if let Some(msg) = table.get("message").and_then(|v| v.as_str()) {
+        gate.message = Some(msg.trim().to_string());
+    }
+    if let Some(region) = table.get("region").and_then(|v| v.as_str()) {
+        gate.region = Some(region.to_string());
+    }
+    if let Some(tools) = table.get("tools").and_then(|v| v.as_array()) {
+        gate.tools = tools
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+    }
+    // A negative budget is a typo, not "never hold the stage" — fall back to the
+    // default rather than silently disabling the gate.
+    if let Some(max) = table
+        .get("max_attempts")
+        .and_then(|v| v.as_integer())
+        .filter(|max| *max >= 0)
+    {
+        gate.max_attempts = Some(max as usize);
+    }
+    gate
+}
+
 fn parse_security_config(security_table: &toml::value::Table) -> crate::SecurityConfig {
     let mut sc = crate::SecurityConfig::default();
     if let Some(tt) = security_table
@@ -2479,6 +2518,84 @@ mode = "autonomous"
     }
 
     #[test]
+    fn parse_manifest_transition_gate_reads_every_key() {
+        let toml = r#"
+[agent]
+name = "gate-test"
+
+[stages.implement]
+mode = "autonomous"
+available_tools = ["write_file"]
+
+[stages.implement.transitions.review]
+hint = "done"
+gate = { require_modifications = true, message = "  write something!  ", region = "implementation", tools = ["patch_file", 7], max_attempts = 2 }
+
+[stages.review]
+mode = "autonomous"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let gate = bp
+            .find_stage("implement")
+            .unwrap()
+            .transitions
+            .as_ref()
+            .unwrap()["review"]
+            .gate
+            .as_ref()
+            .unwrap();
+        assert!(gate.require_modifications);
+        assert_eq!(gate.message.as_deref(), Some("write something!"));
+        assert_eq!(gate.region.as_deref(), Some("implementation"));
+        // Non-string entries in `tools` are skipped, not an error.
+        assert_eq!(gate.tools, vec!["patch_file".to_string()]);
+        assert_eq!(gate.max_attempts, Some(2));
+    }
+
+    #[test]
+    fn parse_manifest_transition_gate_defaults_and_ignores_wrong_types() {
+        let toml = r#"
+[agent]
+name = "gate-default-test"
+
+[stages.a]
+mode = "autonomous"
+
+[stages.a.transitions.b]
+hint = "no gate here"
+
+[stages.a.transitions.c]
+gate = { require_modifications = "yes", message = 3, region = [], tools = "write_file", max_attempts = -4 }
+
+[stages.b]
+mode = "autonomous"
+
+[stages.c]
+mode = "autonomous"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let transitions = bp.find_stage("a").unwrap().transitions.as_ref().unwrap();
+        // An edge with no `gate` table has no gate at all.
+        assert!(transitions["b"].gate.is_none());
+        // A gate whose every key is the wrong type — including a negative
+        // attempt budget — falls back to the defaults, i.e. a gate that blocks
+        // nothing rather than one that silently never holds.
+        let gate = transitions["c"].gate.as_ref().unwrap();
+        assert_eq!(gate, &crate::blueprint::TransitionGate::default());
+        // Zero, on the other hand, is a deliberate "record it but never hold".
+        let toml = toml.replace("max_attempts = -4", "max_attempts = 0");
+        let bp = parse_manifest(&toml).unwrap();
+        assert_eq!(
+            bp.find_stage("a").unwrap().transitions.as_ref().unwrap()["c"]
+                .gate
+                .as_ref()
+                .unwrap()
+                .max_attempts,
+            Some(0)
+        );
+    }
+
+    #[test]
     fn parse_manifest_stage_accepts_messages_false() {
         let toml = r#"
 [agent]
@@ -2748,6 +2865,62 @@ mode = "autonomous"
         assert!(transitions.contains_key("plan"));
         // self-looping 'plan' stage must cap max_revisits.
         assert!(plan.max_revisits.is_some());
+    }
+
+    /// Issue #107: an implement stage that can leave without having written
+    /// anything is how a run ends up with no output at all. Every non-error edge
+    /// out of `implement` must carry a `require_modifications` gate, and the
+    /// write tools must be routed into the region that gate points at (which is
+    /// also what the reviewer is told to read).
+    #[test]
+    fn shipped_coding_agents_gate_every_non_error_implement_edge() {
+        for manifest_content in [
+            include_str!("../../../agents/coder/agent.leviath"),
+            include_str!("../../../agents/software-engineer/agent.leviath"),
+        ] {
+            let bp = parse_manifest(manifest_content).unwrap();
+            bp.validate().unwrap();
+            let implement = bp.find_stage("implement").unwrap();
+            assert!(
+                implement.available_tools.iter().any(|t| t == "write_file")
+                    && implement.available_tools.iter().any(|t| t == "edit_file"),
+                "{}: implement must advertise both write tools",
+                bp.name
+            );
+            let transitions = implement.transitions.as_ref().unwrap();
+            for (target, edge) in transitions {
+                if edge.condition == crate::blueprint::TransitionCondition::Error {
+                    continue; // recovery must stay reachable from a failed stage
+                }
+                assert!(
+                    edge.gate.is_some(),
+                    "{}: implement → {target} has no gate",
+                    bp.name
+                );
+                let gate = edge.gate.as_ref().unwrap();
+                assert!(gate.require_modifications, "{}: → {target}", bp.name);
+                assert_eq!(
+                    gate.region.as_deref(),
+                    Some("implementation"),
+                    "{}: → {target} must accept the persisted region as evidence",
+                    bp.name
+                );
+            }
+            // ...and the writes actually land in that region.
+            let overrides = &implement
+                .tool_result_routing
+                .as_ref()
+                .expect("implement must route tool results")
+                .tool_overrides;
+            for tool in ["write_file", "edit_file"] {
+                assert_eq!(
+                    overrides.get(tool).map(String::as_str),
+                    Some("implementation"),
+                    "{}: {tool} results must persist in `implementation`",
+                    bp.name
+                );
+            }
+        }
     }
 
     #[test]

@@ -514,6 +514,7 @@ a = "true"
                 condition: Default::default(),
                 hint: None,
                 transform: Default::default(),
+                gate: None,
             },
         );
         let mut stage_a = Stage::new("a".to_string(), make_model());

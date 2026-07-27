@@ -247,6 +247,29 @@ impl Blueprint {
                     }
                 }
 
+                // A `require_modifications` gate on a stage that advertises no
+                // file-modifying tool can never be satisfied — it would just
+                // burn the stage's re-run budget every time.
+                for (target_name, edge) in transitions {
+                    let Some(gate) = &edge.gate else { continue };
+                    if !gate.require_modifications {
+                        continue;
+                    }
+                    let can_modify = stage.available_tools.iter().any(|t| {
+                        MODIFYING_TOOLS.contains(&t.as_str())
+                            || gate.tools.iter().any(|extra| extra == t)
+                    });
+                    if !can_modify {
+                        return Err(ValidationError::Transition {
+                            from: stage.name.clone(),
+                            to: target_name.clone(),
+                            message: "gate requires modifications, but the stage has no \
+                                      file-modifying tool in available_tools"
+                                .to_string(),
+                        });
+                    }
+                }
+
                 // Self-loop safety: stages that transition to themselves need max_revisits
                 if transitions.contains_key(&stage.name) && stage.max_revisits.is_none() {
                     return Err(ValidationError::Stage {
@@ -359,9 +382,9 @@ impl Blueprint {
 
 /// Configuration for automatic file tracking in context regions.
 ///
-/// When configured, read_file/write_file/edit_file results are automatically
-/// synced to a HashMap region, and tool results reference the system prompt
-/// instead of duplicating content.
+/// When configured, read_file/write_file results are automatically synced to a
+/// HashMap region, and tool results reference the system prompt instead of
+/// duplicating content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileTrackingConfig {
     /// Name of the HashMap region to sync files to
@@ -369,7 +392,9 @@ pub struct FileTrackingConfig {
     /// Auto-update on read_file
     #[serde(default = "default_true_val")]
     pub track_reads: bool,
-    /// Auto-update on write_file/edit_file
+    /// Auto-update on write_file. (`edit_file` is not tracked: its arguments are
+    /// `old_str`/`new_str`, so the post-edit file body isn't available without a
+    /// re-read.)
     #[serde(default = "default_true_val")]
     pub track_writes: bool,
     /// Truncate files larger than this token count in context
@@ -912,7 +937,58 @@ pub struct TransitionEdge {
     /// How context transforms when crossing this edge
     #[serde(default)]
     pub transform: EdgeTransform,
+
+    /// Preconditions the agent must satisfy before this edge may be followed.
+    /// Absent ⇒ the edge is unconditional (beyond its `condition`).
+    #[serde(default)]
+    pub gate: Option<TransitionGate>,
 }
+
+/// Preconditions an edge imposes on the stage it leaves, checked once the edge
+/// has been chosen but before its transform runs. A gate that isn't satisfied
+/// re-runs the stage with a `[System]` nudge instead of transitioning.
+///
+/// The motivating case (issue #107): an agent that reads and reasons about the
+/// codebase entirely through `shell` and reaches the review stage without ever
+/// having called a file-writing tool, producing a run with no output at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransitionGate {
+    /// Require at least one successful file-modifying tool call in the stage
+    /// being left.
+    #[serde(default)]
+    pub require_modifications: bool,
+
+    /// Nudge injected when the gate blocks. A default explaining the framework's
+    /// change tracking is generated when absent.
+    #[serde(default)]
+    pub message: Option<String>,
+
+    /// Region whose non-emptiness also satisfies the gate. Per-stage tool-call
+    /// counters reset on stage entry and are not restored when a run resumes
+    /// after a daemon restart, but context regions are — so pointing the gate at
+    /// the region the write tools are routed into keeps a resumed run honest.
+    #[serde(default)]
+    pub region: Option<String>,
+
+    /// Tool names counted as modifying beyond the built-in `write_file` /
+    /// `edit_file` — for agents whose writes go through MCP or script tools.
+    #[serde(default)]
+    pub tools: Vec<String>,
+
+    /// How many times the stage is re-run before the gate gives up and lets the
+    /// transition through (with a warning). Defaults to
+    /// [`DEFAULT_GATE_ATTEMPTS`].
+    #[serde(default)]
+    pub max_attempts: Option<usize>,
+}
+
+/// Default re-run budget for an unsatisfied [`TransitionGate`].
+pub const DEFAULT_GATE_ATTEMPTS: usize = 3;
+
+/// Built-in tools that modify files on disk, for [`TransitionGate`]'s
+/// `require_modifications` accounting. Extended per-edge by
+/// [`TransitionGate::tools`].
+pub const MODIFYING_TOOLS: &[&str] = &["write_file", "edit_file"];
 
 /// Condition that determines when a transition edge is available.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1141,6 +1217,7 @@ mod tests {
                 condition: TransitionCondition::Always,
                 hint: None,
                 transform: EdgeTransform::Direct,
+                gate: None,
             },
         );
         plan.transitions = Some(transitions);
@@ -1435,11 +1512,74 @@ mod tests {
                 condition: TransitionCondition::Always,
                 hint: None,
                 transform: EdgeTransform::Direct,
+                gate: None,
             },
         );
         stage.transitions = Some(transitions);
         let bp = Blueprint::new("t".into(), "".into(), vec![stage], make_layout());
         assert!(bp.validate().is_err());
+    }
+
+    /// A `require_modifications` gate on a stage that can't modify anything
+    /// could never be satisfied — it would just burn the stage's re-run budget
+    /// on every pass. Reject it at load time instead (issue #107).
+    #[test]
+    fn test_graph_validation_modification_gate_needs_a_writing_stage() {
+        let gated = |tools: &[&str], extra: &[&str]| {
+            let mut stage = Stage::new("impl".to_string(), make_model());
+            stage.available_tools = tools.iter().map(|t| t.to_string()).collect();
+            let mut transitions = HashMap::new();
+            transitions.insert(
+                "review".to_string(),
+                TransitionEdge {
+                    target: "review".to_string(),
+                    condition: TransitionCondition::Always,
+                    hint: None,
+                    transform: EdgeTransform::Direct,
+                    gate: Some(TransitionGate {
+                        require_modifications: true,
+                        tools: extra.iter().map(|t| t.to_string()).collect(),
+                        ..Default::default()
+                    }),
+                },
+            );
+            stage.transitions = Some(transitions);
+            Blueprint::new(
+                "t".into(),
+                "".into(),
+                vec![stage, Stage::new("review".to_string(), make_model())],
+                make_layout(),
+            )
+        };
+        let err = gated(&["read_file"], &[]).validate().unwrap_err();
+        assert!(err.to_string().contains("no file-modifying tool"));
+        // A built-in write tool satisfies it...
+        assert!(gated(&["read_file", "edit_file"], &[]).validate().is_ok());
+        // ...as does one the gate itself declares (MCP / script toolchains).
+        assert!(
+            gated(&["read_file", "patch_file"], &["patch_file"])
+                .validate()
+                .is_ok()
+        );
+        // A gate that doesn't require modifications is never checked.
+        let mut off = gated(&["read_file"], &[]);
+        off.stages[0]
+            .transitions
+            .as_mut()
+            .unwrap()
+            .get_mut("review")
+            .unwrap()
+            .gate = Some(TransitionGate::default());
+        assert!(off.validate().is_ok());
+        // Neither is an edge with no gate at all.
+        off.stages[0]
+            .transitions
+            .as_mut()
+            .unwrap()
+            .get_mut("review")
+            .unwrap()
+            .gate = None;
+        assert!(off.validate().is_ok());
     }
 
     #[test]
@@ -1453,6 +1593,7 @@ mod tests {
                 condition: TransitionCondition::Always,
                 hint: None,
                 transform: EdgeTransform::Direct,
+                gate: None,
             },
         );
         stage.transitions = Some(transitions);
@@ -1472,6 +1613,7 @@ mod tests {
                 condition: TransitionCondition::Always,
                 hint: None,
                 transform: EdgeTransform::Direct,
+                gate: None,
             },
         );
         stage.transitions = Some(transitions);
@@ -1495,6 +1637,7 @@ mod tests {
                 condition: TransitionCondition::Always,
                 hint: None,
                 transform: EdgeTransform::Direct,
+                gate: None,
             },
         );
         plan.transitions = Some(transitions);
@@ -1517,6 +1660,7 @@ mod tests {
                 condition: TransitionCondition::Always,
                 hint: None,
                 transform: EdgeTransform::Direct,
+                gate: None,
             },
         );
         a.transitions = Some(a_transitions);
@@ -1529,6 +1673,7 @@ mod tests {
                 condition: TransitionCondition::Always,
                 hint: None,
                 transform: EdgeTransform::Direct,
+                gate: None,
             },
         );
         b.transitions = Some(b_transitions);

@@ -821,15 +821,38 @@ impl WorldHost {
         match op {
             ControlOp::Spawn { args, reply } => {
                 let result = match self.spawner.as_mut() {
-                    Some(spawner) => match spawner(&mut self.world, &args) {
-                        Ok(entity) => {
-                            self.by_run_id.insert(args.run_id.clone(), entity);
-                            Ok(args.run_id)
+                    // Spawning runs outside the pipeline schedule, so it isn't
+                    // covered by `run_isolated`'s panic guard: a panic while
+                    // parsing a blueprint or building a sandbox would otherwise
+                    // unwind the whole serve task and take the daemon with it.
+                    // As with `run_isolated`, the world may be left holding a
+                    // partially-built entity — the run just never registers.
+                    Some(spawner) => {
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            spawner(&mut self.world, &args)
+                        })) {
+                            Ok(Ok(entity)) => {
+                                self.by_run_id.insert(args.run_id.clone(), entity);
+                                Ok(args.run_id.clone())
+                            }
+                            Ok(Err(e)) => Err(e),
+                            Err(_) => Err("agent spawn panicked".to_string()),
                         }
-                        Err(e) => Err(e),
-                    },
+                    }
                     None => Err("this daemon cannot spawn agents".to_string()),
                 };
+                // A failed spawn used to be invisible daemon-side: the error went
+                // back over the socket to a client that has already exited, and
+                // nothing was written to disk (issue #107).
+                if let Err(error) = &result {
+                    tracing::error!(
+                        run_id = %args.run_id,
+                        blueprint = %args.blueprint_path,
+                        workdir = %args.workdir,
+                        error = %error,
+                        "agent spawn failed"
+                    );
+                }
                 let _ = reply.send(result);
             }
             ControlOp::Status { run_id, reply } => {
@@ -1261,6 +1284,29 @@ mod tests {
         })
         .await;
         assert_eq!(result, Err("bad blueprint".to_string()));
+    }
+
+    #[tokio::test]
+    async fn spawn_op_contains_a_panicking_spawner() {
+        // A panic while building an agent (bad manifest, sandbox blow-up) must
+        // not unwind the daemon's serve task — the run just fails to start.
+        let mut host = host_with(vec![]);
+        host.set_spawner(Box::new(|_world, _args| panic!("simulated spawn panic")));
+        let (tx, rx) = oneshot::channel();
+        crate::test_support::with_silenced_panics(|| {
+            host.handle(ControlOp::Spawn {
+                args: Box::new(SpawnArgs::default()),
+                reply: tx,
+            });
+        });
+        assert_eq!(rx.await.unwrap(), Err("agent spawn panicked".to_string()));
+        // The host is still usable afterwards, and the run never registered.
+        let status = ask(&mut host, |reply| ControlOp::Status {
+            run_id: SpawnArgs::default().run_id,
+            reply,
+        })
+        .await;
+        assert!(status.is_none());
     }
 
     #[tokio::test]

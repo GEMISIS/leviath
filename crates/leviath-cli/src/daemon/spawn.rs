@@ -537,6 +537,17 @@ fn build_agent_inner(
     subagent_tx: UnboundedSender<SubAgentOp>,
     enforce_seeds: bool,
 ) -> Result<Entity, String> {
+    // 0. The working directory must exist before anything is built over it.
+    // `ToolContext::new` silently keeps a path it can't canonicalize, so without
+    // this a bogus workdir spawns a healthy-looking agent whose every tool call
+    // fails with a message naming the shell rather than the directory (#107).
+    if !std::fs::metadata(&args.workdir).is_ok_and(|m| m.is_dir()) {
+        return Err(format!(
+            "workspace '{}' does not exist or is not a directory",
+            args.workdir
+        ));
+    }
+
     // 1. Load the blueprint (the client resolves the manifest path).
     let content = std::fs::read_to_string(&args.blueprint_path)
         .map_err(|e| format!("read manifest '{}': {e}", args.blueprint_path))?;
@@ -746,6 +757,9 @@ fn build_agent_inner(
             metadata,
             TokenTotals::default(),
             PersistWatermark::default(),
+            // Fresh counters; a reloaded run gets its accumulated flags put back
+            // by `recovery::reload_persisted_agents`.
+            leviath_runtime::persistence::RunOutcomeFlags::default(),
         ));
         // `Option`'s iterator inserts compaction settings when present without a
         // dangling `if let` block-end region.
@@ -1186,6 +1200,51 @@ mod tests {
             allow: Vec::new(),
             max_depth: None,
             parent_run_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn build_agent_rejects_a_workdir_that_is_missing_or_not_a_directory() {
+        // `ToolContext::new` silently keeps a path it can't canonicalize, so
+        // without this check a bogus workdir spawns a healthy-looking agent
+        // whose every tool call then fails with ENOENT (issue #107).
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"w\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+        let not_a_dir = dir.path().join("a-file");
+        std::fs::write(&not_a_dir, "x").unwrap();
+
+        for workdir in [
+            dir.path()
+                .join("does-not-exist")
+                .to_string_lossy()
+                .to_string(),
+            not_a_dir.to_string_lossy().to_string(),
+        ] {
+            let (mut world, cli) = test_world();
+            let hub = InteractionHub::new();
+            let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+            let mut args = spawn_args(&manifest.to_string_lossy());
+            args.workdir = workdir.clone();
+            let err = build_agent(
+                world.world_mut(),
+                cli.as_ref(),
+                &Config::default(),
+                mcp,
+                &[],
+                &hub,
+                &args,
+                100,
+                sub_tx(),
+            )
+            .unwrap_err();
+            assert!(err.contains("workspace"), "got: {err}");
+            assert!(err.contains(&workdir), "got: {err}");
         }
     }
 

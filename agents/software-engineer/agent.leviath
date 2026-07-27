@@ -134,7 +134,11 @@ max_revisits = 5
 system_prompt = """
 You are the implementation stage. The plan in the `plan` region has been approved.
 Execute it step by step:
-- Use write_file to create new files and edit_file to modify existing ones.
+- Use write_file to create new files and edit_file to modify existing ones. Do
+  NOT edit files through bash — no `sed -i`, no `tee`, no `>`/`>>` redirection,
+  no here-docs. Only write_file/edit_file are recorded in the `implementation`
+  region the reviewer reads, and this stage will not hand off until at least one
+  of them has landed.
 - Use bash to run tests or verify the build after writing — output goes to
   `test_results`.
 
@@ -156,22 +160,37 @@ of what was created/modified and whether tests passed.
 
 # Large read output persists in `codebase`; test output persists in `test_results`
 # (the review stage reads it). Routed results leave a short pointer in conversation
-# (paired with their tool_use) with the full output as text in the region. Small
-# write/edit confirmations stay inline.
+# (paired with their tool_use) with the full output as text in the region.
+#
+# write_file/edit_file confirmations persist in `implementation`, alongside the
+# hand-written `changelog`: it is a mechanical record of every file touched, it
+# survives `conversation` eviction, and — being persisted context — it satisfies
+# the transition gates below after a daemon restart, when per-stage counters are
+# gone.
 [stages.implement.tool_routing]
 default_region = "conversation"
 [stages.implement.tool_routing.overrides]
 read_file  = "codebase"
 list_dir   = "codebase"
 bash       = "test_results"
+write_file = "implementation"
+edit_file  = "implementation"
 
+# Both non-error edges are gated: an agent that explored through bash and changed
+# nothing is sent back for another pass rather than handing an untouched workspace
+# to review — or slipping out sideways via the `plan` edge, which can itself end
+# the run (issue #107).
 [stages.implement.transitions.review]
 hint = "Implementation complete, ready for review"
 transform = "compact"
+gate = { require_modifications = true, region = "implementation" }
 
+# Going back to planning with nothing written is sometimes the right call, so this
+# edge only asks once before letting a genuinely stuck agent through.
 [stages.implement.transitions.plan]
 hint = "Need to fundamentally rethink the approach"
 transform = "compact"
+gate = { require_modifications = true, region = "implementation", max_attempts = 1 }
 
 [stages.implement.transitions.error_recovery]
 condition = "error"
@@ -201,9 +220,10 @@ Minor style issues don't warrant another implementation pass.
 system_prompt = """
 You are the review stage. The implementation is complete.
 
-Use the `changelog` region to see exactly which files changed, and `decisions` to
-understand why choices were made before you question them. Read those files and
-provide a quality review:
+Use the `changelog` region to see exactly which files changed (the
+`implementation` region holds the mechanical record of every write the framework
+saw, if the changelog looks incomplete), and `decisions` to understand why choices
+were made before you question them. Read those files and provide a quality review:
 - Correctness: does it match the plan AND the original task in `task`?
 - Edge cases: what inputs or conditions could cause failures?
 - Code quality: clarity, naming, error handling, conventions.
