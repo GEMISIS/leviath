@@ -1,6 +1,6 @@
 [agent]
 name = "log-analyzer"
-version = "0.3.0"
+version = "0.0.1"
 description = "Analyzes log files — identifies anomalies, trends, and error patterns via a scripted analyze⇄script loop, maintaining a severity-ranked findings index"
 entry_stage = "ingest"
 

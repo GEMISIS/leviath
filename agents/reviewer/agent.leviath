@@ -1,6 +1,6 @@
 [agent]
 name = "reviewer"
-version = "0.3.0"
+version = "0.0.1"
 description = "Code review agent — discover, scan, deep review, and report with error recovery and multi-provider fallback"
 entry_stage = "discover"
 

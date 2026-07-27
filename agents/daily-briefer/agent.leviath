@@ -1,6 +1,6 @@
 [agent]
 name = "daily-briefer"
-version = "0.3.0"
+version = "0.0.1"
 description = "Morning summary agent — gathers from local + web sources, prioritizes into a running index, and delivers a concise briefing"
 entry_stage = "collect"
 

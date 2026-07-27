@@ -1,6 +1,6 @@
 [agent]
 name = "writing-assistant"
-version = "0.3.0"
+version = "0.0.1"
 description = "Research-backed writing — topic to polished draft, with a web-research stage, an interactive outline checkpoint, a draft⇄edit loop, and a final proofread pass"
 entry_stage = "research"
 
