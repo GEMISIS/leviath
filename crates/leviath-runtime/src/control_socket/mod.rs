@@ -314,6 +314,47 @@ where
     Ok(())
 }
 
+/// How long a control request waits for the daemon before giving up, when
+/// `LEVIATH_CONTROL_TIMEOUT_SECS` is unset.
+///
+/// Generous enough to cover a busy daemon's control loop, short enough that a
+/// wedged one is reported rather than waited on indefinitely.
+pub const DEFAULT_CONTROL_TIMEOUT_SECS: u64 = 30;
+
+/// Floor on the deadline for a `Spawn`, which does more work than the other ops:
+/// the daemon connects the blueprint's MCP servers before spawning, and each of
+/// those has its own 30s connect timeout, so a blueprint declaring several
+/// servers can legitimately outlast the ordinary deadline. Without this floor a
+/// slow-but-succeeding spawn would be reported to the user as a timeout.
+pub const SPAWN_CONTROL_TIMEOUT_SECS: u64 = 300;
+
+/// The deadline for one control request. `LEVIATH_CONTROL_TIMEOUT_SECS`
+/// overrides it; `0` disables the deadline (for debugging a daemon that is
+/// legitimately slow). An unparseable value falls back to the default.
+pub fn request_timeout() -> std::time::Duration {
+    let secs = std::env::var("LEVIATH_CONTROL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_CONTROL_TIMEOUT_SECS);
+    match secs {
+        0 => std::time::Duration::MAX,
+        secs => std::time::Duration::from_secs(secs),
+    }
+}
+
+/// The deadline for `req`: [`request_timeout`], raised to at least
+/// [`SPAWN_CONTROL_TIMEOUT_SECS`] for a `Spawn`. An explicitly disabled deadline
+/// (`0`) stays disabled.
+fn timeout_for(req: &ControlRequest) -> std::time::Duration {
+    let base = request_timeout();
+    match req {
+        ControlRequest::Spawn { .. } if base != std::time::Duration::MAX => {
+            base.max(std::time::Duration::from_secs(SPAWN_CONTROL_TIMEOUT_SECS))
+        }
+        _ => base,
+    }
+}
+
 /// The client half of the control transport: connects to the daemon's control
 /// socket (resolved from a [`ControlId`]), sends one [`ControlRequest`], and
 /// reads back its [`ControlResponse`]. A fresh connection per request keeps it
@@ -330,8 +371,27 @@ impl ControlClient {
     }
 
     /// Send one request and await its response. Errors if the daemon can't be
-    /// reached, the connection closes before a reply, or the reply doesn't parse.
+    /// reached, does not answer within [`request_timeout`], the connection closes
+    /// before a reply, or the reply doesn't parse.
     pub async fn request(&self, req: &ControlRequest) -> std::io::Result<ControlResponse> {
+        // The daemon services control ops from a single loop, so one op that
+        // takes a long time (or a wedged world) delays every other client. With
+        // no deadline, `lev cancel` and the dashboard simply hung — no output, no
+        // error, nothing to act on. A timeout turns that into a failure the
+        // caller can fall back from.
+        let deadline = timeout_for(req);
+        tokio::time::timeout(deadline, self.request_uncapped(req))
+            .await
+            .unwrap_or_else(|_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("the daemon did not respond within {}s", deadline.as_secs()),
+                ))
+            })
+    }
+
+    /// [`Self::request`] without the deadline.
+    async fn request_uncapped(&self, req: &ControlRequest) -> std::io::Result<ControlResponse> {
         let stream = connect(&self.id).await?;
         let (read_half, mut write_half) = tokio::io::split(stream);
         let mut line = serde_json::to_string(req).expect("ControlRequest serializes");
@@ -877,6 +937,87 @@ mod tests {
 
         let err = ControlClient::new(id).list().await.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    /// A daemon that accepts the connection but never answers must not hang the
+    /// client. `lev cancel` against a wedged daemon used to block forever with no
+    /// output — nothing to see, nothing to act on, and no way to kill the run.
+    #[tokio::test]
+    async fn client_times_out_on_a_daemon_that_never_answers() {
+        let (mut listener, id, _dir) = test_listener();
+        let server = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap();
+            // Read the request, then never reply and hold the connection open.
+            let (read_half, _write_half) = tokio::io::split(stream);
+            let mut lines = BufReader::new(read_half).lines();
+            let _ = lines.next_line().await;
+            std::future::pending::<()>().await;
+        });
+
+        let err = temp_env::async_with_vars([("LEVIATH_CONTROL_TIMEOUT_SECS", Some("1"))], async {
+            ControlClient::new(id).list().await.unwrap_err()
+        })
+        .await;
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(err.to_string().contains("did not respond"), "got: {err}");
+        server.abort();
+    }
+
+    #[test]
+    fn request_timeout_honors_the_override_and_falls_back() {
+        temp_env::with_var("LEVIATH_CONTROL_TIMEOUT_SECS", Some("7"), || {
+            assert_eq!(request_timeout(), std::time::Duration::from_secs(7));
+        });
+        // `0` disables the deadline entirely, for debugging a legitimately slow
+        // daemon.
+        temp_env::with_var("LEVIATH_CONTROL_TIMEOUT_SECS", Some("0"), || {
+            assert_eq!(request_timeout(), std::time::Duration::MAX);
+        });
+        // Garbage and absence both fall back rather than failing the command.
+        temp_env::with_var("LEVIATH_CONTROL_TIMEOUT_SECS", Some("soon"), || {
+            assert_eq!(
+                request_timeout(),
+                std::time::Duration::from_secs(DEFAULT_CONTROL_TIMEOUT_SECS)
+            );
+        });
+        temp_env::with_var_unset("LEVIATH_CONTROL_TIMEOUT_SECS", || {
+            assert_eq!(
+                request_timeout(),
+                std::time::Duration::from_secs(DEFAULT_CONTROL_TIMEOUT_SECS)
+            );
+        });
+    }
+
+    /// A spawn connects the blueprint's MCP servers first (30s each), so it gets
+    /// a longer floor than the interactive ops — otherwise a slow-but-succeeding
+    /// spawn is reported to the user as a timeout.
+    #[test]
+    fn spawn_gets_a_longer_deadline_than_other_ops() {
+        let spawn = ControlRequest::Spawn {
+            args: Box::new(SpawnArgs::default()),
+        };
+        let cancel = ControlRequest::Cancel {
+            run_id: "r".to_string(),
+        };
+        temp_env::with_var_unset("LEVIATH_CONTROL_TIMEOUT_SECS", || {
+            assert_eq!(
+                timeout_for(&spawn),
+                std::time::Duration::from_secs(SPAWN_CONTROL_TIMEOUT_SECS)
+            );
+            assert_eq!(
+                timeout_for(&cancel),
+                std::time::Duration::from_secs(DEFAULT_CONTROL_TIMEOUT_SECS)
+            );
+        });
+        // A configured value larger than the floor wins for both.
+        temp_env::with_var("LEVIATH_CONTROL_TIMEOUT_SECS", Some("900"), || {
+            assert_eq!(timeout_for(&spawn), std::time::Duration::from_secs(900));
+            assert_eq!(timeout_for(&cancel), std::time::Duration::from_secs(900));
+        });
+        // A deliberately disabled deadline stays disabled, spawn included.
+        temp_env::with_var("LEVIATH_CONTROL_TIMEOUT_SECS", Some("0"), || {
+            assert_eq!(timeout_for(&spawn), std::time::Duration::MAX);
+        });
     }
 
     #[tokio::test]
