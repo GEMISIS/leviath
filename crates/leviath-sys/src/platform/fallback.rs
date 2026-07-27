@@ -23,3 +23,9 @@ pub(crate) fn configure_detached(_cmd: &mut std::process::Command) {}
 pub(crate) fn current_uid() -> u32 {
     0
 }
+
+/// No process groups to signal on this platform; killing the direct child is
+/// all that is available (and is what the caller already does).
+pub(crate) fn kill_process_group(_pgid: u32) -> io::Result<()> {
+    Ok(())
+}
