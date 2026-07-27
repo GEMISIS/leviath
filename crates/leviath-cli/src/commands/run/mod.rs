@@ -47,6 +47,12 @@ pub struct RunArgs {
     #[arg(long)]
     pub max_depth: Option<usize>,
 
+    /// Refuse the blueprint's `seed = { command = "..." }` regions. Those run a
+    /// shell command at spawn — before the first inference, and so before any
+    /// approval prompt. See `lev validate <path>` to inspect them first.
+    #[arg(long)]
+    pub no_seed_commands: bool,
+
     /// Dynamic per-region seed flags (`--<region> <text|@file>`), collected by an
     /// argv pre-scan in the binary since region names are blueprint-defined.
     /// clap skips this field; it is populated after parsing.
@@ -62,6 +68,7 @@ const KNOWN_RUN_FLAGS: &[&str] = &[
     "yolo",
     "allow",
     "max-depth",
+    "no-seed-commands",
     "verbose",
     "help",
     "version",

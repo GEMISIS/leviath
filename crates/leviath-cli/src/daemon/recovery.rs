@@ -312,6 +312,9 @@ fn reload_one(
         // Launch overrides aren't persisted; a reloaded run reverts to its
         // blueprint's own tool policy (safe-side: more prompting, never less).
         yolo: false,
+        // Belt and braces: seeds aren't replayed on reload at all (see above),
+        // so a resumed run can never re-execute a command seed.
+        no_seed_commands: true,
         allow: Vec::new(),
         max_depth: None,
         parent_run_id: meta.parent_run_id.clone(),

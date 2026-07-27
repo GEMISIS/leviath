@@ -229,6 +229,28 @@ network = false      # isolate this stage
 ```
 
 </td>
+<td width="33%" valign="top">
+
+**🧭 Codebase Discovery & Workflow Synthesis**
+
+The coding agents open with a `discover` stage that answers *what is this codebase* and *how do I verify my work here* before a line is written — then writes a concrete verification workflow (`BASELINE` / `VERIFY` / `DONE WHEN`) into a pinned region. `implement` captures the baseline **before** its first edit and diffs every later run against it, so a test that used to pass and now fails is caught immediately instead of at review time. Both regions are `required`, so the runtime re-runs `discover` until they're actually populated — the workflow is a commitment the review stage holds the run to, not a suggestion.
+
+Seed a region from a command so discovery starts from facts instead of `ls`:
+
+```toml
+[context.regions]
+repo_files = { kind = "pinned", max_tokens = 4000,
+               seed = { command = "git ls-files" } }
+```
+
+⚠️ A command seed runs **at spawn — before the first inference, and so before any tool-approval prompt**. It is confined to the workdir, routed through the entry stage's sandbox when one is configured, and capped in time and output size; a failure is non-fatal unless the region is `required`. `lev validate <agent>` prints every command seed so you can audit an agent before installing it. Refuse them per-run with `--no-seed-commands`, or machine-wide:
+
+```toml
+[security]
+allow_seed_commands = false
+```
+
+</td>
 </tr>
 </table>
 
@@ -306,15 +328,15 @@ Every agent also has an `error_recovery` stage (omitted from the graphs) that ca
 <table>
 <tr><th align="left">Agent</th><th align="left">Workflow</th></tr>
 <tr>
-<td valign="middle" width="30%"><b>software-engineer</b> <em>(default)</em><br>Full coding workflow with human-approved planning</td>
+<td valign="middle" width="30%"><b>software-engineer</b> <em>(default)</em><br>Full coding workflow with codebase discovery and human-approved planning</td>
 <td><img src="docs/assets/agents/software-engineer.svg" alt="software-engineer workflow graph" width="520"></td>
 </tr>
 <tr>
-<td valign="middle" width="30%"><b>coder</b><br>Focused implementation with a review loop</td>
+<td valign="middle" width="30%"><b>coder</b><br>Focused implementation with codebase discovery and a review loop</td>
 <td><img src="docs/assets/agents/coder.svg" alt="coder workflow graph" width="520"></td>
 </tr>
 <tr>
-<td valign="middle" width="30%"><b>reviewer</b><br>Code review and audit</td>
+<td valign="middle" width="30%"><b>reviewer</b><br>Code review and audit, grounded in a discovery pass</td>
 <td><img src="docs/assets/agents/reviewer.svg" alt="reviewer workflow graph" width="520"></td>
 </tr>
 <tr>

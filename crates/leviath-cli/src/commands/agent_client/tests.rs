@@ -308,6 +308,7 @@ prompt = "Do it"
     let args = AgentClientArgs {
         agent: Some(dir.to_string_lossy().to_string()),
         yolo: false,
+        no_seed_commands: false,
         allow: vec![],
         max_depth: None,
     };

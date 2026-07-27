@@ -28,6 +28,7 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::Config;
+use crate::daemon::seed_command::SeedCommandPolicy;
 use crate::daemon::subagent::SubAgentHandle;
 use crate::daemon::tool_service::{AgentToolState, CliToolService};
 
@@ -330,12 +331,16 @@ fn build_tool_state(
 ///   required-at-spawn gate, before any inference.
 /// - `Files` / `Glob` read workdir files; `Literal` is verbatim; `Rhai` runs a
 ///   workdir script whose `String` return seeds the region.
+/// - `Command` runs a shell command in the workdir under `commands` (issue
+///   #108) — sandboxed, time- and size-capped, and skippable. Every failure is
+///   non-fatal unless the region is `required`.
 /// - Any caller key (other than `task`) that isn't a declared `CallerInput`
 ///   region is rejected (typo protection, mirrors the CLI-side check).
 fn resolve_seeds(
     blueprint: &Blueprint,
     args: &SpawnArgs,
     workdir: &str,
+    commands: &SeedCommandPolicy,
 ) -> Result<HashMap<String, String>, String> {
     use leviath_core::layout::RegionSeed;
 
@@ -429,6 +434,59 @@ fn resolve_seeds(
                         "required region '{}': rhai seed '{script}' returned empty",
                         region.name
                     ));
+                }
+            }
+            // A command seed *executes* at spawn, before any inference and so
+            // before any tool-approval prompt. It is therefore skipped outright
+            // when disabled, and every failure mode is non-fatal unless the
+            // region is `required` (mirroring the Files/Glob arms above): a
+            // discovery nicety must never be able to sink a run.
+            RegionSeed::Command { command } => {
+                if !commands.allowed {
+                    if region.required {
+                        return Err(format!(
+                            "required region '{}': command seeds are disabled \
+                             (`[security] allow_seed_commands = false` or --no-seed-commands)",
+                            region.name
+                        ));
+                    }
+                    tracing::warn!(
+                        region = %region.name,
+                        "command seed skipped: command seeds are disabled"
+                    );
+                    continue;
+                }
+                match commands.run(command, base) {
+                    Ok(out) if !out.trim().is_empty() => {
+                        seeds.insert(region.name.clone(), out);
+                    }
+                    Ok(_) => {
+                        if region.required {
+                            return Err(format!(
+                                "required region '{}': command seed '{command}' returned empty",
+                                region.name
+                            ));
+                        }
+                        tracing::warn!(
+                            region = %region.name,
+                            command = %command,
+                            "command seed returned no output; region left empty"
+                        );
+                    }
+                    Err(e) => {
+                        if region.required {
+                            return Err(format!(
+                                "required region '{}': command seed '{command}' failed: {e}",
+                                region.name
+                            ));
+                        }
+                        tracing::warn!(
+                            region = %region.name,
+                            command = %command,
+                            error = %e,
+                            "command seed failed; region left empty"
+                        );
+                    }
                 }
             }
         }
@@ -720,8 +778,16 @@ fn build_agent_inner(
     // regions that weren't provided fail here — before any inference, so no
     // tokens are spent. On reload the window is restored from a snapshot after
     // this, so seeding is skipped entirely.
+    // Command seeds (issue #108) run here, so they inherit the entry stage's
+    // sandbox (built in step 2a above) and are refused by either the machine-wide
+    // `[security] allow_seed_commands` switch or this run's `--no-seed-commands`.
     let seeds = if enforce_seeds {
-        resolve_seeds(&blueprint, args, &args.workdir)?
+        let policy = SeedCommandPolicy::new(
+            config.security.allow_seed_commands && !args.no_seed_commands,
+            std::time::Duration::from_secs(config.limits.script_shell_timeout_secs),
+            sandbox.clone(),
+        );
+        resolve_seeds(&blueprint, args, &args.workdir, &policy)?
     } else {
         HashMap::new()
     };
@@ -816,6 +882,7 @@ fn build_agent_inner(
         parent_run_id: args.run_id.clone(),
         workdir: args.workdir.clone(),
         max_depth: max_child_depth,
+        no_seed_commands: args.no_seed_commands,
     };
     // Rhai script-tool host (Layer 3): resolve `[tool_script_permissions]` once,
     // with `read_file`/`shell` `inherit` deferring to the agent's own resolved
@@ -1210,6 +1277,7 @@ mod tests {
             callback_url: None,
             callback_secret: None,
             yolo: false,
+            no_seed_commands: false,
             allow: Vec::new(),
             max_depth: None,
             parent_run_id: None,
@@ -2115,9 +2183,26 @@ conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
             callback_url: None,
             callback_secret: None,
             yolo: false,
+            no_seed_commands: false,
             allow: Vec::new(),
             max_depth: None,
             parent_run_id: None,
+        }
+    }
+
+    /// The default policy for the non-command seed tests: command seeds off, so
+    /// nothing is ever executed by a test that isn't about command seeds.
+    fn seed_policy() -> SeedCommandPolicy {
+        SeedCommandPolicy::disabled()
+    }
+
+    /// A policy whose runner is a stub returning `result`, for the command-seed
+    /// arms (no real process, deterministic on every platform).
+    fn stub_policy(result: Result<String, String>) -> SeedCommandPolicy {
+        SeedCommandPolicy {
+            allowed: true,
+            timeout: std::time::Duration::from_secs(1),
+            runner: std::sync::Arc::new(move |_, _, _| result.clone()),
         }
     }
 
@@ -2132,7 +2217,7 @@ criteria = { kind = "pinned", max_tokens = 2000, seed = "input" }"#,
             HashMap::from([("criteria".to_string(), "be safe".to_string())]),
             "/tmp",
         );
-        let seeds = resolve_seeds(&bp, &args, "/tmp").unwrap();
+        let seeds = resolve_seeds(&bp, &args, "/tmp", &seed_policy()).unwrap();
         assert_eq!(seeds.get("task").map(String::as_str), Some("build it"));
         assert_eq!(seeds.get("criteria").map(String::as_str), Some("be safe"));
     }
@@ -2142,7 +2227,7 @@ criteria = { kind = "pinned", max_tokens = 2000, seed = "input" }"#,
         let bp =
             bp(r#"spec = { kind = "pinned", max_tokens = 2000, seed = "input", required = true }"#);
         let args = args_with("t", HashMap::new(), "/tmp");
-        let err = resolve_seeds(&bp, &args, "/tmp").unwrap_err();
+        let err = resolve_seeds(&bp, &args, "/tmp", &seed_policy()).unwrap_err();
         assert!(err.contains("spec"), "got: {err}");
     }
 
@@ -2150,7 +2235,7 @@ criteria = { kind = "pinned", max_tokens = 2000, seed = "input" }"#,
     fn resolve_seeds_optional_caller_input_missing_is_omitted() {
         let bp = bp(r#"notes = { kind = "pinned", max_tokens = 2000, seed = "input" }"#);
         let args = args_with("t", HashMap::new(), "/tmp");
-        let seeds = resolve_seeds(&bp, &args, "/tmp").unwrap();
+        let seeds = resolve_seeds(&bp, &args, "/tmp", &seed_policy()).unwrap();
         assert!(!seeds.contains_key("notes"));
     }
 
@@ -2164,7 +2249,8 @@ criteria = { kind = "pinned", max_tokens = 2000, seed = "input" }"#,
 docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"] } }"#,
         );
         let args = args_with("t", HashMap::new(), &dir.path().to_string_lossy());
-        let seeds = resolve_seeds(&bp, &args, &dir.path().to_string_lossy()).unwrap();
+        let seeds =
+            resolve_seeds(&bp, &args, &dir.path().to_string_lossy(), &seed_policy()).unwrap();
         assert_eq!(seeds.get("lit").map(String::as_str), Some("hello"));
         let docs = seeds.get("docs").unwrap();
         assert!(docs.contains("alpha") && docs.contains("beta"));
@@ -2180,7 +2266,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             bp(r#"specs = { kind = "pinned", max_tokens = 4000, seed = { glob = "specs/*.md" } }"#);
         let wd = dir.path().to_string_lossy().to_string();
         let args = args_with("t", HashMap::new(), &wd);
-        let seeds = resolve_seeds(&bp, &args, &wd).unwrap();
+        let seeds = resolve_seeds(&bp, &args, &wd, &seed_policy()).unwrap();
         let specs = seeds.get("specs").unwrap();
         assert!(specs.contains("spec one") && specs.contains("spec two"));
     }
@@ -2199,7 +2285,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         );
         let wd = dir.path().to_string_lossy().to_string();
         let args = args_with("hello", HashMap::new(), &wd);
-        let seeds = resolve_seeds(&bp, &args, &wd).unwrap();
+        let seeds = resolve_seeds(&bp, &args, &wd, &seed_policy()).unwrap();
         assert_eq!(
             seeds.get("scripted").map(String::as_str),
             Some("seeded: hello")
@@ -2215,13 +2301,13 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             r#"docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["missing.txt"] }, required = true }"#,
         );
         let args = args_with("t", HashMap::new(), &wd);
-        let err = resolve_seeds(&req, &args, &wd).unwrap_err();
+        let err = resolve_seeds(&req, &args, &wd, &seed_policy()).unwrap_err();
         assert!(err.contains("missing.txt"), "got: {err}");
         // Optional + a missing file → the region is simply omitted.
         let opt = bp(
             r#"docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["missing.txt"] } }"#,
         );
-        let seeds = resolve_seeds(&opt, &args, &wd).unwrap();
+        let seeds = resolve_seeds(&opt, &args, &wd, &seed_policy()).unwrap();
         assert!(!seeds.contains_key("docs"));
     }
 
@@ -2234,12 +2320,12 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         let req = bp(
             r#"specs = { kind = "pinned", max_tokens = 2000, seed = { glob = "none/*.md" }, required = true }"#,
         );
-        let err = resolve_seeds(&req, &args, &wd).unwrap_err();
+        let err = resolve_seeds(&req, &args, &wd, &seed_policy()).unwrap_err();
         assert!(err.contains("matched no files"), "got: {err}");
         // Optional glob with no matches → region omitted.
         let opt =
             bp(r#"specs = { kind = "pinned", max_tokens = 2000, seed = { glob = "none/*.md" } }"#);
-        let seeds = resolve_seeds(&opt, &args, &wd).unwrap();
+        let seeds = resolve_seeds(&opt, &args, &wd, &seed_policy()).unwrap();
         assert!(!seeds.contains_key("specs"));
     }
 
@@ -2250,7 +2336,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         let wd = dir.path().to_string_lossy().to_string();
         let bp = bp(r#"specs = { kind = "pinned", max_tokens = 2000, seed = { glob = "[" } }"#);
         let args = args_with("t", HashMap::new(), &wd);
-        let err = resolve_seeds(&bp, &args, &wd).unwrap_err();
+        let err = resolve_seeds(&bp, &args, &wd, &seed_policy()).unwrap_err();
         assert!(err.contains("bad glob"), "got: {err}");
     }
 
@@ -2264,8 +2350,125 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             r#"scripted = { kind = "pinned", max_tokens = 500, seed = { rhai = "boom.rhai" } }"#,
         );
         let args = args_with("t", HashMap::new(), &wd);
-        let err = resolve_seeds(&bp, &args, &wd).unwrap_err();
+        let err = resolve_seeds(&bp, &args, &wd, &seed_policy()).unwrap_err();
         assert!(err.contains("rhai seed failed"), "got: {err}");
+    }
+
+    // ─── command seeds (issue #108) ──────────────────────────────────────────
+
+    /// A blueprint with one command-seeded region, optionally `required`.
+    fn command_bp(required: bool) -> leviath_core::Blueprint {
+        let req = if required { ", required = true" } else { "" };
+        bp(&format!(
+            r#"facts = {{ kind = "pinned", max_tokens = 500, seed = {{ command = "scan-repo" }}{req} }}"#
+        ))
+    }
+
+    #[test]
+    fn resolve_seeds_command_stores_output() {
+        let bp = command_bp(false);
+        let args = args_with("t", HashMap::new(), "/tmp");
+        let seeds = resolve_seeds(
+            &bp,
+            &args,
+            "/tmp",
+            &stub_policy(Ok("src/lib.rs\nsrc/main.rs".to_string())),
+        )
+        .unwrap();
+        assert_eq!(
+            seeds.get("facts").map(String::as_str),
+            Some("src/lib.rs\nsrc/main.rs")
+        );
+    }
+
+    #[test]
+    fn resolve_seeds_command_receives_the_workdir_and_command() {
+        // The declared command and the run's workdir reach the runner verbatim.
+        let bp = command_bp(false);
+        let args = args_with("t", HashMap::new(), "/work");
+        let policy = SeedCommandPolicy {
+            allowed: true,
+            timeout: std::time::Duration::from_secs(9),
+            runner: std::sync::Arc::new(|command, workdir, timeout| {
+                Ok(format!(
+                    "{command}@{}#{}",
+                    workdir.display(),
+                    timeout.as_secs()
+                ))
+            }),
+        };
+        let seeds = resolve_seeds(&bp, &args, "/work", &policy).unwrap();
+        assert_eq!(
+            seeds.get("facts").map(String::as_str),
+            Some("scan-repo@/work#9")
+        );
+    }
+
+    #[test]
+    fn resolve_seeds_command_failure_is_skipped_when_optional() {
+        let bp = command_bp(false);
+        let args = args_with("t", HashMap::new(), "/tmp");
+        let seeds = resolve_seeds(
+            &bp,
+            &args,
+            "/tmp",
+            &stub_policy(Err("timed out".to_string())),
+        )
+        .unwrap();
+        assert!(
+            !seeds.contains_key("facts"),
+            "an optional command seed must not sink the spawn"
+        );
+    }
+
+    #[test]
+    fn resolve_seeds_command_failure_errors_when_required() {
+        let bp = command_bp(true);
+        let args = args_with("t", HashMap::new(), "/tmp");
+        let err =
+            resolve_seeds(&bp, &args, "/tmp", &stub_policy(Err("boom".to_string()))).unwrap_err();
+        assert!(err.contains("scan-repo"), "got: {err}");
+        assert!(err.contains("boom"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_seeds_command_empty_output_is_skipped_when_optional() {
+        let bp = command_bp(false);
+        let args = args_with("t", HashMap::new(), "/tmp");
+        let seeds =
+            resolve_seeds(&bp, &args, "/tmp", &stub_policy(Ok("   \n".to_string()))).unwrap();
+        assert!(!seeds.contains_key("facts"));
+    }
+
+    #[test]
+    fn resolve_seeds_command_empty_output_errors_when_required() {
+        let bp = command_bp(true);
+        let args = args_with("t", HashMap::new(), "/tmp");
+        let err = resolve_seeds(&bp, &args, "/tmp", &stub_policy(Ok(String::new()))).unwrap_err();
+        assert!(err.contains("returned empty"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_seeds_command_skipped_when_disabled() {
+        // `[security] allow_seed_commands = false` / `--no-seed-commands`: the
+        // runner is never consulted. The stub would have produced content, so an
+        // empty region proves the seed was skipped rather than merely failing.
+        let bp = command_bp(false);
+        let args = args_with("t", HashMap::new(), "/tmp");
+        let mut policy = stub_policy(Ok("SHOULD NOT BE USED".to_string()));
+        policy.allowed = false;
+        let seeds = resolve_seeds(&bp, &args, "/tmp", &policy).unwrap();
+        assert!(!seeds.contains_key("facts"));
+    }
+
+    #[test]
+    fn resolve_seeds_required_command_errors_when_disabled() {
+        // A required region can't be silently left empty — the run stops with a
+        // message naming the switch that turned command seeds off.
+        let bp = command_bp(true);
+        let args = args_with("t", HashMap::new(), "/tmp");
+        let err = resolve_seeds(&bp, &args, "/tmp", &SeedCommandPolicy::disabled()).unwrap_err();
+        assert!(err.contains("allow_seed_commands"), "got: {err}");
     }
 
     #[test]
@@ -2279,7 +2482,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             r#"specs = { kind = "pinned", max_tokens = 2000, seed = { glob = "sub*" }, required = true }"#,
         );
         let args = args_with("t", HashMap::new(), &wd);
-        let err = resolve_seeds(&bp, &args, &wd).unwrap_err();
+        let err = resolve_seeds(&bp, &args, &wd, &seed_policy()).unwrap_err();
         assert!(err.contains("read seed file"), "got: {err}");
     }
 
@@ -2291,7 +2494,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             r#"scripted = { kind = "pinned", max_tokens = 500, seed = { rhai = "nope.rhai" } }"#,
         );
         let args = args_with("t", HashMap::new(), &wd);
-        let err = resolve_seeds(&bp, &args, &wd).unwrap_err();
+        let err = resolve_seeds(&bp, &args, &wd, &seed_policy()).unwrap_err();
         assert!(err.contains("read rhai seed"), "got: {err}");
     }
 
@@ -2305,13 +2508,13 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         let req = bp(
             r#"scripted = { kind = "pinned", max_tokens = 500, seed = { rhai = "empty.rhai" }, required = true }"#,
         );
-        let err = resolve_seeds(&req, &args, &wd).unwrap_err();
+        let err = resolve_seeds(&req, &args, &wd, &seed_policy()).unwrap_err();
         assert!(err.contains("returned empty"), "got: {err}");
         // Optional + empty → region omitted (no error).
         let opt = bp(
             r#"scripted = { kind = "pinned", max_tokens = 500, seed = { rhai = "empty.rhai" } }"#,
         );
-        let seeds = resolve_seeds(&opt, &args, &wd).unwrap();
+        let seeds = resolve_seeds(&opt, &args, &wd, &seed_policy()).unwrap();
         assert!(!seeds.contains_key("scripted"));
     }
 
@@ -2325,7 +2528,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             HashMap::from([("ghost".to_string(), "x".to_string())]),
             "/tmp",
         );
-        let seeds = resolve_seeds(&bp, &args, "/tmp").unwrap();
+        let seeds = resolve_seeds(&bp, &args, "/tmp", &seed_policy()).unwrap();
         assert_eq!(seeds.get("task").map(String::as_str), Some("t"));
         assert!(!seeds.contains_key("ghost"));
     }

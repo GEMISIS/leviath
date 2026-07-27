@@ -53,6 +53,7 @@ pub(super) async fn spawn_agent(
         callback_url: body.callback_url.clone(),
         callback_secret: body.callback_secret.clone(),
         yolo: body.yolo,
+        no_seed_commands: body.no_seed_commands,
         allow: body.allow.clone(),
         max_depth: body.max_depth,
         // Serve spawns are top-level runs.

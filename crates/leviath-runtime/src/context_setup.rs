@@ -64,10 +64,45 @@ pub fn init_window_seeded(
                 .map(|r| r.name.clone())
         };
         if let Some(region_name) = target {
-            let tokens = content.len() / 4 + 1;
-            let _ = window.add_to_region(&region_name, content.clone(), tokens);
+            // Trim to the region's (already-resolved) budget first: `add_entry`
+            // REJECTS an over-budget entry outright rather than truncating it, so
+            // without this a seed larger than its region — a big README, a long
+            // `git ls-files` — would silently leave the region completely empty.
+            let budget = window
+                .get_region(&region_name)
+                .map(|r| r.max_tokens)
+                .unwrap_or(0);
+            let fitted = fit_seed_to_budget(content, budget);
+            let tokens = fitted.len() / 4 + 1;
+            let _ = window.add_to_region(&region_name, fitted, tokens);
         }
     }
+}
+
+/// Marker appended to a seed that was trimmed to fit its region.
+const SEED_TRUNCATION_MARKER: &str =
+    "\n[...truncated by leviath: seed exceeded this region's budget]";
+
+/// Trim `content` so that its `len/4 + 1` token estimate fits `max_tokens`,
+/// leaving room for [`SEED_TRUNCATION_MARKER`]. Returns `content` unchanged when
+/// it already fits. Always cuts on a UTF-8 char boundary.
+fn fit_seed_to_budget(content: &str, max_tokens: usize) -> String {
+    // The token estimate used throughout: `len / 4 + 1`. Fitting means
+    // `len / 4 + 1 <= max_tokens`, i.e. `len <= (max_tokens - 1) * 4`.
+    let allowed = max_tokens.saturating_sub(1).saturating_mul(4);
+    if content.len() <= allowed {
+        return content.to_string();
+    }
+    // Reserve room for the marker; if even that doesn't fit, the region is too
+    // small to say anything useful, so emit nothing rather than a lone marker.
+    let Some(room) = allowed.checked_sub(SEED_TRUNCATION_MARKER.len()) else {
+        return String::new();
+    };
+    let mut end = room.min(content.len());
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{SEED_TRUNCATION_MARKER}", &content[..end])
 }
 
 /// Resolve which region the `task` text seeds into: prefer a pinned region named
@@ -148,7 +183,9 @@ pub fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_layout, init_window, init_window_seeded};
+    use super::{
+        SEED_TRUNCATION_MARKER, apply_layout, fit_seed_to_budget, init_window, init_window_seeded,
+    };
     use crate::ContextWindow;
     use leviath_core::{
         Blueprint, ContextLayout, EvictionStrategy, RegionKind, Stage, blueprint::ModelConfig,
@@ -203,6 +240,81 @@ mod tests {
         );
         // An unknown seed key targets no region and is silently dropped.
         assert!(window.get_region("ghost").is_none());
+    }
+
+    #[test]
+    fn fit_seed_to_budget_leaves_a_fitting_seed_untouched() {
+        assert_eq!(fit_seed_to_budget("hello", 100), "hello");
+        // Exactly at the limit: len == (max_tokens - 1) * 4.
+        let exact = "x".repeat(36);
+        assert_eq!(fit_seed_to_budget(&exact, 10), exact);
+    }
+
+    /// The token estimate `init_window_seeded` computes for a fitted seed — the
+    /// number that has to land inside the region's budget.
+    fn estimated_tokens(fitted: &str) -> usize {
+        fitted.len() / 4 + 1
+    }
+
+    #[test]
+    fn fit_seed_to_budget_truncates_and_marks_an_oversized_seed() {
+        let big = "x".repeat(10_000);
+        let fitted = fit_seed_to_budget(&big, 100);
+        assert!(fitted.ends_with(SEED_TRUNCATION_MARKER));
+        // The estimate the caller will compute must actually fit the budget.
+        let estimate = estimated_tokens(&fitted);
+        assert!(estimate <= 100, "estimate was {estimate}");
+    }
+
+    #[test]
+    fn fit_seed_to_budget_cuts_on_a_char_boundary() {
+        // Place a 2-byte char so it straddles the cut exactly: slicing there
+        // would panic, so the walk-back has to move off it.
+        const MAX_TOKENS: usize = 60;
+        let room = (MAX_TOKENS - 1) * 4 - SEED_TRUNCATION_MARKER.len();
+        let mut s = "a".repeat(room - 1);
+        s.push('é'); // occupies bytes room-1 and room — the cut lands inside it
+        s.push_str(&"b".repeat(500));
+        assert!(!s.is_char_boundary(room), "test must straddle the cut");
+
+        let fitted = fit_seed_to_budget(&s, MAX_TOKENS);
+        assert!(fitted.ends_with(SEED_TRUNCATION_MARKER));
+        assert!(estimated_tokens(&fitted) <= MAX_TOKENS);
+        // The straddling char was dropped whole rather than split.
+        assert_eq!(
+            fitted,
+            format!("{}{SEED_TRUNCATION_MARKER}", "a".repeat(room - 1))
+        );
+    }
+
+    #[test]
+    fn fit_seed_to_budget_yields_nothing_when_even_the_marker_cannot_fit() {
+        // A region too small to hold the marker gets nothing rather than a bare
+        // "[...truncated]" with no content.
+        assert_eq!(fit_seed_to_budget("some content here", 2), "");
+        // Degenerate budgets are handled by the saturating arithmetic.
+        assert_eq!(fit_seed_to_budget("x", 0), "");
+    }
+
+    #[test]
+    fn init_window_seeded_truncates_a_seed_larger_than_its_region() {
+        // Regression: `add_entry` rejects an over-budget entry outright, so an
+        // untrimmed oversized seed used to leave the region completely EMPTY.
+        let bp = blueprint_with(vec![RegionDefinition::new(
+            "facts".to_string(),
+            RegionKind::Pinned,
+            50,
+        )]);
+        let seeds = HashMap::from([("facts".to_string(), "y".repeat(10_000))]);
+        let mut window = ContextWindow::new(100_000);
+        init_window_seeded(&mut window, &bp, &seeds);
+
+        let region = window.get_region("facts").unwrap();
+        assert!(
+            !region.content.is_empty(),
+            "an oversized seed must be trimmed, not dropped"
+        );
+        assert!(region.content[0].content.ends_with(SEED_TRUNCATION_MARKER));
     }
 
     #[test]

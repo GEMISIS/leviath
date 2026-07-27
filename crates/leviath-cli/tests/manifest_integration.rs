@@ -129,10 +129,97 @@ fn specific_agent_coder_has_expected_structure() {
     assert!(bp.stages.len() >= 2); // at least analyze + implement
     assert!(bp.find_stage("analyze").is_some());
     assert!(bp.find_stage("implement").is_some());
+    // Discovery runs before planning (issue #108).
+    assert_eq!(bp.resolve_entry_stage_name(), "discover");
 
     // Should have graph transitions
     let analyze = bp.find_stage("analyze").unwrap();
     assert!(analyze.transitions.is_some());
+}
+
+/// The agents that work inside a codebase all begin with a `discover` stage that
+/// maps the project and synthesizes a verification workflow (issue #108), and
+/// that stage must actually be able to deliver it. Three things have to line up
+/// or the feature silently degrades to a no-op:
+///
+///   1. `discover` is the entry stage — discovery has to precede planning;
+///   2. it holds `context_write`/`context_append` — `unmet_required_regions`
+///      returns EMPTY for a stage with no context-writing tool, so without one
+///      the required-region gate never fires and the stage can leave both
+///      regions blank;
+///   3. `discovery` and `workflow` are `required` and UNSEEDED — a `required`
+///      region carrying a file/glob seed hard-errors at spawn when the file is
+///      missing, whereas an unseeded one is skipped by `resolve_seeds` and left
+///      to the runtime gate, which is the behaviour we want.
+#[test]
+fn codebase_agents_open_with_an_enforced_discover_stage() {
+    use leviath_core::layout::RegionSeed;
+
+    for name in ["coder", "software-engineer", "reviewer", "parallel-fixer"] {
+        let path = workspace_root().join(format!("agents/{name}/agent.leviath"));
+        let content = std::fs::read_to_string(&path).unwrap();
+        let bp = leviath_core::manifest::parse_manifest(&content).unwrap();
+
+        assert_eq!(
+            bp.resolve_entry_stage_name(),
+            "discover",
+            "agent '{name}' must start with the discover stage"
+        );
+        let discover = bp
+            .find_stage("discover")
+            .unwrap_or_else(|| panic!("agent '{name}' has no discover stage"));
+        assert!(
+            discover
+                .available_tools
+                .iter()
+                .any(|t| t == "context_write" || t == "context_append"),
+            "agent '{name}' discover stage needs a context-writing tool, or the \
+             required-region gate silently does nothing"
+        );
+        assert!(
+            discover.max_iterations.is_some_and(|n| n <= 10),
+            "agent '{name}' discover stage needs a tight max_iterations so \
+             discovery can't consume the run"
+        );
+
+        for region in ["discovery", "workflow"] {
+            let def = bp
+                .context_layout
+                .get_region(region)
+                .unwrap_or_else(|| panic!("agent '{name}' has no '{region}' region"));
+            assert!(
+                def.required,
+                "agent '{name}' region '{region}' must be required so the runtime \
+                 gate forces the discover stage to populate it"
+            );
+            assert!(
+                def.seed.is_none(),
+                "agent '{name}' region '{region}' must be unseeded — a required \
+                 region with a seed is resolved (and can hard-fail) at spawn"
+            );
+            assert!(
+                matches!(def.kind, leviath_core::RegionKind::Pinned),
+                "agent '{name}' region '{region}' must be pinned so no edge \
+                 transform can clear or compact it"
+            );
+        }
+
+        // The deterministic pre-scan is a convenience, so it must NOT be required:
+        // outside a git repo the command fails and the region is left empty.
+        let facts = bp
+            .context_layout
+            .get_region("repo_files")
+            .unwrap_or_else(|| panic!("agent '{name}' has no 'repo_files' region"));
+        assert!(
+            matches!(facts.seed, Some(RegionSeed::Command { .. })),
+            "agent '{name}' region 'repo_files' must carry a command seed"
+        );
+        assert!(
+            !facts.required,
+            "agent '{name}' region 'repo_files' must be optional — its command \
+             fails outside a git repo and must not sink the run"
+        );
+    }
 }
 
 #[test]

@@ -165,6 +165,10 @@ pub(super) struct SpawnAgentReq {
     /// Tools to allow outright for this run.
     #[serde(default)]
     pub(super) allow: Vec<String>,
+    /// Refuse this run's `seed = { command = ... }` regions, which would
+    /// otherwise execute at spawn before any approval prompt.
+    #[serde(default)]
+    pub(super) no_seed_commands: bool,
     pub(super) workdir: Option<String>,
     /// Literal seed content for named caller-input regions, keyed by region name.
     #[serde(default)]

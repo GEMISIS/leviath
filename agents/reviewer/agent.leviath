@@ -1,8 +1,8 @@
 [agent]
 name = "reviewer"
 version = "0.3.0"
-description = "Code review agent — scan, deep review, and report with error recovery and multi-provider fallback"
-entry_stage = "scan"
+description = "Code review agent — discover, scan, deep review, and report with error recovery and multi-provider fallback"
+entry_stage = "discover"
 
 # Read-only agent: it inspects a diff/codebase and reports. No write access.
 [tool_permissions]
@@ -10,7 +10,51 @@ read_file = "allow"
 list_dir  = "allow"
 bash      = "ask"
 
-# ─── Stage 1: Scan ────────────────────────────────────────────────────────────
+# ─── Stage 1: Discover ────────────────────────────────────────────────────────
+# A reviewer that doesn't know how to run this project's tests can only assert;
+# one that does can verify. Map the project first, then review. Cheap model, hard
+# iteration cap, one non-error edge (auto-followed, no routing call).
+[stages.discover]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Map the project and work out how to verify a hypothesis in it"
+available_tools = ["read_file", "list_dir", "bash", "context_write"]
+max_iterations = 6
+max_revisits = 2
+system_prompt = """
+Before reviewing anything, work out what this project is and how a claim about it
+can be CHECKED rather than asserted. Do not review the diff here.
+
+Start from what you already have — do not rediscover it:
+- `repo_files` holds the tracked file list (empty if this isn't a git repo).
+- `project_context` is pre-loaded with architecture/conventions docs.
+- If `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md` or
+  `.github/copilot-instructions.md` exist, read them — they usually state the
+  test command and the review bar directly.
+
+Fill gaps with list_dir/read_file. Use bash ONLY read-only, to interrogate the
+tooling (e.g. `pytest --collect-only -q`, `cargo test --list`, `npm run`). This
+agent has no write access; never attempt to modify anything.
+
+Write `discovery` (context_write): language, build system, test runner, the
+command to run a SINGLE test or file, directory layout, and the conventions this
+project actually holds itself to (which is what "correct" means in the review).
+
+Write `workflow` (context_write) ending with these two literal lines, which the
+deep review uses to confirm hypotheses instead of guessing:
+  VERIFY: <command to run one test or check, or "none — no runnable suite">
+  DONE WHEN: <what makes this review complete and trustworthy>
+"""
+
+[stages.discover.transitions.scan]
+hint = "Project mapped — begin the review"
+transform = "direct"
+
+[stages.discover.transitions.error_handler]
+condition = "error"
+transform = "direct"
+
+# ─── Stage 2: Scan ────────────────────────────────────────────────────────────
 [stages.scan]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
@@ -19,9 +63,9 @@ available_tools = ["read_file", "list_dir", "context_append"]
 max_iterations = 12
 system_prompt = """
 Do a fast first pass over the code in the `diff` region (and read_file for
-surrounding context). Honor any focus in `review_criteria`, and use
-`project_context` (pre-loaded architecture/conventions) to judge what "correct"
-means here.
+surrounding context). Honor any focus in `review_criteria`, and use `discovery`
+(this project's layout and conventions, mapped by the discover stage) plus
+`project_context` to judge what "correct" means here.
 
 Flag the obvious red flags — don't go deep yet:
 - Security: injection, unsafe deserialization, secrets in code, missing authz.
@@ -47,7 +91,7 @@ transform = "direct"
 condition = "error"
 transform = "direct"
 
-# ─── Stage 2: Deep review ─────────────────────────────────────────────────────
+# ─── Stage 3: Deep review ─────────────────────────────────────────────────────
 [stages.deep_review]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "devstral:24b" }] }
@@ -73,7 +117,10 @@ context_write each time the counts change, e.g. "critical: 2, warning: 5, info: 
 This survives even if the finding detail is compacted, so the report stage always
 has the totals.
 
-Use bash only to CONFIRM a hypothesis (e.g. run a test), never to modify anything.
+Use bash only to CONFIRM a hypothesis, never to modify anything — `workflow`'s
+VERIFY line holds the command this project actually uses to run one test. A
+finding you were able to check beats one you reasoned your way to; say which it
+is. Hold the review to `workflow`'s DONE WHEN line.
 """
 
 # Passive reads go to `findings`; bash (hypothesis checks) stays in conversation.
@@ -91,7 +138,7 @@ transform = "compact"
 condition = "error"
 transform = "direct"
 
-# ─── Stage 3: Report (terminal) ───────────────────────────────────────────────
+# ─── Stage 4: Report (terminal) ───────────────────────────────────────────────
 [stages.report]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
@@ -114,7 +161,7 @@ matches the severity_index totals.
 # Explicit empty transitions = terminal.
 [stages.report.transitions]
 
-# ─── Stage 4: Error handler ───────────────────────────────────────────────────
+# ─── Stage 5: Error handler ───────────────────────────────────────────────────
 [stages.error_handler]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
@@ -147,6 +194,19 @@ diff            = { kind = "pinned", budget = "20%", max_tokens = 20000, require
 review_criteria = { kind = "pinned", budget = "2%",  max_tokens = 3000, seed = "criteria" }
 # Pre-loaded on startup: architecture / conventions (missing files skipped).
 project_context = { kind = "pinned", budget = "4%",  max_tokens = 5000, seed = { files = ["ARCHITECTURE.md", "DESIGN.md", "docs/ARCHITECTURE.md", "CONVENTIONS.md", "CONTRIBUTING.md", "README.md"] } }
+# Deterministic repo scan, run once at spawn (issue #108) — the discover stage
+# starts from facts instead of burning iterations on `ls`. `git ls-files` behaves
+# identically on POSIX and Windows shells; outside a git repo it fails and this is
+# simply left empty (non-fatal), and oversized output is trimmed to the budget.
+# Refuse it with `--no-seed-commands` or `[security] allow_seed_commands = false`.
+repo_files      = { kind = "pinned", budget = "3%",  max_tokens = 4000, seed = { command = "git ls-files" } }
+
+# ── Discovery (issue #108): written by the discover stage, read by every later
+# stage. Pinned, so no edge transform can clear or compact them. `required` puts
+# the runtime's own gate behind them (`require_context_regions`): the discover
+# stage is re-run with a nudge until it actually fills them.
+discovery       = { kind = "pinned", budget = "4%",  max_tokens = 5000, required = true, required_message = "Populate `discovery` (context_write) with this project's build system, test runner, layout and conventions before leaving the discover stage." }
+workflow        = { kind = "pinned", budget = "2%",  max_tokens = 2000, required = true, required_message = "Populate `workflow` (context_write) with the literal VERIFY / DONE WHEN lines before leaving the discover stage." }
 
 # Accumulated review findings and the running severity tally.
 findings        = { kind = "temporary", budget = "20%", max_tokens = 25000 }

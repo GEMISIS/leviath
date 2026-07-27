@@ -1298,6 +1298,7 @@ mod tests {
             parent_run_id: "parent".to_string(),
             workdir: "/tmp".to_string(),
             max_depth: 3,
+            no_seed_commands: false,
         };
         let builtins = Arc::new(leviath_tools::BuiltinTools::new(
             leviath_tools::ToolContext::new(std::env::temp_dir()),

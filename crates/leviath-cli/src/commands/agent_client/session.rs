@@ -73,6 +73,7 @@ pub(super) fn spawn_args(
         callback_url: None,
         callback_secret: None,
         yolo: args.yolo,
+        no_seed_commands: args.no_seed_commands,
         allow: args.allow.clone(),
         max_depth: args.max_depth,
         parent_run_id: None,
@@ -144,6 +145,7 @@ prompt = "Plan the work"
         let args = AgentClientArgs {
             agent: None,
             yolo: true,
+            no_seed_commands: false,
             allow: vec!["bash".to_string()],
             max_depth: Some(2),
         };

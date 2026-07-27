@@ -967,7 +967,7 @@ fn parse_region_layout(
 /// text); any other string → caller input keyed by that string, with the
 /// convenience alias `"input"` meaning "keyed by this region's own name".
 /// Table forms: `{ glob = "…" }`, `{ files = [...] }`, `{ literal = "…" }`,
-/// `{ rhai = "…" }`, or `{ caller = "…" }`.
+/// `{ rhai = "…" }`, `{ command = "…" }`, or `{ caller = "…" }`.
 ///
 /// Back-compat: a region literally named `task` with no `seed` gets an implicit
 /// `CallerInput { name: "task" }`, so unmodified blueprints seed the task text
@@ -1009,6 +1009,10 @@ fn parse_region_seed(region_name: &str, value: Option<&toml::Value>) -> Option<R
             } else if let Some(script) = t.get("rhai").and_then(|v| v.as_str()) {
                 Some(RegionSeed::Rhai {
                     script: script.to_string(),
+                })
+            } else if let Some(command) = t.get("command").and_then(|v| v.as_str()) {
+                Some(RegionSeed::Command {
+                    command: command.to_string(),
                 })
             } else {
                 t.get("caller")
@@ -1716,6 +1720,7 @@ specs = { kind = "pinned", max_tokens = 8000, seed = { glob = "specs/*.md" } }
 config = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.yaml", "b.yaml"] } }
 lit = { kind = "pinned", max_tokens = 500, seed = { literal = "hello" } }
 scripted = { kind = "pinned", max_tokens = 500, seed = { rhai = "init.rhai" } }
+facts = { kind = "pinned", max_tokens = 500, seed = { command = "git ls-files" } }
 plain = { kind = "pinned", max_tokens = 500 }
 conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
 "#;
@@ -1763,6 +1768,12 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             region("scripted"),
             Some(RegionSeed::Rhai {
                 script: "init.rhai".to_string()
+            })
+        );
+        assert_eq!(
+            region("facts"),
+            Some(RegionSeed::Command {
+                command: "git ls-files".to_string()
             })
         );
         assert!(
@@ -3009,6 +3020,43 @@ mode = "autonomous"
         let bp = parse_manifest(manifest_content).unwrap();
         bp.validate()
             .expect("shipped software-engineer blueprint must pass Blueprint::validate()");
+    }
+
+    /// The discover stage (issue #108) runs BEFORE the human sees a plan, so the
+    /// plan they approve is grounded in what this repo actually is. It must have
+    /// exactly one non-error outgoing edge: `resolve_transition` auto-follows a
+    /// single edge without consulting the routing LLM, which is what keeps the
+    /// stage cheap. A second normal edge would silently add a routing call to
+    /// every run.
+    #[test]
+    fn software_engineer_opens_with_a_single_edge_discover_stage() {
+        let manifest_content = include_str!("../../../agents/software-engineer/agent.leviath");
+        let bp = parse_manifest(manifest_content).unwrap();
+
+        assert_eq!(bp.resolve_entry_stage_name(), "discover");
+        let discover = bp.find_stage("discover").expect("discover stage exists");
+        let transitions = discover
+            .transitions
+            .as_ref()
+            .expect("discover stage must declare transitions");
+        assert!(transitions.contains_key("plan"));
+
+        let normal_edges = transitions
+            .iter()
+            .filter(|(_, e)| !matches!(e.condition, TransitionCondition::Error))
+            .count();
+        assert_eq!(
+            normal_edges, 1,
+            "discover must have exactly one non-error edge so the runtime \
+             auto-follows it instead of paying for a routing inference"
+        );
+        // And it must be able to write the regions it is gated on.
+        assert!(
+            discover
+                .available_tools
+                .iter()
+                .any(|t| t == "context_write" || t == "context_append")
+        );
     }
 
     #[test]

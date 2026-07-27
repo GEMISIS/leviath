@@ -76,6 +76,12 @@ pub struct AgentClientArgs {
     /// Override the blueprint's max sub-agent tree depth.
     #[arg(long)]
     pub max_depth: Option<usize>,
+
+    /// Refuse the blueprint's `seed = { command = "..." }` regions. Those run a
+    /// shell command at spawn — before the first inference, and so before any
+    /// approval prompt.
+    #[arg(long)]
+    pub no_seed_commands: bool,
 }
 
 /// The protocol server. Generic over transport at the boundary, then erased to

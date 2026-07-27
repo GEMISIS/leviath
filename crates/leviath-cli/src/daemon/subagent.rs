@@ -27,6 +27,10 @@ pub struct SubAgentHandle {
     pub workdir: String,
     /// Maximum allowed sub-agent tree depth.
     pub max_depth: usize,
+    /// The parent run's `--no-seed-commands` setting, inherited by children so a
+    /// per-run opt-out can't be side-stepped by spawning a sub-agent whose
+    /// blueprint declares command seeds.
+    pub no_seed_commands: bool,
 }
 
 /// The tool names routed to the sub-agent handler.
@@ -91,6 +95,7 @@ async fn spawn(h: &SubAgentHandle, args: &serde_json::Value) -> String {
         child_max_depth,
         // Sub-agents receive their whole task via `full_task`; no region flags.
         std::collections::HashMap::new(),
+        h.no_seed_commands,
     ) {
         Ok(a) => a,
         Err(e) => return format!("[error] cannot spawn '{blueprint}': {e}"),
@@ -229,6 +234,7 @@ mod tests {
             parent_run_id: "parent".to_string(),
             workdir: "/tmp".to_string(),
             max_depth: 3,
+            no_seed_commands: false,
         }
     }
 
