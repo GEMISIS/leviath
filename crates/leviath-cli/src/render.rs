@@ -23,14 +23,13 @@ use ratatui::{
     text::{Line, Span, Text},
 };
 
-// ─── Palette (mirrors the dashboard theme) ────────────────────────────────────
+// ─── Palette ──────────────────────────────────────────────────────────────────
+//
+// Shared with every other Leviath terminal surface. This file used to carry its
+// own hand-copied duplicate of the dashboard's palette, which is exactly the
+// kind of thing that drifts.
 
-const C_ACCENT: Color = Color::Cyan;
-const C_SUCCESS: Color = Color::Green;
-const C_DIM: Color = Color::DarkGray;
-const C_MUTED: Color = Color::Gray;
-const C_WHITE: Color = Color::White;
-const C_CODE_BG: Color = Color::Rgb(30, 30, 40);
+use crate::tui::theme::{C_ACCENT, C_CODE_BG, C_DIM, C_MUTED, C_SUCCESS, C_WHITE};
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 

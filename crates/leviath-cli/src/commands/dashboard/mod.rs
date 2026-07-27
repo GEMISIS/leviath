@@ -8,11 +8,22 @@ mod render;
 mod state;
 #[cfg(test)]
 mod test_support;
-mod theme;
 mod types;
+
+/// The palette lives in the crate-level [`crate::tui`] module, shared with the
+/// `lev setup` wizard and the markdown renderer. Aliased here so the existing
+/// `crate::commands::dashboard::theme::*` imports across `render/` keep
+/// resolving unchanged.
+use crate::tui::theme;
 
 pub use helpers::yank_to_clipboard_via;
 pub use types::{AgentDisplayStatus, DashboardAgent, DashboardArgs};
+
+/// The terminal seams are crate-level too ([`crate::tui`]) now that `lev setup`
+/// is a second ratatui surface driving the same `CrosstermSetup` from the
+/// binary. Re-exported here because `main.rs` and the dashboard tests import
+/// them through this path.
+pub use crate::tui::{CrosstermEventSource, EventSource, TerminalSetup};
 
 use crossterm::event::{Event, KeyEventKind};
 use leviath_runtime::control_socket::{ControlClient, ControlRequest, ControlResponse};
@@ -80,56 +91,6 @@ async fn daemon_background_loop(
             return;
         }
     }
-}
-
-/// Abstracts "give me the next input event, or `None` if the poll timeout
-/// elapses" (i.e. `crossterm::event::poll` + `event::read`), so the
-/// dashboard's main loop (`run_dashboard_loop`) can be driven by canned
-/// events in tests instead of blocking on a real terminal.
-pub trait EventSource {
-    fn poll_event(&mut self, timeout: Duration) -> std::io::Result<Option<Event>>;
-}
-
-/// Production [`EventSource`]: reads real terminal input via crossterm.
-/// Uses injectable function pointers for `poll` and `read` so the two
-/// branches of `poll_event` can be exercised in unit tests without a real
-/// TTY.  In production, construct via [`CrosstermEventSource::new`]. Wired
-/// into the real dashboard only by the binary's `real_dashboard`.
-pub struct CrosstermEventSource {
-    poll_fn: fn(Duration) -> std::io::Result<bool>,
-    read_fn: fn() -> std::io::Result<Event>,
-}
-
-#[allow(clippy::new_without_default)] // constructed only by the binary's real_dashboard
-impl CrosstermEventSource {
-    pub fn new() -> Self {
-        Self {
-            poll_fn: crossterm::event::poll,
-            read_fn: crossterm::event::read,
-        }
-    }
-}
-
-impl EventSource for CrosstermEventSource {
-    fn poll_event(&mut self, timeout: Duration) -> std::io::Result<Option<Event>> {
-        if (self.poll_fn)(timeout)? {
-            Ok(Some((self.read_fn)()?))
-        } else {
-            Ok(None)
-        }
-    }
-}
-
-/// Abstracts terminal setup/teardown so `execute_core` can be tested with
-/// a [`ratatui::backend::TestBackend`] and no-op TTY operations. The real
-/// crossterm implementation (`CrosstermSetup`) lives in the binary — see
-/// `real_dashboard` — since it can only be exercised against a real terminal.
-pub trait TerminalSetup {
-    type B: ratatui::backend::Backend;
-    fn enable(&mut self) -> anyhow::Result<()>;
-    fn create_terminal(&mut self) -> anyhow::Result<Terminal<Self::B>>;
-    fn disable(&mut self);
-    fn print_done(&self);
 }
 
 /// Terminal-independent core: runs the dashboard event loop after terminal
@@ -597,184 +558,19 @@ mod tests {
         assert_eq!(agent.stage, "init");
     }
 
-    // ─── run_dashboard_loop / EventSource ───────────────────────────────────
+    // ─── run_dashboard_loop ─────────────────────────────────────────────────
+    //
+    // The terminal doubles these tests drive (`TestEventSource`,
+    // `TestBackendHarness`, `TestSetup`, `key`) are crate-level, in
+    // [`crate::tui`], and shared with the `lev setup` wizard's tests. Keeping
+    // exactly one implementation of each is load-bearing for coverage: it means
+    // [`execute_core`] and [`run_dashboard_loop`] monomorphize over a single
+    // concrete backend / event source in the measured test build, so
+    // `cargo-llvm-cov`'s per-instantiation region report has no partially
+    // covered sibling monomorphization to undercount.
 
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::empty()))
-    }
-
-    /// The single test [`EventSource`] used throughout this module. Keeping
-    /// exactly one implementation means [`execute_core`] and
-    /// [`run_dashboard_loop`] each monomorphize over just one concrete
-    /// `EventSource` in the measured test build, so `cargo-llvm-cov`'s
-    /// per-instantiation region report has no partially-covered sibling
-    /// monomorphization to undercount.
-    ///
-    /// Two modes, both reachable from one type:
-    /// - scripted: yields a fixed sequence (one `Option<Event>` per
-    ///   `poll_event` call -- `Some(e)` -> `Ok(Some(e))`, `None` ->
-    ///   `Ok(None)`, i.e. a simulated poll-timeout tick), then `None` forever
-    ///   once exhausted.
-    /// - failing (`fail = true`): every `poll_event` returns `Err`, to drive
-    ///   `run_dashboard_loop`'s `?`-propagation path.
-    struct TestEventSource {
-        events: std::collections::VecDeque<Option<Event>>,
-        fail: bool,
-    }
-
-    impl TestEventSource {
-        /// Construct from a list of concrete events (all wrapped in `Some`).
-        fn new(events: Vec<Event>) -> Self {
-            Self {
-                events: events.into_iter().map(Some).collect(),
-                fail: false,
-            }
-        }
-
-        /// Construct from a list of `Option<Event>`, allowing explicit `None`
-        /// ticks (simulated poll timeouts with no input) to be interleaved.
-        fn new_with_nones(events: Vec<Option<Event>>) -> Self {
-            Self {
-                events: events.into(),
-                fail: false,
-            }
-        }
-
-        /// Construct a source whose `poll_event` always errors.
-        fn failing() -> Self {
-            Self {
-                events: std::collections::VecDeque::new(),
-                fail: true,
-            }
-        }
-    }
-
-    impl EventSource for TestEventSource {
-        fn poll_event(&mut self, _timeout: Duration) -> std::io::Result<Option<Event>> {
-            if self.fail {
-                return Err(std::io::Error::other("simulated event source failure"));
-            }
-            Ok(self.events.pop_front().flatten())
-        }
-    }
-
-    /// The single test [`ratatui::backend::Backend`] used throughout this
-    /// module: a thin wrapper around a real [`ratatui::backend::TestBackend`]
-    /// that adds a `fail_draw` switch. Using one backend type (rather than a
-    /// separate always-failing backend) keeps [`run_dashboard_loop`] to a
-    /// single monomorphization, so both the success and the `?`-error arms of
-    /// its `terminal.draw(...)?` are exercised within the *same* instantiation
-    /// -- leaving no partially-covered sibling for the region report to flag.
-    struct TestBackendHarness {
-        inner: ratatui::backend::TestBackend,
-        fail_draw: bool,
-    }
-
-    impl TestBackendHarness {
-        fn new(width: u16, height: u16) -> Self {
-            Self {
-                inner: ratatui::backend::TestBackend::new(width, height),
-                fail_draw: false,
-            }
-        }
-
-        fn failing(width: u16, height: u16) -> Self {
-            Self {
-                inner: ratatui::backend::TestBackend::new(width, height),
-                fail_draw: true,
-            }
-        }
-    }
-
-    impl ratatui::backend::Backend for TestBackendHarness {
-        fn draw<'a, I>(&mut self, content: I) -> std::io::Result<()>
-        where
-            I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
-        {
-            if self.fail_draw {
-                return Err(std::io::Error::other("simulated draw failure"));
-            }
-            self.inner.draw(content)
-        }
-
-        fn hide_cursor(&mut self) -> std::io::Result<()> {
-            self.inner.hide_cursor()
-        }
-        fn show_cursor(&mut self) -> std::io::Result<()> {
-            self.inner.show_cursor()
-        }
-        fn get_cursor_position(&mut self) -> std::io::Result<ratatui::layout::Position> {
-            self.inner.get_cursor_position()
-        }
-        fn set_cursor_position<P: Into<ratatui::layout::Position>>(
-            &mut self,
-            position: P,
-        ) -> std::io::Result<()> {
-            self.inner.set_cursor_position(position)
-        }
-        fn clear(&mut self) -> std::io::Result<()> {
-            self.inner.clear()
-        }
-        fn size(&self) -> std::io::Result<ratatui::layout::Size> {
-            self.inner.size()
-        }
-        fn window_size(&mut self) -> std::io::Result<ratatui::backend::WindowSize> {
-            self.inner.window_size()
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            self.inner.flush()
-        }
-    }
-
-    fn test_terminal() -> Terminal<TestBackendHarness> {
-        Terminal::new(TestBackendHarness::new(120, 40)).unwrap()
-    }
-
-    /// Test [`TerminalSetup`] backing [`execute_core`] with a
-    /// [`TestBackendHarness`] terminal and no-op TTY operations, so the generic
-    /// core (and the [`run_dashboard_loop`] it calls) monomorphizes only over
-    /// test doubles in the measured test build -- never over the real
-    /// `CrosstermBackend`, which can't be driven under `cargo test`. The two
-    /// `_should_fail` flags let the error-propagation tests drive
-    /// `execute_core`'s `setup.enable()?` and `setup.create_terminal()?`
-    /// failure arms deterministically.
-    struct TestSetup {
-        enable_should_fail: bool,
-        create_should_fail: bool,
-    }
-
-    impl TestSetup {
-        fn new() -> Self {
-            Self {
-                enable_should_fail: false,
-                create_should_fail: false,
-            }
-        }
-    }
-
-    impl TerminalSetup for TestSetup {
-        type B = TestBackendHarness;
-
-        fn enable(&mut self) -> anyhow::Result<()> {
-            if self.enable_should_fail {
-                anyhow::bail!("simulated enable failure");
-            }
-            Ok(())
-        }
-
-        fn create_terminal(&mut self) -> anyhow::Result<Terminal<Self::B>> {
-            if self.create_should_fail {
-                anyhow::bail!("simulated create_terminal failure");
-            }
-            Terminal::new(TestBackendHarness::new(80, 24)).map_err(anyhow::Error::from)
-        }
-
-        fn disable(&mut self) {}
-
-        fn print_done(&self) {}
-    }
+    use crate::tui::{TestBackendHarness, TestEventSource, TestSetup, key, test_terminal};
+    use crossterm::event::KeyCode;
 
     #[tokio::test]
     async fn run_dashboard_loop_quits_on_esc_from_main_list() {
@@ -832,7 +628,7 @@ mod tests {
         let mut terminal = test_terminal();
         let release = Event::Key(crossterm::event::KeyEvent::new_with_kind(
             KeyCode::Char('x'),
-            KeyModifiers::empty(),
+            crossterm::event::KeyModifiers::empty(),
             crossterm::event::KeyEventKind::Release,
         ));
         let mut events = TestEventSource::new(vec![release, Event::FocusGained, key(KeyCode::Esc)]);
@@ -921,111 +717,9 @@ mod tests {
     // bounded in headless testing); on a real terminal, with no scripted key
     // ever setting `should_quit`, it hangs indefinitely.
 
-    // ─── CrosstermEventSource poll branches ─────────────────────────────────
-
-    fn mock_poll_true(_: Duration) -> std::io::Result<bool> {
-        Ok(true)
-    }
-    fn mock_poll_false(_: Duration) -> std::io::Result<bool> {
-        Ok(false)
-    }
-    fn mock_read_esc() -> std::io::Result<Event> {
-        Ok(Event::Key(KeyEvent::new(
-            KeyCode::Esc,
-            KeyModifiers::empty(),
-        )))
-    }
-
-    #[test]
-    fn crossterm_event_source_poll_true_returns_some_event() {
-        let mut src = CrosstermEventSource {
-            poll_fn: mock_poll_true,
-            read_fn: mock_read_esc,
-        };
-        let result = src.poll_event(Duration::from_millis(0)).unwrap();
-        assert!(result.is_some());
-    }
-
-    #[test]
-    fn crossterm_event_source_poll_false_returns_none() {
-        let mut src = CrosstermEventSource {
-            poll_fn: mock_poll_false,
-            read_fn: mock_read_esc,
-        };
-        let result = src.poll_event(Duration::from_millis(0)).unwrap();
-        assert!(result.is_none());
-    }
-
-    // ─── CrosstermEventSource::poll_event: `?`-propagation branches ─────────
-    //
-    // Both `poll_event` tests above only ever exercise the `Ok` side of each
-    // `?` (`(self.poll_fn)(timeout)?` and `(self.read_fn)()?`). Inject fake
-    // fn pointers that return `Err` to exercise the error-propagation branch
-    // of each `?` individually -- neither touches a real terminal.
-
-    fn mock_poll_err(_: Duration) -> std::io::Result<bool> {
-        Err(std::io::Error::other("simulated poll failure"))
-    }
-
-    fn mock_read_err() -> std::io::Result<Event> {
-        Err(std::io::Error::other("simulated read failure"))
-    }
-
-    #[test]
-    fn crossterm_event_source_poll_fn_error_propagates() {
-        let mut src = CrosstermEventSource {
-            poll_fn: mock_poll_err,
-            read_fn: mock_read_esc,
-        };
-        let result = src.poll_event(Duration::from_millis(0));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn crossterm_event_source_read_fn_error_propagates() {
-        let mut src = CrosstermEventSource {
-            poll_fn: mock_poll_true,
-            read_fn: mock_read_err,
-        };
-        let result = src.poll_event(Duration::from_millis(0));
-        assert!(result.is_err());
-    }
-
-    // ─── CrosstermEventSource::new constructor ──────────────────────────────
-    //
-    // The constructor only *stores* fn pointers (crossterm's real `poll`/`read`);
-    // taking a function's address never invokes it, so constructing the type
-    // touches no real terminal state.
-
-    #[test]
-    fn crossterm_event_source_new_constructs_without_touching_real_events() {
-        let _src = CrosstermEventSource::new();
-    }
-
-    // ─── TestBackendHarness: delegated trait methods ─────────────────────────
-
-    #[test]
-    fn test_backend_harness_non_draw_methods_delegate() {
-        // `terminal.draw(…)` in the loop tests only reaches a subset of the
-        // backend's trait methods, so exercise the rest directly here. They
-        // all just forward to the wrapped `TestBackend`; the `draw` success
-        // arm is covered by the loop tests and the `fail_draw` arm by
-        // `run_dashboard_loop_propagates_draw_error`.
-        use ratatui::backend::Backend as _;
-        let mut backend = TestBackendHarness::new(20, 10);
-        assert!(backend.hide_cursor().is_ok());
-        assert!(backend.show_cursor().is_ok());
-        assert!(backend.get_cursor_position().is_ok());
-        assert!(
-            backend
-                .set_cursor_position(ratatui::layout::Position::new(1, 1))
-                .is_ok()
-        );
-        assert!(backend.clear().is_ok());
-        assert!(backend.size().is_ok());
-        assert!(backend.window_size().is_ok());
-        assert!(backend.flush().is_ok());
-    }
+    // `CrosstermEventSource`'s own poll/read branches and
+    // `TestBackendHarness`'s delegated trait methods are covered where those
+    // types now live, in `crate::tui`.
 
     // ─── execute_core / TestSetup ───────────────────────────────────────────
     //
