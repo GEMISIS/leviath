@@ -11,9 +11,24 @@ pub fn configure_detached(cmd: &mut Command) {
     crate::platform::configure_detached(cmd);
 }
 
+/// The calling user's numeric id.
+///
+/// Used to address a per-user service domain (`launchctl bootstrap gui/<uid>`).
+/// Returns `0` on platforms with no POSIX uid, where no such domain exists.
+pub fn current_uid() -> u32 {
+    crate::platform::current_uid()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_uid_is_reported() {
+        // Just has to answer without panicking; root (0) is a legitimate value
+        // on Unix and the only value on non-Unix.
+        let _uid: u32 = current_uid();
+    }
 
     #[test]
     fn configure_detached_public_wrapper_registers_without_spawning() {

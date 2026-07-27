@@ -138,6 +138,8 @@ impl RiskyExecutors for RealExecutors {
             Some(DaemonAction::Stop) => real_daemon_stop().await,
             Some(DaemonAction::Status) => real_daemon_status().await,
             Some(DaemonAction::Restart) => real_daemon_restart().await,
+            Some(DaemonAction::Install) => real_daemon_install(),
+            Some(DaemonAction::Uninstall) => real_daemon_uninstall(),
         }
     }
 
@@ -282,6 +284,14 @@ async fn real_daemon_status() -> anyhow::Result<()> {
         0
     };
     println!("{}", commands::daemon::format_status(running, count));
+    // Supervision is best-effort information: on a platform with no supported
+    // supervisor there is simply nothing to report.
+    if let Ok(unit) = resolve_service_unit() {
+        println!(
+            "{}",
+            commands::daemon_service::format_supervision(unit.path.exists(), &unit.path)
+        );
+    }
     Ok(())
 }
 
@@ -290,6 +300,69 @@ async fn real_daemon_status() -> anyhow::Result<()> {
 async fn real_daemon_restart() -> anyhow::Result<()> {
     real_daemon_stop().await?;
     real_daemon_start().await
+}
+
+/// Resolve the platform's service definition for this installation. Wiring only
+/// — the rendering, paths, and command lines are the tested
+/// `commands::daemon_service` core; this supplies the real exe path, home
+/// directory, and uid.
+fn resolve_service_unit() -> anyhow::Result<commands::daemon_service::ServiceUnit> {
+    let user_home = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the service file"))?;
+    let leviath_home = leviath_cli::config::leviath_home_dir()
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve a leviath home directory"))?
+        .join(".leviath");
+    let exe = std::env::current_exe()?;
+    commands::daemon_service::service_unit(
+        &exe,
+        &leviath_home,
+        &commands::daemon_service::config_home(&user_home)?,
+        leviath_sys::current_uid(),
+    )
+}
+
+/// Run a supervisor command (`launchctl` / `systemctl`), reporting its stderr on
+/// failure. The real subprocess spawn — the argv it runs is built and tested in
+/// `commands::daemon_service`.
+fn run_supervisor(cmd: &(String, Vec<String>)) -> anyhow::Result<()> {
+    let out = std::process::Command::new(&cmd.0).args(&cmd.1).output()?;
+    if out.status.success() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "`{} {}` failed: {}",
+        cmd.0,
+        cmd.1.join(" "),
+        String::from_utf8_lossy(&out.stderr).trim()
+    )
+}
+
+/// `lev daemon install`: write the platform service file and hand it to the
+/// supervisor, so the daemon starts at login and is restarted if it ever dies.
+fn real_daemon_install() -> anyhow::Result<()> {
+    let unit = resolve_service_unit()?;
+    let path = commands::daemon_service::install(&unit)?;
+    println!("wrote {}", path.display());
+    // Re-registering a live service is an error on both platforms; drop any
+    // previous registration first so `install` is idempotent.
+    let _ = run_supervisor(&unit.deactivate);
+    run_supervisor(&unit.activate)?;
+    println!("the leviath daemon is now supervised and will restart automatically");
+    Ok(())
+}
+
+/// `lev daemon uninstall`: deregister from the supervisor and remove the file.
+fn real_daemon_uninstall() -> anyhow::Result<()> {
+    let unit = resolve_service_unit()?;
+    // Deregistration fails when nothing is registered; that's the desired end
+    // state either way, so only the file removal is reported.
+    let _ = run_supervisor(&unit.deactivate);
+    if commands::daemon_service::uninstall(&unit)? {
+        println!("removed {}", unit.path.display());
+    } else {
+        println!("no leviath service was installed");
+    }
+    Ok(())
 }
 
 /// Real `lev daemon`: bind the platform control socket and drive the shared world

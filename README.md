@@ -102,7 +102,10 @@ lev run deep-researcher --task "Survey the current state of solid-state battery 
 `lev run` hands the agent to a background **daemon** that hosts every agent in
 one shared world, so runs keep going after your terminal closes. The daemon
 starts automatically on first use (run it yourself with `lev daemon` to watch its
-logs). Inspect and steer running agents from any terminal:
+logs). For unattended, long-running agents, `lev daemon install` hands it to the
+OS supervisor — launchd on macOS, a systemd `--user` unit on Linux — so it starts
+at login and comes back on its own if it ever dies; on the next start it reloads
+every interrupted run. Inspect and steer running agents from any terminal:
 
 ```bash
 lev ps                       # list running agents and their status
@@ -412,6 +415,7 @@ For a clean "sling a task and get a result" flow with Gas City, prefer **autonom
 | `lev cancel <run-id>` | Cancel a running agent |
 | `lev respond [req-id] [value]` | List or answer pending `ask_user` interactions |
 | `lev daemon` | Run the shared-world daemon in the foreground |
+| `lev daemon install` / `uninstall` | Supervise the daemon (launchd / systemd `--user`) so it restarts automatically |
 | `lev dash` | TUI dashboard |
 | `lev serve` | REST + WebSocket API server |
 | `lev agent-client` | Serve an agent over the Agent Client Protocol (stdio; Gas City / Zed) |

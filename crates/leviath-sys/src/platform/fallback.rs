@@ -17,3 +17,9 @@ pub(crate) fn ensure_private(_path: &Path, _mode: u32) -> io::Result<Option<u32>
 }
 
 pub(crate) fn configure_detached(_cmd: &mut std::process::Command) {}
+
+/// Windows has no POSIX uid; the value is only used to address a per-user
+/// launchd/systemd domain, neither of which exists here.
+pub(crate) fn current_uid() -> u32 {
+    0
+}

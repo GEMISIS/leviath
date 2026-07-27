@@ -6,6 +6,7 @@ pub mod context;
 pub mod create;
 pub mod ctl;
 pub mod daemon;
+pub mod daemon_service;
 pub mod dashboard;
 pub mod list;
 pub mod mcp;
