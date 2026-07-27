@@ -174,6 +174,7 @@ pub fn restore_fan_out_waiting(
 /// `Error` if the split output isn't a JSON array). Removing `ProcessResponse`
 /// here keeps the normal `process_response` routing from touching these agents.
 pub fn fan_out_split(world: &mut World) {
+    crate::tick_scope::clear();
     let mut candidates: Vec<(Entity, String, FanOutConfig)> = Vec::new();
     {
         let mut q = world.query_filtered::<(
@@ -194,6 +195,7 @@ pub fn fan_out_split(world: &mut World) {
     }
 
     for (parent, response, config) in candidates {
+        crate::tick_scope::enter(parent);
         world
             .entity_mut(parent)
             .remove::<ProcessResponse>()
@@ -229,12 +231,14 @@ pub fn fan_out_split(world: &mut World) {
 /// running apply the failure policy, inject the consolidated report, and
 /// transition to the merge stage (or resolve the stage's own transition).
 pub fn fan_out_collect(world: &mut World) {
+    crate::tick_scope::clear();
     let parents: Vec<Entity> = {
         let mut q = world.query_filtered::<Entity, With<FanOutWaiting>>();
         q.iter(world).collect()
     };
 
     for parent in parents {
+        crate::tick_scope::enter(parent);
         // A cancelled/errored parent abandons the fan-out; its workers are reaped
         // by the host's cascade cancel (which walks SubAgentChildren).
         if !matches!(agent_status(world, parent), Some(AgentStatus::Waiting)) {
