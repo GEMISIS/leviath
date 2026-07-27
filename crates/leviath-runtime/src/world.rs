@@ -53,6 +53,38 @@ use crate::tool_bridge::spawn_tool_pool;
 /// Two consecutive equal fingerprints mean a tick changed nothing (quiescence).
 type Fingerprint = [usize; 10];
 
+/// How many attributed system panics one [`PipelineWorld::run_to_fixed_point`]
+/// round will absorb before it stops driving. Each one fails a different agent,
+/// so this only bites if the world is thoroughly broken — it exists so a
+/// pathological agent can't spin the loop.
+const MAX_TICK_FAILURES_PER_ROUND: usize = 8;
+
+/// A schedule configured the way the pipeline needs it.
+///
+/// Every pipeline system is `.chain()`ed, so the multi-threaded executor can
+/// never overlap two of them — it only adds a hop through the compute task
+/// pool. Running single-threaded keeps systems on the thread that catches their
+/// panics, which is what lets [`run_isolated`] read the offending agent out of
+/// the (thread-local) [`crate::tick_scope`] (issue #109).
+fn tick_schedule() -> Schedule {
+    let mut schedule = Schedule::default();
+    schedule.set_executor_kind(bevy_ecs::schedule::ExecutorKind::SingleThreaded);
+    schedule
+}
+
+/// What one [`PipelineWorld::tick`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TickOutcome {
+    /// Every system ran to completion.
+    Clean,
+    /// A system panicked and the agent responsible was failed; the rest of the
+    /// world is unaffected and can keep being driven.
+    AgentFailed,
+    /// A system panicked with no agent in scope, so nothing could be failed.
+    /// Re-ticking would just re-panic.
+    Unattributed,
+}
+
 /// The shared ECS world that hosts and drives every agent.
 pub struct PipelineWorld {
     world: World,
@@ -82,9 +114,10 @@ impl PipelineWorld {
         runs_dir: std::path::PathBuf,
         runtime: Handle,
     ) -> Self {
-        // The multi-threaded schedule executor and `Query::par_iter` fan out over
-        // the compute task pool; initialize it once (idempotent) so per-agent
-        // phases (e.g. request assembly in `dispatch_inference`) run in parallel.
+        // `Query::par_iter` fans out over the compute task pool; initialize it
+        // once (idempotent) so per-agent request assembly in `dispatch_inference`
+        // runs in parallel. (The schedule executor itself is single-threaded —
+        // see `tick_schedule`.)
         bevy_tasks::ComputeTaskPool::get_or_init(bevy_tasks::TaskPool::default);
 
         let wake = Arc::new(Notify::new());
@@ -151,7 +184,7 @@ impl PipelineWorld {
 
         // The tick chain is split into two `.chain()`ed groups (bevy caps a
         // system tuple at 20); the second group runs strictly after the first.
-        let mut schedule = Schedule::default();
+        let mut schedule = tick_schedule();
         schedule.add_systems(
             (
                 deliver_messages,
@@ -381,11 +414,42 @@ impl PipelineWorld {
         self.set_status(entity, AgentStatus::Cancelled)
     }
 
-    /// Run one schedule tick over every agent. Returns `false` if a system
-    /// panicked — the panic is caught so one bad agent can't crash the daemon
-    /// and take down every other hosted agent with it.
-    pub fn tick(&mut self) -> bool {
-        run_isolated(&mut self.schedule, &mut self.world)
+    /// Run one schedule tick over every agent, catching a panic from any system
+    /// so one bad agent can't crash the daemon and take every other hosted agent
+    /// with it.
+    ///
+    /// When the panic can be traced to a specific agent (the usual case — see
+    /// [`crate::tick_scope`]), that agent is failed with the panic message so it
+    /// stops being driven, its run is persisted as errored, and the host reaps
+    /// it. Without that, the world would re-tick the same unchanged state on
+    /// every wake and panic again indefinitely (issue #109).
+    pub fn tick(&mut self) -> TickOutcome {
+        let Err(panicked) = run_isolated(&mut self.schedule, &mut self.world) else {
+            return TickOutcome::Clean;
+        };
+        let message = format!(
+            "internal error: a pipeline system panicked: {}",
+            panicked.message
+        );
+        match panicked.entity {
+            Some(entity) if self.set_status(entity, AgentStatus::Error { message }) => {
+                tracing::error!(
+                    ?entity,
+                    panic = %panicked.message,
+                    "a pipeline system panicked; failing that agent — the daemon and every \
+                     other run keep going"
+                );
+                TickOutcome::AgentFailed
+            }
+            _ => {
+                tracing::error!(
+                    panic = %panicked.message,
+                    "a pipeline system panicked outside any agent's scope; the daemon survived \
+                     (an agent may be wedged — cancel it via `lev cancel <run-id>`)"
+                );
+                TickOutcome::Unattributed
+            }
+        }
     }
 
     /// Append a system to the schedule (test-only, for panic-isolation tests).
@@ -431,16 +495,33 @@ impl PipelineWorld {
     /// host loop can interleave control operations between quiescent points.
     pub fn run_to_fixed_point(&mut self) {
         let mut prev = self.fingerprint();
+        let mut failures = 0;
         loop {
-            if !self.tick() {
-                // A system panicked; stop driving this round. The daemon stays
-                // alive, other agents keep running, and the wedged agent can be
-                // cancelled via the control socket (dispatch systems skip
-                // non-Active agents once cancelled).
-                break;
+            let outcome = self.tick();
+            match outcome {
+                TickOutcome::Clean => {}
+                // The offending agent has been failed, so it won't be driven
+                // again. Keep ticking: the rest of the world still has work to
+                // do, and only a later tick reaches `dispatch_persistence` (the
+                // last system in the chain) to record the failure on disk. The
+                // budget stops a pathological agent that somehow panics again
+                // from spinning this loop.
+                TickOutcome::AgentFailed if failures < MAX_TICK_FAILURES_PER_ROUND => {
+                    failures += 1;
+                }
+                // Nothing to fail, so re-ticking would just re-panic: stop
+                // driving this round. The daemon stays alive, other agents keep
+                // running, and a wedged agent can be cancelled via the control
+                // socket (dispatch systems skip non-Active agents once
+                // cancelled).
+                TickOutcome::AgentFailed | TickOutcome::Unattributed => break,
             }
             let now = self.fingerprint();
-            if now == prev {
+            // Quiescence, but only trust it after a clean tick: a panicking tick
+            // abandons the rest of the chain (and its buffered commands), so the
+            // markers can look unchanged while the world very much has changed.
+            // Force at least one more tick so the failed agent gets persisted.
+            if now == prev && outcome == TickOutcome::Clean {
                 break;
             }
             prev = now;
@@ -476,20 +557,51 @@ impl PipelineWorld {
     }
 }
 
+/// A panic caught while ticking the schedule, and the agent it belongs to.
+struct TickPanic {
+    /// The agent being processed when the panic fired, if the pipeline had
+    /// recorded one (see [`crate::tick_scope`]).
+    entity: Option<Entity>,
+    /// The panic payload rendered as text.
+    message: String,
+}
+
 /// Run a schedule over a world, catching a panic from any system so it can't
-/// unwind the daemon's drive loop and take down every hosted agent. Returns
-/// `true` on a clean tick, `false` (logged) if a system panicked. The world may
-/// be partially updated after a panic; the offending agent stays as-is and can
-/// be cancelled via the control socket.
-fn run_isolated(schedule: &mut Schedule, world: &mut World) -> bool {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| schedule.run(world)));
-    if result.is_err() {
-        tracing::error!(
-            "a pipeline system panicked; the daemon survived (an agent may be \
-             wedged — cancel it via `lev cancel <run-id>`)"
-        );
+/// unwind the daemon's drive loop and take down every hosted agent.
+///
+/// The world may be partially updated after a panic: the panicking system's
+/// buffered `Commands` are lost, but resources and components already written
+/// are intact, so the caller can still fail the offending agent.
+fn run_isolated(schedule: &mut Schedule, world: &mut World) -> Result<(), TickPanic> {
+    // Clear first: the slot is thread-local and survives across ticks, so a
+    // stale entity from an earlier tick must not be blamed for this one.
+    crate::tick_scope::clear();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| schedule.run(world))) {
+        Ok(()) => Ok(()),
+        Err(payload) => {
+            reset_executor(schedule);
+            Err(TickPanic {
+                entity: crate::tick_scope::current(),
+                message: leviath_core::panic_message(payload.as_ref()),
+            })
+        }
     }
-    result.is_ok()
+}
+
+/// Give `schedule` a fresh executor after a caught panic.
+///
+/// bevy's executors mark a system "completed" *before* running it and only
+/// clear that set when `run` returns normally. A panic therefore leaves every
+/// system up to and including the offending one marked done, so the **next**
+/// tick silently skips them and only runs the tail of the chain — a partial
+/// tick that would, among other things, keep `dispatch_persistence` from ever
+/// seeing an agent we just failed. Swapping the executor kind and back is the
+/// public API for forcing a rebuild (`set_executor_kind` is a no-op when the
+/// kind is unchanged).
+fn reset_executor(schedule: &mut Schedule) {
+    use bevy_ecs::schedule::ExecutorKind;
+    schedule.set_executor_kind(ExecutorKind::Simple);
+    schedule.set_executor_kind(ExecutorKind::SingleThreaded);
 }
 
 #[cfg(test)]
@@ -506,28 +618,58 @@ mod tests {
     /// its own panic. (The guard is only ever held across synchronous work.)
     static PANIC_HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Run `f` with the process panic hook silenced (the panic is expected), and
+    /// serialized against the other hook-swapping tests.
+    fn with_silent_panics<T>(f: impl FnOnce() -> T) -> T {
+        let _hook_guard = PANIC_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let out = f();
+        std::panic::set_hook(prev_hook);
+        out
+    }
+
     #[test]
-    fn run_isolated_catches_a_system_panic() {
+    fn run_isolated_catches_a_system_panic_and_reports_the_agent() {
         fn ok_system() {}
         fn boom_system() {
             panic!("simulated system panic");
         }
+        // A system that panics *while working on a specific agent* — the shape
+        // every real pipeline system has.
+        fn boom_on_agent_system() {
+            crate::tick_scope::enter(Entity::from_raw(41));
+            panic!("agent-scoped panic");
+        }
         let mut world = World::new();
 
         // A clean schedule ticks normally.
-        let mut ok = Schedule::default();
+        let mut ok = tick_schedule();
         ok.add_systems(ok_system);
-        assert!(run_isolated(&mut ok, &mut world));
+        assert!(run_isolated(&mut ok, &mut world).is_ok());
 
-        // A panicking system is caught (the daemon would survive).
-        let mut bad = Schedule::default();
+        // A panicking system is caught (the daemon would survive) and, with no
+        // agent in scope, reports no entity to blame.
+        let mut bad = tick_schedule();
         bad.add_systems(boom_system);
-        let _hook_guard = PANIC_HOOK_LOCK.lock().expect("panic-hook lock poisoned");
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {})); // silence the expected panic
-        let survived = run_isolated(&mut bad, &mut world);
-        std::panic::set_hook(prev_hook);
-        assert!(!survived);
+        let err = with_silent_panics(|| run_isolated(&mut bad, &mut world))
+            .expect_err("the panic must be caught");
+        assert_eq!(err.entity, None);
+        assert_eq!(err.message, "simulated system panic");
+
+        // With an agent in scope, the panic is attributed to it.
+        let mut blamed = tick_schedule();
+        blamed.add_systems(boom_on_agent_system);
+        let err = with_silent_panics(|| run_isolated(&mut blamed, &mut world))
+            .expect_err("the panic must be caught");
+        assert_eq!(err.entity, Some(Entity::from_raw(41)));
+        assert_eq!(err.message, "agent-scoped panic");
+
+        // A later clean tick must not inherit the previous tick's entity.
+        assert!(run_isolated(&mut ok, &mut world).is_ok());
+        assert_eq!(crate::tick_scope::current(), None);
     }
 
     use crate::components::{AgentState, ContextWindow, InferenceConfig};
@@ -739,11 +881,59 @@ mod tests {
         }
         let mut world = build_world(ProviderRegistry::new());
         world.add_test_system(boom_system);
-        let _hook_guard = PANIC_HOOK_LOCK.lock().expect("panic-hook lock poisoned");
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        world.run_to_fixed_point(); // returns (breaks on the caught panic)
-        std::panic::set_hook(prev_hook);
+        // Unattributed: nothing to fail, so the round stops immediately.
+        with_silent_panics(|| world.run_to_fixed_point());
+    }
+
+    #[tokio::test]
+    async fn a_panicking_system_fails_its_agent_instead_of_looping_forever() {
+        // Before issue #109 was fixed, a panicking system was swallowed
+        // anonymously: nothing changed, so the very next wake re-ticked the same
+        // state and panicked again, forever, while every other agent stalled.
+        // Now the agent in scope is failed, which takes it out of the dispatch
+        // systems (they only act on `Active` agents) and lets the world settle.
+        static VICTIM: std::sync::Mutex<Option<Entity>> = std::sync::Mutex::new(None);
+        static PANICS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+        fn boom_on_active_agent(agents: Query<(Entity, &AgentState)>) {
+            // No trailing statements after the `panic!`: an unreachable tail
+            // would read as uncovered under the workspace's 100% gate.
+            let Some((entity, _)) = agents
+                .iter()
+                .find(|(_, state)| state.status == AgentStatus::Active)
+            else {
+                return; // the agent has been failed — nothing left to blow up
+            };
+            crate::tick_scope::enter(entity);
+            *VICTIM
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(entity);
+            PANICS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            panic!("blew up on this agent");
+        }
+
+        let mut world = build_world(ProviderRegistry::new());
+        let entity = spawn(&mut world);
+        world.add_test_system(boom_on_active_agent);
+        with_silent_panics(|| world.run_to_fixed_point());
+
+        let victim = VICTIM
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        assert_eq!(victim, Some(entity), "the system saw the spawned agent");
+        let status = world.agent_status(entity);
+        assert!(
+            matches!(status, Some(AgentStatus::Error { ref message })
+                if message.contains("a pipeline system panicked")
+                    && message.contains("blew up on this agent")),
+            "got: {status:?}"
+        );
+        // The loop terminated rather than re-panicking without bound.
+        assert!(
+            PANICS.load(std::sync::atomic::Ordering::SeqCst) <= MAX_TICK_FAILURES_PER_ROUND + 1,
+            "the panic budget must stop the round"
+        );
     }
 
     fn registry_with(responses: Vec<InferenceResponse>) -> ProviderRegistry {
@@ -1071,6 +1261,84 @@ mod tests {
         let meta = meta.expect("final Complete snapshot flushed to disk");
         assert_eq!(meta.run_id, "run-42");
         assert!(dir.path().join("run-42").join("context.json").exists());
+    }
+
+    #[tokio::test]
+    async fn a_panicked_agent_is_recorded_as_errored_on_disk() {
+        // The reported symptom in issue #109: a crashed run stayed `"running"`
+        // in meta.json forever. `dispatch_persistence` is the *last* system in
+        // the chain, so the tick that panics never reaches it — which is exactly
+        // why `run_to_fixed_point` keeps driving after failing the agent.
+        fn boom_on_active_agent(agents: Query<(Entity, &AgentState)>) {
+            let Some((entity, _)) = agents
+                .iter()
+                .find(|(_, state)| state.status == AgentStatus::Active)
+            else {
+                return; // the agent has been failed — nothing left to blow up
+            };
+            crate::tick_scope::enter(entity);
+            panic!("exploded mid-stage");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut world = PipelineWorld::new(
+            registry_with(vec![]),
+            Arc::new(EchoTools),
+            InferencePoolConfig::new(),
+            1,
+            dir.path().to_path_buf(),
+            Handle::current(),
+        );
+        world.spawn_agent((
+            AgentBlueprint(blueprint()),
+            StageCursor { index: 0 },
+            agent_state(),
+            crate::components::MessageInbox::default(),
+            StageProgress::default(),
+            StageInferences(vec![stage("m")]),
+            StageSetups(vec![setup()]),
+            VisitCounts::default(),
+            window(),
+            stage("m"),
+            setup().inference_config,
+            crate::persistence::RunMetadata {
+                run_id: "run-boom".to_string(),
+                agent_name: "a".to_string(),
+                agent_path: "/p".to_string(),
+                task: "t".to_string(),
+                model: None,
+                workdir: "/w".to_string(),
+                num_stages: 1,
+                started_at: 0,
+                parent_run_id: None,
+                metadata: std::collections::HashMap::new(),
+                callback_url: None,
+                callback_secret: None,
+                title: None,
+            },
+            crate::persistence::TokenTotals::default(),
+            crate::pipeline::PersistWatermark::default(),
+            ReadyToInfer,
+        ));
+        world.add_test_system(boom_on_active_agent);
+        with_silent_panics(|| world.run_to_fixed_point());
+
+        let meta_path = dir.path().join("run-boom").join("meta.json");
+        let mut meta = None;
+        for _ in 0..200 {
+            if let Ok(text) = std::fs::read_to_string(&meta_path)
+                && let Ok(m) = serde_json::from_str::<leviath_core::run_meta::RunMeta>(&text)
+                && m.status == leviath_core::run_meta::RunStatus::Error
+            {
+                meta = Some(m);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let meta = meta.expect("the panicked run must be persisted as errored");
+        let error = meta.error.unwrap_or_default();
+        assert!(error.contains("a pipeline system panicked"), "got: {error}");
+        assert!(error.contains("exploded mid-stage"), "got: {error}");
     }
 
     /// A single-stage blueprint whose stage is an `interactive_points` stage with a

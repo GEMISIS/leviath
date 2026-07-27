@@ -29,6 +29,7 @@ pub mod repetition;
 pub mod restore;
 pub mod script_provider;
 pub mod taint;
+pub mod tick_scope;
 pub mod tool_bridge;
 pub mod world;
 // test_support.rs gates itself with an inner `#![cfg(test)]` attribute, so no

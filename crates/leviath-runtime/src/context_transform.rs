@@ -106,7 +106,9 @@ pub fn dispatch_content_summary(
     providers: Res<Providers>,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     for (entity, state, pending, settings) in agents.iter() {
+        crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue; // paused / cancelled — don't start new work
         }
@@ -159,10 +161,12 @@ pub fn collect_content_summary(
     mut agents: Query<&mut ContextWindow, With<AwaitingContentSummary>>,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     while let Ok(outcome) = results.0.try_recv() {
         let Ok(mut window) = agents.get_mut(outcome.entity) else {
             continue; // stale: child cancelled/despawned since dispatch
         };
+        crate::tick_scope::enter(outcome.entity);
         if let Ok(summaries) = outcome.result {
             for (region, summary) in summaries {
                 let tokens = summary.len() / 4 + 1;

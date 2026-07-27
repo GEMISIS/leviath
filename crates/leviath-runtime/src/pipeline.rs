@@ -231,6 +231,13 @@ pub fn dispatch_inference(
     // per-agent CPU cost and is independent, so it runs in parallel on the
     // compute pool. Permit acquisition (an atomic semaphore) and the tokio spawn
     // are thread-safe; the marker swap is batched via `ParallelCommands`.
+    //
+    // This is the one system whose body runs off the driver thread, so
+    // `tick_scope` (a thread-local) can't attribute a panic raised in here to
+    // the agent that caused it. Clear it so such a panic is reported
+    // unattributed rather than blamed on whichever agent a previous system
+    // happened to leave recorded (issue #109).
+    crate::tick_scope::clear();
     agents
         .par_iter()
         .for_each(|(entity, state, window, config, si)| {
@@ -317,11 +324,13 @@ pub fn collect_inference(
     >,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     while let Ok(outcome) = results.0.try_recv() {
         let Ok((mut state, totals, cursor, mut ledger, buffer)) = agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
         };
+        crate::tick_scope::enter(outcome.entity);
         let idx = cursor.map_or(0, |c| c.index);
         match outcome.result {
             Ok(response) => {
@@ -454,7 +463,9 @@ pub fn process_response(
     >,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     for (entity, result, mut progress, totals) in agents.iter_mut() {
+        crate::tick_scope::enter(entity);
         progress.iterations += 1; // per-stage inference count (for max_iterations)
         let mut e = commands.entity(entity);
         e.remove::<ProcessResponse>();
@@ -494,7 +505,9 @@ pub fn handle_empty_response(
     >,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     for (entity, mut window, infer, mut progress) in agents.iter_mut() {
+        crate::tick_scope::enter(entity);
         if progress.total_tool_calls > 0 || progress.text_only_nudges >= MAX_TEXT_ONLY_NUDGES {
             commands
                 .entity(entity)
@@ -653,6 +666,7 @@ pub fn dispatch_tools(
     gate_stage: Option<Res<crate::gate_prompt::GatePromptStage>>,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     let default_policy = leviath_core::PolicyConfig::default();
     let policy_ref = policy.as_ref().map(|p| &p.0).unwrap_or(&default_policy);
     let script_checker = script_rules.as_ref().map(|r| r.0.as_ref());
@@ -672,6 +686,7 @@ pub fn dispatch_tools(
         auto_gate,
     ) in agents.iter_mut()
     {
+        crate::tick_scope::enter(entity);
         // `--yolo`: waive taint-gate enforcement so a headless run never blocks
         // on a gate prompt no one can answer (taint tracking still records).
         let auto_approve_gates = auto_gate.is_some();
@@ -1122,6 +1137,7 @@ pub fn collect_tools(
     >,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     while let Ok(outcome) = results.0.try_recv() {
         let Ok((
             mut window,
@@ -1137,6 +1153,7 @@ pub fn collect_tools(
         else {
             continue; // stale: agent cancelled/despawned since dispatch
         };
+        crate::tick_scope::enter(outcome.entity);
         // Merge the inline context-tool results (if any) with the lane results,
         // ordered by the original tool calls.
         let mut parts = outcome.results;
@@ -1231,7 +1248,9 @@ pub fn dispatch_compaction(
     providers: Res<Providers>,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     for (entity, state, mut window, settings) in agents.iter_mut() {
+        crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue; // paused / waiting / cancelled — don't start new work
         }
@@ -1306,10 +1325,12 @@ pub fn collect_compaction(
     mut agents: Query<&mut ContextWindow, With<AwaitingCompaction>>,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     while let Ok(outcome) = results.0.try_recv() {
         let Ok(mut window) = agents.get_mut(outcome.entity) else {
             continue; // stale: agent cancelled/despawned since dispatch
         };
+        crate::tick_scope::enter(outcome.entity);
         if let Ok(summaries) = outcome.result {
             for (region_name, summary) in summaries {
                 let summary_tokens = summary.len() / 4;
@@ -1460,7 +1481,9 @@ pub fn dispatch_edge_compact(
     providers: Res<Providers>,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     for (entity, state, window, pending, settings) in agents.iter_mut() {
+        crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue; // paused / waiting / cancelled — don't start new work
         }
@@ -1558,10 +1581,12 @@ pub fn reflect_interaction_status(
     >,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     let Some(hub) = hub else { return };
     let pending: std::collections::HashSet<String> =
         hub.pending().into_iter().map(|(id, _)| id).collect();
     for (entity, mut state, marked) in agents.iter_mut() {
+        crate::tick_scope::enter(entity);
         match (pending.contains(&state.agent_id), marked.is_some()) {
             // Newly blocked on a prompt: surface it as Waiting.
             (true, false) => {
@@ -1626,6 +1651,7 @@ fn reconcile_stage_ledger(
 #[allow(clippy::type_complexity)]
 pub fn dispatch_persistence(
     mut agents: Query<(
+        Entity,
         &RunMetadata,
         &AgentState,
         &ContextWindow,
@@ -1648,7 +1674,9 @@ pub fn dispatch_persistence(
     hub: Option<Res<InteractionHub>>,
     sink: Option<Res<crate::host::WorldEventSink>>,
 ) {
+    crate::tick_scope::clear();
     for (
+        entity,
         md,
         state,
         window,
@@ -1664,6 +1692,7 @@ pub fn dispatch_persistence(
         (awaiting_point, ip_cursor, ip_rounds),
     ) in agents.iter_mut()
     {
+        crate::tick_scope::enter(entity);
         let now = chrono::Utc::now().timestamp();
 
         // Reconcile the stage ledger every persist tick so status/timestamps track
@@ -1772,15 +1801,17 @@ pub struct MessageIntake(pub UnboundedReceiver<AgentMessage>);
 /// `AgentEngine::process_messages` / `deliver_inbox_messages`.
 pub fn deliver_messages(
     mut intake: ResMut<MessageIntake>,
-    mut agents: Query<(&AgentState, &mut MessageInbox, &mut ContextWindow)>,
+    mut agents: Query<(Entity, &AgentState, &mut MessageInbox, &mut ContextWindow)>,
 ) {
+    crate::tick_scope::clear();
     // Route inbound channel messages to their target agent's inbox.
     let mut incoming = Vec::new();
     while let Ok(msg) = intake.0.try_recv() {
         incoming.push(msg);
     }
     for msg in incoming {
-        for (state, mut inbox, _) in agents.iter_mut() {
+        for (entity, state, mut inbox, _) in agents.iter_mut() {
+            crate::tick_scope::enter(entity);
             if state.agent_id == msg.agent_id {
                 inbox.push(msg.clone());
                 break;
@@ -1790,7 +1821,8 @@ pub fn deliver_messages(
     }
 
     // Deliver inboxes into context windows for agents that accept messages.
-    for (state, mut inbox, mut window) in agents.iter_mut() {
+    for (entity, state, mut inbox, mut window) in agents.iter_mut() {
+        crate::tick_scope::enter(entity);
         if !state.accepts_messages {
             continue; // hold until a stage that accepts messages
         }
@@ -1916,7 +1948,9 @@ pub fn enforce_max_iterations(
     >,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     for (entity, state, bp, cursor, progress) in agents.iter() {
+        crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue;
         }
@@ -2016,6 +2050,7 @@ fn is_terminal_status(status: &AgentStatus) -> bool {
 /// resumes (re-inserting `ResolveTransition`, back to `Active`) once every child
 /// is terminal.
 pub fn gate_requires_children(world: &mut World) {
+    crate::tick_scope::clear();
     use crate::components::SubAgentChildren;
 
     // Hold: transitioning agents whose stage requires children that aren't done.
@@ -2036,6 +2071,7 @@ pub fn gate_requires_children(world: &mut World) {
         }
     }
     for (entity, children) in candidates {
+        crate::tick_scope::enter(entity);
         let pending = children.iter().any(|&c| {
             world
                 .get::<AgentState>(c)
@@ -2054,6 +2090,7 @@ pub fn gate_requires_children(world: &mut World) {
     }
 
     // Resume: held agents whose children have all finished.
+    crate::tick_scope::clear();
     let mut waiting: Vec<(Entity, Vec<Entity>)> = Vec::new();
     {
         let mut q = world.query_filtered::<
@@ -2065,6 +2102,7 @@ pub fn gate_requires_children(world: &mut World) {
         }
     }
     for (entity, children) in waiting {
+        crate::tick_scope::enter(entity);
         let all_done = children.iter().all(|&c| {
             world
                 .get::<AgentState>(c)
@@ -2173,7 +2211,9 @@ pub fn require_context_regions(
     >,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     for (entity, bp, cursor, mut window, reentries, outcome) in agents.iter_mut() {
+        crate::tick_scope::enter(entity);
         if outcome.is_some() {
             continue; // error / max-iterations transition takes precedence
         }
@@ -2227,6 +2267,7 @@ pub fn resolve_transition(
     >,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     use leviath_core::blueprint::TransitionCondition;
     for (
         entity,
@@ -2241,6 +2282,7 @@ pub fn resolve_transition(
         outcome,
     ) in agents.iter_mut()
     {
+        crate::tick_scope::enter(entity);
         let stage = &bp.0.stages[cursor.index];
         // How the stage ended governs the transition: an error/max-iterations
         // outcome follows its conditioned edge (e.g. → error_recovery) if present.
@@ -2915,7 +2957,9 @@ pub fn dispatch_transition_choice(
     providers: Res<Providers>,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     for (entity, state, mut window, si, bp, cursor, choice) in agents.iter_mut() {
+        crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue; // paused / waiting / cancelled — don't start new work
         }
@@ -2991,6 +3035,7 @@ pub fn collect_transition_choice(
     )>,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     while let Ok(outcome) = results.0.try_recv() {
         let Ok((
             bp,
@@ -3006,6 +3051,7 @@ pub fn collect_transition_choice(
         else {
             continue; // stale: agent cancelled/despawned since dispatch
         };
+        crate::tick_scope::enter(outcome.entity);
         let response = match outcome.result {
             Ok(response) => response,
             Err(err) => {
@@ -3094,7 +3140,9 @@ pub fn sync_tool_stages(
     entered: Query<(Entity, &StageJustEntered)>,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     for (entity, stage) in entered.iter() {
+        crate::tick_scope::enter(entity);
         service.0.sync_stage(entity, stage.index, &stage.name);
         commands.entity(entity).remove::<StageJustEntered>();
     }
@@ -3120,7 +3168,9 @@ pub fn refresh_advertised_tools(
     >,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     for (entity, cursor, mut si, mut sis) in agents.iter_mut() {
+        crate::tick_scope::enter(entity);
         if let Some(tools) = service.0.refresh_tools(entity, cursor.index) {
             si.tools = tools.clone();
             // Keep the catalog entry in sync so re-entering this stage advertises
@@ -3142,7 +3192,9 @@ pub fn poll_dynamic_tool_refresh(
     agents: Query<Entity, With<DynamicTools>>,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     for entity in agents.iter() {
+        crate::tick_scope::enter(entity);
         if service.0.wants_refresh(entity) {
             commands.entity(entity).insert(ToolsNeedRefresh);
         }

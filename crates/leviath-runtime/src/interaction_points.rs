@@ -407,7 +407,9 @@ pub fn gate_interaction_points(
     >,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     for (entity, bp, cursor, pc) in agents.iter() {
+        crate::tick_scope::enter(entity);
         let Some(points) = stage_points(bp, cursor) else {
             continue;
         };
@@ -445,12 +447,14 @@ pub fn dispatch_interaction_point(
     stage: Option<Res<InteractionPointStage>>,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     let (Some(hub), Some(stage)) = (hub, stage) else {
         return; // no lane wired (test world)
     };
     for (entity, state, bp, cursor, infer, mut window, pc, rounds, plan_override) in
         agents.iter_mut()
     {
+        crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue; // paused / cancelled — don't open a prompt
         }
@@ -524,12 +528,14 @@ pub fn collect_interaction_point(
     >,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     while let Ok(out) = results.0.try_recv() {
         let Ok((mut state, mut window, bp, cursor, pc, rounds, io_buf)) =
             agents.get_mut(out.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
         };
+        crate::tick_scope::enter(out.entity);
         let idx = pc.map_or(0, |c| c.0);
         let round = rounds.map_or(0, |r| r.0);
         let (name, npoints) = match stage_points(bp, cursor) {

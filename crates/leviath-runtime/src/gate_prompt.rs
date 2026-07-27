@@ -149,10 +149,12 @@ pub fn collect_gate_prompt(
     )>,
     mut commands: Commands,
 ) {
+    crate::tick_scope::clear();
     while let Ok(out) = results.0.try_recv() {
         let Ok((state, mut awaiting, mut resolved, gate)) = agents.get_mut(out.entity) else {
             continue; // stale: agent cancelled/despawned since dispatch
         };
+        crate::tick_scope::enter(out.entity);
         // Apply the resolution through the gate (raises clearance for AlwaysAllow).
         let denied = gate.and_then(|mut g| {
             g.apply_resolution(
