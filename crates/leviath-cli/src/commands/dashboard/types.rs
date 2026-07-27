@@ -255,6 +255,7 @@ mod tests {
         );
         assert!(AgentDisplayStatus::Idle.to_string().contains("IDLE"));
         assert!(AgentDisplayStatus::Cancelled.to_string().contains("CANCEL"));
+        assert!(AgentDisplayStatus::Stale.to_string().contains("STALE"));
     }
 
     #[test]
@@ -270,6 +271,8 @@ mod tests {
     fn agent_display_status_color_idle_and_cancelled() {
         assert_eq!(AgentDisplayStatus::Idle.color(), C_DIM);
         assert_eq!(AgentDisplayStatus::Cancelled.color(), C_DIM);
+        // Stale is a warning, not a finished state: it wants attention.
+        assert_eq!(AgentDisplayStatus::Stale.color(), C_WARN);
         assert_eq!(AgentDisplayStatus::Waiting.color(), C_WARN);
         assert_eq!(AgentDisplayStatus::CompleteInteractive.color(), C_SUCCESS);
     }

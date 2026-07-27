@@ -1252,6 +1252,22 @@ mod tests {
         e
     }
 
+    /// A [`ForceTerminator`] that records each run id it was asked to terminate
+    /// and reports success for everything but `"never-existed"`. Shared by the
+    /// tests that expect it to fire and the ones that expect it not to, so its
+    /// body is exercised rather than existing only to go unused.
+    fn recording_terminator(seen: Arc<Mutex<Vec<String>>>) -> ForceTerminator {
+        Box::new(move |run_id| {
+            seen.lock().unwrap().push(run_id.to_string());
+            run_id != "never-existed"
+        })
+    }
+
+    /// A [`Reloader`] that pages any run id in as a fresh agent.
+    fn paging_reloader() -> Reloader {
+        Box::new(|world, run_id| Some(world.spawn_agent((agent_state(run_id),))))
+    }
+
     async fn ask<T>(host: &mut WorldHost, make: impl FnOnce(oneshot::Sender<T>) -> ControlOp) -> T {
         let (tx, rx) = oneshot::channel();
         host.handle(make(tx));
@@ -1647,6 +1663,37 @@ mod tests {
         );
     }
 
+    /// A child that was already reaped is skipped rather than tripping the
+    /// cancel: `SubAgentChildren` still names it, but the entity is gone, so
+    /// there is no agent id to close interactions for.
+    #[tokio::test]
+    async fn cancel_tolerates_a_child_that_has_already_been_reaped() {
+        let mut host = host_with(vec![]);
+        let parent = spawn(&mut host, "parent", "parent");
+        let ghost = host.world_mut().spawn_agent((agent_state("ghost"),));
+        host.world_mut()
+            .world_mut()
+            .entity_mut(parent)
+            .insert(SubAgentChildren {
+                children: vec![ghost],
+                max_child_depth: 3,
+            });
+        host.world_mut().world_mut().despawn(ghost);
+
+        assert!(
+            ask(&mut host, |reply| ControlOp::Cancel {
+                run_id: "parent".to_string(),
+                reply
+            })
+            .await,
+            "the parent is still cancelled"
+        );
+        assert_eq!(
+            host.world.agent_status(parent),
+            Some(AgentStatus::Cancelled)
+        );
+    }
+
     /// Cancelling a run closes its open prompts. The blocked `ask` occupies a
     /// tool-lane worker, and the lane has a fixed worker count — leaving it
     /// parked forever is what starves every other agent's tool batches.
@@ -1662,10 +1709,17 @@ mod tests {
                 .ask(InteractionRequest::free_text("q", "ask", "stage", true))
                 .await
         });
-        // Wait for the ask to register.
+        // Wait for the ask to register, then let the host emit it — so the
+        // emitted-interaction set is non-empty and the cancel has something to
+        // prune, rather than pruning an empty set.
         while hub.pending().is_empty() {
             tokio::task::yield_now().await;
         }
+        host.emit_events();
+        assert!(
+            !host.emitted_interactions.is_empty(),
+            "the open request was emitted"
+        );
 
         ask(&mut host, |reply| ControlOp::Cancel {
             run_id: "run-a".to_string(),
@@ -1684,6 +1738,10 @@ mod tests {
         // ...and the request stops being advertised to `lev respond` / the
         // dashboard for a run that is going away.
         assert!(hub.pending().is_empty(), "no orphaned prompt is left open");
+        assert!(
+            host.emitted_interactions.is_empty(),
+            "and it is pruned from the emitted set, not re-announced forever"
+        );
     }
 
     /// The floor under every kill: a run the reloader can't rebuild must still be
@@ -1695,11 +1753,7 @@ mod tests {
         // A reloader that always declines — the deleted-blueprint case.
         host.set_reloader(Box::new(|_world, _run_id| None));
         let terminated = Arc::new(Mutex::new(Vec::new()));
-        let seen = terminated.clone();
-        host.set_force_terminator(Box::new(move |run_id| {
-            seen.lock().unwrap().push(run_id.to_string());
-            run_id != "never-existed"
-        }));
+        host.set_force_terminator(recording_terminator(terminated.clone()));
 
         assert!(
             ask(&mut host, |reply| ControlOp::Cancel {
@@ -1729,12 +1783,8 @@ mod tests {
     async fn cancel_does_not_force_terminate_a_run_it_could_cancel() {
         let mut host = host_with(vec![]);
         spawn(&mut host, "run-a", "agent-a");
-        let forced = Arc::new(Mutex::new(false));
-        let hit = forced.clone();
-        host.set_force_terminator(Box::new(move |_run_id| {
-            *hit.lock().unwrap() = true;
-            true
-        }));
+        let terminated = Arc::new(Mutex::new(Vec::new()));
+        host.set_force_terminator(recording_terminator(terminated.clone()));
 
         assert!(
             ask(&mut host, |reply| ControlOp::Cancel {
@@ -1747,7 +1797,10 @@ mod tests {
             host.world.agent_status(host.by_run_id["run-a"]),
             Some(AgentStatus::Cancelled)
         );
-        assert!(!*forced.lock().unwrap(), "the disk fallback stayed unused");
+        assert!(
+            terminated.lock().unwrap().is_empty(),
+            "the disk fallback stayed unused"
+        );
     }
 
     /// Agents that enter the world outside a `Spawn` op (fan-out workers, built
@@ -1785,9 +1838,7 @@ mod tests {
 
         assert_eq!(host.live_entity("worker-run"), Some(entity), "adopted");
         // A reloader that would mint a duplicate if the map were still missing it.
-        host.set_reloader(Box::new(|world, run_id| {
-            Some(world.spawn_agent((agent_state(run_id),)))
-        }));
+        host.set_reloader(paging_reloader());
         assert!(
             ask(&mut host, |reply| ControlOp::Cancel {
                 run_id: "worker-run".to_string(),
@@ -2385,9 +2436,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_pages_in_an_unloaded_run() {
         let mut host = host_with(vec![]);
-        host.set_reloader(Box::new(|world, run_id| {
-            Some(world.spawn_agent((agent_state(run_id),)))
-        }));
+        host.set_reloader(paging_reloader());
         // Cancelling a run that isn't in memory pages it in, then cancels it.
         let cancelled = ask(&mut host, |reply| ControlOp::Cancel {
             run_id: "unloaded".to_string(),

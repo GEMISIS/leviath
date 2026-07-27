@@ -115,9 +115,6 @@ pub(crate) struct Dashboard {
     /// The background loop's sender for [`DaemonOutcome`]s; taken by
     /// `init_dashboard`, retained by tests to inject outcomes.
     pub(super) daemon_outcome_tx: Option<mpsc::UnboundedSender<DaemonOutcome>>,
-    /// Run ids the daemon reported it could not act on, so the disk sync doesn't
-    /// quietly restore them to ACTIVE without saying why.
-    pub(super) failed_cancels: std::collections::HashSet<String>,
     /// The run ids the daemon currently holds, refreshed each tick. `None` when
     /// the daemon did not answer — the disk view is then taken at face value
     /// rather than declaring every run stale.
@@ -227,7 +224,6 @@ impl Dashboard {
             mcp_bg_ends: Some((mcp_cmd_rx, mcp_outcome_tx)),
             daemon_outcome_rx,
             daemon_outcome_tx: Some(daemon_outcome_tx),
-            failed_cancels: std::collections::HashSet::new(),
             daemon_run_ids: None,
             clock: system_now_secs,
         }
@@ -253,15 +249,13 @@ impl Dashboard {
     }
 
     /// Drain the daemon's answers to this tick's commands. A refused command
-    /// becomes a toast and a log line; the run is remembered so the next disk
-    /// sync can show it truthfully rather than just flipping it back.
+    /// becomes a toast and a log line, so the row reverting on the next disk
+    /// sync has a visible explanation rather than none.
     pub(super) fn drain_daemon_outcomes(&mut self) {
         while let Ok(outcome) = self.daemon_outcome_rx.try_recv() {
             if outcome.ok {
-                self.failed_cancels.remove(&outcome.run_id);
                 continue;
             }
-            self.failed_cancels.insert(outcome.run_id.clone());
             Self::push_toast(
                 &mut self.toasts,
                 outcome.message.clone(),
@@ -1969,6 +1963,18 @@ mod tests {
 
     // ─── staleness: disk says live, but nothing is driving it ───
 
+    /// A clock far enough past a run's `updated_at` (1000) that it counts as
+    /// untouched. Shared by every staleness test, including the ones whose
+    /// checks short-circuit before reading the clock.
+    fn stale_clock() -> i64 {
+        1_000 + Dashboard::STALE_AFTER_SECS * 100
+    }
+
+    /// A clock still inside the staleness window.
+    fn fresh_clock() -> i64 {
+        1_000 + Dashboard::STALE_AFTER_SECS - 1
+    }
+
     /// The reported bug's shape: a run whose `meta.json` claims `starting` /
     /// `running`, which the daemon does not hold and which has not been touched
     /// in a long time, is not ACTIVE — nothing is driving it.
@@ -1983,7 +1989,7 @@ mod tests {
                 runstate::create_run(&meta).unwrap();
 
                 let mut dash = make_test_dashboard();
-                dash.clock = || 1_000 + Dashboard::STALE_AFTER_SECS + 1;
+                dash.clock = stale_clock;
                 // The daemon answered, and knows nothing about this run.
                 dash.daemon_run_ids = Some(std::collections::HashSet::new());
                 dash.sync_from_run_state();
@@ -2008,7 +2014,7 @@ mod tests {
             runstate::create_run(&meta).unwrap();
 
             let mut dash = make_test_dashboard();
-            dash.clock = || 1_000 + Dashboard::STALE_AFTER_SECS * 100;
+            dash.clock = stale_clock;
             dash.daemon_run_ids = Some([run_id.to_string()].into_iter().collect());
             dash.sync_from_run_state();
 
@@ -2031,7 +2037,7 @@ mod tests {
             runstate::create_run(&meta).unwrap();
 
             let mut dash = make_test_dashboard();
-            dash.clock = || 1_000 + Dashboard::STALE_AFTER_SECS * 100;
+            dash.clock = stale_clock;
             dash.daemon_run_ids = None; // no answer this tick
             dash.sync_from_run_state();
 
@@ -2053,7 +2059,7 @@ mod tests {
             runstate::create_run(&meta).unwrap();
 
             let mut dash = make_test_dashboard();
-            dash.clock = || 1_000 + Dashboard::STALE_AFTER_SECS - 1;
+            dash.clock = fresh_clock;
             dash.daemon_run_ids = Some(std::collections::HashSet::new());
             dash.sync_from_run_state();
 
@@ -2061,6 +2067,74 @@ mod tests {
             assert_eq!(agent.status, AgentDisplayStatus::Active);
             cleanup_run(run_id);
         });
+    }
+
+    /// A reachable daemon's run list is recorded; an unreachable one leaves
+    /// "unknown" rather than an empty set, which would read as "nothing is
+    /// running" and flip every healthy run to STALE.
+    #[tokio::test]
+    async fn sync_daemon_runs_records_the_list_or_unknown() {
+        use leviath_runtime::control_socket::{bind_control_listener, control_id};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let dir = tempfile::tempdir().unwrap();
+        let id = control_id(dir.path());
+        let mut listener = bind_control_listener(&id).unwrap();
+        let server = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = tokio::io::split(stream);
+            let mut lines = BufReader::new(read_half).lines();
+            let _ = lines.next_line().await;
+            let _ = write_half
+                .write_all(b"{\"result\":\"list\",\"runs\":[[\"run-a\",\"Active\"]]}\n")
+                .await;
+        });
+
+        let mut dash = make_test_dashboard();
+        dash.sync_daemon_runs(&ControlClient::new(id)).await;
+        assert_eq!(
+            dash.daemon_run_ids,
+            Some(["run-a".to_string()].into_iter().collect())
+        );
+        let _ = server.await;
+
+        // No daemon at all → unknown, not "none running".
+        let gone = tempfile::tempdir().unwrap();
+        dash.sync_daemon_runs(&ControlClient::new(control_id(
+            &gone.path().join("no-daemon"),
+        )))
+        .await;
+        assert_eq!(dash.daemon_run_ids, None);
+    }
+
+    /// The production clock answers with a plausible wall-clock time (the tests
+    /// above inject a fixed one, so this is the only place it runs).
+    #[test]
+    fn system_clock_reports_a_wall_clock_time() {
+        // Well after 2020 and before 2100 — i.e. a real epoch second.
+        let now = system_now_secs();
+        assert!(now > 1_577_836_800 && now < 4_102_444_800, "got {now}");
+    }
+
+    /// A stale run sorts above the finished ones: it is unfinished business the
+    /// user probably wants to clear, not history.
+    #[test]
+    fn stale_sorts_above_the_finished_states() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("done", AgentDisplayStatus::Complete));
+        dash.agents
+            .push(make_test_agent("stale", AgentDisplayStatus::Stale));
+        dash.agents
+            .push(make_test_agent("live", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+
+        let order: Vec<&str> = dash
+            .display_indices
+            .iter()
+            .map(|&i| dash.agents[i].id.as_str())
+            .collect();
+        assert_eq!(order, vec!["live", "stale", "done"]);
     }
 
     // ─── daemon outcomes are surfaced ───
@@ -2092,7 +2166,6 @@ mod tests {
             dash.log.iter().any(|l| l.message.contains("run-x")),
             "and recorded in the activity log"
         );
-        assert!(dash.failed_cancels.contains("run-x"));
     }
 
     #[test]
@@ -2109,7 +2182,7 @@ mod tests {
         dash.drain_daemon_outcomes();
 
         assert!(dash.toasts.is_empty(), "success is silent");
-        assert!(!dash.failed_cancels.contains("run-y"));
+        assert!(dash.log.iter().all(|l| !l.message.contains("run-y")));
     }
 
     #[test]

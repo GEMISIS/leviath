@@ -356,8 +356,12 @@ pub fn force_cancel_in(run_dir: &Path, now: i64) -> ForceCancelOutcome {
     match write_meta_to(run_dir, &cancelled) {
         Ok(()) => ForceCancelOutcome::Cancelled,
         Err(e) => {
+            // Formatted outside the macro: a method call inside a `%field` is
+            // only evaluated when a subscriber visits the value, so it would go
+            // unexercised under the tests' no-op subscriber.
+            let path = run_dir.display().to_string();
             tracing::warn!(
-                run_dir = %run_dir.display(),
+                run_dir = %path,
                 error = %e,
                 "could not force a run to cancelled on disk"
             );

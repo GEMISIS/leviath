@@ -345,6 +345,14 @@ mod tests {
 
     #[tokio::test]
     async fn unexpected_response_is_an_error() {
+        // Both the `send_bool` path (`lev msg`) and `cancel_run`'s own match
+        // reject a response shape they didn't ask for.
+        let r = with_daemon(r#"{"result":"spawned","run_id":"x"}"#, |c| async move {
+            send_message(&c, &msg_args()).await
+        })
+        .await;
+        assert!(r.unwrap_err().to_string().contains("unexpected"));
+
         let r = with_daemon(r#"{"result":"spawned","run_id":"x"}"#, |c| async move {
             cancel_run(
                 &c,
@@ -357,6 +365,38 @@ mod tests {
         })
         .await;
         assert!(r.unwrap_err().to_string().contains("unexpected"));
+    }
+
+    /// `lev msg` has no on-disk fallback — an unreachable daemon is simply an
+    /// error, unlike `lev cancel`.
+    #[tokio::test]
+    async fn message_to_an_unreachable_daemon_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = ControlClient::new(control_id(&dir.path().join("no-daemon")));
+        let err = send_message(&client, &msg_args()).await.unwrap_err();
+        assert!(err.to_string().contains("not reachable"));
+    }
+
+    /// A run directory that cannot be rewritten is reported as such, rather than
+    /// as a successful cancel.
+    #[tokio::test]
+    async fn forcing_a_run_whose_metadata_cannot_be_written_reports_the_failure() {
+        crate::runstate::with_isolated_runs_dir_async("ctl-force-unwritable", |_base| async {
+            let dir = crate::runstate::run_dir("blocked-1");
+            std::fs::create_dir_all(dir.join("meta.json")).unwrap();
+
+            let err = cancel_run(
+                &ControlClient::new(control_id(std::path::Path::new("/nonexistent"))),
+                &CancelArgs {
+                    run_id: "blocked-1".to_string(),
+                    force: true,
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(err.to_string().contains("could not write"), "got: {err}");
+        })
+        .await;
     }
 
     #[tokio::test]
