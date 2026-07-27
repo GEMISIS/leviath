@@ -101,6 +101,20 @@ pub type Spawner = Box<dyn FnMut(&mut PipelineWorld, &SpawnArgs) -> Result<Entit
 /// [`WorldHost::set_reloader`].
 pub type Reloader = Box<dyn FnMut(&mut PipelineWorld, &str) -> Option<Entity> + Send>;
 
+/// The daemon-installed last resort for cancelling a run the world cannot hold:
+/// given a run id, it forces that run's **on-disk** state to a terminal status
+/// and reports whether a run directory existed to act on.
+///
+/// This is what makes a cancel unconditional. [`Reloader`] declines whenever a
+/// run can't be rebuilt — its blueprint was moved or deleted, its metadata is
+/// unreadable, it died mid-spawn before any agent existed — and before this seam
+/// a cancel in that state replied `false` and wrote nothing, so `meta.json` kept
+/// claiming `running`/`starting` forever and the run could never be got rid of.
+/// The runtime has no notion of the on-disk layout, so the daemon supplies the
+/// writer. Installed with [`WorldHost::set_force_terminator`]; without one, a
+/// cancel that misses in the world simply misses (the prior behavior).
+pub type ForceTerminator = Box<dyn FnMut(&str) -> bool + Send>;
+
 /// The daemon-installed hook run just before a terminal agent's entity is
 /// despawned (reaped). It receives the world and the entity while both are still
 /// valid, so the daemon can release per-agent resources the runtime doesn't know
@@ -380,6 +394,7 @@ pub struct WorldHost {
     spawner: Option<Spawner>,
     spawn_preprocessor: Option<SpawnPreprocessor>,
     reloader: Option<Reloader>,
+    force_terminator: Option<ForceTerminator>,
     reaper: Option<Reaper>,
     events: broadcast::Sender<WorldEvent>,
     emitted: HashMap<String, Emitted>,
@@ -413,6 +428,7 @@ impl WorldHost {
             spawner: None,
             spawn_preprocessor: None,
             reloader: None,
+            force_terminator: None,
             reaper: None,
             events,
             emitted: HashMap::new(),
@@ -444,6 +460,7 @@ impl WorldHost {
     /// what changed (status/tokens/context/completion) plus any new interaction.
     /// Called after each drive to quiescence, so subscribers see every change.
     fn emit_events(&mut self) {
+        self.adopt_unregistered_runs();
         let pairs: Vec<(String, Entity)> = self
             .by_run_id
             .iter()
@@ -612,6 +629,33 @@ impl WorldHost {
         }
     }
 
+    /// Register any agent that exists in the world but is missing from the run-id
+    /// map, so the host's view is the world's view.
+    ///
+    /// Not every agent arrives through a `Spawn` control op: fan-out workers are
+    /// built straight into the world by the fan-out spawner, which has no handle
+    /// on the host to register them. An unregistered agent is invisible to `list`
+    /// (so `lev ps` never showed a worker), never reaped (its sandbox and tool
+    /// state leak), and — worst — un-cancellable, because a cancel by its run id
+    /// misses the map, falls through to the reloader, and pages a **second** live
+    /// entity in from that run's on-disk state while the original keeps running.
+    /// Adopting them here is idempotent and keeps a stale mapping from winning:
+    /// a registered id whose entity has been despawned is re-pointed.
+    fn adopt_unregistered_runs(&mut self) {
+        let live: Vec<(String, Entity)> = self
+            .world
+            .world_mut()
+            .query::<(Entity, &RunMetadata)>()
+            .iter(self.world.world())
+            .map(|(entity, md)| (md.run_id.clone(), entity))
+            .collect();
+        for (run_id, entity) in live {
+            if self.live_entity(&run_id) != Some(entity) {
+                self.by_run_id.insert(run_id, entity);
+            }
+        }
+    }
+
     /// Whether a terminal agent is safe to unload: it has no **live** parent that
     /// might still be waiting on it. True for a root (no `ParentRef`), or when its
     /// parent has been despawned or is itself terminal; false while a non-terminal
@@ -646,6 +690,13 @@ impl WorldHost {
     /// Without one, an op targeting a run that isn't in memory just misses.
     pub fn set_reloader(&mut self, reloader: Reloader) {
         self.reloader = Some(reloader);
+    }
+
+    /// Install the [`ForceTerminator`] used to terminate a run on disk when the
+    /// world cannot hold it. Without one, a cancel that misses in the world and
+    /// can't be reloaded just misses.
+    pub fn set_force_terminator(&mut self, force_terminator: ForceTerminator) {
+        self.force_terminator = Some(force_terminator);
     }
 
     /// Install the reap hook run just before each terminal agent is despawned,
@@ -789,8 +840,14 @@ impl WorldHost {
         Ok(run_id)
     }
 
-    /// Cancel a run and every descendant. Returns whether the run existed (paging
-    /// it in from disk first if it had been unloaded).
+    /// Cancel a run and every descendant, paging the root in from disk first if it
+    /// had been unloaded. Returns whether the run was found in the world.
+    ///
+    /// Cancelling only the root would leave its sub-agents and fan-out workers
+    /// running — they are independent agents the schedule keeps driving, so they
+    /// would carry on spending tokens with no parent to report to. Each cancelled
+    /// agent's open interactions are closed too, so nothing is left blocked on a
+    /// prompt for a run that is going away.
     fn cancel_tree(&mut self, run_id: &str) -> bool {
         let Some(root) = self.resolve_or_reload(run_id) else {
             return false;
@@ -806,7 +863,27 @@ impl WorldHost {
         }
         let mut cancelled = false;
         for e in subtree {
+            // Read the agent id before cancelling — the entity stays valid until
+            // it is reaped, but reading first keeps this independent of that.
+            let agent_id = self
+                .world
+                .world()
+                .get::<AgentState>(e)
+                .map(|s| s.agent_id.clone());
             cancelled |= self.world.cancel(e);
+            if let Some(agent_id) = agent_id {
+                self.interactions.cancel_for_agent(&agent_id);
+                // The hub is keyed by agent id but the emitted-interaction set is
+                // keyed by request id, so drop the ids that are no longer pending.
+                let still_open: HashSet<String> = self
+                    .interactions
+                    .pending()
+                    .into_iter()
+                    .map(|(_, req)| req.id)
+                    .collect();
+                self.emitted_interactions
+                    .retain(|id| still_open.contains(id));
+            }
         }
         cancelled
     }
@@ -883,9 +960,17 @@ impl WorldHost {
                 let _ = reply.send(ok);
             }
             ControlOp::Cancel { run_id, reply } => {
-                let ok = self
-                    .resolve_or_reload(&run_id)
-                    .is_some_and(|e| self.world.cancel(e));
+                // Cancel is unconditional: it either takes effect in the world
+                // (root plus every descendant) or, when the run can't be held
+                // there at all, is forced onto its on-disk state. It reports
+                // `false` only when there is genuinely no such run anywhere —
+                // otherwise a run whose blueprint had moved stayed `running` on
+                // disk forever with no way to get rid of it.
+                let ok = self.cancel_tree(&run_id)
+                    || self
+                        .force_terminator
+                        .as_mut()
+                        .is_some_and(|terminate| terminate(&run_id));
                 let _ = reply.send(ok);
             }
             ControlOp::List { reply } => {
@@ -1526,6 +1611,195 @@ mod tests {
         })
         .await;
         assert!(!miss);
+    }
+
+    /// A user-facing cancel must reach the sub-agent tree, not just the root —
+    /// otherwise the children keep running with nobody to report to. Before this,
+    /// only the model-facing `kill_agent` tool cascaded.
+    #[tokio::test]
+    async fn cancel_cascades_to_the_whole_tree() {
+        let mut host = host_with(vec![]);
+        host.set_spawner(child_spawner());
+        spawn(&mut host, "parent", "parent");
+        ask_sub(&mut host, |reply| SubAgentOp::Spawn {
+            args: Box::new(SpawnArgs {
+                run_id: "child".to_string(),
+                ..Default::default()
+            }),
+            parent_run_id: "parent".to_string(),
+            max_depth: 3,
+            reply,
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            ask(&mut host, |reply| ControlOp::Cancel {
+                run_id: "parent".to_string(),
+                reply
+            })
+            .await
+        );
+        assert_eq!(
+            host.world.agent_status(host.by_run_id["child"]),
+            Some(AgentStatus::Cancelled),
+            "cancelling the parent cancels its children"
+        );
+    }
+
+    /// Cancelling a run closes its open prompts. The blocked `ask` occupies a
+    /// tool-lane worker, and the lane has a fixed worker count — leaving it
+    /// parked forever is what starves every other agent's tool batches.
+    #[tokio::test]
+    async fn cancel_closes_the_runs_open_interactions() {
+        let mut host = host_with(vec![]);
+        let hub = host.interactions();
+        spawn(&mut host, "run-a", "agent-a");
+
+        let backend = hub.backend_for("agent-a");
+        let asking = tokio::spawn(async move {
+            backend
+                .ask(InteractionRequest::free_text("q", "ask", "stage", true))
+                .await
+        });
+        // Wait for the ask to register.
+        while hub.pending().is_empty() {
+            tokio::task::yield_now().await;
+        }
+
+        ask(&mut host, |reply| ControlOp::Cancel {
+            run_id: "run-a".to_string(),
+            reply,
+        })
+        .await;
+
+        // The blocked future is released rather than parked forever. Bounded,
+        // because the regression this guards *is* an unbounded wait: without the
+        // per-agent cancel this await simply never returns, and a test that hangs
+        // rather than fails is worse than no test.
+        tokio::time::timeout(std::time::Duration::from_secs(5), asking)
+            .await
+            .expect("cancelling the run releases its blocked ask")
+            .expect("the ask task did not panic");
+        // ...and the request stops being advertised to `lev respond` / the
+        // dashboard for a run that is going away.
+        assert!(hub.pending().is_empty(), "no orphaned prompt is left open");
+    }
+
+    /// The floor under every kill: a run the reloader can't rebuild must still be
+    /// terminated, via the daemon's on-disk force-terminator. Replying `false` and
+    /// writing nothing is what made such a run permanent.
+    #[tokio::test]
+    async fn cancel_falls_back_to_the_force_terminator_when_the_world_cannot_hold_the_run() {
+        let mut host = host_with(vec![]);
+        // A reloader that always declines — the deleted-blueprint case.
+        host.set_reloader(Box::new(|_world, _run_id| None));
+        let terminated = Arc::new(Mutex::new(Vec::new()));
+        let seen = terminated.clone();
+        host.set_force_terminator(Box::new(move |run_id| {
+            seen.lock().unwrap().push(run_id.to_string());
+            run_id != "never-existed"
+        }));
+
+        assert!(
+            ask(&mut host, |reply| ControlOp::Cancel {
+                run_id: "unreloadable".to_string(),
+                reply
+            })
+            .await,
+            "a run that can't be reloaded is still terminated"
+        );
+        assert!(
+            !ask(&mut host, |reply| ControlOp::Cancel {
+                run_id: "never-existed".to_string(),
+                reply
+            })
+            .await,
+            "`false` is reserved for a run that exists nowhere"
+        );
+        assert_eq!(
+            *terminated.lock().unwrap(),
+            vec!["unreloadable".to_string(), "never-existed".to_string()]
+        );
+    }
+
+    /// A live run is cancelled in the world; the on-disk fallback is not consulted
+    /// (the persistence lane records the status change).
+    #[tokio::test]
+    async fn cancel_does_not_force_terminate_a_run_it_could_cancel() {
+        let mut host = host_with(vec![]);
+        spawn(&mut host, "run-a", "agent-a");
+        let forced = Arc::new(Mutex::new(false));
+        let hit = forced.clone();
+        host.set_force_terminator(Box::new(move |_run_id| {
+            *hit.lock().unwrap() = true;
+            true
+        }));
+
+        assert!(
+            ask(&mut host, |reply| ControlOp::Cancel {
+                run_id: "run-a".to_string(),
+                reply
+            })
+            .await
+        );
+        assert_eq!(
+            host.world.agent_status(host.by_run_id["run-a"]),
+            Some(AgentStatus::Cancelled)
+        );
+        assert!(!*forced.lock().unwrap(), "the disk fallback stayed unused");
+    }
+
+    /// Agents that enter the world outside a `Spawn` op (fan-out workers, built
+    /// directly by the fan-out spawner) are adopted into the run-id map, so they
+    /// are listed, reaped and — the point here — cancellable by id. Left
+    /// unregistered, a cancel missed the map and paged a *second* copy of the run
+    /// in from disk while the original kept going.
+    #[tokio::test]
+    async fn unregistered_world_agents_are_adopted_and_become_cancellable() {
+        let mut host = host_with(vec![]);
+        let entity = host.world_mut().spawn_agent((
+            agent_state("worker"),
+            RunMetadata {
+                run_id: "worker-run".to_string(),
+                agent_name: "w".to_string(),
+                agent_path: String::new(),
+                task: String::new(),
+                model: None,
+                workdir: String::new(),
+                num_stages: 1,
+                started_at: 0,
+                parent_run_id: None,
+                metadata: Default::default(),
+                callback_url: None,
+                callback_secret: None,
+                title: None,
+            },
+        ));
+        assert!(
+            !host.by_run_id.contains_key("worker-run"),
+            "not registered by the spawn itself"
+        );
+
+        host.emit_events();
+
+        assert_eq!(host.live_entity("worker-run"), Some(entity), "adopted");
+        // A reloader that would mint a duplicate if the map were still missing it.
+        host.set_reloader(Box::new(|world, run_id| {
+            Some(world.spawn_agent((agent_state(run_id),)))
+        }));
+        assert!(
+            ask(&mut host, |reply| ControlOp::Cancel {
+                run_id: "worker-run".to_string(),
+                reply
+            })
+            .await
+        );
+        assert_eq!(
+            host.world.agent_status(entity),
+            Some(AgentStatus::Cancelled),
+            "the original entity is cancelled, not a reloaded copy"
+        );
     }
 
     #[tokio::test]

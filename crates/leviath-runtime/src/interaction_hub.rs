@@ -137,6 +137,29 @@ impl InteractionHub {
         removed
     }
 
+    /// Cancel every open request belonging to `agent_id`, returning how many were
+    /// closed. Each one's `submit` wakes with the neutral response.
+    ///
+    /// This is the per-agent counterpart of [`Self::cancel`], which is keyed by
+    /// request id — an id a canceller of a *run* doesn't have. Without it,
+    /// cancelling a run left its `ask` future blocked forever: the future holds a
+    /// tool-lane worker (the lane has a fixed worker count, so enough of them
+    /// stall every other agent's tool batches), and the orphaned request keeps
+    /// being surfaced by `lev respond` and the dashboard for a run that no longer
+    /// exists.
+    pub fn cancel_for_agent(&self, agent_id: &str) -> usize {
+        // Dropping each entry drops its responder, waking `submit` with an error.
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let before = pending.len();
+        pending.retain(|_, entry| entry.agent_id != agent_id);
+        let removed = before - pending.len();
+        drop(pending);
+        if removed > 0 {
+            self.nudge();
+        }
+        removed
+    }
+
     /// A per-agent [`InteractionBackend`] backed by this hub.
     pub fn backend_for(&self, agent_id: impl Into<String>) -> HubInteractionBackend {
         HubInteractionBackend {

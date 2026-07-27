@@ -84,11 +84,18 @@ fn now_secs() -> i64 {
 
 /// Inner implementation of `runs_dir`, parameterised so it can be tested
 /// without touching the process-global env. All callers go through `runs_dir`.
+///
+/// The fallback resolves through [`crate::config::leviath_home_dir`], not
+/// `dirs::home_dir` directly, so `LEVIATH_HOME` redirects the runs dir like it
+/// redirects the config, the control socket and the agents dir. It used to use
+/// `dirs::home_dir` alone, which meant a test that set `LEVIATH_HOME` was
+/// isolated everywhere *except* here and still wrote runs into the developer's
+/// real `~/.leviath/runs`. `LEVIATH_RUNS_DIR` still wins over both.
 fn runs_dir_from(env_override: Option<&str>) -> PathBuf {
     if let Some(dir) = env_override {
         return PathBuf::from(dir);
     }
-    dirs::home_dir()
+    crate::config::leviath_home_dir()
         .unwrap_or_default()
         .join(".leviath")
         .join("runs")
@@ -228,7 +235,12 @@ pub fn create_run(meta: &RunMeta) -> anyhow::Result<()> {
     create_run_in(&run_dir(&meta.run_id), meta)
 }
 
-fn create_run_in(dir: &std::path::Path, meta: &RunMeta) -> anyhow::Result<()> {
+/// Create an explicit run directory and write initial metadata into it.
+///
+/// Callers that already know the directory should prefer this over
+/// [`create_run`], which resolves it from the home directory — the daemon's
+/// spawner stakes out the run dir under its own configured `runs_dir`.
+pub(crate) fn create_run_in(dir: &std::path::Path, meta: &RunMeta) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)?;
 
     // Restrict the run directory to owner-only (no-op on non-Unix).
@@ -258,7 +270,105 @@ pub fn read_meta(run_id: &str) -> anyhow::Result<RunMeta> {
     read_meta_from(&run_dir(run_id))
 }
 
-fn read_meta_from(dir: &std::path::Path) -> anyhow::Result<RunMeta> {
+/// Whether an on-disk run status means the run has finished and should be left
+/// alone. `Starting`/`Running`/`WaitingInput` are all "still going" as far as
+/// anything reading the runs dir is concerned.
+pub fn is_terminal_status(status: &RunStatus) -> bool {
+    matches!(
+        status,
+        RunStatus::Complete
+            | RunStatus::CompleteInteractive
+            | RunStatus::Error
+            | RunStatus::Cancelled
+    )
+}
+
+/// The outcome of forcing a run to a terminal state on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForceCancelOutcome {
+    /// The run was live on disk and is now recorded `Cancelled`.
+    Cancelled,
+    /// The run was already finished; nothing was written.
+    AlreadyTerminal,
+    /// No run directory with that id exists.
+    NoSuchRun,
+    /// The directory exists but its metadata could not be rewritten.
+    WriteFailed,
+}
+
+impl ForceCancelOutcome {
+    /// Whether the id named a run at all — i.e. whether the cancel had a target,
+    /// regardless of whether it needed to write anything.
+    pub fn found_run(&self) -> bool {
+        !matches!(self, Self::NoSuchRun)
+    }
+}
+
+/// Force a run's on-disk metadata to `Cancelled`, in the runs dir resolved from
+/// the environment. See [`force_cancel_in`].
+pub fn force_cancel(run_id: &str) -> ForceCancelOutcome {
+    force_cancel_in(&run_dir(run_id), now_secs())
+}
+
+/// Force the run in `run_dir` to `Cancelled`, stamping `updated_at` with `now`.
+///
+/// This is the floor under every kill path: it needs nothing but the filesystem,
+/// so it works for a run the daemon can't rebuild (blueprint deleted, metadata
+/// corrupt, died mid-spawn) and for a run whose daemon is gone entirely. Both
+/// the daemon's force-terminator seam and `lev cancel --force` route here so
+/// there is one definition of "terminated on disk".
+///
+/// A directory whose `meta.json` is missing or unparseable still gets a minimal
+/// `Cancelled` record written: such a run is otherwise skipped by `list_runs`,
+/// which makes it invisible *and* permanent.
+pub fn force_cancel_in(run_dir: &Path, now: i64) -> ForceCancelOutcome {
+    if !run_dir.is_dir() {
+        return ForceCancelOutcome::NoSuchRun;
+    }
+    let run_id = run_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let cancelled = match read_meta_from(run_dir) {
+        Ok(meta) if is_terminal_status(&meta.status) => return ForceCancelOutcome::AlreadyTerminal,
+        Ok(meta) => RunMeta {
+            status: RunStatus::Cancelled,
+            updated_at: now,
+            ..meta
+        },
+        // Unreadable metadata: synthesize just enough to record the outcome. The
+        // run id is the directory name, which is the one field always recoverable.
+        Err(_) => RunMeta {
+            status: RunStatus::Cancelled,
+            updated_at: now,
+            error: Some("run metadata was unreadable; cancelled".to_string()),
+            ..RunMeta::new(
+                run_id.clone(),
+                run_id,
+                String::new(),
+                String::new(),
+                None,
+                String::new(),
+                0,
+            )
+        },
+    };
+    match write_meta_to(run_dir, &cancelled) {
+        Ok(()) => ForceCancelOutcome::Cancelled,
+        Err(e) => {
+            tracing::warn!(
+                run_dir = %run_dir.display(),
+                error = %e,
+                "could not force a run to cancelled on disk"
+            );
+            ForceCancelOutcome::WriteFailed
+        }
+    }
+}
+
+/// Read run metadata out of an explicit run directory (the daemon works from its
+/// own configured `runs_dir` rather than the home-resolved one).
+pub(crate) fn read_meta_from(dir: &std::path::Path) -> anyhow::Result<RunMeta> {
     let path = dir.join("meta.json");
     let json = std::fs::read_to_string(&path)?;
     Ok(serde_json::from_str(&json)?)
@@ -1190,6 +1300,28 @@ mod tests {
         assert!(path.ends_with(".leviath\\runs"));
     }
 
+    /// With no `LEVIATH_RUNS_DIR`, the runs dir must follow `LEVIATH_HOME` — the
+    /// same home every other leviath path resolves through. Without this, setting
+    /// `LEVIATH_HOME` isolates a test's config/socket/agents dir while its runs
+    /// still land in the real `~/.leviath/runs`.
+    #[test]
+    fn runs_dir_follows_leviath_home() {
+        temp_env::with_vars(
+            [
+                ("LEVIATH_RUNS_DIR", None::<&str>),
+                ("LEVIATH_HOME", Some("/tmp/leviath-home-runs-test")),
+            ],
+            || {
+                assert_eq!(
+                    runs_dir(),
+                    PathBuf::from("/tmp/leviath-home-runs-test")
+                        .join(".leviath")
+                        .join("runs")
+                );
+            },
+        );
+    }
+
     #[test]
     fn dashboard_log_path_from_uses_override_when_provided() {
         let path = dashboard_log_path_from(Some("/custom/leviath/dashboard.log"));
@@ -1845,6 +1977,104 @@ mod tests {
         assert!(runs.iter().any(|r| r.run_id == good_run_id));
         assert!(!runs.iter().any(|r| r.run_id == bad_run_id));
         assert!(!runs.iter().any(|r| r.run_id == no_meta_run_id));
+    }
+
+    // ─── force_cancel_in: the floor under every kill path ───
+
+    /// Write a run dir with `status` and return its path.
+    fn run_dir_with(base: &std::path::Path, run_id: &str, status: RunStatus) -> PathBuf {
+        let dir = base.join(run_id);
+        let meta = RunMeta {
+            status,
+            ..RunMeta::new(
+                run_id.into(),
+                "a".into(),
+                "/p".into(),
+                "t".into(),
+                None,
+                "/w".into(),
+                1,
+            )
+        };
+        create_run_in(&dir, &meta).unwrap();
+        dir
+    }
+
+    #[test]
+    fn force_cancel_terminates_every_non_terminal_status() {
+        let base = tempfile::tempdir().unwrap();
+        for status in [
+            RunStatus::Starting,
+            RunStatus::Running,
+            RunStatus::WaitingInput,
+        ] {
+            let dir = run_dir_with(base.path(), &format!("live-{status}"), status.clone());
+            assert_eq!(force_cancel_in(&dir, 99), ForceCancelOutcome::Cancelled);
+            let meta = read_meta_from(&dir).unwrap();
+            assert_eq!(meta.status, RunStatus::Cancelled, "{status} is killable");
+            assert_eq!(meta.updated_at, 99, "the cancel is stamped");
+        }
+    }
+
+    #[test]
+    fn force_cancel_leaves_a_finished_run_alone() {
+        let base = tempfile::tempdir().unwrap();
+        for status in [
+            RunStatus::Complete,
+            RunStatus::CompleteInteractive,
+            RunStatus::Error,
+            RunStatus::Cancelled,
+        ] {
+            let dir = run_dir_with(base.path(), &format!("done-{status}"), status.clone());
+            assert_eq!(
+                force_cancel_in(&dir, 99),
+                ForceCancelOutcome::AlreadyTerminal,
+                "{status} is already finished"
+            );
+            assert_eq!(read_meta_from(&dir).unwrap().status, status);
+        }
+    }
+
+    #[test]
+    fn force_cancel_reports_no_such_run_for_a_missing_directory() {
+        let base = tempfile::tempdir().unwrap();
+        let outcome = force_cancel_in(&base.path().join("ghost"), 99);
+        assert_eq!(outcome, ForceCancelOutcome::NoSuchRun);
+        assert!(!outcome.found_run(), "nothing to cancel");
+    }
+
+    /// A run dir whose metadata can't be parsed still gets terminated. Such a run
+    /// is skipped by `list_runs`, so leaving it alone makes it both invisible and
+    /// permanent — the one state from which there is no way back.
+    #[test]
+    fn force_cancel_writes_a_record_over_unreadable_metadata() {
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("corrupt-run");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("meta.json"), "{ not json").unwrap();
+
+        assert_eq!(force_cancel_in(&dir, 99), ForceCancelOutcome::Cancelled);
+        let meta = read_meta_from(&dir).expect("now parses");
+        assert_eq!(meta.status, RunStatus::Cancelled);
+        assert_eq!(meta.run_id, "corrupt-run", "recovered from the dir name");
+        assert!(meta.error.is_some(), "records why it was synthesized");
+    }
+
+    /// A directory that exists but can't be written still counts as "found" — the
+    /// caller must not report "no such run" for a run that plainly exists.
+    #[test]
+    fn force_cancel_reports_a_write_failure_but_still_found_the_run() {
+        crate::test_support::with_tracing(|| {
+            let base = tempfile::tempdir().unwrap();
+            let dir = base.path().join("blocked-run");
+            std::fs::create_dir_all(&dir).unwrap();
+            // A directory where `meta.json` must go: the rename can't succeed.
+            std::fs::create_dir_all(dir.join("meta.json")).unwrap();
+
+            let outcome = force_cancel_in(&dir, 99);
+            assert_eq!(outcome, ForceCancelOutcome::WriteFailed);
+            assert!(outcome.found_run());
+        });
     }
 
     #[test]

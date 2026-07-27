@@ -335,6 +335,15 @@ pub fn collect_inference(
             continue; // stale: agent cancelled/despawned since dispatch
         };
         crate::tick_scope::enter(outcome.entity);
+        // The agent reached a terminal state while this inference was in flight
+        // (a cancel, or a panic that failed it). Drop the response: applying it
+        // would move the run on to `ProcessResponse` and it would keep going.
+        if is_terminal_status(&state.status) {
+            commands
+                .entity(outcome.entity)
+                .remove::<AwaitingInference>();
+            continue;
+        }
         let idx = cursor.map_or(0, |c| c.index);
         match outcome.result {
             Ok(response) => {
@@ -2435,7 +2444,11 @@ fn resolve_transition_sync(
 pub struct WaitingForChildren;
 
 /// Whether an agent status is terminal (the run/child has finished).
-fn is_terminal_status(status: &AgentStatus) -> bool {
+///
+/// Every collect system consults this before applying an outcome: a run that
+/// reached a terminal state while its work was in flight must stay there, not be
+/// walked back to `Active`/`Complete` by the result landing afterwards.
+pub fn is_terminal_status(status: &AgentStatus) -> bool {
     matches!(
         status,
         AgentStatus::Complete | AgentStatus::Error { .. } | AgentStatus::Cancelled
@@ -3607,6 +3620,15 @@ pub fn collect_transition_choice(
             continue; // stale: agent cancelled/despawned since dispatch
         };
         crate::tick_scope::enter(outcome.entity);
+        // Cancelled/failed mid-choice: every arm below rewrites the status
+        // (including a bare `Complete` when nothing matches), which would report
+        // a cancelled run as having finished normally.
+        if is_terminal_status(&state.status) {
+            commands
+                .entity(outcome.entity)
+                .remove::<AwaitingTransitionResponse>();
+            continue;
+        }
         let response = match outcome.result {
             Ok(response) => response,
             Err(err) => {
@@ -4298,6 +4320,44 @@ mod tests {
         assert_eq!(led.0[1].prompt_tokens, 5);
         assert_eq!(led.0[1].completion_tokens, 3);
         assert_eq!(led.0[1].cached_tokens, 2);
+    }
+
+    /// A response that lands after the run was cancelled is discarded. The
+    /// dispatch guard stops *new* inferences, but one already in flight still
+    /// returns — and applying it advanced the run to `ProcessResponse`, from
+    /// which it carried on as if nothing had happened.
+    #[test]
+    fn collect_inference_drops_a_response_for_a_cancelled_run() {
+        let (mut world, tx) = world_with_results();
+        let mut state = agent_state();
+        state.status = AgentStatus::Cancelled;
+        let e = world
+            .spawn((
+                state,
+                AwaitingInference,
+                StageCursor { index: 0 },
+                StageIoBuffer::default(),
+            ))
+            .id();
+        tx.send(InferenceOutcome {
+            entity: e,
+            result: Ok(resp("too late")),
+        })
+        .unwrap();
+
+        run_collect(&mut world);
+
+        let state = world.get::<AgentState>(e).unwrap();
+        assert_eq!(state.status, AgentStatus::Cancelled, "stays cancelled");
+        assert_eq!(state.iteration, 0, "the response was not counted");
+        assert!(
+            world.get::<ProcessResponse>(e).is_none(),
+            "and the run is not advanced by it"
+        );
+        assert!(
+            world.get::<AwaitingInference>(e).is_none(),
+            "the awaiting marker is cleared so nothing re-collects it"
+        );
     }
 
     #[test]
@@ -10347,6 +10407,46 @@ mod tests {
         assert!(world.get::<ReadyToInfer>(e).is_some());
         assert!(world.get::<AwaitingTransitionResponse>(e).is_none());
         assert_eq!(world.get::<AgentState>(e).unwrap().current_stage, "b");
+    }
+
+    /// A transition choice that lands after the run was cancelled is discarded.
+    /// Notably the no-match arm sets `Complete` unconditionally, which would
+    /// report a cancelled run as having finished normally.
+    #[test]
+    fn collect_choice_does_not_resurrect_or_complete_a_cancelled_run() {
+        for choice in ["b", "not-a-stage"] {
+            let (mut world, tx) = world_with_transition_results();
+            let bp = blueprint(vec![
+                stage_named("a", None, false, None),
+                stage_named("b", None, false, None),
+            ]);
+            let e = spawn_responding_agent(
+                &mut world,
+                bp,
+                vec![si("m0"), si("m1")],
+                vec![plain_edge("b")],
+            );
+            world.get_mut::<AgentState>(e).unwrap().status = AgentStatus::Cancelled;
+            tx.send(InferenceOutcome {
+                entity: e,
+                result: Ok(resp(choice)),
+            })
+            .unwrap();
+
+            run_collect_transition(&mut world);
+
+            assert_eq!(
+                world.get::<AgentState>(e).unwrap().status,
+                AgentStatus::Cancelled,
+                "choice {choice:?} left the run cancelled"
+            );
+            assert_eq!(
+                world.get::<StageCursor>(e).unwrap().index,
+                0,
+                "and did not advance the stage"
+            );
+            assert!(world.get::<AwaitingTransitionResponse>(e).is_none());
+        }
     }
 
     #[test]

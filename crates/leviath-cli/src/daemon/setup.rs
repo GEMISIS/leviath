@@ -228,6 +228,16 @@ pub fn build_host(
         )
     }));
 
+    // Last resort for a cancel the world can't service: force the run's on-disk
+    // state to `Cancelled`. The reloader above declines whenever a run can't be
+    // rebuilt — deleted blueprint, unreadable metadata, died mid-spawn — and
+    // without this a cancel in that state wrote nothing at all, so `meta.json`
+    // went on claiming the run was live and nothing could ever clear it.
+    let terminate_runs = runs_dir.clone();
+    host.set_force_terminator(Box::new(move |run_id| {
+        crate::runstate::force_cancel_in(&terminate_runs.join(run_id), now_secs()).found_run()
+    }));
+
     // Reap hook: when a terminal agent is reaped, tear down its sandbox and drop
     // its per-agent tool state (the latter also fixing a prior leak where tool
     // state was never released). Factored into `make_reaper` so the closure body
@@ -258,6 +268,7 @@ pub fn build_host(
     // spawn time for the run's start timestamp. Per-agent MCP defs = the global
     // servers' defs plus this blueprint's declared servers' defs (warmed above).
     let spawn_pool = mcp_pool.clone();
+    let spawn_runs_dir = runs_dir.clone();
     host.set_spawner(Box::new(move |world, args| {
         // Stake out the run directory before anything that can fail: blueprint
         // parsing, sandbox creation, provider resolution and seed validation all
@@ -265,7 +276,7 @@ pub fn build_host(
         // disk at all — no run dir, no meta.json, nothing to diagnose (#107).
         // The reload path deliberately doesn't do this: it must not overwrite a
         // recovering run's own metadata.
-        write_placeholder_meta(args);
+        write_placeholder_meta(&spawn_runs_dir, args);
         let defs = per_agent_mcp_defs(&spawn_pool, &mcp_tool_defs, &args.blueprint_path);
         build_agent(
             world.world_mut(),
@@ -288,7 +299,16 @@ pub fn build_host(
 /// state existed). Everything the agent hasn't resolved yet — model, stage names,
 /// stage count — is left blank; the first persistence tick overwrites the file
 /// with the real thing. Best-effort: a failure here must not block the spawn.
-fn write_placeholder_meta(args: &leviath_runtime::host::SpawnArgs) {
+///
+/// Writes under the host's configured `runs_dir` — the same directory the
+/// persistence lane and the reloader use. It deliberately does *not* go through
+/// `runstate::create_run`, which resolves the runs dir globally from
+/// `dirs::home_dir()`: that ignored a daemon configured with a different runs dir
+/// and, because `dirs::home_dir()` cannot be redirected by `$HOME` on macOS, let
+/// any test that spawned through a real host write placeholder runs into the
+/// developer's own `~/.leviath/runs` (where they then showed as permanently
+/// ACTIVE, since nothing would ever advance them).
+fn write_placeholder_meta(runs_dir: &std::path::Path, args: &leviath_runtime::host::SpawnArgs) {
     // The real agent name lives in the blueprint, which hasn't been parsed yet —
     // but the run id is `<agent>-<unix-secs>-<hex4>`, so its prefix is the name
     // (dashes inside the agent name included).
@@ -307,7 +327,7 @@ fn write_placeholder_meta(args: &leviath_runtime::host::SpawnArgs) {
         args.workdir.clone(),
         0,
     );
-    if let Err(e) = crate::runstate::create_run(&meta) {
+    if let Err(e) = crate::runstate::create_run_in(&runs_dir.join(&args.run_id), &meta) {
         tracing::warn!(run_id = %args.run_id, error = %e, "could not pre-create run directory");
     }
 }
@@ -495,60 +515,48 @@ mod tests {
     /// spawn that fails at *any* later step still leaves a `meta.json`.
     #[tokio::test]
     async fn spawner_pre_creates_the_run_dir_even_when_the_spawn_fails() {
-        crate::runstate::with_isolated_runs_dir_async("spawn-placeholder", |_base| async {
-            let runs = tempfile::tempdir().unwrap();
-            let mut host = setup_daemon_host(
-                Config::default(),
-                runs.path().to_path_buf(),
-                Handle::current(),
-            )
-            .await;
-            let (reply, rx) = oneshot::channel();
-            host.handle(ControlOp::Spawn {
-                args: Box::new(SpawnArgs {
-                    // A blueprint path that doesn't exist: the spawn fails at the
-                    // very first step inside build_agent.
-                    run_id: "my-agent-1234-ab12".to_string(),
-                    blueprint_path: "/no/such/agent.leviath".to_string(),
-                    task: "t".to_string(),
-                    regions: Default::default(),
-                    model: None,
-                    workdir: std::env::temp_dir().to_string_lossy().to_string(),
-                    metadata: Default::default(),
-                    callback_url: None,
-                    callback_secret: None,
-                    yolo: false,
-                    no_seed_commands: false,
-                    allow: Vec::new(),
-                    max_depth: None,
-                    parent_run_id: None,
-                }),
-                reply,
-            });
-            assert!(rx.await.unwrap().is_err());
-
-            let meta = crate::runstate::read_meta("my-agent-1234-ab12")
-                .expect("a failed spawn still leaves meta.json behind");
-            assert_eq!(meta.status, leviath_core::run_meta::RunStatus::Starting);
-            assert_eq!(meta.task, "t");
-            // The agent name is recovered from the run id's prefix, dashes and all.
-            assert_eq!(meta.agent_name, "my-agent");
-        })
+        let runs = tempfile::tempdir().unwrap();
+        let mut host = setup_daemon_host(
+            Config::default(),
+            runs.path().to_path_buf(),
+            Handle::current(),
+        )
         .await;
+        let (reply, rx) = oneshot::channel();
+        host.handle(ControlOp::Spawn {
+            args: Box::new(SpawnArgs {
+                // A blueprint path that doesn't exist: the spawn fails at the
+                // very first step inside build_agent.
+                run_id: "my-agent-1234-ab12".to_string(),
+                blueprint_path: "/no/such/agent.leviath".to_string(),
+                task: "t".to_string(),
+                workdir: std::env::temp_dir().to_string_lossy().to_string(),
+                ..Default::default()
+            }),
+            reply,
+        });
+        assert!(rx.await.unwrap().is_err());
+
+        let meta = crate::runstate::read_meta_from(&runs.path().join("my-agent-1234-ab12"))
+            .expect("a failed spawn still leaves meta.json behind");
+        assert_eq!(meta.status, leviath_core::run_meta::RunStatus::Starting);
+        assert_eq!(meta.task, "t");
+        // The agent name is recovered from the run id's prefix, dashes and all.
+        assert_eq!(meta.agent_name, "my-agent");
     }
 
     #[test]
     fn placeholder_meta_falls_back_to_the_whole_run_id_as_the_agent_name() {
-        crate::runstate::with_isolated_runs_dir("spawn-placeholder-odd-id", |_base| {
-            let args = SpawnArgs {
-                // Not the `<agent>-<secs>-<hex>` shape the run-id minter makes.
-                run_id: "odd".to_string(),
-                task: "t".to_string(),
-                ..Default::default()
-            };
-            write_placeholder_meta(&args);
-            assert_eq!(crate::runstate::read_meta("odd").unwrap().agent_name, "odd");
-        });
+        let runs = tempfile::tempdir().unwrap();
+        let args = SpawnArgs {
+            // Not the `<agent>-<secs>-<hex>` shape the run-id minter makes.
+            run_id: "odd".to_string(),
+            task: "t".to_string(),
+            ..Default::default()
+        };
+        write_placeholder_meta(runs.path(), &args);
+        let meta = crate::runstate::read_meta_from(&runs.path().join("odd")).unwrap();
+        assert_eq!(meta.agent_name, "odd");
     }
 
     #[test]
@@ -559,19 +567,132 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let blocker = dir.path().join("not-a-dir");
             std::fs::write(&blocker, "x").unwrap();
-            temp_env::with_var(
-                "LEVIATH_RUNS_DIR",
-                Some(blocker.join("runs").to_string_lossy().to_string()),
-                || {
-                    let args = SpawnArgs {
-                        run_id: "blocked".to_string(),
-                        ..Default::default()
-                    };
-                    write_placeholder_meta(&args);
-                    assert!(crate::runstate::read_meta("blocked").is_err());
-                },
+            let args = SpawnArgs {
+                run_id: "blocked".to_string(),
+                ..Default::default()
+            };
+            write_placeholder_meta(&blocker.join("runs"), &args);
+            assert!(
+                crate::runstate::read_meta_from(&blocker.join("runs").join("blocked")).is_err()
             );
         });
+    }
+
+    /// The spawner stakes out the run directory under the **host's configured**
+    /// `runs_dir`, never the home-resolved global one.
+    ///
+    /// This is an isolation invariant, not a convenience: `runstate::run_dir()`
+    /// goes through `dirs::home_dir()`, which ignores a `$HOME` override on macOS,
+    /// so a spawner that used it wrote into the developer's real `~/.leviath/runs`
+    /// from any test that drove a real host — leaving `status: "starting"` runs
+    /// that no daemon owned and nothing could ever advance. Asserting the global
+    /// dir is untouched is what keeps that from coming back.
+    #[tokio::test]
+    async fn spawner_writes_the_placeholder_under_the_hosts_runs_dir() {
+        let runs = tempfile::tempdir().unwrap();
+        let global_before = existing_global_run_ids();
+
+        let mut host = setup_daemon_host(
+            Config::default(),
+            runs.path().to_path_buf(),
+            Handle::current(),
+        )
+        .await;
+        let (reply, rx) = oneshot::channel();
+        host.handle(ControlOp::Spawn {
+            args: Box::new(SpawnArgs {
+                // A blueprint that doesn't exist: the spawn fails *after* the
+                // placeholder is staked out, which is the case that leaves a run
+                // dir behind.
+                run_id: "isolation-1234-ab12".to_string(),
+                blueprint_path: "/no/such/agent.leviath".to_string(),
+                task: "t".to_string(),
+                workdir: std::env::temp_dir().to_string_lossy().to_string(),
+                ..Default::default()
+            }),
+            reply,
+        });
+        assert!(rx.await.unwrap().is_err(), "the spawn itself fails");
+
+        assert!(
+            crate::runstate::read_meta_from(&runs.path().join("isolation-1234-ab12")).is_ok(),
+            "the placeholder lands in the host's configured runs dir"
+        );
+        assert_eq!(
+            existing_global_run_ids(),
+            global_before,
+            "spawning through a host must not write into the home-resolved runs dir"
+        );
+    }
+
+    /// End-to-end for the reported bug: a run whose blueprint no longer exists
+    /// cannot be rebuilt, so the reloader declines — and the cancel used to stop
+    /// there, replying "no such run" and writing nothing, leaving `meta.json`
+    /// claiming the run was live with no way to ever clear it. It must now be
+    /// terminated on disk instead.
+    #[tokio::test]
+    async fn cancelling_an_unreloadable_run_terminates_it_on_disk() {
+        let runs = tempfile::tempdir().unwrap();
+        let mut host = setup_daemon_host(
+            Config::default(),
+            runs.path().to_path_buf(),
+            Handle::current(),
+        )
+        .await;
+
+        // Staked out *after* startup, so the recovery sweep (which marks
+        // un-reloadable runs as crashed) hasn't already dealt with it — this is
+        // the live case: the daemon is up and the run cannot be paged in.
+        let run_dir = runs.path().join("gone-1234-ab12");
+        let meta = leviath_core::run_meta::RunMeta::new(
+            "gone-1234-ab12".to_string(),
+            "gone".to_string(),
+            // A blueprint path that does not exist — the deleted-manifest case.
+            "/no/such/dir/agent.leviath".to_string(),
+            "t".to_string(),
+            None,
+            std::env::temp_dir().to_string_lossy().to_string(),
+            1,
+        );
+        crate::runstate::create_run_in(&run_dir, &meta).unwrap();
+        assert!(
+            !crate::runstate::is_terminal_status(
+                &crate::runstate::read_meta_from(&run_dir).unwrap().status
+            ),
+            "the run starts out looking live"
+        );
+
+        let (reply, rx) = oneshot::channel();
+        host.handle(ControlOp::Cancel {
+            run_id: "gone-1234-ab12".to_string(),
+            reply,
+        });
+        assert!(rx.await.unwrap(), "the cancel reports that it applied");
+        assert_eq!(
+            crate::runstate::read_meta_from(&run_dir).unwrap().status,
+            leviath_core::run_meta::RunStatus::Cancelled,
+            "and it reached disk, so nothing shows the run as live any more"
+        );
+
+        // A run id that names nothing at all is still an honest miss.
+        let (reply, rx) = oneshot::channel();
+        host.handle(ControlOp::Cancel {
+            run_id: "no-such-run".to_string(),
+            reply,
+        });
+        assert!(!rx.await.unwrap());
+    }
+
+    /// The run ids currently present in the home-resolved (global) runs dir.
+    /// Used to assert a test added nothing there; an unreadable/absent dir is an
+    /// empty set, which is the same assertion.
+    fn existing_global_run_ids() -> std::collections::BTreeSet<String> {
+        std::fs::read_dir(crate::runstate::runs_dir())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect()
     }
 
     // ── per-agent MCP (issue #97) ──
