@@ -40,10 +40,10 @@ use crate::pipeline::{
     PersistenceStage, ProcessResponse, Providers, ReadyForTools, ReadyForTransition, ReadyToInfer,
     ResolveTransition, ToolResults, ToolService, ToolServiceRes, ToolStage, TransitionResults,
     check_workspace_health, collect_compaction, collect_inference, collect_tools,
-    collect_transition_choice, deliver_messages, dispatch_compaction, dispatch_edge_compact,
-    dispatch_inference, dispatch_persistence, dispatch_tools, dispatch_transition_choice,
-    enforce_max_iterations, gate_requires_children, handle_empty_response,
-    poll_dynamic_tool_refresh, process_response, reflect_interaction_status,
+    collect_transition_choice, deliver_messages, detect_stuck_stage, dispatch_compaction,
+    dispatch_edge_compact, dispatch_inference, dispatch_persistence, dispatch_tools,
+    dispatch_transition_choice, enforce_max_iterations, gate_requires_children,
+    handle_empty_response, poll_dynamic_tool_refresh, process_response, reflect_interaction_status,
     refresh_advertised_tools, require_context_regions, resolve_transition, sync_tool_stages,
 };
 use crate::providers::ProviderRegistry;
@@ -199,6 +199,10 @@ impl PipelineWorld {
                 dispatch_compaction,
                 // Cap a stage at its max_iterations before running more inference.
                 enforce_max_iterations,
+                // …then the softer guard: bail out of a stage that is burning
+                // turns/edits without progress, when the blueprint declares a
+                // `stuck` escape edge. Runs after the hard cap so that always wins.
+                detect_stuck_stage,
                 // Stop a run whose working directory vanished, rather than let
                 // every tool fail with ENOENT for the rest of the run.
                 check_workspace_health,

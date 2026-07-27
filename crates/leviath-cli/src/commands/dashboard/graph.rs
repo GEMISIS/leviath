@@ -47,6 +47,7 @@ pub(super) fn load_graph_info(agent_path: &str) -> Option<GraphTransitionInfo> {
                         TransitionCondition::Error => "error".to_string(),
                         TransitionCondition::MaxIterations => "max_iterations".to_string(),
                         TransitionCondition::LlmChoice => "llm_choice".to_string(),
+                        TransitionCondition::Stuck => "stuck".to_string(),
                     };
                     let transform = match &edge.transform {
                         EdgeTransform::Direct => "direct".to_string(),
@@ -336,6 +337,13 @@ transform = "compact"
 [stages.implement.transitions.plan]
 condition = "max_iterations"
 
+[stages.implement.transitions.reassess]
+condition = "stuck"
+stuck_after_iterations = 20
+
+[stages.reassess]
+mode = "autonomous"
+
 [stages.review]
 mode = "autonomous"
 
@@ -356,7 +364,7 @@ hint = "retry"
 
         let info = load_graph_info(dir.path().to_str().unwrap()).expect("graph mode expected");
         assert_eq!(info.entry_stage, "plan");
-        assert_eq!(info.stage_names.len(), 4);
+        assert_eq!(info.stage_names.len(), 5);
         assert!(info.stage_names.contains(&"plan".to_string()));
 
         let plan_edges = info.edges.get("plan").unwrap();
@@ -367,7 +375,17 @@ hint = "retry"
         assert_eq!(plan_edges[0].transform, "direct");
 
         let implement_edges = info.edges.get("implement").unwrap();
-        assert_eq!(implement_edges.len(), 3);
+        assert_eq!(implement_edges.len(), 4);
+        // A `stuck` edge must render with its own label, not fall back to
+        // another condition (#106).
+        assert_eq!(
+            implement_edges
+                .iter()
+                .find(|e| e.target == "reassess")
+                .expect("stuck edge present")
+                .condition,
+            "stuck"
+        );
         let review_edge = implement_edges
             .iter()
             .find(|e| e.target == "review")

@@ -171,6 +171,19 @@ Six region types with deterministic eviction — architecture stays pinned, tool
 
 Each stage gets its own model, tools, and context layout. Run them linearly or as a [directed graph](https://leviath.dev/docs/stages#graph) with conditional transitions, error recovery, and LLM-driven routing — check it with `lev validate`.
 
+A `stuck` edge escapes a stage that is making no progress — measured, not self-reported, so it fires even when the agent hasn't noticed:
+
+```toml
+[stages.implement.transitions.reassess]
+condition = "stuck"
+stuck_after_iterations      = 20   # inferences in this stage
+stuck_after_minutes         = 15   # wall clock in this stage
+stuck_after_same_file_edits = 5    # write/edit calls against one path
+stuck_after_tool_calls      = 60   # tool calls in this stage
+```
+
+Set any subset — whichever trips first wins, and each stage arms its own. The runtime writes *why* into the target stage's context.
+
 [Learn more →](https://leviath.dev/docs/stages)
 
 </td>
@@ -323,16 +336,18 @@ At 10 concurrent agents, Leviath uses **18 MB** of device RAM vs. **3,209 MB** f
 
 Ten agents ship out of the box — each a multi-stage directed graph with structured context regions, per-stage model fallback (Anthropic → OpenAI → local), and error recovery. The research and writing agents also carry drop-in `web_search`/`web_fetch` script tools.
 
-Every agent also has an `error_recovery` stage (omitted from the graphs) that catches failed tool calls and hands back into the main flow. Diamonds are LLM-routed or human-in-the-loop decisions.
+Every agent also has an `error_recovery` stage (omitted from the graphs) that catches failed tool calls and hands back into the main flow. Diamonds are LLM-routed or human-in-the-loop decisions; dotted edges fire automatically on a runtime condition rather than by the agent's choice.
+
+The two coding agents can also detour through an optional **`prototype`** spike when the approach is uncertain — the planner elects it per task and folds what it learns back into the plan — and are pulled into **`reassess`** by a `stuck` edge when they burn turns or keep editing one file without progress.
 
 <table>
 <tr><th align="left">Agent</th><th align="left">Workflow</th></tr>
 <tr>
-<td valign="middle" width="30%"><b>software-engineer</b> <em>(default)</em><br>Full coding workflow with codebase discovery and human-approved planning</td>
+<td valign="middle" width="30%"><b>software-engineer</b> <em>(default)</em><br>Full coding workflow with codebase discovery, human-approved planning, an optional prototype spike, and stuck detection</td>
 <td><img src="docs/assets/agents/software-engineer.svg" alt="software-engineer workflow graph" width="520"></td>
 </tr>
 <tr>
-<td valign="middle" width="30%"><b>coder</b><br>Focused implementation with codebase discovery and a review loop</td>
+<td valign="middle" width="30%"><b>coder</b><br>Focused implementation with codebase discovery, an optional prototype spike, stuck detection, and a review loop</td>
 <td><img src="docs/assets/agents/coder.svg" alt="coder workflow graph" width="520"></td>
 </tr>
 <tr>

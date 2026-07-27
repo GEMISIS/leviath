@@ -237,12 +237,26 @@ impl Blueprint {
         // All transition targets must exist
         for stage in &self.stages {
             if let Some(ref transitions) = stage.transitions {
-                for target_name in transitions.keys() {
+                for (target_name, edge) in transitions {
                     if !stage_names.contains(target_name.as_str()) {
                         return Err(ValidationError::Transition {
                             from: stage.name.clone(),
                             to: target_name.clone(),
                             message: "target stage does not exist".to_string(),
+                        });
+                    }
+                    // A `stuck` edge with no threshold could never fire. Caught
+                    // here as well as in the manifest parser, so blueprints built
+                    // programmatically (API / `lev validate`) are held to it too.
+                    if edge.condition == TransitionCondition::Stuck
+                        && !edge.stuck.is_some_and(|c| c.is_armed())
+                    {
+                        return Err(ValidationError::Transition {
+                            from: stage.name.clone(),
+                            to: target_name.clone(),
+                            message: "condition = \"stuck\" requires at least one \
+                                      stuck_after_* threshold (the edge could never fire)"
+                                .to_string(),
                         });
                     }
                 }
@@ -942,6 +956,49 @@ pub struct TransitionEdge {
     /// Absent ⇒ the edge is unconditional (beyond its `condition`).
     #[serde(default)]
     pub gate: Option<TransitionGate>,
+
+    /// Thresholds arming a [`TransitionCondition::Stuck`] edge. `Some` iff the
+    /// condition is `Stuck` — both the manifest parser and [`Blueprint::validate`]
+    /// reject the two half-configured shapes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stuck: Option<StuckConfig>,
+}
+
+/// Thresholds that arm a [`TransitionCondition::Stuck`] edge.
+///
+/// At least one threshold is always set: an edge with none could never fire, so
+/// both the manifest parser and [`Blueprint::validate`] reject that shape rather
+/// than build a dead edge. Every threshold is evaluated against the *current
+/// stage's* progress counters, which reset on each stage entry — so a blueprint
+/// can arm different stages with different thresholds independently.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StuckConfig {
+    /// `stuck_after_iterations`: inferences run in this stage without finishing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_iterations: Option<usize>,
+
+    /// `stuck_after_minutes`: wall-clock minutes spent in this stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_minutes: Option<usize>,
+
+    /// `stuck_after_same_file_edits`: `write_file`/`edit_file` calls against a
+    /// single path in this stage — the "100 iterations in the wrong file" mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_same_file_edits: Option<usize>,
+
+    /// `stuck_after_tool_calls`: total tool calls made in this stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_tool_calls: Option<usize>,
+}
+
+impl StuckConfig {
+    /// Whether any threshold is set. `false` ⇒ the edge could never fire.
+    pub fn is_armed(&self) -> bool {
+        self.after_iterations.is_some()
+            || self.after_minutes.is_some()
+            || self.after_same_file_edits.is_some()
+            || self.after_tool_calls.is_some()
+    }
 }
 
 /// Preconditions an edge imposes on the stage it leaves, checked once the edge
@@ -1003,6 +1060,12 @@ pub enum TransitionCondition {
     MaxIterations,
     /// LLM picks from available transitions (default for multi-transition stages)
     LlmChoice,
+    /// Fires *mid-stage* when the stage's runtime metrics cross this edge's
+    /// [`StuckConfig`] thresholds — the agent is burning iterations, wall clock,
+    /// or edits to one file without finishing. Unlike every other condition this
+    /// interrupts a stage the agent never said it had completed, so when the edge
+    /// is unavailable the runtime resumes the stage rather than transitioning.
+    Stuck,
 }
 
 /// How context transforms when crossing a transition edge.
@@ -1218,6 +1281,7 @@ mod tests {
                 hint: None,
                 transform: EdgeTransform::Direct,
                 gate: None,
+                stuck: None,
             },
         );
         plan.transitions = Some(transitions);
@@ -1513,6 +1577,7 @@ mod tests {
                 hint: None,
                 transform: EdgeTransform::Direct,
                 gate: None,
+                stuck: None,
             },
         );
         stage.transitions = Some(transitions);
@@ -1536,6 +1601,7 @@ mod tests {
                     condition: TransitionCondition::Always,
                     hint: None,
                     transform: EdgeTransform::Direct,
+                    stuck: None,
                     gate: Some(TransitionGate {
                         require_modifications: true,
                         tools: extra.iter().map(|t| t.to_string()).collect(),
@@ -1594,6 +1660,7 @@ mod tests {
                 hint: None,
                 transform: EdgeTransform::Direct,
                 gate: None,
+                stuck: None,
             },
         );
         stage.transitions = Some(transitions);
@@ -1614,6 +1681,7 @@ mod tests {
                 hint: None,
                 transform: EdgeTransform::Direct,
                 gate: None,
+                stuck: None,
             },
         );
         stage.transitions = Some(transitions);
@@ -1638,6 +1706,7 @@ mod tests {
                 hint: None,
                 transform: EdgeTransform::Direct,
                 gate: None,
+                stuck: None,
             },
         );
         plan.transitions = Some(transitions);
@@ -1661,6 +1730,7 @@ mod tests {
                 hint: None,
                 transform: EdgeTransform::Direct,
                 gate: None,
+                stuck: None,
             },
         );
         a.transitions = Some(a_transitions);
@@ -1674,6 +1744,7 @@ mod tests {
                 hint: None,
                 transform: EdgeTransform::Direct,
                 gate: None,
+                stuck: None,
             },
         );
         b.transitions = Some(b_transitions);
@@ -1749,6 +1820,118 @@ mod tests {
     fn test_interaction_style_equality() {
         assert_eq!(InteractionStyle::FreeText, InteractionStyle::FreeText);
         assert_ne!(InteractionStyle::FreeText, InteractionStyle::MultipleChoice);
+    }
+
+    // ─── stuck detection (#106) ─────────────────────────────────────────────
+
+    #[test]
+    fn stuck_config_is_armed_only_when_a_threshold_is_set() {
+        assert!(!StuckConfig::default().is_armed());
+        for cfg in [
+            StuckConfig {
+                after_iterations: Some(1),
+                ..Default::default()
+            },
+            StuckConfig {
+                after_minutes: Some(1),
+                ..Default::default()
+            },
+            StuckConfig {
+                after_same_file_edits: Some(1),
+                ..Default::default()
+            },
+            StuckConfig {
+                after_tool_calls: Some(1),
+                ..Default::default()
+            },
+        ] {
+            assert!(cfg.is_armed(), "{cfg:?} should be armed");
+        }
+    }
+
+    #[test]
+    fn transition_condition_stuck_round_trips_as_snake_case() {
+        let json = serde_json::to_string(&TransitionCondition::Stuck).unwrap();
+        assert_eq!(json, "\"stuck\"");
+        let back: TransitionCondition = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, TransitionCondition::Stuck);
+        assert_ne!(TransitionCondition::Stuck, TransitionCondition::Always);
+    }
+
+    #[test]
+    fn transition_edge_stuck_round_trips_and_is_omitted_when_absent() {
+        let plain = TransitionEdge {
+            target: "b".to_string(),
+            condition: TransitionCondition::Always,
+            hint: None,
+            transform: EdgeTransform::Direct,
+            gate: None,
+            stuck: None,
+        };
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(
+            !json.contains("stuck"),
+            "absent config must be skipped: {json}"
+        );
+
+        let armed = TransitionEdge {
+            condition: TransitionCondition::Stuck,
+            stuck: Some(StuckConfig {
+                after_iterations: Some(20),
+                after_minutes: Some(10),
+                after_same_file_edits: Some(3),
+                after_tool_calls: Some(60),
+            }),
+            ..plain
+        };
+        let back: TransitionEdge = serde_json::from_str(&serde_json::to_string(&armed).unwrap())
+            .expect("armed edge round-trips");
+        assert_eq!(back.condition, TransitionCondition::Stuck);
+        assert_eq!(back.stuck, armed.stuck);
+    }
+
+    /// A blueprint built programmatically (API / `lev validate`) bypasses the
+    /// manifest parser, so `validate` has to catch the dead-edge shape too.
+    #[test]
+    fn validate_rejects_a_stuck_edge_with_no_threshold() {
+        let build = |stuck| {
+            let mut a = Stage::new("a".to_string(), make_model());
+            let b = Stage::new("b".to_string(), make_model());
+            let mut transitions = std::collections::HashMap::new();
+            transitions.insert(
+                "b".to_string(),
+                TransitionEdge {
+                    target: "b".to_string(),
+                    condition: TransitionCondition::Stuck,
+                    hint: None,
+                    transform: EdgeTransform::Direct,
+                    gate: None,
+                    stuck,
+                },
+            );
+            a.transitions = Some(transitions);
+            Blueprint::new("t".into(), "".into(), vec![a, b], make_layout())
+        };
+
+        for dead in [None, Some(StuckConfig::default())] {
+            let err = build(dead)
+                .validate()
+                .expect_err("dead stuck edge rejected");
+            assert!(
+                format!("{err:?}").contains("stuck_after_"),
+                "unexpected error: {err:?}"
+            );
+        }
+
+        // The same graph with a real threshold is fine.
+        assert!(
+            build(Some(StuckConfig {
+                after_iterations: Some(5),
+                ..Default::default()
+            }))
+            .validate()
+            .is_ok()
+        );
     }
 
     #[test]

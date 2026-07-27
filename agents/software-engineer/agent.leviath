@@ -1,6 +1,6 @@
 [agent]
 name = "software-engineer"
-version = "0.3.0"
+version = "0.4.0"
 description = "Plan-then-implement agent — mirrors the Claude Code discover→plan→approve→code→review workflow"
 entry_stage = "discover"
 
@@ -105,7 +105,14 @@ transition_prompt = """
 You've shown the plan to the user and asked them to approve it, request
 revisions, or edit it directly.
 
-- If they approved the plan, transition to 'implement'.
+- If they approved the plan, transition to 'implement' — UNLESS the plan rests
+  on an assumption you have not verified (you are unsure an API/library behaves
+  as assumed, or `discovery` did not pin down where the behavior you must change
+  lives). In that case transition to 'prototype' to settle it with a small spike
+  first. The user approved the goal, not your guesses about the codebase; a
+  spike that corrects the plan serves them better than forty edits in the wrong
+  file. Only detour when you expect to learn something that would change what
+  you write.
 - If they asked for revisions or edited the plan, transition back to 'plan',
   incorporate their feedback (see the "directive"/"detail" messages in
   context), and produce an updated plan before asking again.
@@ -158,7 +165,10 @@ read_file = "codebase"
 list_dir  = "codebase"
 
 [stages.plan.transitions.implement]
-hint = "Plan approved — proceed to implementation"
+hint = "Plan approved and the approach is verified — proceed to implementation"
+
+[stages.plan.transitions.prototype]
+hint = "Plan approved but rests on an unverified assumption — spike it first"
 
 [stages.plan.transitions.plan]
 hint = "User asked for revisions or more detail — keep planning"
@@ -194,6 +204,78 @@ edit_options = ["Add detail — expand a section"]
 # next step via a tool call (deterministic routing, agent-driven capture).
 [stages.plan.interaction_points.directives]
 "Revise — I'll describe changes" = "The user wants to revise the plan. Call the ask_user_text tool to ask exactly what they want changed. Then start from the CURRENT plan (in the 'plan' section of your context — it already includes any edits the user made directly) and apply ONLY the requested change, preserving every other detail verbatim (wording, file names, and exact strings the user chose). Do not revert earlier user edits or 'correct' them back to defaults. End with the '## Plan' and '## Files' sections so it can be re-approved."
+
+# ─── Stage 2b: Prototype (elective) ──────────────────────────────────────────
+# NOT a mandatory hop — `plan` only routes here when the approved plan rests on
+# an assumption the agent has not actually verified. It buys information
+# cheaply: prove or kill the riskiest assumption, record what was ruled out, and
+# correct the plan so `implement` executes evidence instead of a guess. The
+# user's approved GOAL is never renegotiated here, only the technical route.
+[stages.prototype]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "devstral:24b" }] }
+description = "Spike the riskiest assumption in the approved plan before executing it"
+available_tools = ["read_file", "list_dir", "write_file", "edit_file", "bash", "context_write", "context_append"]
+max_iterations = 15
+max_revisits = 2
+transition_prompt = """
+Spike complete. Based on what you actually observed:
+- Respond with `implement` if a hypothesis held up — you now know where the
+  change belongs and what it should do.
+- Respond with `plan` if every hypothesis failed. The approved plan rests on a
+  wrong premise, so the user needs to see and approve a corrected one rather
+  than have you execute a plan you know is wrong.
+"""
+system_prompt = """
+You are spiking, not implementing. The plan in `plan` was approved by the user,
+but it assumes things about this codebase you have not verified. Pick the ONE
+assumption that would cost the most to discover was wrong, and settle it with
+the smallest thing that actually runs.
+
+1. State the assumption in a sentence.
+2. Prove or disprove it: a throwaway script, a failing test that reproduces the
+   bug, a bash one-liner that greps for where the behavior really lives. Use the
+   VERIFY command from `workflow` — do not invent your own. For a BUGFIX the
+   spike IS the reproduction; do not move on without one.
+3. Append the result to the `prototypes` region (context_append): the
+   assumption, the verdict, the exact command or snippet that settled it, and
+   the file paths you confirmed. Record what you RULED OUT as carefully as what
+   worked — a dead end you don't write down gets retried.
+4. Before you leave, write the corrected approach to the `plan` region
+   (context_write, key "plan"). Preserve the user's intent and any wording they
+   chose; correct only the technical route. That plan is what runs next.
+
+Keep this to a handful of iterations, and throw away scaffolding you created
+purely to test a hypothesis. You are buying information, not shipping code.
+"""
+
+[stages.prototype.tool_routing]
+default_region = "conversation"
+[stages.prototype.tool_routing.overrides]
+read_file  = "codebase"
+list_dir   = "codebase"
+bash       = "test_results"
+write_file = "implementation"
+edit_file  = "implementation"
+
+[stages.prototype.transitions.implement]
+hint = "A hypothesis held up — implement it properly"
+transform = "compact"
+
+[stages.prototype.transitions.plan]
+hint = "Every hypothesis failed — the plan's premise is wrong, re-plan with the user"
+transform = "compact"
+
+[stages.prototype.transitions.reassess]
+condition = "stuck"
+stuck_after_iterations = 12
+stuck_after_same_file_edits = 4
+hint = "The spike is going in circles — step back"
+transform = "direct"
+
+[stages.prototype.transitions.error_recovery]
+condition = "error"
+transform = "direct"
 
 # ─── Stage 3: Implement ──────────────────────────────────────────────────────
 # Executes the approved plan. Write/edit/bash require tool-approval unless
@@ -286,6 +368,26 @@ hint = "Need to fundamentally rethink the approach"
 transform = "compact"
 gate = { require_modifications = true, region = "implementation", max_attempts = 1 }
 
+# Runtime escape hatch (issue #106). Distinct from the voluntary `plan` edge
+# above: that one requires the agent to NOTICE it is lost, which is exactly what
+# fails when it is stuck. This one fires on measured behavior instead, and is
+# ungated — a stuck agent is not helped by being told to write more.
+[stages.implement.transitions.reassess]
+condition = "stuck"
+stuck_after_iterations = 20
+stuck_after_minutes = 15
+stuck_after_same_file_edits = 5
+hint = "No forward progress — step back and reassess"
+transform = "custom"
+# `custom`, not `compact`: a plain compact edge would summarize EVERY
+# stage-specific region including `test_results`, the raw evidence reassess most
+# needs. Compact only the conversation and leave the rest intact.
+[stages.implement.transitions.reassess.transform_config]
+carry = ["discovery", "workflow", "task", "constraints", "architecture", "plan", "codebase", "implementation", "prototypes", "changelog", "decisions", "errors", "test_results", "stuck_report"]
+compact = ["conversation"]
+clear = ["scratch"]
+compact_prompt = "Summarize what was attempted in this stage: which files were edited and how often, which tests were run and their outcome, and the last point at which anything demonstrably worked."
+
 [stages.implement.transitions.error_recovery]
 condition = "error"
 transform = "direct"
@@ -363,6 +465,73 @@ compact_prompt = "Summarize review findings as a numbered list of required fixes
 condition = "error"
 transform = "direct"
 
+# ─── Stage 4b: Reassess ──────────────────────────────────────────────────────
+# Reached ONLY via a `stuck` edge (issue #106) — invisible during normal flow,
+# exactly like error_recovery. Deliberately has NO write tools: the point is to
+# stop editing and start thinking. It reads the runtime's `stuck_report` (which
+# threshold tripped and why), finds the wrong assumption, and corrects the plan
+# before handing back to implement.
+[stages.reassess]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "devstral:24b" }] }
+description = "Step back after no progress: diagnose the dead end and re-plan"
+available_tools = ["read_file", "list_dir", "bash", "context_write", "context_append"]
+max_iterations = 8
+max_revisits = 2
+system_prompt = """
+You are NOT here to write code — you have no write tools on purpose. You were
+pulled out of implementation because you stopped making progress. The
+`stuck_report` region says which threshold tripped and why.
+
+Work through this in order:
+1. Re-read the ORIGINAL task in `task` and the user's `constraints`. State in
+   one sentence what "done" means. Not what the plan says — what the task says.
+   Check it against the DONE WHEN line in `workflow`.
+2. Separate what you have VERIFIED (a command you ran and an output you saw)
+   from what you ASSUMED. `test_results`, `changelog`, `decisions` and
+   `implementation` are your evidence. The bug is almost always in the assumed
+   column.
+3. Find the wrong assumption. The most common one by far is that you have been
+   editing the wrong file. Use list_dir/read_file and bash (grep) to confirm
+   WHERE the behavior under test actually lives before changing anything else.
+4. If an earlier version worked and a later edit broke it, say so explicitly and
+   make reverting to that state step 1 of the new plan. Use bash (git diff /
+   git status) to see everything this run has changed. A working fix you broke
+   is worth more than a fresh idea.
+
+Then rewrite the `plan` region (context_write, key "plan") with a corrected
+numbered plan whose FIRST step is the smallest change you can verify with one
+command, and which names explicitly what NOT to touch again. Preserve the user's
+approved intent — correct the route, not the destination. Append one line to
+`errors` naming the dead end so it is not retried.
+"""
+
+[stages.reassess.tool_permissions]
+read_file = "allow"
+list_dir  = "allow"
+bash      = "ask"
+
+# Diagnostic bash output (git diff, greps, test re-runs) persists to test_results.
+[stages.reassess.tool_routing]
+default_region = "conversation"
+[stages.reassess.tool_routing.overrides]
+read_file = "codebase"
+list_dir  = "codebase"
+bash      = "test_results"
+
+[stages.reassess.transitions.implement]
+hint = "Corrected plan in hand — retry implementation"
+transform = "custom"
+[stages.reassess.transitions.implement.transform_config]
+carry = ["discovery", "workflow", "task", "constraints", "architecture", "plan", "codebase", "implementation", "prototypes", "changelog", "decisions", "errors", "stuck_report"]
+compact = ["conversation"]
+clear = ["scratch", "test_results"]
+compact_prompt = "Summarize the reassessment as three things: the wrong assumption, the corrected approach, and what must be reverted first."
+
+[stages.reassess.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
 # ─── Stage 5: Error Recovery ────────────────────────────────────────────────
 # Only reachable via error condition edges — invisible during normal flow.
 
@@ -370,7 +539,7 @@ transform = "direct"
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Diagnose and resolve errors encountered during implementation"
-available_tools = ["read_file", "bash"]
+available_tools = ["read_file", "bash", "context_append"]
 max_iterations = 10
 max_revisits = 2
 system_prompt = """
@@ -378,6 +547,10 @@ An error occurred during implementation. Your job:
 1. Read the error details from the conversation context.
 2. Diagnose the root cause.
 3. Suggest a fix or workaround.
+
+Append a one-line summary of the failure to the `errors` region
+(context_append) so repeated failures become visible as a pattern. If you see
+the SAME error recurring there, change approach rather than repeating the fix.
 
 Once you've identified the issue, transition back to implement to retry.
 """
@@ -404,6 +577,13 @@ constraints  = { kind = "pinned", budget = "1%", max_tokens = 2000, seed = "cons
 # Pre-loaded on startup: architecture / design docs (missing files skipped).
 architecture = { kind = "pinned", budget = "3%", max_tokens = 6000, seed = { files = ["ARCHITECTURE.md", "DESIGN.md", "docs/ARCHITECTURE.md", "docs/architecture.md", "README.md"] } }
 plan         = { kind = "pinned", budget = "5%", max_tokens = 6000 }
+# Verified findings from a `prototype` spike: the assumption, the verdict, and
+# the command that settled it — including what was RULED OUT. Pinned so neither
+# implement nor reassess redoes the spike.
+prototypes   = { kind = "pinned", budget = "4%", max_tokens = 6000 }
+# Written by the RUNTIME when a `stuck` edge fires (issue #106): which threshold
+# tripped and why. Pinned so it survives the edge transform into `reassess`.
+stuck_report = { kind = "pinned", budget = "1%", max_tokens = 2000 }
 # Deterministic repo scan, run once at spawn — the discover stage starts from
 # facts instead of burning iterations on `ls`. `git ls-files` behaves identically
 # on POSIX and Windows shells; outside a git repo it fails and this is simply
@@ -433,6 +613,11 @@ impl_history     = { kind = "compact_history", source_region = "implementation",
 decisions    = { kind = "sliding_window", max_items = 10, budget = "3%", max_tokens = 4000 }
 changelog    = { kind = "sliding_window", max_items = 20, budget = "2%", max_tokens = 3000 }
 test_results = { kind = "clearable",      budget = "4%", max_tokens = 5000 }
+# A small sliding window so a repeating failure is visible as a pattern rather
+# than a one-off. Written explicitly via context_append by error_recovery and
+# reassess — never by tool routing (only `conversation` may hold routed tool
+# results; a second sliding_window desyncs them from their tool_use → API 400).
+errors       = { kind = "sliding_window", max_items = 5, budget = "2%", max_tokens = 3000 }
 
 # ── Conversation (bulk eviction for caching) + working memory ──
 conversation = { kind = "sliding_window", max_items = 40, budget = "20%", max_tokens = 30000, strategy = "bulk", overflow = 20 }

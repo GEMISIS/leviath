@@ -6,7 +6,7 @@
 
 use crate::blueprint::{
     ContentTransform, ContextTransform, EdgeTransform, ModelConfig, ModelEntry, RegionMapping,
-    StageMode, TransitionCondition, TransitionEdge,
+    StageMode, StuckConfig, TransitionCondition, TransitionEdge,
 };
 use crate::error::{Error, Result};
 use crate::layout::{RegionDefinition, RegionSeed};
@@ -475,16 +475,40 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                         Some("error") => TransitionCondition::Error,
                         Some("max_iterations") => TransitionCondition::MaxIterations,
                         Some("llm_choice") => TransitionCondition::LlmChoice,
+                        Some("stuck") => TransitionCondition::Stuck,
                         Some("always") | None => TransitionCondition::Always,
                         // Reject unknown conditions rather than silently building a
                         // `Custom(..)` edge the runtime never evaluates (a dead edge).
                         Some(other) => {
                             return Err(Error::Other(format!(
                                 "transition to '{target_name}' has unknown condition \
-                                 '{other}' (valid: always, error, max_iterations, llm_choice)"
+                                 '{other}' (valid: always, error, max_iterations, \
+                                 llm_choice, stuck)"
                             )));
                         }
                     };
+
+                    // Stuck thresholds live on the edge they arm, so a stage can
+                    // be armed on iterations while another is armed on wall clock.
+                    // Both halves are required together: a bare `condition =
+                    // "stuck"` edge could never fire, and thresholds under any
+                    // other condition would be silently ignored.
+                    let stuck = parse_stuck_config(edge_value);
+                    let is_stuck = condition == TransitionCondition::Stuck;
+                    if is_stuck && stuck.is_none() {
+                        return Err(Error::Other(format!(
+                            "transition to '{target_name}' has condition 'stuck' but no \
+                             threshold (set at least one of stuck_after_iterations, \
+                             stuck_after_minutes, stuck_after_same_file_edits, \
+                             stuck_after_tool_calls)"
+                        )));
+                    }
+                    if !is_stuck && stuck.is_some() {
+                        return Err(Error::Other(format!(
+                            "transition to '{target_name}' sets stuck_after_* thresholds \
+                             but its condition is not 'stuck' — they would never be read"
+                        )));
+                    }
 
                     let transform = match edge_value.get("transform").and_then(|v| v.as_str()) {
                         Some("clear") => EdgeTransform::Clear,
@@ -558,6 +582,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                             hint,
                             transform,
                             gate,
+                            stuck,
                         },
                     );
                 }
@@ -750,6 +775,28 @@ fn str_field(v: &toml::Value, key: &str) -> String {
         .and_then(|x| x.as_str())
         .unwrap_or_default()
         .to_string()
+}
+
+/// Parse a transition edge's `stuck_after_*` thresholds into a [`StuckConfig`],
+/// or `None` when the edge arms none of them.
+///
+/// Non-positive values read as unset — mirroring `enforce_max_iterations`, where
+/// `max == 0` means "unlimited" — so `stuck_after_iterations = 0` leaves the edge
+/// unarmed and the caller rejects it, rather than the edge firing on turn zero.
+fn parse_stuck_config(edge: &toml::Value) -> Option<StuckConfig> {
+    let threshold = |key: &str| {
+        edge.get(key)
+            .and_then(|v| v.as_integer())
+            .filter(|v| *v > 0)
+            .map(|v| v as usize)
+    };
+    let cfg = StuckConfig {
+        after_iterations: threshold("stuck_after_iterations"),
+        after_minutes: threshold("stuck_after_minutes"),
+        after_same_file_edits: threshold("stuck_after_same_file_edits"),
+        after_tool_calls: threshold("stuck_after_tool_calls"),
+    };
+    cfg.is_armed().then_some(cfg)
 }
 
 /// Parse one `[[transforms.mappings]]` entry. An omitted or unrecognized
@@ -1315,6 +1362,115 @@ mode = "autonomous"
         let err = parse_manifest(toml).unwrap_err().to_string();
         assert!(err.contains("unknown condition"), "got: {err}");
         assert!(err.contains("whenever_i_feel_like_it"), "got: {err}");
+        // The rejection message must list every condition that IS valid.
+        assert!(err.contains("stuck"), "got: {err}");
+    }
+
+    // ─── stuck detection (#106) ─────────────────────────────────────────────
+
+    /// Build a two-stage manifest whose `analyze → next` edge carries `body`.
+    fn stuck_edge_manifest(body: &str) -> String {
+        format!(
+            r#"
+[agent]
+name = "stuck-agent"
+
+[stages.analyze]
+mode = "autonomous"
+
+[stages.analyze.transitions.next]
+{body}
+
+[stages.next]
+mode = "autonomous"
+"#
+        )
+    }
+
+    #[test]
+    fn parse_manifest_reads_stuck_transition_thresholds() {
+        let toml = stuck_edge_manifest(
+            r#"condition = "stuck"
+stuck_after_iterations = 20
+stuck_after_minutes = 10
+stuck_after_same_file_edits = 3
+stuck_after_tool_calls = 60"#,
+        );
+        let bp = parse_manifest(&toml).unwrap();
+        let edge = bp.stages[0]
+            .transitions
+            .as_ref()
+            .unwrap()
+            .get("next")
+            .unwrap();
+        assert_eq!(edge.condition, TransitionCondition::Stuck);
+        let cfg = edge.stuck.expect("thresholds parsed");
+        assert_eq!(cfg.after_iterations, Some(20));
+        assert_eq!(cfg.after_minutes, Some(10));
+        assert_eq!(cfg.after_same_file_edits, Some(3));
+        assert_eq!(cfg.after_tool_calls, Some(60));
+    }
+
+    #[test]
+    fn parse_manifest_reads_a_partially_armed_stuck_edge() {
+        let toml = stuck_edge_manifest(
+            r#"condition = "stuck"
+stuck_after_same_file_edits = 5"#,
+        );
+        let bp = parse_manifest(&toml).unwrap();
+        let cfg = bp.stages[0].transitions.as_ref().unwrap()["next"]
+            .stuck
+            .expect("thresholds parsed");
+        assert_eq!(cfg.after_same_file_edits, Some(5));
+        assert_eq!(cfg.after_iterations, None);
+        assert_eq!(cfg.after_minutes, None);
+        assert_eq!(cfg.after_tool_calls, None);
+    }
+
+    #[test]
+    fn parse_manifest_rejects_a_stuck_condition_with_no_threshold() {
+        let toml = stuck_edge_manifest(r#"condition = "stuck""#);
+        let err = parse_manifest(&toml).unwrap_err().to_string();
+        assert!(
+            err.contains("condition 'stuck' but no threshold"),
+            "got: {err}"
+        );
+    }
+
+    /// A zero threshold reads as unset (mirroring `max_iterations = 0` meaning
+    /// "unlimited"), so it leaves the edge dead rather than firing on turn zero.
+    #[test]
+    fn parse_manifest_treats_non_positive_stuck_thresholds_as_unset() {
+        let toml = stuck_edge_manifest(
+            r#"condition = "stuck"
+stuck_after_iterations = 0
+stuck_after_minutes = -5"#,
+        );
+        let err = parse_manifest(&toml).unwrap_err().to_string();
+        assert!(
+            err.contains("condition 'stuck' but no threshold"),
+            "got: {err}"
+        );
+    }
+
+    /// Thresholds under any other condition would silently never be read — the
+    /// classic "I forgot `condition = \"stuck\"`" footgun.
+    #[test]
+    fn parse_manifest_rejects_stuck_thresholds_without_the_stuck_condition() {
+        let toml = stuck_edge_manifest("stuck_after_iterations = 20");
+        let err = parse_manifest(&toml).unwrap_err().to_string();
+        assert!(err.contains("its condition is not 'stuck'"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_manifest_leaves_ordinary_edges_without_stuck_config() {
+        let toml = stuck_edge_manifest(r#"hint = "go on""#);
+        let bp = parse_manifest(&toml).unwrap();
+        assert!(
+            bp.stages[0].transitions.as_ref().unwrap()["next"]
+                .stuck
+                .is_none()
+        );
     }
 
     #[test]
@@ -2879,10 +3035,16 @@ mode = "autonomous"
     }
 
     /// Issue #107: an implement stage that can leave without having written
-    /// anything is how a run ends up with no output at all. Every non-error edge
-    /// out of `implement` must carry a `require_modifications` gate, and the
-    /// write tools must be routed into the region that gate points at (which is
-    /// also what the reviewer is told to read).
+    /// anything is how a run ends up with no output at all. Every edge out of
+    /// `implement` that the AGENT can choose must carry a `require_modifications`
+    /// gate, and the write tools must be routed into the region that gate points
+    /// at (which is also what the reviewer is told to read).
+    ///
+    /// Runtime-fired edges (`error`, `stuck`) are exempt, and deliberately so: a
+    /// gate answers "did you do any work before leaving?", which only makes sense
+    /// for a voluntary exit. Gating an escape hatch would send a failed or
+    /// looping agent back into the stage it is failing in — a stuck agent is not
+    /// helped by being told to write more (issue #106).
     #[test]
     fn shipped_coding_agents_gate_every_non_error_implement_edge() {
         for manifest_content in [
@@ -2900,8 +3062,14 @@ mode = "autonomous"
             );
             let transitions = implement.transitions.as_ref().unwrap();
             for (target, edge) in transitions {
-                if edge.condition == crate::blueprint::TransitionCondition::Error {
-                    continue; // recovery must stay reachable from a failed stage
+                // Recovery must stay reachable from a failed stage, and a stuck
+                // escape must stay reachable from a looping one.
+                if matches!(
+                    edge.condition,
+                    crate::blueprint::TransitionCondition::Error
+                        | crate::blueprint::TransitionCondition::Stuck
+                ) {
+                    continue;
                 }
                 assert!(
                     edge.gate.is_some(),
