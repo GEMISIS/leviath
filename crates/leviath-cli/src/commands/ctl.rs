@@ -25,6 +25,13 @@ pub struct MsgArgs {
 pub struct CancelArgs {
     /// The run id to cancel.
     pub run_id: String,
+    /// Terminate the run's on-disk state directly, without asking the daemon.
+    ///
+    /// Use when the daemon is gone or unresponsive. The run is recorded
+    /// `Cancelled` so nothing lists it as live; if a daemon is in fact still
+    /// driving it, restart the daemon so it picks up the new state.
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// Arguments for `lev respond` — answer a pending `ask_user` interaction the
@@ -85,16 +92,75 @@ pub async fn send_message(client: &ControlClient, args: &MsgArgs) -> anyhow::Res
 }
 
 /// `lev cancel`: cancel a run.
+///
+/// A kill must always be possible, so this never depends on the daemon being
+/// reachable. `--force` goes straight to the run's on-disk state; otherwise the
+/// daemon is asked first (it can also stop the work, not just record the
+/// outcome) and the on-disk write is the fallback when it can't be reached or
+/// doesn't answer in time.
 pub async fn cancel_run(client: &ControlClient, args: &CancelArgs) -> anyhow::Result<()> {
-    send_bool(
-        client,
-        ControlRequest::Cancel {
+    if args.force {
+        return report_forced(
+            crate::runstate::force_cancel(&args.run_id),
+            &args.run_id,
+            None,
+        );
+    }
+    match client
+        .request(&ControlRequest::Cancel {
             run_id: args.run_id.clone(),
+        })
+        .await
+    {
+        Ok(ControlResponse::Ok { ok: true }) => {
+            println!("cancelled");
+            Ok(())
+        }
+        Ok(ControlResponse::Ok { ok: false }) => bail!("no such run"),
+        Ok(other) => bail!("unexpected daemon response: {other:?}"),
+        // The daemon is down, wedged, or too busy to answer. Terminate the run on
+        // disk ourselves rather than leave the user with nothing.
+        Err(e) => report_forced(
+            crate::runstate::force_cancel(&args.run_id),
+            &args.run_id,
+            Some(e),
+        ),
+    }
+}
+
+/// Report the outcome of an on-disk cancel. `daemon_error` is set when this was
+/// a fallback rather than an explicit `--force`, and is included so the user
+/// knows why the daemon wasn't used.
+fn report_forced(
+    outcome: crate::runstate::ForceCancelOutcome,
+    run_id: &str,
+    daemon_error: Option<std::io::Error>,
+) -> anyhow::Result<()> {
+    use crate::runstate::ForceCancelOutcome as O;
+    let why = match &daemon_error {
+        Some(e) => format!(" (the daemon did not answer: {e})"),
+        None => String::new(),
+    };
+    match outcome {
+        O::Cancelled => {
+            println!(
+                "cancelled '{run_id}' on disk{why}; if a daemon is still running, \
+                 restart it so it picks up the change"
+            );
+            Ok(())
+        }
+        O::AlreadyTerminal => {
+            println!("'{run_id}' had already finished; nothing to cancel");
+            Ok(())
+        }
+        O::NoSuchRun => match daemon_error {
+            Some(e) => bail!(
+                "the leviath daemon is not reachable ({e}), and there is no run '{run_id}' on disk"
+            ),
+            None => bail!("no such run"),
         },
-        "cancelled",
-        "no such run",
-    )
-    .await
+        O::WriteFailed => bail!("could not write '{run_id}' metadata to record the cancel"),
+    }
 }
 
 /// A short human label for an interaction kind (used by the `lev respond` list).
@@ -252,6 +318,7 @@ mod tests {
                 &c,
                 &CancelArgs {
                     run_id: "r".to_string(),
+                    force: false,
                 },
             )
             .await
@@ -267,6 +334,7 @@ mod tests {
                 &c,
                 &CancelArgs {
                     run_id: "r".to_string(),
+                    force: false,
                 },
             )
             .await
@@ -282,6 +350,7 @@ mod tests {
                 &c,
                 &CancelArgs {
                     run_id: "r".to_string(),
+                    force: false,
                 },
             )
             .await
@@ -298,11 +367,137 @@ mod tests {
             &client,
             &CancelArgs {
                 run_id: "r".to_string(),
+                force: false,
             },
         )
         .await
         .unwrap_err();
         assert!(err.to_string().contains("not reachable"));
+    }
+
+    /// Write a live-looking run into the (isolated) runs dir.
+    fn seed_live_run(run_id: &str) {
+        crate::runstate::create_run(&crate::runstate::RunMeta {
+            status: crate::runstate::RunStatus::Running,
+            ..crate::runstate::RunMeta::new(
+                run_id.into(),
+                "a".into(),
+                "/p".into(),
+                "t".into(),
+                None,
+                "/w".into(),
+                1,
+            )
+        })
+        .unwrap();
+    }
+
+    fn status_of(run_id: &str) -> crate::runstate::RunStatus {
+        crate::runstate::read_meta(run_id).unwrap().status
+    }
+
+    /// `--force` never contacts the daemon, so a kill stays possible when the
+    /// daemon is dead, wedged, or was never started.
+    #[tokio::test]
+    async fn force_cancels_on_disk_without_a_daemon() {
+        crate::runstate::with_isolated_runs_dir_async("ctl-force-cancel", |_base| async {
+            seed_live_run("stuck-1");
+            let dir = tempfile::tempdir().unwrap();
+            // A socket path with nothing listening on it.
+            let client = ControlClient::new(control_id(&dir.path().join("no-daemon")));
+
+            cancel_run(
+                &client,
+                &CancelArgs {
+                    run_id: "stuck-1".to_string(),
+                    force: true,
+                },
+            )
+            .await
+            .expect("forced cancel succeeds with no daemon");
+
+            assert_eq!(status_of("stuck-1"), crate::runstate::RunStatus::Cancelled);
+        })
+        .await;
+    }
+
+    /// Without `--force`, an unreachable daemon falls back to the on-disk write
+    /// rather than leaving the user with an error and a run still marked live.
+    #[tokio::test]
+    async fn an_unreachable_daemon_falls_back_to_cancelling_on_disk() {
+        crate::runstate::with_isolated_runs_dir_async("ctl-fallback-cancel", |_base| async {
+            seed_live_run("stuck-2");
+            let dir = tempfile::tempdir().unwrap();
+            let client = ControlClient::new(control_id(&dir.path().join("no-daemon")));
+
+            cancel_run(
+                &client,
+                &CancelArgs {
+                    run_id: "stuck-2".to_string(),
+                    force: false,
+                },
+            )
+            .await
+            .expect("the fallback succeeds");
+
+            assert_eq!(status_of("stuck-2"), crate::runstate::RunStatus::Cancelled);
+        })
+        .await;
+    }
+
+    /// Forcing a run that already finished is reported, not treated as a failure.
+    #[tokio::test]
+    async fn forcing_an_already_finished_run_is_not_an_error() {
+        crate::runstate::with_isolated_runs_dir_async("ctl-force-terminal", |_base| async {
+            crate::runstate::create_run(&crate::runstate::RunMeta {
+                status: crate::runstate::RunStatus::Complete,
+                ..crate::runstate::RunMeta::new(
+                    "done-1".into(),
+                    "a".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/w".into(),
+                    1,
+                )
+            })
+            .unwrap();
+
+            cancel_run(
+                &ControlClient::new(control_id(std::path::Path::new("/nonexistent"))),
+                &CancelArgs {
+                    run_id: "done-1".to_string(),
+                    force: true,
+                },
+            )
+            .await
+            .expect("already-finished is reported, not an error");
+
+            assert_eq!(
+                status_of("done-1"),
+                crate::runstate::RunStatus::Complete,
+                "and the recorded outcome is left intact"
+            );
+        })
+        .await;
+    }
+
+    /// Forcing an id that names no run at all is still an honest failure.
+    #[tokio::test]
+    async fn forcing_an_unknown_run_reports_no_such_run() {
+        crate::runstate::with_isolated_runs_dir_async("ctl-force-missing", |_base| async {
+            let err = cancel_run(
+                &ControlClient::new(control_id(std::path::Path::new("/nonexistent"))),
+                &CancelArgs {
+                    run_id: "never-existed".to_string(),
+                    force: true,
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(err.to_string().contains("no such run"), "got: {err}");
+        })
+        .await;
     }
 
     // ─── lev respond ──────────────────────────────────────────────────────────

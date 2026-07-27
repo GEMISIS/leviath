@@ -38,7 +38,8 @@ pub enum Commands {
     /// Send a message to a running agent
     Msg(commands::ctl::MsgArgs),
 
-    /// Cancel a running agent
+    /// Cancel a running agent (alias: `kill`)
+    #[command(alias = "kill")]
     Cancel(commands::ctl::CancelArgs),
 
     /// Answer a pending interaction (or list open ones with no request id)
@@ -303,6 +304,7 @@ mod tests {
     async fn dispatch_cancel_variant_is_routed_through_the_executor() {
         let args = commands::ctl::CancelArgs {
             run_id: "r".to_string(),
+            force: false,
         };
         assert!(dispatch(Commands::Cancel(args), &MockRisky).await.is_ok());
     }

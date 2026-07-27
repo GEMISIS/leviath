@@ -23,6 +23,7 @@ async-trait = "0.1"
 
 [dev-dependencies]
 async-trait = "0.1"
+temp-env = { workspace = true, features = ["async_closure"] }
 tempfile = "3"
 
 [lints]
