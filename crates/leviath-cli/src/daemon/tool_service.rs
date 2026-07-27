@@ -151,14 +151,22 @@ async fn execute_script_tool(state: &AgentToolState, tc: &ToolCall) -> String {
     };
     let host = state.script_host.clone();
     let args = tc.arguments.clone();
-    match tokio::task::spawn_blocking(move || {
-        leviath_scripting::execute_script_tool(&tool, args, host)
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(e) => format!("[error] script tool panicked: {e}"),
-    }
+    tokio::task::spawn_blocking(move || leviath_scripting::execute_script_tool(&tool, args, host))
+        .await
+        .unwrap_or_else(script_tool_join_failed)
+}
+
+/// Last-resort net for a script tool: a panic that escaped the script engine's
+/// own native-function guards, or a task cancelled by runtime shutdown, becomes
+/// a tool error rather than taking the daemon (and every other run) with it.
+///
+/// A free function applied via `unwrap_or_else` — not a `match` arm — because
+/// the arm can no longer be reached from a test now that panics are contained
+/// inside `leviath_scripting` (issue #109), while this body is directly
+/// unit-testable with a real `JoinError`. Mirrors
+/// `leviath_providers::rhai_provider`'s `task_failed`.
+fn script_tool_join_failed(e: tokio::task::JoinError) -> String {
+    format!("[error] script tool panicked: {e}")
 }
 
 /// Resolve policy, handle approvals / dynamic interactions, and execute a batch
@@ -819,9 +827,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn script_tool_panic_is_caught() {
-        // A host function that panics propagates a Rust panic through the Rhai
-        // engine; spawn_blocking turns it into a JoinError, which we report as a
-        // tool error instead of aborting the daemon.
+        // A host function that panics is stopped at the Rhai native-function
+        // boundary and surfaced as an ordinary tool error. It must never unwind
+        // through the engine: rhai's `ArgBackup` destructor asserts during
+        // unwinding, which double-panics and aborts the whole daemon (#109).
         struct PanicHost;
         impl leviath_scripting::ScriptHost for PanicHost {
             fn http_get(
@@ -873,7 +882,27 @@ mod tests {
         let names: HashSet<String> = ["boom".to_string()].into_iter().collect();
         let (state, _dir) = script_state(&hub, &[("boom", "env_var(\"X\")")], names, host, allow);
         let out = dispatch_tools(state, vec![call("c1", "boom", serde_json::json!({}))]).await;
-        assert!(out[0].1.contains("panicked"));
+        let result = &out[0].1;
+        assert!(result.contains("env_var panicked"), "got: {result}");
+        assert!(result.contains("boom in host"), "got: {result}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn script_tool_join_failure_becomes_a_tool_error() {
+        // The blocking-task net beneath the engine's own guards: whatever kills
+        // the task (a panic that slipped past them, or runtime shutdown) must
+        // read back as a tool error, not take the daemon down.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {})); // silence the expected panic
+        let join_err = tokio::task::spawn_blocking(|| panic!("kaboom"))
+            .await
+            .expect_err("the blocking task must fail");
+        std::panic::set_hook(prev);
+        let out = script_tool_join_failed(join_err);
+        assert!(
+            out.starts_with("[error] script tool panicked:"),
+            "got: {out}"
+        );
     }
 
     #[tokio::test]
