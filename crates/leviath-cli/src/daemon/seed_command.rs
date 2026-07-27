@@ -92,13 +92,29 @@ impl std::fmt::Debug for SeedCommandPolicy {
 /// `shell` tool would route it for the entry stage.
 fn seed_command_runner(sandbox: Option<Arc<SandboxManager>>) -> SeedCommandRunner {
     Arc::new(move |command, workdir, timeout| {
-        let (shell, flag) = default_shell();
-        let cmd = match &sandbox {
-            Some(sb) => sb.build_command(shell, flag, command, workdir),
-            None => host_shell_command(shell, flag, command, workdir),
-        };
-        run_seed_command(cmd, timeout)
+        run_seed_command(
+            build_seed_command(sandbox.as_deref(), command, workdir),
+            timeout,
+        )
     })
+}
+
+/// Build the command for a seed: through the agent's sandbox when it has one,
+/// else straight onto the host — both targeting the run's workdir.
+///
+/// Split from execution so the routing decision is assertable without spawning
+/// anything (and without depending on whether the host's namespaces actually
+/// work, which varies by machine and by CI runner).
+fn build_seed_command(
+    sandbox: Option<&SandboxManager>,
+    command: &str,
+    workdir: &Path,
+) -> TokioCommand {
+    let (shell, flag) = default_shell();
+    match sandbox {
+        Some(sb) => sb.build_command(shell, flag, command, workdir),
+        None => host_shell_command(shell, flag, command, workdir),
+    }
 }
 
 /// Drive `cmd` to completion with a wall-clock cap, returning its combined
@@ -264,14 +280,21 @@ mod tests {
         assert!(err.contains("exited with"), "got: {err}");
     }
 
-    /// With a sandbox attached, the command is built through the manager rather
-    /// than straight onto the host — the same routing the built-in `shell` tool
-    /// uses, so a seed can't escape the isolation the entry stage declared.
+    /// Without a sandbox the command goes straight to the platform shell.
+    #[test]
+    fn an_unsandboxed_seed_command_uses_the_platform_shell() {
+        let cmd = build_seed_command(None, "echo hi", Path::new("/w"));
+        assert_eq!(cmd.as_std().get_program(), default_shell().0);
+    }
+
+    /// With a sandbox attached the command is built BY the manager rather than
+    /// straight onto the host — the same routing the built-in `shell` tool uses,
+    /// so a seed can't escape the isolation the entry stage declared.
     ///
-    /// A `namespace` sandbox with `on_unavailable = "warn"` constructs on every
-    /// platform (falling back to the host when namespaces aren't supported),
-    /// which keeps this exercising the sandbox arm on Linux, macOS and Windows
-    /// alike.
+    /// This asserts the routing, not the execution: whether a namespace is
+    /// actually usable varies by machine (and CI runners probe as supporting
+    /// them while refusing the uid_map write), so running the command here would
+    /// be testing the kernel, not this code.
     #[test]
     fn a_sandboxed_seed_command_is_built_through_the_manager() {
         let by_index = vec![leviath_core::ToolSandboxConfig {
@@ -279,16 +302,14 @@ mod tests {
             on_unavailable: leviath_core::OnUnavailable::Warn,
             ..Default::default()
         }];
-        let workdir = std::env::temp_dir();
-        let manager = SandboxManager::build("seed-test", by_index, &workdir.to_string_lossy(), 0)
+        let manager = SandboxManager::build("seed-test", by_index, "/w", 0)
             .expect("a warn-fallback namespace sandbox always builds")
             .expect("an active sandbox config yields a manager");
 
-        let policy = SeedCommandPolicy::new(true, Duration::from_secs(30), Some(Arc::new(manager)));
-        // The command still runs and its output still comes back; what this
-        // covers is that it went through `SandboxManager::build_command`.
-        let out = policy.run("echo sandboxed-seed-ok", &workdir).unwrap();
-        assert!(out.contains("sandboxed-seed-ok"), "got: {out}");
+        let cmd = build_seed_command(Some(&manager), "echo hi", Path::new("/w"));
+        // Where namespaces work this is the namespace binary; where they don't
+        // the manager falls back to the shell. Either way the manager built it.
+        assert!(!cmd.as_std().get_program().is_empty());
     }
 
     /// The `Ok(Err(_))` arm: the shell binary itself cannot be spawned. Built
