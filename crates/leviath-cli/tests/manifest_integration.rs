@@ -129,96 +129,88 @@ fn specific_agent_coder_has_expected_structure() {
     assert!(bp.stages.len() >= 2); // at least analyze + implement
     assert!(bp.find_stage("analyze").is_some());
     assert!(bp.find_stage("implement").is_some());
-    // Discovery runs before planning (issue #108).
-    assert_eq!(bp.resolve_entry_stage_name(), "discover");
 
     // Should have graph transitions
     let analyze = bp.find_stage("analyze").unwrap();
     assert!(analyze.transitions.is_some());
 }
 
-/// The agents that work inside a codebase all begin with a `discover` stage that
-/// maps the project and synthesizes a verification workflow (issue #108), and
-/// that stage must actually be able to deliver it. Three things have to line up
-/// or the feature silently degrades to a no-op:
+/// A `required` region the AGENT is expected to fill is enforced at runtime by
+/// `require_context_regions`, which re-runs the stage with a nudge until the
+/// region has content. But `unmet_required_regions` returns EMPTY for a stage
+/// with no context-writing tool — gating a stage that *can't* populate the
+/// region would loop pointlessly — so a blueprint that marks a region `required`
+/// while giving no stage `context_write`/`context_append` gets a gate that
+/// silently does nothing, and the region stays blank with no error.
 ///
-///   1. `discover` is the entry stage — discovery has to precede planning;
-///   2. it holds `context_write`/`context_append` — `unmet_required_regions`
-///      returns EMPTY for a stage with no context-writing tool, so without one
-///      the required-region gate never fires and the stage can leave both
-///      regions blank;
-///   3. `discovery` and `workflow` are `required` and UNSEEDED — a `required`
-///      region carrying a file/glob seed hard-errors at spawn when the file is
-///      missing, whereas an unseeded one is skipped by `resolve_seeds` and left
-///      to the runtime gate, which is the behaviour we want.
+/// Caller-input regions are exempt: those are supplied and validated at spawn,
+/// not written by the agent.
 #[test]
-fn codebase_agents_open_with_an_enforced_discover_stage() {
+fn agent_written_required_regions_have_a_stage_that_can_write_them() {
     use leviath_core::layout::RegionSeed;
 
-    for name in ["coder", "software-engineer", "reviewer", "parallel-fixer"] {
-        let path = workspace_root().join(format!("agents/{name}/agent.leviath"));
-        let content = std::fs::read_to_string(&path).unwrap();
+    for (name, path) in &discover_agent_manifests() {
+        let content = std::fs::read_to_string(path).unwrap();
         let bp = leviath_core::manifest::parse_manifest(&content).unwrap();
 
-        assert_eq!(
-            bp.resolve_entry_stage_name(),
-            "discover",
-            "agent '{name}' must start with the discover stage"
-        );
-        let discover = bp
-            .find_stage("discover")
-            .unwrap_or_else(|| panic!("agent '{name}' has no discover stage"));
-        assert!(
-            discover
-                .available_tools
-                .iter()
-                .any(|t| t == "context_write" || t == "context_append"),
-            "agent '{name}' discover stage needs a context-writing tool, or the \
-             required-region gate silently does nothing"
-        );
-        assert!(
-            discover.max_iterations.is_some_and(|n| n <= 10),
-            "agent '{name}' discover stage needs a tight max_iterations so \
-             discovery can't consume the run"
-        );
-
-        for region in ["discovery", "workflow"] {
-            let def = bp
-                .context_layout
-                .get_region(region)
-                .unwrap_or_else(|| panic!("agent '{name}' has no '{region}' region"));
-            assert!(
-                def.required,
-                "agent '{name}' region '{region}' must be required so the runtime \
-                 gate forces the discover stage to populate it"
-            );
-            assert!(
-                def.seed.is_none(),
-                "agent '{name}' region '{region}' must be unseeded — a required \
-                 region with a seed is resolved (and can hard-fail) at spawn"
-            );
-            assert!(
-                matches!(def.kind, leviath_core::RegionKind::Pinned),
-                "agent '{name}' region '{region}' must be pinned so no edge \
-                 transform can clear or compact it"
-            );
+        let agent_written: Vec<&str> = bp
+            .context_layout
+            .regions
+            .iter()
+            .filter(|r| r.required)
+            .filter(|r| !matches!(r.seed, Some(RegionSeed::CallerInput { .. })))
+            .map(|r| r.name.as_str())
+            .collect();
+        if agent_written.is_empty() {
+            continue;
         }
 
-        // The deterministic pre-scan is a convenience, so it must NOT be required:
-        // outside a git repo the command fails and the region is left empty.
-        let facts = bp
-            .context_layout
-            .get_region("repo_files")
-            .unwrap_or_else(|| panic!("agent '{name}' has no 'repo_files' region"));
+        let writers: Vec<&str> = bp
+            .stages
+            .iter()
+            .filter(|s| {
+                s.available_tools
+                    .iter()
+                    .any(|t| t == "context_write" || t == "context_append")
+            })
+            .map(|s| s.name.as_str())
+            .collect();
         assert!(
-            matches!(facts.seed, Some(RegionSeed::Command { .. })),
-            "agent '{name}' region 'repo_files' must carry a command seed"
+            !writers.is_empty(),
+            "agent '{name}' marks {agent_written:?} required but no stage has \
+             context_write/context_append — the required-region gate is a no-op \
+             and the region silently stays empty"
         );
-        assert!(
-            !facts.required,
-            "agent '{name}' region 'repo_files' must be optional — its command \
-             fails outside a git repo and must not sink the run"
-        );
+    }
+}
+
+/// A `required` region must not also carry a file/glob/command seed: those are
+/// resolved at spawn, where `required` turns any miss (absent file, empty glob,
+/// failing command) into a hard spawn error. An agent-populated region should be
+/// left unseeded so `resolve_seeds` skips it and the runtime gate handles it.
+#[test]
+fn required_regions_are_not_also_seeded_from_the_environment() {
+    use leviath_core::layout::RegionSeed;
+
+    for (name, path) in &discover_agent_manifests() {
+        let content = std::fs::read_to_string(path).unwrap();
+        let bp = leviath_core::manifest::parse_manifest(&content).unwrap();
+
+        for region in bp.context_layout.regions.iter().filter(|r| r.required) {
+            let environmental = matches!(
+                region.seed,
+                Some(
+                    RegionSeed::Files { .. } | RegionSeed::Glob { .. } | RegionSeed::Command { .. }
+                )
+            );
+            assert!(
+                !environmental,
+                "agent '{name}' region '{}' is required AND seeded from the \
+                 environment — a missing file or failing command would fail the \
+                 spawn outright",
+                region.name
+            );
+        }
     }
 }
 

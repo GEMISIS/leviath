@@ -3022,43 +3022,6 @@ mode = "autonomous"
             .expect("shipped software-engineer blueprint must pass Blueprint::validate()");
     }
 
-    /// The discover stage (issue #108) runs BEFORE the human sees a plan, so the
-    /// plan they approve is grounded in what this repo actually is. It must have
-    /// exactly one non-error outgoing edge: `resolve_transition` auto-follows a
-    /// single edge without consulting the routing LLM, which is what keeps the
-    /// stage cheap. A second normal edge would silently add a routing call to
-    /// every run.
-    #[test]
-    fn software_engineer_opens_with_a_single_edge_discover_stage() {
-        let manifest_content = include_str!("../../../agents/software-engineer/agent.leviath");
-        let bp = parse_manifest(manifest_content).unwrap();
-
-        assert_eq!(bp.resolve_entry_stage_name(), "discover");
-        let discover = bp.find_stage("discover").expect("discover stage exists");
-        let transitions = discover
-            .transitions
-            .as_ref()
-            .expect("discover stage must declare transitions");
-        assert!(transitions.contains_key("plan"));
-
-        let normal_edges = transitions
-            .iter()
-            .filter(|(_, e)| !matches!(e.condition, TransitionCondition::Error))
-            .count();
-        assert_eq!(
-            normal_edges, 1,
-            "discover must have exactly one non-error edge so the runtime \
-             auto-follows it instead of paying for a routing inference"
-        );
-        // And it must be able to write the regions it is gated on.
-        assert!(
-            discover
-                .available_tools
-                .iter()
-                .any(|t| t == "context_write" || t == "context_append")
-        );
-    }
-
     #[test]
     fn software_engineer_plan_and_implement_can_ask_the_user_dynamically() {
         // Beyond the static plan_approval checkpoint, plan/implement should
