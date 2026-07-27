@@ -494,6 +494,11 @@ impl OllamaNdjsonStream {
 impl Stream for OllamaNdjsonStream {
     type Item = Result<StreamChunk>;
 
+    #[expect(
+        clippy::string_slice,
+        reason = "`newline_pos` is a `find` hit for the ASCII '\\n', so it and `newline_pos + 1` \
+                  are char boundaries"
+    )]
     fn poll_next(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,

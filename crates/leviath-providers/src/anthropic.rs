@@ -863,6 +863,11 @@ impl Stream for AnthropicSseStream {
 }
 
 /// Parse a single SSE event from the buffer, consuming it if found.
+#[expect(
+    clippy::string_slice,
+    reason = "`event_end` is a `find` hit for the ASCII \"\\n\\n\" terminator, so it and \
+              `event_end + 2` are char boundaries"
+)]
 fn parse_sse_event(buffer: &mut String, tool_index: &mut usize) -> Option<StreamChunk> {
     // Look for a complete event (double newline)
     let event_end = buffer.find("\n\n")?;

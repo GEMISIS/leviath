@@ -1,5 +1,7 @@
 //! Pure utility functions used across the dashboard.
 
+use leviath_core::truncate_at_boundary;
+
 /// Format a Unix timestamp as a relative time string ("just now", "2m ago", "1h ago").
 pub(super) fn relative_time(ts: i64) -> String {
     if ts == 0 {
@@ -37,13 +39,9 @@ pub(super) fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        // Find the nearest char boundary at or before `max` to avoid
-        // panicking on multi-byte UTF-8 characters (e.g. em-dashes).
-        let mut end = max;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…", &s[..end])
+        // Cut on a char boundary so multi-byte content (em-dashes, emoji in run
+        // titles) shortens instead of panicking.
+        format!("{}…", truncate_at_boundary(s, max))
     }
 }
 

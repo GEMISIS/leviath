@@ -92,6 +92,11 @@ pub fn render_system_suffix(tools: &[Tool]) -> String {
 /// a `name` is skipped. An *unterminated* fence is left in the prose untouched —
 /// a truncated reply shouldn't have its visible text silently eaten. An `id`
 /// emitted by the model is ignored; ids are the runtime's to allocate.
+#[expect(
+    clippy::string_slice,
+    reason = "every index here is a `find` hit offset by the length of an ASCII literal \
+              (FENCE_OPEN, FENCE_CLOSE, '\\n'), so all of them are char boundaries"
+)]
 pub fn parse_tool_calls(text: &str) -> (String, Vec<(String, serde_json::Value)>) {
     let mut prose = String::new();
     let mut calls = Vec::new();

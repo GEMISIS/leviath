@@ -20,6 +20,11 @@ use crate::runstate;
 /// runs dir outside `$HOME`, which isn't portable (`std::env::temp_dir()` lives
 /// *under* the home directory on Windows, so it only ever hits the shortened
 /// branch there).
+#[expect(
+    clippy::string_slice,
+    reason = "the `starts_with(home)` guard makes `home.len()` the end of a matched prefix, which \
+              is a char boundary"
+)]
 fn shorten_home_path(raw: String, home: &str) -> String {
     if !home.is_empty() && raw.starts_with(home) {
         format!("~{}", &raw[home.len()..])
@@ -657,6 +662,11 @@ impl Dashboard {
         }
     }
 
+    #[expect(
+        clippy::string_slice,
+        reason = "`prefix_end` is only non-zero on a `starts_with` branch, where it is the length \
+                  of the ASCII tag that just matched — a char boundary"
+    )]
     fn build_output_lines(
         &self,
         agent: &DashboardAgent,

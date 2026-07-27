@@ -78,6 +78,11 @@ impl Dashboard {
         );
     }
 
+    #[expect(
+        clippy::string_slice,
+        reason = "the `starts_with(&home)` guard makes `home.len()` the end of a matched prefix, \
+                  which is a char boundary"
+    )]
     pub(in crate::commands::dashboard) fn render_info_strip(
         &self,
         frame: &mut Frame,

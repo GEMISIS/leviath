@@ -18,6 +18,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use leviath_core::floor_char_boundary;
 use leviath_scripting::ScriptHost;
 use leviath_tools::ShellExecutor;
 use tokio::process::Command as TokioCommand;
@@ -439,15 +440,9 @@ const MAX_SCRIPT_IO_BYTES: usize = 900_000;
 
 pub(crate) fn cap_script_io(mut s: String) -> String {
     if s.len() > MAX_SCRIPT_IO_BYTES {
-        // Walk back to a char boundary before truncating — a byte cut-off lands
-        // mid-character on multi-byte text and panics (the shape of issue #109).
-        // The loop terminates because the branch guarantees `end < s.len()`, and
-        // byte 0 is always a boundary, so it can never run past the start.
-        let mut end = MAX_SCRIPT_IO_BYTES;
-        while !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        s.truncate(end);
+        // Cut on a char boundary — a raw byte cut-off lands mid-character on
+        // multi-byte text and panics (the shape of issue #109).
+        s.truncate(floor_char_boundary(&s, MAX_SCRIPT_IO_BYTES));
         s.push_str("\n[...truncated by leviath: response exceeded 900 KB]");
     }
     s

@@ -370,6 +370,11 @@ impl Stream for OpenAiSseStream {
 
 /// Parse a single SSE event from the buffer.
 /// Returns `Some(Some(chunk))` for data, `Some(None)` for stream end, `None` for incomplete.
+#[expect(
+    clippy::string_slice,
+    reason = "`event_end` is a `find` hit for the ASCII \"\\n\\n\" terminator, so it and \
+              `event_end + 2` are char boundaries"
+)]
 pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<StreamChunk>> {
     let event_end = buffer.find("\n\n")?;
     let event_text = buffer[..event_end].to_string();

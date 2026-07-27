@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 
-use leviath_core::{Blueprint, ContextLayout, EvictionStrategy, Region, RegionKind};
+use leviath_core::{
+    Blueprint, ContextLayout, EvictionStrategy, Region, RegionKind, truncate_at_boundary,
+};
 
 use crate::ContextWindow;
 
@@ -98,11 +100,10 @@ fn fit_seed_to_budget(content: &str, max_tokens: usize) -> String {
     let Some(room) = allowed.checked_sub(SEED_TRUNCATION_MARKER.len()) else {
         return String::new();
     };
-    let mut end = room.min(content.len());
-    while end > 0 && !content.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}{SEED_TRUNCATION_MARKER}", &content[..end])
+    format!(
+        "{}{SEED_TRUNCATION_MARKER}",
+        truncate_at_boundary(content, room)
+    )
 }
 
 /// Resolve which region the `task` text seeds into: prefer a pinned region named

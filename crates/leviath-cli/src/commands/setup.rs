@@ -296,12 +296,18 @@ fn parse_yes_no(input: &str, current: bool) -> bool {
     }
 }
 
-/// Redact an API key for display: show first 8 chars + "...".
+/// Redact an API key for display: show the first 8 characters + "...".
+///
+/// Counts *characters*, not bytes. A byte-based version both panicked on a key
+/// containing a multi-byte character straddling byte 8 (the shape of issue #115)
+/// and, worse, leaked: a 3-character 9-byte key is longer than 8 bytes, so the
+/// byte branch would print every character of it followed by an "I truncated
+/// this" marker.
 fn redact(key: &str) -> String {
-    if key.len() <= 8 {
+    if key.chars().count() <= 8 {
         "***".to_string()
     } else {
-        format!("{}...", &key[..8])
+        format!("{}...", key.chars().take(8).collect::<String>())
     }
 }
 
@@ -326,6 +332,18 @@ mod tests {
     #[test]
     fn redact_empty() {
         assert_eq!(redact(""), "***");
+    }
+
+    #[test]
+    fn redact_multibyte_key() {
+        // Issue #115: byte 8 falls inside the third '日' (bytes 6..9), which used
+        // to panic.
+        assert_eq!(redact("日本語日本語日本語"), "日本語日本語日本...");
+        // 3 characters but 9 bytes — the byte-length guard would have classified
+        // this as "long" and printed the whole key. Character counting redacts it.
+        assert_eq!(redact("日本語"), "***");
+        // Exactly 8 characters is still fully redacted.
+        assert_eq!(redact("日本語日本語日本"), "***");
     }
 
     // ─── apply_flags ───────────────────────────────────────────────────────

@@ -65,6 +65,11 @@ fn build_http_client() -> reqwest::Client {
 /// in the environment rather than in a file on disk. An undefined variable
 /// expands to nothing (and warns) rather than leaving the literal `${NAME}` to
 /// be sent as if it were the credential.
+#[expect(
+    clippy::string_slice,
+    reason = "`start` and `end` are `find` hits, offset only by the lengths of the ASCII literals \
+              `${` and `}` — all char boundaries"
+)]
 pub(crate) fn expand_env(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut rest = value;
