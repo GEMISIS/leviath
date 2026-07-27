@@ -345,9 +345,24 @@ impl RealScriptIo {
     }
 
     /// Send a built request and read its body as text.
+    ///
+    /// A body the `Content-Type` marks as binary is refused rather than decoded.
+    /// `Response::text` decodes *anything* lossily, so a PNG or MP3 came back as
+    /// a page of U+FFFD replacement characters reported as a **successful**
+    /// fetch — no error, no signal, straight into the model's context.
     fn send(req: reqwest::blocking::RequestBuilder) -> Result<String, String> {
         let resp = req.send().map_err(|e| format!("request failed: {e}"))?;
         let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        if is_binary_content_type(&content_type) {
+            let len = resp.content_length();
+            return Err(non_text_body_message(&content_type, len));
+        }
         let text = cap_script_io(resp.text().map_err(|e| format!("read body: {e}"))?);
         if status.is_success() {
             Ok(text)
@@ -355,6 +370,56 @@ impl RealScriptIo {
             Err(format!("http {status}: {text}"))
         }
     }
+}
+
+/// Media types that are never text, so decoding them would only produce noise.
+///
+/// The check is on the declared type, deliberately **not** on UTF-8 validity of
+/// the bytes: `Response::text` is charset-aware and decodes Shift-JIS,
+/// ISO-8859-1 and Windows-1252 pages *correctly*, and a strict `from_utf8` test
+/// would misclassify exactly those as binary — the non-English pages a
+/// researcher agent is most likely to fetch. Anything unrecognised (including a
+/// missing header) falls through to the existing text path.
+const BINARY_CONTENT_PREFIXES: &[&str] = &[
+    "image/",
+    "audio/",
+    "video/",
+    "font/",
+    "application/octet-stream",
+    "application/pdf",
+    "application/zip",
+    "application/gzip",
+    "application/x-tar",
+    "application/x-bzip",
+    "application/wasm",
+    "application/vnd.",
+    "application/msword",
+];
+
+/// Whether a `Content-Type` header names content this tool cannot render as text.
+fn is_binary_content_type(content_type: &str) -> bool {
+    // Trim parameters (`image/png; charset=binary`) and normalise case.
+    let essence = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    // `application/xml`, `+json`, `+xml` etc. are structured *text* despite the
+    // `application/` prefix, so match on the concrete list rather than the tree.
+    BINARY_CONTENT_PREFIXES
+        .iter()
+        .any(|prefix| essence.starts_with(prefix))
+}
+
+/// The diagnostic a script tool sees for a binary body. Phrased for the model:
+/// it names the type and size so the agent can pick a different source.
+fn non_text_body_message(content_type: &str, len: Option<u64>) -> String {
+    let size = match len {
+        Some(bytes) => format!(", {} KB", bytes.div_ceil(1024)),
+        None => String::new(),
+    };
+    format!("non-text content ({content_type}{size}) — this tool returns text only")
 }
 
 /// Cap a host-I/O string below the tool engine's 1 MB `max_string_size`
@@ -366,6 +431,10 @@ const MAX_SCRIPT_IO_BYTES: usize = 900_000;
 
 fn cap_script_io(mut s: String) -> String {
     if s.len() > MAX_SCRIPT_IO_BYTES {
+        // Walk back to a char boundary before truncating — a byte cut-off lands
+        // mid-character on multi-byte text and panics (the shape of issue #109).
+        // The loop terminates because the branch guarantees `end < s.len()`, and
+        // byte 0 is always a boundary, so it can never run past the start.
         let mut end = MAX_SCRIPT_IO_BYTES;
         while !s.is_char_boundary(end) {
             end -= 1;
@@ -780,11 +849,111 @@ mod tests {
                         "server error",
                     )
                 }),
+            )
+            // A binary body: `Response::text` would lossily decode this into
+            // replacement characters and report success.
+            .route(
+                "/png",
+                get(|| async {
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "image/png")],
+                        // A real PNG signature + IHDR-ish bytes; invalid UTF-8.
+                        vec![0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe],
+                    )
+                }),
+            )
+            // Declared text in a non-UTF-8 charset — must still decode, which is
+            // why the guard reads the header rather than testing UTF-8 validity.
+            .route(
+                "/shiftjis",
+                get(|| async {
+                    (
+                        [(
+                            axum::http::header::CONTENT_TYPE,
+                            "text/html; charset=shift_jis",
+                        )],
+                        // "日本語" in Shift-JIS.
+                        vec![0x93u8, 0xfa, 0x96, 0x7b, 0x8c, 0xea],
+                    )
+                }),
             );
         tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
             listener, app,
         )));
         base
+    }
+
+    #[test]
+    fn binary_content_types_are_classified_but_structured_text_is_not() {
+        for text in [
+            "",
+            "text/html; charset=utf-8",
+            "text/plain",
+            "application/json",
+            "application/xml",
+            "application/xhtml+xml",
+            "application/ld+json",
+            "application/javascript",
+        ] {
+            assert!(!is_binary_content_type(text), "should be text: {text:?}");
+        }
+        for binary in [
+            "image/png",
+            "IMAGE/PNG",
+            "image/jpeg; charset=binary",
+            "  audio/mpeg  ",
+            "video/mp4",
+            "font/woff2",
+            "application/octet-stream",
+            "application/pdf",
+            "application/zip",
+            "application/gzip",
+            "application/x-tar",
+            "application/x-bzip2",
+            "application/wasm",
+            "application/vnd.ms-excel",
+            "application/msword",
+        ] {
+            assert!(
+                is_binary_content_type(binary),
+                "should be binary: {binary:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_non_text_diagnostic_names_the_type_and_size_when_known() {
+        let with_len = non_text_body_message("image/png", Some(2049));
+        assert!(with_len.contains("image/png"), "got: {with_len}");
+        assert!(with_len.contains("3 KB"), "rounds up: {with_len}");
+        let without_len = non_text_body_message("audio/mpeg", None);
+        assert!(without_len.contains("audio/mpeg"), "got: {without_len}");
+        assert!(
+            !without_len.contains("KB"),
+            "no size to report: {without_len}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn binary_bodies_are_refused_and_non_utf8_text_still_decodes() {
+        let base = mock_http().await;
+        let (png, sjis) = tokio::task::spawn_blocking(move || {
+            (
+                RealScriptIo.http_get(&format!("{base}/png"), BTreeMap::new()),
+                RealScriptIo.http_get(&format!("{base}/shiftjis"), BTreeMap::new()),
+            )
+        })
+        .await
+        .unwrap();
+
+        // A PNG is refused outright rather than returned as replacement chars.
+        let err = png.unwrap_err();
+        assert!(err.contains("non-text content"), "got: {err}");
+        assert!(err.contains("image/png"), "got: {err}");
+
+        // A Shift-JIS page is text: it must still come back decoded. Guarding on
+        // UTF-8 validity instead of the header would have broken this.
+        assert_eq!(sjis.unwrap(), "日本語");
     }
 
     #[tokio::test(flavor = "multi_thread")]

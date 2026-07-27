@@ -745,28 +745,34 @@ fn strip_tags(html: &str) -> String {
     out
 }
 
-/// How far past an `&` to look for the closing `;`. The longest entity this
-/// decoder recognises is `&#x10FFFF;` (10 bytes); 12 leaves headroom.
-const ENTITY_SCAN_BYTES: usize = 12;
+/// How many characters past an `&` to look for the closing `;`. The longest
+/// entity this decoder recognises is `&#x10FFFF;` (10 chars); 12 leaves headroom.
+const ENTITY_SCAN_CHARS: usize = 12;
 
 /// Decode common HTML entities (named + numeric decimal/hex). Unknown or
 /// unterminated entities are left verbatim.
+///
+/// The scan is bounded by **characters**, not bytes. Bounding it by bytes is
+/// what aborted the daemon in issue #109: `after` begins at an `&`, so a fixed
+/// byte-12 cut-off slices mid-character on any multi-byte text
+/// (`"&日本語日本"` → *"byte index 12 is not a char boundary"*), and
+/// `html_to_text` runs this over every fetched page. Clamping the byte window
+/// down to a boundary also worked, but only because `&` is single-byte — an
+/// unstated invariant that a later edit could quietly break. Indices from
+/// `char_indices` are boundaries by construction, so there is nothing left to
+/// get wrong. Entities are all ASCII, so the two bounds agree on any real one.
 fn decode_entities(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
         let after = &rest[amp..];
-        // Only the first few bytes can hold an entity, but the cut-off must land
-        // on a char boundary: `after` starts at `&`, so a fixed byte 12 slices
-        // mid-character on any multi-byte text ("&日本語日本" panicked with
-        // "byte index 12 is not a char boundary") — and since `html_to_text`
-        // runs on every fetched page, that panic aborted the daemon (issue #109).
-        let mut window = after.len().min(ENTITY_SCAN_BYTES);
-        while !after.is_char_boundary(window) {
-            window -= 1;
-        }
-        match after[..window].find(';') {
+        let semi = after
+            .char_indices()
+            .take(ENTITY_SCAN_CHARS)
+            .find(|&(_, c)| c == ';')
+            .map(|(i, _)| i);
+        match semi {
             Some(semi) => match decode_one_entity(&after[1..semi]) {
                 Some(ch) => {
                     out.push(ch);
