@@ -3,11 +3,20 @@
 //! When enabled, logs full request/response details for every provider HTTP call.
 
 /// Redact an API key for logging, showing only the last 4 characters.
+///
+/// Counts *characters*, not bytes, for the same two reasons as `lev setup`'s
+/// redactor: `key.len() - 4` can land inside a multi-byte character and panic
+/// (the shape of issue #115), and a 5-byte 2-character key is longer than 4
+/// *bytes*, so the byte branch would print the whole thing behind four stars.
 fn redact_api_key(key: &str) -> String {
-    if key.len() <= 4 {
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= 4 {
         "****".to_string()
     } else {
-        format!("****{}", &key[key.len() - 4..])
+        format!(
+            "****{}",
+            chars[chars.len() - 4..].iter().collect::<String>()
+        )
     }
 }
 
@@ -93,6 +102,15 @@ mod tests {
     #[test]
     fn redact_api_key_long() {
         assert_eq!(redact_api_key("sk-ant-api03-abc123xyz"), "****3xyz");
+    }
+
+    #[test]
+    fn redact_api_key_multibyte() {
+        // Issue #115: `key.len() - 4` used to land inside the last '日' and panic.
+        assert_eq!(redact_api_key("sk-日本語日本語"), "****語日本語");
+        // 2 characters but 6 bytes — the byte-length guard called this "long" and
+        // printed the whole key. Character counting redacts it.
+        assert_eq!(redact_api_key("日本"), "****");
     }
 
     #[test]

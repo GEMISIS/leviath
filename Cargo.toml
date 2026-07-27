@@ -29,6 +29,19 @@ description = "A structured agent runtime for LLMs — context memory, multi-sta
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
+# `&s[a..b]` on a `&str` panics when an index lands inside a multi-byte character.
+# That is not hypothetical here: it aborted the daemon twice (issues #109 and #115,
+# a byte cut-off through an emoji inside a Rhai host function), and an audit found
+# two more live instances plus four hand-rolled copies of the walk-back loop. So it
+# is denied workspace-wide. Cut with `leviath_core::truncate_at_boundary` /
+# `floor_char_boundary`, or -- when the index provably *is* a boundary because it
+# came from `find`/`char_indices`/`starts_with` -- annotate the enclosing item with
+# `#[expect(clippy::string_slice, reason = "...")]` naming the construct that
+# guarantees it. "Looks fine" is exactly the unstated invariant this lint exists to
+# stop.
+[workspace.lints.clippy]
+string_slice = "deny"
+
 [workspace.dependencies]
 # Core crates
 leviath-core = { path = "crates/leviath-core" }

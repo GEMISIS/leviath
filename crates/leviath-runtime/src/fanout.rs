@@ -43,6 +43,11 @@ pub struct WorkItem {
 
 /// Parse a split response into work items. Tolerates markdown fences and prose by
 /// extracting the outermost `[ … ]`. (Ported from the deleted imperative engine.)
+#[expect(
+    clippy::string_slice,
+    reason = "`s` and `e` come from `find`/`rfind` on the ASCII '[' and ']', so both are char \
+              boundaries and the inclusive range ends on the last byte of ']'"
+)]
 pub fn parse_work_items(content: &str) -> Result<Vec<WorkItem>, String> {
     let trimmed = content.trim();
     let slice = match (trimmed.find('['), trimmed.rfind(']')) {

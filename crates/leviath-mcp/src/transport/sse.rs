@@ -20,6 +20,10 @@ pub(crate) struct SseEvent {
 /// untouched so the caller can append more bytes and retry. Events are
 /// terminated by a blank line; `\r\n` is normalized, since a server behind a
 /// proxy may emit either ending.
+#[expect(
+    clippy::string_slice,
+    reason = "`end` is a `find` hit for an ASCII line terminator, so it is a char boundary"
+)]
 pub(crate) fn parse_sse_frame(buffer: &mut String) -> Option<SseEvent> {
     // A frame ends at the first blank line, in whichever line ending arrives.
     let (end, sep_len) = find_frame_end(buffer)?;

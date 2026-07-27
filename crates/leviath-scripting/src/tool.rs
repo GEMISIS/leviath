@@ -703,6 +703,12 @@ fn strip_raw_text_elements(html: &str) -> String {
     s
 }
 
+#[expect(
+    clippy::string_slice,
+    reason = "`i` only ever advances by `ch.len_utf8()` and `rel` comes from `find`, so both are \
+              char boundaries; `to_ascii_lowercase` preserves byte lengths, so `lower` and `html` \
+              share them"
+)]
 fn strip_element(html: &str, tag: &str) -> String {
     let lower = html.to_ascii_lowercase();
     let open = format!("<{tag}");
@@ -761,6 +767,11 @@ const ENTITY_SCAN_CHARS: usize = 12;
 /// unstated invariant that a later edit could quietly break. Indices from
 /// `char_indices` are boundaries by construction, so there is nothing left to
 /// get wrong. Entities are all ASCII, so the two bounds agree on any real one.
+#[expect(
+    clippy::string_slice,
+    reason = "`amp` comes from `find` and `semi` from `char_indices`, so every index here is a \
+              char boundary; `after[1..]` is safe because `after` starts at the single-byte '&'"
+)]
 fn decode_entities(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
@@ -1706,6 +1717,11 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
         assert_eq!(decode_entities("&amp;日本語"), "&日本語");
         // Trailing '&' at the very end of the string (window == 1).
         assert_eq!(decode_entities("tail&"), "tail&");
+        // Issue #115 re-reported the same crash with a flag emoji. '&' plus nine
+        // ASCII bytes puts the four-byte regional indicator at bytes 10..14, so
+        // the old byte-12 window cut straight through it. Pinned verbatim so the
+        // reported input, not just an equivalent one, stays covered.
+        assert_eq!(decode_entities("&abcdefghi🇸"), "&abcdefghi🇸");
     }
 
     #[test]

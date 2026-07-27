@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use crate::config::Config;
 use leviath_core::manifest::parse_manifest;
+use leviath_core::truncate_at_boundary;
 
 #[derive(Args)]
 pub struct TestArgs {
@@ -392,11 +393,15 @@ fn validate_test_case(test: &TestCase) -> bool {
     true
 }
 
+/// Shorten a model response for the assertion-failure preview.
+///
+/// Cuts on a char boundary: this runs on raw model output, and a byte cut-off
+/// through an emoji panicked `lev test` outright (the shape of issue #115).
 fn truncate_str(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max])
+        format!("{}...", truncate_at_boundary(s, max))
     }
 }
 
@@ -714,9 +719,17 @@ max_tokens = 500
 
     #[test]
     fn truncate_str_unicode() {
-        // Non-ASCII content should still work (might truncate mid-char for simple impl)
-        let s = "abcde";
-        assert_eq!(truncate_str(s, 3), "abc...");
+        assert_eq!(truncate_str("abcde", 3), "abc...");
+        // Issue #115: the cut lands inside a multi-byte character. This used to
+        // panic ("byte index N is not a char boundary") on the assertion-failure
+        // path, which prints raw model output. '🎉' occupies bytes 3..7.
+        assert_eq!(truncate_str("abc🎉def", 4), "abc...");
+        assert_eq!(truncate_str("abc🎉def", 6), "abc...");
+        // A boundary-aligned cut is unaffected.
+        assert_eq!(truncate_str("abc🎉def", 7), "abc🎉...");
+        // Every character straddles the cut — the preview degrades to the marker
+        // rather than panicking.
+        assert_eq!(truncate_str("🎉🎉", 2), "...");
     }
 
     // ─── dry_run with filter ──────────────────────────────────────────────

@@ -25,6 +25,7 @@ pub mod run_archive;
 pub mod run_meta;
 pub mod sandbox;
 pub mod taint;
+pub mod text;
 
 pub use blueprint::{
     Blueprint, ContextTransform, EdgeTransform, FileTrackingConfig, RepetitionDetectionConfig,
@@ -45,3 +46,4 @@ pub use taint::{
     GateDecision, GateDecisionSource, GateEvent, RegionTaint, SecurityConfig, TaintLevel,
     ToolClassification, ToolDirection,
 };
+pub use text::{floor_char_boundary, truncate_at_boundary};

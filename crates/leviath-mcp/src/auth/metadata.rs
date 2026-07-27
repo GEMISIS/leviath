@@ -41,6 +41,11 @@ pub(crate) struct AuthServerMetadata {
 ///
 /// Returns `None` when the header is absent or carries no such parameter, in
 /// which case the caller falls back to the well-known path.
+#[expect(
+    clippy::string_slice,
+    reason = "`start` is a `find` hit plus the length of the ASCII needle it matched, and `end` is \
+              a `find` hit or the length — all char boundaries"
+)]
 pub(crate) fn resource_metadata_url(www_authenticate: Option<&str>) -> Option<String> {
     let header = www_authenticate?;
     // The parameter looks like: Bearer resource_metadata="https://…", …

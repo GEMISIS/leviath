@@ -12,6 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use leviath_agent_client::MAX_FRAME_BYTES;
+use leviath_core::floor_char_boundary;
 
 /// Incremental reader over a run's readable output, across all of its stages.
 ///
@@ -87,21 +88,16 @@ fn stage_output_path(runs_dir: &Path, run_id: &str, idx: usize) -> PathBuf {
 /// zero-length chunk). The common case — output well under one frame — returns a
 /// single slice.
 pub fn split_chunks(text: &str) -> Vec<&str> {
-    if text.is_empty() {
-        return Vec::new();
-    }
     let mut chunks = Vec::new();
-    let mut start = 0;
-    while start < text.len() {
-        let mut end = (start + MAX_FRAME_BYTES).min(text.len());
-        // Back up to the nearest char boundary at or below `end`. `end > start`
-        // always holds here, and there is a boundary in (start, end] because at
-        // least one whole char began at `start`.
-        while end > start && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        chunks.push(&text[start..end]);
-        start = end;
+    let mut rest = text;
+    while !rest.is_empty() {
+        // The cut is never 0, so `rest` always shrinks and the loop terminates:
+        // a whole char begins at byte 0 of `rest` and `MAX_FRAME_BYTES` is far
+        // wider than the 4-byte maximum char, so the walk-back cannot reach the
+        // start.
+        let (chunk, tail) = rest.split_at(floor_char_boundary(rest, MAX_FRAME_BYTES));
+        chunks.push(chunk);
+        rest = tail;
     }
     chunks
 }
