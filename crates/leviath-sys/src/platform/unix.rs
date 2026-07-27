@@ -69,6 +69,19 @@ pub(crate) fn current_uid() -> u32 {
     nix::unistd::getuid().as_raw()
 }
 
+/// SIGKILL the process group led by `pgid`.
+///
+/// `nix::sys::signal::killpg` with a negated pid is the safe wrapper around
+/// `killpg(2)`; no `unsafe` is involved. Errors (the group already exited, or
+/// was never ours) are the normal case when reaping and are swallowed by the
+/// caller.
+pub(crate) fn kill_process_group(pgid: u32) -> io::Result<()> {
+    use nix::sys::signal::{Signal, killpg};
+    use nix::unistd::Pid;
+    killpg(Pid::from_raw(pgid as i32), Signal::SIGKILL)
+        .map_err(|e| io::Error::from_raw_os_error(e as i32))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

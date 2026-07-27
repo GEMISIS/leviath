@@ -10,6 +10,34 @@ use std::sync::{Arc, Mutex, PoisonError};
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
+/// Put `cmd` in its own process group, so the whole command tree can be
+/// signalled as one. `leviath_sys::configure_detached` does this for a
+/// `std::process::Command`; the tool lane uses tokio's, which has its own
+/// (Unix-only) setter. A no-op where the platform has no process groups —
+/// there, killing the direct child is all that exists.
+pub fn own_process_group(cmd: &mut Command) {
+    #[cfg(unix)]
+    cmd.process_group(0);
+    #[cfg(not(unix))]
+    let _ = cmd;
+}
+
+/// SIGKILLs a shell's whole process group when dropped.
+///
+/// `kill_on_drop` reaps the shell itself; this reaps what the shell started.
+/// Held for the duration of one shell tool call, so it fires on every exit path
+/// — normal completion (where the group is already gone and the signal is a
+/// harmless no-op), timeout, and the future being dropped because the agent was
+/// cancelled.
+pub struct ProcessGroupReaper(pub u32);
+
+impl Drop for ProcessGroupReaper {
+    fn drop(&mut self) {
+        // The group is usually already gone; failing to signal it is expected.
+        let _ = leviath_sys::kill_process_group(self.0);
+    }
+}
+
 /// A platform feature a built-in tool depends on.
 ///
 /// Each built-in declares the capabilities it requires (see
@@ -1025,17 +1053,33 @@ impl BuiltinTools {
                 c
             }
         };
-        // Kill the child if this future is dropped. Dropping a `Command` future
-        // detaches the process by default, so a cancelled agent (or an elapsed
-        // timeout, which drops the future the same way) would leave its shell
-        // running — the run is gone from every listing while its command carries
-        // on writing to the workspace.
+        // Reap the whole command on drop, not just the shell.
+        //
+        // Dropping a `Command` future detaches its process by default, so a
+        // cancelled agent (or an elapsed timeout, which drops the future the
+        // same way) left its shell running: the run vanished from every listing
+        // while its command carried on writing to the workspace. `kill_on_drop`
+        // fixes the shell — but only the shell. Anything the shell itself
+        // started (`sleep 400 && …`) is a *grandchild*, gets reparented to init,
+        // and keeps running. Putting the shell in its own process group and
+        // signalling the group on drop takes the whole tree down with it.
         cmd.kill_on_drop(true);
-        let run = cmd.output();
+        own_process_group(&mut cmd);
+        // `spawn` inherits stdio where `output` pipes it; pipe explicitly so the
+        // command's output is still captured.
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
 
-        match timeout(timeout_duration, run).await {
+        let child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => return format!("[error] Failed to spawn shell '{}': {}", shell, e),
+        };
+        // The child leads its own group, so its pid is the group id.
+        let _reaper = child.id().map(ProcessGroupReaper);
+
+        match timeout(timeout_duration, child.wait_with_output()).await {
             Err(_) => format!("[timed out] Command exceeded 60s: {}", command),
-            Ok(Err(e)) => format!("[error] Failed to spawn shell '{}': {}", shell, e),
+            Ok(Err(e)) => format!("[error] Failed to run shell '{}': {}", shell, e),
             Ok(Ok(output)) => Self::format_command_output(
                 &output.stdout,
                 &output.stderr,
@@ -2007,6 +2051,37 @@ mod tests {
             .shell_with_timeout(&json!({"command": "sleep 5"}), Duration::from_millis(100))
             .await;
         assert!(result.contains("[timed out]"));
+    }
+
+    /// A timed-out (or cancelled) command takes its *grandchildren* with it.
+    ///
+    /// `kill_on_drop` only reaps the shell. Anything the shell started is
+    /// reparented to init and keeps running — a cancelled agent's `sleep`
+    /// outliving the run that spawned it. Verified by writing a marker file
+    /// after a delay: if the grandchild survived, the marker appears.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timed_out_command_kills_its_grandchildren() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("survived");
+        let tools = make_tools(dir.path());
+
+        // A *backgrounded subshell* is the grandchild, and it is what writes the
+        // marker. Chaining (`sleep 2 && touch`) would not test anything: the
+        // `touch` is run by the shell itself, so killing the shell suppresses it
+        // whether or not the group was signalled.
+        let cmd = format!("( sleep 2; touch {} ) & sleep 30", marker.display());
+        let result = tools
+            .shell_with_timeout(&json!({ "command": cmd }), Duration::from_millis(100))
+            .await;
+        assert!(result.contains("[timed out]"), "got: {result}");
+
+        // Well past when the grandchild would have written it.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(
+            !marker.exists(),
+            "the grandchild outlived the command that started it"
+        );
     }
 
     #[tokio::test]

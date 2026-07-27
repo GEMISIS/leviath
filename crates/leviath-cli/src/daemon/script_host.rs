@@ -477,16 +477,29 @@ impl ScriptIo for RealScriptIo {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return Err("shell is unavailable: no tokio runtime on this thread".to_string());
         };
-        // Reap the child if the future is dropped (timeout, or the whole batch
-        // dropped because the agent was cancelled) rather than detaching it.
+        // Reap the whole command tree if the future is dropped (timeout, or the
+        // batch dropped because the agent was cancelled) rather than detaching
+        // it. `kill_on_drop` covers the shell; its own children are reparented
+        // to init unless the group is signalled — see `leviath_tools`' shell
+        // tool, which does the same.
         cmd.kill_on_drop(true);
+        leviath_tools::own_process_group(&mut cmd);
+        // `spawn` inherits stdio where `output` pipes it; pipe explicitly so the
+        // command's output is still captured.
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
         handle.block_on(async move {
-            match tokio::time::timeout(timeout, cmd.output()).await {
+            let child = match cmd.spawn() {
+                Ok(child) => child,
+                Err(e) => return Err(format!("failed to spawn shell: {e}")),
+            };
+            let _reaper = child.id().map(leviath_tools::ProcessGroupReaper);
+            match tokio::time::timeout(timeout, child.wait_with_output()).await {
                 Ok(Ok(output)) => Ok(cap_script_io(combine_shell_output(
                     &output.stdout,
                     &output.stderr,
                 ))),
-                Ok(Err(e)) => Err(format!("failed to spawn shell: {e}")),
+                Ok(Err(e)) => Err(format!("failed to run shell: {e}")),
                 Err(_) => Err(format!(
                     "shell command timed out after {}s",
                     timeout.as_secs()

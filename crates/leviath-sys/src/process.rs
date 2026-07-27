@@ -11,6 +11,21 @@ pub fn configure_detached(cmd: &mut Command) {
     crate::platform::configure_detached(cmd);
 }
 
+/// SIGKILL every process in the group led by `pgid` (a no-op on platforms
+/// without process groups).
+///
+/// Killing a child shell is not enough to stop what it started: the shell's own
+/// children are reparented to init and keep running. A cancelled agent's
+/// `sleep 400` outliving the run that started it is exactly that. Spawning the
+/// shell into its own group (via [`configure_detached`]) and signalling the
+/// group tears down the whole tree.
+///
+/// Errors are the ordinary case (the group already exited) and are the caller's
+/// to ignore.
+pub fn kill_process_group(pgid: u32) -> std::io::Result<()> {
+    crate::platform::kill_process_group(pgid)
+}
+
 /// The calling user's numeric id.
 ///
 /// Used to address a per-user service domain (`launchctl bootstrap gui/<uid>`).
