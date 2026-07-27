@@ -431,10 +431,12 @@ pub const SCRIPT_TOOL_MAX_OPERATIONS: u64 = 500_000;
 /// is already a string (returned verbatim). Any script error becomes an
 /// `[error] …` string.
 ///
-/// The eval is wrapped in [`std::panic::catch_unwind`] so a panic in a host
-/// function (e.g. a TLS-backend failure) is caught cleanly — without unwinding
-/// through Rhai's stack. This prevents a double-panic abort when a `Drop` impl
-/// panics during unwinding (issue #109).
+/// A panic raised by a native (host) function never unwinds through this call:
+/// it is caught at the native-function boundary by `guard_str`/`guard_dyn`
+/// and arrives here as an ordinary script error (issue #109). Anything that
+/// still escapes — a panic from Rhai's own internals — is contained one level
+/// up, where the daemon runs this on a `spawn_blocking` task and turns the
+/// resulting `JoinError` into a tool error.
 pub fn execute(tool: &ScriptTool, args: serde_json::Value, host: Arc<dyn ScriptHost>) -> String {
     let engine = build_tool_engine(host);
     // Converting a `serde_json::Value` to a Rhai `Dynamic` is infallible (any
@@ -443,25 +445,9 @@ pub fn execute(tool: &ScriptTool, args: serde_json::Value, host: Arc<dyn ScriptH
     let params = rhai::serde::to_dynamic(args).unwrap_or(Dynamic::UNIT);
     let mut scope = Scope::new();
     scope.push_dynamic("params", params);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        engine.eval_ast_with_scope::<Dynamic>(&mut scope, &tool.ast)
-    }));
-    match result {
-        Ok(Ok(value)) => dynamic_to_result_string(value),
-        Ok(Err(e)) => format!("[error] {}: {}", tool.meta.name, e),
-        Err(payload) => {
-            let msg = payload
-                .downcast_ref::<String>()
-                .map(|s| s.as_str())
-                .or_else(|| payload.downcast_ref::<&str>().copied())
-                .unwrap_or("unknown panic");
-            tracing::warn!(
-                tool = %tool.meta.name,
-                panic = msg,
-                "script tool panicked during execution (issue #109)"
-            );
-            format!("[error] {}: script panicked: {msg}", tool.meta.name)
-        }
+    match engine.eval_ast_with_scope::<Dynamic>(&mut scope, &tool.ast) {
+        Ok(value) => dynamic_to_result_string(value),
+        Err(e) => format!("[error] {}: {}", tool.meta.name, e),
     }
 }
 
@@ -500,75 +486,154 @@ fn build_tool_engine(host: Arc<dyn ScriptHost>) -> Engine {
     engine
 }
 
+/// What a registered native function hands back to Rhai.
+type HostRes<T> = std::result::Result<T, Box<EvalAltResult>>;
+
 /// Turn a host `Result<String, String>` into a Rhai fn result, mapping `Err`
 /// into a runtime exception (which `execute` renders as `[error] …`).
-fn to_rhai(
-    r: std::result::Result<String, String>,
-) -> std::result::Result<String, Box<EvalAltResult>> {
+fn to_rhai(r: std::result::Result<String, String>) -> HostRes<String> {
     r.map_err(|msg| Box::new(EvalAltResult::ErrorRuntime(msg.into(), Position::NONE)))
+}
+
+/// Turn a caught panic payload into the same runtime exception a normal host
+/// error produces, so Rhai unwinds nothing.
+fn panic_to_rhai(name: &str, payload: Box<dyn std::any::Any + Send>) -> Box<EvalAltResult> {
+    let msg = leviath_core::panic_message(payload.as_ref());
+    tracing::warn!(
+        host_fn = name,
+        panic = %msg,
+        "a script-tool host function panicked; surfacing it as a script error (issue #109)"
+    );
+    Box::new(EvalAltResult::ErrorRuntime(
+        format!("{name} panicked: {msg}").into(),
+        Position::NONE,
+    ))
+}
+
+/// Run a `String`-returning native function so a panic inside it **never**
+/// unwinds into Rhai.
+///
+/// This is the primary fix for issue #109. Rhai's `exec_native_fn_call` takes an
+/// `ArgBackup` whenever the first argument is a variable reference (which is
+/// every real call shape, e.g. `http_get(params.url)`), and restores it *after*
+/// the call returns. A panicking native function skips that restore, and
+/// `ArgBackup`'s destructor then asserts during unwinding — a second panic while
+/// panicking, which Rust turns into `abort()`. That aborted the whole daemon,
+/// killing every concurrent run. Catching here means the unwind never reaches
+/// Rhai's frame at all.
+///
+/// Deliberately **not generic**: a generic guard monomorphizes per closure, and
+/// each instantiation's panic arm would then need its own test to hold the
+/// workspace's 100% coverage gate. One `&mut dyn FnMut` instantiation keeps
+/// every caller's regions merged into one.
+fn guard_str(name: &str, f: &mut dyn FnMut() -> HostRes<String>) -> HostRes<String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(r) => r,
+        Err(payload) => Err(panic_to_rhai(name, payload)),
+    }
+}
+
+/// [`guard_str`] for the one native function that returns a `Dynamic`
+/// (`parse_json`). Same rationale, different return type — kept non-generic for
+/// the same coverage reason.
+fn guard_dyn(name: &str, f: &mut dyn FnMut() -> HostRes<Dynamic>) -> HostRes<Dynamic> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(r) => r,
+        Err(payload) => Err(panic_to_rhai(name, payload)),
+    }
 }
 
 /// Convert a Rhai object-map of headers into a `BTreeMap<String,String>`, each
 /// value stringified.
-fn headers_from_map(map: Map) -> BTreeMap<String, String> {
-    map.into_iter()
+/// Borrows rather than consumes so the guarded `FnMut` wrappers in
+/// [`register_host_functions`] can call it without moving out of a capture.
+fn headers_from_map(map: &Map) -> BTreeMap<String, String> {
+    map.iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect()
 }
 
 /// Register the eight host functions. Five delegate to [`ScriptHost`]; three
 /// (`parse_json`, `to_json`, `encode_uri`) are pure.
+///
+/// **Every** registration goes through [`guard_str`] / [`guard_dyn`], so a panic
+/// anywhere in a native function becomes an ordinary Rhai runtime error instead
+/// of unwinding into Rhai and aborting the process (issue #109). The pure
+/// helpers are guarded too — they run on untrusted, model- and network-supplied
+/// input, so "this one can't panic" is not a property worth betting the daemon on.
 fn register_host_functions(engine: &mut Engine, host: Arc<dyn ScriptHost>) {
     // http_get(url) / http_get(url, headers)
     let h = host.clone();
     engine.register_fn("http_get", move |url: &str| {
-        to_rhai(h.http_get(url, BTreeMap::new()))
+        guard_str("http_get", &mut || {
+            to_rhai(h.http_get(url, BTreeMap::new()))
+        })
     });
     let h = host.clone();
     engine.register_fn("http_get", move |url: &str, headers: Map| {
-        to_rhai(h.http_get(url, headers_from_map(headers)))
+        guard_str("http_get", &mut || {
+            to_rhai(h.http_get(url, headers_from_map(&headers)))
+        })
     });
 
     // http_post(url, body) / http_post(url, body, headers)
     let h = host.clone();
     engine.register_fn("http_post", move |url: &str, body: &str| {
-        to_rhai(h.http_post(url, body, BTreeMap::new()))
+        guard_str("http_post", &mut || {
+            to_rhai(h.http_post(url, body, BTreeMap::new()))
+        })
     });
     let h = host.clone();
     engine.register_fn("http_post", move |url: &str, body: &str, headers: Map| {
-        to_rhai(h.http_post(url, body, headers_from_map(headers)))
+        guard_str("http_post", &mut || {
+            to_rhai(h.http_post(url, body, headers_from_map(&headers)))
+        })
     });
 
     // shell(cmd)
     let h = host.clone();
-    engine.register_fn("shell", move |cmd: &str| to_rhai(h.shell(cmd)));
+    engine.register_fn("shell", move |cmd: &str| {
+        guard_str("shell", &mut || to_rhai(h.shell(cmd)))
+    });
 
     // read_file(path)
     let h = host.clone();
-    engine.register_fn("read_file", move |path: &str| to_rhai(h.read_file(path)));
+    engine.register_fn("read_file", move |path: &str| {
+        guard_str("read_file", &mut || to_rhai(h.read_file(path)))
+    });
 
     // write_file(path, content)
     let h = host.clone();
     engine.register_fn("write_file", move |path: &str, content: &str| {
-        to_rhai(h.write_file(path, content))
+        guard_str("write_file", &mut || to_rhai(h.write_file(path, content)))
     });
 
     // env_var(name)
     let h = host.clone();
-    engine.register_fn("env_var", move |name: &str| to_rhai(h.env_var(name)));
+    engine.register_fn("env_var", move |name: &str| {
+        guard_str("env_var", &mut || to_rhai(h.env_var(name)))
+    });
 
-    // Pure helpers. These are named free functions (not inline closures) so
-    // their bodies get a single, cleanly-attributed monomorphization under
+    // Pure helpers. Their bodies live in named free functions (not inline
+    // closures) so they get a single, cleanly-attributed monomorphization under
     // coverage instrumentation instead of being inlined into rhai's generic
     // `register_fn` wrapper (a known attribution artifact).
-    engine.register_fn("parse_json", parse_json_fn);
-    engine.register_fn("to_json", to_json_fn);
-    engine.register_fn("encode_uri", |s: &str| -> String { percent_encode(s) });
-    engine.register_fn("html_to_text", |s: &str| -> String { html_to_text(s) });
+    engine.register_fn("parse_json", |s: &str| -> HostRes<Dynamic> {
+        guard_dyn("parse_json", &mut || parse_json_fn(s))
+    });
+    engine.register_fn("to_json", |v: Dynamic| -> HostRes<String> {
+        guard_str("to_json", &mut || to_json_fn(&v))
+    });
+    engine.register_fn("encode_uri", |s: &str| -> HostRes<String> {
+        guard_str("encode_uri", &mut || Ok(percent_encode(s)))
+    });
+    engine.register_fn("html_to_text", |s: &str| -> HostRes<String> {
+        guard_str("html_to_text", &mut || Ok(html_to_text(s)))
+    });
 }
 
 /// `parse_json(str)` host function: JSON string → Rhai value.
-fn parse_json_fn(s: &str) -> std::result::Result<Dynamic, Box<EvalAltResult>> {
+fn parse_json_fn(s: &str) -> HostRes<Dynamic> {
     let value: serde_json::Value = serde_json::from_str(s).map_err(|e| {
         Box::new(EvalAltResult::ErrorRuntime(
             format!("parse_json: {e}").into(),
@@ -581,8 +646,8 @@ fn parse_json_fn(s: &str) -> std::result::Result<Dynamic, Box<EvalAltResult>> {
 /// `to_json(value)` host function: Rhai value → JSON string. `from_dynamic`
 /// fails for values with no JSON representation (e.g. a function pointer);
 /// `Value::to_string` (Display) is then infallible.
-fn to_json_fn(v: Dynamic) -> std::result::Result<String, Box<EvalAltResult>> {
-    let json: serde_json::Value = rhai::serde::from_dynamic(&v)?;
+fn to_json_fn(v: &Dynamic) -> HostRes<String> {
+    let json: serde_json::Value = rhai::serde::from_dynamic(v)?;
     Ok(json.to_string())
 }
 
@@ -680,6 +745,10 @@ fn strip_tags(html: &str) -> String {
     out
 }
 
+/// How far past an `&` to look for the closing `;`. The longest entity this
+/// decoder recognises is `&#x10FFFF;` (10 bytes); 12 leaves headroom.
+const ENTITY_SCAN_BYTES: usize = 12;
+
 /// Decode common HTML entities (named + numeric decimal/hex). Unknown or
 /// unterminated entities are left verbatim.
 fn decode_entities(s: &str) -> String {
@@ -688,7 +757,15 @@ fn decode_entities(s: &str) -> String {
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
         let after = &rest[amp..];
-        let window = after.len().min(12);
+        // Only the first few bytes can hold an entity, but the cut-off must land
+        // on a char boundary: `after` starts at `&`, so a fixed byte 12 slices
+        // mid-character on any multi-byte text ("&日本語日本" panicked with
+        // "byte index 12 is not a char boundary") — and since `html_to_text`
+        // runs on every fetched page, that panic aborted the daemon (issue #109).
+        let mut window = after.len().min(ENTITY_SCAN_BYTES);
+        while !after.is_char_boundary(window) {
+            window -= 1;
+        }
         match after[..window].find(';') {
             Some(semi) => match decode_one_entity(&after[1..semi]) {
                 Some(ch) => {
@@ -754,7 +831,13 @@ fn collapse_whitespace(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, PoisonError};
+
+    /// Serializes the tests that swap the **process-global** panic hook. Without
+    /// it they interleave under the parallel test runner: one test's `set_hook`
+    /// replaces another's silencing closure before that test's panic fires, so
+    /// the closure never runs and reads as uncovered.
+    static PANIC_HOOK_LOCK: Mutex<()> = Mutex::new(());
 
     // ── A fake host recording calls and returning canned results. ──
 
@@ -1236,103 +1319,119 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
         }
     }
 
-    #[test]
-    fn execute_host_panic_is_caught_by_catch_unwind() {
-        // A host function that panics is caught by catch_unwind in execute(),
-        // preventing a double-panic abort when a Drop impl also panics during
-        // unwinding (issue #109).
-        let host: Arc<dyn ScriptHost> = Arc::new(PanickingHost {
-            payload: PanicPayload::Formatted("TLS init failed"),
-        });
-        let tool = tool_from("// @tool t\nhttp_get(\"http://x\")");
+    /// Run a script whose only host call panics and return the tool's output,
+    /// with the process panic hook silenced for the duration (the panic is
+    /// expected; its default backtrace would just spam the test log).
+    fn execute_with_panicking_host(payload: PanicPayload, script: &str) -> String {
+        let host: Arc<dyn ScriptHost> = Arc::new(PanickingHost { payload });
+        let tool = tool_from(script);
+        let _guard = PANIC_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
         let out = execute(&tool, serde_json::json!({}), host);
-        assert!(out.contains("[error]"), "got: {out}");
-        assert!(out.contains("script panicked"), "got: {out}");
-        assert!(out.contains("TLS init failed"), "got: {out}");
+        std::panic::set_hook(prev);
+        out
+    }
+
+    /// Assert the tool reported a guarded panic from `host_fn` carrying `detail`.
+    fn assert_guarded_panic(out: &str, tool_name: &str, host_fn: &str, detail: &str) {
+        assert!(
+            out.starts_with(&format!("[error] {tool_name}:")),
+            "got: {out}"
+        );
+        assert!(out.contains(&format!("{host_fn} panicked")), "got: {out}");
+        assert!(out.contains(detail), "got: {out}");
     }
 
     #[test]
-    fn execute_shell_panic_is_caught_by_catch_unwind() {
-        let host: Arc<dyn ScriptHost> = Arc::new(PanickingHost {
-            payload: PanicPayload::Formatted("sandbox init exploded"),
-        });
-        let tool = tool_from("// @tool sh\nshell(\"ls\")");
-        let out = execute(&tool, serde_json::json!({}), host);
-        assert!(out.contains("[error] sh:"), "got: {out}");
-        assert!(out.contains("script panicked"), "got: {out}");
-        assert!(out.contains("sandbox init exploded"), "got: {out}");
+    fn every_host_fn_panic_becomes_a_script_error() {
+        // A panicking host function must NEVER unwind into Rhai: rhai's
+        // `exec_native_fn_call` holds an `ArgBackup` whose destructor asserts,
+        // so unwinding through it is a double panic → `abort()` → the whole
+        // daemon dies (issue #109). Each of these would have aborted the test
+        // process before the guards existed.
+        for (host_fn, tool_name, script) in [
+            ("http_get", "t", "// @tool t\nhttp_get(\"http://x\")"),
+            (
+                "http_get",
+                "t",
+                "// @tool t\nhttp_get(\"http://x\", #{ \"A\": \"b\" })",
+            ),
+            (
+                "http_post",
+                "t",
+                "// @tool t\nhttp_post(\"http://x\", \"b\")",
+            ),
+            (
+                "http_post",
+                "t",
+                "// @tool t\nhttp_post(\"http://x\", \"b\", #{ \"A\": \"b\" })",
+            ),
+            ("shell", "sh", "// @tool sh\nshell(\"ls\")"),
+            ("read_file", "rf", "// @tool rf\nread_file(\"x.txt\")"),
+            (
+                "write_file",
+                "wf",
+                "// @tool wf\nwrite_file(\"out.txt\", \"data\")",
+            ),
+            ("env_var", "ev", "// @tool ev\nenv_var(\"HOME\")"),
+        ] {
+            let out =
+                execute_with_panicking_host(PanicPayload::Formatted("TLS init failed"), script);
+            assert_guarded_panic(&out, tool_name, host_fn, "TLS init failed");
+        }
     }
 
     #[test]
-    fn execute_read_file_panic_is_caught_by_catch_unwind() {
-        let host: Arc<dyn ScriptHost> = Arc::new(PanickingHost {
-            payload: PanicPayload::Formatted("filesystem corrupted"),
-        });
-        let tool = tool_from("// @tool rf\nread_file(\"x.txt\")");
-        let out = execute(&tool, serde_json::json!({}), host);
-        assert!(out.contains("[error] rf:"), "got: {out}");
-        assert!(out.contains("script panicked"), "got: {out}");
-        assert!(out.contains("filesystem corrupted"), "got: {out}");
+    fn guarded_panic_renders_str_and_non_string_payloads() {
+        let out = execute_with_panicking_host(
+            PanicPayload::Literal,
+            "// @tool t\nhttp_get(\"http://x\")",
+        );
+        assert_guarded_panic(&out, "t", "http_get", "literal str panic");
+
+        let out = execute_with_panicking_host(
+            PanicPayload::NonString,
+            "// @tool t\nhttp_get(\"http://x\")",
+        );
+        assert_guarded_panic(&out, "t", "http_get", "unknown panic");
     }
 
     #[test]
-    fn execute_http_post_panic_is_caught_by_catch_unwind() {
-        let host: Arc<dyn ScriptHost> = Arc::new(PanickingHost {
-            payload: PanicPayload::Formatted("post failed"),
-        });
-        let tool = tool_from("// @tool t\nhttp_post(\"http://x\", \"body\")");
-        let out = execute(&tool, serde_json::json!({}), host);
-        assert!(out.contains("[error]"), "got: {out}");
-        assert!(out.contains("script panicked"), "got: {out}");
-        assert!(out.contains("post failed"), "got: {out}");
-    }
+    fn guards_pass_through_success_and_convert_panics() {
+        // Both guards, both arms, called directly: the pure host functions
+        // (`parse_json` / `html_to_text` / …) can't be made to panic through a
+        // script, so their panic arm is exercised here.
+        let _guard = PANIC_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(
+            guard_str("ok_str", &mut || Ok("value".to_string())).unwrap(),
+            "value"
+        );
+        assert!(
+            guard_dyn("ok_dyn", &mut || Ok(Dynamic::from(7_i64)))
+                .unwrap()
+                .is_int()
+        );
 
-    #[test]
-    fn execute_write_file_panic_is_caught_by_catch_unwind() {
-        let host: Arc<dyn ScriptHost> = Arc::new(PanickingHost {
-            payload: PanicPayload::Formatted("write failed"),
-        });
-        let tool = tool_from("// @tool t\nwrite_file(\"out.txt\", \"data\")");
-        let out = execute(&tool, serde_json::json!({}), host);
-        assert!(out.contains("[error]"), "got: {out}");
-        assert!(out.contains("script panicked"), "got: {out}");
-        assert!(out.contains("write failed"), "got: {out}");
-    }
-
-    #[test]
-    fn execute_env_var_panic_is_caught_by_catch_unwind() {
-        let host: Arc<dyn ScriptHost> = Arc::new(PanickingHost {
-            payload: PanicPayload::Formatted("env exploded"),
-        });
-        let tool = tool_from("// @tool t\nenv_var(\"HOME\")");
-        let out = execute(&tool, serde_json::json!({}), host);
-        assert!(out.contains("[error]"), "got: {out}");
-        assert!(out.contains("script panicked"), "got: {out}");
-        assert!(out.contains("env exploded"), "got: {out}");
-    }
-
-    #[test]
-    fn execute_panic_with_str_payload() {
-        let host: Arc<dyn ScriptHost> = Arc::new(PanickingHost {
-            payload: PanicPayload::Literal,
-        });
-        let tool = tool_from("// @tool t\nhttp_get(\"http://x\")");
-        let out = execute(&tool, serde_json::json!({}), host);
-        assert!(out.contains("[error]"), "got: {out}");
-        assert!(out.contains("script panicked"), "got: {out}");
-        assert!(out.contains("literal str panic"), "got: {out}");
-    }
-
-    #[test]
-    fn execute_panic_with_non_string_payload() {
-        let host: Arc<dyn ScriptHost> = Arc::new(PanickingHost {
-            payload: PanicPayload::NonString,
-        });
-        let tool = tool_from("// @tool t\nhttp_get(\"http://x\")");
-        let out = execute(&tool, serde_json::json!({}), host);
-        assert!(out.contains("[error]"), "got: {out}");
-        assert!(out.contains("script panicked"), "got: {out}");
-        assert!(out.contains("unknown panic"), "got: {out}");
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let str_err = guard_str("boom_str", &mut || panic!("string arm")).unwrap_err();
+        let dyn_err = guard_dyn("boom_dyn", &mut || panic!("dynamic arm")).unwrap_err();
+        std::panic::set_hook(prev);
+        assert!(
+            str_err
+                .to_string()
+                .contains("boom_str panicked: string arm")
+        );
+        assert!(
+            dyn_err
+                .to_string()
+                .contains("boom_dyn panicked: dynamic arm")
+        );
     }
 
     #[test]
@@ -1496,11 +1595,11 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
         // independent of rhai's generic `register_fn` wrapper.
         let mut map = Map::new();
         map.insert("a".into(), Dynamic::from(1_i64));
-        assert_eq!(to_json_fn(Dynamic::from_map(map)).unwrap(), "{\"a\":1}");
+        assert_eq!(to_json_fn(&Dynamic::from_map(map)).unwrap(), "{\"a\":1}");
         // A function pointer has no JSON representation → Err.
         let engine = Engine::new();
         let fnptr: Dynamic = engine.eval("|| 1").unwrap();
-        assert!(to_json_fn(fnptr).is_err());
+        assert!(to_json_fn(&fnptr).is_err());
     }
 
     #[test]
@@ -1527,7 +1626,7 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
     fn headers_from_map_stringifies_values() {
         let mut m = Map::new();
         m.insert("n".into(), Dynamic::from(42_i64));
-        let headers = headers_from_map(m);
+        let headers = headers_from_map(&m);
         assert_eq!(headers.get("n").map(String::as_str), Some("42"));
     }
 
@@ -1581,6 +1680,26 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
         assert_eq!(decode_entities("&#99999999;"), "&#99999999;"); // decimal out of range (from_u32 None)
         // No ampersand at all.
         assert_eq!(decode_entities("plain"), "plain");
+    }
+
+    #[test]
+    fn decode_entities_survives_multibyte_after_an_ampersand() {
+        // Regression for issue #109: the entity-scan window is a byte count, so
+        // a bare '&' followed by multi-byte text used to slice mid-character and
+        // panic ("byte index 12 is not a char boundary") — inside a Rhai native
+        // fn, which aborted the daemon. Every one of these is a real shape from
+        // fetched HTML.
+        assert_eq!(decode_entities("&日本語日本"), "&日本語日本");
+        assert_eq!(decode_entities("R&D 日本語です"), "R&D 日本語です");
+        assert_eq!(decode_entities("&🎉🎉🎉🎉"), "&🎉🎉🎉🎉");
+        assert_eq!(
+            decode_entities("&\u{2014}\u{2014}\u{2014}\u{2014}"),
+            "&————"
+        );
+        // A real entity immediately followed by multi-byte text still decodes.
+        assert_eq!(decode_entities("&amp;日本語"), "&日本語");
+        // Trailing '&' at the very end of the string (window == 1).
+        assert_eq!(decode_entities("tail&"), "tail&");
     }
 
     #[test]

@@ -18,6 +18,7 @@ pub mod interaction;
 pub mod layout;
 pub mod lifecycle;
 pub mod manifest;
+pub mod panic_payload;
 pub mod policy;
 pub mod region;
 pub mod run_archive;
@@ -33,6 +34,7 @@ pub use cache::{CacheBreakpoint, CacheHint};
 pub use error::{Error, Result, ValidationError};
 pub use layout::{BudgetSpec, ContextLayout, RegionDefinition};
 pub use lifecycle::{CompactionConfig, CompactionStrategy, EvictionPolicy};
+pub use panic_payload::panic_message;
 pub use policy::{AllowlistRule, McpToolOverride, PolicyConfig, ScriptedRule};
 pub use region::{
     ContentFormat, EntryKind, EvictionStrategy, Region, RegionEntry, RegionKind, RegionSchema,
