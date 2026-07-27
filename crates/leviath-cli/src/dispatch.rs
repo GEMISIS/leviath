@@ -258,6 +258,8 @@ mod tests {
     async fn dispatch_setup_variant_is_routed_through_the_executor() {
         let args = commands::setup::SetupArgs {
             non_interactive: true,
+            no_verify: false,
+            install_agents: false,
             anthropic_key: None,
             openai_key: None,
             google_key: None,
