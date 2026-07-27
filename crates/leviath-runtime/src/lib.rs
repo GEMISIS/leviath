@@ -6,6 +6,7 @@
 //! and inference execution through a game-loop-inspired architecture where agents
 //! are entities and their behaviors are systems.
 
+pub mod cancel;
 pub mod compaction_bridge;
 pub mod components;
 pub mod context_setup;

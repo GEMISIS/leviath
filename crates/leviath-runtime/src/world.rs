@@ -39,10 +39,10 @@ use crate::pipeline::{
     AwaitingTransitionResponse, CompactionResults, InferenceResults, InferenceStage, MessageIntake,
     PersistenceStage, ProcessResponse, Providers, ReadyForTools, ReadyForTransition, ReadyToInfer,
     ResolveTransition, ToolResults, ToolService, ToolServiceRes, ToolStage, TransitionResults,
-    check_workspace_health, collect_compaction, collect_inference, collect_tools,
-    collect_transition_choice, deliver_messages, detect_stuck_stage, dispatch_compaction,
-    dispatch_edge_compact, dispatch_inference, dispatch_persistence, dispatch_tools,
-    dispatch_transition_choice, enforce_max_iterations, gate_requires_children,
+    abort_terminal_work, check_workspace_health, collect_compaction, collect_inference,
+    collect_tools, collect_transition_choice, deliver_messages, detect_stuck_stage,
+    dispatch_compaction, dispatch_edge_compact, dispatch_inference, dispatch_persistence,
+    dispatch_tools, dispatch_transition_choice, enforce_max_iterations, gate_requires_children,
     handle_empty_response, poll_dynamic_tool_refresh, process_response, reflect_interaction_status,
     refresh_advertised_tools, require_context_regions, resolve_transition, sync_tool_stages,
 };
@@ -187,6 +187,11 @@ impl PipelineWorld {
         let mut schedule = tick_schedule();
         schedule.add_systems(
             (
+                // First: stop whatever a now-terminal agent still has running in
+                // the async lanes. Ahead of everything else so a cancel frees its
+                // inference permit and tool-lane worker on the very next tick,
+                // rather than whenever the provider or tool happens to answer.
+                abort_terminal_work,
                 deliver_messages,
                 collect_compaction,
                 // Apply any completed Summarize context-transform summaries into

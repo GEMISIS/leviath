@@ -43,6 +43,9 @@ pub struct ToolJob {
     pub entity: Entity,
     /// Runs the agent's batch of tool calls.
     pub exec: BoxedToolExec,
+    /// Fires when the agent is cancelled, so the worker drops the batch instead
+    /// of running it to completion. The agent holds the other half.
+    pub cancel: crate::cancel::CancelToken,
 }
 
 /// The result of a [`ToolJob`], applied on a later tick by the tool-collect
@@ -74,10 +77,25 @@ pub async fn tool_worker(
             let mut rx = jobs.lock().await;
             rx.recv().await
         };
-        let Some(ToolJob { entity, exec }) = next else {
+        let Some(ToolJob {
+            entity,
+            exec,
+            cancel,
+        }) = next
+        else {
             return; // channel closed → shut down
         };
-        let out = exec().await;
+        // A cancelled agent's batch is dropped rather than run to completion.
+        // This is what returns the worker to the pool: several of the things a
+        // batch can await are unbounded (a tool-approval prompt, an `ask_user`,
+        // a `wait_for_agent` poll), so without this a cancelled agent kept one
+        // of the lane's fixed number of workers forever — and once they were all
+        // taken, no other agent's tools ran either.
+        let out = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => continue,
+            out = exec() => out,
+        };
         // Harmless no-op if the collect side has gone away.
         let _ = results.send(ToolOutcome {
             entity,
@@ -109,6 +127,14 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn job(entity: u32, pairs: Vec<(&'static str, &'static str)>) -> ToolJob {
+        job_with(entity, pairs, crate::cancel::CancelToken::new())
+    }
+
+    fn job_with(
+        entity: u32,
+        pairs: Vec<(&'static str, &'static str)>,
+        cancel: crate::cancel::CancelToken,
+    ) -> ToolJob {
         ToolJob {
             entity: Entity::from_raw(entity),
             exec: Box::new(move || {
@@ -119,6 +145,7 @@ mod tests {
                         .collect()
                 })
             }),
+            cancel,
         }
     }
 
@@ -144,6 +171,62 @@ mod tests {
         let second = rrx.try_recv().unwrap();
         assert_eq!(second.entity, Entity::from_raw(2));
         assert!(rrx.try_recv().is_err()); // no more outcomes
+    }
+
+    /// A cancelled batch is dropped, not run to completion, and the worker goes
+    /// back to serving the lane.
+    ///
+    /// This is what unwedges the daemon: several things a batch can await are
+    /// unbounded (a tool-approval prompt, `ask_user`, a `wait_for_agent` poll),
+    /// and the lane has a fixed number of workers — so a cancelled agent used to
+    /// hold one forever, and once all of them were held no agent's tools ran.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancelled_batch_is_abandoned_and_frees_the_worker() {
+        let (jtx, jrx) = mpsc::unbounded_channel();
+        let (rtx, mut rrx) = mpsc::unbounded_channel();
+        let wake = Arc::new(Notify::new());
+        let cancel = crate::cancel::CancelToken::new();
+
+        // A batch that never finishes on its own — the unbounded-prompt case.
+        let started = Arc::new(Notify::new());
+        let started_tx = started.clone();
+        jtx.send(ToolJob {
+            entity: Entity::from_raw(1),
+            exec: Box::new(move || {
+                Box::pin(async move {
+                    started_tx.notify_waiters();
+                    std::future::pending::<()>().await;
+                    unreachable!("the batch is dropped before it can finish")
+                })
+            }),
+            cancel: cancel.clone(),
+        })
+        .unwrap();
+        // Queued behind it: only reachable once the worker is released.
+        jtx.send(job(2, vec![("c2", "r2")])).unwrap();
+        drop(jtx);
+
+        let handles = spawn_tool_pool(&Handle::current(), jrx, rtx, wake, 1);
+        // Wait until the stuck batch is actually executing, then cancel it.
+        let waiting = started.notified();
+        tokio::pin!(waiting);
+        waiting.as_mut().enable();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), waiting).await;
+        cancel.cancel();
+
+        // The single worker moves on to the next job rather than staying parked.
+        let next = tokio::time::timeout(std::time::Duration::from_secs(5), rrx.recv())
+            .await
+            .expect("the worker was freed by the cancel")
+            .expect("an outcome arrived");
+        assert_eq!(next.entity, Entity::from_raw(2), "the queued batch ran");
+        assert!(
+            rrx.try_recv().is_err(),
+            "and the cancelled batch reported no results"
+        );
+        for h in handles {
+            let _ = h.await;
+        }
     }
 
     #[tokio::test]
@@ -190,6 +273,7 @@ mod tests {
                         vec![("c".to_string(), "r".to_string())]
                     })
                 }),
+                cancel: crate::cancel::CancelToken::new(),
             })
             .unwrap();
         }

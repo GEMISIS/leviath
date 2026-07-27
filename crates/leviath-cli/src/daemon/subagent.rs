@@ -141,8 +141,25 @@ async fn wait(h: &SubAgentHandle, agent_id: &str) -> String {
                     label(&status)
                 );
             }
+            // The caller itself was cancelled (or failed) while waiting. Give up
+            // rather than keep polling for a child that is being torn down with
+            // it — this loop has no other exit, so it would hold its tool-lane
+            // worker for as long as the daemon lived.
+            Some(_) if caller_is_terminal(h).await => {
+                return format!("[error] cancelled while waiting for '{agent_id}'");
+            }
             Some(_) => tokio::time::sleep(WAIT_POLL).await,
         }
+    }
+}
+
+/// Whether the agent that called `wait_for_agent` has itself reached a terminal
+/// state. A dropped request (daemon shutting down) counts as terminal — there is
+/// nothing left to wait for either way.
+async fn caller_is_terminal(h: &SubAgentHandle) -> bool {
+    match status_of(h, &h.parent_run_id).await {
+        Some(status) => is_terminal(&status),
+        None => true,
     }
 }
 
@@ -242,13 +259,29 @@ mod tests {
     /// no per-call-site closures, so this single service loop is the only region
     /// (covered collectively across the suite). `spawn_result` answers `Spawn`
     /// and the received args are recorded into the returned `Vec` for assertions;
-    /// `statuses` answers successive `Check`s in order (`None` once exhausted);
-    /// `ok` answers `Send`/`Kill`.
+    /// `statuses` answers successive `Check`s for *children* in order (`None`
+    /// once exhausted); `ok` answers `Send`/`Kill`. The caller ("parent") is
+    /// reported `Active` — see [`fake_host_with_parent`] to script it.
     #[allow(clippy::type_complexity)]
     fn fake_host(
         spawn_result: Result<String, String>,
         statuses: Vec<Option<AgentStatus>>,
         ok: bool,
+    ) -> (
+        SubAgentHandle,
+        std::sync::Arc<std::sync::Mutex<Vec<SpawnArgs>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        fake_host_with_parent(spawn_result, statuses, ok, Some(AgentStatus::Active))
+    }
+
+    /// [`fake_host`] with the calling agent's own status scripted too.
+    #[allow(clippy::type_complexity)]
+    fn fake_host_with_parent(
+        spawn_result: Result<String, String>,
+        statuses: Vec<Option<AgentStatus>>,
+        ok: bool,
+        parent_status: Option<AgentStatus>,
     ) -> (
         SubAgentHandle,
         std::sync::Arc<std::sync::Mutex<Vec<SpawnArgs>>>,
@@ -264,6 +297,13 @@ mod tests {
                     SubAgentOp::Spawn { reply, args, .. } => {
                         seen_task.lock().unwrap().push(*args);
                         let _ = reply.send(spawn_result.clone());
+                    }
+                    // `wait` polls the *caller* as well as the child (to bail out
+                    // if the caller was itself cancelled), so the scripted queue
+                    // answers only for children — the caller is reported Active
+                    // unless a test scripts it otherwise.
+                    SubAgentOp::Check { reply, run_id } if run_id == "parent" => {
+                        let _ = reply.send(parent_status.clone());
                     }
                     SubAgentOp::Check { reply, .. } => {
                         let _ = reply.send(checks.next().flatten());
@@ -407,6 +447,31 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         )
         .await;
         assert!(out.contains("finished with status: complete"));
+    }
+
+    /// `wait_for_agent` gives up when the *calling* agent is cancelled. The loop
+    /// has no other exit, and it runs on a tool-lane worker — of which there are
+    /// a fixed number — so a cancelled caller would otherwise poll for a child
+    /// that is being torn down with it until the daemon exits.
+    #[tokio::test]
+    async fn wait_gives_up_when_the_calling_agent_is_cancelled() {
+        let (h, _seen, _t) = fake_host_with_parent(
+            Ok("child-1".to_string()),
+            // The child never finishes on its own.
+            vec![Some(AgentStatus::Active); 8],
+            false,
+            Some(AgentStatus::Cancelled),
+        );
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            handle(&h, &tc("wait_for_agent", json!({ "agent_id": "child-1" }))),
+        )
+        .await
+        .expect("the wait returns instead of polling forever");
+        assert!(
+            out.contains("cancelled while waiting"),
+            "reports why it stopped, got: {out}"
+        );
     }
 
     #[tokio::test]
