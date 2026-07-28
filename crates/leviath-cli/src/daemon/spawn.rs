@@ -631,7 +631,16 @@ fn build_agent_inner(
     // `max_iterations` always wins.
     if let Some(default_max) = config.limits.default_max_iterations {
         for stage in &mut blueprint.stages {
-            stage.max_iterations.get_or_insert(default_max);
+            // `0` means *unbounded* to the pipeline, and `get_or_insert` only
+            // fills `None` — so a manifest writing `max_iterations = 0` looked
+            // like "unset" while actually opting out of the user's ceiling
+            // entirely, and looped without limit against their API keys. A
+            // manifest may still declare its own finite number; it may not
+            // declare "no limit" over a user who asked for one.
+            match stage.max_iterations {
+                None | Some(0) => stage.max_iterations = Some(default_max),
+                Some(_) => {}
+            }
         }
     }
 

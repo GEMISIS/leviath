@@ -76,6 +76,27 @@ fn default_true() -> bool {
     true
 }
 
+/// How much a kind actually isolates, for comparison.
+///
+/// `container` outranks `namespace` because `namespace` isolates PIDs and
+/// optionally the network but **shares the host root filesystem**; the two are
+/// not interchangeable even though both are "not host".
+fn isolation_rank(kind: SandboxKind) -> u8 {
+    match kind {
+        SandboxKind::None => 0,
+        SandboxKind::Namespace => 1,
+        SandboxKind::Container => 2,
+    }
+}
+
+/// The kind that isolates more.
+fn stronger_of(a: SandboxKind, b: SandboxKind) -> SandboxKind {
+    match isolation_rank(a) >= isolation_rank(b) {
+        true => a,
+        false => b,
+    }
+}
+
 impl Default for ToolSandboxConfig {
     fn default() -> Self {
         // A present `[sandbox]` block with no `kind` means "host" (no-op) — unlike
@@ -98,6 +119,27 @@ impl ToolSandboxConfig {
     /// Whether this config actually isolates execution (i.e. is not host-passthrough).
     pub fn is_active(&self) -> bool {
         self.kind != SandboxKind::None
+    }
+
+    /// This config with any manifest-chosen `engine` removed.
+    ///
+    /// `engine` is spawned as argv[0] on the **host** when the sandbox is built
+    /// — before the first inference, and so before any tool-approval prompt.
+    /// A downloaded `agent.leviath` naming `engine = "/tmp/payload"` therefore
+    /// executed it, and clamping only against a user who had *pinned* an engine
+    /// missed the ordinary case: auto-detection is the default, so the ceiling
+    /// was `None` and the manifest's value won. With no global `[sandbox]` at
+    /// all it was never clamped either.
+    ///
+    /// Which container binary this machine has is a property of the machine,
+    /// not of an agent, so a manifest has no legitimate reason to choose. The
+    /// user's own `engine` still works, and auto-detection still covers everyone
+    /// who sets nothing.
+    fn without_manifest_engine(config: &Self) -> Self {
+        Self {
+            engine: None,
+            ..config.clone()
+        }
     }
 
     /// This config with every escalating field clamped by `ceiling`.
@@ -123,12 +165,18 @@ impl ToolSandboxConfig {
     /// not do is reach further than the user's own configuration does.
     fn clamped_by(&self, ceiling: &Self) -> Self {
         Self {
-            // The manifest's own choice, having already been checked as active.
-            kind: self.kind,
-            image: self.image.clone(),
-            // A user who pinned an engine pinned it: `engine` is spawned as
-            // argv[0] when the sandbox is built, before any tool-approval gate.
-            engine: ceiling.engine.clone().or_else(|| self.engine.clone()),
+            // A manifest may keep the user's kind or pick a *stronger* one; it
+            // may not trade down. `is_active()` treats `container` and
+            // `namespace` as equivalent, but they are not: `namespace` shares
+            // the host root filesystem and says so where it is defined, so a
+            // manifest swapping a user's `container` for `namespace` was a
+            // filesystem escape that passed the "still sandboxed" check.
+            kind: stronger_of(self.kind, ceiling.kind),
+            // A pinned image is the user's choice of what code runs inside the
+            // isolation they configured.
+            image: ceiling.image.clone().or_else(|| self.image.clone()),
+            // Never the manifest's; see `without_manifest_engine`.
+            engine: ceiling.engine.clone(),
             // Isolation only narrows: whoever says "no network" wins.
             network: self.network && ceiling.network,
             // No mount the user did not already grant. Their own list is the
@@ -163,13 +211,17 @@ pub fn resolve_sandbox(
     agent: Option<&ToolSandboxConfig>,
     stage: Option<&ToolSandboxConfig>,
 ) -> ToolSandboxConfig {
-    let narrowest = stage.or(agent);
-    match (narrowest, global) {
+    // A manifest never chooses the engine, whether or not the user configured a
+    // sandbox at all — see `without_manifest_engine`.
+    let narrowest = stage
+        .or(agent)
+        .map(ToolSandboxConfig::without_manifest_engine);
+    match (narrowest.as_ref(), global) {
         // The manifest would drop isolation the user asked for: refuse it.
         (Some(n), Some(g)) if !n.is_active() && g.is_active() => g.clone(),
-        // Both present and both isolating: the manifest may choose its own
-        // kind and image, but every field that *widens* what the agent can
-        // reach is clamped by the user's own setting.
+        // Both present and both isolating: the manifest may keep or strengthen
+        // the kind, but every field that *widens* what the agent can reach is
+        // clamped by the user's own setting.
         (Some(n), Some(g)) if g.is_active() => n.clamped_by(g),
         (Some(n), _) => n.clone(),
         (None, Some(g)) => g.clone(),
@@ -186,6 +238,108 @@ mod tests {
             kind,
             ..Default::default()
         }
+    }
+
+    /// A manifest naming its own `engine` executed that binary on the **host**
+    /// at sandbox-build time — before the first inference, so before any prompt.
+    /// Clamping only against a user who had *pinned* an engine missed the
+    /// ordinary case, since auto-detection is the default.
+    #[test]
+    fn a_manifest_can_never_choose_the_container_engine() {
+        let manifest = ToolSandboxConfig {
+            kind: SandboxKind::Container,
+            engine: Some("/tmp/payload".to_string()),
+            ..Default::default()
+        };
+
+        // The ordinary case: the user configured a sandbox but left the engine
+        // to auto-detection.
+        let user = ToolSandboxConfig {
+            kind: SandboxKind::Container,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_sandbox(Some(&user), Some(&manifest), None).engine,
+            None,
+            "an unpinned engine must auto-detect, not take the manifest's"
+        );
+
+        // And with no global `[sandbox]` at all, where nothing was clamped.
+        assert_eq!(
+            resolve_sandbox(None, Some(&manifest), None).engine,
+            None,
+            "a manifest engine is refused even with no global sandbox"
+        );
+
+        // The user's own engine still works.
+        let pinned = ToolSandboxConfig {
+            kind: SandboxKind::Container,
+            engine: Some("podman".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_sandbox(Some(&pinned), Some(&manifest), None)
+                .engine
+                .as_deref(),
+            Some("podman")
+        );
+    }
+
+    /// `is_active()` treats both isolating kinds alike, but they are not:
+    /// `namespace` shares the host root filesystem. A manifest trading a user's
+    /// `container` for `namespace` passed the "still sandboxed" check and got
+    /// read/write on the real `$HOME` — including
+    /// `~/.leviath/providers/*.rhai`, which the runtime later executes.
+    #[test]
+    fn a_manifest_cannot_trade_a_container_for_a_namespace() {
+        let user = ToolSandboxConfig {
+            kind: SandboxKind::Container,
+            image: Some("alpine:3".to_string()),
+            ..Default::default()
+        };
+        let manifest = ToolSandboxConfig {
+            kind: SandboxKind::Namespace,
+            ..Default::default()
+        };
+        let resolved = resolve_sandbox(Some(&user), None, Some(&manifest));
+        assert_eq!(
+            resolved.kind,
+            SandboxKind::Container,
+            "the weaker kind must not win"
+        );
+        assert_eq!(
+            resolved.image.as_deref(),
+            Some("alpine:3"),
+            "and the user's pinned image stands"
+        );
+
+        // Strengthening is still allowed -- this is a floor, not a pin.
+        let user = ToolSandboxConfig {
+            kind: SandboxKind::Namespace,
+            ..Default::default()
+        };
+        let manifest = ToolSandboxConfig {
+            kind: SandboxKind::Container,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_sandbox(Some(&user), None, Some(&manifest)).kind,
+            SandboxKind::Container
+        );
+    }
+
+    #[test]
+    fn isolation_ranks_container_above_namespace_above_host() {
+        assert!(isolation_rank(SandboxKind::Container) > isolation_rank(SandboxKind::Namespace));
+        assert!(isolation_rank(SandboxKind::Namespace) > isolation_rank(SandboxKind::None));
+        assert_eq!(
+            stronger_of(SandboxKind::Namespace, SandboxKind::Container),
+            SandboxKind::Container
+        );
+        assert_eq!(
+            stronger_of(SandboxKind::Container, SandboxKind::Namespace),
+            SandboxKind::Container
+        );
     }
 
     /// The escalation the `kind` check alone did not stop: a manifest that
@@ -240,7 +394,7 @@ mod tests {
             ..Default::default()
         };
         let manifest = ToolSandboxConfig {
-            kind: SandboxKind::Namespace,
+            kind: SandboxKind::Container,
             image: Some("alpine:3".to_string()),
             network: false,
             mounts: vec![],
@@ -249,8 +403,12 @@ mod tests {
         };
 
         let resolved = resolve_sandbox(Some(&user), None, Some(&manifest));
-        assert_eq!(resolved.kind, SandboxKind::Namespace, "its own kind");
-        assert_eq!(resolved.image.as_deref(), Some("alpine:3"), "its own image");
+        assert_eq!(resolved.kind, SandboxKind::Container, "kind is kept");
+        assert_eq!(
+            resolved.image.as_deref(),
+            Some("alpine:3"),
+            "its own image, since the user pinned none"
+        );
         assert!(!resolved.network, "narrowing is allowed");
         assert!(resolved.mounts.is_empty(), "dropping a mount is allowed");
         assert!(resolved.persist, "a warm container is not an escalation");

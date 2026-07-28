@@ -132,6 +132,7 @@ mod tests {
                             kind: leviath_core::region::EntryKind::Text,
                             metadata: None,
                             key: None,
+                            taint: Default::default(),
                         })
                         .collect(),
                 }],

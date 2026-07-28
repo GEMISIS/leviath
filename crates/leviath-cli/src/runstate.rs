@@ -244,7 +244,7 @@ const RUN_ID_ENTROPY_BITS: u32 = 48;
 /// and reading chronologically, and the dashboard's short-ID display
 /// (`split('-').next_back()`) still lands on the unique component.
 pub fn new_run_id(agent_name: &str) -> String {
-    use rand::Rng as _;
+    use rand::RngExt as _;
     let entropy: u64 = rand::rng().random::<u64>() >> (u64::BITS - RUN_ID_ENTROPY_BITS);
     let safe_name = agent_name.replace(|c: char| !c.is_alphanumeric() && c != '-', "-");
     format!("{}-{}-{:012x}", safe_name, now_secs(), entropy)
@@ -864,6 +864,7 @@ mod tests {
                 kind: Default::default(),
                 metadata: None,
                 key: None,
+                taint: Default::default(),
             }],
         };
         let json = serde_json::to_string(&snap).unwrap();
@@ -1510,6 +1511,7 @@ mod tests {
                             kind: Default::default(),
                             metadata: None,
                             key: None,
+                            taint: Default::default(),
                         },
                         RegionEntrySnapshot {
                             content: "Additional instruction".into(),
@@ -1517,6 +1519,7 @@ mod tests {
                             kind: Default::default(),
                             metadata: Some(serde_json::json!({"source": "user"})),
                             key: None,
+                            taint: Default::default(),
                         },
                     ],
                 },
@@ -1548,6 +1551,7 @@ mod tests {
             kind: Default::default(),
             metadata: None,
             key: None,
+            taint: Default::default(),
         };
         let json = serde_json::to_value(&entry).unwrap();
         assert!(json.get("metadata").is_none());

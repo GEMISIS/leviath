@@ -1693,6 +1693,7 @@ mod tests {
                     kind: EntryKind::UserMessage,
                     metadata: None,
                     key: None,
+                    taint: Default::default(),
                 }],
             }],
         };

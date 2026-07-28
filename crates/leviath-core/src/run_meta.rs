@@ -241,6 +241,19 @@ pub struct RegionEntrySnapshot {
     /// Key for HashMap region entries (file paths, section names, etc.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// How sensitive this entry is.
+    ///
+    /// Persisted because taint was not, and a restore that dropped it silently
+    /// disarmed the gate: the reloaded run re-enabled taint tracking, found
+    /// every region back at `Public`, and let outbound tools through that had
+    /// been blocked a moment earlier. Any restart, crash-recovery, `resume`, or
+    /// page-in did it.
+    ///
+    /// Defaults to `Public` for snapshots written before this field existed —
+    /// the same value they were being restored with anyway, so nothing is worse
+    /// than it was, and new runs are correct from their first write.
+    #[serde(default)]
+    pub taint: crate::taint::TaintLevel,
 }
 
 /// Per-region token snapshot written by the background worker after each inference.
@@ -489,6 +502,7 @@ mod tests {
                     kind: crate::region::EntryKind::UserMessage,
                     metadata: Some(serde_json::json!({"a": 1})),
                     key: Some("k".to_string()),
+                    taint: Default::default(),
                 }],
             }],
         };

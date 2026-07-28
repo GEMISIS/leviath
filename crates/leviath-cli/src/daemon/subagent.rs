@@ -62,6 +62,22 @@ pub async fn handle(h: &SubAgentHandle, tc: &ToolCall) -> String {
     }
 }
 
+/// Whether `blueprint`, read as a path, lands inside `workdir`.
+///
+/// Symlink-aware, so a link planted in the workspace cannot be used to point at
+/// something that only *looks* outside it. A bare agent name is not a path that
+/// exists here, so it is never caught by this.
+fn resolves_within_workdir(blueprint: &str, workdir: &str) -> bool {
+    let candidate = std::path::Path::new(blueprint);
+    let workdir = std::path::Path::new(workdir);
+    // Only an existing path can be one the agent just wrote.
+    if !candidate.exists() {
+        let joined = workdir.join(blueprint);
+        return joined.exists() && leviath_core::resolves_within(&joined, workdir);
+    }
+    leviath_core::resolves_within(candidate, workdir)
+}
+
 /// A required string argument, or `""` when missing/not a string.
 fn str_arg<'a>(args: &'a serde_json::Value, key: &str) -> &'a str {
     args.get(key).and_then(|v| v.as_str()).unwrap_or("")
@@ -73,6 +89,29 @@ async fn spawn(h: &SubAgentHandle, args: &serde_json::Value) -> String {
     if blueprint.is_empty() || task.is_empty() {
         return "[error] spawn_agent requires 'blueprint' and 'task'".to_string();
     }
+    // Never a blueprint the agent could have written itself.
+    //
+    // `blueprint` comes from model output and `find_manifest` accepts any path.
+    // `write_file` is confined to the workdir — but the spawner was not, so a
+    // model steered by injected content could write `x/agent.leviath` inside its
+    // own workdir and then spawn it. The child is built with seeds enforced, so
+    // that manifest's `seed = { command = ... }` ran on the host before its
+    // first inference, and its `[[mcp_servers]]` spawned arbitrary programs:
+    // a confined file write escalated to unconfined command execution.
+    //
+    // Refusing paths *inside the workdir* closes that exactly, and leaves
+    // everything legitimate working — an installed agent by name, or a path a
+    // human or the parent blueprint chose. A model that can already write
+    // outside the workdir has arbitrary execution by other means, so nothing
+    // here is the weak link.
+    if resolves_within_workdir(blueprint, &h.workdir) {
+        return format!(
+            "[error] '{blueprint}' is inside this agent's own working directory. \
+             Spawn an installed agent by name, or a blueprint from outside the \
+             workspace — an agent may not author the blueprint it runs."
+        );
+    }
+
     // Optional seed context is prepended to the task (it lands in the child's
     // pinned task region, which is exactly what the parent wants seeded).
     let full_task = match args.get("seed_context").and_then(|v| v.as_str()) {
@@ -173,6 +212,7 @@ async fn send(h: &SubAgentHandle, args: &serde_json::Value) -> String {
     if h.sender
         .send(SubAgentOp::Send {
             run_id: agent_id.to_string(),
+            caller_run_id: h.parent_run_id.clone(),
             content: message.to_string(),
             reply: tx,
         })
@@ -182,7 +222,10 @@ async fn send(h: &SubAgentHandle, args: &serde_json::Value) -> String {
     }
     match rx.await {
         Ok(true) => format!("Delivered message to '{agent_id}'."),
-        Ok(false) => format!("[error] '{agent_id}' did not accept the message"),
+        Ok(false) => format!(
+            "[error] '{agent_id}' did not accept the message. An agent may only \
+             message itself or an agent it spawned."
+        ),
         Err(_) => "[error] the daemon dropped the message".to_string(),
     }
 }
@@ -195,6 +238,7 @@ async fn kill(h: &SubAgentHandle, agent_id: &str) -> String {
     if h.sender
         .send(SubAgentOp::Kill {
             run_id: agent_id.to_string(),
+            caller_run_id: h.parent_run_id.clone(),
             reply: tx,
         })
         .is_err()
@@ -242,6 +286,78 @@ fn label(status: &AgentStatus) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The escalation this closes: `write_file` is confined to the workdir, but
+    /// the spawner was not — so a model could author `x/agent.leviath` in its own
+    /// workspace and spawn it, and the child is built with seeds enforced, so
+    /// that manifest's command seeds ran on the host before its first inference.
+    #[tokio::test]
+    async fn spawn_refuses_a_blueprint_the_agent_could_have_written() {
+        let work = tempfile::tempdir().unwrap();
+        // Exactly what the model would produce: a manifest inside its workdir.
+        let planted = work.path().join("x");
+        std::fs::create_dir(&planted).unwrap();
+        std::fs::write(planted.join("agent.leviath"), "[agent]\nname = \"x\"\n").unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let h = SubAgentHandle {
+            sender: tx,
+            parent_run_id: "parent".to_string(),
+            workdir: work.path().to_string_lossy().to_string(),
+            max_depth: 3,
+            no_seed_commands: false,
+        };
+
+        for bad in [
+            planted.to_string_lossy().to_string(),
+            "x".to_string(),
+            "x/agent.leviath".to_string(),
+        ] {
+            let out = spawn(&h, &serde_json::json!({"blueprint": bad, "task": "go"})).await;
+            assert!(
+                out.contains("own working directory"),
+                "{bad} must be refused: {out}"
+            );
+        }
+    }
+
+    /// And a blueprint from outside the workspace is untouched — an installed
+    /// agent by name, or a path a human chose.
+    #[tokio::test]
+    async fn spawn_allows_a_blueprint_outside_the_workdir() {
+        let work = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::write(
+            elsewhere.path().join("agent.leviath"),
+            "[agent]\nname = \"x\"\n",
+        )
+        .unwrap();
+
+        // The receiver is dropped so the op fails fast rather than waiting on a
+        // reply no host is here to send. What this asserts is that the path
+        // check let the blueprint through, not that a spawn succeeded.
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(rx);
+        let h = SubAgentHandle {
+            sender: tx,
+            parent_run_id: "parent".to_string(),
+            workdir: work.path().to_string_lossy().to_string(),
+            max_depth: 3,
+            no_seed_commands: false,
+        };
+        let out = spawn(
+            &h,
+            &serde_json::json!({
+                "blueprint": elsewhere.path().to_string_lossy(),
+                "task": "go"
+            }),
+        )
+        .await;
+        assert!(
+            !out.contains("own working directory"),
+            "a blueprint outside the workspace must not be refused: {out}"
+        );
+    }
     use leviath_runtime::host::SpawnArgs;
     use serde_json::json;
 

@@ -153,12 +153,25 @@ const SECRET_NAME_HINTS: &[&str] = &[
     "API_KEY",
     "ACCESS_KEY",
     "PRIVATE_KEY",
+    // Bare `KEY`, which subsumes the three above and catches everything they
+    // missed: `OPENAI_KEY`, `ENCRYPTION_KEY`, `MASTER_KEY`, `DEPLOY_KEY`. The
+    // longer forms stay for documentation value. A variable whose name merely
+    // contains "key" and is not a secret (`KEYBOARD_LAYOUT`, `KEYCHAIN_PATH`)
+    // costs its owner one `allow_env_vars` entry, which is the trade this list
+    // is meant to make.
+    "KEY",
+    // A personal access token, which is what `_PAT` conventionally means.
+    "_PAT",
     "SESSION",
     "COOKIE",
     "AUTH",
     "BEARER",
     "SIGNATURE",
     "SIGNING",
+    // Sentry DSNs embed a key; `.netrc` and kubeconfigs are credential files.
+    "DSN",
+    "NETRC",
+    "KUBECONFIG",
 ];
 
 /// Exact names that are sensitive without matching any of [`SECRET_NAME_HINTS`].
@@ -321,6 +334,47 @@ mod tests {
             "OPENROUTER_API_KEY",
         ] {
             assert!(is_sensitive_env_name(name), "{name}");
+        }
+    }
+
+    /// The list is the whole of what stands between a script tool or an MCP
+    /// header and a credential, so a common secret name it misses is a leak.
+    /// `KEY` was absent, so `OPENAI_KEY` sailed through while `OPENAI_API_KEY`
+    /// was caught.
+    #[test]
+    fn common_secret_names_are_all_recognised() {
+        for name in [
+            "OPENAI_KEY",
+            "ENCRYPTION_KEY",
+            "MASTER_KEY",
+            "DEPLOY_KEY",
+            "ANTHROPIC_API_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "GITHUB_TOKEN",
+            "GITHUB_PAT",
+            "SENTRY_DSN",
+            "NETRC",
+            "KUBECONFIG",
+            "npm_password",
+        ] {
+            assert!(
+                is_sensitive_env_name(name),
+                "{name} must be treated as a secret"
+            );
+        }
+
+        // And the list has not become "everything": ordinary variables an agent
+        // legitimately reads still pass.
+        for name in [
+            "PATH",
+            "HOME",
+            "LANG",
+            "TERM",
+            "TZ",
+            "EDITOR",
+            "OLLAMA_HOST",
+        ] {
+            assert!(!is_sensitive_env_name(name), "{name} is not a secret");
         }
     }
 

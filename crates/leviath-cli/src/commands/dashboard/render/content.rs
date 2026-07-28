@@ -1479,6 +1479,7 @@ mod tests {
                     kind: Default::default(),
                     metadata: None,
                     key: None,
+                    taint: Default::default(),
                 }],
             }],
         });
@@ -1776,6 +1777,7 @@ mod tests {
                     kind: Default::default(),
                     metadata: None,
                     key: None,
+                    taint: Default::default(),
                 }],
             }],
         });
@@ -1805,6 +1807,7 @@ mod tests {
                 kind: Default::default(),
                 metadata: None,
                 key: None,
+                taint: Default::default(),
             })
             .collect();
         agent.context_snapshot = Some(runstate::ContextSnapshot {

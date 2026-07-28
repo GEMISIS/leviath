@@ -116,6 +116,18 @@ pub fn restore_agent(
                         key: e.key.clone(),
                     })
                     .collect();
+                // Rebuild the taint alongside the content. Assigning `content`
+                // directly bypasses `add_tainted_entry`, which is the only thing
+                // that records per-entry taint — so without this the region came
+                // back `Public` no matter how sensitive it had been, while the
+                // gate reported itself armed.
+                // Only where the region already tracks taint: restoring it onto
+                // a region with tracking off would invent a level nothing reads.
+                if region.taint.is_some() {
+                    region.taint = Some(leviath_core::taint::RegionTaint::from_entry_taints(
+                        snap_region.entries.iter().map(|e| e.taint).collect(),
+                    ));
+                }
                 region.current_tokens = region.content.iter().map(|e| e.tokens).sum();
             }
         }
@@ -242,6 +254,7 @@ mod tests {
                             kind: EntryKind::UserMessage,
                             metadata: None,
                             key: None,
+                            taint: Default::default(),
                         },
                         RegionEntrySnapshot {
                             content: "prior assistant".to_string(),
@@ -249,6 +262,7 @@ mod tests {
                             kind: EntryKind::AssistantTurn { tool_calls: vec![] },
                             metadata: None,
                             key: None,
+                            taint: Default::default(),
                         },
                     ],
                 },
@@ -264,10 +278,55 @@ mod tests {
                         kind: EntryKind::Text,
                         metadata: None,
                         key: None,
+                        taint: Default::default(),
                     }],
                 },
             ],
         }
+    }
+
+    /// Taint was not persisted at all, so a restart, resume or page-in brought
+    /// every region back `Public` no matter how sensitive it had been — while
+    /// the gate went on reporting itself armed. It is rebuilt from the entries,
+    /// and only where the region already tracks taint: restoring a level onto a
+    /// region with tracking off would invent one nothing reads.
+    #[test]
+    fn restore_rebuilds_region_taint_from_the_persisted_entries() {
+        use leviath_core::taint::TaintLevel;
+
+        let mut snap = snapshot();
+        snap.regions[0].entries[0].taint = TaintLevel::Private;
+        snap.regions[0].entries[1].taint = TaintLevel::Public;
+
+        // Tracking off: the region stays untainted rather than gaining a level.
+        let (mut world, entity) = agent_world();
+        restore_agent(&mut world, entity, &snap, 1, 7, TokenTotals::default());
+        assert!(
+            world
+                .get::<ContextWindow>(entity)
+                .unwrap()
+                .get_region("conversation")
+                .unwrap()
+                .taint
+                .is_none()
+        );
+
+        // Tracking on: the level comes back, per entry and in aggregate.
+        let (mut world, entity) = agent_world();
+        world
+            .get_mut::<ContextWindow>(entity)
+            .unwrap()
+            .get_region_mut("conversation")
+            .unwrap()
+            .enable_taint_tracking();
+        restore_agent(&mut world, entity, &snap, 1, 7, TokenTotals::default());
+
+        let window = world.get::<ContextWindow>(entity).unwrap();
+        let region = window.get_region("conversation").unwrap();
+        assert_eq!(region.taint_level(), Some(TaintLevel::Private));
+        let taint = region.taint.as_ref().unwrap();
+        assert_eq!(taint.entry_taint(0), Some(TaintLevel::Private));
+        assert_eq!(taint.entry_taint(1), Some(TaintLevel::Public));
     }
 
     #[test]

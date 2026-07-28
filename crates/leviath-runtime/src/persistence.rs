@@ -132,12 +132,21 @@ pub fn build_context_snapshot(window: &ContextWindow, stage_name: &str) -> Conte
             entries: r
                 .content
                 .iter()
-                .map(|e| RegionEntrySnapshot {
+                .enumerate()
+                .map(|(i, e)| RegionEntrySnapshot {
                     content: e.content.clone(),
                     tokens: e.tokens,
                     kind: e.kind.clone(),
                     metadata: e.metadata.clone(),
                     key: e.key.clone(),
+                    // `None` when the region has no taint tracking (it is off,
+                    // or this is an older region): `Public`, which is what a
+                    // restore assumed anyway.
+                    taint: r
+                        .taint
+                        .as_ref()
+                        .and_then(|t| t.entry_taint(i))
+                        .unwrap_or_default(),
                 })
                 .collect(),
         })

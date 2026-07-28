@@ -28,6 +28,9 @@ dirs = { workspace = true }
 reqwest = { workspace = true }
 
 [dev-dependencies]
+# A redirecting server, so the redirect policy is verified by following one
+# rather than by testing the decision it delegates to.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util"] }
 # Real directories and real symlinks: the path-containment tests are about what
 # the filesystem actually does, so a mock would test the mock.
 tempfile = "3"

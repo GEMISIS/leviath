@@ -164,6 +164,9 @@ pub enum SubAgentOp {
     Send {
         /// The target run.
         run_id: String,
+        /// The run doing the sending. The target must be it or one of its
+        /// descendants — see [`AgentHost::is_within_tree`].
+        caller_run_id: String,
         /// The message body.
         content: String,
         /// Reply: whether the message was accepted.
@@ -173,6 +176,9 @@ pub enum SubAgentOp {
     Kill {
         /// The run to cancel (with its descendants).
         run_id: String,
+        /// The run doing the cancelling. The target must be it or one of its
+        /// descendants — see [`AgentHost::is_within_tree`].
+        caller_run_id: String,
         /// Reply: whether anything was cancelled.
         reply: oneshot::Sender<bool>,
     },
@@ -759,9 +765,14 @@ impl WorldHost {
             }
             SubAgentOp::Send {
                 run_id,
+                caller_run_id,
                 content,
                 reply,
             } => {
+                if !self.is_within_tree(&run_id, &caller_run_id) {
+                    let _ = reply.send(false);
+                    return;
+                }
                 // Page the target in if it was unloaded, so delivery finds it.
                 self.resolve_or_reload(&run_id);
                 let ok = self
@@ -775,8 +786,13 @@ impl WorldHost {
                     .is_ok();
                 let _ = reply.send(ok);
             }
-            SubAgentOp::Kill { run_id, reply } => {
-                let _ = reply.send(self.cancel_tree(&run_id));
+            SubAgentOp::Kill {
+                run_id,
+                caller_run_id,
+                reply,
+            } => {
+                let within = self.is_within_tree(&run_id, &caller_run_id);
+                let _ = reply.send(within && self.cancel_tree(&run_id));
             }
         }
     }
@@ -849,6 +865,45 @@ impl WorldHost {
     /// would carry on spending tokens with no parent to report to. Each cancelled
     /// agent's open interactions are closed too, so nothing is left blocked on a
     /// prompt for a run that is going away.
+    /// Whether `run_id` is `ancestor` itself or one of its descendants.
+    ///
+    /// `send_to_agent` and `kill_agent` took any run id at all. Nothing tied the
+    /// target to the caller, so an agent could cancel an unrelated run, inject
+    /// text into its context, or — worst — hand it data: a message is added to
+    /// the target as `Public` regardless of the sender's taint, so an agent
+    /// holding `Private` context whose own outbound tools were gated could pass
+    /// it to a sibling whose tools were not. That is a laundering channel
+    /// straight through the middle of taint tracking.
+    ///
+    /// A downward walk from the caller, the same shape [`cancel_tree`] uses:
+    /// parentage is recorded as `SubAgentChildren`, so "is it mine" is "is it in
+    /// my subtree".
+    ///
+    /// [`cancel_tree`]: Self::cancel_tree
+    fn is_within_tree(&mut self, run_id: &str, ancestor: &str) -> bool {
+        if run_id == ancestor {
+            return true;
+        }
+        // Both ends as entities: the host already maps run ids to them, and
+        // comparing entities avoids re-reading an id component per node.
+        let (Some(target), Some(root)) = (
+            self.resolve_or_reload(run_id),
+            self.resolve_or_reload(ancestor),
+        ) else {
+            return false;
+        };
+        let mut stack = vec![root];
+        while let Some(e) = stack.pop() {
+            if e == target {
+                return true;
+            }
+            if let Some(kids) = self.world.world().get::<SubAgentChildren>(e) {
+                stack.extend(kids.children.iter().copied());
+            }
+        }
+        false
+    }
+
     fn cancel_tree(&mut self, run_id: &str) -> bool {
         let Some(root) = self.resolve_or_reload(run_id) else {
             return false;
@@ -1576,12 +1631,78 @@ mod tests {
         assert_eq!(none, None);
     }
 
+    /// `send_to_agent` and `kill_agent` took any run id at all, so an agent
+    /// could reach into an unrelated run — cancel it, inject text, or hand it
+    /// data that arrives `Public` regardless of the sender's taint. That last
+    /// one is a laundering channel straight through taint tracking.
+    /// The converse of the refusal: a run the caller *did* spawn is reachable,
+    /// so scoping did not simply block everything. This also walks the
+    /// `SubAgentChildren` link rather than matching the caller itself.
+    #[tokio::test]
+    async fn subagent_ops_reach_a_run_the_caller_spawned() {
+        let mut host = host_with(vec![]);
+        let parent = spawn(&mut host, "parent", "parent");
+        let child = spawn(&mut host, "child", "child");
+        host.world_mut()
+            .world_mut()
+            .entity_mut(parent)
+            .insert(SubAgentChildren {
+                children: vec![child],
+                max_child_depth: 3,
+            });
+
+        let delivered = ask_sub(&mut host, |reply| SubAgentOp::Send {
+            run_id: "child".to_string(),
+            caller_run_id: "parent".to_string(),
+            content: "carry on".to_string(),
+            reply,
+        })
+        .await;
+        assert!(delivered, "a run we spawned is ours to message");
+    }
+
+    #[tokio::test]
+    async fn subagent_ops_refuse_a_run_outside_the_callers_tree() {
+        let mut host = host_with(vec![]);
+        spawn(&mut host, "run-a", "run-a");
+        spawn(&mut host, "outsider", "outsider");
+
+        let delivered = ask_sub(&mut host, |reply| SubAgentOp::Send {
+            run_id: "outsider".to_string(),
+            caller_run_id: "run-a".to_string(),
+            content: "take this".to_string(),
+            reply,
+        })
+        .await;
+        assert!(!delivered, "a run we did not spawn is not ours to message");
+
+        let killed = ask_sub(&mut host, |reply| SubAgentOp::Kill {
+            run_id: "outsider".to_string(),
+            caller_run_id: "run-a".to_string(),
+            reply,
+        })
+        .await;
+        assert!(!killed, "nor ours to cancel");
+
+        // A run id that resolves to nothing at all is likewise not ours — the
+        // walk never starts, rather than defaulting to reachable.
+        let phantom = ask_sub(&mut host, |reply| SubAgentOp::Send {
+            run_id: "no-such-run".to_string(),
+            caller_run_id: "run-a".to_string(),
+            content: "hello?".to_string(),
+            reply,
+        })
+        .await;
+        assert!(!phantom, "an unknown run id is in nobody's tree");
+    }
+
     #[tokio::test]
     async fn subagent_send_delivers_to_inbox() {
         let mut host = host_with(vec![]);
         spawn(&mut host, "run-a", "run-a");
         let ok = ask_sub(&mut host, |reply| SubAgentOp::Send {
             run_id: "run-a".to_string(),
+            caller_run_id: "run-a".to_string(),
             content: "hello child".to_string(),
             reply,
         })
@@ -1608,6 +1729,7 @@ mod tests {
 
         let ok = ask_sub(&mut host, |reply| SubAgentOp::Kill {
             run_id: "parent".to_string(),
+            caller_run_id: "parent".to_string(),
             reply,
         })
         .await;
@@ -1624,6 +1746,7 @@ mod tests {
         // Killing an unknown run is a no-op.
         let miss = ask_sub(&mut host, |reply| SubAgentOp::Kill {
             run_id: "ghost".to_string(),
+            caller_run_id: "ghost".to_string(),
             reply,
         })
         .await;

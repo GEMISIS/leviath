@@ -42,6 +42,14 @@ build/test tooling read-only (e.g. `pytest --collect-only -q`, `cargo test
 --list`, `npm run`). Do not modify anything. You have few iterations — spend
 them on the area the task touches, not a full tour.
 
+This stage does not build the deliverable. If you find yourself creating the
+thing the task asked for, stop — that is `implement`'s job, and doing it here
+means the plan gets written against work you have already done rather than
+against the repository. If a scratch file is genuinely unavoidable to answer a
+question about the tooling, delete it before you finish, and say in `discovery`
+what you created and that you removed it. A file left behind reads to every
+later stage as pre-existing code.
+
 Write `discovery` (context_write) covering:
 - language, build system, and how to build
 - the test runner, the command to run the WHOLE suite, and the command to run a
@@ -98,9 +106,19 @@ available_tools = ["read_file", "list_dir", "ask_user_text", "ask_user_choice", 
 max_iterations = 20
 max_revisits = 6
 # "Abort" is handled deterministically by the engine (see abort_options on the
-# plan_approval interaction point), so allow_complete is no longer required for
-# it — kept true only so the LLM may still end here in edge cases.
-allow_complete = true
+# plan_approval interaction point), so allow_complete is not required here — and
+# leaving it on let a model end the whole run from `plan`.
+#
+# That is not hypothetical: a model that had created a file during `discover`
+# (which has `bash`) read it back here, concluded "already created and verified
+# in the previous step — no further action is needed", and completed. The user's
+# correction to the plan was applied to the document and then ignored, because
+# the model had already decided there was nothing to do. `implement` never ran.
+#
+# Planning is not a place a run should be able to end. Every edge out of here
+# goes to `prototype`, `implement` or back to `discover`; the abort path is the
+# engine's, not the model's.
+allow_complete = false
 transition_prompt = """
 You've shown the plan to the user and asked them to approve it, request
 revisions, or edit it directly.
