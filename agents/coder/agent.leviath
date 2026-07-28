@@ -130,6 +130,8 @@ Then:
 2. Check `conventions` and `architecture` — pre-loaded style/lint rules and design
    docs. Follow them; don't rediscover them.
 3. Estimate scope: which files to create/modify, and roughly how large the change is.
+   Name them — do not create them. This stage has no tool that writes or edits a
+   file, and calling one is refused; `implement` makes the change you describe.
 4. Identify dependencies — modules, libraries, config, or tests this touches.
    Use list_dir/read_file ONLY to fill real gaps left by `discovery`. For a fresh
    task with no existing code, skip exploration entirely.
@@ -360,6 +362,10 @@ Minor style nits don't warrant another implementation pass.
 system_prompt = """
 You are reviewing the implementation. Verify it against the ORIGINAL task in the
 `task` region — not just against the plan (the plan can be wrong).
+
+You review here; you do not repair. This stage has no write or edit tool and
+calling one is refused — report what you find and route back to `implement`,
+which is where changes are made and re-reviewed.
 
 1. Read the files that were created or modified (they are tracked in the
    `implementation` region; read_file for anything you need to confirm).
