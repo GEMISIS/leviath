@@ -2045,6 +2045,7 @@ dependencies = [
  "keyring",
  "keyring-core",
  "nix",
+ "temp-env",
  "tempfile",
  "tracing",
 ]
