@@ -74,6 +74,10 @@ anyhow = "1.0"
 chrono = "0.4"
 rhai = { version = "1.20", features = ["sync", "serde"] }
 glob = "0.3"
+# Already in the tree via reqwest; named explicitly so `leviath-core` can hold
+# the outbound-URL policy (`leviath_core::net`) without depending on reqwest.
+# `reqwest::Url` IS this crate's `Url`, so the two interoperate directly.
+url = "2.5"
 tiktoken-rs = "0.5"
 async-trait = "0.1"
 futures = "0.3"

@@ -926,7 +926,11 @@ fn build_agent_inner(
         .with_shell(
             sandbox.clone(),
             std::time::Duration::from_secs(config.limits.script_shell_timeout_secs),
-        ),
+        )
+        // `[security] allow_local_network`. Off by default, so a `web_fetch` URL
+        // the model picked out of attacker-influenced context cannot reach cloud
+        // metadata, the user's own `lev serve`, or their LAN.
+        .with_local_network(config.security.allow_local_network),
     );
     // Build the dynamic-tools re-resolution context (issue #97 escape hatch) and
     // tag the entity `DynamicTools` so the runtime polls it for mid-run re-scans.

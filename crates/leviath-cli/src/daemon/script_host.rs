@@ -194,6 +194,10 @@ pub struct DaemonScriptHost {
     /// Wall-clock cap on a single `shell()` call, so a runaway command can't hang
     /// the agent (mirrors the built-in shell tool's timeout).
     shell_timeout: Duration,
+    /// `[security] allow_local_network`: whether this agent's fetches may reach
+    /// loopback / private / link-local addresses. Off unless the user turned it
+    /// on — see [`check_outbound`].
+    allow_local_network: bool,
 }
 
 impl DaemonScriptHost {
@@ -207,7 +211,15 @@ impl DaemonScriptHost {
             io,
             sandbox: None,
             shell_timeout: Duration::from_secs(60),
+            allow_local_network: false,
         }
+    }
+
+    /// Permit fetches to loopback / private / link-local addresses, from
+    /// `[security] allow_local_network`. Consuming builder used at spawn.
+    pub fn with_local_network(mut self, allow: bool) -> Self {
+        self.allow_local_network = allow;
+        self
     }
 
     /// Build a host wired to the real network/process/filesystem/env backend.
@@ -261,11 +273,27 @@ fn denied(func: &str) -> String {
     format!("[denied] script host function '{func}' is denied by tool_script_permissions")
 }
 
+/// Check a script-supplied URL against the outbound policy before it is sent.
+///
+/// The URL came from the model, and the model picked it out of context an
+/// attacker can influence — so this is the boundary between "the agent browsing
+/// the web" and "the agent probing the user's own network on someone else's
+/// behalf". See [`leviath_core::net`] for what is refused and why.
+///
+/// Lives on the host (the permission/confinement layer) rather than in
+/// [`RealScriptIo`], so a test double is subject to the same rule as the real
+/// backend and the check cannot be skipped by swapping the I/O out.
+fn check_outbound(url: &str, allow_local: bool) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|e| format!("[denied] invalid URL '{url}': {e}"))?;
+    leviath_core::check_url(&parsed, allow_local).map_err(|e| format!("[denied] {e}"))
+}
+
 impl ScriptHost for DaemonScriptHost {
     fn http_get(&self, url: &str, headers: BTreeMap<String, String>) -> Result<String, String> {
         if !self.allow.http_get {
             return Err(denied("http_get"));
         }
+        check_outbound(url, self.allow_local_network)?;
         self.io.http_get(url, headers)
     }
 
@@ -278,6 +306,7 @@ impl ScriptHost for DaemonScriptHost {
         if !self.allow.http_post {
             return Err(denied("http_post"));
         }
+        check_outbound(url, self.allow_local_network)?;
         self.io.http_post(url, body, headers)
     }
 
@@ -352,9 +381,49 @@ static HTTP_CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
     std::sync::LazyLock::new(|| {
         reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(30))
+            // Re-check every redirect hop. Validating only the URL the script
+            // passed is not enough: a perfectly public page answering `302
+            // Location: http://169.254.169.254/` lands on the cloud metadata
+            // service just the same, and reqwest follows up to 10 hops by
+            // default. `limited(5)` also bounds redirect loops.
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 5 {
+                    return attempt.error("too many redirects");
+                }
+                match leviath_core::check_url(attempt.url(), local_network_allowed()) {
+                    Ok(()) => attempt.follow(),
+                    Err(e) => attempt.error(format!("refused to follow redirect: {e}")),
+                }
+            }))
             .build()
             .expect("failed to build blocking reqwest client")
     });
+
+/// Whether *redirect hops* may land on loopback / private / link-local
+/// addresses.
+///
+/// The authoritative check is [`DaemonScriptHost::allow_local_network`], a plain
+/// field on the host. This atomic exists only because [`HTTP_CLIENT`] is
+/// process-wide and its redirect callback runs inside reqwest with no access to
+/// the host that started the request. `[security] allow_local_network` is a
+/// machine-wide switch, so one value per process is the right granularity —
+/// but keep the field authoritative and this a mirror of it, not the reverse:
+/// global mutable state read by the main check would make every test that
+/// touches it race with every test that doesn't.
+///
+/// Defaults to `false`, so a path that forgets to initialize it is the safe one.
+static ALLOW_LOCAL_REDIRECTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Apply `[security] allow_local_network` to redirect following for this process.
+pub fn set_local_network_allowed(allow: bool) {
+    ALLOW_LOCAL_REDIRECTS.store(allow, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The current value of the [`ALLOW_LOCAL_REDIRECTS`] switch.
+fn local_network_allowed() -> bool {
+    ALLOW_LOCAL_REDIRECTS.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 impl RealScriptIo {
     /// A handle on the shared [`HTTP_CLIENT`] (cloning a `Client` shares its
@@ -392,6 +461,19 @@ impl RealScriptIo {
         if is_binary_content_type(&content_type) {
             let len = resp.content_length();
             return Err(non_text_body_message(&content_type, len));
+        }
+        // Refuse an oversized body before reading a byte of it. `text()` buffers
+        // the whole response, so a server advertising a multi-gigabyte
+        // `text/plain` is a memory-exhaustion DoS the 900 KB output cap below
+        // does nothing about — that cap runs *after* the allocation.
+        //
+        // Residual: a chunked response sends no `Content-Length`, so a body that
+        // lies about its size is still buffered. The client's 30-second timeout
+        // is what bounds that case; closing it properly needs a streaming decoder
+        // that preserves `text()`'s charset handling (it decodes Shift-JIS and
+        // Latin-1 pages correctly, which a raw `Read` + `from_utf8` would not).
+        if let Some(msg) = oversized_body_message(resp.content_length(), MAX_RESPONSE_BYTES) {
+            return Err(msg);
         }
         let text = cap_script_io(resp.text().map_err(|e| format!("read body: {e}"))?);
         if status.is_success() {
@@ -458,6 +540,32 @@ fn non_text_body_message(content_type: &str, len: Option<u64>) -> String {
 /// even inside try/catch). This is only a crash guard — context-size truncation is
 /// handled downstream by region budgets and any in-script truncation.
 const MAX_SCRIPT_IO_BYTES: usize = 900_000;
+
+/// Largest response body [`RealScriptIo::send`] will read, checked against the
+/// declared `Content-Length` *before* buffering.
+///
+/// Well above [`MAX_SCRIPT_IO_BYTES`] on purpose: a page a little larger than the
+/// output cap should still be fetched and truncated (that is the normal case for
+/// a long article), while a body two orders of magnitude larger is refused
+/// outright as a resource-exhaustion attempt rather than allocated first.
+const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// The refusal message for an over-large declared body, or `None` to proceed.
+///
+/// Split out as a pure function with an injectable `max` so the threshold is
+/// testable without a 32 MB HTTP round trip — and because a mock server cannot
+/// help here anyway: hyper panics rather than send a `Content-Length` that
+/// disagrees with the body it is writing, so the lying-header case that motivates
+/// the check is unreachable from an honest test server.
+fn oversized_body_message(content_length: Option<u64>, max: u64) -> Option<String> {
+    match content_length {
+        Some(len) if len > max => Some(format!(
+            "response declares {len} bytes, over the {max}-byte limit — \
+             fetch a more specific page"
+        )),
+        _ => None,
+    }
+}
 
 pub(crate) fn cap_script_io(mut s: String) -> String {
     if s.len() > MAX_SCRIPT_IO_BYTES {
@@ -826,20 +934,25 @@ mod tests {
         assert_eq!(host.write_file("out.txt", "body").unwrap(), "w");
     }
 
+    /// A public IP *literal*, not a hostname: the outbound check resolves names,
+    /// and a unit test must not depend on DNS (or on the network being up) to
+    /// decide whether the host delegates to its I/O backend.
+    const PUBLIC_URL: &str = "http://93.184.216.34/";
+
     #[test]
     fn allowed_calls_delegate_to_io() {
         let io = RecordingIo::arc();
         let host = DaemonScriptHost::with_io(all_allowed(), std::env::temp_dir(), io.clone());
-        assert_eq!(host.http_get("http://x", BTreeMap::new()).unwrap(), "g");
+        assert_eq!(host.http_get(PUBLIC_URL, BTreeMap::new()).unwrap(), "g");
         assert_eq!(
-            host.http_post("http://x", "b", BTreeMap::new()).unwrap(),
+            host.http_post(PUBLIC_URL, "b", BTreeMap::new()).unwrap(),
             "p"
         );
         assert_eq!(host.shell("ls").unwrap(), "s");
         assert_eq!(host.write_file("out.txt", "body").unwrap(), "w");
         assert_eq!(host.env_var("HOME").unwrap(), "e");
         let calls = io.calls.lock().unwrap().clone();
-        assert!(calls.contains(&"get:http://x".to_string()));
+        assert!(calls.contains(&format!("get:{PUBLIC_URL}")));
         assert!(calls.iter().any(|c| c.starts_with("post:")));
         // Un-sandboxed → the prepared command runs the host shell.
         assert!(calls.iter().any(|c| c.starts_with("shell:")));
@@ -849,6 +962,82 @@ mod tests {
                 .any(|c| c.starts_with("write:") && c.ends_with(":body"))
         );
         assert!(calls.contains(&"env:HOME".to_string()));
+    }
+
+    /// The exfiltration/SSRF case: a script tool with `http_get` permission is
+    /// still not a licence to reach the user's own network. Nothing may touch
+    /// the I/O backend — the URL is refused before a request is built.
+    #[test]
+    fn outbound_check_blocks_local_targets_before_any_io() {
+        let io = RecordingIo::arc();
+        let host = DaemonScriptHost::with_io(all_allowed(), std::env::temp_dir(), io.clone());
+        for url in [
+            // Cloud metadata: returns instance credentials.
+            "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+            // The user's own agent-spawning API.
+            "http://127.0.0.1:3000/api/agents",
+            // The LAN.
+            "http://192.168.1.1/",
+            // Not an HTTP scheme at all.
+            "file:///etc/passwd",
+        ] {
+            let err = host.http_get(url, BTreeMap::new()).unwrap_err();
+            assert!(err.starts_with("[denied]"), "{url} → {err}");
+            let err = host.http_post(url, "leak", BTreeMap::new()).unwrap_err();
+            assert!(err.starts_with("[denied]"), "{url} → {err}");
+        }
+        assert!(
+            io.calls.lock().unwrap().is_empty(),
+            "a refused URL must never reach the I/O backend: {:?}",
+            io.calls.lock().unwrap()
+        );
+    }
+
+    /// A malformed URL is refused rather than passed through for the HTTP client
+    /// to interpret.
+    #[test]
+    fn outbound_check_rejects_unparseable_urls() {
+        let io = RecordingIo::arc();
+        let host = DaemonScriptHost::with_io(all_allowed(), std::env::temp_dir(), io.clone());
+        let err = host.http_get("not a url", BTreeMap::new()).unwrap_err();
+        assert!(err.contains("invalid URL"), "{err}");
+        assert!(io.calls.lock().unwrap().is_empty());
+    }
+
+    /// `[security] allow_local_network = true` is what a user running a local
+    /// model (Ollama on 11434, say) sets. It is a field on the host, not global
+    /// state, so this test cannot perturb any other.
+    #[test]
+    fn allow_local_network_opens_the_local_path() {
+        let io = RecordingIo::arc();
+        let host = DaemonScriptHost::with_io(all_allowed(), std::env::temp_dir(), io.clone())
+            .with_local_network(true);
+        assert_eq!(
+            host.http_get("http://127.0.0.1:11434/api/tags", BTreeMap::new())
+                .unwrap(),
+            "g"
+        );
+        // The scheme check is not waived by it.
+        assert!(
+            host.http_get("file:///etc/passwd", BTreeMap::new())
+                .is_err()
+        );
+    }
+
+    /// The redirect mirror is a separate process-wide value; setting it must not
+    /// change what the host itself decides.
+    #[test]
+    fn redirect_switch_is_independent_of_the_host_field() {
+        let io = RecordingIo::arc();
+        let host = DaemonScriptHost::with_io(all_allowed(), std::env::temp_dir(), io.clone());
+        let previous = local_network_allowed();
+        set_local_network_allowed(true);
+        let decided = host.http_get("http://127.0.0.1:9/", BTreeMap::new());
+        set_local_network_allowed(previous);
+        assert!(
+            decided.is_err(),
+            "the host field, not the redirect mirror, decides the initial URL"
+        );
     }
 
     #[test]
@@ -1050,6 +1239,26 @@ mod tests {
         // A Shift-JIS page is text: it must still come back decoded. Guarding on
         // UTF-8 validity instead of the header would have broken this.
         assert_eq!(sjis.unwrap(), "日本語");
+    }
+
+    /// A body declaring itself larger than the cap is refused from the header,
+    /// before `text()` allocates it. The 900 KB output cap runs *after* the read,
+    /// so it was never a defence against this.
+    #[test]
+    fn oversized_declared_body_is_refused() {
+        let msg = oversized_body_message(Some(999_999_999), 1_000).expect("should refuse");
+        assert!(msg.contains("999999999"), "{msg}");
+        assert!(msg.contains("1000-byte limit"), "{msg}");
+    }
+
+    /// A body at or under the cap proceeds, and so does one with no declared
+    /// length — a chunked response has none, and refusing every chunked page
+    /// would break most of the web.
+    #[test]
+    fn body_within_cap_or_of_unknown_size_proceeds() {
+        assert!(oversized_body_message(Some(1_000), 1_000).is_none());
+        assert!(oversized_body_message(Some(0), 1_000).is_none());
+        assert!(oversized_body_message(None, 1_000).is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]

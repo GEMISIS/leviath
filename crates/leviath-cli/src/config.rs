@@ -225,12 +225,31 @@ pub struct SecurityConfig {
     /// agent's command seeds before installing it with `lev validate <path>`.
     #[serde(default = "default_true")]
     pub allow_seed_commands: bool,
+
+    /// Whether agent-driven fetches may reach loopback, private, and link-local
+    /// addresses.
+    ///
+    /// **Off by default.** An agent's `web_fetch` URL is chosen by the model out
+    /// of context an attacker can influence — a search result, a page fetched a
+    /// moment ago, an issue body — so an unrestricted fetch makes the agent a
+    /// confused deputy *inside* the user's network. The concrete targets are
+    /// `http://169.254.169.254/…` (cloud metadata, which returns instance
+    /// credentials), `http://127.0.0.1:3000/api/…` (the user's own `lev serve`),
+    /// and anything on the LAN.
+    ///
+    /// Turn this on when the agent is genuinely meant to talk to something local
+    /// — a self-hosted model, a dev server under test. It applies to the script
+    /// host's `http_get`/`http_post` and to redirect following; see
+    /// [`leviath_core::net`].
+    #[serde(default)]
+    pub allow_local_network: bool,
 }
 
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             allow_seed_commands: true,
+            allow_local_network: false,
         }
     }
 }
@@ -2004,6 +2023,7 @@ anthropic_api_key = "sk-ant-test-key"
             },
             security: SecurityConfig {
                 allow_seed_commands: false,
+                allow_local_network: true,
             },
         };
 
