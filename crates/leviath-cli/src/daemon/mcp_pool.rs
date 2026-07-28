@@ -34,6 +34,9 @@ pub struct McpPool {
     /// config default -- a pool built without being told reads `mcp-auth.json`,
     /// exactly as before this field existed.
     credential_store: leviath_core::CredentialStoreKind,
+    /// `[security] allow_env_vars`: which credential-shaped variables an MCP
+    /// server's `${VAR}` headers may interpolate.
+    allow_env_vars: Vec<String>,
 }
 
 /// A stable dedup key for a server config: its full serialized form. Two
@@ -53,7 +56,14 @@ impl McpPool {
             reserved,
             connected: StdMutex::new(HashMap::new()),
             credential_store: leviath_core::CredentialStoreKind::default(),
+            allow_env_vars: Vec::new(),
         }
+    }
+
+    /// Allow these credential-shaped variables in MCP `${VAR}` headers.
+    pub fn with_env_allowlist(mut self, allow: Vec<String>) -> Self {
+        self.allow_env_vars = allow;
+        self
     }
 
     /// Read and write MCP grants through `kind`'s backend.
@@ -74,6 +84,7 @@ impl McpPool {
             shared_mcp,
             config_servers,
             leviath_core::CredentialStoreKind::default(),
+            Vec::new(),
         )
     }
 
@@ -88,6 +99,7 @@ impl McpPool {
         shared_mcp: Arc<Mutex<ToolExecutor>>,
         config_servers: &[MCPServerConfig],
         credential_store: leviath_core::CredentialStoreKind,
+        allow_env_vars: Vec<String>,
     ) -> Arc<Self> {
         let mut reserved: HashSet<String> =
             leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(std::env::temp_dir()))
@@ -95,8 +107,11 @@ impl McpPool {
                 .into_iter()
                 .collect();
         reserved.extend(leviath_tools::BuiltinTools::subagent_tool_names());
-        let pool =
-            Arc::new(Self::new(shared_mcp, reserved).with_credential_store(credential_store));
+        let pool = Arc::new(
+            Self::new(shared_mcp, reserved)
+                .with_credential_store(credential_store)
+                .with_env_allowlist(allow_env_vars),
+        );
         for server in config_servers {
             pool.seed(server, Vec::new());
         }
@@ -152,7 +167,10 @@ impl McpPool {
         };
         let auth_was_resolved = auth.is_some();
         let mut discovery = ToolDiscovery::new();
-        match discovery.discover_from_config_with_auth(config, auth).await {
+        match discovery
+            .discover_from_config_with_auth(config, auth, &self.allow_env_vars)
+            .await
+        {
             Ok((_metas, mut client)) => {
                 // Attach a refresher so an OAuth-backed server that outlives its
                 // access token re-auths on a 401 instead of failing every call.

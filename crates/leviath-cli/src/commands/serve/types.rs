@@ -157,6 +157,9 @@ pub(super) struct ServeLimits {
     pub(super) workdir_root: Option<PathBuf>,
     /// `--no-remote-yolo`: whether a spawn request may set `"yolo": true`.
     pub(super) no_remote_yolo: bool,
+    /// `[security] allow_local_network`: whether a completion webhook may point
+    /// at loopback, private or link-local addresses.
+    pub(super) allow_local_network: bool,
 }
 
 impl ServeLimits {
@@ -164,6 +167,27 @@ impl ServeLimits {
     ///
     /// Uses the same symlink-aware containment the file tools use, so a symlink
     /// under the root cannot be used to point an agent outside it.
+    /// Check a requested completion webhook against the same SSRF policy every
+    /// model-supplied URL goes through.
+    ///
+    /// The URL arrives in a `POST /api/agents` body, is persisted, and is POSTed
+    /// to when the run finishes — from inside the trust boundary, and with
+    /// retries. Unchecked, `"callback_url": "http://169.254.169.254/…"` made the
+    /// daemon a repeatable request primitive against the cloud metadata service
+    /// and anything else on the local network, on behalf of a caller that
+    /// `--workdir-root` and `--no-remote-yolo` exist to keep at arm's length.
+    ///
+    /// `allow_local_network` mirrors the config setting: an operator who
+    /// deliberately points webhooks at a service on the same host can, and
+    /// everyone else cannot.
+    pub(super) fn check_callback_url(&self, url: &str) -> Result<(), String> {
+        let parsed = url
+            .parse::<url::Url>()
+            .map_err(|e| format!("callback_url is not a URL: {e}"))?;
+        leviath_core::check_url(&parsed, self.allow_local_network)
+            .map_err(|e| format!("callback_url is not allowed: {e}"))
+    }
+
     pub(super) fn check_workdir(&self, workdir: &std::path::Path) -> Result<(), String> {
         let Some(root) = &self.workdir_root else {
             return Ok(());

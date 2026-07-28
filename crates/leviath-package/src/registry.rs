@@ -27,7 +27,50 @@ pub struct PackageRegistry {
     client: reqwest::Client,
 }
 
+/// Whether `url`'s host is this machine.
+fn is_loopback_url(url: &str) -> bool {
+    let after_scheme = url.split("://").nth(1).unwrap_or(url);
+    let host = after_scheme
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .rsplit_once(':')
+        .map_or(
+            after_scheme.split('/').next().unwrap_or_default(),
+            |(h, _)| h,
+        );
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1")
+}
+
 impl PackageRegistry {
+    /// Refuse a registry URL that is not HTTPS.
+    ///
+    /// The URL comes from `[registries]` in the user's config, and `publish`
+    /// sends `Authorization: Bearer <token>` to it while `download` installs
+    /// whatever bytes come back. Over `http://` a network attacker reads the
+    /// publish token and swaps the bundle, so cleartext is refused outright
+    /// rather than warned about.
+    fn require_https(&self) -> anyhow::Result<()> {
+        // A prefix check, not a URL parse: the crate has no URL parser and the
+        // question is only which scheme the string starts with.
+        //
+        // Loopback is exempt, matching the rule MCP OAuth discovery already
+        // uses: a registry on this machine has no network for an attacker to
+        // sit on, and requiring TLS there would only mean a self-signed
+        // certificate to work around.
+        if is_loopback_url(&self.url) {
+            return Ok(());
+        }
+        match self.url.split("://").next() {
+            Some("https") => Ok(()),
+            _ => anyhow::bail!(
+                "registry url '{}' is not https. A package registry carries your \
+                 publish token and the bundles you install, so cleartext is refused.",
+                self.url
+            ),
+        }
+    }
+
     /// Create a new registry client.
     pub fn new(url: String) -> Self {
         Self {
@@ -65,6 +108,7 @@ impl PackageRegistry {
 
     /// Download a package by name and version.
     pub async fn download(&self, name: &str, version: &str) -> anyhow::Result<Vec<u8>> {
+        self.require_https()?;
         tracing::info!(name = %name, version = %version, registry = %self.url, "Downloading package");
 
         let url = format!("{}/api/v1/packages/{}/{}/download", self.url, name, version);
@@ -116,6 +160,7 @@ impl PackageRegistry {
 
     /// Publish a package bundle to the registry.
     pub async fn publish(&self, bundle: &[u8], token: &str) -> anyhow::Result<()> {
+        self.require_https()?;
         tracing::info!(registry = %self.url, size = bundle.len(), "Publishing package");
 
         let url = format!("{}/api/v1/packages", self.url);
@@ -142,6 +187,61 @@ impl PackageRegistry {
 
 #[cfg(test)]
 mod tests {
+
+    /// A registry carries the publish token and the bundles that get installed.
+    /// Over cleartext a network attacker reads the one and swaps the other, so
+    /// `http://` is refused rather than warned about.
+    #[tokio::test]
+    async fn a_cleartext_registry_is_refused() {
+        let reg = PackageRegistry::new("http://registry.example".to_string());
+        let err = reg
+            .download("x", "1.0.0")
+            .await
+            .expect_err("http is refused");
+        assert!(err.to_string().contains("not https"), "{err}");
+        let err = reg
+            .publish(b"bundle", "tok")
+            .await
+            .expect_err("http is refused");
+        assert!(err.to_string().contains("not https"), "{err}");
+
+        // And a value that is not a URL at all does not sneak through.
+        let reg = PackageRegistry::new("registry.example".to_string());
+        assert!(reg.download("x", "1.0.0").await.is_err());
+
+        // An https registry passes the scheme check and goes on to fail for an
+        // ordinary reason (nothing is listening), which is what shows the guard
+        // refuses cleartext rather than refusing everything.
+        let reg = PackageRegistry::new("https://127.0.0.2:19998".to_string());
+        let err = reg
+            .download("x", "1.0.0")
+            .await
+            .expect_err("nothing listening");
+        assert!(!err.to_string().contains("not https"), "{err}");
+    }
+
+    /// Loopback is exempt, matching the rule MCP OAuth discovery already uses:
+    /// there is no network for an attacker to sit on, and requiring TLS would
+    /// only mean a self-signed certificate to work around.
+    #[test]
+    fn loopback_is_recognised_and_exempt() {
+        for local in [
+            "http://localhost:8080",
+            "http://127.0.0.1:19999",
+            "http://[::1]:8080/api",
+            "http://localhost",
+        ] {
+            assert!(is_loopback_url(local), "{local} is this machine");
+        }
+        for remote in [
+            "http://registry.example",
+            "https://registry.example",
+            "http://127.0.0.1.evil.example",
+            "http://notlocalhost",
+        ] {
+            assert!(!is_loopback_url(remote), "{remote} is not this machine");
+        }
+    }
     use super::*;
     use crate::test_support::with_tracing;
 

@@ -199,27 +199,44 @@ mod tests {
     }
 
     /// The real thing, against a real file on a real Windows filesystem: after
-    /// restricting, `icacls` must report exactly one granted account.
+    /// restricting, no *other user* may reach it.
+    ///
+    /// The property asserted is deliberately "no broad principal", not "exactly
+    /// one account". `NT AUTHORITY\SYSTEM` and `BUILTIN\Administrators` survive
+    /// on Windows and asserting otherwise would be asserting something the OS
+    /// does not do — SYSTEM is the operating system and an administrator can
+    /// take ownership of any file regardless, so neither is an escalation. What
+    /// must not survive is a grant to `Users`, `Everyone` or
+    /// `Authenticated Users`, which is what lets the account next door read
+    /// your API keys.
     #[test]
-    fn restricting_a_real_file_leaves_only_the_owner() {
+    fn restricting_a_real_file_keeps_other_users_out() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret");
         std::fs::write(&path, b"the key").unwrap();
 
         restrict_to_owner(&path).expect("restricting a file we own succeeds");
-        assert_eq!(std::fs::read(&path).unwrap(), b"the key", "still readable");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"the key",
+            "still ours to read"
+        );
 
         // Ask Windows what the ACL now says.
         let shown = std::process::Command::new(icacls_program())
             .arg(path.display().to_string())
             .output()
             .expect("icacls runs");
-        let acl = String::from_utf8_lossy(&shown.stdout);
+        let acl = String::from_utf8_lossy(&shown.stdout).into_owned();
+
         let user = std::env::var("USERNAME").unwrap();
-        assert!(acl.contains(&user), "the owner keeps access: {acl}");
-        // One granted account: the ACE lines are the ones naming a right.
-        let granted = acl.lines().filter(|l| l.contains(":(")).count();
-        assert_eq!(granted, 1, "only the owner may be granted: {acl}");
+        assert!(acl.contains(&user), "the owner keeps access:\n{acl}");
+        for broad in ["\\Users:", "Everyone:", "Authenticated Users:"] {
+            assert!(
+                !acl.contains(broad),
+                "'{broad}' must not be granted after restricting:\n{acl}"
+            );
+        }
     }
 
     #[test]

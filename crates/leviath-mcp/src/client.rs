@@ -183,8 +183,12 @@ impl MCPClient {
     }
 
     /// Connect to an MCP server over HTTP.
-    pub fn connect_http(url: &str, headers: &HashMap<String, String>) -> anyhow::Result<Self> {
-        let transport = HttpTransport::new(url, headers)?;
+    pub fn connect_http(
+        url: &str,
+        headers: &HashMap<String, String>,
+        allow_env: &[String],
+    ) -> anyhow::Result<Self> {
+        let transport = HttpTransport::new(url, headers, allow_env)?;
         Ok(Self::new(Box::new(transport)))
     }
 
@@ -206,7 +210,7 @@ impl MCPClient {
     /// Callers above this point — discovery, execution, the tool registry —
     /// never learn which one it turned out to be.
     pub async fn from_config(config: &MCPServerConfig) -> anyhow::Result<Self> {
-        Self::from_config_with_auth(config, None).await
+        Self::from_config_with_auth(config, None, &[]).await
     }
 
     /// [`Self::from_config`] with a resolved `Authorization` header injected for
@@ -220,6 +224,7 @@ impl MCPClient {
     pub async fn from_config_with_auth(
         config: &MCPServerConfig,
         auth_header: Option<(String, String)>,
+        allow_env: &[String],
     ) -> anyhow::Result<Self> {
         match config.resolve()? {
             ResolvedTransport::Stdio { command, args, env } => {
@@ -231,7 +236,7 @@ impl MCPClient {
                 if let Some((name, value)) = auth_header {
                     headers.insert(name, value);
                 }
-                Self::connect_http(url, &headers)
+                Self::connect_http(url, &headers, allow_env)
             }
         }
     }
@@ -1516,7 +1521,7 @@ for line in sys.stdin:
     fn connect_http_builds_a_client_without_touching_the_network() {
         // No server is listening; construction must still succeed, because
         // the first request is what connects.
-        assert!(MCPClient::connect_http("http://127.0.0.1:1/mcp", &HashMap::new()).is_ok());
+        assert!(MCPClient::connect_http("http://127.0.0.1:1/mcp", &HashMap::new(), &[]).is_ok());
     }
 
     struct NoopRefresher;
@@ -1538,7 +1543,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn set_refresher_on_http_is_accepted() {
         let mut client =
-            MCPClient::connect_http("http://127.0.0.1:1/mcp", &HashMap::new()).unwrap();
+            MCPClient::connect_http("http://127.0.0.1:1/mcp", &HashMap::new(), &[]).unwrap();
         // Exercise the refresher itself so its body is covered.
         use crate::transport::BearerRefresher as _;
         assert_eq!(NoopRefresher.refresh().await.unwrap(), "Bearer x");
@@ -1547,7 +1552,7 @@ for line in sys.stdin:
 
     #[test]
     fn connect_http_rejects_an_unparseable_url() {
-        assert!(MCPClient::connect_http("not a url", &HashMap::new()).is_err());
+        assert!(MCPClient::connect_http("not a url", &HashMap::new(), &[]).is_err());
     }
 
     #[tokio::test]
@@ -1578,7 +1583,7 @@ for line in sys.stdin:
         let config = MCPServerConfig::http("s", "http://127.0.0.1:1/mcp");
         let header = Some(("Authorization".to_string(), "Bearer tok".to_string()));
         assert!(
-            MCPClient::from_config_with_auth(&config, header)
+            MCPClient::from_config_with_auth(&config, header, &[])
                 .await
                 .is_ok()
         );

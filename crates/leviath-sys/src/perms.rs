@@ -133,14 +133,17 @@ mod tests {
 
     #[test]
     fn secure_file_perms_missing_path_behavior() {
-        // Unix `chmod` errors on a missing path (ENOENT); the non-Unix no-op
-        // ignores the path and succeeds.
+        // Unix `chmod` and Windows `icacls` both fail on a path that is not
+        // there; only a platform with no permission model at all succeeds,
+        // because it genuinely did nothing. Reporting the failure is the point:
+        // silently succeeding at protecting a file that does not exist is how a
+        // caller ends up believing a secret is restricted when it is not.
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("nope");
         let result = secure_file_perms(&missing);
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         assert!(result.is_err());
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         assert!(result.is_ok());
     }
 

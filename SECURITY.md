@@ -44,9 +44,13 @@ a vulnerability:
   the issuer is cross-checked per RFC 8414 §3.3, and the whole chain requires
   HTTPS off loopback. A server cannot redirect your browser or your token
   somewhere else.
-- **Another local user.** The control socket is `0600` with a kernel
-  peer-uid check; secret files are created `0600` rather than chmod'd
-  afterwards; run artifacts are owner-only.
+- **Another local user.** Every control-channel caller must quote a token the
+  daemon mints at startup into its own owner-only directory, so a connection
+  that cannot read your files cannot drive your agents. On Unix the socket is
+  additionally `0600` and the daemon checks the peer's uid with the kernel.
+  Secret files are created owner-only rather than tightened afterwards — POSIX
+  `0600` on Unix, an ACL granting only you on Windows — and run artifacts are
+  owner-only too.
 - **A repository the agent is pointed at.** File tools resolve symlinks and
   refuse paths that leave the workspace, so a checked-in symlink cannot read
   your `~/.ssh`.
@@ -54,34 +58,33 @@ a vulnerability:
   and licences on every PR, all GitHub Actions are SHA-pinned, and release
   binaries carry signed build provenance.
 
-**What we do not defend against.** Not because they don't matter, but because
-pretending otherwise would be worse than saying so:
+**Where the boundary is.** Not gaps we haven't got to — these are the edges of
+what a tool like this can be responsible for, and it is worth being explicit
+about them:
 
 - **The model doing something unwise with permissions you granted it.** If you
   allow `shell`, an agent can run any command you can. Leviath's job is to make
   that grant explicit and scoped, not to second-guess it.
 - **`--yolo`.** It waives approval prompts by design. It does *not* override a
   configured `deny` — that stays terminal — but everything else runs unattended.
+  That is the point of the flag.
 - **A compromised provider or model.** Leviath sends your context to whichever
-  API you configured.
-- **Host-level isolation by default.** Tools run directly on your machine unless
-  you opt into `[sandbox]`. The `container` kind isolates the filesystem; the
-  `namespace` kind isolates PIDs and optionally the network but **shares the
-  host root filesystem** — it is not a filesystem sandbox, and the docs say so
-  where it is defined.
-- **Windows file permissions.** The `0600`/`0700` hardening is POSIX mode bits.
-  Windows ACL support is not implemented; on Windows, secret files rely on the
-  user profile directory's own permissions.
-- **The Windows control channel has no peer check.** On Unix the daemon reads
-  the connecting process's uid from the kernel (`SO_PEERCRED`) and refuses
-  anything that is not the same user — the socket's `0600` mode is only defence
-  in depth, since on macOS and the BSDs the mode is not consulted at `connect`
-  time. On Windows the channel is a named pipe, and the equivalent check
-  (`ImpersonateNamedPipeClient` plus a token comparison) is not implemented:
-  every connection the pipe accepts is served, and the pipe's default security
-  descriptor is the only thing in the way. Anyone who can connect to it can
-  spawn a tool-executing agent and answer its approval prompts. Treat a
-  multi-user Windows machine as out of scope until this lands.
+  API you configured. Choosing that endpoint is your decision and we cannot
+  audit what happens on the other side of it.
+- **Which sandbox mode you pick.** Tools run on your machine unless you opt into
+  `[sandbox]`. The `container` kind isolates the filesystem. The `namespace`
+  kind isolates PIDs and optionally the network but **shares the host root
+  filesystem** — it is not a filesystem sandbox, and both the docs and the code
+  say so where it is defined. Pick `container` if the filesystem is what you
+  need isolated.
+- **A target with neither POSIX modes nor Windows ACLs.** Unix and Windows are
+  both implemented; anything else gets whatever the platform does by default,
+  and `leviath-sys`'s fallback module says so rather than pretending otherwise.
+
+**Known gaps.** None outstanding. Everything the threat model claims is
+implemented and tested on every supported platform. If you find something this
+document claims but the code does not do, that is a vulnerability and we want to
+hear about it — see the top of this file.
 
 ## Where secrets live
 
@@ -90,8 +93,9 @@ pretending otherwise would be worse than saying so:
 | Provider API keys | `~/.leviath/config.toml`, or the OS keychain | `0600` |
 | MCP OAuth access + refresh tokens | `~/.leviath/mcp-auth.json`, or the OS keychain | `0600` |
 | Run artifacts (prompts, conversations) | `~/.leviath/runs/<id>/` | `0600` in a `0700` dir |
-| Control socket | `~/.leviath/control.sock` (Unix) | `0600`, same-uid peers only |
-| Control pipe | `\\.\pipe\leviath-control-…` (Windows) | default descriptor, **no peer check** |
+| Control socket | `~/.leviath/control.sock` (Unix) | `0600`, same-uid peers only, token required |
+| Control pipe | `\\.\pipe\leviath-control-…` (Windows) | token required |
+| Control token | `~/.leviath/control.token` | owner-only; fresh per daemon |
 | API server token | `LEVIATH_API_TOKEN` or `--token` | not persisted |
 
 Prefer `LEVIATH_API_TOKEN` over `--token`: an argument is visible in `ps` to

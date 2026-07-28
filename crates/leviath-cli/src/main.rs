@@ -167,6 +167,9 @@ impl RiskyExecutors for RealExecutors {
                     .unwrap_or_default(),
             )
             .map_err(|e| anyhow::anyhow!("{e}"))?,
+            allow_env_vars: leviath_cli::config::Config::load()
+                .map(|c| c.security.allow_env_vars)
+                .unwrap_or_default(),
         };
         commands::mcp::execute_with(args, &env).await
     }
