@@ -24,16 +24,21 @@ keychain = ["dep:keyring", "dep:keyring-core"]
 [dependencies]
 tracing = { workspace = true }
 
-[target.'cfg(unix)'.dependencies]
-nix = { workspace = true }
-
 # The OS credential store (macOS Keychain / Windows Credential Manager / Secret
 # Service). Optional: see the `keychain` feature above. `keyring-core` is used
 # directly for the `Entry` API so tests can install an in-memory store as the
 # process default -- no CI runner has an unlocked login keychain, and reaching a
 # developer's real one would raise an OS prompt and hang.
+#
+# NOT under `[target.'cfg(unix)'.dependencies]`, where these first landed: the
+# `keychain` feature is unconditional, so on Windows that enabled `dep:keyring`
+# for a dependency that did not exist for the target and the crate failed to
+# compile. macOS and Linux both being unix hid it until CI.
 keyring = { version = "4", optional = true }
 keyring-core = { version = "1", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
