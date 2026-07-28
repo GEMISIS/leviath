@@ -678,21 +678,28 @@ impl Config {
 
     /// Get the path to the config file.
     ///
-    /// `LEVIATH_CONFIG_PATH` overrides this when set (mirrors the
-    /// `LEVIATH_RUNS_DIR` convention in `runstate.rs`), so tests can point
-    /// at an isolated path instead of the developer's real
-    /// `~/.leviath/config.toml`. On macOS, `dirs::home_dir()` resolves via
-    /// `NSHomeDirectory()` rather than the `$HOME` env var, so mutating
-    /// `$HOME` alone does not redirect this.
+    /// Two overrides, narrowest first: `LEVIATH_CONFIG_PATH` names this file
+    /// exactly, and `LEVIATH_HOME` (via [`leviath_core::data_dir`]) redirects it
+    /// along with every other home-relative path.
+    ///
+    /// It used to honor only the first. `LEVIATH_HOME`'s whole purpose is to
+    /// "redirect every home-relative path at once" — that is what its doc says
+    /// and what tests, sandboxed runs and scratch environments rely on — so a
+    /// config path that quietly ignored it meant a run that believed it was
+    /// isolated would read *and write* the developer's real
+    /// `~/.leviath/config.toml`, the file holding every provider API key. Found
+    /// by doing exactly that during live testing.
     pub fn config_path() -> PathBuf {
         if let Ok(override_path) = std::env::var("LEVIATH_CONFIG_PATH") {
             return PathBuf::from(override_path);
         }
-        dirs::home_dir()
+        leviath_core::data_dir()
             .unwrap_or_default()
-            .join(".leviath")
             .join("config.toml")
     }
+
+    // Tests for the two overrides live in the `tests` module below; see
+    // `config_path_honors_leviath_home`.
 
     /// Validate API key formats and return warnings for suspicious keys.
     pub fn validate_keys(&self) -> Vec<String> {
@@ -1340,6 +1347,46 @@ google_api_key = "AIza-existing"
     /// which is how it used to be saved. `write_private` creates the file with
     /// the mode already applied.
     #[cfg(unix)]
+    /// `LEVIATH_HOME` must redirect the config too, not just the runs and
+    /// agents directories.
+    ///
+    /// It did not, and the consequence was concrete: a scratch environment that
+    /// set `LEVIATH_HOME` and ran `lev mcp add` wrote to the developer's *real*
+    /// `~/.leviath/config.toml` — the file holding every provider API key —
+    /// while believing it was isolated.
+    #[test]
+    fn config_path_honors_leviath_home() {
+        temp_env::with_vars(
+            [
+                ("LEVIATH_CONFIG_PATH", None::<&str>),
+                ("LEVIATH_HOME", Some("/tmp/lev-cfg-test")),
+            ],
+            || {
+                assert_eq!(
+                    Config::config_path(),
+                    std::path::PathBuf::from("/tmp/lev-cfg-test/.leviath/config.toml")
+                );
+            },
+        );
+    }
+
+    /// The narrower override still wins, so an explicit path is exact.
+    #[test]
+    fn config_path_prefers_the_explicit_override() {
+        temp_env::with_vars(
+            [
+                ("LEVIATH_CONFIG_PATH", Some("/tmp/exact.toml")),
+                ("LEVIATH_HOME", Some("/tmp/lev-cfg-test")),
+            ],
+            || {
+                assert_eq!(
+                    Config::config_path(),
+                    std::path::PathBuf::from("/tmp/exact.toml")
+                );
+            },
+        );
+    }
+
     /// One `tracing::debug!(?config)` would otherwise put every provider key in
     /// the logs.
     #[test]
