@@ -145,7 +145,11 @@ fn resolve_task_with_editor(
             // also creates it owner-only, so the task prompt is not world
             // readable while the editor holds it open.
             let tmp = write_task_template(&tmp_dir_fn(), &template)?;
-            let tmp_path = tmp.path().to_path_buf();
+            // Close our own handle before the editor opens the file: Windows
+            // refuses a second writer while the first still holds it, so the
+            // editor could not save. `TempPath` keeps the delete-on-drop.
+            let tmp = tmp.into_temp_path();
+            let tmp_path = tmp.to_path_buf();
 
             // Launch the editor (exits only when the user closes it)
             let result = launch_editor_fn(&tmp_path);
