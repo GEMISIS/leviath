@@ -105,3 +105,40 @@ pulldown-cmark = "0.12"
 tui-textarea = { version = "0.7", features = ["crossterm"] }
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["cors"] }
+
+# ── Release profile ──────────────────────────────────────────────────────────
+#
+# There was no `[profile.release]` at all, so shipped binaries used cargo's
+# defaults: no LTO, 16 codegen units, full symbol table, and — the one that
+# matters for correctness — arithmetic overflow wrapping silently.
+[profile.release]
+# Overflow panics instead of wrapping. This workspace already treats
+# index/arithmetic mistakes as a real class of bug rather than a theoretical one
+# (see the `clippy::string_slice` deny above, which exists because a byte index
+# through a multi-byte character aborted the daemon twice). Token budgets,
+# context-window arithmetic and region sizing are all `usize` maths on
+# model-influenced numbers; a wrap there produces a wrong answer that looks like
+# a valid one. A panic is a worse user experience and a much better failure mode.
+overflow-checks = true
+
+# One codegen unit and fat LTO: smaller binary, and the whole program is
+# optimized as a unit rather than per-CGU.
+lto = "fat"
+codegen-units = 1
+
+# Strip symbols. `debug` is already false, so there is no DWARF; this drops the
+# symbol table too, which is a smaller download and slightly less of a map for
+# anyone poking at the binary. Backtraces from a released build are already not
+# meaningful without symbols on hand.
+strip = "symbols"
+
+# NOTE: `panic = "abort"` is deliberately NOT set, and should not be added.
+#
+# The daemon depends on unwinding. Rhai host functions are wrapped in
+# `catch_unwind` (`leviath_scripting::tool::guard_str`/`guard_dyn`) so that a
+# panic inside a native function registered with the script engine becomes an
+# ordinary script error instead of taking the whole daemon down — that was issue
+# #109, where a byte-boundary panic inside `decode_entities` aborted the process
+# for every running agent. `panic = "abort"` would remove that safety net and
+# reinstate the bug. The same applies to the pipeline's per-system panic
+# attribution and the `catch_unwind` around agent spawn.
