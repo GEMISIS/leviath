@@ -491,6 +491,18 @@ mod tests {
         Err("cannot delete".to_string())
     }
 
+    /// Make `path` unwritable, and undo it.
+    ///
+    /// `set_readonly` rather than a `0400` chmod: it clears the write bits on
+    /// Unix *and* sets the read-only attribute on Windows, so the "the rewrite
+    /// failed" tests run on every platform. Gated to Unix they left the `?` arms
+    /// they cover unexercised on Windows, which the gate then failed on.
+    fn set_readonly(path: &std::path::Path, readonly: bool) {
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_readonly(readonly);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
     /// The keychain backend on a machine that has none.
     fn no_keychain() -> crate::credentials::Resolved {
         Err(
@@ -736,23 +748,20 @@ mod tests {
     /// The rewrite that completes a move into the keychain has to be able to
     /// fail: the secrets are already in the store, but the config still names
     /// them, and reporting success would be a lie.
-    #[cfg(unix)]
     #[test]
     fn a_failed_final_rewrite_fails_the_migration() {
-        use std::os::unix::fs::PermissionsExt;
-
         let _guard = with_mock_store();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let config = config_with_keys(CredentialStoreKind::File);
         config.save_to_path_public(&path).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        set_readonly(&path, true);
 
         let err = apply_migration_with(&config, &path, false, keychain(), None)
             .expect_err("an unwritable config cannot complete the move");
         assert!(!err.to_string().is_empty());
 
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        set_readonly(&path, false);
     }
 
     /// `Ok(None)` -- the file backend where a keychain was expected -- is a
@@ -918,11 +927,8 @@ mod tests {
     /// `migrate` must propagate a failed migration rather than reporting
     /// success. Here the config file itself is read-only, so the rewrite that
     /// completes the move cannot happen.
-    #[cfg(unix)]
     #[test]
     fn migrate_propagates_a_failed_move() {
-        use std::os::unix::fs::PermissionsExt;
-
         let _guard = with_mock_store();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -930,13 +936,13 @@ mod tests {
             .save_to_path_public(&path)
             .unwrap();
         // Readable, so the load succeeds; unwritable, so the rewrite does not.
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        set_readonly(&path, true);
 
         let err = run_auth(&path, AuthArgs::migrate_for_test(true, false))
             .expect_err("an unwritable config cannot be migrated");
         assert!(!err.to_string().is_empty());
 
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        set_readonly(&path, false);
     }
 
     /// Writing a grant into a temporary MCP auth store, so the migration
