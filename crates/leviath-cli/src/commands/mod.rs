@@ -2,6 +2,7 @@
 
 pub mod add;
 pub mod agent_client;
+pub mod auth;
 pub mod context;
 pub mod create;
 pub mod ctl;

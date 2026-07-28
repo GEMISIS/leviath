@@ -30,6 +30,7 @@
 mod platform;
 
 pub mod browser;
+pub mod keychain;
 pub mod perms;
 pub mod process;
 pub mod sandbox;

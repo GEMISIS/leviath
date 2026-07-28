@@ -67,6 +67,12 @@ hex = { workspace = true }
 rand = { workspace = true }
 
 [dev-dependencies]
+# An in-memory credential store installed as the process default, so the
+# `KeychainStore` adapter is tested against the real `leviath_sys::keychain`
+# path rather than a stand-in. No CI runner has an unlocked login keychain, and
+# reaching a developer's real one would raise an OS prompt and hang.
+keyring-core = "1"
+
 tempfile = "3"
 temp-env = { workspace = true, features = ["async_closure"] }
 
