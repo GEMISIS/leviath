@@ -259,10 +259,27 @@ impl DaemonScriptHost {
     /// `..` escape and a symlink that leaves the directory (mirrors
     /// `BuiltinTools::resolve`, which documents the reasoning).
     fn resolve_in_workdir(&self, requested: &str) -> Result<PathBuf, String> {
+        Self::resolve_in(requested, &self.workdir, leviath_core::resolves_within)
+    }
+
+    /// Core of [`resolve_in_workdir`](Self::resolve_in_workdir) with the
+    /// containment check injected.
+    ///
+    /// A `fn` pointer (not `impl Fn`) so there is one monomorphization, matching
+    /// the seam idiom used for the browser opener and the socket peer lookup.
+    /// The seam exists because the refusal cannot be reached otherwise on every
+    /// platform: producing the escape needs a real symlink, and creating one on
+    /// Windows requires a privilege CI runners do not have. The `#[cfg(unix)]`
+    /// test still proves the real filesystem behaviour end to end.
+    fn resolve_in(
+        requested: &str,
+        workdir: &Path,
+        within: fn(&Path, &Path) -> bool,
+    ) -> Result<PathBuf, String> {
         let raw = if Path::new(requested).is_absolute() {
             PathBuf::from(requested)
         } else {
-            self.workdir.join(requested)
+            workdir.join(requested)
         };
         let mut normalized = PathBuf::new();
         for component in raw.components() {
@@ -275,14 +292,14 @@ impl DaemonScriptHost {
                 c => normalized.push(c),
             }
         }
-        if !normalized.starts_with(&self.workdir) {
+        if !normalized.starts_with(workdir) {
             return Err(format!(
                 "path '{requested}' would escape the working directory"
             ));
         }
         // The lexical check above is textual only: a symlink inside the workdir
         // pointing outside it satisfies `starts_with` while reading anywhere.
-        if !leviath_core::resolves_within(&normalized, &self.workdir) {
+        if !within(&normalized, workdir) {
             return Err(format!(
                 "path '{requested}' resolves outside the working directory through a symlink"
             ));
@@ -1468,6 +1485,32 @@ mod tests {
         .unwrap();
         let err = out.expect_err("an endless redirect must be stopped");
         assert!(err.contains("too many redirects"), "got: {err}");
+    }
+
+    /// The containment refusal, driven through the injected predicate so it is
+    /// exercised on every platform. The `#[cfg(unix)]` test below proves the
+    /// same refusal against a real symlink; this one proves the arm fires on
+    /// Windows too, where a test cannot create one.
+    #[test]
+    fn resolve_in_refuses_a_path_that_does_not_resolve_within_the_workdir() {
+        fn escapes(_: &Path, _: &Path) -> bool {
+            false
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let err = DaemonScriptHost::resolve_in("notes.txt", dir.path(), escapes)
+            .expect_err("a path that resolves outside must be refused");
+        assert!(err.contains("symlink"), "{err}");
+    }
+
+    /// The converse, so the test above is not passing merely because everything
+    /// is refused.
+    #[test]
+    fn resolve_in_admits_an_ordinary_path_within_the_workdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolved =
+            DaemonScriptHost::resolve_in("notes.txt", dir.path(), leviath_core::resolves_within)
+                .expect("an ordinary path resolves");
+        assert!(resolved.ends_with("notes.txt"));
     }
 
     /// The script host's own path confinement, mirroring `BuiltinTools`: a
