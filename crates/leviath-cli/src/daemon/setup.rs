@@ -93,8 +93,11 @@ pub async fn setup_daemon_host(
     // restart can still execute its blueprint MCP tools (recovery warming — the
     // async counterpart of the live-spawn preprocessor, done here before the
     // sync reload inside build_host).
-    let mcp_pool =
-        crate::daemon::mcp_pool::McpPool::for_daemon(registry.mcp.clone(), &config.mcp_servers);
+    let mcp_pool = crate::daemon::mcp_pool::McpPool::for_daemon_with(
+        registry.mcp.clone(),
+        &config.mcp_servers,
+        config.security.credential_store,
+    );
     mcp_pool.warm_recovered(&runs_dir).await;
     build_host(
         config,

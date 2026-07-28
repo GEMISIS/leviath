@@ -159,6 +159,14 @@ impl RiskyExecutors for RealExecutors {
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
             tools_dir: leviath_core::tools_dir(),
+            // Resolved here, once, so a keychain that cannot be reached fails
+            // the command instead of silently writing a refresh token to disk.
+            credential_store: leviath_cli::credentials::store_for(
+                leviath_cli::config::Config::load()
+                    .map(|c| c.security.credential_store)
+                    .unwrap_or_default(),
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
         };
         commands::mcp::execute_with(args, &env).await
     }

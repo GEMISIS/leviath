@@ -213,7 +213,25 @@ impl OAuthClient {
         store_path: &std::path::Path,
         now: u64,
     ) -> anyhow::Result<Option<(String, String)>> {
-        let mut store = AuthStore::load(store_path)?;
+        self.authorization_header_with(server_name, store_path, now, None)
+            .await
+    }
+
+    /// [`authorization_header`](Self::authorization_header) reading and writing
+    /// grants through `credentials` -- the OS credential store, when
+    /// `[security] credential_store = "keychain"` is set.
+    ///
+    /// `None` is the file backend. A refreshed token is written back through the
+    /// same backend it was read from, so a refresh in keychain mode does not
+    /// quietly land the new refresh token on disk.
+    pub async fn authorization_header_with(
+        &self,
+        server_name: &str,
+        store_path: &std::path::Path,
+        now: u64,
+        credentials: Option<&dyn leviath_core::CredentialStore>,
+    ) -> anyhow::Result<Option<(String, String)>> {
+        let mut store = AuthStore::load_with(store_path, credentials)?;
         let Some(auth) = store.get(server_name) else {
             return Ok(None);
         };
@@ -227,7 +245,7 @@ impl OAuthClient {
             })?;
             let access = refreshed.access_token.clone();
             store.set(server_name, refreshed);
-            store.save(store_path)?;
+            store.save_with(store_path, credentials)?;
             access
         } else {
             auth.access_token.clone()

@@ -8,7 +8,7 @@
 
 use crate::config::Config;
 use clap::{Args, Subcommand};
-use leviath_core::CredentialStoreKind;
+use leviath_core::{CredentialStore, CredentialStoreKind};
 
 #[derive(Debug, Args)]
 pub struct AuthArgs {
@@ -80,6 +80,8 @@ pub(crate) struct Status {
     pub unavailable: Option<String>,
     /// Providers whose key is set, from any source.
     pub providers: Vec<String>,
+    /// MCP servers with a stored OAuth grant.
+    pub mcp_servers: Vec<String>,
     /// Providers whose key is present in *both* the config file and the OS
     /// store. A duplicate is not an error, but it is worth saying: the file
     /// copy wins, so rotating the keychain entry would appear to do nothing.
@@ -135,11 +137,17 @@ pub(crate) fn status_with(
         .cloned()
         .collect();
 
+    // MCP grants live in their own store, keyed by server name. A load failure
+    // is reported as "none" rather than propagated: `lev auth status` is the
+    // command a user runs *because* something is wrong, so it has to answer.
+    let mcp_servers = mcp_server_names(leviath_mcp::AuthStore::default_path().as_deref(), None);
+
     Status {
         kind,
         supported,
         unavailable,
         providers,
+        mcp_servers,
         duplicated,
         config_path: path.display().to_string(),
     }
@@ -206,6 +214,13 @@ pub(crate) fn render_status(s: &Status) -> String {
         out.push_str("Provider keys configured:\n");
         for p in &s.providers {
             out.push_str(&format!("  - {p}\n"));
+        }
+    }
+
+    if !s.mcp_servers.is_empty() {
+        out.push_str("\nMCP servers logged in:\n");
+        for m in &s.mcp_servers {
+            out.push_str(&format!("  - {m}\n"));
         }
     }
 
@@ -303,7 +318,13 @@ pub(crate) fn plan_migration(config: &Config, to_file: bool) -> MigrationPlan {
 /// file before the keychain write succeeded would destroy the user's API keys.
 fn apply_migration(config: &Config, path: &std::path::Path, to_file: bool) -> anyhow::Result<()> {
     let resolved = crate::credentials::store_for(CredentialStoreKind::Keychain);
-    apply_migration_with(config, path, to_file, resolved)
+    apply_migration_with(
+        config,
+        path,
+        to_file,
+        resolved,
+        leviath_mcp::AuthStore::default_path().as_deref(),
+    )
 }
 
 /// Core of [`apply_migration`] with the keychain already resolved — see
@@ -313,6 +334,7 @@ fn apply_migration_with(
     path: &std::path::Path,
     to_file: bool,
     resolved: crate::credentials::Resolved,
+    mcp_path: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let secrets = config.provider_secrets();
 
@@ -331,6 +353,15 @@ fn apply_migration_with(
                 // reported by `lev auth status` as a duplicate.
                 if let Err(e) = store.delete(account) {
                     tracing::warn!("could not remove {account} from the keychain: {e}");
+                }
+            }
+            // The MCP grants move the same direction: out of the keychain and
+            // back into their own file.
+            let names = mcp_server_names(mcp_path, Some(store.as_ref()));
+            migrate_mcp_grants(mcp_path, Some(store.as_ref()), None)?;
+            for name in names {
+                if let Err(e) = store.delete(&leviath_core::mcp_account(&name)) {
+                    tracing::warn!("could not remove the grant for '{name}': {e}");
                 }
             }
         }
@@ -360,13 +391,58 @@ fn apply_migration_with(
     // Only now is it safe to drop the file copies.
     let mut stripped = config.clone();
     stripped.security.credential_store = CredentialStoreKind::Keychain;
-    stripped.save_to_path_public(path)
+    stripped.save_to_path_public(path)?;
+
+    migrate_mcp_grants(mcp_path, None, Some(store.as_ref()))
+}
+
+/// Rewrite the MCP auth store at `path`, moving its grants from `source` to
+/// `destination`.
+///
+/// `None` on either side means the file itself. The grants are read through
+/// whichever backend holds them today and written to the other, so this is the
+/// same operation in both directions.
+///
+/// A missing path or a store that was never created is not an error: a user who
+/// has never run `lev mcp login` has nothing to move.
+fn migrate_mcp_grants(
+    path: Option<&std::path::Path>,
+    source: Option<&dyn CredentialStore>,
+    destination: Option<&dyn CredentialStore>,
+) -> anyhow::Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    if !path.exists() {
+        return Ok(());
+    }
+    let store = leviath_mcp::AuthStore::load_with(path, source)?;
+    store.save_with(path, destination)
+}
+
+/// The MCP servers with a stored grant, read through `store`.
+fn mcp_server_names(
+    path: Option<&std::path::Path>,
+    store: Option<&dyn CredentialStore>,
+) -> Vec<String> {
+    path.and_then(|p| leviath_mcp::AuthStore::load_with(p, store).ok())
+        .map(|s| {
+            let mut names: Vec<String> = s
+                .server_names()
+                .into_iter()
+                .map(str::to_string)
+                .chain(s.keychain_server_names().iter().cloned())
+                .collect();
+            names.sort();
+            names.dedup();
+            names
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_core::CredentialStore;
 
     use crate::credentials::test_store;
 
@@ -445,7 +521,7 @@ mod tests {
         let before = std::fs::read_to_string(&path).unwrap();
         assert!(before.contains("sk-ant-secret"), "the file starts with it");
 
-        apply_migration_with(&config, &path, false, keychain()).unwrap();
+        apply_migration_with(&config, &path, false, keychain(), None).unwrap();
 
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -480,8 +556,8 @@ mod tests {
         let path = dir.path().join("config.toml");
 
         let config = config_with_keys(CredentialStoreKind::Keychain);
-        apply_migration_with(&config, &path, false, keychain()).unwrap();
-        apply_migration_with(&config, &path, true, keychain()).unwrap();
+        apply_migration_with(&config, &path, false, keychain(), None).unwrap();
+        apply_migration_with(&config, &path, true, keychain(), None).unwrap();
 
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(after.contains("sk-ant-secret"), "back in the file: {after}");
@@ -510,7 +586,7 @@ mod tests {
         let before = std::fs::read_to_string(&path).unwrap();
 
         assert!(
-            apply_migration_with(&config, &path, false, no_keychain()).is_err(),
+            apply_migration_with(&config, &path, false, no_keychain(), None).is_err(),
             "no store means no migration"
         );
         assert_eq!(
@@ -537,7 +613,7 @@ mod tests {
             set: accepts_write,
             delete: refuses_delete,
         };
-        let err = apply_migration_with(&config, &path, false, Ok(Some(Box::new(amnesiac))))
+        let err = apply_migration_with(&config, &path, false, Ok(Some(Box::new(amnesiac))), None)
             .expect_err("a store that does not persist must not be trusted");
         assert!(err.to_string().contains("did not read back"), "{err}");
         assert_eq!(
@@ -559,7 +635,7 @@ mod tests {
             set: refuses_write,
             delete: refuses_delete,
         };
-        let err = apply_migration_with(&config, &path, false, Ok(Some(Box::new(refuses))))
+        let err = apply_migration_with(&config, &path, false, Ok(Some(Box::new(refuses))), None)
             .expect_err("a refused write is not a migration");
         assert!(err.to_string().contains("failed to store"), "{err}");
     }
@@ -578,10 +654,68 @@ mod tests {
             set: accepts_write,
             delete: refuses_delete,
         };
-        apply_migration_with(&config, &path, true, Ok(Some(Box::new(undeletable))))
-            .expect("the keys are in the file; cleanup is best effort");
+        // A real MCP store too, so the grant cleanup runs and its failure is
+        // shown to be non-fatal as well.
+        let mcp = dir.path().join("mcp-auth.json");
+        write_mcp_store(&mcp, "github");
+
+        apply_migration_with(
+            &config,
+            &path,
+            true,
+            Ok(Some(Box::new(undeletable))),
+            Some(&mcp),
+        )
+        .expect("the keys are in the file; cleanup is best effort");
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(after.contains("sk-ant-secret"), "{after}");
+    }
+
+    /// The ordinary to-file path: both the provider keys and the MCP grants come
+    /// back, and the keychain entries are cleaned up without incident.
+    #[test]
+    fn migrating_to_the_file_also_brings_back_the_mcp_grants() {
+        use leviath_core::CredentialStore as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mcp = dir.path().join("mcp-auth.json");
+        let config = config_with_keys(CredentialStoreKind::Keychain);
+
+        // Put a grant in the store, and leave the file holding only the index.
+        let store = leviath_core::MemoryStore::new();
+        write_mcp_store(&mcp, "github");
+        migrate_mcp_grants(Some(&mcp), None, Some(&store)).unwrap();
+        assert!(!std::fs::read_to_string(&mcp).unwrap().contains("rt-SECRET"));
+        store
+            .set(
+                &leviath_core::provider_account("anthropic"),
+                "sk-ant-secret",
+            )
+            .unwrap();
+
+        apply_migration_with(&config, &path, true, Ok(Some(Box::new(store))), Some(&mcp)).unwrap();
+
+        assert!(
+            std::fs::read_to_string(&mcp).unwrap().contains("rt-SECRET"),
+            "the grant is back in its own file"
+        );
+    }
+
+    /// A corrupt MCP store must fail the migration rather than be reported as a
+    /// completed move that silently dropped every login.
+    #[test]
+    fn a_corrupt_mcp_store_fails_a_migration_to_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mcp = dir.path().join("mcp-auth.json");
+        std::fs::write(&mcp, "not json").unwrap();
+
+        let config = config_with_keys(CredentialStoreKind::Keychain);
+        let store = leviath_core::MemoryStore::new();
+        let err = apply_migration_with(&config, &path, true, Ok(Some(Box::new(store))), Some(&mcp))
+            .expect_err("a corrupt MCP store is not a successful migration");
+        assert!(!err.to_string().is_empty());
     }
 
     /// And a migration to the file still works when there is no keychain at all
@@ -591,12 +725,34 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let config = config_with_keys(CredentialStoreKind::Keychain);
-        apply_migration_with(&config, &path, true, no_keychain()).unwrap();
+        apply_migration_with(&config, &path, true, no_keychain(), None).unwrap();
         assert!(
             std::fs::read_to_string(&path)
                 .unwrap()
                 .contains("sk-ant-secret")
         );
+    }
+
+    /// The rewrite that completes a move into the keychain has to be able to
+    /// fail: the secrets are already in the store, but the config still names
+    /// them, and reporting success would be a lie.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_final_rewrite_fails_the_migration() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = with_mock_store();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = config_with_keys(CredentialStoreKind::File);
+        config.save_to_path_public(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+        let err = apply_migration_with(&config, &path, false, keychain(), None)
+            .expect_err("an unwritable config cannot complete the move");
+        assert!(!err.to_string().is_empty());
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
     /// `Ok(None)` -- the file backend where a keychain was expected -- is a
@@ -606,7 +762,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let config = config_with_keys(CredentialStoreKind::File);
-        let err = apply_migration_with(&config, &path, false, Ok(None))
+        let err = apply_migration_with(&config, &path, false, Ok(None), None)
             .expect_err("there is nowhere to migrate to");
         assert!(err.to_string().contains("no OS credential store"), "{err}");
     }
@@ -717,6 +873,7 @@ mod tests {
             supported: false,
             unavailable: None,
             providers: vec!["provider/anthropic".into()],
+            mcp_servers: Vec::new(),
             duplicated: Vec::new(),
             config_path: "/x/config.toml".into(),
         };
@@ -782,6 +939,97 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
+    /// Writing a grant into a temporary MCP auth store, so the migration
+    /// helpers have something to move.
+    fn write_mcp_store(path: &std::path::Path, server: &str) {
+        let mut store = leviath_mcp::AuthStore::default();
+        store.set(
+            server,
+            leviath_mcp::ServerAuth {
+                resource: "https://example.test/mcp".to_string(),
+                issuer: "https://example.test".to_string(),
+                authorization_endpoint: "https://example.test/authorize".to_string(),
+                token_endpoint: "https://example.test/token".to_string(),
+                client_id: "cid".to_string(),
+                access_token: "at-SECRET".to_string(),
+                refresh_token: Some("rt-SECRET".to_string()),
+                expires_at: 9_999_999_999,
+                scope: String::new(),
+            },
+        );
+        store.save(path).unwrap();
+    }
+
+    /// MCP OAuth grants move with the provider keys: tokens out of the file,
+    /// only the server name left behind as an index.
+    #[test]
+    fn mcp_grants_move_into_the_credential_store_and_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mcp = dir.path().join("mcp-auth.json");
+        write_mcp_store(&mcp, "github");
+        assert!(std::fs::read_to_string(&mcp).unwrap().contains("rt-SECRET"));
+
+        let store = leviath_core::MemoryStore::new();
+        migrate_mcp_grants(Some(&mcp), None, Some(&store)).unwrap();
+
+        let on_disk = std::fs::read_to_string(&mcp).unwrap();
+        assert!(!on_disk.contains("rt-SECRET"), "{on_disk}");
+        assert!(!on_disk.contains("at-SECRET"), "{on_disk}");
+        assert!(on_disk.contains("github"), "the index remains: {on_disk}");
+        assert_eq!(mcp_server_names(Some(&mcp), Some(&store)), ["github"]);
+
+        // ...and back again.
+        migrate_mcp_grants(Some(&mcp), Some(&store), None).unwrap();
+        let restored = std::fs::read_to_string(&mcp).unwrap();
+        assert!(restored.contains("rt-SECRET"), "{restored}");
+    }
+
+    /// Nothing to move is not an error -- a user who has never run
+    /// `lev mcp login` has no store, and no home is not a failure either.
+    #[test]
+    fn migrating_mcp_grants_is_a_no_op_when_there_is_nothing_to_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("mcp-auth.json");
+
+        migrate_mcp_grants(None, None, None).expect("no path, nothing to do");
+        migrate_mcp_grants(Some(&missing), None, None).expect("no file, nothing to do");
+        assert!(mcp_server_names(None, None).is_empty());
+        assert!(mcp_server_names(Some(&missing), None).is_empty());
+    }
+
+    /// A corrupt MCP store fails the migration rather than silently discarding
+    /// every stored grant.
+    #[test]
+    fn a_corrupt_mcp_store_fails_the_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let mcp = dir.path().join("mcp-auth.json");
+        std::fs::write(&mcp, "not json").unwrap();
+
+        assert!(migrate_mcp_grants(Some(&mcp), None, None).is_err());
+        // The reporting path is more forgiving: `lev auth status` is the command
+        // a user runs *because* something is wrong, so it answers with "none"
+        // rather than refusing to run.
+        assert!(mcp_server_names(Some(&mcp), None).is_empty());
+    }
+
+    /// The status report lists logged-in MCP servers.
+    #[test]
+    fn status_lists_mcp_servers() {
+        let s = Status {
+            kind: CredentialStoreKind::Keychain,
+            supported: true,
+            unavailable: None,
+            providers: vec!["provider/anthropic".into()],
+            mcp_servers: vec!["github".into(), "linear".into()],
+            duplicated: Vec::new(),
+            config_path: "/x/config.toml".into(),
+        };
+        let rendered = render_status(&s);
+        assert!(rendered.contains("MCP servers logged in"), "{rendered}");
+        assert!(rendered.contains("- github"), "{rendered}");
+        assert!(rendered.contains("- linear"), "{rendered}");
+    }
+
     /// A config file that cannot be parsed must fail the command rather than
     /// being treated as an empty install -- both entry points read it.
     #[test]
@@ -818,7 +1066,9 @@ mod tests {
             set: refuses_write,
             delete: refuses_delete,
         };
-        assert!(apply_migration_with(&config, &path, false, Ok(Some(Box::new(refuses)))).is_err());
+        assert!(
+            apply_migration_with(&config, &path, false, Ok(Some(Box::new(refuses))), None).is_err()
+        );
     }
 
     /// The `to_file` direction writes the config first; an unwritable path has
@@ -833,7 +1083,7 @@ mod tests {
 
         let config = config_with_keys(CredentialStoreKind::Keychain);
         assert!(
-            apply_migration_with(&config, &path, true, no_keychain()).is_err(),
+            apply_migration_with(&config, &path, true, no_keychain(), None).is_err(),
             "an unwritable destination is not a migration"
         );
     }

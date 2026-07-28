@@ -82,10 +82,22 @@ impl ServerAuth {
 }
 
 /// The whole store: one [`ServerAuth`] per configured server name.
+///
+/// With `[security] credential_store = "keychain"` the grants themselves live
+/// in the OS credential store and the file keeps only their *names*, in
+/// [`keychain_server_names`](Self::keychain_server_names). The names have to stay on disk
+/// because the OS stores offer no portable "list everything under this service"
+/// operation, and without them a `lev mcp list` could not report what is logged
+/// in. A server name is not a secret; the access and refresh tokens are, and
+/// those are what move.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AuthStore {
     #[serde(default)]
     servers: HashMap<String, ServerAuth>,
+
+    /// Servers whose grant is held in the OS credential store rather than here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    keychain_servers: Vec<String>,
 }
 
 impl AuthStore {
@@ -95,19 +107,99 @@ impl AuthStore {
     /// unreadable or corrupt file is an error, because silently starting empty
     /// would drop working credentials.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
+        Self::load_with(path, None)
+    }
+
+    /// [`load`](Self::load), pulling any keychain-held grants out of `store`.
+    ///
+    /// `None` is the file backend, and is exactly [`load`](Self::load).
+    ///
+    /// A grant the credential store cannot return is dropped rather than failing
+    /// the load: the user is then simply logged out of that one server and
+    /// `lev mcp login` fixes it, whereas refusing to load would take down every
+    /// other server's tools too.
+    pub fn load_with(
+        path: &Path,
+        store: Option<&dyn leviath_core::CredentialStore>,
+    ) -> anyhow::Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
         }
         let content = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("Failed to read MCP auth store: {}", e))?;
-        serde_json::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("MCP auth store is corrupt: {}", e))
+        let mut this: Self = serde_json::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("MCP auth store is corrupt: {}", e))?;
+
+        if let Some(store) = store {
+            // Over the *names*, looking each up in turn: mapping names to
+            // accounts and back again would leave an "account without the
+            // expected prefix" arm that this code can never produce.
+            for name in this.keychain_servers.clone() {
+                let Ok(Some(json)) = store.get(&leviath_core::mcp_account(&name)) else {
+                    tracing::warn!(
+                        "no stored credential for MCP server '{name}'; \
+                         run `lev mcp login {name}` to re-authenticate"
+                    );
+                    continue;
+                };
+                match serde_json::from_str::<ServerAuth>(&json) {
+                    Ok(auth) => {
+                        this.servers.insert(name.clone(), auth);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "stored credential for MCP server '{name}' is unreadable ({e}); \
+                             run `lev mcp login {name}` to re-authenticate"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(this)
     }
 
     /// Write the store to `path` with owner-only permissions.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
+        self.save_with(path, None)
+    }
+
+    /// [`save`](Self::save), putting the grants in `store` instead of the file.
+    ///
+    /// The destination is written before the file that indexes it, and a store
+    /// that refuses the write fails the whole save: quietly falling back to
+    /// writing tokens into the file would leave a user who asked for the
+    /// keychain with plaintext refresh tokens on disk and no sign of it.
+    pub fn save_with(
+        &self,
+        path: &Path,
+        store: Option<&dyn leviath_core::CredentialStore>,
+    ) -> anyhow::Result<()> {
         create_parent_dir(path)?;
-        let content = serde_json::to_string_pretty(self).expect("AuthStore is always serializable");
+
+        let to_write = match store {
+            None => self.clone(),
+            Some(store) => {
+                let mut names: Vec<String> = Vec::new();
+                for (name, auth) in &self.servers {
+                    let json =
+                        serde_json::to_string(auth).expect("ServerAuth is always serializable");
+                    store
+                        .set(&leviath_core::mcp_account(name), &json)
+                        .map_err(|e| {
+                            anyhow::anyhow!("failed to store credentials for '{name}': {e}")
+                        })?;
+                    names.push(name.clone());
+                }
+                names.sort();
+                Self {
+                    servers: HashMap::new(),
+                    keychain_servers: names,
+                }
+            }
+        };
+
+        let content =
+            serde_json::to_string_pretty(&to_write).expect("AuthStore is always serializable");
         // `write_private`, not `fs::write` + `chmod`. The two-step version left
         // this file — access *and refresh* tokens for every MCP server — at the
         // umask default (typically 0644) between the write and the mode change,
@@ -139,8 +231,21 @@ impl AuthStore {
     }
 
     /// Remove a server's auth, returning whether anything was removed.
+    ///
+    /// Also drops it from the keychain index, so a later `save_with` does not
+    /// re-list a server whose grant is gone.
     pub fn remove(&mut self, server: &str) -> bool {
-        self.servers.remove(server).is_some()
+        let indexed = self.keychain_servers.iter().any(|s| s == server);
+        self.keychain_servers.retain(|s| s != server);
+        self.servers.remove(server).is_some() || indexed
+    }
+
+    /// Servers whose grant is held in the OS credential store.
+    ///
+    /// What `lev auth migrate --to-file` needs in order to know which accounts
+    /// to clear once the tokens are back in the file.
+    pub fn keychain_server_names(&self) -> &[String] {
+        &self.keychain_servers
     }
 
     /// Names of every server with stored auth.
@@ -176,6 +281,175 @@ fn leviath_home() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+
+    /// With a credential store the tokens leave the file entirely: only the
+    /// server *names* stay, because the OS stores cannot be enumerated and
+    /// `lev mcp list` still has to be able to say what is logged in.
+    #[test]
+    fn keychain_mode_keeps_the_tokens_out_of_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp-auth.json");
+        let credentials = leviath_core::MemoryStore::new();
+
+        let mut store = AuthStore::default();
+        store.set(
+            "github",
+            ServerAuth {
+                resource: "https://example.test/mcp".to_string(),
+                issuer: "https://example.test".to_string(),
+                authorization_endpoint: "https://example.test/authorize".to_string(),
+                token_endpoint: "https://example.test/token".to_string(),
+                client_id: "cid".to_string(),
+                access_token: "at-SECRET".to_string(),
+                refresh_token: Some("rt-SECRET".to_string()),
+                expires_at: 9_999_999_999,
+                scope: String::new(),
+            },
+        );
+        store.save_with(&path, Some(&credentials)).unwrap();
+
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(!on_disk.contains("at-SECRET"), "{on_disk}");
+        assert!(!on_disk.contains("rt-SECRET"), "{on_disk}");
+        assert!(
+            on_disk.contains("github"),
+            "the name is the index: {on_disk}"
+        );
+
+        // And it comes back through the same store.
+        let loaded = AuthStore::load_with(&path, Some(&credentials)).unwrap();
+        let auth = loaded.get("github").expect("the grant is restored");
+        assert_eq!(auth.access_token, "at-SECRET");
+        assert_eq!(auth.refresh_token.as_deref(), Some("rt-SECRET"));
+        assert_eq!(loaded.keychain_server_names(), ["github"]);
+
+        // Without the store, the tokens are simply absent -- not fabricated.
+        let blind = AuthStore::load_with(&path, None).unwrap();
+        assert!(blind.get("github").is_none());
+    }
+
+    /// A grant the store cannot return leaves the user logged out of that one
+    /// server rather than failing the whole load and taking every other
+    /// server's tools with it.
+    #[test]
+    fn an_unreadable_stored_grant_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp-auth.json");
+        std::fs::write(&path, r#"{"servers":{},"keychain_servers":["github"]}"#).unwrap();
+
+        let credentials = leviath_core::MemoryStore::new();
+        leviath_core::CredentialStore::set(
+            &credentials,
+            &leviath_core::mcp_account("github"),
+            "not json at all",
+        )
+        .unwrap();
+
+        let loaded = AuthStore::load_with(&path, Some(&credentials)).unwrap();
+        assert!(loaded.get("github").is_none(), "skipped, not fabricated");
+    }
+
+    /// A server listed in the index whose credential is no longer in the store
+    /// leaves the user logged out of that one server -- not with a fabricated
+    /// empty grant, and not with the whole load failing.
+    #[test]
+    fn an_indexed_server_with_no_stored_credential_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp-auth.json");
+        std::fs::write(
+            &path,
+            r#"{"servers":{},"keychain_servers":["github","linear"]}"#,
+        )
+        .unwrap();
+
+        let credentials = leviath_core::MemoryStore::new();
+        // Only one of the two is actually present.
+        let auth = ServerAuth {
+            resource: "https://example.test/mcp".to_string(),
+            issuer: "https://example.test".to_string(),
+            authorization_endpoint: "https://example.test/authorize".to_string(),
+            token_endpoint: "https://example.test/token".to_string(),
+            client_id: "cid".to_string(),
+            access_token: "at".to_string(),
+            refresh_token: None,
+            expires_at: 0,
+            scope: String::new(),
+        };
+        leviath_core::CredentialStore::set(
+            &credentials,
+            &leviath_core::mcp_account("linear"),
+            &serde_json::to_string(&auth).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = AuthStore::load_with(&path, Some(&credentials)).unwrap();
+        assert!(loaded.get("github").is_none(), "absent, not fabricated");
+        assert!(loaded.get("linear").is_some(), "and the other still loads");
+    }
+
+    /// A store that refuses the write fails the save outright: quietly writing
+    /// the tokens into the file instead would leave a user who asked for the
+    /// keychain with plaintext refresh tokens on disk.
+    #[test]
+    fn a_store_that_refuses_the_write_fails_the_save() {
+        struct Refuses;
+        impl leviath_core::CredentialStore for Refuses {
+            fn get(&self, _: &str) -> Result<Option<String>, String> {
+                Ok(None)
+            }
+            fn set(&self, _: &str, _: &str) -> Result<(), String> {
+                Err("read-only".to_string())
+            }
+            fn delete(&self, _: &str) -> Result<bool, String> {
+                Err("read-only".to_string())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp-auth.json");
+        let mut store = AuthStore::default();
+        store.set(
+            "github",
+            ServerAuth {
+                resource: "https://example.test/mcp".to_string(),
+                issuer: "https://example.test".to_string(),
+                authorization_endpoint: "https://example.test/authorize".to_string(),
+                token_endpoint: "https://example.test/token".to_string(),
+                client_id: "c".to_string(),
+                access_token: "at".to_string(),
+                refresh_token: None,
+                expires_at: 0,
+                scope: String::new(),
+            },
+        );
+
+        let err = store
+            .save_with(&path, Some(&Refuses))
+            .expect_err("a refused write is not a save");
+        assert!(err.to_string().contains("failed to store"), "{err}");
+        // The rest of the trait, which `save_with` itself never needs.
+        use leviath_core::CredentialStore;
+        assert_eq!(CredentialStore::get(&Refuses, "x").unwrap(), None);
+        assert!(CredentialStore::delete(&Refuses, "x").is_err());
+    }
+
+    /// `remove` clears the keychain index too, so a later save does not re-list
+    /// a server whose grant is gone.
+    #[test]
+    fn remove_clears_the_keychain_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp-auth.json");
+        std::fs::write(&path, r#"{"servers":{},"keychain_servers":["github"]}"#).unwrap();
+
+        let mut store = AuthStore::load_with(&path, None).unwrap();
+        assert_eq!(store.keychain_server_names(), ["github"]);
+        assert!(
+            store.remove("github"),
+            "an indexed server counts as present"
+        );
+        assert!(store.keychain_server_names().is_empty());
+        assert!(!store.remove("github"), "and is gone the second time");
+    }
     use super::*;
 
     fn sample() -> ServerAuth {
