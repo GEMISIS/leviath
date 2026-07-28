@@ -104,7 +104,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: stable
-      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2
+      - uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2
         with:
           tool: cargo-deny
       - name: Check advisories, licenses, bans and sources
@@ -175,7 +175,7 @@ jobs:
           components: llvm-tools
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2
         with:
           tool: cargo-llvm-cov
       # Gates this one package at a hard 100% (regions/lines/functions) via
@@ -251,7 +251,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install ast-grep
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2
         with:
           tool: ast-grep
       - name: Scan for coverage suppression markers
