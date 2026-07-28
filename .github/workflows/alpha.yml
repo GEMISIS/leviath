@@ -24,11 +24,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Build
         run: cargo build --all-targets
       - name: Test
@@ -65,11 +65,11 @@ jobs:
             artifact: leviath-windows-x64
             ext: zip
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: release-${{ matrix.target }}
       # aarch64-linux is cross-compiled from the x64 runner (hosted ARM
@@ -99,7 +99,7 @@ jobs:
             cd staging && tar czf ../${{ matrix.artifact }}.tar.gz lev
           fi
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.artifact }}.${{ matrix.ext }}
           path: ${{ matrix.artifact }}.${{ matrix.ext }}
@@ -110,8 +110,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Required by `actions/attest-build-provenance`, which mints a signed,
+      # publicly verifiable statement of *what built these binaries, from which
+      # commit, with which workflow*. Without it a release asset is a file
+      # somebody uploaded; with it, `gh attestation verify` proves provenance.
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Get commit info
         id: info
@@ -121,7 +127,7 @@ jobs:
           echo "sha_full=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts/
 
@@ -144,10 +150,24 @@ jobs:
       - name: Reset alpha channel release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release delete alpha --yes --cleanup-tag --repo ${{ github.repository }} || true
+          REPO: ${{ github.repository }}
+        run: gh release delete alpha --yes --cleanup-tag --repo "$REPO" || true
+
+      # Sign a provenance statement for every shipped binary before publishing.
+      # Checksums alone only detect transport corruption: anyone who can write a
+      # release can rewrite both the binary and its SHA256SUMS. An attestation is
+      # signed by GitHub's OIDC identity for this workflow, so it cannot be
+      # forged by someone who merely holds a repo token.
+      #
+      # Users verify with:
+      #   gh attestation verify <file> --repo Sun-Forge-AI/leviath
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: "release/*"
 
       - name: Publish alpha release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           tag_name: alpha
           target_commitish: ${{ steps.info.outputs.sha_full }}

