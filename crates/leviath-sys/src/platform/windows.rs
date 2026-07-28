@@ -239,6 +239,41 @@ mod tests {
         }
     }
 
+    /// With no account to grant, restricting must fail rather than quietly
+    /// leaving the file as it was — the whole point is not to believe a secret
+    /// is protected when it is not.
+    #[test]
+    fn restricting_fails_when_there_is_no_account_to_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret");
+        std::fs::write(&path, b"x").unwrap();
+
+        temp_env::with_var_unset("USERNAME", || {
+            assert!(restrict_to_owner(&path).is_err(), "no USERNAME, no grant");
+            // And it propagates through the public entry points rather than
+            // being swallowed by either.
+            assert!(ensure_private(&path, 0o600).is_err());
+            assert!(write_with_mode(&path, b"x", 0o600).is_err());
+        });
+    }
+
+    /// A missing `icacls` is reported too. Spawning is the one step that can
+    /// fail before the tool ever runs, and treating it as success would mean
+    /// silently skipping the hardening.
+    #[test]
+    fn a_missing_icacls_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret");
+        std::fs::write(&path, b"x").unwrap();
+
+        temp_env::with_var("SystemRoot", Some(r"C:\definitely-not-windows"), || {
+            assert!(
+                restrict_to_owner(&path).is_err(),
+                "a system root with no icacls.exe is an error"
+            );
+        });
+    }
+
     #[test]
     fn write_with_mode_writes_and_restricts() {
         let dir = tempfile::tempdir().unwrap();

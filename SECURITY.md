@@ -31,19 +31,26 @@ a vulnerability:
 
 - **A malicious or compromised agent package.** An `agent.leviath` you installed
   can only *tighten* what your `~/.leviath/config.toml` allows, never loosen it.
-  It cannot grant itself tools you denied, turn off a sandbox you enabled, or
-  disable taint tracking. `lev add` prints what a package asks for before you
-  run it.
+  It cannot grant itself tools you denied, disable taint tracking, or weaken a
+  sandbox you configured — not by turning it off, and not by widening it: it
+  cannot add a bind-mount you did not grant, re-enable a network you isolated,
+  or replace the engine binary. `lev add` prints what a package asks for before
+  you run it.
 - **Prompt injection reaching an agent's tools.** A model told by a fetched web
   page to exfiltrate your keys should fail. Script tools cannot read
   credential-shaped environment variables without an explicit allowlist entry,
   and outbound fetches cannot reach loopback, private, or link-local addresses —
   including cloud metadata endpoints — without `[security]
-  allow_local_network`.
+  allow_local_network`. The same address check covers every URL Leviath is
+  *given* rather than chooses, including a completion webhook posted through
+  `lev serve`.
 - **A hostile MCP server.** OAuth discovery is bound to the server's own origin,
   the issuer is cross-checked per RFC 8414 §3.3, and the whole chain requires
   HTTPS off loopback. A server cannot redirect your browser or your token
-  somewhere else.
+  somewhere else, and redirects are capped so it cannot chain the daemon around
+  your network. A server entry's `${VAR}` headers follow the same
+  credential-name allowlist as script tools, so one cannot be written to post
+  your API keys to a URL of its own choosing.
 - **Another local user.** Every control-channel caller must quote a token the
   daemon mints at startup into its own owner-only directory, so a connection
   that cannot read your files cannot drive your agents. On Unix the socket is
@@ -56,7 +63,13 @@ a vulnerability:
   your `~/.ssh`.
 - **The supply chain.** `Cargo.lock` is committed, `cargo-deny` gates advisories
   and licences on every PR, all GitHub Actions are SHA-pinned, and release
-  binaries carry signed build provenance.
+  binaries carry signed build provenance. Every install path — the shell
+  installer, the PowerShell installer, the Homebrew formulae and the Scoop
+  manifest — verifies the download against the release's `SHA256SUMS` and
+  refuses to install on a mismatch. That catches a corrupted download, a swapped
+  asset, or a mirror serving something else; it is not a substitute for
+  verifying the provenance attestation, which is the stronger check and is
+  tracked separately.
 
 **Where the boundary is.** Not gaps we haven't got to — these are the edges of
 what a tool like this can be responsible for, and it is worth being explicit
@@ -173,11 +186,20 @@ kind = "container"            # a manifest cannot turn this off
 
 ## Verifying a release
 
+The installers do the checksum half for you — `install.sh`, `install.ps1`, the
+Homebrew formulae and the Scoop manifest all verify against the release's
+`SHA256SUMS` and refuse to install on a mismatch. To check by hand, or to verify
+the attestation as well:
+
 ```bash
-gh attestation verify lev-x86_64-unknown-linux-gnu.tar.gz --repo Sun-Forge-AI/leviath
+# Asset names are `leviath-<platform>-<arch>.<ext>`, e.g.:
+gh attestation verify leviath-linux-x64.tar.gz --repo Sun-Forge-AI/leviath
 sha256sum -c SHA256SUMS
 ```
 
-The attestation is the stronger check: anyone who can write a release can
-rewrite both a binary and its checksum, but the attestation is signed by
-GitHub's OIDC identity for the build workflow.
+The attestation is the stronger check, and the reason the checksum alone is not
+enough: anyone who can write a release can rewrite both a binary *and* its
+checksum, but the attestation is signed by GitHub's OIDC identity for the build
+workflow and cannot be forged from inside the release. The installers do not
+verify it yet — attestations are public infrastructure and this repository is
+private, so `gh attestation verify` is a manual step until that changes.
