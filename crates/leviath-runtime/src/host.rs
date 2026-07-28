@@ -165,7 +165,7 @@ pub enum SubAgentOp {
         /// The target run.
         run_id: String,
         /// The run doing the sending. The target must be it or one of its
-        /// descendants — see [`AgentHost::is_within_tree`].
+        /// descendants — see `WorldHost::is_within_tree`.
         caller_run_id: String,
         /// The message body.
         content: String,
@@ -177,7 +177,7 @@ pub enum SubAgentOp {
         /// The run to cancel (with its descendants).
         run_id: String,
         /// The run doing the cancelling. The target must be it or one of its
-        /// descendants — see [`AgentHost::is_within_tree`].
+        /// descendants — see `WorldHost::is_within_tree`.
         caller_run_id: String,
         /// Reply: whether anything was cancelled.
         reply: oneshot::Sender<bool>,
