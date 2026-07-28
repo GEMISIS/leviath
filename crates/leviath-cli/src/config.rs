@@ -265,6 +265,32 @@ pub struct SecurityConfig {
     /// read as a variable literally named `*`, not as "allow everything".
     #[serde(default)]
     pub allow_env_vars: Vec<String>,
+
+    /// Where provider API keys and MCP OAuth tokens are kept.
+    ///
+    /// **`file` by default** — `~/.leviath/config.toml` and
+    /// `~/.leviath/mcp-auth.json`, both created `0600` so they are never even
+    /// briefly world-readable. This is what Claude Code and Codex do, and it is
+    /// the only backend that works headless, in a container, over SSH, and on a
+    /// CI runner.
+    ///
+    /// Set it to `keychain` to move secrets into the OS credential store (macOS
+    /// Keychain, Windows Credential Manager, Secret Service elsewhere), so a
+    /// stolen `~/.leviath` directory yields nothing:
+    ///
+    /// ```toml
+    /// [security]
+    /// credential_store = "keychain"
+    /// ```
+    ///
+    /// Then run `lev auth migrate` to move the secrets you already have. It is
+    /// opt-in rather than the default because an unavailable keychain is not a
+    /// degraded experience but a broken one — every inference fails at once —
+    /// and the environments Leviath is most useful in are the least likely to
+    /// have a working credential store. `lev auth status` reports whether this
+    /// machine actually has one.
+    #[serde(default)]
+    pub credential_store: leviath_core::CredentialStoreKind,
 }
 
 impl Default for SecurityConfig {
@@ -273,6 +299,7 @@ impl Default for SecurityConfig {
             allow_seed_commands: true,
             allow_local_network: false,
             allow_env_vars: Vec::new(),
+            credential_store: leviath_core::CredentialStoreKind::File,
         }
     }
 }
@@ -636,7 +663,94 @@ impl Config {
             config.ollama_base_url = std::env::var("OLLAMA_HOST").ok();
         }
 
+        config.fill_from_credential_store();
+
         Ok(config)
+    }
+
+    /// Fill any provider key still unset from the configured credential store.
+    fn fill_from_credential_store(&mut self) {
+        let resolved = crate::credentials::store_for(self.security.credential_store);
+        self.fill_from_credential_store_with(resolved);
+    }
+
+    /// Core of [`fill_from_credential_store`](Self::fill_from_credential_store)
+    /// with the backend already resolved.
+    ///
+    /// Runs *after* the file and the environment, so precedence is file > env >
+    /// keychain: what the user can see wins over what they cannot. In keychain
+    /// mode `lev auth migrate` strips the keys out of the file, so in practice
+    /// the keychain is the only source — but a key left behind by hand keeps
+    /// working rather than being silently ignored, and `lev auth status` reports
+    /// when a secret exists in both places.
+    ///
+    /// A store that cannot be opened is a warning, not a hard failure. The user
+    /// may still have working keys in their environment, and refusing to load
+    /// the config at all would take down `lev auth status` — the one command
+    /// that can explain what is wrong. The resolution is the caller's so that
+    /// path is testable: "no store is installed in this process" is not the same
+    /// as "this machine has no keychain", and on a developer's Mac the first
+    /// silently becomes the second.
+    fn fill_from_credential_store_with(&mut self, resolved: crate::credentials::Resolved) {
+        match resolved {
+            Ok(Some(store)) => self.apply_credential_store(store.as_ref()),
+            // The file backend keeps its keys in this struct already.
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!("{e}. Falling back to keys from the config file and environment.");
+            }
+        }
+    }
+
+    /// Overlay `store`'s secrets onto whichever provider keys are still unset.
+    fn apply_credential_store(&mut self, store: &dyn leviath_core::CredentialStore) {
+        let accounts: Vec<String> = crate::credentials::PROVIDER_KEYS
+            .iter()
+            .map(|p| leviath_core::provider_account(p))
+            .collect();
+        let mut found = store.read_all(&accounts);
+        let mut take = |provider: &str| found.remove(&leviath_core::provider_account(provider));
+
+        let anthropic = take("anthropic");
+        let openai = take("openai");
+        let google = take("google");
+        let openrouter = take("openrouter");
+
+        self.providers.anthropic_api_key = self.providers.anthropic_api_key.take().or(anthropic);
+        self.providers.openai_api_key = self.providers.openai_api_key.take().or(openai);
+        self.providers.google_api_key = self.providers.google_api_key.take().or(google);
+        self.openrouter_api_key = self.openrouter_api_key.take().or(openrouter);
+    }
+
+    /// This config with every provider API key removed.
+    ///
+    /// What gets serialized in keychain mode: the secrets go to the OS store and
+    /// the file keeps only the settings. Returning a stripped copy rather than
+    /// mutating in place matters — the caller is usually saving a config it is
+    /// still going to use for inference, and blanking its keys would break the
+    /// run that triggered the save.
+    fn without_secrets(&self) -> Self {
+        let mut copy = self.clone();
+        copy.providers.anthropic_api_key = None;
+        copy.providers.openai_api_key = None;
+        copy.providers.google_api_key = None;
+        copy.openrouter_api_key = None;
+        copy
+    }
+
+    /// Every provider key currently set, as `(account, secret)` pairs.
+    pub(crate) fn provider_secrets(&self) -> Vec<(String, String)> {
+        [
+            ("anthropic", self.providers.anthropic_api_key.as_deref()),
+            ("openai", self.providers.openai_api_key.as_deref()),
+            ("google", self.providers.google_api_key.as_deref()),
+            ("openrouter", self.openrouter_api_key.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(name, key)| {
+            key.map(|k| (leviath_core::provider_account(name), k.to_string()))
+        })
+        .collect()
     }
 
     /// Save configuration to a path, parameterized so it can be exercised in
@@ -649,8 +763,41 @@ impl Config {
             create_config_dir(parent)?;
         }
 
+        // In keychain mode the secrets belong in the OS store, and the file
+        // keeps only the settings -- otherwise `lev setup` would helpfully write
+        // every key back into `config.toml` and quietly undo the migration.
+        //
+        // A store that cannot be written is *not* silently downgraded to writing
+        // the keys into the file: a user who asked for the keychain would end up
+        // with plaintext keys on disk and no indication of it.
+        let resolved = crate::credentials::store_for(self.security.credential_store);
+        self.write_to(path, resolved)
+    }
+
+    /// Core of [`save_to_path`](Self::save_to_path) with the backend already
+    /// resolved -- see
+    /// [`fill_from_credential_store_with`](Self::fill_from_credential_store_with)
+    /// for why the resolution is the caller's.
+    fn write_to(
+        &self,
+        path: &std::path::Path,
+        resolved: crate::credentials::Resolved,
+    ) -> anyhow::Result<()> {
+        let to_write = match resolved.map_err(|e| anyhow::anyhow!("{e}"))? {
+            Some(store) => {
+                for (account, secret) in self.provider_secrets() {
+                    store
+                        .set(&account, &secret)
+                        .map_err(|e| anyhow::anyhow!("failed to store {account}: {e}"))?;
+                }
+                self.without_secrets()
+            }
+            None => self.clone(),
+        };
+
         // Config contains only primitive-typed fields; toml serialization is infallible.
-        let content = toml::to_string_pretty(self).expect("Config serialization is infallible");
+        let content =
+            toml::to_string_pretty(&to_write).expect("Config serialization is infallible");
 
         // `write_private`, not `fs::write` + `chmod`. This file holds every
         // provider API key, and the two-step version left it at the umask
@@ -948,6 +1095,242 @@ where
 
 #[cfg(test)]
 mod tests {
+    /// Saving with a keychain that cannot be reached must fail rather than
+    /// quietly writing the keys into the file. A user who asked for the keychain
+    /// would otherwise end up with plaintext keys on disk and no sign of it.
+    #[test]
+    fn saving_with_an_unreachable_keychain_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = Config::default();
+        config.security.credential_store = leviath_core::CredentialStoreKind::Keychain;
+        config.providers.anthropic_api_key = Some("sk-ant".to_string());
+
+        assert!(
+            config
+                .write_to(&path, Err("no keychain".to_string()))
+                .is_err()
+        );
+        assert!(!path.exists(), "no file may be written at all");
+    }
+
+    /// The same for a store that is reachable but refuses the write.
+    #[test]
+    fn saving_to_a_store_that_refuses_the_write_writes_nothing() {
+        use leviath_core::CredentialStore as _;
+
+        struct Refuses;
+        impl leviath_core::CredentialStore for Refuses {
+            fn get(&self, _: &str) -> Result<Option<String>, String> {
+                Ok(None)
+            }
+            fn set(&self, _: &str, _: &str) -> Result<(), String> {
+                Err("read-only keychain".to_string())
+            }
+            fn delete(&self, _: &str) -> Result<bool, String> {
+                Err("read-only keychain".to_string())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = Config::default();
+        config.security.credential_store = leviath_core::CredentialStoreKind::Keychain;
+        config.providers.anthropic_api_key = Some("sk-ant".to_string());
+
+        // The other two answers are part of the contract even though `write_to`
+        // only needs `set`; a store impl has to answer all three.
+        assert_eq!(Refuses.get("provider/anthropic").unwrap(), None);
+        assert!(Refuses.delete("provider/anthropic").is_err());
+
+        let err = config
+            .write_to(&path, Ok(Some(Box::new(Refuses))))
+            .expect_err("a refused write is not a save");
+        assert!(err.to_string().contains("failed to store"), "{err}");
+        assert!(!path.exists(), "no file may be written at all");
+    }
+
+    /// And the successful keychain path: the secrets go to the store and the
+    /// file keeps only the settings.
+    #[test]
+    fn saving_in_keychain_mode_puts_the_secrets_in_the_store_not_the_file() {
+        use leviath_core::CredentialStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = Config::default();
+        config.security.credential_store = leviath_core::CredentialStoreKind::Keychain;
+        config.providers.anthropic_api_key = Some("sk-ant-secret".to_string());
+        config.default_model = Some("some-model".to_string());
+
+        let store = std::sync::Arc::new(leviath_core::MemoryStore::new());
+        struct Shared(std::sync::Arc<leviath_core::MemoryStore>);
+        impl CredentialStore for Shared {
+            fn get(&self, a: &str) -> Result<Option<String>, String> {
+                self.0.get(a)
+            }
+            fn set(&self, a: &str, s: &str) -> Result<(), String> {
+                self.0.set(a, s)
+            }
+            fn delete(&self, a: &str) -> Result<bool, String> {
+                self.0.delete(a)
+            }
+        }
+
+        config
+            .write_to(&path, Ok(Some(Box::new(Shared(store.clone())))))
+            .unwrap();
+
+        // `delete` completes the trait; `write_to` itself never needs it.
+        assert!(
+            Shared(store.clone())
+                .delete(&leviath_core::provider_account("anthropic"))
+                .unwrap()
+        );
+        store
+            .set(
+                &leviath_core::provider_account("anthropic"),
+                "sk-ant-secret",
+            )
+            .unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(!written.contains("sk-ant-secret"), "{written}");
+        assert!(
+            written.contains("some-model"),
+            "settings survive: {written}"
+        );
+        // Read back through the same wrapper `write_to` was handed, so all
+        // three of its methods are exercised.
+        assert_eq!(
+            Shared(store.clone())
+                .get(&leviath_core::provider_account("anthropic"))
+                .unwrap()
+                .as_deref(),
+            Some("sk-ant-secret")
+        );
+    }
+
+    /// The keychain fills only what the file and the environment left unset --
+    /// what the user can see wins over what they cannot.
+    #[test]
+    fn the_credential_store_fills_only_the_keys_that_are_unset() {
+        use leviath_core::{CredentialStore, MemoryStore};
+
+        let store = MemoryStore::new();
+        store
+            .set(
+                &leviath_core::provider_account("anthropic"),
+                "from-keychain",
+            )
+            .unwrap();
+        store
+            .set(&leviath_core::provider_account("openai"), "openai-keychain")
+            .unwrap();
+        store
+            .set(&leviath_core::provider_account("google"), "google-keychain")
+            .unwrap();
+        store
+            .set(&leviath_core::provider_account("openrouter"), "or-keychain")
+            .unwrap();
+
+        let mut config = Config::default();
+        // Already set from the file: the keychain must not overwrite it.
+        config.providers.anthropic_api_key = Some("from-file".to_string());
+        config.apply_credential_store(&store);
+
+        assert_eq!(
+            config.providers.anthropic_api_key.as_deref(),
+            Some("from-file"),
+            "an existing key wins over the keychain"
+        );
+        assert_eq!(
+            config.providers.openai_api_key.as_deref(),
+            Some("openai-keychain")
+        );
+        assert_eq!(
+            config.providers.google_api_key.as_deref(),
+            Some("google-keychain")
+        );
+        assert_eq!(config.openrouter_api_key.as_deref(), Some("or-keychain"));
+    }
+
+    /// An empty store leaves everything alone rather than blanking keys.
+    #[test]
+    fn an_empty_credential_store_changes_nothing() {
+        let mut config = Config::default();
+        config.providers.openai_api_key = Some("keep-me".to_string());
+        config.apply_credential_store(&leviath_core::MemoryStore::new());
+        assert_eq!(config.providers.openai_api_key.as_deref(), Some("keep-me"));
+        assert!(config.providers.anthropic_api_key.is_none());
+    }
+
+    /// The three resolutions the loader can get back. A keychain that was asked
+    /// for but is unreachable must warn and carry on -- refusing to load the
+    /// config would take down `lev auth status`, the one command that can
+    /// explain the problem.
+    #[test]
+    fn an_unreachable_credential_store_does_not_stop_the_config_loading() {
+        use leviath_core::{CredentialStore, MemoryStore};
+
+        let mut config = Config::default();
+        config.fill_from_credential_store_with(Err("no keychain here".to_string()));
+        assert!(config.providers.anthropic_api_key.is_none());
+
+        // The file backend: nothing to overlay.
+        let mut config = Config::default();
+        config.providers.openai_api_key = Some("k".to_string());
+        config.fill_from_credential_store_with(Ok(None));
+        assert_eq!(config.providers.openai_api_key.as_deref(), Some("k"));
+
+        // A working store fills the gap.
+        let store = MemoryStore::new();
+        store
+            .set(&leviath_core::provider_account("anthropic"), "filled")
+            .unwrap();
+        let mut config = Config::default();
+        config.fill_from_credential_store_with(Ok(Some(Box::new(store))));
+        assert_eq!(
+            config.providers.anthropic_api_key.as_deref(),
+            Some("filled")
+        );
+    }
+
+    #[test]
+    fn provider_secrets_lists_every_set_key_and_nothing_else() {
+        let mut config = Config::default();
+        assert!(config.provider_secrets().is_empty());
+
+        config.providers.anthropic_api_key = Some("a".to_string());
+        config.openrouter_api_key = Some("o".to_string());
+        let secrets = config.provider_secrets();
+        assert_eq!(secrets.len(), 2);
+        assert!(secrets.contains(&("provider/anthropic".to_string(), "a".to_string())));
+        assert!(secrets.contains(&("provider/openrouter".to_string(), "o".to_string())));
+    }
+
+    /// `without_secrets` must return a *copy*: the caller is usually saving a
+    /// config it is still going to run with, and blanking its keys in place
+    /// would break that run.
+    #[test]
+    fn without_secrets_strips_a_copy_and_leaves_the_original_usable() {
+        let mut config = Config::default();
+        config.providers.anthropic_api_key = Some("a".to_string());
+        config.providers.openai_api_key = Some("b".to_string());
+        config.providers.google_api_key = Some("c".to_string());
+        config.openrouter_api_key = Some("d".to_string());
+        config.default_model = Some("m".to_string());
+
+        let stripped = config.without_secrets();
+        assert!(stripped.provider_secrets().is_empty(), "no keys survive");
+        assert_eq!(stripped.default_model.as_deref(), Some("m"), "settings do");
+        assert_eq!(
+            config.providers.anthropic_api_key.as_deref(),
+            Some("a"),
+            "the original is untouched"
+        );
+    }
+
     use super::*;
     use crate::test_support::with_tracing;
 
@@ -2183,6 +2566,7 @@ anthropic_api_key = "sk-ant-test-key"
                 allow_seed_commands: false,
                 allow_local_network: true,
                 allow_env_vars: vec!["MY_PROVIDER_KEY".to_string()],
+                credential_store: leviath_core::CredentialStoreKind::Keychain,
             },
         };
 

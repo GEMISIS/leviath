@@ -3,6 +3,7 @@
 pub mod bundled;
 pub mod commands;
 pub mod config;
+pub mod credentials;
 pub mod daemon;
 pub mod dispatch;
 pub mod render;

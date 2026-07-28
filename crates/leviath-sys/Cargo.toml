@@ -13,11 +13,27 @@ authors.workspace = true
 # ever meant to be published — at which point its path deps need versions too.
 publish = false
 
+[features]
+# On by default; turn it off for a target `keyring` does not support, or for a
+# minimal build that should not link platform credential libraries at all. With
+# it off `leviath_sys::keychain::is_supported()` is false and every operation
+# reports plainly instead of pretending an empty store.
+default = ["keychain"]
+keychain = ["dep:keyring", "dep:keyring-core"]
+
 [dependencies]
 tracing = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
+
+# The OS credential store (macOS Keychain / Windows Credential Manager / Secret
+# Service). Optional: see the `keychain` feature above. `keyring-core` is used
+# directly for the `Entry` API so tests can install an in-memory store as the
+# process default -- no CI runner has an unlocked login keychain, and reaching a
+# developer's real one would raise an OS prompt and hang.
+keyring = { version = "4", optional = true }
+keyring-core = { version = "1", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

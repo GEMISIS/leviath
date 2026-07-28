@@ -13,6 +13,7 @@
 pub mod blueprint;
 pub mod cache;
 pub mod config;
+pub mod credentials;
 pub mod error;
 pub mod interaction;
 pub mod layout;
@@ -35,6 +36,9 @@ pub use blueprint::{
     Stage, StageResult, StuckConfig, ToolResultRouting, TransitionCondition, TransitionEdge,
 };
 pub use cache::{CacheBreakpoint, CacheHint};
+pub use credentials::{
+    CredentialStore, CredentialStoreKind, MemoryStore, mcp_account, provider_account,
+};
 pub use error::{Error, Result, ValidationError};
 pub use layout::{BudgetSpec, ContextLayout, RegionDefinition};
 pub use lifecycle::{CompactionConfig, CompactionStrategy, EvictionPolicy};

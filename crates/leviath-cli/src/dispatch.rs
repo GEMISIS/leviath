@@ -91,6 +91,9 @@ pub enum Commands {
 
     /// Manage MCP tool servers and their authentication
     Mcp(commands::mcp::McpArgs),
+
+    /// Inspect and move the secrets Leviath holds
+    Auth(commands::auth::AuthArgs),
 }
 
 /// The subset of commands whose real execution performs I/O that a unit test
@@ -129,6 +132,9 @@ pub trait RiskyExecutors {
     async fn daemon(&self, args: commands::daemon::DaemonArgs) -> anyhow::Result<()>;
     /// `lev mcp` — rewrites config, opens a browser for OAuth, touches the token store.
     async fn mcp(&self, args: commands::mcp::McpArgs) -> anyhow::Result<()>;
+
+    /// `lev auth` — reads the config file and may write the OS credential store.
+    async fn auth(&self, args: commands::auth::AuthArgs) -> anyhow::Result<()>;
 }
 
 /// Inject argv-prescanned dynamic `--<region>` seed flags into a parsed
@@ -170,6 +176,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Daemon(args) => ex.daemon(args).await,
         Commands::Context(args) => commands::context::execute(args).await,
         Commands::Mcp(args) => ex.mcp(args).await,
+        Commands::Auth(args) => ex.auth(args).await,
     }
 }
 
@@ -216,6 +223,10 @@ mod tests {
         async fn daemon(&self, _args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
             Ok(())
         }
+        async fn auth(&self, _args: commands::auth::AuthArgs) -> anyhow::Result<()> {
+            Ok(())
+        }
+
         async fn mcp(&self, _args: commands::mcp::McpArgs) -> anyhow::Result<()> {
             Ok(())
         }
@@ -324,6 +335,13 @@ mod tests {
             socket: None,
         };
         let result = dispatch(Commands::Daemon(args), &MockRisky).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_auth_variant_is_routed_through_the_executor() {
+        let args = commands::auth::AuthArgs::status_for_test();
+        let result = dispatch(Commands::Auth(args), &MockRisky).await;
         assert!(result.is_ok());
     }
 

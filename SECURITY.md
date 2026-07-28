@@ -77,7 +77,7 @@ pretending otherwise would be worse than saying so:
 
 | What | Where | Mode |
 |---|---|---|
-| Provider API keys | `~/.leviath/config.toml` | `0600` |
+| Provider API keys | `~/.leviath/config.toml`, or the OS keychain | `0600` |
 | MCP OAuth access + refresh tokens | `~/.leviath/mcp-auth.json` | `0600` |
 | Run artifacts (prompts, conversations) | `~/.leviath/runs/<id>/` | `0600` in a `0700` dir |
 | Control socket | `~/.leviath/control.sock` | `0600`, same-uid peers only |
@@ -86,9 +86,40 @@ pretending otherwise would be worse than saying so:
 Prefer `LEVIATH_API_TOKEN` over `--token`: an argument is visible in `ps` to
 every local user for the lifetime of the process.
 
-Secrets are stored in files rather than an OS keychain, which is the same shape
-as comparable tools. If your threat model needs a keychain, say so in an issue —
-the storage is behind one interface and the work is scoped.
+### Using the OS keychain instead
+
+By default secrets live in the `0600` files above, which is the same shape as
+comparable tools and the only arrangement that works headless, in containers,
+over SSH, and on CI. To move them into the OS credential store — macOS Keychain,
+Windows Credential Manager, or the Secret Service elsewhere — so that a stolen
+`~/.leviath` directory yields nothing:
+
+```toml
+# ~/.leviath/config.toml
+[security]
+credential_store = "keychain"
+```
+
+Then move the secrets you already have:
+
+```bash
+lev auth migrate          # config file -> OS keychain
+lev auth migrate --dry-run  # show what would move
+lev auth migrate --to-file  # and back again
+lev auth status           # which backend, and what it holds
+```
+
+`lev auth migrate` writes the destination and reads each secret back before
+removing the source, so a store that accepts writes but does not persist them
+cannot cost you your API keys.
+
+This is opt-in rather than the default because an unavailable keychain is not a
+degraded experience but a broken one — every inference fails at once — and the
+environments Leviath is most useful in are the least likely to have a working
+credential store. `lev auth status` reports whether this machine actually has
+one. Builds can also omit credential-store support entirely (the `keychain`
+feature), in which case `lev auth status` says so rather than offering a
+migration that cannot work.
 
 ## Hardening a deployment
 

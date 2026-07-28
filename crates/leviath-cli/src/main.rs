@@ -141,6 +141,10 @@ impl RiskyExecutors for RealExecutors {
         }
     }
 
+    async fn auth(&self, args: commands::auth::AuthArgs) -> anyhow::Result<()> {
+        commands::auth::execute(args).await
+    }
+
     async fn mcp(&self, args: commands::mcp::McpArgs) -> anyhow::Result<()> {
         // The command logic is the tested `mcp::execute_with`; only the real
         // paths, browser launcher, and clock are composed here.
