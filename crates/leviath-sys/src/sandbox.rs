@@ -106,11 +106,17 @@ const FORBIDDEN_MOUNTS: &[&str] = &[
 /// relative path (which the engine would resolve against its own cwd, not ours)
 /// and anything containing `..`.
 pub fn mount_allowed(path: &str) -> bool {
-    let p = std::path::Path::new(path);
-    if !p.is_absolute()
-        || p.components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
+    // POSIX semantics spelled out rather than `std::path::Path`, because these
+    // are paths *inside a Linux container* — the host's rules do not apply to
+    // them. On Windows `Path::new("/data").is_absolute()` is false (an absolute
+    // path there needs a drive letter), so routing this through `Path` refused
+    // every legitimate container mount on Windows while behaving correctly on
+    // Unix. Fail-closed, so not a hole — but containers were unusable, and no
+    // test caught it because the host and the container agreed on every
+    // platform the tests ran on.
+    let absolute = path.starts_with('/');
+    let traverses = path.split('/').any(|segment| segment == "..");
+    if !absolute || traverses {
         return false;
     }
     // Normalize a trailing slash so "/etc/" and "/etc" compare alike.
@@ -331,6 +337,24 @@ mod tests {
 
     /// Ordinary project directories still mount — the denylist is about host
     /// infrastructure, not about making the feature unusable.
+    /// The rule is POSIX, not host-native: a container path is a Linux path
+    /// wherever the daemon happens to be running. Routing it through
+    /// `std::path::Path` made every mount fail on Windows, where `/data` is not
+    /// an absolute path.
+    #[test]
+    fn mount_rules_do_not_depend_on_the_host_platform() {
+        // Absolute in POSIX terms, on every host.
+        assert!(mount_allowed("/data"));
+        assert!(mount_allowed("/home/u/project"));
+        // A Windows-style path is not a container path, and is refused.
+        assert!(!mount_allowed(r"C:\data"));
+        assert!(!mount_allowed(r"\\server\share"));
+        // Traversal is caught by segment, not by host path parsing.
+        assert!(!mount_allowed("/data/../etc"));
+        assert!(!mount_allowed("/.."));
+        assert!(!mount_allowed(".."));
+    }
+
     #[test]
     fn ordinary_mounts_are_allowed() {
         for path in [
