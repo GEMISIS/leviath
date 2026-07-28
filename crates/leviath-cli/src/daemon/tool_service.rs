@@ -708,7 +708,7 @@ mod tests {
             vec![vec!["read_file".to_string(), "echo".to_string()]],
         );
         let svc = CliToolService::new();
-        let e = Entity::from_raw(1);
+        let e = Entity::from_raw_u32(1).expect("a small literal index is always a valid entity id");
         svc.register(e, state.clone());
 
         let defs = svc.refresh_tools(e, 0).unwrap();
@@ -727,7 +727,7 @@ mod tests {
         // agents — one bad agent taking the whole daemon's tool dispatch with it
         // (issue #109). Recovering the guard keeps the map usable.
         let svc = CliToolService::new();
-        let e = Entity::from_raw(1);
+        let e = Entity::from_raw_u32(1).expect("a small literal index is always a valid entity id");
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {})); // silence the deliberate panic
         let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -761,7 +761,7 @@ mod tests {
             vec![vec![]], // only stage 0 exists
         );
         let svc = CliToolService::new();
-        let e = Entity::from_raw(2);
+        let e = Entity::from_raw_u32(2).expect("a small literal index is always a valid entity id");
         svc.register(e, state);
         assert!(svc.refresh_tools(e, 9).is_none());
     }
@@ -771,7 +771,7 @@ mod tests {
         let hub = InteractionHub::new();
         let svc = CliToolService::new();
         // Non-dynamic agent → both are inert.
-        let e = Entity::from_raw(3);
+        let e = Entity::from_raw_u32(3).expect("a small literal index is always a valid entity id");
         svc.register(
             e,
             state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new()),
@@ -779,7 +779,8 @@ mod tests {
         assert!(svc.refresh_tools(e, 0).is_none());
         assert!(!svc.wants_refresh(e));
         // Unregistered entity → both are inert.
-        let ghost = Entity::from_raw(99);
+        let ghost =
+            Entity::from_raw_u32(99).expect("a small literal index is always a valid entity id");
         assert!(svc.refresh_tools(ghost, 0).is_none());
         assert!(!svc.wants_refresh(ghost));
     }
@@ -801,7 +802,7 @@ mod tests {
             .dirty
             .store(true, Ordering::SeqCst);
         let svc = CliToolService::new();
-        let e = Entity::from_raw(4);
+        let e = Entity::from_raw_u32(4).expect("a small literal index is always a valid entity id");
         svc.register(e, state);
         assert!(svc.wants_refresh(e)); // reads true...
         assert!(!svc.wants_refresh(e)); // ...and drained it to false
@@ -1095,7 +1096,7 @@ mod tests {
     async fn exec_for_without_state_errors() {
         let service = CliToolService::new();
         let exec = service.exec_for(
-            Entity::from_raw(1),
+            Entity::from_raw_u32(1).expect("a small literal index is always a valid entity id"),
             vec![call("c1", "read_file", serde_json::json!({}))],
         );
         let results = exec().await;
@@ -1109,7 +1110,7 @@ mod tests {
         let mut deny = HashMap::new();
         deny.insert("bash".to_string(), ToolPolicy::Deny);
         let service = CliToolService::new();
-        let e = Entity::from_raw(5);
+        let e = Entity::from_raw_u32(5).expect("a small literal index is always a valid entity id");
         service.register(e, state_with(&hub, leviath_mcp::ToolExecutor::new(), deny));
 
         let out = service.exec_for(
@@ -1128,7 +1129,7 @@ mod tests {
     fn sync_stage_swaps_perms_and_name() {
         let hub = InteractionHub::new();
         let service = CliToolService::new();
-        let e = Entity::from_raw(9);
+        let e = Entity::from_raw_u32(9).expect("a small literal index is always a valid entity id");
         let mut deny = HashMap::new();
         deny.insert("bash".to_string(), "deny".to_string());
         let builtins = Arc::new(leviath_tools::BuiltinTools::new(
@@ -1169,7 +1170,11 @@ mod tests {
         assert_eq!(*state.stage_name.lock().unwrap(), "ghost");
 
         // An unregistered entity is a no-op (must not panic).
-        service.sync_stage(Entity::from_raw(123), 0, "x");
+        service.sync_stage(
+            Entity::from_raw_u32(123).expect("a small literal index is always a valid entity id"),
+            0,
+            "x",
+        );
     }
 
     #[test]
@@ -1177,7 +1182,8 @@ mod tests {
         use leviath_core::sandbox::{OnUnavailable, SandboxKind, ToolSandboxConfig};
         let hub = InteractionHub::new();
         let service = CliToolService::new();
-        let e = Entity::from_raw(11);
+        let e =
+            Entity::from_raw_u32(11).expect("a small literal index is always a valid entity id");
         // Two namespace-warn stages → a manager builds on any platform without a
         // runtime, so this exercises `sync_stage`'s per-stage sandbox branch.
         let ns = ToolSandboxConfig {
@@ -1209,7 +1215,8 @@ mod tests {
 
         // With a sandbox: reap removes the state and tears the sandbox down
         // (namespace → destroy_all is a no-op, so no runtime is needed).
-        let e = Entity::from_raw(21);
+        let e =
+            Entity::from_raw_u32(21).expect("a small literal index is always a valid entity id");
         let ns = ToolSandboxConfig {
             kind: SandboxKind::Namespace,
             on_unavailable: OnUnavailable::Warn,
@@ -1230,7 +1237,8 @@ mod tests {
         assert!(service.take(e).is_none(), "reap removed the state");
 
         // Without a sandbox: reap still drops the state (the leak fix path).
-        let e2 = Entity::from_raw(22);
+        let e2 =
+            Entity::from_raw_u32(22).expect("a small literal index is always a valid entity id");
         service.register(
             e2,
             state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new()),

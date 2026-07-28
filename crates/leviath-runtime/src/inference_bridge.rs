@@ -264,7 +264,8 @@ mod tests {
     fn job(provider: Arc<dyn Provider>) -> InferenceJob {
         let pools = InferencePools::new(InferencePoolConfig::new());
         InferenceJob {
-            entity: Entity::from_raw(7),
+            entity: Entity::from_raw_u32(7)
+                .expect("a small literal index is always a valid entity id"),
             provider,
             request: test_request(),
             permit: pools.try_acquire("m").expect("free pool"),
@@ -290,7 +291,8 @@ mod tests {
             calls: std::sync::Mutex::new(0),
         });
         let job = InferenceJob {
-            entity: Entity::from_raw(7),
+            entity: Entity::from_raw_u32(7)
+                .expect("a small literal index is always a valid entity id"),
             provider,
             request: test_request(),
             permit,
@@ -341,7 +343,8 @@ mod tests {
             calls: std::sync::Mutex::new(0),
         });
         let job = InferenceJob {
-            entity: Entity::from_raw(7),
+            entity: Entity::from_raw_u32(7)
+                .expect("a small literal index is always a valid entity id"),
             provider,
             request: test_request(),
             permit,
@@ -387,7 +390,10 @@ mod tests {
         .await;
 
         let outcome = rx.try_recv().expect("outcome sent");
-        assert_eq!(outcome.entity, Entity::from_raw(7));
+        assert_eq!(
+            outcome.entity,
+            Entity::from_raw_u32(7).expect("a small literal index is always a valid entity id")
+        );
         assert_eq!(outcome.result.unwrap().content, "hi");
         // The wake was signalled (a subsequent notified() returns immediately).
         wake.notified().await;
@@ -443,7 +449,8 @@ mod tests {
     fn counting_job(provider: Arc<dyn Provider>, exact: bool) -> InferenceJob {
         let pools = InferencePools::new(InferencePoolConfig::new());
         InferenceJob {
-            entity: Entity::from_raw(7),
+            entity: Entity::from_raw_u32(7)
+                .expect("a small literal index is always a valid entity id"),
             provider,
             request: test_request(), // max_tokens: 100
             permit: pools.try_acquire("m").expect("free pool"),

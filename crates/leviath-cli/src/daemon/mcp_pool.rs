@@ -223,7 +223,12 @@ impl McpPool {
 /// already depends on core — a cycle). Returns an empty vec when the section is
 /// absent or malformed; a malformed entry is skipped with a warning.
 pub fn parse_blueprint_mcp_servers(manifest_toml: &str) -> Vec<MCPServerConfig> {
-    let Ok(value) = manifest_toml.parse::<toml::Value>() else {
+    // `toml::from_str`, not `manifest_toml.parse::<toml::Value>()`. In toml 1.x
+    // `FromStr for Value` parses a single *value*, not a document — so a real
+    // manifest starting with `[agent]` reads as an array literal followed by
+    // junk and fails. It still compiles, so the change is silent; the tests are
+    // what caught it.
+    let Ok(value) = toml::from_str::<toml::Value>(manifest_toml) else {
         return Vec::new();
     };
     let Some(array) = value.get("mcp_servers").and_then(|v| v.as_array()) else {

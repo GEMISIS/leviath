@@ -131,6 +131,13 @@ async fn execute_core<S: TerminalSetup, E: EventSource>(
 /// carry an injectable-failure switch, so the draw-error and poll-error `?`
 /// arms are exercised within that one monomorphization), never a real
 /// terminal backend.
+///
+/// The draw error is mapped explicitly rather than propagated with a bare `?`.
+/// On ratatui 0.29 `Backend::Error` is `io::Error` and either works; from 0.30
+/// it becomes an associated type with no `Send + Sync` bound, and a bare `?`
+/// into `anyhow::Error` stops compiling. Mapping here keeps this loop working
+/// across that change without a `B::Error: Send + Sync + 'static` bound that
+/// would have to be repeated on every caller and on `TerminalSetup::B`.
 async fn run_dashboard_loop<B: ratatui::backend::Backend>(
     dashboard: &mut Dashboard,
     control: &ControlClient,
@@ -161,7 +168,9 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
         dashboard.drain_daemon_outcomes();
 
         // Draw
-        terminal.draw(|frame| dashboard.draw(frame))?;
+        terminal
+            .draw(|frame| dashboard.draw(frame))
+            .map_err(|e| anyhow::anyhow!("terminal draw failed: {e}"))?;
 
         // Handle input
         if let Some(event) = events.poll_event(tick_rate)? {

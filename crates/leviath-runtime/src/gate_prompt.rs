@@ -234,7 +234,7 @@ mod tests {
         let task = {
             let hub = hub.clone();
             tokio::spawn(run_gate_prompt(
-                Entity::from_raw(1),
+                Entity::from_raw_u32(1).expect("a small literal index is always a valid entity id"),
                 hub,
                 "run".to_string(),
                 "c1".to_string(),
@@ -349,7 +349,8 @@ mod tests {
     fn collect_drops_outcome_for_missing_agent() {
         let (mut world, tx) = collect_world();
         tx.send(GatePromptOutcome {
-            entity: Entity::from_raw(999),
+            entity: Entity::from_raw_u32(999)
+                .expect("a small literal index is always a valid entity id"),
             tool_id: "c1".to_string(),
             tool_name: "shell".to_string(),
             taint: TaintLevel::Internal,

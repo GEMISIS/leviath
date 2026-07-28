@@ -126,7 +126,12 @@ pub fn effective_script_permissions(
     manifest_toml: &str,
 ) -> ScriptToolPermissions {
     let mut eff = global.clone();
-    let Ok(value) = manifest_toml.parse::<toml::Value>() else {
+    // `toml::from_str`, not `manifest_toml.parse::<toml::Value>()`. In toml 1.x
+    // `FromStr for Value` parses a single *value*, not a document — so a real
+    // manifest starting with `[agent]` reads as an array literal followed by
+    // junk and fails. It still compiles, so the change is silent; the tests are
+    // what caught it.
+    let Ok(value) = toml::from_str::<toml::Value>(manifest_toml) else {
         return eff;
     };
     let Some(table) = value

@@ -1952,6 +1952,7 @@ pub fn dispatch_persistence(
         // (test / `lev run`); a zero-subscriber `send` error is ignored.
         if let Some(sink) = &sink {
             for (_idx, line) in output_appends.iter().chain(log_appends.iter()) {
+                // `Res<T>` derefs to `T` in bevy_ecs 0.19; it is no longer a tuple struct.
                 let _ = sink.0.send(crate::host::WorldEvent::Log {
                     run_id: md.run_id.clone(),
                     agent_id: state.agent_id.clone(),
@@ -5557,18 +5558,33 @@ mod tests {
     #[test]
     fn default_sync_stage_is_a_noop() {
         // A service that doesn't override `sync_stage` uses the no-op default.
-        EchoService.sync_stage(Entity::from_raw(0), 3, "x");
+        EchoService.sync_stage(
+            Entity::from_raw_u32(0).expect("a small literal index is always a valid entity id"),
+            3,
+            "x",
+        );
     }
 
     #[tokio::test]
     async fn default_refresh_tools_returns_none() {
         // A service that doesn't override `refresh_tools` uses the None default.
-        assert!(EchoService.refresh_tools(Entity::from_raw(0), 0).is_none());
+        assert!(
+            EchoService
+                .refresh_tools(
+                    Entity::from_raw_u32(0)
+                        .expect("a small literal index is always a valid entity id"),
+                    0
+                )
+                .is_none()
+        );
         // Exercise RefreshService's (unused-by-the-system) exec_for closure too.
         assert!(
-            RefreshService(vec![]).exec_for(Entity::from_raw(0), Vec::new())()
-                .await
-                .is_empty()
+            RefreshService(vec![]).exec_for(
+                Entity::from_raw_u32(0).expect("a small literal index is always a valid entity id"),
+                Vec::new()
+            )()
+            .await
+            .is_empty()
         );
     }
 
@@ -5687,12 +5703,17 @@ mod tests {
 
     #[tokio::test]
     async fn default_wants_refresh_returns_false() {
-        assert!(!EchoService.wants_refresh(Entity::from_raw(0)));
+        assert!(!EchoService.wants_refresh(
+            Entity::from_raw_u32(0).expect("a small literal index is always a valid entity id")
+        ));
         // Exercise PollService's (unused-by-the-system) exec_for closure.
         assert!(
-            PollService(false).exec_for(Entity::from_raw(0), Vec::new())()
-                .await
-                .is_empty()
+            PollService(false).exec_for(
+                Entity::from_raw_u32(0).expect("a small literal index is always a valid entity id"),
+                Vec::new()
+            )()
+            .await
+            .is_empty()
         );
     }
 
@@ -9858,7 +9879,10 @@ mod tests {
                 requires_children_bp(true),
                 StageCursor { index: 0 },
                 agent_state(),
-                children(vec![Entity::from_raw(999_999)]),
+                children(vec![
+                    Entity::from_raw_u32(999_999)
+                        .expect("a small literal index is always a valid entity id"),
+                ]),
                 ResolveTransition,
             ))
             .id();
@@ -9883,7 +9907,10 @@ mod tests {
         let ghost = world
             .spawn((
                 agent_state(),
-                children(vec![Entity::from_raw(999_999)]),
+                children(vec![
+                    Entity::from_raw_u32(999_999)
+                        .expect("a small literal index is always a valid entity id"),
+                ]),
                 WaitingForChildren,
             ))
             .id();

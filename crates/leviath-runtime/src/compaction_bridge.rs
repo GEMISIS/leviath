@@ -145,7 +145,8 @@ mod tests {
     fn job(provider: Arc<dyn Provider>, regions: Vec<&str>) -> CompactionJob {
         let pools = InferencePools::new(InferencePoolConfig::new());
         CompactionJob {
-            entity: Entity::from_raw(3),
+            entity: Entity::from_raw_u32(3)
+                .expect("a small literal index is always a valid entity id"),
             provider,
             requests: regions
                 .into_iter()
@@ -165,7 +166,10 @@ mod tests {
         run_compaction_job(job(provider, vec!["a", "b"]), tx, wake.clone()).await;
 
         let outcome = rx.try_recv().unwrap();
-        assert_eq!(outcome.entity, Entity::from_raw(3));
+        assert_eq!(
+            outcome.entity,
+            Entity::from_raw_u32(3).expect("a small literal index is always a valid entity id")
+        );
         let summaries = outcome.result.unwrap();
         assert_eq!(
             summaries,

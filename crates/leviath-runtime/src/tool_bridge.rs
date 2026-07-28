@@ -136,7 +136,7 @@ mod tests {
         cancel: crate::cancel::CancelToken,
     ) -> ToolJob {
         ToolJob {
-            entity: Entity::from_raw(entity),
+            entity: Entity::from_raw_u32(entity).expect("index came from a live entity id"),
             exec: Box::new(move || {
                 Box::pin(async move {
                     pairs
@@ -159,7 +159,7 @@ mod tests {
         cancel: crate::cancel::CancelToken,
     ) -> ToolJob {
         ToolJob {
-            entity: Entity::from_raw(entity),
+            entity: Entity::from_raw_u32(entity).expect("index came from a live entity id"),
             exec: Box::new(move || {
                 Box::pin(async move {
                     // `notify_one` (not `notify_waiters`) on both signals: it
@@ -227,10 +227,16 @@ mod tests {
         tool_worker(shared(jrx), rtx, wake).await;
 
         let first = rrx.try_recv().unwrap();
-        assert_eq!(first.entity, Entity::from_raw(1));
+        assert_eq!(
+            first.entity,
+            Entity::from_raw_u32(1).expect("a small literal index is always a valid entity id")
+        );
         assert_eq!(first.results, vec![("c1".to_string(), "r1".to_string())]);
         let second = rrx.try_recv().unwrap();
-        assert_eq!(second.entity, Entity::from_raw(2));
+        assert_eq!(
+            second.entity,
+            Entity::from_raw_u32(2).expect("a small literal index is always a valid entity id")
+        );
         assert!(rrx.try_recv().is_err()); // no more outcomes
     }
 
@@ -274,7 +280,11 @@ mod tests {
             .await
             .expect("the worker was freed by the cancel")
             .expect("an outcome arrived");
-        assert_eq!(next.entity, Entity::from_raw(2), "the queued batch ran");
+        assert_eq!(
+            next.entity,
+            Entity::from_raw_u32(2).expect("a small literal index is always a valid entity id"),
+            "the queued batch ran"
+        );
         assert!(
             rrx.try_recv().is_err(),
             "and the cancelled batch reported no results"
@@ -315,7 +325,7 @@ mod tests {
             let arrived = arrived.clone();
             let go = go.clone();
             jtx.send(ToolJob {
-                entity: Entity::from_raw(i),
+                entity: Entity::from_raw_u32(i).expect("index came from a live entity id"),
                 exec: Box::new(move || {
                     Box::pin(async move {
                         if arrived.fetch_add(1, Ordering::SeqCst) + 1 == 3 {
@@ -357,7 +367,10 @@ mod tests {
         let handles = spawn_tool_pool(&Handle::current(), jrx, rtx, wake, 0);
         assert_eq!(handles.len(), 1); // clamped up to one worker
         let out = rrx.recv().await.unwrap();
-        assert_eq!(out.entity, Entity::from_raw(7));
+        assert_eq!(
+            out.entity,
+            Entity::from_raw_u32(7).expect("a small literal index is always a valid entity id")
+        );
         for h in handles {
             h.await.unwrap();
         }

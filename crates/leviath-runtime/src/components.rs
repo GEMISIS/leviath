@@ -1240,7 +1240,8 @@ mod tests {
     #[test]
     fn test_parent_ref_component() {
         let parent_ref = super::ParentRef {
-            parent_entity: Entity::from_raw(42),
+            parent_entity: Entity::from_raw_u32(42)
+                .expect("a small literal index is always a valid entity id"),
             parent_agent_id: "coder-01".to_string(),
             depth: 1,
         };
@@ -1251,7 +1252,10 @@ mod tests {
     #[test]
     fn test_children_component() {
         let children = super::SubAgentChildren {
-            children: vec![Entity::from_raw(1), Entity::from_raw(2)],
+            children: vec![
+                Entity::from_raw_u32(1).expect("a small literal index is always a valid entity id"),
+                Entity::from_raw_u32(2).expect("a small literal index is always a valid entity id"),
+            ],
             max_child_depth: 3,
         };
         assert_eq!(children.children.len(), 2);
@@ -1448,7 +1452,9 @@ mod tests {
     #[test]
     fn test_sub_agent_children_clone() {
         let children = SubAgentChildren {
-            children: vec![Entity::from_raw(1)],
+            children: vec![
+                Entity::from_raw_u32(1).expect("a small literal index is always a valid entity id"),
+            ],
             max_child_depth: 2,
         };
         let cloned = children.clone();

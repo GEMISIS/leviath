@@ -431,7 +431,8 @@ mod tests {
         let mut reaper = make_reaper(tool_service.clone());
         // No registered state for this entity → a clean no-op (the reap-branch
         // logic itself is covered by CliToolService::reap's own unit test).
-        let entity = bevy_ecs::entity::Entity::from_raw(1);
+        let entity = bevy_ecs::entity::Entity::from_raw_u32(1)
+            .expect("a small literal index is always a valid entity id");
         reaper(&mut world, entity);
         assert!(tool_service.take(entity).is_none());
     }
