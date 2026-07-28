@@ -691,6 +691,40 @@ prompt = "Implement"
         assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 
+    /// `PUT` runs the same unvalidated join as `POST` and `DELETE` did, and it
+    /// ends in `fs::write` of caller-supplied TOML. A valid manifest with a
+    /// traversing *name* must be refused before the path is built, not after.
+    #[tokio::test]
+    async fn update_blueprint_rejects_traversing_names() {
+        use axum::routing::put;
+
+        let manifest = r#"
+[agent]
+name = "x"
+version = "1.0.0"
+description = "d"
+
+[stages.plan]
+prompt = "p"
+"#;
+        for name in ["..", "%2e%2e", "."] {
+            let app = Router::new().route("/api/blueprints/{name}", put(update_blueprint));
+            let body = serde_json::json!({ "manifest": manifest });
+            let req = Request::builder()
+                .method("PUT")
+                .uri(format!("/api/blueprints/{name}"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                axum::http::StatusCode::BAD_REQUEST,
+                "name {name:?} should be refused"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn update_blueprint_not_found_returns_404() {
         use axum::routing::put;

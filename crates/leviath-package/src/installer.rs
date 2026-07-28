@@ -21,25 +21,25 @@ const MAX_UNPACKED_BYTES: u64 = 256 * 1024 * 1024;
 /// by the file tools, a link is a way to smuggle content in (or to have a later
 /// write follow it out). Nothing in a legitimate agent bundle needs one.
 fn reject_symlinks(dir: &Path) -> anyhow::Result<()> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        // The directory was just unpacked; an unreadable one is a real error,
-        // but it will surface on the next read rather than here.
-        Err(_) => return Ok(()),
-    };
-    for entry in entries.flatten() {
+    // `into_iter().flatten().flatten()` rather than a `match` on `read_dir`: this
+    // directory was created and unpacked into moments ago, so an unreadable one
+    // has no reachable test — and it surfaces anyway on the manifest read that
+    // follows. Collapsing it to "no entries" keeps the semantics with no branch
+    // nothing can exercise.
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
         let path = entry.path();
-        // `symlink_metadata` does not follow the link, which is the point.
-        let meta = fs::symlink_metadata(&path)
-            .map_err(|e| anyhow::anyhow!("Failed to inspect '{}': {e}", path.display()))?;
-        if meta.file_type().is_symlink() {
-            anyhow::bail!(
-                "Package contains a symlink ('{}'), which is not permitted in an agent bundle",
+        // One stat, three outcomes. `symlink_metadata` does not follow the link,
+        // which is the point. A stat failure folds into the refusal arm rather
+        // than getting its own: either way we cannot certify the entry, and an
+        // error branch nothing can trigger would be permanently uncovered.
+        match fs::symlink_metadata(&path).map(|m| m.file_type()).ok() {
+            Some(t) if t.is_dir() => reject_symlinks(&path)?,
+            Some(t) if !t.is_symlink() => {}
+            _ => anyhow::bail!(
+                "Package contains a symlink or unreadable entry ('{}'), which is not \
+                 permitted in an agent bundle",
                 path.display()
-            );
-        }
-        if meta.is_dir() {
-            reject_symlinks(&path)?;
+            ),
         }
     }
     Ok(())
@@ -393,10 +393,12 @@ description = "{}"
             archive.finish().unwrap();
         }
         let bomb = encoder.finish().unwrap();
+        // The length is bound first: a *call* inside `assert!`'s format
+        // arguments is a region only the failing path reaches.
+        let compressed = bomb.len();
         assert!(
-            bomb.len() < 5 * 1024 * 1024,
-            "precondition: the bomb is small on disk ({} bytes)",
-            bomb.len()
+            compressed < 5 * 1024 * 1024,
+            "precondition: the bomb is small on disk"
         );
 
         let dir = tempfile::tempdir().unwrap();
@@ -405,6 +407,75 @@ description = "{}"
             .install_from_bytes("bomb", &bomb)
             .expect_err("an oversized bundle must be refused");
         assert!(err.to_string().contains("Failed to extract"), "{err}");
+    }
+
+    /// A bundle with a `tools/` subdirectory — the realistic shape, and the one
+    /// that exercises the recursive descent rather than only the flat case.
+    #[test]
+    fn install_from_bytes_accepts_a_nested_directory() {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        {
+            let mut archive = tar::Builder::new(&mut encoder);
+            for (path, body) in [
+                (
+                    "agent.leviath",
+                    "[agent]\nname = \"n\"\nversion = \"1.0.0\"\n",
+                ),
+                ("tools/web_fetch.rhai", "// @tool web_fetch\n"),
+            ] {
+                let bytes = body.as_bytes();
+                let mut header = tar::Header::new_gnu();
+                header.set_size(bytes.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                archive.append_data(&mut header, path, bytes).unwrap();
+            }
+            archive.finish().unwrap();
+        }
+        let bundle = encoder.finish().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+        let installed = installer.install_from_bytes("nested", &bundle).unwrap();
+        assert!(installed.path.join("tools/web_fetch.rhai").exists());
+    }
+
+    /// A symlink hidden one directory down is refused too — the scan descends
+    /// rather than checking only the top level, which is where a bundle would
+    /// naturally put one (`tools/`).
+    #[cfg(unix)]
+    #[test]
+    fn install_from_bytes_refuses_a_nested_symlink_entry() {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        {
+            let mut archive = tar::Builder::new(&mut encoder);
+            let manifest = "[agent]\nname = \"n\"\nversion = \"1.0.0\"\n";
+            let bytes = manifest.as_bytes();
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, "agent.leviath", bytes)
+                .unwrap();
+
+            let mut link = tar::Header::new_gnu();
+            link.set_size(0);
+            link.set_entry_type(tar::EntryType::Symlink);
+            link.set_mode(0o777);
+            archive
+                .append_link(&mut link, "tools/escape", "/etc/passwd")
+                .unwrap();
+            archive.finish().unwrap();
+        }
+        let bundle = encoder.finish().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+        let err = installer
+            .install_from_bytes("nested-link", &bundle)
+            .expect_err("a nested symlink must be refused");
+        assert!(err.to_string().contains("symlink"), "{err}");
     }
 
     /// tar-rs blocks entries that *extract* outside the destination, but a

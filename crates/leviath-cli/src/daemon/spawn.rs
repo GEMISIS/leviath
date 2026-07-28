@@ -1755,10 +1755,10 @@ mod tests {
             }],
         )()
         .await;
+        let result = out[0].1.clone();
         assert!(
-            out[0].1.contains("[denied]"),
-            "a configured deny must survive --yolo, got: {}",
-            out[0].1
+            result.contains("[denied]"),
+            "a configured deny must survive --yolo, got: {result}"
         );
 
         // `--yolo` still does its job for a tool the config did not deny:
@@ -1773,10 +1773,10 @@ mod tests {
             }],
         )()
         .await;
+        let result = out[0].1.clone();
         assert!(
-            !out[0].1.contains("[denied]"),
-            "--yolo must still waive approval where nothing denies, got: {}",
-            out[0].1
+            !result.contains("[denied]"),
+            "--yolo must still waive approval where nothing denies, got: {result}"
         );
     }
 

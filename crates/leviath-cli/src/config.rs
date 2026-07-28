@@ -1387,6 +1387,36 @@ google_api_key = "AIza-existing"
         );
     }
 
+    /// The escape hatch for the permission floor: a user grants one named agent
+    /// more than their global setting, in their own config rather than in the
+    /// downloaded manifest.
+    #[test]
+    fn permissions_for_agent_overlays_the_named_grant_on_the_global() {
+        let mut config = Config::default();
+        config
+            .tool_permissions
+            .insert("shell".to_string(), ToolPolicy::Ask);
+        config
+            .tool_permissions
+            .insert("write_file".to_string(), ToolPolicy::Deny);
+        config.agent_tool_permissions.insert(
+            "coder".to_string(),
+            HashMap::from([("shell".to_string(), ToolPolicy::Allow)]),
+        );
+
+        let coder = config.permissions_for_agent("coder");
+        assert_eq!(coder.get("shell"), Some(&ToolPolicy::Allow), "granted");
+        assert_eq!(
+            coder.get("write_file"),
+            Some(&ToolPolicy::Deny),
+            "the rest of the global ceiling still applies"
+        );
+
+        // Any other agent sees the global setting untouched.
+        let other = config.permissions_for_agent("researcher");
+        assert_eq!(other.get("shell"), Some(&ToolPolicy::Ask));
+    }
+
     /// One `tracing::debug!(?config)` would otherwise put every provider key in
     /// the logs.
     #[test]

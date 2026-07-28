@@ -128,8 +128,13 @@ fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
             }
             return Some(full);
         }
-        let name = probe.file_name()?.to_os_string();
-        let parent = probe.parent()?.to_path_buf();
+        // Both in one step: after `file_name()` succeeds, `parent()` cannot
+        // fail (only a root has no parent, and a root has no file name either),
+        // so two separate `?`s would leave the second permanently uncovered.
+        let (Some(name), Some(parent)) = (probe.file_name(), probe.parent()) else {
+            return None;
+        };
+        let (name, parent) = (name.to_os_string(), parent.to_path_buf());
         tail.push(name);
         probe = parent;
     }
@@ -138,6 +143,42 @@ fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Everything Leviath persists sits under one root, and `LEVIATH_HOME`
+    /// moves all of it together. Seven separate resolvers with three readings of
+    /// that variable is what this replaced — and the consequence was concrete: a
+    /// run that believed it was isolated wrote to the real
+    /// `~/.leviath/config.toml`.
+    #[test]
+    fn every_data_path_follows_leviath_home_together() {
+        temp_env::with_var("LEVIATH_HOME", Some("/tmp/lev-paths-test"), || {
+            let root = PathBuf::from("/tmp/lev-paths-test");
+            assert_eq!(home_dir(), Some(root.clone()));
+            let data = root.join(".leviath");
+            assert_eq!(data_dir(), Some(data.clone()));
+            assert_eq!(tools_dir(), Some(data.join("tools")));
+            assert_eq!(providers_dir(), Some(data.join("providers")));
+            assert_eq!(agents_dir(), Some(data.join("agents")));
+        });
+    }
+
+    /// Without the override, everything is under the real home's `.leviath`.
+    /// Asserted by shape: CI always has a home, but which one is not this
+    /// module's business.
+    #[test]
+    fn without_the_override_paths_sit_under_the_real_home() {
+        temp_env::with_var_unset("LEVIATH_HOME", || {
+            let home = home_dir().expect("a home directory resolves");
+            let data = data_dir().expect("so does the data dir");
+            assert_eq!(data, home.join(".leviath"));
+            // The global tool-scan directory in particular: this resolved to
+            // `$HOME/tools` before, outside Leviath's own directory entirely,
+            // and every `.rhai` file there becomes an executable tool for every
+            // agent.
+            assert_eq!(tools_dir(), Some(data.join("tools")));
+            assert!(tools_dir().expect("set").ends_with(".leviath/tools"));
+        });
+    }
 
     #[test]
     fn safe_components_are_ordinary_names() {

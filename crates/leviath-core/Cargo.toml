@@ -31,6 +31,7 @@ reqwest = { workspace = true }
 # Real directories and real symlinks: the path-containment tests are about what
 # the filesystem actually does, so a mock would test the mock.
 tempfile = "3"
+temp-env = { workspace = true }
 
 [lints]
 workspace = true

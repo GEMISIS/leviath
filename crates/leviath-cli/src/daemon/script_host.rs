@@ -435,6 +435,23 @@ static HTTP_CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
             .expect("failed to build blocking reqwest client")
     });
 
+/// Flatten an error and its `source` chain into one `": "`-joined line.
+///
+/// reqwest's own `Display` for a refused redirect is "error following redirect
+/// for url (…)" — it never mentions the reason, which for us is the whole point:
+/// "refused to follow redirect: private address" and "too many redirects" are
+/// different problems with different fixes, and both were reaching the script
+/// author as the same opaque sentence.
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut parts = vec![e.to_string()];
+    let mut source = e.source();
+    while let Some(err) = source {
+        parts.push(err.to_string());
+        source = err.source();
+    }
+    parts.join(": ")
+}
+
 /// Whether *redirect hops* may land on loopback / private / link-local
 /// addresses.
 ///
@@ -486,7 +503,15 @@ impl RealScriptIo {
     /// a page of U+FFFD replacement characters reported as a **successful**
     /// fetch — no error, no signal, straight into the model's context.
     fn send(req: reqwest::blocking::RequestBuilder) -> Result<String, String> {
-        let resp = req.send().map_err(|e| format!("request failed: {e}"))?;
+        Self::send_capped(req, MAX_RESPONSE_BYTES)
+    }
+
+    /// [`send`](Self::send) with the body cap injected, so the oversized-body
+    /// refusal is testable against a small response instead of a 32 MiB one.
+    fn send_capped(req: reqwest::blocking::RequestBuilder, max: u64) -> Result<String, String> {
+        let resp = req
+            .send()
+            .map_err(|e| format!("request failed: {}", error_chain(&e)))?;
         let status = resp.status();
         let content_type = resp
             .headers()
@@ -508,7 +533,7 @@ impl RealScriptIo {
         // is what bounds that case; closing it properly needs a streaming decoder
         // that preserves `text()`'s charset handling (it decodes Shift-JIS and
         // Latin-1 pages correctly, which a raw `Read` + `from_utf8` would not).
-        if let Some(msg) = oversized_body_message(resp.content_length(), MAX_RESPONSE_BYTES) {
+        if let Some(msg) = oversized_body_message(resp.content_length(), max) {
             return Err(msg);
         }
         let text = cap_script_io(resp.text().map_err(|e| format!("read body: {e}"))?);
@@ -1022,10 +1047,10 @@ mod tests {
             let err = host.http_post(url, "leak", BTreeMap::new()).unwrap_err();
             assert!(err.starts_with("[denied]"), "{url} → {err}");
         }
+        let calls = io.calls.lock().unwrap().clone();
         assert!(
-            io.calls.lock().unwrap().is_empty(),
-            "a refused URL must never reach the I/O backend: {:?}",
-            io.calls.lock().unwrap()
+            calls.is_empty(),
+            "a refused URL must never reach the I/O backend: {calls:?}"
         );
     }
 
@@ -1106,10 +1131,22 @@ mod tests {
         );
     }
 
+    /// `ALLOW_LOCAL_REDIRECTS` is process-wide, so every test that writes it
+    /// races every test that reads it. Tests run in parallel in one process;
+    /// without this, a test that sets the mirror to `true` makes a concurrent
+    /// test's redirect refusal silently succeed instead.
+    static REDIRECT_MIRROR: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take the redirect-mirror lock.
+    fn lock_redirect_mirror() -> std::sync::MutexGuard<'static, ()> {
+        REDIRECT_MIRROR.lock().expect("redirect mirror lock")
+    }
+
     /// The redirect mirror is a separate process-wide value; setting it must not
     /// change what the host itself decides.
     #[test]
     fn redirect_switch_is_independent_of_the_host_field() {
+        let _guard = lock_redirect_mirror();
         let io = RecordingIo::arc();
         let host = DaemonScriptHost::with_io(all_allowed(), std::env::temp_dir(), io.clone());
         let previous = local_network_allowed();
@@ -1341,6 +1378,111 @@ mod tests {
         assert!(oversized_body_message(Some(1_000), 1_000).is_none());
         assert!(oversized_body_message(Some(0), 1_000).is_none());
         assert!(oversized_body_message(None, 1_000).is_none());
+    }
+
+    /// The cap in the real `send` path, against a small response with the limit
+    /// lowered — the 32 MiB production value would mean transferring 32 MiB to
+    /// assert one branch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn send_refuses_a_body_over_the_cap() {
+        let base = mock_http().await;
+        let out = tokio::task::spawn_blocking(move || {
+            let client = RealScriptIo::client();
+            // `/ok` returns "GET-BODY" (8 bytes) with a Content-Length.
+            RealScriptIo::send_capped(client.get(format!("{base}/ok")), 4)
+        })
+        .await
+        .unwrap();
+        let err = out.expect_err("a body over the cap is refused");
+        assert!(err.contains("over the"), "got: {err}");
+    }
+
+    /// A redirect is a fresh destination the caller's original URL check never
+    /// saw, so the policy re-checks every hop. Here a public-looking request is
+    /// bounced to loopback — the shape that turns any redirect-following fetch
+    /// into an SSRF primitive.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn redirects_to_a_local_address_are_refused() {
+        use axum::Router;
+        use axum::response::Redirect;
+        use axum::routing::get;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Only `/bounce` is served: if the guard ever fails open, the request
+        // 404s instead of succeeding, and the test still fails -- but no handler
+        // sits here unreached on the passing path.
+        let app = Router::new().route(
+            "/bounce",
+            get(move || async move { Redirect::temporary(&format!("http://{addr}/ok")) }),
+        );
+        tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
+            listener, app,
+        )));
+
+        // The mirror is taken, read and restored entirely inside the blocking
+        // closure: holding a `std` guard across an `.await` is a deadlock the
+        // scheduler is free to arrange.
+        let out = tokio::task::spawn_blocking(move || {
+            let _guard = lock_redirect_mirror();
+            let previous = local_network_allowed();
+            set_local_network_allowed(false);
+            let result = RealScriptIo.http_get(&format!("http://{addr}/bounce"), BTreeMap::new());
+            set_local_network_allowed(previous);
+            result
+        })
+        .await
+        .unwrap();
+        let err = out.expect_err("a redirect to loopback must not be followed");
+        assert!(err.contains("refused to follow redirect"), "got: {err}");
+    }
+
+    /// A redirect *loop* is bounded even when every hop is permitted, so a
+    /// server cannot hold a fetch open by bouncing it forever.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_redirect_loop_is_bounded() {
+        use axum::Router;
+        use axum::response::Redirect;
+        use axum::routing::get;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/loop",
+            get(move || async move { Redirect::temporary(&format!("http://{addr}/loop")) }),
+        );
+        tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
+            listener, app,
+        )));
+
+        let out = tokio::task::spawn_blocking(move || {
+            let _guard = lock_redirect_mirror();
+            // Loopback hops are permitted here, so the *count* is what stops it.
+            let previous = local_network_allowed();
+            set_local_network_allowed(true);
+            let result = RealScriptIo.http_get(&format!("http://{addr}/loop"), BTreeMap::new());
+            set_local_network_allowed(previous);
+            result
+        })
+        .await
+        .unwrap();
+        let err = out.expect_err("an endless redirect must be stopped");
+        assert!(err.contains("too many redirects"), "got: {err}");
+    }
+
+    /// The script host's own path confinement, mirroring `BuiltinTools`: a
+    /// symlink inside the workdir that points outside it is refused.
+    #[cfg(unix)]
+    #[test]
+    fn script_host_read_refuses_a_symlink_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().join("workspace");
+        std::fs::create_dir(&workdir).unwrap();
+        std::os::unix::fs::symlink("/", workdir.join("link")).unwrap();
+
+        let host = DaemonScriptHost::with_io(all_allowed(), workdir, RecordingIo::arc());
+        let err = host.read_file("link/etc/hosts").unwrap_err();
+        assert!(err.contains("symlink"), "got: {err}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

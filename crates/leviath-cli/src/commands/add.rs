@@ -250,12 +250,12 @@ fn script_tool_names(install_dir: &Path) -> Vec<String> {
         .into_iter()
         .flatten()
         .flatten()
+        // `DirEntry::file_name` rather than `path().file_name()`: the latter
+        // returns an `Option` that a directory entry can never actually be
+        // missing, leaving an arm no test can reach.
         .filter_map(|e| {
-            let path = e.path();
-            match path.extension().and_then(|x| x.to_str()) {
-                Some("rhai") => path.file_name()?.to_str().map(str::to_string),
-                _ => None,
-            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.ends_with(".rhai").then_some(name)
         })
         .collect();
     names.sort();
@@ -394,6 +394,19 @@ mod capability_tests {
         assert!(!findings[0].contains("read_file"));
     }
 
+    /// A `[tool_script_permissions]` table that only *tightens* is not a grant,
+    /// so it must not appear in the inventory — the same "quiet unless there is
+    /// something to say" rule the ordinary-agent case establishes.
+    #[test]
+    fn a_script_permission_table_that_grants_nothing_is_not_reported() {
+        let manifest = "[agent]\nname = \"x\"\n\n\
+                        [tool_script_permissions]\nenv_var = \"deny\"\nhttp_get = \"ask\"\n";
+        assert!(
+            describe_capabilities(manifest, &[]).is_empty(),
+            "denying host access is not a capability to warn about"
+        );
+    }
+
     #[test]
     fn stage_level_grants_are_reported_too() {
         let manifest = "[agent]\nname = \"x\"\n\n\
@@ -442,6 +455,56 @@ mod capability_tests {
     fn opting_into_a_sandbox_is_not_reported() {
         let manifest = "[agent]\nname = \"x\"\n\n[sandbox]\nkind = \"container\"\n";
         assert!(describe_capabilities(manifest, &[]).is_empty());
+    }
+
+    /// The `tools/` scan that feeds the inventory: only `.rhai` files count, and
+    /// they come back sorted so the message is stable between runs.
+    #[test]
+    fn script_tool_names_lists_only_rhai_files_sorted() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = dir.path().join("tools");
+        std::fs::create_dir(&tools).unwrap();
+        for name in ["zeta.rhai", "alpha.rhai", "README.md", "notes.txt"] {
+            std::fs::write(tools.join(name), "x").unwrap();
+        }
+        assert_eq!(
+            super::script_tool_names(dir.path()),
+            vec!["alpha.rhai".to_string(), "zeta.rhai".to_string()]
+        );
+    }
+
+    /// An agent with no `tools/` directory at all — the common case.
+    #[test]
+    fn script_tool_names_is_empty_without_a_tools_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(super::script_tool_names(dir.path()).is_empty());
+    }
+
+    /// The end-to-end printer, over a directory rather than a string: it must
+    /// stay silent for an ordinary agent and speak for a demanding one.
+    #[test]
+    fn print_capabilities_reads_the_installed_directory() {
+        crate::test_support::with_tracing(|| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("agent.leviath"),
+                "[agent]\nname = \"q\"\n\n[tool_permissions]\nshell = \"allow\"\n",
+            )
+            .unwrap();
+            let tools = dir.path().join("tools");
+            std::fs::create_dir(&tools).unwrap();
+            std::fs::write(tools.join("t.rhai"), "// @tool t\n").unwrap();
+            super::print_capabilities("q", dir.path());
+
+            // And the quiet path: a plain agent prints nothing.
+            let plain = tempfile::tempdir().unwrap();
+            std::fs::write(
+                plain.path().join("agent.leviath"),
+                "[agent]\nname = \"p\"\n\n[stages.main]\nprompt = \"p\"\n",
+            )
+            .unwrap();
+            super::print_capabilities("p", plain.path());
+        });
     }
 
     #[test]

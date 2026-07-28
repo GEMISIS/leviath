@@ -230,7 +230,7 @@ pub(super) struct ValidateResponse {
 
 // ─── Agent types ────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 pub(super) struct SpawnAgentReq {
     pub(super) blueprint: String,
     pub(super) task: String,

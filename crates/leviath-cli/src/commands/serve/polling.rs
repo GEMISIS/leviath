@@ -24,9 +24,7 @@ pub(super) async fn event_loop(state: AppState, backoff: Duration) {
     // endpoint that accepts a connection and never answers hung this delivery
     // forever. The shared factory supplies a connect+total timeout floor and
     // caps redirects.
-    let client = leviath_core::client_builder(leviath_core::ClientTimeouts::default())
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    let client = leviath_core::client(leviath_core::ClientTimeouts::default());
     loop {
         consume_once(&state, &client).await;
         // The stream ended (daemon closed / restarted) or was unreachable; back
@@ -678,7 +676,11 @@ mod tests {
         let id = control_id(dir);
         let mut listener = bind_control_listener(&id).unwrap();
         let handle = tokio::spawn(async move {
-            let stream = listener.accept().await.unwrap();
+            let stream = listener
+                .accept()
+                .await
+                .expect("accept succeeds")
+                .expect("our own connection is admitted");
             let (read_half, mut write_half) = tokio::io::split(stream);
             let mut lines = BufReader::new(read_half).lines();
             let _subscribe = lines.next_line().await.unwrap();
@@ -731,7 +733,11 @@ mod tests {
         let mut listener = bind_control_listener(&id).unwrap();
         let handle = tokio::spawn(async move {
             for _ in 0..passes {
-                let stream = listener.accept().await.unwrap();
+                let stream = listener
+                    .accept()
+                    .await
+                    .expect("accept succeeds")
+                    .expect("our own connection is admitted");
                 let (read_half, mut write_half) = tokio::io::split(stream);
                 let mut lines = BufReader::new(read_half).lines();
                 let _subscribe = lines.next_line().await.unwrap();

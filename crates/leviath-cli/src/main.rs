@@ -398,7 +398,11 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
     let (op_tx, op_rx) = tokio::sync::mpsc::unbounded_channel();
     let events = host.event_sender();
     tokio::spawn(async move {
-        while let Ok(stream) = listener.accept().await {
+        // `Ok(None)` means someone connected but is not this user: the listener
+        // has already closed that connection and logged it. Skip and keep
+        // serving rather than treating it as a fatal accept error.
+        while let Ok(accepted) = listener.accept().await {
+            let Some(stream) = accepted else { continue };
             let op_tx = op_tx.clone();
             let events = events.clone();
             tokio::spawn(async move {

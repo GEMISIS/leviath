@@ -1239,4 +1239,104 @@ prompt = "Run"
         )
         .await;
     }
+    /// The three CORS shapes. Default is *no layer*: the API's clients are
+    /// programmatic and not subject to CORS, so a browser-facing `*` default
+    /// gave them nothing and widened the surface for everyone else.
+    #[tokio::test]
+    async fn cors_is_off_by_default_explicit_when_asked_and_fatal_when_malformed() {
+        fn args_with(cors: Option<&str>) -> ServeArgs {
+            ServeArgs {
+                port: 0,
+                host: "127.0.0.1".to_string(),
+                cors: cors.map(str::to_string),
+                token: Some("t".to_string()),
+                allow_admin: false,
+                workdir_root: None,
+                no_remote_yolo: false,
+            }
+        }
+
+        /// Start, wait until bound, then shut down. Only reached for values that
+        /// are accepted — a rejected one never binds.
+        async fn starts(cors: Option<&str>) {
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(execute_with_shutdown(
+                args_with(cors),
+                no_daemon_control(),
+                Box::pin(async move {
+                    let _ = stop_rx.await;
+                }),
+                Some(ready_tx),
+            ));
+            ready_rx.await.expect("the server bound");
+            let _ = stop_tx.send(());
+            server.await.expect("join").expect("clean shutdown");
+        }
+
+        starts(None).await;
+        starts(Some("*")).await;
+        starts(Some("https://ok.example")).await;
+
+        // A malformed origin fails before binding, so this can be awaited
+        // directly rather than raced against a `ready` signal.
+        let err = execute_with_shutdown(
+            args_with(Some("not a valid\nheader")),
+            no_daemon_control(),
+            Box::pin(std::future::pending()),
+            None,
+        )
+        .await
+        .expect_err("a malformed origin must refuse to start");
+        assert!(err.to_string().contains("not a valid origin header"));
+    }
+
+    /// The MCP admin endpoints are mounted only with `--allow-admin`: adding an
+    /// MCP server writes a spawn command into config, which Leviath then runs.
+    #[tokio::test]
+    async fn the_mcp_admin_routes_are_mounted_only_with_allow_admin() {
+        for allow_admin in [false, true] {
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+            let args = ServeArgs {
+                port: 0,
+                host: "127.0.0.1".to_string(),
+                cors: None,
+                token: Some("t".to_string()),
+                allow_admin,
+                workdir_root: None,
+                no_remote_yolo: false,
+            };
+            let server = tokio::spawn(execute_with_shutdown(
+                args,
+                no_daemon_control(),
+                Box::pin(async move {
+                    let _ = stop_rx.await;
+                }),
+                Some(ready_tx),
+            ));
+            let addr = ready_rx.await.expect("bound");
+
+            let status = reqwest::Client::new()
+                .post(format!("http://{addr}/api/mcp/servers"))
+                .bearer_auth("t")
+                .json(&serde_json::json!({}))
+                .send()
+                .await
+                .expect("request")
+                .status()
+                .as_u16();
+            // 405 (Method Not Allowed) is the signature of "this path exists
+            // for GET but POST is not mounted". Asserted as a presence check
+            // rather than an exact code for the mounted case, whose status
+            // depends on body validation rather than on routing.
+            match allow_admin {
+                false => assert_eq!(status, 405, "the admin route must not be mounted"),
+                true => assert_ne!(status, 405, "the admin route must be mounted"),
+            }
+
+            let _ = stop_tx.send(());
+            let _ = server.await;
+        }
+    }
 }

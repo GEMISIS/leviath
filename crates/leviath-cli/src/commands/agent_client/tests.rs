@@ -55,7 +55,9 @@ impl ScriptedDaemon {
         let responder = Arc::new(responder);
         let accept = tokio::spawn(async move {
             loop {
-                let Ok(stream) = listener.accept().await else {
+                // `Ok(None)` is a peer that is not this user; in a test the
+                // only connection is our own.
+                let Ok(Some(stream)) = listener.accept().await else {
                     break;
                 };
                 let events = events.clone();
@@ -1268,7 +1270,7 @@ async fn output_is_flushed_on_the_poll_tick_between_events() {
     let mut listener = bind_control_listener(&id).unwrap();
     let accept = tokio::spawn(async move {
         loop {
-            let Ok(stream) = listener.accept().await else {
+            let Ok(Some(stream)) = listener.accept().await else {
                 break;
             };
             tokio::spawn(async move {
@@ -1335,7 +1337,7 @@ async fn a_closed_event_stream_ends_the_turn() {
     let mut listener = bind_control_listener(&id).unwrap();
     let accept = tokio::spawn(async move {
         loop {
-            let Ok(stream) = listener.accept().await else {
+            let Ok(Some(stream)) = listener.accept().await else {
                 break;
             };
             tokio::spawn(async move {

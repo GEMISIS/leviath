@@ -34,9 +34,7 @@ impl PackageRegistry {
             url,
             // Was a bare `Client::new()` — no connect timeout, no read timeout,
             // no redirect cap — against a *user-configurable* registry URL.
-            client: leviath_core::client_builder(leviath_core::ClientTimeouts::default())
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+            client: leviath_core::client(leviath_core::ClientTimeouts::default()),
         }
     }
 
