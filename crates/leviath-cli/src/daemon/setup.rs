@@ -29,8 +29,15 @@ use crate::tools::ToolRegistry;
 /// (honoring `LEVIATH_HOME`): a Unix-socket path on Unix, a named-pipe name on
 /// Windows. `None` if no home directory can be resolved.
 pub fn control_address() -> Option<leviath_runtime::control_socket::ControlId> {
-    leviath_home_dir()
-        .map(|home| leviath_runtime::control_socket::control_id(&home.join(".leviath")))
+    control_dir().map(|dir| leviath_runtime::control_socket::control_id(&dir))
+}
+
+/// The directory holding the control channel and its token.
+///
+/// Separate from [`control_address`] because on Windows a control id is a pipe
+/// name rather than a path, so the token's location cannot be derived from it.
+pub fn control_dir() -> Option<std::path::PathBuf> {
+    leviath_home_dir().map(|home| home.join(".leviath"))
 }
 
 /// This CLI binary's build id (short git hash, `-dirty` when the tree had

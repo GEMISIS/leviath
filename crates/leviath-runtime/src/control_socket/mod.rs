@@ -17,6 +17,8 @@
 //! [`ControlClient`] operate. It is the default, always-on management channel
 //! (the opt-in HTTP API that `lev serve` toggles is a separate surface).
 
+use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc::UnboundedSender;
@@ -42,11 +44,98 @@ pub use windows::{
     control_id, control_id_from_str, is_daemon_running,
 };
 
+/// A shared secret that proves a control-channel caller is this same user.
+///
+/// # Why this exists
+///
+/// On Unix the daemon asks the kernel which uid is on the other end of the
+/// socket and refuses anything that is not its own — see the peer check in the
+/// `unix` module. Windows offers an equivalent, but reaching it means calling
+/// `ImpersonateNamedPipeClient` and comparing security identifiers through raw
+/// FFI, and this workspace is `unsafe_code = "forbid"` from top to bottom. So
+/// the Windows control channel served *every* connection it accepted: anyone who
+/// could reach the pipe could spawn a tool-executing agent and answer its
+/// approval prompts.
+///
+/// A token closes that without any of the FFI. The daemon writes a fresh random
+/// secret into its own directory, readable only by the owner, and refuses any
+/// connection that cannot quote it. A caller who can read the file is a caller
+/// who can already read `config.toml` — so the token grants nothing that was not
+/// already reachable, which is exactly the property wanted.
+///
+/// It is required on every platform, not only Windows. One protocol is easier to
+/// reason about than two, the extra round trip on a local socket is
+/// unmeasurable, and on Unix it is defence in depth behind the uid check rather
+/// than a replacement for it.
+#[derive(Clone)]
+pub struct ControlToken(String);
+
+impl std::fmt::Debug for ControlToken {
+    /// Never render the secret: this type ends up inside daemon state that other
+    /// code may reasonably want to `{:?}`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ControlToken(<redacted>)")
+    }
+}
+
+impl ControlToken {
+    /// The token file beside the control socket.
+    pub fn path(dir: &Path) -> PathBuf {
+        dir.join("control.token")
+    }
+
+    /// Generate a fresh token and write it owner-only.
+    ///
+    /// Called at bind, so a restarted daemon invalidates every previous token —
+    /// a stale one cannot be replayed against the new process.
+    pub fn create(dir: &Path) -> std::io::Result<Self> {
+        use rand::Rng as _;
+        // 256 bits from the OS generator. Hex rather than raw bytes so the file
+        // is a single printable line that a human can compare, and so the value
+        // survives being read back as text.
+        let bytes: [u8; 32] = rand::rng().random();
+        let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+
+        std::fs::create_dir_all(dir)?;
+        let _ = leviath_sys::secure_dir_perms(dir);
+        leviath_sys::write_private(&Self::path(dir), token.as_bytes())?;
+        Ok(Self(token))
+    }
+
+    /// Read the token a running daemon wrote.
+    pub fn load(dir: &Path) -> std::io::Result<Self> {
+        let token = std::fs::read_to_string(Self::path(dir))?;
+        Ok(Self(token.trim().to_string()))
+    }
+
+    /// Whether `presented` is this token, compared in constant time.
+    ///
+    /// Constant time because the comparison is against a secret and the caller
+    /// controls the input: a byte-at-a-time early return leaks the prefix, and
+    /// a local attacker can retry without limit.
+    pub fn matches(&self, presented: &str) -> bool {
+        leviath_core::constant_time_eq(&self.0, presented)
+    }
+
+    /// The token itself, for a client that is about to present it.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
 /// A control request over the wire. Agents are addressed by run id (the stable
 /// id), except `Message`, which targets an agent id.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ControlRequest {
+    /// Prove the caller is this user, by quoting the daemon's control token.
+    ///
+    /// Must be the first request on a connection. Until it succeeds the daemon
+    /// answers nothing else — see [`ControlToken`] for why.
+    Authenticate {
+        /// The token read from `<leviath-home>/control.token`.
+        token: String,
+    },
     /// Spawn a new agent.
     Spawn {
         /// The spawn request. Boxed because it is much larger than the other
@@ -145,6 +234,9 @@ pub enum ControlResponse {
 /// down) yields the operation's neutral result.
 async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> ControlResponse {
     match req {
+        // Handled by `handle_connection` before dispatch is ever reached: it is
+        // about the connection, not about the world.
+        ControlRequest::Authenticate { .. } => ControlResponse::Ok { ok: true },
         ControlRequest::Spawn { args } => {
             let (reply, rx) = oneshot::channel();
             let _ = op_tx.send(ControlOp::Spawn { args, reply });
@@ -279,16 +371,50 @@ pub async fn handle_connection<S>(
     stream: S,
     op_tx: UnboundedSender<ControlOp>,
     events: broadcast::Sender<WorldEvent>,
+    token: Option<ControlToken>,
 ) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut lines = BufReader::new(read_half).lines();
+    // `None` means this daemon runs without a token and every caller is
+    // accepted, which is only the case in tests that drive the protocol
+    // directly. Production always passes one.
+    let mut authenticated = token.is_none();
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
             continue;
         }
+
+        // Until the caller has proved who it is, `Authenticate` is the only
+        // request that gets an answer. Anything else -- including a malformed
+        // line -- is refused and the connection dropped, so an unauthenticated
+        // peer cannot sit probing the protocol.
+        if !authenticated {
+            let refused = match serde_json::from_str::<ControlRequest>(&line) {
+                Ok(ControlRequest::Authenticate { token: presented }) => {
+                    match token.as_ref().is_some_and(|t| t.matches(&presented)) {
+                        true => {
+                            authenticated = true;
+                            write_line(&mut write_half, &ControlResponse::Ok { ok: true }).await;
+                            continue;
+                        }
+                        false => "authentication failed",
+                    }
+                }
+                _ => "authentication required: send an `authenticate` request first",
+            };
+            write_line(
+                &mut write_half,
+                &ControlResponse::Error {
+                    message: refused.to_string(),
+                },
+            )
+            .await;
+            return Ok(());
+        }
+
         let response = match serde_json::from_str::<ControlRequest>(&line) {
             // Subscribe switches this connection to an event stream and never
             // returns to the request loop. Drop this connection's sender clone
@@ -299,19 +425,30 @@ where
                 drop(events);
                 return stream_events(&mut write_half, rx).await;
             }
+            // Already authenticated: a repeat is harmless, not an error.
+            Ok(ControlRequest::Authenticate { .. }) => ControlResponse::Ok { ok: true },
             Ok(req) => dispatch(req, &op_tx).await,
             Err(e) => ControlResponse::Error {
                 message: format!("invalid request: {e}"),
             },
         };
-        // `ControlResponse` is a plain serde enum — serialization is infallible.
-        let mut out = serde_json::to_string(&response).expect("ControlResponse serializes");
-        out.push('\n');
-        // A failed write means the client hung up; the next read returns EOF and
-        // the loop ends cleanly, so the write error needs no separate handling.
-        let _ = write_half.write_all(out.as_bytes()).await;
+        write_line(&mut write_half, &response).await;
     }
     Ok(())
+}
+
+/// Write one newline-delimited response.
+///
+/// A failed write means the client hung up; the next read returns EOF and the
+/// loop ends cleanly, so the error needs no separate handling.
+async fn write_line<W>(write_half: &mut W, response: &ControlResponse)
+where
+    W: AsyncWrite + Unpin,
+{
+    // `ControlResponse` is a plain serde enum — serialization is infallible.
+    let mut out = serde_json::to_string(response).expect("ControlResponse serializes");
+    out.push('\n');
+    let _ = write_half.write_all(out.as_bytes()).await;
 }
 
 /// How long a control request waits for the daemon before giving up, when
@@ -362,12 +499,44 @@ fn timeout_for(req: &ControlRequest) -> std::time::Duration {
 #[derive(Clone)]
 pub struct ControlClient {
     id: ControlId,
+    token: Option<ControlToken>,
 }
 
 impl ControlClient {
-    /// A client for the control socket identified by `id`.
+    /// A client for the control socket identified by `id`, with no token.
+    ///
+    /// Only reaches a daemon that runs without one, which in practice means a
+    /// test driving the protocol directly. Real callers use
+    /// [`with_token`](Self::with_token) — see [`ControlToken`].
     pub fn new(id: impl Into<ControlId>) -> Self {
-        Self { id: id.into() }
+        Self {
+            id: id.into(),
+            token: None,
+        }
+    }
+
+    /// Present `token` on every connection this client opens.
+    pub fn with_token(mut self, token: ControlToken) -> Self {
+        self.token = Some(token);
+        self
+    }
+
+    /// A client that reads the daemon's token out of `dir`.
+    ///
+    /// The error says what to do about it: a missing token file almost always
+    /// means no daemon is running, not that anything is broken.
+    pub fn for_home(id: impl Into<ControlId>, dir: &Path) -> std::io::Result<Self> {
+        let token = ControlToken::load(dir).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!(
+                    "could not read the daemon's control token at {}: {e}. \
+                     Is the daemon running? Start it with `lev daemon start`.",
+                    ControlToken::path(dir).display()
+                ),
+            )
+        })?;
+        Ok(Self::new(id).with_token(token))
     }
 
     /// Send one request and await its response. Errors if the daemon can't be
@@ -394,13 +563,47 @@ impl ControlClient {
     async fn request_uncapped(&self, req: &ControlRequest) -> std::io::Result<ControlResponse> {
         let stream = connect(&self.id).await?;
         let (read_half, mut write_half) = tokio::io::split(stream);
+        let mut lines = BufReader::new(read_half).lines();
+
+        // Authenticate first, on every connection: the client opens a fresh one
+        // per request, so there is no session to carry the proof across.
+        if let Some(token) = &self.token {
+            let hello = ControlRequest::Authenticate {
+                token: token.expose().to_string(),
+            };
+            let mut line = serde_json::to_string(&hello).expect("ControlRequest serializes");
+            line.push('\n');
+            let _ = write_half.write_all(line.as_bytes()).await;
+
+            // `.ok().flatten()`: a read error and a clean EOF are the same fact
+            // here -- the daemon did not answer the handshake -- and giving the
+            // error its own `?` arm leaves a branch no test can drive.
+            match lines.next_line().await.ok().flatten() {
+                Some(resp) => match serde_json::from_str::<ControlResponse>(&resp) {
+                    Ok(ControlResponse::Ok { ok: true }) => {}
+                    _ => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "the daemon refused this client's control token. \
+                             Restart it with `lev daemon restart` to issue a fresh one.",
+                        ));
+                    }
+                },
+                None => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "control connection closed during authentication",
+                    ));
+                }
+            }
+        }
+
         let mut line = serde_json::to_string(req).expect("ControlRequest serializes");
         line.push('\n');
         // A failed write means the peer is already gone; the read below then sees
         // EOF and returns the error, so the write needs no separate propagation.
         let _ = write_half.write_all(line.as_bytes()).await;
 
-        let mut lines = BufReader::new(read_half).lines();
         match lines.next_line().await? {
             Some(resp_line) => serde_json::from_str(&resp_line)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
@@ -474,6 +677,84 @@ impl WorldEventStream {
 
 #[cfg(test)]
 mod tests {
+
+    // ── Control-channel authentication ──────────────────────────────────────
+
+    /// The token is what stands between another local user and a
+    /// tool-executing agent on Windows, where there is no kernel peer check.
+    #[test]
+    fn a_token_round_trips_through_its_file_and_is_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let created = ControlToken::create(dir.path()).unwrap();
+        let loaded = ControlToken::load(dir.path()).unwrap();
+
+        assert!(
+            created.matches(loaded.expose()),
+            "the same secret comes back"
+        );
+        assert_eq!(created.expose().len(), 64, "256 bits, hex encoded");
+        let rendered = created.expose().to_string();
+        assert!(
+            rendered.chars().all(|c| c.is_ascii_hexdigit()),
+            "one printable line: {rendered}"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(ControlToken::path(dir.path()))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "the token must be owner-only");
+        }
+    }
+
+    /// Every daemon mints its own, so a token from a previous process cannot be
+    /// replayed against the one running now.
+    #[test]
+    fn each_token_is_different() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let first = ControlToken::create(a.path()).unwrap();
+        let second = ControlToken::create(b.path()).unwrap();
+        assert!(!first.matches(second.expose()), "tokens must not repeat");
+    }
+
+    #[test]
+    fn a_wrong_or_truncated_token_does_not_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = ControlToken::create(dir.path()).unwrap();
+        assert!(!token.matches(""));
+        assert!(!token.matches("deadbeef"));
+        // A correct prefix is still wrong: the compare is over the whole value.
+        let half: String = token.expose().chars().take(32).collect();
+        assert!(!token.matches(&half));
+        assert!(token.matches(token.expose()));
+    }
+
+    /// The secret must not leak through a `{:?}` of daemon state that happens
+    /// to contain it.
+    #[test]
+    fn the_token_is_redacted_in_debug_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = ControlToken::create(dir.path()).unwrap();
+        let rendered = format!("{token:?}");
+        assert!(!rendered.contains(token.expose()), "{rendered}");
+        assert!(rendered.contains("redacted"), "{rendered}");
+    }
+
+    /// Loading from a directory with no daemon says what to do about it.
+    #[test]
+    fn a_missing_token_is_an_actionable_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // `.err()` rather than `expect_err`, which would need `Debug` on the
+        // client -- a type that holds the token.
+        let err = ControlClient::for_home(control_id(dir.path()), dir.path())
+            .err()
+            .expect("no daemon, no token");
+        assert!(err.to_string().contains("lev daemon start"), "{err}");
+    }
     use super::*;
     use tokio::sync::mpsc;
 
@@ -542,7 +823,7 @@ mod tests {
                 .await
                 .expect("accept succeeds")
                 .expect("our own connection is admitted");
-            let _ = handle_connection(stream, op_tx, no_events()).await;
+            let _ = handle_connection(stream, op_tx, no_events(), None).await;
         });
 
         let stream = connect(&id).await.unwrap();
@@ -724,6 +1005,195 @@ mod tests {
         drop(tx);
     }
 
+    /// `create` reports rather than panicking when its directory cannot be
+    /// written -- a read-only home should fail the daemon loudly, not leave it
+    /// running with no way for clients to authenticate.
+    #[test]
+    fn creating_a_token_in_an_unwritable_place_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // A file where the token's directory would have to be.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        assert!(
+            ControlToken::create(&blocker.join("nested")).is_err(),
+            "a directory that cannot be created is an error"
+        );
+
+        // And the other half: the directory is fine, but the token path itself
+        // is already a directory, so the write fails.
+        let occupied = dir.path().join("occupied");
+        std::fs::create_dir_all(ControlToken::path(&occupied)).unwrap();
+        assert!(
+            ControlToken::create(&occupied).is_err(),
+            "a token file that cannot be written is an error"
+        );
+    }
+
+    /// `dispatch` has an `Authenticate` arm it never sees in practice, because
+    /// `handle_connection` answers that request itself. It exists so the match
+    /// is exhaustive; this pins that it is inert rather than doing something.
+    #[tokio::test]
+    async fn dispatching_authenticate_is_inert() {
+        let (op_tx, _op_rx) = mpsc::unbounded_channel();
+        let response = dispatch(
+            ControlRequest::Authenticate {
+                token: "irrelevant".to_string(),
+            },
+            &op_tx,
+        )
+        .await;
+        assert!(matches!(response, ControlResponse::Ok { ok: true }));
+    }
+
+    /// A client that re-sends `Authenticate` on an already-authenticated
+    /// connection is answered, not punished: a repeat is harmless.
+    #[tokio::test]
+    async fn re_authenticating_on_an_open_connection_is_accepted() {
+        let (events, _r) = broadcast::channel::<WorldEvent>(16);
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        spawn_fake_host(op_rx);
+        let (mut listener, id, dir) = test_listener();
+        let token = ControlToken::create(dir.path()).unwrap();
+
+        let server_token = token.clone();
+        let server = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap().unwrap();
+            let _ = handle_connection(stream, op_tx, events, Some(server_token)).await;
+        });
+
+        let stream = connect(&id).await.unwrap();
+        let (read_half, mut write_half) = tokio::io::split(stream);
+        let mut lines = BufReader::new(read_half).lines();
+        let hello = serde_json::to_string(&ControlRequest::Authenticate {
+            token: token.expose().to_string(),
+        })
+        .unwrap();
+        for _ in 0..2 {
+            write_half
+                .write_all(format!("{hello}\n").as_bytes())
+                .await
+                .unwrap();
+            let resp: ControlResponse =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            let rendered = format!("{resp:?}");
+            assert!(rendered.starts_with("Ok"), "{rendered}");
+        }
+
+        // Hang up so the server sees EOF and its task ends.
+        drop(write_half);
+        drop(lines);
+        server.await.unwrap();
+    }
+
+    /// A daemon that hangs up mid-handshake is reported as such rather than as
+    /// a mysterious parse failure.
+    #[tokio::test]
+    async fn a_connection_closed_during_authentication_is_reported() {
+        let (mut listener, id, dir) = test_listener();
+        let token = ControlToken::create(dir.path()).unwrap();
+        tokio::spawn(async move {
+            // Accept, then drop without answering the handshake.
+            let _ = listener.accept().await;
+        });
+
+        let err = ControlClient::new(id)
+            .with_token(token)
+            .list()
+            .await
+            .expect_err("a hang-up during authentication is an error");
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+        assert!(err.to_string().contains("during authentication"), "{err}");
+    }
+
+    /// The whole point, end to end over a real socket: a caller that cannot
+    /// quote the token gets nothing. Before this, the Windows channel served
+    /// every connection it accepted.
+    #[tokio::test]
+    async fn an_unauthenticated_caller_is_refused_and_disconnected() {
+        let (events, _r) = broadcast::channel::<WorldEvent>(16);
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        spawn_fake_host(op_rx);
+        let (mut listener, id, dir) = test_listener();
+        let token = ControlToken::create(dir.path()).unwrap();
+
+        let server_token = token.clone();
+        let server = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap().unwrap();
+            let _ = handle_connection(stream, op_tx, events, Some(server_token)).await;
+        });
+
+        // A client with no token at all: its first request is `List`, which the
+        // daemon must refuse rather than answer.
+        let err = ControlClient::new(id)
+            .list()
+            .await
+            .expect("the daemon answers, then hangs up");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("authentication required"),
+            "an unauthenticated List must not be served: {rendered}"
+        );
+        // The refusal closes the connection, so the server task ends on its own.
+        server.await.unwrap();
+    }
+
+    /// And a *wrong* token is refused just as firmly as none at all.
+    #[tokio::test]
+    async fn a_client_presenting_the_wrong_token_is_refused() {
+        let (events, _r) = broadcast::channel::<WorldEvent>(16);
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        spawn_fake_host(op_rx);
+        let (mut listener, id, dir) = test_listener();
+        let real = ControlToken::create(dir.path()).unwrap();
+
+        tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap().unwrap();
+            let _ = handle_connection(stream, op_tx, events, Some(real)).await;
+        });
+
+        // A different daemon's token.
+        let other_dir = tempfile::tempdir().unwrap();
+        let wrong = ControlToken::create(other_dir.path()).unwrap();
+        let err = ControlClient::new(id)
+            .with_token(wrong)
+            .list()
+            .await
+            .expect_err("a wrong token is refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains("refused"), "{err}");
+    }
+
+    /// The converse, so the tests above are not passing merely because
+    /// everything is refused: the right token gets served.
+    #[tokio::test]
+    async fn a_client_presenting_the_right_token_is_served() {
+        let (events, _r) = broadcast::channel::<WorldEvent>(16);
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        spawn_fake_host(op_rx);
+        let (mut listener, id, dir) = test_listener();
+        let token = ControlToken::create(dir.path()).unwrap();
+
+        let server_token = token.clone();
+        let server = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap().unwrap();
+            let _ = handle_connection(stream, op_tx, events, Some(server_token)).await;
+        });
+
+        // Loaded the way a real client does, out of the daemon's directory.
+        let client = ControlClient::for_home(id, dir.path()).unwrap();
+        let response = client
+            .list()
+            .await
+            .expect("an authenticated List is served");
+        let rendered = format!("{response:?}");
+        assert!(
+            rendered.starts_with("List"),
+            "expected a run list: {rendered}"
+        );
+        // The client closes after its one request, ending the server task.
+        server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn subscribe_streams_events_to_the_client() {
         let (events, _r) = broadcast::channel::<WorldEvent>(16);
@@ -739,7 +1209,7 @@ mod tests {
                 .await
                 .expect("accept succeeds")
                 .expect("our own connection is admitted");
-            let _ = handle_connection(stream, op_tx, server_events).await;
+            let _ = handle_connection(stream, op_tx, server_events, None).await;
         });
 
         let mut stream = ControlClient::new(id).subscribe().await.unwrap();
@@ -783,7 +1253,7 @@ mod tests {
                 .await
                 .expect("accept succeeds")
                 .expect("our own connection is admitted");
-            let _ = handle_connection(stream, op_tx, server_events).await;
+            let _ = handle_connection(stream, op_tx, server_events, None).await;
         });
 
         let mut stream = ControlClient::new(id).subscribe().await.unwrap();
@@ -811,7 +1281,7 @@ mod tests {
         spawn_fake_host(op_rx);
         let (client, server, _dir) = connected_pair().await;
         let handle =
-            tokio::spawn(async move { handle_connection(server, op_tx, no_events()).await });
+            tokio::spawn(async move { handle_connection(server, op_tx, no_events(), None).await });
 
         let (read_half, mut write_half) = tokio::io::split(client);
         // A blank line (skipped) then garbage (error) then a valid request.
@@ -849,7 +1319,7 @@ mod tests {
         spawn_fake_host(op_rx);
         let (client, server, _dir) = connected_pair().await;
         let handle =
-            tokio::spawn(async move { handle_connection(server, op_tx, no_events()).await });
+            tokio::spawn(async move { handle_connection(server, op_tx, no_events(), None).await });
 
         let (_read_half, mut write_half) = tokio::io::split(client);
         // Invalid UTF-8 makes the line reader return an I/O error, which
@@ -876,7 +1346,7 @@ mod tests {
                     .expect("our own connection is admitted");
                 let op_tx = op_tx.clone();
                 tokio::spawn(async move {
-                    let _ = handle_connection(stream, op_tx, no_events()).await;
+                    let _ = handle_connection(stream, op_tx, no_events(), None).await;
                 });
             }
         });
