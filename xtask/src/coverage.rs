@@ -213,8 +213,13 @@ pub fn parse_uncovered(json: &serde_json::Value) -> Vec<String> {
         let Some(name) = file["filename"].as_str() else {
             continue;
         };
-        // Trim to something readable: the workspace-relative tail.
-        let short = name.rsplit_once("/src/").map_or(name, |(_, tail)| tail);
+        // Trim to something readable: the workspace-relative tail. Both
+        // separators, because llvm-cov reports `...\src\lib.rs` on Windows and
+        // that is exactly where these one-platform gaps show up.
+        let short = name
+            .rsplit_once("/src/")
+            .or_else(|| name.rsplit_once("\\src\\"))
+            .map_or(name, |(_, tail)| tail);
         let mut seen = std::collections::BTreeSet::new();
         for seg in file["segments"].as_array().into_iter().flatten() {
             let s = seg.as_array().filter(|s| s.len() >= 6);
@@ -357,6 +362,20 @@ mod tests {
 
     /// A filename with no `/src/` segment is reported whole rather than
     /// silently dropped.
+    /// llvm-cov reports Windows paths with backslashes, and a one-platform gap
+    /// is exactly the case this output exists for -- so the shortening has to
+    /// handle both separators.
+    #[test]
+    fn parse_uncovered_shortens_a_windows_path() {
+        let json = serde_json::json!({
+            "data": [{"files": [{
+                "filename": "D:\\a\\leviath\\crates\\leviath-tools\\src\\lib.rs",
+                "segments": [[803, 13, 0, true, true, false]]
+            }]}]
+        });
+        assert_eq!(parse_uncovered(&json), vec!["lib.rs:803:13".to_string()]);
+    }
+
     #[test]
     fn parse_uncovered_keeps_a_path_it_cannot_shorten() {
         let json = serde_json::json!({
