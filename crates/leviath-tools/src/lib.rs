@@ -776,10 +776,27 @@ impl BuiltinTools {
     /// throughout, which is a larger change; this stops the planted-symlink case,
     /// which is the one an agent can actually arrange.
     fn resolve(&self, requested: &str) -> anyhow::Result<PathBuf> {
+        Self::resolve_within(requested, &self.ctx.workdir, resolves_within)
+    }
+
+    /// Core of [`resolve`](Self::resolve) with the containment check injected.
+    ///
+    /// A `fn` pointer (not `impl Fn`) so there is one monomorphization, matching
+    /// the seam idiom used elsewhere in the workspace. The seam exists because
+    /// the refusal cannot be reached otherwise on every platform: producing the
+    /// escape needs a real symlink, and creating one on Windows requires a
+    /// privilege CI runners do not have. Injecting the predicate lets the
+    /// refusal itself be tested everywhere, while the `#[cfg(unix)]` tests below
+    /// still prove the real filesystem behaviour end to end.
+    fn resolve_within(
+        requested: &str,
+        workdir: &Path,
+        within: fn(&Path, &Path) -> bool,
+    ) -> anyhow::Result<PathBuf> {
         let raw = if Path::new(requested).is_absolute() {
             PathBuf::from(requested)
         } else {
-            self.ctx.workdir.join(requested)
+            workdir.join(requested)
         };
 
         // Normalize by resolving .. and . without requiring the path to exist.
@@ -795,11 +812,11 @@ impl BuiltinTools {
             }
         }
 
-        if !normalized.starts_with(&self.ctx.workdir) {
+        if !normalized.starts_with(workdir) {
             anyhow::bail!("path '{}' would escape the working directory", requested);
         }
 
-        if !resolves_within(&normalized, &self.ctx.workdir) {
+        if !within(&normalized, workdir) {
             anyhow::bail!(
                 "path '{requested}' resolves outside the working directory through a symlink"
             );
@@ -1442,6 +1459,32 @@ mod tests {
     ///
     /// This matters most where the containment is load-bearing: Leviath's file
     /// tools run on the *host* over the bind-mounted workdir even when the
+    /// The containment refusal itself, driven through the injected predicate so
+    /// it is exercised on every platform. The `#[cfg(unix)]` tests below prove
+    /// the same refusal against a real symlink; this one proves the arm exists
+    /// and fires on Windows too, where a test cannot create one.
+    #[test]
+    fn resolve_refuses_a_path_that_does_not_resolve_within_the_workdir() {
+        fn escapes(_: &Path, _: &Path) -> bool {
+            false
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let err = BuiltinTools::resolve_within("notes.txt", dir.path(), escapes)
+            .expect_err("a path that resolves outside must be refused");
+        assert!(err.to_string().contains("symlink"), "{err}");
+    }
+
+    /// The converse, so the test above is not passing merely because everything
+    /// is refused: with the real predicate an ordinary path resolves.
+    #[test]
+    fn resolve_admits_an_ordinary_path_within_the_workdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolved =
+            BuiltinTools::resolve_within("notes.txt", dir.path(), leviath_core::resolves_within)
+                .expect("an ordinary path resolves");
+        assert!(resolved.ends_with("notes.txt"));
+    }
+
     /// stage's `shell` is confined to a container, so a symlink the agent made
     /// inside the container escaped the container through these tools. It is also
     /// reachable from a checked-in symlink in a freshly cloned repository, which

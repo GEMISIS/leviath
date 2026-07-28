@@ -21,6 +21,43 @@ const MAX_UNPACKED_BYTES: u64 = 256 * 1024 * 1024;
 /// by the file tools, a link is a way to smuggle content in (or to have a later
 /// write follow it out). Nothing in a legitimate agent bundle needs one.
 fn reject_symlinks(dir: &Path) -> anyhow::Result<()> {
+    reject_symlinks_with(dir, classify)
+}
+
+/// What an entry is, as far as this check cares.
+///
+/// A three-way answer rather than a `FileType`, because `FileType` cannot be
+/// constructed without a real file of that kind — and a real symlink is exactly
+/// what a test cannot create on Windows without a privilege CI runners lack.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Entry {
+    Dir,
+    File,
+    /// A symlink, or an entry that could not be stat'd at all — the same
+    /// refusal either way, since neither can be certified.
+    Refused,
+}
+
+/// Classify a directory entry by its own metadata, not its target's.
+///
+/// `symlink_metadata` does not follow the link, which is the point.
+fn classify(path: &Path) -> Entry {
+    match fs::symlink_metadata(path).map(|m| m.file_type()).ok() {
+        Some(t) if t.is_dir() => Entry::Dir,
+        Some(t) if !t.is_symlink() => Entry::File,
+        _ => Entry::Refused,
+    }
+}
+
+/// Core of [`reject_symlinks`] with the classifier injected.
+///
+/// A `fn` pointer (not `impl Fn`) so there is one monomorphization, matching the
+/// seam idiom used elsewhere in the workspace. The seam exists because the
+/// refusal cannot be reached otherwise on every platform: it needs a real
+/// symlink on disk, and creating one on Windows requires a privilege CI runners
+/// do not have. The `#[cfg(unix)]` tests still prove the real behaviour end to
+/// end through a genuine symlink in a genuine archive.
+fn reject_symlinks_with(dir: &Path, classify: fn(&Path) -> Entry) -> anyhow::Result<()> {
     // `into_iter().flatten().flatten()` rather than a `match` on `read_dir`: this
     // directory was created and unpacked into moments ago, so an unreadable one
     // has no reachable test — and it surfaces anyway on the manifest read that
@@ -28,14 +65,10 @@ fn reject_symlinks(dir: &Path) -> anyhow::Result<()> {
     // nothing can exercise.
     for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
         let path = entry.path();
-        // One stat, three outcomes. `symlink_metadata` does not follow the link,
-        // which is the point. A stat failure folds into the refusal arm rather
-        // than getting its own: either way we cannot certify the entry, and an
-        // error branch nothing can trigger would be permanently uncovered.
-        match fs::symlink_metadata(&path).map(|m| m.file_type()).ok() {
-            Some(t) if t.is_dir() => reject_symlinks(&path)?,
-            Some(t) if !t.is_symlink() => {}
-            _ => anyhow::bail!(
+        match classify(&path) {
+            Entry::Dir => reject_symlinks_with(&path, classify)?,
+            Entry::File => {}
+            Entry::Refused => anyhow::bail!(
                 "Package contains a symlink or unreadable entry ('{}'), which is not \
                  permitted in an agent bundle",
                 path.display()
@@ -482,6 +515,40 @@ description = "{}"
     /// symlink entry lands inside it legally and then points wherever it likes.
     /// The installed tree is later scanned for `.rhai` tool scripts, so a link
     /// is a way to smuggle content in.
+    /// The refusal itself, driven through the injected classifier so it runs on
+    /// every platform. The `#[cfg(unix)]` tests below prove the same refusal
+    /// against a genuine symlink in a genuine archive; this one proves the arm
+    /// fires on Windows too, where a test cannot create one.
+    #[test]
+    fn reject_symlinks_refuses_an_entry_it_cannot_certify() {
+        fn all_refused(_: &Path) -> Entry {
+            Entry::Refused
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("thing"), b"x").unwrap();
+
+        let err = reject_symlinks_with(dir.path(), all_refused)
+            .expect_err("an entry that cannot be certified is refused");
+        assert!(err.to_string().contains("symlink or unreadable"), "{err}");
+    }
+
+    /// Ordinary files and nested directories pass, so the test above is not
+    /// passing merely because everything is refused.
+    #[test]
+    fn reject_symlinks_admits_ordinary_files_and_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("tools");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("web_fetch.rhai"), b"x").unwrap();
+        std::fs::write(dir.path().join("agent.leviath"), b"x").unwrap();
+
+        reject_symlinks(dir.path()).expect("an ordinary bundle passes");
+        // And the classifier itself agrees about what it saw.
+        assert_eq!(classify(&nested), Entry::Dir);
+        assert_eq!(classify(&nested.join("web_fetch.rhai")), Entry::File);
+        assert_eq!(classify(&dir.path().join("no-such-entry")), Entry::Refused);
+    }
+
     #[cfg(unix)]
     #[test]
     fn install_from_bytes_refuses_a_symlink_entry() {
