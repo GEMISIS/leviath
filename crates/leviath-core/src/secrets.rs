@@ -19,6 +19,30 @@
 //! Neither is a substitute for the other, and both are shared rather than
 //! reimplemented per call site so a gap gets fixed once.
 
+/// Compare two secrets without leaking their contents through timing.
+///
+/// Runs over the full length of both inputs rather than returning at the first
+/// differing byte, so an attacker cannot recover a token one character at a time
+/// by measuring how long a wrong guess takes. The *length* still leaks, which is
+/// fine: these are fixed-shape tokens, and refusing early on a length mismatch
+/// avoids indexing past the end.
+///
+/// Shared so every secret comparison in the workspace is the same one. The API
+/// server had a correct implementation; the OAuth callback's `state` check used
+/// `==` and was the only comparison that differed.
+#[must_use]
+pub fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Environment variables a spawned child (an MCP server, a shell tool) inherits.
 ///
 /// Deliberately short. A child needs enough to find its interpreter and behave

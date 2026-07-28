@@ -244,13 +244,31 @@ impl OAuthClient {
         // A probe request surfaces the WWW-Authenticate hint; a server that
         // answers it without auth still yields the well-known document.
         let www_authenticate = self.probe_challenge(mcp, headers).await;
-        let resource_meta_url = match metadata::resource_metadata_url(www_authenticate.as_deref()) {
-            Some(url) => url,
-            None => metadata::well_known_resource_url(mcp).to_string(),
+        let hinted = metadata::resource_metadata_url(www_authenticate.as_deref());
+        // The hint comes out of a header the *remote server* wrote, and whatever
+        // it names is then fetched by us, from inside the user's network. Bind it
+        // to the MCP server's own origin: a server may point at its own metadata
+        // document, which is the legitimate use, and may not point at anything
+        // else. Without this, connecting to a hostile MCP server was enough to
+        // make Leviath fetch an arbitrary URL — cloud metadata included.
+        let resource_meta_url = match hinted {
+            Some(hint) => {
+                let parsed = Url::parse(&hint)
+                    .map_err(|e| anyhow::anyhow!("invalid resource_metadata URL '{hint}': {e}"))?;
+                if !metadata::same_origin(&parsed, mcp) {
+                    anyhow::bail!(
+                        "MCP server at {mcp} pointed resource_metadata at a different origin \
+                         ({parsed}) — refusing to follow it"
+                    );
+                }
+                parsed
+            }
+            None => metadata::well_known_resource_url(mcp),
         };
+        self.require_safe_discovery_url(&resource_meta_url)?;
 
         let value = self
-            .get_json(&resource_meta_url)
+            .get_json(resource_meta_url.as_str())
             .await
             .map_err(|e| anyhow::anyhow!("failed to fetch resource metadata: {}", e))?;
         let resource_meta: ProtectedResourceMetadata = serde_json::from_value(value)
@@ -272,12 +290,33 @@ impl OAuthClient {
         Ok((resource, server_meta))
     }
 
+    /// Refuse a discovery URL that would carry a bearer token in cleartext.
+    fn require_safe_discovery_url(&self, url: &Url) -> anyhow::Result<()> {
+        match metadata::is_safe_discovery_url(url) {
+            true => Ok(()),
+            false => anyhow::bail!(
+                "refusing OAuth discovery over an insecure URL ({url}): the flow carries a \
+                 bearer token, so it must use https (http is permitted only on loopback)"
+            ),
+        }
+    }
+
     /// Fetch AS metadata, trying RFC 8414 then the OpenID fallback.
+    ///
+    /// The returned document is validated against `issuer` before use. RFC 8414
+    /// §3.3 requires the `issuer` in the metadata to match the one that was
+    /// requested, and this never checked — so a hostile
+    /// `authorization_servers[0]` in the resource document could redirect the
+    /// entire flow to an attacker's authorization server and harvest the code.
     async fn fetch_auth_server_metadata(&self, issuer: &str) -> anyhow::Result<AuthServerMetadata> {
         let mut last_err = None;
         for url in metadata::auth_server_metadata_urls(issuer)? {
+            self.require_safe_discovery_url(&url)?;
             match self.fetch_one_auth_server_metadata(url.as_str()).await {
-                Ok(meta) => return Ok(meta),
+                Ok(meta) => {
+                    self.validate_auth_server_metadata(issuer, &meta)?;
+                    return Ok(meta);
+                }
                 Err(e) => last_err = Some(e),
             }
         }
@@ -285,6 +324,56 @@ impl OAuthClient {
             "failed to fetch authorization server metadata: {}",
             last_err.expect("at least one candidate URL is always tried")
         ))
+    }
+
+    /// Check a fetched AS metadata document against the issuer it claims to
+    /// describe.
+    ///
+    /// Three things, all of which a hostile document would otherwise get for
+    /// free:
+    ///
+    /// 1. The document's own `issuer` matches the one requested (RFC 8414 §3.3).
+    /// 2. The authorization and token endpoints share the issuer's origin, so a
+    ///    valid-looking document cannot send the user's browser — and the
+    ///    resulting code — somewhere else.
+    /// 3. Both endpoints are safe to use at all (https, or loopback).
+    fn validate_auth_server_metadata(
+        &self,
+        issuer: &str,
+        meta: &AuthServerMetadata,
+    ) -> anyhow::Result<()> {
+        let issuer_url = Url::parse(issuer)
+            .map_err(|e| anyhow::anyhow!("invalid authorization server issuer '{issuer}': {e}"))?;
+
+        // RFC 8414 §3.3. Compared as parsed URLs so a trailing slash is not a
+        // spurious mismatch.
+        if !meta.issuer.is_empty() {
+            let claimed = Url::parse(&meta.issuer).map_err(|e| {
+                anyhow::anyhow!("invalid issuer '{}' in metadata: {e}", meta.issuer)
+            })?;
+            if !metadata::same_origin(&claimed, &issuer_url) {
+                anyhow::bail!(
+                    "authorization server metadata claims issuer '{}' but was fetched for \
+                     '{issuer}' — refusing (RFC 8414 §3.3)",
+                    meta.issuer
+                );
+            }
+        }
+
+        for (label, endpoint) in [
+            ("authorization_endpoint", &meta.authorization_endpoint),
+            ("token_endpoint", &meta.token_endpoint),
+        ] {
+            let parsed = Url::parse(endpoint)
+                .map_err(|e| anyhow::anyhow!("invalid {label} '{endpoint}': {e}"))?;
+            self.require_safe_discovery_url(&parsed)?;
+            if !metadata::same_origin(&parsed, &issuer_url) {
+                anyhow::bail!(
+                    "{label} '{endpoint}' is not on the issuer's origin ('{issuer}') — refusing"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Fetch and parse AS metadata from one candidate URL.
@@ -585,7 +674,11 @@ async fn handle_callback_connection(
         return Err(anyhow::anyhow!("authorization server returned: {}", error));
     }
     match (params.get("code"), params.get("state")) {
-        (Some(code), Some(state)) if state == expected_state => {
+        // Constant-time: the state is 128 bits of fresh entropy over loopback, so
+        // a timing oracle here is theoretical — but it was the one secret
+        // comparison in the codebase still using `==`, and "theoretical" is not
+        // a reason for the comparison to differ from every other one.
+        (Some(code), Some(state)) if leviath_core::constant_time_eq(state, expected_state) => {
             write_response(
                 &mut stream,
                 "200 OK",
@@ -1738,6 +1831,48 @@ mod tests {
         );
     }
 
+    /// A hostile MCP server pointing `resource_metadata` at somebody else's
+    /// origin. The URL comes out of a `WWW-Authenticate` header the server
+    /// controls entirely, and used to be fetched with no validation at all —
+    /// so connecting to a malicious server was enough to make Leviath issue a
+    /// request to any URL from inside the user's network.
+    #[tokio::test]
+    async fn login_refuses_a_cross_origin_resource_metadata_hint() {
+        // A server whose 401 points at a *different* origin. The target does not
+        // need to exist: the refusal must happen before the fetch.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = axum::Router::new().route(
+            "/mcp",
+            post(|| async {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    [(
+                        reqwest::header::WWW_AUTHENTICATE,
+                        "Bearer resource_metadata=\"http://169.254.169.254/latest/meta-data/\"",
+                    )],
+                )
+            }),
+        );
+        tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
+            listener, app,
+        )));
+
+        let err = OAuthClient::new()
+            .login(
+                &format!("{base}/mcp"),
+                &HashMap::new(),
+                auto_consent(),
+                0,
+                None,
+            )
+            .await
+            .expect_err("a cross-origin resource_metadata hint must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("different origin"), "got: {msg}");
+        assert!(msg.contains("169.254.169.254"), "got: {msg}");
+    }
+
     #[tokio::test]
     async fn login_fails_when_the_authorize_endpoint_is_malformed() {
         let server = mock_auth_server("bad_authorize").await;
@@ -1751,8 +1886,12 @@ mod tests {
             )
             .await
             .expect_err("a bad authorize endpoint must fail");
+        // Caught during metadata validation now, which runs before the URL is
+        // built — so the message names the field rather than the later
+        // build-the-authorize-URL step. Earlier is better: the endpoint never
+        // reaches the browser opener.
         assert!(
-            err.to_string().contains("authorization endpoint"),
+            err.to_string().contains("authorization_endpoint"),
             "got: {err}"
         );
     }

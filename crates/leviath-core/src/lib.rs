@@ -47,7 +47,7 @@ pub use region::{
     SerializedToolCall,
 };
 pub use sandbox::{OnUnavailable, SandboxKind, ToolSandboxConfig, resolve_sandbox};
-pub use secrets::{child_env_allowed, is_sensitive_env_name, script_env_allowed};
+pub use secrets::{child_env_allowed, constant_time_eq, is_sensitive_env_name, script_env_allowed};
 pub use taint::{
     GateDecision, GateDecisionSource, GateEvent, RegionTaint, SecurityConfig, TaintLevel,
     ToolClassification, ToolDirection,

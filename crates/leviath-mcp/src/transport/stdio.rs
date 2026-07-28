@@ -77,26 +77,26 @@ fn command_candidates(command: &str) -> Vec<String> {
     command_candidates_for(command, cfg!(windows))
 }
 
-/// Filter environment variables, stripping sensitive keys.
+/// Build a clean environment for a spawned MCP server.
 ///
-/// Used to build a clean environment for child processes: an MCP server has no
-/// business inheriting the parent's provider credentials. Anything the server
-/// genuinely needs is passed explicitly via the config's `env` map.
+/// **Allowlist, not denylist.** An MCP server is third-party code by definition,
+/// and we are choosing what to hand it — so the question is "what does it need",
+/// not "what must we remember to withhold". The previous substring denylist
+/// (`API_KEY`, `SECRET_KEY`, `ACCESS_TOKEN`, …) passed everything whose name
+/// happened not to match: `AWS_SECRET_ACCESS_KEY` matches neither `API_SECRET`
+/// nor `SECRET_KEY`, and `GITHUB_TOKEN`, `GH_TOKEN`, `NPM_TOKEN`,
+/// `DATABASE_URL`, `SSH_AUTH_SOCK` and Leviath's own `LEVIATH_API_TOKEN` were
+/// never on the list at all. A denylist here loses to every credential the
+/// ecosystem invents next.
+///
+/// What survives is [`leviath_core::child_env_allowed`]: enough to find an
+/// interpreter and behave like a terminal program. Anything else a server
+/// legitimately needs is declared in its own `env` block in config, which the
+/// caller applies *after* this filter and which therefore always wins — that is
+/// the supported way to give a server its token.
 pub fn filter_env(vars: &[(String, String)]) -> HashMap<String, String> {
-    let sensitive_patterns = [
-        "API_KEY",
-        "API_SECRET",
-        "SECRET_KEY",
-        "ACCESS_TOKEN",
-        "AUTH_TOKEN",
-        "PRIVATE_KEY",
-        "PASSWORD",
-    ];
     vars.iter()
-        .filter(|(key, _)| {
-            let key_upper = key.to_uppercase();
-            !sensitive_patterns.iter().any(|p| key_upper.contains(p))
-        })
+        .filter(|(key, _)| leviath_core::child_env_allowed(key))
         .cloned()
         .collect()
 }
@@ -526,20 +526,45 @@ mod tests {
 
         assert_eq!(filtered.get("HOME").unwrap(), "/home/user");
         assert_eq!(filtered.get("PATH").unwrap(), "/usr/bin");
-        assert_eq!(filtered.len(), 2, "everything else is credential-shaped");
+        assert_eq!(filtered.len(), 2, "only allowlisted names survive");
     }
 
+    /// The allowlist excludes *unknown* names, not merely credential-shaped
+    /// ones. `SAFE_VAR` is harmless and still does not reach the child: a server
+    /// that needs it declares it in its own `env` block, which the caller applies
+    /// after this filter. That is the whole difference between an allowlist and
+    /// the denylist this replaced.
     #[test]
-    fn filter_env_matching_is_case_insensitive_and_substring() {
+    fn filter_env_excludes_anything_not_on_the_allowlist() {
         let vars = [
             ("my_api_key", "secret"),
             ("CUSTOM_API_KEY_VALUE", "val"),
             ("SAFE_VAR", "ok"),
+            ("PATH", "/usr/bin"),
         ]
         .map(|(k, v)| (k.to_string(), v.to_string()));
         let filtered = filter_env(&vars);
         assert_eq!(filtered.len(), 1);
-        assert!(filtered.contains_key("SAFE_VAR"));
+        assert!(filtered.contains_key("PATH"));
+        assert!(!filtered.contains_key("SAFE_VAR"));
+    }
+
+    /// The names the old substring denylist let through. Each of these reached
+    /// every spawned MCP server — third-party code, by definition.
+    #[test]
+    fn filter_env_strips_what_the_old_denylist_missed() {
+        let vars = [
+            ("AWS_SECRET_ACCESS_KEY", "x"),
+            ("AWS_SESSION_TOKEN", "x"),
+            ("GITHUB_TOKEN", "x"),
+            ("GH_TOKEN", "x"),
+            ("NPM_TOKEN", "x"),
+            ("DATABASE_URL", "x"),
+            ("SSH_AUTH_SOCK", "x"),
+            ("LEVIATH_API_TOKEN", "x"),
+        ]
+        .map(|(k, v)| (k.to_string(), v.to_string()));
+        assert!(filter_env(&vars).is_empty());
     }
 
     #[test]
