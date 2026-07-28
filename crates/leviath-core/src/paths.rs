@@ -1,6 +1,58 @@
-//! Path containment: keeping file access inside the directory it belongs in.
+//! Path containment, and the one definition of where Leviath's data lives.
 
 use std::path::{Path, PathBuf};
+
+/// The user's home directory, honoring the `LEVIATH_HOME` override.
+///
+/// `dirs::home_dir()` cannot be redirected by `$HOME` on macOS
+/// (`NSHomeDirectory()`) or `%USERPROFILE%` on Windows
+/// (`SHGetKnownFolderPath`), so `LEVIATH_HOME` is the single override every
+/// home-relative path honors — which is what lets a test (including one that
+/// spawns the real `lev` binary) redirect all of them at once.
+///
+/// `None` when neither resolves; callers decide how to report that rather than
+/// this silently picking a surprising fallback.
+pub fn home_dir() -> Option<PathBuf> {
+    if let Some(override_home) = std::env::var_os("LEVIATH_HOME") {
+        return Some(PathBuf::from(override_home));
+    }
+    dirs::home_dir()
+}
+
+/// Leviath's data root: `<home>/.leviath`.
+///
+/// Every persistent thing Leviath owns lives under here — `config.toml`,
+/// `mcp-auth.json`, `runs/`, `agents/`, `providers/`, `tools/`, the control
+/// socket. Having one function say so is the point: there were seven separate
+/// resolvers with **three incompatible readings of `LEVIATH_HOME`**, so with the
+/// override set the MCP OAuth token store landed in a different directory from
+/// the config that names those servers, and `lev serve` could not see agents
+/// `lev add` had just installed.
+pub fn data_dir() -> Option<PathBuf> {
+    home_dir().map(|home| home.join(".leviath"))
+}
+
+/// The directory scanned for global drop-in Rhai *tool* scripts.
+///
+/// `<home>/.leviath/tools`, alongside `providers/` and `agents/` — not
+/// `<home>/tools`, which is where three call sites landed by joining `"tools"`
+/// onto the *user home* rather than the data root. That mattered: every `.rhai`
+/// file found here is compiled and offered to **every** agent as an executable
+/// tool, and `$HOME/tools` is an ordinary, non-hidden directory a developer may
+/// well already have or that other software may write into.
+pub fn tools_dir() -> Option<PathBuf> {
+    data_dir().map(|d| d.join("tools"))
+}
+
+/// The directory holding drop-in Rhai *provider* scripts.
+pub fn providers_dir() -> Option<PathBuf> {
+    data_dir().map(|d| d.join("providers"))
+}
+
+/// The directory installed agents are unpacked into.
+pub fn agents_dir() -> Option<PathBuf> {
+    data_dir().map(|d| d.join("agents"))
+}
 
 /// Whether `name` is safe to use as a single path component.
 ///

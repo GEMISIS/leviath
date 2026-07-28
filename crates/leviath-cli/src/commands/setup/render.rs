@@ -712,7 +712,12 @@ mod tests {
         w.enter(Step::ProviderDetail);
 
         let hidden = rendered(&w);
-        assert!(hidden.contains("sk-ant-s..."), "{hidden}");
+        // Last four characters, not the first eight — see `catalog::redact`.
+        assert!(hidden.contains("****here"), "{hidden}");
+        assert!(
+            !hidden.contains("sk-ant-s"),
+            "issuer prefix leaked:\n{hidden}"
+        );
         assert!(
             !hidden.contains("secret-value"),
             "the key leaked:\n{hidden}"

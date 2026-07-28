@@ -160,19 +160,20 @@ pub fn is_configured(config: &Config, id: &str) -> bool {
     }
 }
 
-/// Redact a credential for display: first 8 characters, then `...`.
+/// Redact a credential for display.
 ///
-/// Counts *characters*, not bytes. A byte-based version both panicked on a key
-/// containing a multi-byte character straddling byte 8 (the shape of issue
-/// #115) and, worse, leaked: a 3-character 9-byte key is longer than 8 bytes,
-/// so the byte branch would print every character of it followed by an "I
-/// truncated this" marker.
+/// Delegates to `leviath_core::secrets::redact`, which keeps the **last** four
+/// characters. This used to show the *first eight* — a different answer from
+/// the HTTP logger's, and the wrong half to keep: API keys are structured at
+/// the front, so `sk-ant-a`, `sk-proj-` and `ghp_…` identify the issuer and, on
+/// a short token, expose a meaningful fraction of the value. A suffix is
+/// unstructured and just as good for "is this the key I think it is".
+///
+/// Kept as a named wrapper rather than replacing every call site, so this
+/// module's UI code reads the same and there is one place to look if the
+/// wizard ever needs a different presentation.
 pub fn redact(key: &str) -> String {
-    if key.chars().count() <= 8 {
-        "***".to_string()
-    } else {
-        format!("{}...", key.chars().take(8).collect::<String>())
-    }
+    leviath_core::redact(key)
 }
 
 #[cfg(test)]
@@ -303,27 +304,34 @@ mod tests {
 
     // ─── redact ─────────────────────────────────────────────────────────────
 
+    /// The wizard now shows the last four characters, matching the HTTP
+    /// logger. It used to show the first *eight* — a second answer to "how much
+    /// of a secret is safe to print", and the wrong half: API keys are
+    /// structured at the front, so `sk-ant-a` names the issuer and, on a short
+    /// token, is a meaningful fraction of the value.
     #[test]
     fn redact_hides_short_keys_entirely() {
-        assert_eq!(redact(""), "***");
-        assert_eq!(redact("abc"), "***");
-        assert_eq!(redact("12345678"), "***");
+        assert_eq!(redact(""), "****");
+        assert_eq!(redact("abc"), "****");
+        assert_eq!(redact("12345678"), "****");
     }
 
     #[test]
-    fn redact_shows_a_recognisable_prefix_of_a_long_key() {
-        assert_eq!(redact("sk-ant-api-key-12345"), "sk-ant-a...");
-        assert_eq!(redact("123456789"), "12345678...");
+    fn redact_shows_a_recognisable_suffix_of_a_long_key() {
+        assert_eq!(redact("sk-ant-api-key-12345"), "****2345");
+        assert_eq!(redact("123456789"), "****6789");
+        // The issuer prefix must not survive.
+        assert!(!redact("sk-ant-api-key-12345").contains("sk-ant"));
     }
 
     #[test]
     fn redact_counts_characters_not_bytes() {
-        // Issue #115: byte 8 falls inside the third '日' (bytes 6..9), which
-        // used to panic.
-        assert_eq!(redact("日本語日本語日本語"), "日本語日本語日本...");
-        // 3 characters but 9 bytes -- the byte-length guard would have
-        // classified this as "long" and printed the whole key.
-        assert_eq!(redact("日本語"), "***");
-        assert_eq!(redact("日本語日本語日本"), "***");
+        // Issue #115: a byte-based cut lands inside a multi-byte character and
+        // panics.
+        assert_eq!(redact("日本語日本語日本語"), "****語日本語");
+        // 3 characters but 9 bytes — a byte-length guard would call this "long"
+        // and print the whole key.
+        assert_eq!(redact("日本語"), "****");
+        assert_eq!(redact("日本語日本語日本"), "****");
     }
 }

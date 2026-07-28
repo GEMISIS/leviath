@@ -21,6 +21,11 @@ tracing = { workspace = true }
 chrono = { workspace = true }
 toml = { workspace = true }
 url = { workspace = true }
+dirs = { workspace = true }
+# For the shared HTTP client factory (`leviath_core::net::client_builder`), so
+# every outbound client in the workspace starts from one timeout + redirect
+# policy instead of a bare `Client::new()` with neither.
+reqwest = { workspace = true }
 
 [dev-dependencies]
 # Real directories and real symlinks: the path-containment tests are about what

@@ -38,16 +38,22 @@ pub use cache::{CacheBreakpoint, CacheHint};
 pub use error::{Error, Result, ValidationError};
 pub use layout::{BudgetSpec, ContextLayout, RegionDefinition};
 pub use lifecycle::{CompactionConfig, CompactionStrategy, EvictionPolicy};
-pub use net::{UrlRejection, check_url, is_restricted_addr};
+pub use net::{ClientTimeouts, UrlRejection, check_url, client_builder, is_restricted_addr};
 pub use panic_payload::panic_message;
-pub use paths::{is_safe_path_component, resolves_within};
+pub use paths::{
+    agents_dir, data_dir, home_dir, is_safe_path_component, providers_dir, resolves_within,
+    tools_dir,
+};
 pub use policy::{AllowlistRule, McpToolOverride, PolicyConfig, ScriptedRule};
 pub use region::{
     ContentFormat, EntryKind, EvictionStrategy, Region, RegionEntry, RegionKind, RegionSchema,
     SerializedToolCall,
 };
 pub use sandbox::{OnUnavailable, SandboxKind, ToolSandboxConfig, resolve_sandbox};
-pub use secrets::{child_env_allowed, constant_time_eq, is_sensitive_env_name, script_env_allowed};
+pub use secrets::{
+    child_env_allowed, constant_time_eq, is_secret_header, is_sensitive_env_name, redact,
+    script_env_allowed,
+};
 pub use taint::{
     GateDecision, GateDecisionSource, GateEvent, RegionTaint, SecurityConfig, TaintLevel,
     ToolClassification, ToolDirection,

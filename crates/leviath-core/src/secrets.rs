@@ -43,6 +43,49 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
+/// Render a secret for display, showing only its last four characters.
+///
+/// The **one** redaction policy for the workspace. There were two, and they
+/// disagreed about which end of the value to keep: the HTTP logger showed the
+/// last four, the setup wizard the first eight. Two answers to "how much of a
+/// secret is safe to print" means neither is a policy — and a prefix is the
+/// wrong half to keep, because API keys are structured at the front:
+/// `sk-ant-a…`, `sk-proj-…`, `ghp_…` all identify the issuer and, for a short
+/// token, a meaningful fraction of the value.
+///
+/// Counts **characters**, not bytes. `value.len() - 4` can land inside a
+/// multi-byte character and panic (the shape of issue #115), and a 5-byte
+/// 2-character value is longer than 4 *bytes*, so a byte-based length check
+/// would print the whole thing behind four stars.
+#[must_use]
+pub fn redact(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    // Four visible characters out of five or fewer is most of the value.
+    if chars.len() <= 8 {
+        return "****".to_string();
+    }
+    format!(
+        "****{}",
+        chars[chars.len() - 4..].iter().collect::<String>()
+    )
+}
+
+/// Whether a header's value must be redacted before it is logged.
+///
+/// A substring match rather than an exact-name list. The list version named
+/// `authorization`, `x-api-key` and `api-key`, and therefore logged Gemini's
+/// `x-goog-api-key` **in full** under `--features debug-http` — the one
+/// provider whose header did not happen to be on it. A denylist of exact names
+/// has to be complete to be correct, and this one was not; matching on the
+/// shape of the name fails safe as new headers appear.
+#[must_use]
+pub fn is_secret_header(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    ["auth", "key", "token", "secret", "cookie", "credential"]
+        .iter()
+        .any(|hint| lower.contains(hint))
+}
+
 /// Environment variables a spawned child (an MCP server, a shell tool) inherits.
 ///
 /// Deliberately short. A child needs enough to find its interpreter and behave
@@ -170,6 +213,67 @@ pub fn script_env_allowed(name: &str, allowlist: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The suffix is kept, not the prefix: API keys are structured at the front,
+    /// so showing `sk-ant-a` names the issuer and, on a short token, exposes a
+    /// meaningful fraction of the value.
+    #[test]
+    fn redact_keeps_only_a_short_suffix() {
+        assert_eq!(redact("sk-ant-api-key-12345"), "****2345");
+        assert!(!redact("sk-ant-api-key-12345").contains("sk-ant"));
+        assert!(!redact("ghp_realgithubtoken").contains("ghp_"));
+    }
+
+    /// A short value is hidden entirely — four visible characters out of eight
+    /// is most of it.
+    #[test]
+    fn redact_hides_short_values_completely() {
+        for value in ["", "a", "abcd", "12345678"] {
+            assert_eq!(redact(value), "****", "{value:?}");
+        }
+    }
+
+    /// Issue #115: a byte-based cut lands inside a multi-byte character and
+    /// panics, and a byte-length guard calls a short multi-byte value "long"
+    /// and prints all of it.
+    #[test]
+    fn redact_counts_characters_not_bytes() {
+        assert_eq!(redact("日本語日本語日本語"), "****語日本語");
+        assert_eq!(redact("日本"), "****");
+    }
+
+    /// The exact-name list this replaces missed `x-goog-api-key`, so Gemini
+    /// keys were logged in full under `--features debug-http`.
+    #[test]
+    fn secret_headers_are_matched_by_shape_not_an_exact_list() {
+        for name in [
+            "authorization",
+            "Authorization",
+            "x-api-key",
+            "api-key",
+            "x-goog-api-key",
+            "proxy-authorization",
+            "cookie",
+            "set-cookie",
+            "x-auth-token",
+            "x-amz-security-token",
+        ] {
+            assert!(is_secret_header(name), "{name} must be redacted");
+        }
+    }
+
+    #[test]
+    fn ordinary_headers_are_not_redacted() {
+        for name in [
+            "content-type",
+            "user-agent",
+            "accept",
+            "content-length",
+            "anthropic-version",
+        ] {
+            assert!(!is_secret_header(name), "{name} should log verbatim");
+        }
+    }
 
     /// Every one of these slipped through the substring denylist this replaces.
     #[test]

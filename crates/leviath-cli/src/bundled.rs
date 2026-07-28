@@ -149,6 +149,51 @@ mod tests {
         }
     }
 
+    /// A tool script shipped under the same filename by more than one agent
+    /// must be byte-identical everywhere.
+    ///
+    /// Each agent directory is self-contained — that is what lets `lev add
+    /// <dir>` and `lev pack` work — so `web_fetch.rhai` and `web_search.rhai`
+    /// exist as five copies each rather than one shared file. That is fine
+    /// until one copy is fixed and the others are not: these scripts are the
+    /// agents' network surface, so a hardening change applied to one of five is
+    /// four agents still carrying the old behaviour, with nothing to say so.
+    ///
+    /// This turns that silent drift into a test failure. Deliberately keyed on
+    /// filename over *all* discovered agents rather than naming the five, so it
+    /// keeps holding as agents are added or renamed.
+    #[test]
+    fn a_tool_script_shared_by_several_agents_is_identical_in_all_of_them() {
+        use std::collections::HashMap;
+
+        // filename -> (first agent that shipped it, its contents)
+        let mut first_seen: HashMap<&str, (&str, &str)> = HashMap::new();
+        for agent in BUNDLED_AGENTS {
+            for (rel, contents) in agent.files {
+                let Some(filename) = rel.strip_prefix("tools/") else {
+                    continue;
+                };
+                match first_seen.get(filename) {
+                    Some((other, expected)) => assert!(
+                        expected == contents,
+                        "tools/{filename} differs between bundled agents {other} and {} — \
+                         a change to one copy was not applied to the others",
+                        agent.name
+                    ),
+                    None => {
+                        first_seen.insert(filename, (agent.name, contents));
+                    }
+                }
+            }
+        }
+        // Guard against a vacuous pass: if the scan found no tool scripts at
+        // all, the loop above asserts nothing.
+        assert!(
+            !first_seen.is_empty(),
+            "no bundled agent ships a tools/ script — this invariant is not being tested"
+        );
+    }
+
     #[test]
     fn every_bundled_manifest_parses_and_agrees_with_its_recorded_version() {
         // The recorded version drives install/update planning, so a build.rs
