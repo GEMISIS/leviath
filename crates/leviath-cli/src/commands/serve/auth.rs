@@ -36,17 +36,11 @@ pub(super) fn resolve_token(arg: Option<&str>) -> anyhow::Result<String> {
 }
 
 /// Constant-time string equality, so a wrong token can't be recovered by timing.
-fn constant_time_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
+///
+/// Re-exported from `leviath_core::secrets` rather than kept as a local copy, so
+/// there is one such comparison in the workspace. The MCP OAuth callback's
+/// `state` check used plain `==` until it was pointed at this one.
+use leviath_core::constant_time_eq;
 
 /// The token a request presents: `Authorization: Bearer <token>`, else the
 /// `token` query parameter (for WebSocket clients that can't set headers).

@@ -72,6 +72,38 @@ pub(crate) fn well_known_resource_url(mcp_url: &Url) -> Url {
         .expect("well-known path is always joinable")
 }
 
+/// Whether a discovery URL is safe to fetch.
+///
+/// HTTPS, or HTTP on loopback. Everything in the OAuth discovery chain carries
+/// or leads to a bearer token, and `http://` to a remote host puts that token on
+/// the wire in cleartext. The loopback exemption is for developing against a
+/// local authorization server, where there is no network to intercept.
+pub(crate) fn is_safe_discovery_url(url: &Url) -> bool {
+    match url.scheme() {
+        "https" => true,
+        "http" => matches!(
+            url.host(),
+            Some(url::Host::Domain("localhost"))
+                | Some(url::Host::Ipv4(std::net::Ipv4Addr::LOCALHOST))
+                | Some(url::Host::Ipv6(std::net::Ipv6Addr::LOCALHOST))
+        ),
+        _ => false,
+    }
+}
+
+/// Whether two URLs share an origin (scheme, host, and effective port).
+///
+/// Used to bind a server-supplied `resource_metadata` URL to the MCP server that
+/// offered it. That URL arrives in a `WWW-Authenticate` header — entirely under
+/// the remote server's control — and was previously fetched with no check at
+/// all, which made every MCP connection an SSRF primitive pointed at whatever
+/// the server named, including cloud metadata endpoints.
+pub(crate) fn same_origin(a: &Url, b: &Url) -> bool {
+    a.scheme() == b.scheme()
+        && a.host() == b.host()
+        && a.port_or_known_default() == b.port_or_known_default()
+}
+
 /// The candidate authorization-server metadata URLs to try, in order.
 ///
 /// RFC 8414 first, then the OpenID Connect discovery document as a fallback:
@@ -206,5 +238,58 @@ mod tests {
         let meta: AuthServerMetadata = serde_json::from_str(json).unwrap();
         assert!(meta.registration_endpoint.is_none());
         assert!(meta.scopes_supported.is_empty());
+    }
+
+    fn u(s: &str) -> Url {
+        Url::parse(s).expect("test URL parses")
+    }
+
+    /// Everything in the discovery chain carries or leads to a bearer token, so
+    /// plain HTTP to a remote host would put that token on the wire.
+    #[test]
+    fn discovery_requires_https_off_loopback() {
+        assert!(is_safe_discovery_url(&u("https://auth.example.com/x")));
+        assert!(!is_safe_discovery_url(&u("http://auth.example.com/x")));
+        assert!(!is_safe_discovery_url(&u("ftp://auth.example.com/x")));
+    }
+
+    /// ...but a local authorization server has no network to intercept, and
+    /// refusing it would break every local-dev setup (and this crate's own mock
+    /// server tests).
+    #[test]
+    fn discovery_permits_http_on_loopback() {
+        for url in [
+            "http://localhost:8080/x",
+            "http://127.0.0.1:8080/x",
+            "http://[::1]:8080/x",
+        ] {
+            assert!(is_safe_discovery_url(&u(url)), "{url}");
+        }
+        // Not loopback, just similarly named.
+        assert!(!is_safe_discovery_url(&u("http://localhost.evil.com/x")));
+    }
+
+    /// The `resource_metadata` hint comes from a header the remote server wrote.
+    /// Binding it to that server's own origin is what stops a hostile MCP server
+    /// from making us fetch an arbitrary URL from inside the user's network.
+    #[test]
+    fn same_origin_compares_scheme_host_and_port() {
+        let mcp = u("https://mcp.example.com/mcp");
+        assert!(same_origin(
+            &u("https://mcp.example.com/.well-known/x"),
+            &mcp
+        ));
+        // Default port is equivalent to the explicit one.
+        assert!(same_origin(&u("https://mcp.example.com:443/x"), &mcp));
+
+        assert!(!same_origin(&u("https://evil.example.com/x"), &mcp));
+        assert!(!same_origin(&u("http://mcp.example.com/x"), &mcp));
+        assert!(!same_origin(&u("https://mcp.example.com:8443/x"), &mcp));
+        // A subdomain is a different origin.
+        assert!(!same_origin(&u("https://a.mcp.example.com/x"), &mcp));
+        // The classic near-miss.
+        assert!(!same_origin(&u("https://mcp.example.com.evil.com/x"), &mcp));
+        // Cloud metadata, the thing this ultimately protects.
+        assert!(!same_origin(&u("http://169.254.169.254/latest/"), &mcp));
     }
 }
