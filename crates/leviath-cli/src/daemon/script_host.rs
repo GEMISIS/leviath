@@ -95,13 +95,32 @@ fn parse_script_permission_str(s: &str) -> Option<ScriptPermission> {
     }
 }
 
-/// The effective `[tool_script_permissions]` for an agent: the global config with
-/// the agent's own blueprint `[tool_script_permissions]` overlaid per field (a
-/// field the agent sets wins; an unset or unrecognized field keeps the global
-/// value). Parsed CLI-side (these types live in the CLI config, not
-/// `leviath-core`), mirroring `parse_blueprint_mcp_servers`. Since agents can
-/// ship their own tool scripts, they can also tighten/loosen the per-function
-/// permissions for their own run.
+/// How restrictive a script permission is, for clamping.
+///
+/// `Allow` (unconditional) is the loosest; `Inherit` still requires the agent's
+/// own policy for the equivalent built-in to permit the call; `Deny` is the
+/// tightest.
+fn script_restrictiveness(p: ScriptPermission) -> u8 {
+    match p {
+        ScriptPermission::Allow => 0,
+        ScriptPermission::Inherit => 1,
+        ScriptPermission::Deny => 2,
+    }
+}
+
+/// The effective `[tool_script_permissions]` for an agent: the user's global
+/// config with the agent's own blueprint `[tool_script_permissions]` overlaid
+/// per field — but **only where the manifest is more restrictive**.
+///
+/// Agents ship their own `.rhai` tool scripts, so it is reasonable for a
+/// manifest to say "this agent never needs `shell`". It is not reasonable for it
+/// to say the opposite: a manifest that could set `shell = "allow"` over a user's
+/// global `deny` meant installing an agent was enough to overrule the machine's
+/// configuration. So a manifest may tighten a field and never loosen it, the same
+/// rule [`crate::tools::resolve_policy`] applies to `[tool_permissions]`.
+///
+/// Parsed CLI-side (these types live in the CLI config, not `leviath-core`),
+/// mirroring `parse_blueprint_mcp_servers`.
 pub fn effective_script_permissions(
     global: &ScriptToolPermissions,
     manifest_toml: &str,
@@ -116,12 +135,14 @@ pub fn effective_script_permissions(
     else {
         return eff;
     };
-    // For each key the agent set to a recognized value, override that field.
+    // For each key the agent set to a recognized value, keep whichever of the
+    // two is stricter.
     let apply = |key: &str, slot: &mut ScriptPermission| {
         if let Some(p) = table
             .get(key)
             .and_then(|v| v.as_str())
             .and_then(parse_script_permission_str)
+            && script_restrictiveness(p) > script_restrictiveness(*slot)
         {
             *slot = p;
         }
@@ -638,11 +659,11 @@ mod tests {
     // ── effective_script_permissions (per-agent override) ──
 
     #[test]
-    fn effective_perms_agent_overrides_win_per_field() {
-        // Global denies everything; the agent's blueprint loosens/sets several
+    fn effective_perms_agent_tightens_per_field() {
+        // Global allows everything; the agent's blueprint tightens several
         // fields (exercising the allow/deny/inherit parse arms) and leaves the
         // rest at the global value.
-        let global = perms(ScriptPermission::Deny);
+        let global = perms(ScriptPermission::Allow);
         let manifest = "\
             [tool_script_permissions]\n\
             http_get = \"allow\"\n\
@@ -652,9 +673,37 @@ mod tests {
         assert_eq!(eff.http_get, ScriptPermission::Allow, "allow arm");
         assert_eq!(eff.shell, ScriptPermission::Deny, "deny arm");
         assert_eq!(eff.write_file, ScriptPermission::Inherit, "inherit arm");
-        assert_eq!(eff.env_var, ScriptPermission::Deny, "unset keeps global");
-        assert_eq!(eff.read_file, ScriptPermission::Deny);
-        assert_eq!(eff.http_post, ScriptPermission::Deny);
+        assert_eq!(eff.env_var, ScriptPermission::Allow, "unset keeps global");
+        assert_eq!(eff.read_file, ScriptPermission::Allow);
+        assert_eq!(eff.http_post, ScriptPermission::Allow);
+    }
+
+    /// The manifest may not loosen what the user locked down. This previously
+    /// went the other way — a downloaded agent setting `http_get = "allow"` over
+    /// a global `deny` got the network back, which made the user's config
+    /// advisory rather than binding.
+    #[test]
+    fn effective_perms_agent_cannot_loosen_global() {
+        let global = perms(ScriptPermission::Deny);
+        let manifest = "\
+            [tool_script_permissions]\n\
+            http_get = \"allow\"\n\
+            shell = \"allow\"\n\
+            env_var = \"inherit\"\n";
+        let eff = effective_script_permissions(&global, manifest);
+        assert_eq!(eff.http_get, ScriptPermission::Deny);
+        assert_eq!(eff.shell, ScriptPermission::Deny);
+        assert_eq!(eff.env_var, ScriptPermission::Deny);
+    }
+
+    /// `Inherit` sits between `Allow` and `Deny`, so a manifest cannot promote an
+    /// inherited file/shell permission to an unconditional allow either.
+    #[test]
+    fn effective_perms_agent_cannot_promote_inherit_to_allow() {
+        let global = perms(ScriptPermission::Inherit);
+        let manifest = "[tool_script_permissions]\nshell = \"allow\"\n";
+        let eff = effective_script_permissions(&global, manifest);
+        assert_eq!(eff.shell, ScriptPermission::Inherit);
     }
 
     #[test]

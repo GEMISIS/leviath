@@ -284,36 +284,44 @@ impl Default for SecurityConfig {
 }
 
 /// Resolve whether taint tracking is enabled for a stage, cascading
-/// stage → agent → global (default off when nothing is set). A `Some(_)`
-/// config at a level overrides broader levels with its `taint_tracking`.
+/// stage → agent → global (default off when nothing is set).
+///
+/// **A blueprint can only turn taint tracking on, never off.** The stage and
+/// agent configs come from `agent.leviath`, so if a manifest could set
+/// `taint_tracking = false` over a user's global `true`, installing an agent
+/// would be enough to disable the machine's data-flow enforcement. A manifest
+/// that wants tracking when the user has it off is still honored — that
+/// direction only tightens.
 pub fn resolve_taint_enabled(
     global: bool,
     agent: Option<&SecurityConfig>,
     stage: Option<&SecurityConfig>,
 ) -> bool {
-    stage
+    let manifest = stage
         .map(|s| s.taint_tracking)
-        .or_else(|| agent.map(|a| a.taint_tracking))
-        .unwrap_or(global)
+        .or_else(|| agent.map(|a| a.taint_tracking));
+    global || manifest.unwrap_or(false)
 }
 
 /// Resolve the effective [`SecurityConfig`] for a stage: the most specific
 /// present config (stage over agent), or a default whose `taint_tracking`
 /// follows the global toggle when neither level configures it.
+///
+/// `taint_tracking` is clamped by [`resolve_taint_enabled`] so the two agree —
+/// a manifest cannot disable what the user enabled.
 pub fn resolve_security(
     global: bool,
     agent: Option<&SecurityConfig>,
     stage: Option<&SecurityConfig>,
 ) -> SecurityConfig {
-    if let Some(s) = stage {
-        return s.clone();
-    }
-    if let Some(a) = agent {
-        return a.clone();
-    }
-    SecurityConfig {
-        taint_tracking: global,
-    }
+    let mut resolved = match stage.or(agent) {
+        Some(c) => c.clone(),
+        None => SecurityConfig {
+            taint_tracking: global,
+        },
+    };
+    resolved.taint_tracking = resolve_taint_enabled(global, agent, stage);
+    resolved
 }
 
 /// Resolve whether the batch-tool-calls system-prompt hint is enabled for a
@@ -931,26 +939,28 @@ mod tests {
     }
 
     #[test]
-    fn resolve_taint_enabled_agent_overrides_global() {
-        // Global on, agent opts out.
-        assert!(!resolve_taint_enabled(true, Some(&sec(false)), None));
-        // Global off, agent opts in.
+    fn resolve_taint_enabled_agent_may_opt_in_but_not_out() {
+        // Global off, agent opts in — honored, that only tightens.
         assert!(resolve_taint_enabled(false, Some(&sec(true)), None));
+        // Global on, agent tries to opt out — refused. `agent.leviath` is a
+        // downloaded file; letting it disable the machine's data-flow
+        // enforcement made taint tracking opt-out-by-installing-an-agent.
+        assert!(resolve_taint_enabled(true, Some(&sec(false)), None));
     }
 
     #[test]
-    fn resolve_taint_enabled_stage_overrides_agent_and_global() {
-        // Stage opt-out beats agent opt-in and global on.
-        assert!(!resolve_taint_enabled(
-            true,
-            Some(&sec(true)),
-            Some(&sec(false))
-        ));
+    fn resolve_taint_enabled_stage_may_opt_in_but_not_out() {
         // Stage opt-in beats agent opt-out and global off.
         assert!(resolve_taint_enabled(
             false,
             Some(&sec(false)),
             Some(&sec(true))
+        ));
+        // A stage opt-out cannot override the user's global on.
+        assert!(resolve_taint_enabled(
+            true,
+            Some(&sec(true)),
+            Some(&sec(false))
         ));
     }
 
@@ -983,14 +993,15 @@ mod tests {
     }
 
     #[test]
-    fn resolve_security_prefers_most_specific() {
+    fn resolve_security_prefers_most_specific_but_clamps_taint() {
         // Neither set → default whose taint_tracking follows global.
         assert!(resolve_security(true, None, None).taint_tracking);
         assert!(!resolve_security(false, None, None).taint_tracking);
-        // Agent present → used.
-        assert!(!resolve_security(true, Some(&sec(false)), None).taint_tracking);
-        // Stage present → wins over agent.
+        // Stage present → wins over agent for opting *in*.
         assert!(resolve_security(false, Some(&sec(false)), Some(&sec(true))).taint_tracking);
+        // An agent opt-out cannot beat the user's global on — `resolve_security`
+        // agrees with `resolve_taint_enabled` rather than disagreeing with it.
+        assert!(resolve_security(true, Some(&sec(false)), None).taint_tracking);
     }
 
     #[test]
