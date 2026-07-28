@@ -400,6 +400,12 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
     // `bind_control_listener` enforces the single-instance guarantee and is fully
     // unit-tested; only driving its `accept` in a loop is the untestable sliver.
     let mut listener = bind_control_listener(&id)?;
+    // A fresh token per daemon: whoever cannot read our own directory cannot
+    // drive the control channel. This is what authenticates callers on Windows,
+    // where there is no kernel peer check to fall back on.
+    let control_dir = leviath_cli::daemon::setup::control_dir()
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control token"))?;
+    let token = leviath_runtime::control_socket::ControlToken::create(&control_dir)?;
     // Record the build we started from so a later CLI can detect stale code and
     // restart us (must happen right after we win the single-instance bind).
     leviath_cli::daemon::setup::write_build_marker();
@@ -417,8 +423,9 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
             let Some(stream) = accepted else { continue };
             let op_tx = op_tx.clone();
             let events = events.clone();
+            let token = token.clone();
             tokio::spawn(async move {
-                let _ = handle_connection(stream, op_tx, events).await;
+                let _ = handle_connection(stream, op_tx, events, Some(token)).await;
             });
         }
     });
@@ -440,7 +447,11 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
 fn control_client() -> anyhow::Result<leviath_runtime::control_socket::ControlClient> {
     let id = leviath_cli::daemon::setup::control_address()
         .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control socket"))?;
-    Ok(leviath_runtime::control_socket::ControlClient::new(id))
+    let dir = leviath_cli::daemon::setup::control_dir()
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control token"))?;
+    Ok(leviath_runtime::control_socket::ControlClient::for_home(
+        id, &dir,
+    )?)
 }
 
 /// Real `lev dash`: supplies the real crossterm terminal backend and event
