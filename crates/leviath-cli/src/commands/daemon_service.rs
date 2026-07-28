@@ -286,7 +286,11 @@ pub fn format_supervision(installed: bool, path: &Path) -> String {
 
 /// A path as a string, lossily — these are user home paths, valid UTF-8 in
 /// every case that matters, and a lossy rendering beats failing.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+///
+/// Not gated to the platforms with a supervisor, even though only they build a
+/// unit file: `unit_safe` is unconditional (see its own note), and a helper it
+/// calls cannot be narrower than its caller. Gating it broke the Windows build
+/// outright.
 fn display(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -380,11 +384,6 @@ mod tests {
             // The unit file lives under the user's home.
             let home = config_home(Path::new("/home/u")).expect("this platform has a supervisor");
             assert!(home.starts_with("/home/u"));
-        }
-
-        #[test]
-        fn display_renders_a_path_losslessly_when_it_can() {
-            assert_eq!(display(Path::new("/a/b")), "/a/b");
         }
     }
 
@@ -480,6 +479,11 @@ mod tests {
     /// platform rather than only on a Linux CI runner.
     mod systemd_unit_file {
         use super::*;
+
+        #[test]
+        fn display_renders_a_path_losslessly_when_it_can() {
+            assert_eq!(display(Path::new("/a/b")), "/a/b");
+        }
 
         #[test]
         fn it_renders_the_expected_directives() {
