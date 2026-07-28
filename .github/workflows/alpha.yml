@@ -81,11 +81,35 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
+      # Linker hardening, appended to the workflow-level `-D warnings`.
+      #
+      # It has to be spelled here rather than in `.cargo/config.toml`: the
+      # `RUSTFLAGS` *environment variable* set at the top of this workflow
+      # completely OVERRIDES `build.rustflags` from a config file — it does not
+      # merge — so hardening flags added there would apply to local builds and be
+      # silently dropped from exactly the release builds that need them.
+      #
+      # What each does, per platform:
+      #   - Linux: full RELRO plus BIND_NOW, so the GOT is mapped read-only after
+      #     relocation and cannot be rewritten to redirect a later call.
+      #   - Windows: Control Flow Guard, which validates indirect call targets.
+      #     Stable, MSVC-only, and free.
+      #   - macOS: nothing to add. The Apple linker rejects `-z` options, and the
+      #     platform's own protections (hardened runtime once signed, ASLR) are
+      #     not rustc flags.
       - name: Build release binary
+        shell: bash
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
-        run: cargo build --release --bin lev --target ${{ matrix.target }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          case "$TARGET" in
+            *-linux-gnu)   export RUSTFLAGS="$RUSTFLAGS -C link-arg=-Wl,-z,relro,-z,now" ;;
+            *-windows-msvc) export RUSTFLAGS="$RUSTFLAGS -C control-flow-guard" ;;
+          esac
+          echo "RUSTFLAGS=$RUSTFLAGS"
+          cargo build --release --bin lev --target "$TARGET"
       - name: Package archive
         shell: bash
         run: |
