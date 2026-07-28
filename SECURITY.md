@@ -72,6 +72,16 @@ pretending otherwise would be worse than saying so:
 - **Windows file permissions.** The `0600`/`0700` hardening is POSIX mode bits.
   Windows ACL support is not implemented; on Windows, secret files rely on the
   user profile directory's own permissions.
+- **The Windows control channel has no peer check.** On Unix the daemon reads
+  the connecting process's uid from the kernel (`SO_PEERCRED`) and refuses
+  anything that is not the same user — the socket's `0600` mode is only defence
+  in depth, since on macOS and the BSDs the mode is not consulted at `connect`
+  time. On Windows the channel is a named pipe, and the equivalent check
+  (`ImpersonateNamedPipeClient` plus a token comparison) is not implemented:
+  every connection the pipe accepts is served, and the pipe's default security
+  descriptor is the only thing in the way. Anyone who can connect to it can
+  spawn a tool-executing agent and answer its approval prompts. Treat a
+  multi-user Windows machine as out of scope until this lands.
 
 ## Where secrets live
 
@@ -80,7 +90,8 @@ pretending otherwise would be worse than saying so:
 | Provider API keys | `~/.leviath/config.toml`, or the OS keychain | `0600` |
 | MCP OAuth access + refresh tokens | `~/.leviath/mcp-auth.json`, or the OS keychain | `0600` |
 | Run artifacts (prompts, conversations) | `~/.leviath/runs/<id>/` | `0600` in a `0700` dir |
-| Control socket | `~/.leviath/control.sock` | `0600`, same-uid peers only |
+| Control socket | `~/.leviath/control.sock` (Unix) | `0600`, same-uid peers only |
+| Control pipe | `\\.\pipe\leviath-control-…` (Windows) | default descriptor, **no peer check** |
 | API server token | `LEVIATH_API_TOKEN` or `--token` | not persisted |
 
 Prefer `LEVIATH_API_TOKEN` over `--token`: an argument is visible in `ps` to
