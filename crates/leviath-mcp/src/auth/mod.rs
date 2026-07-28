@@ -123,14 +123,18 @@ impl OAuthClient {
         } else {
             server_meta.scopes_supported.join(" ")
         };
+        // Already validated in `validate_auth_server_metadata`; `.expect` rather
+        // than a second fallible parse, which could not fail.
+        let authorize_endpoint = Url::parse(&server_meta.authorization_endpoint)
+            .expect("the authorization endpoint was parsed during metadata validation");
         let authorize_url = build_authorize_url(
-            &server_meta.authorization_endpoint,
+            &authorize_endpoint,
             &client_id,
             &redirect_uri,
             &pkce,
             &scope,
             &resource,
-        )?;
+        );
 
         // Always print the URL: on a headless or SSH session the browser can't
         // open, and the user needs to paste it themselves.
@@ -310,11 +314,16 @@ impl OAuthClient {
     /// entire flow to an attacker's authorization server and harvest the code.
     async fn fetch_auth_server_metadata(&self, issuer: &str) -> anyhow::Result<AuthServerMetadata> {
         let mut last_err = None;
-        for url in metadata::auth_server_metadata_urls(issuer)? {
+        // Parsed once here and passed down: `auth_server_metadata_urls` already
+        // parses `issuer` and errors on a bad one, so a second parse inside the
+        // validator could never fail.
+        let issuer_url = Url::parse(issuer)
+            .map_err(|e| anyhow::anyhow!("invalid authorization server issuer '{issuer}': {e}"))?;
+        for url in metadata::auth_server_metadata_urls(&issuer_url) {
             self.require_safe_discovery_url(&url)?;
             match self.fetch_one_auth_server_metadata(url.as_str()).await {
                 Ok(meta) => {
-                    self.validate_auth_server_metadata(issuer, &meta)?;
+                    self.validate_auth_server_metadata(&issuer_url, &meta)?;
                     return Ok(meta);
                 }
                 Err(e) => last_err = Some(e),
@@ -339,11 +348,10 @@ impl OAuthClient {
     /// 3. Both endpoints are safe to use at all (https, or loopback).
     fn validate_auth_server_metadata(
         &self,
-        issuer: &str,
+        issuer_url: &Url,
         meta: &AuthServerMetadata,
     ) -> anyhow::Result<()> {
-        let issuer_url = Url::parse(issuer)
-            .map_err(|e| anyhow::anyhow!("invalid authorization server issuer '{issuer}': {e}"))?;
+        let issuer = issuer_url.as_str();
 
         // RFC 8414 §3.3. Compared as parsed URLs so a trailing slash is not a
         // spurious mismatch.
@@ -351,7 +359,7 @@ impl OAuthClient {
             let claimed = Url::parse(&meta.issuer).map_err(|e| {
                 anyhow::anyhow!("invalid issuer '{}' in metadata: {e}", meta.issuer)
             })?;
-            if !metadata::same_origin(&claimed, &issuer_url) {
+            if !metadata::same_origin(&claimed, issuer_url) {
                 anyhow::bail!(
                     "authorization server metadata claims issuer '{}' but was fetched for \
                      '{issuer}' — refusing (RFC 8414 §3.3)",
@@ -367,7 +375,7 @@ impl OAuthClient {
             let parsed = Url::parse(endpoint)
                 .map_err(|e| anyhow::anyhow!("invalid {label} '{endpoint}': {e}"))?;
             self.require_safe_discovery_url(&parsed)?;
-            if !metadata::same_origin(&parsed, &issuer_url) {
+            if !metadata::same_origin(&parsed, issuer_url) {
                 anyhow::bail!(
                     "{label} '{endpoint}' is not on the issuer's origin ('{issuer}') — refusing"
                 );
@@ -560,16 +568,19 @@ impl crate::transport::BearerRefresher for StoredTokenRefresher {
 }
 
 /// Compose the browser authorization URL.
+/// Takes an already-parsed endpoint rather than a string: by the time login
+/// reaches this, `validate_auth_server_metadata` has parsed the endpoint,
+/// required it to be https-or-loopback, and required it to share the issuer's
+/// origin. Re-parsing here would be a failure branch nothing can reach.
 fn build_authorize_url(
-    endpoint: &str,
+    endpoint: &Url,
     client_id: &str,
     redirect_uri: &str,
     pkce: &Pkce,
     scope: &str,
     resource: &str,
-) -> anyhow::Result<Url> {
-    let mut url = Url::parse(endpoint)
-        .map_err(|e| anyhow::anyhow!("Invalid authorization endpoint '{}': {}", endpoint, e))?;
+) -> Url {
+    let mut url = endpoint.clone();
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", client_id)
@@ -580,7 +591,7 @@ fn build_authorize_url(
         .append_pair("scope", scope)
         // RFC 8707: bind the issued token to this specific MCP server.
         .append_pair("resource", resource);
-    Ok(url)
+    url
 }
 
 /// Assemble the stored auth from a token response.
@@ -755,14 +766,13 @@ mod tests {
     #[test]
     fn authorize_url_carries_every_required_parameter() {
         let url = build_authorize_url(
-            "https://auth.example.com/authorize",
+            &Url::parse("https://auth.example.com/authorize").unwrap(),
             "client-1",
             "http://127.0.0.1:5000/callback",
             &fixed_pkce(),
             "openid profile",
             "https://mcp.example.com/mcp",
-        )
-        .unwrap();
+        );
         let params: HashMap<_, _> = url.query_pairs().into_owned().collect();
         assert_eq!(params["response_type"], "code");
         assert_eq!(params["client_id"], "client-1");
@@ -775,20 +785,11 @@ mod tests {
         assert_eq!(params["resource"], "https://mcp.example.com/mcp");
     }
 
-    #[test]
-    fn authorize_url_rejects_a_bad_endpoint() {
-        assert!(
-            build_authorize_url(
-                "not a url",
-                "c",
-                "http://127.0.0.1/callback",
-                &fixed_pkce(),
-                "openid",
-                "https://mcp",
-            )
-            .is_err()
-        );
-    }
+    // `authorize_url_rejects_a_bad_endpoint` is gone with the `&str` parameter:
+    // `build_authorize_url` now takes an already-parsed `Url`, because
+    // `validate_auth_server_metadata` parses and origin-checks the endpoint
+    // before login ever gets here. An unparseable endpoint is covered end to end
+    // by `login_fails_when_the_authorize_endpoint_is_malformed`.
 
     // ─── expires_at ───────────────────────────────────────────────────────
 
@@ -1036,12 +1037,19 @@ mod tests {
         let app = Router::new()
             .route(
                 "/mcp",
-                post(|State((base, _, _)): State<(String, &'static str, Arc<AtomicUsize>)>| async move {
+                post(|State((base, variant, _)): State<(String, &'static str, Arc<AtomicUsize>)>| async move {
                     // Unauthenticated probe → 401 with the resource hint
                     // pointing at this server's own well-known document.
-                    let hint = format!(
-                        "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource\""
-                    );
+                    let hint = if variant == "bad_hint" {
+                        // Not a URL at all: the hint is server-controlled, so a
+                        // malformed one must be rejected rather than parsed
+                        // leniently.
+                        "Bearer resource_metadata=\"not a url\"".to_string()
+                    } else {
+                        format!(
+                            "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource\""
+                        )
+                    };
                     (
                         StatusCode::UNAUTHORIZED,
                         [(reqwest::header::WWW_AUTHENTICATE, hint)],
@@ -1066,6 +1074,9 @@ mod tests {
                     let servers = match variant {
                         "no_auth_server" => serde_json::json!([]),
                         "bad_issuer" => serde_json::json!(["not a url"]),
+                        // A *remote* http issuer: the discovery URLs derived
+                        // from it would carry a bearer token in cleartext.
+                        "http_issuer" => serde_json::json!(["http://auth.example.com"]),
                         _ => serde_json::json!([base]),
                     };
                     Json(serde_json::json!({
@@ -1156,13 +1167,33 @@ mod tests {
         } else {
             vec!["openid", "profile"]
         };
-        let authorize = if variant == "bad_authorize" {
-            "not a url".to_string()
-        } else {
-            format!("{base}/authorize")
+        let authorize = match variant {
+            "bad_authorize" => "not a url".to_string(),
+            // A valid URL on somebody else's origin: the shape a hostile
+            // document uses to send the user's browser — and the resulting
+            // authorization code — somewhere the issuer does not control.
+            "foreign_endpoint" => "https://evil.example.com/authorize".to_string(),
+            // Remote *http*: refused for the scheme before the origin check
+            // even runs.
+            "http_endpoint" => "http://evil.example.com/authorize".to_string(),
+            _ => format!("{base}/authorize"),
+        };
+        let issuer = match variant {
+            // Claims to be a different issuer than the one we fetched it for.
+            // RFC 8414 §3.3 requires these to match.
+            "issuer_mismatch" => "https://someone-else.example.com".to_string(),
+            // Distinct from the existing `bad_issuer`, which makes the
+            // *resource* document name a non-URL authorization server. This one
+            // is the AS document's own `issuer` field.
+            "as_unparseable_issuer" => "not a url".to_string(),
+            // Omitted entirely. The RFC 8414 §3.3 cross-check is skipped rather
+            // than failing, since there is nothing to compare — the endpoint
+            // origin check below still applies.
+            "no_issuer_field" => String::new(),
+            _ => base.to_string(),
         };
         let mut meta = serde_json::json!({
-            "issuer": base,
+            "issuer": issuer,
             "authorization_endpoint": authorize,
             "token_endpoint": format!("{base}/token"),
             "scopes_supported": scopes,
@@ -1871,6 +1902,184 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("different origin"), "got: {msg}");
         assert!(msg.contains("169.254.169.254"), "got: {msg}");
+    }
+
+    /// The `resource_metadata` hint is a string the remote server wrote. A value
+    /// that is not a URL must be refused, not parsed leniently.
+    #[tokio::test]
+    async fn login_refuses_a_malformed_resource_metadata_hint() {
+        let server = mock_auth_server("bad_hint").await;
+        let err = OAuthClient::new()
+            .login(
+                &format!("{}/mcp", server.base),
+                &HashMap::new(),
+                auto_consent(),
+                0,
+                None,
+            )
+            .await
+            .expect_err("a malformed hint must be refused");
+        assert!(
+            err.to_string().contains("invalid resource_metadata URL"),
+            "got: {err}"
+        );
+    }
+
+    /// RFC 8414 §3.3: the document's own `issuer` must match the issuer it was
+    /// fetched for. Without this check, a hostile `authorization_servers[0]` in
+    /// the resource document redirects the whole flow to an attacker's
+    /// authorization server.
+    #[tokio::test]
+    async fn login_refuses_metadata_claiming_a_different_issuer() {
+        let server = mock_auth_server("issuer_mismatch").await;
+        let err = OAuthClient::new()
+            .login(
+                &format!("{}/mcp", server.base),
+                &HashMap::new(),
+                auto_consent(),
+                0,
+                None,
+            )
+            .await
+            .expect_err("an issuer mismatch must be refused");
+        assert!(err.to_string().contains("RFC 8414"), "got: {err}");
+    }
+
+    /// A document whose `issuer` is not a URL at all.
+    #[tokio::test]
+    async fn login_refuses_metadata_with_an_unparseable_issuer() {
+        let server = mock_auth_server("as_unparseable_issuer").await;
+        let err = OAuthClient::new()
+            .login(
+                &format!("{}/mcp", server.base),
+                &HashMap::new(),
+                auto_consent(),
+                0,
+                None,
+            )
+            .await
+            .expect_err("an unparseable issuer must be refused");
+        assert!(err.to_string().contains("invalid issuer"), "got: {err}");
+    }
+
+    /// An `authorization_endpoint` that parses fine but sits on somebody else's
+    /// origin — where the user's browser, and the code it comes back with,
+    /// would go.
+    #[tokio::test]
+    async fn login_refuses_an_endpoint_off_the_issuers_origin() {
+        let server = mock_auth_server("foreign_endpoint").await;
+        let err = OAuthClient::new()
+            .login(
+                &format!("{}/mcp", server.base),
+                &HashMap::new(),
+                auto_consent(),
+                0,
+                None,
+            )
+            .await
+            .expect_err("a foreign endpoint must be refused");
+        assert!(
+            err.to_string().contains("is not on the issuer's origin"),
+            "got: {err}"
+        );
+    }
+
+    /// A document that omits `issuer` skips the §3.3 cross-check rather than
+    /// failing it — there is nothing to compare against. The endpoint-origin
+    /// check still applies, so this is a narrowing, not a bypass: the login
+    /// proceeds normally.
+    #[tokio::test]
+    async fn metadata_without_an_issuer_field_still_completes() {
+        let server = mock_auth_server("no_issuer_field").await;
+        let auth = OAuthClient::new()
+            .login(
+                &format!("{}/mcp", server.base),
+                &HashMap::new(),
+                auto_consent(),
+                0,
+                None,
+            )
+            .await
+            .expect("an absent issuer is not itself a failure");
+        assert!(!auth.access_token.is_empty());
+    }
+
+    /// Every URL in the discovery chain is checked, not just the first. Three
+    /// call sites, three ways to reach a remote `http://`:
+    ///
+    /// 1. the resource-metadata URL itself, when the MCP server is remote;
+    /// 2. the authorization-server metadata URLs, derived from the issuer the
+    ///    resource document names;
+    /// 3. the authorization/token endpoints inside that document.
+    #[tokio::test]
+    async fn every_step_of_discovery_refuses_remote_http() {
+        let insecure = |err: anyhow::Error| {
+            let msg = err.to_string();
+            assert!(msg.contains("refusing OAuth discovery"), "got: {msg}");
+        };
+
+        // (1) A remote http MCP URL. No server needed: the probe simply fails,
+        // discovery falls back to the well-known path, and that URL is refused.
+        insecure(
+            OAuthClient::new()
+                .login(
+                    "http://mcp.example.invalid/mcp",
+                    &HashMap::new(),
+                    auto_consent(),
+                    0,
+                    None,
+                )
+                .await
+                .expect_err("a remote http MCP URL must be refused"),
+        );
+
+        // (2) The resource document names a remote http authorization server.
+        let server = mock_auth_server("http_issuer").await;
+        insecure(
+            OAuthClient::new()
+                .login(
+                    &format!("{}/mcp", server.base),
+                    &HashMap::new(),
+                    auto_consent(),
+                    0,
+                    None,
+                )
+                .await
+                .expect_err("a remote http issuer must be refused"),
+        );
+
+        // (3) The authorization endpoint inside an otherwise-valid document.
+        let server = mock_auth_server("http_endpoint").await;
+        insecure(
+            OAuthClient::new()
+                .login(
+                    &format!("{}/mcp", server.base),
+                    &HashMap::new(),
+                    auto_consent(),
+                    0,
+                    None,
+                )
+                .await
+                .expect_err("a remote http endpoint must be refused"),
+        );
+    }
+
+    /// Plain HTTP to a *remote* host is refused: the flow carries a bearer
+    /// token, so it would be on the wire in cleartext. The loopback exemption
+    /// (which every mock server in this module relies on) is what keeps local
+    /// development working.
+    #[test]
+    fn discovery_over_remote_http_is_refused() {
+        let client = OAuthClient::new();
+        let err = client
+            .require_safe_discovery_url(&Url::parse("http://auth.example.com/x").unwrap())
+            .expect_err("remote http must be refused");
+        assert!(err.to_string().contains("must use https"), "got: {err}");
+        assert!(
+            client
+                .require_safe_discovery_url(&Url::parse("https://auth.example.com/x").unwrap())
+                .is_ok()
+        );
     }
 
     #[tokio::test]

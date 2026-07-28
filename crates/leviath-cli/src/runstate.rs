@@ -629,6 +629,24 @@ where
 mod tests {
     use super::*;
 
+    /// `run_id` arrives from URL segments on `GET /api/agents/{id}/logs` and
+    /// friends. `Path::join` neither normalizes `..` nor resists an absolute
+    /// path, so an unvalidated id read files anywhere. An unsafe one resolves to
+    /// a name that cannot exist, giving the caller a plain miss.
+    #[test]
+    fn run_dir_refuses_an_unsafe_run_id() {
+        crate::test_support::with_tracing(|| {
+            for bad in ["../../etc", "/etc/passwd", "..", "a/b"] {
+                let dir = run_dir(bad);
+                let shown = dir.display().to_string();
+                assert!(dir.ends_with("<invalid>"), "{bad} resolved to {shown}");
+                assert!(!dir.exists(), "{bad} must not resolve to a real path");
+            }
+            // An ordinary id is untouched.
+            assert!(run_dir("run-abc123").ends_with("run-abc123"));
+        });
+    }
+
     #[test]
     fn write_json_atomic_fs_write_failure() {
         // Drive the `std::fs::write(&tmp, json)?` error arm: writing the

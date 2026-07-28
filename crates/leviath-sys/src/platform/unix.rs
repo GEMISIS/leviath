@@ -38,9 +38,12 @@ pub(crate) fn write_with_mode(path: &Path, contents: &[u8], mode: u32) -> io::Re
         .truncate(true)
         .mode(mode)
         .open(path)?;
-    file.write_all(contents)?;
-    file.sync_all()?;
-    set_mode(path, mode)
+    // Chained rather than three `?`s: each `?` is an error branch that cannot be
+    // reached for a file we just opened for writing, and `and_then` keeps the
+    // same short-circuiting without one.
+    file.write_all(contents)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| set_mode(path, mode))
 }
 
 /// Set the exact permission bits on `path`.

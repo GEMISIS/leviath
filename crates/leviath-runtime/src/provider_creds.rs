@@ -171,6 +171,26 @@ pub fn build_provider_registry(creds: &[ProviderCreds]) -> ProviderRegistry {
 mod tests {
     use super::*;
 
+    /// One `tracing::debug!(?creds)` — or an error context that formats a struct
+    /// holding one — would otherwise print the provider key.
+    #[test]
+    fn debug_output_never_contains_the_api_key() {
+        let mut creds = ProviderCreds::simple("anthropic");
+        creds.api_key = Some("sk-ant-SECRET-VALUE".to_string());
+        creds.base_url = Some("https://api.example.com".to_string());
+
+        let rendered = format!("{creds:?}");
+        assert!(!rendered.contains("SECRET-VALUE"), "key leaked: {rendered}");
+        assert!(rendered.contains("<set>"), "{rendered}");
+        // The parts that make a debug line useful survive.
+        assert!(rendered.contains("anthropic"), "{rendered}");
+        assert!(rendered.contains("api.example.com"), "{rendered}");
+
+        // A provider that needs no key says so rather than claiming one.
+        let keyless = format!("{:?}", ProviderCreds::simple("ollama"));
+        assert!(keyless.contains("<unset>"), "{keyless}");
+    }
+
     #[test]
     fn build_provider_registry_from_creds_slice() {
         // Drives `build_provider_registry(&[ProviderCreds])` directly:

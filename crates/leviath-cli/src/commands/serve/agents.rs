@@ -288,6 +288,77 @@ mod tests {
         }
     }
 
+    /// The refusals as the handler returns them: a 403 before the request ever
+    /// reaches the daemon, so a token holder cannot point an agent at the
+    /// filesystem root or waive its approval prompts.
+    #[tokio::test]
+    async fn spawn_refuses_an_out_of_root_workdir_and_remote_yolo() {
+        let root = tempfile::tempdir().unwrap();
+        let agents = tempfile::tempdir().unwrap();
+        let bp = agents.path().join("probe");
+        std::fs::create_dir(&bp).unwrap();
+        std::fs::write(
+            bp.join("agent.leviath"),
+            "[agent]\nname = \"probe\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nprompt = \"p\"\n",
+        )
+        .unwrap();
+
+        let (tx, _) = broadcast::channel(64);
+        let state = AppState {
+            config: Arc::new(Config {
+                agent_paths: vec![agents.path().to_path_buf()],
+                ..Default::default()
+            }),
+            event_tx: tx,
+            control: no_daemon(),
+            mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            limits: Arc::new(ServeLimits {
+                workdir_root: Some(root.path().to_path_buf()),
+                no_remote_yolo: true,
+            }),
+        };
+
+        // Outside `--workdir-root`.
+        let err = spawn_agent(
+            State(state.clone()),
+            Json(SpawnAgentReq {
+                blueprint: "probe".to_string(),
+                task: "t".to_string(),
+                workdir: Some("/".to_string()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect_err("a workdir outside the root must be refused");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert!(
+            err.1.0.error.contains("--workdir-root"),
+            "{}",
+            err.1.0.error
+        );
+
+        // Inside the root, but asking for yolo.
+        let err = spawn_agent(
+            State(state),
+            Json(SpawnAgentReq {
+                blueprint: "probe".to_string(),
+                task: "t".to_string(),
+                workdir: Some(root.path().to_string_lossy().to_string()),
+                yolo: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect_err("remote yolo must be refused");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert!(
+            err.1.0.error.contains("no-remote-yolo"),
+            "{}",
+            err.1.0.error
+        );
+    }
+
     /// `--workdir-root` bounds where an API caller may point an agent. Without
     /// it, `{"workdir": "/"}` handed a tool-executing agent the whole
     /// filesystem.

@@ -67,14 +67,25 @@ pub fn client_builder(timeouts: ClientTimeouts) -> reqwest::ClientBuilder {
         .redirect(reqwest::redirect::Policy::limited(5))
 }
 
+/// A client with the shared floor applied, built.
+///
+/// `.expect`, not a fallback to `Client::new()`: `build()` fails only on TLS
+/// backend initialization, and falling back would silently hand back exactly the
+/// timeout-less client this exists to replace. It also matches what the script
+/// host's shared client already does, and a fallback closure that never runs is
+/// a permanently uncovered region.
+pub fn client(timeouts: ClientTimeouts) -> reqwest::Client {
+    client_builder(timeouts)
+        .build()
+        .expect("building an HTTP client fails only on TLS backend init")
+}
+
 /// Why a URL was refused. Rendered into the tool result the model sees, so it
 /// says what to do differently rather than just failing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UrlRejection {
     /// The scheme is not `http` or `https`.
     Scheme(String),
-    /// The URL has no host (e.g. `http:///path`).
-    NoHost,
     /// The host did not resolve to any address.
     Unresolvable(String),
     /// The host resolved to an address outside the public internet.
@@ -86,6 +97,24 @@ pub enum UrlRejection {
     },
 }
 
+impl UrlRejection {
+    /// A stable short name for this refusal.
+    ///
+    /// Exists so a test can `assert_eq!(err.kind(), "private_address")` rather
+    /// than `assert!(matches!(err, ...))` — the `matches!` non-matching arm is a
+    /// region only a *failing* assertion ever reaches, which reads as uncovered
+    /// under the workspace's 100% gate. Useful in its own right for structured
+    /// logging, where the kind is the field worth indexing on.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Scheme(_) => "scheme",
+            Self::Unresolvable(_) => "unresolvable",
+            Self::PrivateAddress { .. } => "private_address",
+        }
+    }
+}
+
 impl std::fmt::Display for UrlRejection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -93,7 +122,6 @@ impl std::fmt::Display for UrlRejection {
                 f,
                 "scheme '{s}' is not fetchable — only http and https are allowed"
             ),
-            Self::NoHost => write!(f, "URL has no host"),
             Self::Unresolvable(h) => write!(f, "host '{h}' did not resolve"),
             Self::PrivateAddress { host, addr } => write!(
                 f,
@@ -167,6 +195,30 @@ fn is_restricted_v6(a: Ipv6Addr) -> bool {
 /// *every* address it resolves to must pass, so a name with both a public and a
 /// private A record is refused rather than raced.
 pub fn check_url(url: &url::Url, allow_local: bool) -> Result<(), UrlRejection> {
+    check_url_with(url, allow_local, resolve_host)
+}
+
+/// The real resolver: every address `host:port` maps to.
+fn resolve_host(host: &str, port: u16) -> Option<Vec<IpAddr>> {
+    (host, port)
+        .to_socket_addrs()
+        .ok()
+        .map(|addrs| addrs.map(|sa| sa.ip()).collect())
+}
+
+/// Core of [`check_url`] with name resolution injected.
+///
+/// A `fn` pointer, not `impl Fn`, so there is a single monomorphization —
+/// otherwise each caller's closure type gets its own coverage report and every
+/// arm reads as partially covered. The seam exists because the interesting cases
+/// (a name resolving to nothing, a name resolving to a public address, a name
+/// resolving to *both* public and private) cannot be produced from real DNS in a
+/// test without being slow, flaky, or dependent on someone else's zone file.
+pub(crate) fn check_url_with(
+    url: &url::Url,
+    allow_local: bool,
+    resolve: fn(&str, u16) -> Option<Vec<IpAddr>>,
+) -> Result<(), UrlRejection> {
     match url.scheme() {
         "http" | "https" => {}
         other => return Err(UrlRejection::Scheme(other.to_string())),
@@ -178,7 +230,14 @@ pub fn check_url(url: &url::Url, allow_local: bool) -> Result<(), UrlRejection> 
     // literal (`[::1]`), which then fails to parse as an address *and* fails to
     // resolve — refusing the URL, but as "unresolvable" rather than "loopback",
     // and only by accident. `Host` hands back the address already parsed.
-    let host = url.host().ok_or(UrlRejection::NoHost)?;
+    // `.expect`, not a `NoHost` variant: the scheme check above has already
+    // restricted us to http/https, and the URL Standard requires a host for
+    // those "special" schemes — `Url::parse("http://")` fails with "empty host"
+    // rather than producing a hostless URL. A branch for the impossible case
+    // would be a permanently-uncovered one.
+    let host = url
+        .host()
+        .expect("http/https URLs always have a host per the URL Standard");
 
     // A literal address needs no DNS, and must not get it: going through the
     // resolver for something already unambiguous only adds a failure mode.
@@ -199,14 +258,13 @@ pub fn check_url(url: &url::Url, allow_local: bool) -> Result<(), UrlRejection> 
 
     let host = host_str.as_str();
     let port = url.port_or_known_default().unwrap_or(80);
-    let resolved: Vec<IpAddr> = (host, port)
-        .to_socket_addrs()
-        .map_err(|_| UrlRejection::Unresolvable(host.to_string()))?
-        .map(|sa| sa.ip())
-        .collect();
-    if resolved.is_empty() {
+    // A resolver error and an empty answer are the same thing to a caller —
+    // there is no address to check — so they collapse to one branch rather than
+    // two, one of which would be near-impossible to reach.
+    let resolved = resolve(host, port).filter(|addrs: &Vec<IpAddr>| !addrs.is_empty());
+    let Some(resolved) = resolved else {
         return Err(UrlRejection::Unresolvable(host.to_string()));
-    }
+    };
     // Every address must pass. Rejecting on *any* restricted answer means a
     // hostname that resolves to both 93.184.216.34 and 127.0.0.1 is refused
     // rather than depending on which one the client happens to dial.
@@ -229,11 +287,38 @@ mod tests {
         url::Url::parse(s).expect("test URL parses")
     }
 
+    /// The floor exists because two clients were built with a bare
+    /// `Client::new()` and had no timeouts at all.
+    #[test]
+    fn the_default_timeouts_are_a_real_floor() {
+        let t = ClientTimeouts::default();
+        assert!(t.connect > Duration::ZERO, "a connect timeout is the point");
+        assert!(
+            t.total > t.connect,
+            "the total budget must exceed the connect"
+        );
+    }
+
+    /// The builder has to actually produce a client — a factory returning a
+    /// builder nothing can `build()` would be a silent no-op.
+    #[test]
+    fn the_client_builder_produces_a_usable_client() {
+        assert!(client_builder(ClientTimeouts::default()).build().is_ok());
+        // And a caller may override the floor with its own numbers.
+        let custom = ClientTimeouts {
+            connect: Duration::from_secs(1),
+            total: Duration::from_secs(2),
+        };
+        assert!(client_builder(custom).build().is_ok());
+        // The convenience wrapper callers actually use.
+        let _ = client(ClientTimeouts::default());
+    }
+
     #[test]
     fn rejects_non_http_schemes() {
         for s in ["file:///etc/passwd", "ftp://example.com/x", "gopher://x/"] {
             let err = check_url(&u(s), false).unwrap_err();
-            assert!(matches!(err, UrlRejection::Scheme(_)), "{s} → {err:?}");
+            assert_eq!(err.kind(), "scheme", "{s} → {err:?}");
         }
     }
 
@@ -242,7 +327,7 @@ mod tests {
     #[test]
     fn rejects_cloud_metadata_endpoint() {
         let err = check_url(&u("http://169.254.169.254/latest/meta-data/"), false).unwrap_err();
-        assert!(matches!(err, UrlRejection::PrivateAddress { .. }));
+        assert_eq!(err.kind(), "private_address");
     }
 
     /// Asserting on `PrivateAddress` specifically, not just `is_err()`: an IPv6
@@ -263,10 +348,7 @@ mod tests {
             "http://[fe80::1]/",
         ] {
             let err = check_url(&u(s), false).unwrap_err();
-            assert!(
-                matches!(err, UrlRejection::PrivateAddress { .. }),
-                "{s} → {err:?}"
-            );
+            assert_eq!(err.kind(), "private_address", "{s} → {err:?}");
         }
     }
 
@@ -274,10 +356,7 @@ mod tests {
     #[test]
     fn rejects_ipv4_mapped_loopback() {
         let err = check_url(&u("http://[::ffff:127.0.0.1]/"), false).unwrap_err();
-        assert!(
-            matches!(err, UrlRejection::PrivateAddress { .. }),
-            "{err:?}"
-        );
+        assert_eq!(err.kind(), "private_address", "{err:?}");
         assert!(is_restricted_addr("::ffff:10.0.0.1".parse().unwrap()));
     }
 
@@ -298,7 +377,7 @@ mod tests {
     #[test]
     fn unresolvable_host_is_reported_as_such() {
         let err = check_url(&u("http://this-host-does-not-exist.invalid/"), false).unwrap_err();
-        assert!(matches!(err, UrlRejection::Unresolvable(_)), "{err:?}");
+        assert_eq!(err.kind(), "unresolvable", "{err:?}");
     }
 
     /// `localhost` is a *name*, not a literal, so it exercises the resolver path
@@ -306,9 +385,116 @@ mod tests {
     #[test]
     fn rejects_localhost_by_name() {
         let err = check_url(&u("http://localhost:8080/"), false).unwrap_err();
-        assert!(
-            matches!(err, UrlRejection::PrivateAddress { .. }),
-            "{err:?}"
+        assert_eq!(err.kind(), "private_address", "{err:?}");
+    }
+
+    // ─── the resolver seam ────────────────────────────────────────────────
+
+    fn resolves_to_nothing(_: &str, _: u16) -> Option<Vec<IpAddr>> {
+        Some(Vec::new())
+    }
+    fn resolver_fails(_: &str, _: u16) -> Option<Vec<IpAddr>> {
+        None
+    }
+    fn resolves_public(_: &str, _: u16) -> Option<Vec<IpAddr>> {
+        Some(vec!["93.184.216.34".parse().expect("valid")])
+    }
+    fn resolves_to_both(_: &str, _: u16) -> Option<Vec<IpAddr>> {
+        Some(vec![
+            "93.184.216.34".parse().expect("valid"),
+            "127.0.0.1".parse().expect("valid"),
+        ])
+    }
+
+    /// A name that resolves to a public address passes. Injected rather than
+    /// using real DNS: a test that depends on someone else's zone file is slow
+    /// when it works and confusing when it doesn't.
+    #[test]
+    fn a_hostname_resolving_publicly_is_allowed() {
+        assert!(check_url_with(&u("https://example.com/x"), false, resolves_public).is_ok());
+    }
+
+    /// A name with **both** a public and a private answer is refused rather than
+    /// raced. Which address the client would actually dial is not ours to
+    /// predict, so any restricted answer settles it.
+    #[test]
+    fn a_hostname_resolving_to_both_public_and_private_is_refused() {
+        let err = check_url_with(&u("https://split.example/x"), false, resolves_to_both)
+            .expect_err("a private answer must settle it");
+        assert_eq!(err.kind(), "private_address");
+    }
+
+    /// A resolver error and an empty answer are the same thing to a caller:
+    /// there is no address to check.
+    #[test]
+    fn no_addresses_reads_as_unresolvable() {
+        for resolver in [resolves_to_nothing, resolver_fails] {
+            let err = check_url_with(&u("https://nowhere.example/x"), false, resolver)
+                .expect_err("no address means no fetch");
+            assert_eq!(err.kind(), "unresolvable");
+        }
+    }
+
+    /// How many times [`counting_resolver`] has been called. A counter rather
+    /// than a panicking "must not run" resolver: the body of a resolver that is
+    /// never called is itself an uncovered region, so the assertion would come
+    /// at the cost of the thing it is asserting about.
+    static RESOLVER_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn counting_resolver(_: &str, _: u16) -> Option<Vec<IpAddr>> {
+        RESOLVER_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some(vec!["93.184.216.34".parse().expect("valid")])
+    }
+
+    /// The scheme check runs before resolution, so a refused scheme never
+    /// reaches the resolver — no DNS lookup for a URL we were never going to
+    /// fetch.
+    #[test]
+    fn the_scheme_is_checked_before_anything_is_resolved() {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        // Establish that this resolver does get called for a URL that reaches
+        // resolution, so the count below means "not reached" and not "broken".
+        let before = RESOLVER_CALLS.load(SeqCst);
+        assert!(check_url_with(&u("https://example.com/x"), false, counting_resolver).is_ok());
+        assert_eq!(RESOLVER_CALLS.load(SeqCst), before + 1);
+
+        let err = check_url_with(&u("ftp://example.com/x"), false, counting_resolver)
+            .expect_err("ftp is refused");
+        assert_eq!(err.kind(), "scheme");
+        assert_eq!(
+            RESOLVER_CALLS.load(SeqCst),
+            before + 1,
+            "a refused scheme must not trigger a DNS lookup"
+        );
+
+        // A literal address short-circuits resolution too.
+        assert!(check_url_with(&u("https://93.184.216.34/x"), false, counting_resolver).is_ok());
+        assert_eq!(
+            RESOLVER_CALLS.load(SeqCst),
+            before + 1,
+            "an IP literal must not trigger a DNS lookup"
+        );
+    }
+
+    /// Every rejection reports a distinct kind, so the accessor is a real
+    /// discriminator rather than a constant.
+    #[test]
+    fn each_rejection_has_its_own_kind() {
+        let kinds = [
+            UrlRejection::Scheme("ftp".into()).kind(),
+            UrlRejection::Unresolvable("h".into()).kind(),
+            UrlRejection::PrivateAddress {
+                host: "h".into(),
+                addr: "127.0.0.1".parse().expect("valid"),
+            }
+            .kind(),
+        ];
+        let unique: std::collections::HashSet<_> = kinds.iter().collect();
+        assert_eq!(
+            unique.len(),
+            kinds.len(),
+            "kinds must be distinct: {kinds:?}"
         );
     }
 
@@ -319,7 +505,6 @@ mod tests {
         assert!(msg.contains("allow_local_network"), "{msg}");
         assert!(msg.contains("127.0.0.1"), "{msg}");
 
-        assert!(UrlRejection::NoHost.to_string().contains("no host"));
         assert!(
             UrlRejection::Unresolvable("h".into())
                 .to_string()

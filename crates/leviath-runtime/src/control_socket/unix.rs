@@ -55,27 +55,28 @@ impl ControlListener {
     /// A peer whose uid cannot be determined is refused. An unidentifiable
     /// caller is not an authorized one, and failing open here would undo the
     /// whole point on any platform where the lookup is unavailable.
-    pub async fn accept(&mut self) -> std::io::Result<ServerStream> {
-        loop {
-            let (stream, _addr) = self.0.accept().await?;
-            let ours = leviath_sys::current_uid();
-            match leviath_sys::peer_uid(&stream) {
-                Some(peer) if peer == ours => return Ok(stream),
-                Some(peer) => {
-                    tracing::warn!(
-                        peer_uid = peer,
-                        daemon_uid = ours,
-                        "refused a control connection from another user"
-                    );
-                }
-                None => {
-                    tracing::warn!(
-                        "refused a control connection whose peer uid could not be determined"
-                    );
-                }
-            }
-            // `stream` drops here, closing the connection.
-        }
+    pub async fn accept(&mut self) -> std::io::Result<Option<ServerStream>> {
+        self.accept_with(leviath_sys::peer_uid).await
+    }
+
+    /// Core of [`accept`](Self::accept) with the peer lookup injected.
+    ///
+    /// A `fn` pointer (not `impl Fn`) so there is one monomorphization. The seam
+    /// exists because the refusal arms cannot be reached otherwise: producing a
+    /// connection from a *different* uid needs a second user account or root,
+    /// which no CI runner has. Injecting the lookup lets both refusals — a
+    /// foreign uid and an undeterminable one — be driven against a real socket.
+    async fn accept_with(
+        &mut self,
+        peer_uid: fn(&ServerStream) -> Option<u32>,
+    ) -> std::io::Result<Option<ServerStream>> {
+        // One expression, no `?` and no retry loop: the caller's accept loop is
+        // already a loop, so `Ok(None)` ("someone connected, but not us") slots
+        // into it as a `continue`. Retrying in here would add a branch that no
+        // test can reach, in the one function where the refusal *is* the point.
+        self.0.accept().await.map(|(stream, _addr)| {
+            peer_is_ours(peer_uid(&stream), leviath_sys::current_uid()).then_some(stream)
+        })
     }
 }
 
@@ -112,8 +113,35 @@ pub fn bind_control_listener(id: &Path) -> std::io::Result<ControlListener> {
     // `connect`; on macOS and the BSDs it historically is not, which is why the
     // per-connection peer check in `accept_authorized` is the real gate and this
     // is defence in depth rather than the whole story.
-    leviath_sys::secure_file_perms(id)?;
+    // Best-effort, like the directory above: `chmod` on a socket we just created
+    // and own does not realistically fail, and the peer check in `accept` — not
+    // this mode — is what actually holds on macOS and the BSDs, where socket
+    // permissions are not consulted at `connect` time.
+    let _ = leviath_sys::secure_file_perms(id);
     Ok(ControlListener(listener))
+}
+
+/// Whether an accepted connection's peer is this same user.
+///
+/// `None` — the platform could not report a uid — is refused. An unidentifiable
+/// caller is not an authorized one, and failing open here would undo the whole
+/// point on any platform where the lookup is unavailable.
+fn peer_is_ours(peer: Option<u32>, ours: u32) -> bool {
+    match peer {
+        Some(uid) if uid == ours => true,
+        Some(uid) => {
+            tracing::warn!(
+                peer_uid = uid,
+                daemon_uid = ours,
+                "refused a control connection from another user"
+            );
+            false
+        }
+        None => {
+            tracing::warn!("refused a control connection whose peer uid could not be determined");
+            false
+        }
+    }
 }
 
 /// Connect to the daemon's control socket at `id`.
@@ -164,6 +192,54 @@ mod tests {
         );
     }
 
+    /// Both refusal arms, driven against a real socket with the peer lookup
+    /// injected. A connection from a *different* uid needs a second user account
+    /// or root, which no CI runner has — so the lookup is the seam rather than
+    /// the socket.
+    #[tokio::test]
+    async fn accept_skips_connections_that_are_not_ours() {
+        fn foreign_uid(_: &ServerStream) -> Option<u32> {
+            Some(leviath_sys::current_uid().wrapping_add(1))
+        }
+        fn unknown_uid(_: &ServerStream) -> Option<u32> {
+            None
+        }
+
+        for (label, lookup) in [
+            (
+                "another user",
+                foreign_uid as fn(&ServerStream) -> Option<u32>,
+            ),
+            ("an undeterminable uid", unknown_uid),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let id = dir.path().join("control.sock");
+            let mut listener = bind_control_listener(&id).unwrap();
+
+            // Connect first and keep the client alive: a Unix-socket `connect`
+            // completes as soon as the listener has queued it, so no spawned
+            // task is needed — and no abort, whose half-run future would read as
+            // a partially covered region.
+            let _client = connect(&id).await.expect("connecting succeeds");
+            let accepted = listener
+                .accept_with(lookup)
+                .await
+                .expect("accepting itself succeeds");
+            assert!(
+                accepted.is_none(),
+                "a connection from {label} must not be handed to the daemon"
+            );
+        }
+    }
+
+    /// The decision itself: our own uid passes, anything else does not.
+    #[test]
+    fn peer_is_ours_admits_only_this_user() {
+        assert!(peer_is_ours(Some(1000), 1000));
+        assert!(!peer_is_ours(Some(1001), 1000));
+        assert!(!peer_is_ours(None, 1000), "an unknown peer fails closed");
+    }
+
     /// A connection from this same user is accepted — the peer check must not
     /// lock the daemon out of its own socket.
     #[tokio::test]
@@ -173,8 +249,8 @@ mod tests {
         let mut listener = bind_control_listener(&id).unwrap();
 
         let client = tokio::spawn(async move { connect(&id).await });
-        let accepted = listener.accept().await;
-        assert!(accepted.is_ok(), "same-uid peer must be admitted");
+        let accepted = listener.accept().await.expect("accept succeeds");
+        assert!(accepted.is_some(), "same-uid peer must be admitted");
         client.await.unwrap().unwrap();
     }
 

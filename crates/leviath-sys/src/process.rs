@@ -57,6 +57,27 @@ pub fn peer_uid(sock: &impl std::os::fd::AsFd) -> Option<u32> {
 mod tests {
     use super::*;
 
+    /// The check that makes the daemon's control socket safe: the peer's uid
+    /// comes from the kernel, not from anything the peer claims. A socket we
+    /// connected to ourselves must report our own uid.
+    #[cfg(unix)]
+    #[test]
+    fn peer_uid_reports_our_own_uid_for_a_self_connection() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.sock");
+        let listener = UnixListener::bind(&path).expect("bind");
+        let client = std::os::unix::net::UnixStream::connect(&path).expect("connect");
+        let (server, _) = listener.accept().expect("accept");
+
+        // Both ends agree, and both agree with the process's own uid — a peer
+        // check that returned `None` here would refuse every legitimate
+        // connection, which is the failure mode worth catching.
+        assert_eq!(peer_uid(&server), Some(current_uid()));
+        assert_eq!(peer_uid(&client), Some(current_uid()));
+    }
+
     #[test]
     fn current_uid_is_reported() {
         // Just has to answer without panicking; root (0) is a legitimate value

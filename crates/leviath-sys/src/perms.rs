@@ -62,6 +62,47 @@ mod tests {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
+    /// The point of `write_private` over `fs::write` + `chmod`: there is no
+    /// moment where the file exists at the umask default. The absence of that
+    /// window cannot be observed after the fact, so what is asserted is the mode
+    /// on a freshly created file — which the two-step version also reaches, but
+    /// only eventually.
+    #[test]
+    fn write_private_creates_an_owner_only_file_with_the_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret");
+
+        write_private(&path, b"the key").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"the key");
+        #[cfg(unix)]
+        assert_eq!(mode_of(&path), 0o600);
+    }
+
+    /// The mode passed to `open(2)` applies only on *creation*, so an existing
+    /// file keeps whatever permissions it had. Overwriting one that became
+    /// permissive must tighten it again.
+    #[test]
+    fn write_private_retightens_an_existing_permissive_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret");
+        std::fs::write(&path, b"old").unwrap();
+        #[cfg(unix)]
+        set_mode(&path, 0o644);
+
+        write_private(&path, b"new").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        #[cfg(unix)]
+        assert_eq!(mode_of(&path), 0o600);
+    }
+
+    /// A failed secret write must never be mistaken for a successful one.
+    #[test]
+    fn write_private_propagates_an_unwritable_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no-such-dir").join("secret");
+        assert!(write_private(&path, b"x").is_err());
+    }
+
     #[test]
     fn secure_file_perms_restricts_on_unix_and_succeeds_everywhere() {
         let dir = tempfile::tempdir().unwrap();

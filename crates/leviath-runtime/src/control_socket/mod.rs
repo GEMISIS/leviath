@@ -535,7 +535,13 @@ mod tests {
         spawn_fake_host(op_rx);
         let (mut listener, id, _dir) = test_listener();
         tokio::spawn(async move {
-            let stream = listener.accept().await.unwrap();
+            // `accept` yields `Ok(None)` for a peer that is not this user; in a
+            // test the only connection is our own, so it is always `Some`.
+            let stream = listener
+                .accept()
+                .await
+                .expect("accept succeeds")
+                .expect("our own connection is admitted");
             let _ = handle_connection(stream, op_tx, no_events()).await;
         });
 
@@ -726,7 +732,13 @@ mod tests {
         let (mut listener, id, _dir) = test_listener();
         let server_events = events.clone();
         let server = tokio::spawn(async move {
-            let stream = listener.accept().await.unwrap();
+            // `accept` yields `Ok(None)` for a peer that is not this user; in a
+            // test the only connection is our own, so it is always `Some`.
+            let stream = listener
+                .accept()
+                .await
+                .expect("accept succeeds")
+                .expect("our own connection is admitted");
             let _ = handle_connection(stream, op_tx, server_events).await;
         });
 
@@ -764,7 +776,13 @@ mod tests {
         let (mut listener, id, _dir) = test_listener();
         let server_events = events.clone();
         tokio::spawn(async move {
-            let stream = listener.accept().await.unwrap();
+            // `accept` yields `Ok(None)` for a peer that is not this user; in a
+            // test the only connection is our own, so it is always `Some`.
+            let stream = listener
+                .accept()
+                .await
+                .expect("accept succeeds")
+                .expect("our own connection is admitted");
             let _ = handle_connection(stream, op_tx, server_events).await;
         });
 
@@ -781,7 +799,10 @@ mod tests {
     async fn connected_pair() -> (ClientStream, ServerStream, tempfile::TempDir) {
         let (mut listener, id, dir) = test_listener();
         let (client, server) = tokio::join!(connect(&id), listener.accept());
-        (client.unwrap(), server.unwrap(), dir)
+        let server = server
+            .expect("accept succeeds")
+            .expect("our own connection is admitted");
+        (client.unwrap(), server, dir)
     }
 
     #[tokio::test]
@@ -846,7 +867,13 @@ mod tests {
         let (mut listener, id, _dir) = test_listener();
         tokio::spawn(async move {
             for _ in 0..4 {
-                let stream = listener.accept().await.unwrap();
+                // `accept` yields `Ok(None)` for a peer that is not this user; in a
+                // test the only connection is our own, so it is always `Some`.
+                let stream = listener
+                    .accept()
+                    .await
+                    .expect("accept succeeds")
+                    .expect("our own connection is admitted");
                 let op_tx = op_tx.clone();
                 tokio::spawn(async move {
                     let _ = handle_connection(stream, op_tx, no_events()).await;
@@ -900,7 +927,13 @@ mod tests {
     async fn raw_server(bytes: &'static [u8]) -> (ControlId, tempfile::TempDir) {
         let (mut listener, id, dir) = test_listener();
         tokio::spawn(async move {
-            let stream = listener.accept().await.unwrap();
+            // `accept` yields `Ok(None)` for a peer that is not this user; in a
+            // test the only connection is our own, so it is always `Some`.
+            let stream = listener
+                .accept()
+                .await
+                .expect("accept succeeds")
+                .expect("our own connection is admitted");
             let (_r, mut w) = tokio::io::split(stream);
             let _ = w.write_all(bytes).await;
         });
@@ -927,7 +960,13 @@ mod tests {
         // A server that accepts, drains the request, then drops without replying.
         let (mut listener, id, _dir) = test_listener();
         tokio::spawn(async move {
-            let stream = listener.accept().await.unwrap();
+            // `accept` yields `Ok(None)` for a peer that is not this user; in a
+            // test the only connection is our own, so it is always `Some`.
+            let stream = listener
+                .accept()
+                .await
+                .expect("accept succeeds")
+                .expect("our own connection is admitted");
             // Drain the request line first, so dropping the stream is a clean EOF
             // rather than a connection reset from unread data.
             let (read_half, _write_half) = tokio::io::split(stream);
@@ -952,7 +991,13 @@ mod tests {
         // lets the task actually finish.
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
-            let stream = listener.accept().await.unwrap();
+            // `accept` yields `Ok(None)` for a peer that is not this user; in a
+            // test the only connection is our own, so it is always `Some`.
+            let stream = listener
+                .accept()
+                .await
+                .expect("accept succeeds")
+                .expect("our own connection is admitted");
             let (read_half, write_half) = tokio::io::split(stream);
             let mut lines = BufReader::new(read_half).lines();
             let _ = lines.next_line().await;

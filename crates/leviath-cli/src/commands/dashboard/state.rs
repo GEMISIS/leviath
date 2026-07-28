@@ -2081,7 +2081,11 @@ mod tests {
         let id = control_id(dir.path());
         let mut listener = bind_control_listener(&id).unwrap();
         let server = tokio::spawn(async move {
-            let stream = listener.accept().await.unwrap();
+            let stream = listener
+                .accept()
+                .await
+                .expect("accept succeeds")
+                .expect("our own connection is admitted");
             let (read_half, mut write_half) = tokio::io::split(stream);
             let mut lines = BufReader::new(read_half).lines();
             let _ = lines.next_line().await;
@@ -2974,7 +2978,11 @@ mod tests {
         let id = control_id(dir.path());
         let mut listener = bind_control_listener(&id).unwrap();
         let server = tokio::spawn(async move {
-            let stream = listener.accept().await.unwrap();
+            let stream = listener
+                .accept()
+                .await
+                .expect("accept succeeds")
+                .expect("our own connection is admitted");
             let (r, mut w) = tokio::io::split(stream);
             let mut lines = BufReader::new(r).lines();
             let _ = lines.next_line().await.unwrap();

@@ -108,18 +108,17 @@ pub(crate) fn same_origin(a: &Url, b: &Url) -> bool {
 ///
 /// RFC 8414 first, then the OpenID Connect discovery document as a fallback:
 /// some issuers publish only the latter.
-pub(crate) fn auth_server_metadata_urls(issuer: &str) -> anyhow::Result<Vec<Url>> {
-    let base = Url::parse(issuer)
-        .map_err(|e| anyhow::anyhow!("Invalid authorization server issuer '{}': {}", issuer, e))?;
-    // These joins are constant valid paths onto an already-parsed base, so
-    // only the `parse` above can fail.
+/// Infallible: the caller has already parsed the issuer (and reported a bad one),
+/// and these are constant valid paths joined onto an existing base. Taking a
+/// `&Url` rather than a `&str` is what removes the second, unreachable parse.
+pub(crate) fn auth_server_metadata_urls(base: &Url) -> Vec<Url> {
     let rfc8414 = base
         .join("/.well-known/oauth-authorization-server")
         .expect("RFC 8414 path is always joinable");
     let openid = base
         .join("/.well-known/openid-configuration")
         .expect("OpenID configuration path is always joinable");
-    Ok(vec![rfc8414, openid])
+    vec![rfc8414, openid]
 }
 
 #[cfg(test)]
@@ -180,7 +179,7 @@ mod tests {
 
     #[test]
     fn auth_server_urls_offer_rfc8414_then_openid() {
-        let urls = auth_server_metadata_urls("https://auth.example.com").unwrap();
+        let urls = auth_server_metadata_urls(&u("https://auth.example.com"));
         assert_eq!(
             urls[0].as_str(),
             "https://auth.example.com/.well-known/oauth-authorization-server"
@@ -191,10 +190,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn auth_server_urls_reject_a_bad_issuer() {
-        assert!(auth_server_metadata_urls("not a url").is_err());
-    }
+    // A bad issuer no longer reaches this function: it takes an already-parsed
+    // `Url`, so the caller reports an unparseable issuer and this cannot be
+    // handed one. `login_refuses_metadata_with_an_unparseable_issuer` in
+    // `auth::tests` covers that path end to end.
 
     // ─── deserialization ──────────────────────────────────────────────────
 

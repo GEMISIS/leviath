@@ -126,11 +126,20 @@ mod tests {
     #[test]
     fn test_recognized_gpt4_model_resolves_bpe_directly() {
         // "gpt-4" is recognized by tiktoken-rs's own model table, so this
-        // exercises the `Ok(bpe)` branch of `get_bpe_from_model` directly,
-        // as opposed to the cl100k_base fallback used for fictional/future
-        // model names like "gpt-5.5" above.
+        // exercises the `Ok(bpe)` branch of `bpe_for_model` directly.
         let count = count_tokens("Hello, world!", "gpt-4");
         assert!(count > 0);
+    }
+
+    #[test]
+    fn an_unrecognized_gpt_model_falls_back_to_cl100k() {
+        // tiktoken-rs resolves plausible future names by prefix — `gpt-5.5`
+        // returns `Ok` — so the fallback needs a name its table genuinely has
+        // no entry for. Without this, the `unwrap_or_else` arm is never taken
+        // and an unknown model would panic in production before anyone noticed.
+        assert!(tiktoken_rs::bpe_for_model("gpt-zzz").is_err());
+        let count = count_tokens("Hello, world!", "gpt-zzz");
+        assert!(count > 0, "an unknown gpt-* model must still count tokens");
     }
 
     #[test]

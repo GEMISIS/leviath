@@ -214,6 +214,23 @@ pub fn script_env_allowed(name: &str, allowlist: &[String]) -> bool {
 mod tests {
     use super::*;
 
+    /// Runs over the full length of both inputs rather than returning at the
+    /// first differing byte, so a wrong token cannot be recovered one character
+    /// at a time. The length still leaks, which is fine for fixed-shape tokens.
+    #[test]
+    fn constant_time_eq_matches_ordinary_equality() {
+        assert!(constant_time_eq("secret", "secret"));
+        assert!(constant_time_eq("", ""));
+        assert!(!constant_time_eq("secret", "secreu"));
+        // Differing at the very first byte and at the very last must both be
+        // false — the loop does not short-circuit either way.
+        assert!(!constant_time_eq("Xecret", "secret"));
+        assert!(!constant_time_eq("secreX", "secret"));
+        // Length mismatch is refused before indexing.
+        assert!(!constant_time_eq("secret", "secretx"));
+        assert!(!constant_time_eq("secretx", "secret"));
+    }
+
     /// The suffix is kept, not the prefix: API keys are structured at the front,
     /// so showing `sk-ant-a` names the issuer and, on a short token, exposes a
     /// meaningful fraction of the value.
