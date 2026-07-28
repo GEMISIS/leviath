@@ -13,7 +13,8 @@ use std::sync::Arc;
 /// Plain data so [`build_provider_registry`] can instantiate providers without
 /// depending on the CLI's `Config`/`ProviderConfig` types. Build one per
 /// provider that should be registered.
-#[derive(Clone, Debug)]
+/// `Debug` is hand-written (below) so `api_key` cannot be printed.
+#[derive(Clone)]
 pub struct ProviderCreds {
     /// Provider identifier: `anthropic` | `openai` | `google` | `openrouter` |
     /// `ollama` | `claude-code`. Selects which provider is instantiated.
@@ -33,6 +34,30 @@ pub struct ProviderCreds {
     /// than named fields so one provider's options don't accrete onto a struct
     /// shared by six.
     pub options: std::collections::HashMap<String, String>,
+}
+
+/// Hand-written so the API key can never reach a log line.
+///
+/// A `#[derive(Debug)]` here meant a single `tracing::debug!(?creds)` — or an
+/// error context that formats a struct holding one — would print the key.
+/// Nothing did, which is when it is cheap to make impossible.
+impl std::fmt::Debug for ProviderCreds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderCreds")
+            .field("name", &self.name)
+            .field(
+                "api_key",
+                match self.api_key {
+                    Some(_) => &"<set>",
+                    None => &"<unset>",
+                },
+            )
+            .field("base_url", &self.base_url)
+            .field("model_capabilities", &self.model_capabilities)
+            .field("request_timeout_secs", &self.request_timeout_secs)
+            .field("options", &self.options)
+            .finish()
+    }
 }
 
 impl ProviderCreds {

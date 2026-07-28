@@ -118,20 +118,31 @@ async fn execute_with_shutdown(
         polling::RECONNECT_BACKOFF,
     )));
 
-    let cors = if args.cors == "*" {
-        CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any)
-    } else {
-        CorsLayer::new()
-            .allow_origin(
-                args.cors
-                    .parse::<axum::http::HeaderValue>()
-                    .unwrap_or(axum::http::HeaderValue::from_static("*")),
+    // No `--cors` at all: no CORS layer. Programmatic clients are not subject to
+    // CORS, so the previous `*` default bought them nothing while telling every
+    // browser that any page may talk to this server.
+    let cors = match args.cors.as_deref() {
+        None => None,
+        Some("*") => Some(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        ),
+        Some(origin) => {
+            // An unparseable value used to fall back to `*` — silently turning a
+            // typo into "allow everything", the opposite of what was asked for.
+            // Refuse to start instead.
+            let value = origin.parse::<axum::http::HeaderValue>().map_err(|_| {
+                anyhow::anyhow!("--cors value '{origin}' is not a valid origin header")
+            })?;
+            Some(
+                CorsLayer::new()
+                    .allow_origin(value)
+                    .allow_methods(Any)
+                    .allow_headers(Any),
             )
-            .allow_methods(Any)
-            .allow_headers(Any)
+        }
     };
 
     let app = Router::new()
@@ -210,8 +221,14 @@ async fn execute_with_shutdown(
             auth_token,
             auth::require_auth,
         ))
-        .layer(cors)
         .with_state(state);
+    // Applied by branching on the router rather than layering an `Option`:
+    // `Option<CorsLayer>` is not a `Layer`, and a permissive-but-unused layer
+    // would be exactly the default this change removes.
+    let app = match cors {
+        Some(layer) => app.layer(layer),
+        None => app,
+    };
 
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
     tracing::info!("Listening on http://{}", addr);
@@ -805,7 +822,7 @@ prompt = "Run"
         let args = ServeArgs {
             port: 3000,
             host: "127.0.0.1".to_string(),
-            cors: "*".to_string(),
+            cors: None,
             token: Some("test-token".to_string()),
             allow_admin: false,
             workdir_root: None,
@@ -813,7 +830,7 @@ prompt = "Run"
         };
         assert_eq!(args.port, 3000);
         assert_eq!(args.host, "127.0.0.1");
-        assert_eq!(args.cors, "*");
+        assert_eq!(args.cors, None);
     }
 
     #[test]
@@ -903,7 +920,7 @@ prompt = "Run"
                 let args = ServeArgs {
                     port: 0,
                     host: "127.0.0.1".to_string(),
-                    cors: "*".to_string(),
+                    cors: None,
                     token: Some("test-token".to_string()),
                     allow_admin: false,
                     workdir_root: None,
@@ -964,7 +981,7 @@ prompt = "Run"
                 let args = ServeArgs {
                     port: 0,
                     host: "127.0.0.1".to_string(),
-                    cors: "https://example.com".to_string(),
+                    cors: Some("https://example.com".to_string()),
                     token: Some("test-token".to_string()),
                     allow_admin: false,
                     workdir_root: None,
@@ -995,7 +1012,7 @@ prompt = "Run"
         let args = ServeArgs {
             port: 0,
             host: "not a valid host".to_string(),
-            cors: "*".to_string(),
+            cors: None,
             token: Some("test-token".to_string()),
             allow_admin: false,
             workdir_root: None,
@@ -1029,7 +1046,7 @@ prompt = "Run"
                 let args = ServeArgs {
                     port: 0,
                     host: "127.0.0.1".to_string(),
-                    cors: "*".to_string(),
+                    cors: None,
                     token: Some("test-token".to_string()),
                     allow_admin: false,
                     workdir_root: None,
@@ -1059,7 +1076,7 @@ prompt = "Run"
         let args = ServeArgs {
             port: 0,
             host: "127.0.0.1".to_string(),
-            cors: "*".to_string(),
+            cors: None,
             token: Some("test-token".to_string()),
             allow_admin: false,
             workdir_root: None,
@@ -1105,7 +1122,7 @@ prompt = "Run"
         let args = ServeArgs {
             port: 8080,
             host: "192.0.2.1".to_string(),
-            cors: "*".to_string(),
+            cors: None,
             token: Some("test-token".to_string()),
             allow_admin: false,
             workdir_root: None,
@@ -1122,7 +1139,7 @@ prompt = "Run"
             let args = ServeArgs {
                 port: 0,
                 host: "127.0.0.1".to_string(),
-                cors: "*".to_string(),
+                cors: None,
                 token: None,
                 allow_admin: false,
                 workdir_root: None,
@@ -1144,7 +1161,7 @@ prompt = "Run"
                 let args = ServeArgs {
                     port: 0,
                     host: "127.0.0.1".to_string(),
-                    cors: "*".to_string(),
+                    cors: None,
                     token: Some("test-token".to_string()),
                     allow_admin: false,
                     workdir_root: None,
@@ -1192,7 +1209,7 @@ prompt = "Run"
                 let args = ServeArgs {
                     port: 0,
                     host: "127.0.0.1".to_string(),
-                    cors: "*".to_string(),
+                    cors: None,
                     token: Some("test-token".to_string()),
                     allow_admin: false,
                     workdir_root: None,

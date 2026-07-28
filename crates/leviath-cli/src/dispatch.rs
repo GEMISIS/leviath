@@ -339,7 +339,7 @@ mod tests {
         let args = commands::serve::ServeArgs {
             port: 0,
             host: "127.0.0.1".to_string(),
-            cors: "*".to_string(),
+            cors: None,
             token: Some("test-token".to_string()),
             allow_admin: false,
             workdir_root: None,

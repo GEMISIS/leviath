@@ -39,7 +39,13 @@ pub fn write_context_snapshot(run_id: &str, snap: &ContextSnapshot) -> anyhow::R
 /// serialize (see the `.expect` sites).
 fn write_json_atomic(path: &std::path::Path, json: &str) -> anyhow::Result<()> {
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
+    // `write_private`: these files carry the run's full task prompt,
+    // conversation and tool output — and `meta.json` carries the webhook
+    // signing secret. They were written with a plain `fs::write` at the umask
+    // default (typically 0644), protected only by the 0700 on the enclosing run
+    // directory. That is one `chmod` away from being readable, and defence in
+    // depth is the whole point of a mode on the file itself.
+    leviath_sys::write_private(&tmp, json.as_bytes())?;
     std::fs::rename(&tmp, path)?;
     Ok(())
 }

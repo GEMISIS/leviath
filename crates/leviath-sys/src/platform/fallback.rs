@@ -12,6 +12,13 @@ pub(crate) fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// A plain write: this platform has no POSIX mode bits, and faking one here
+/// would claim a protection that is not being applied. Windows ACL handling is
+/// its own piece of work.
+pub(crate) fn write_with_mode(path: &Path, contents: &[u8], _mode: u32) -> io::Result<()> {
+    std::fs::write(path, contents)
+}
+
 pub(crate) fn ensure_private(_path: &Path, _mode: u32) -> io::Result<Option<u32>> {
     Ok(None)
 }

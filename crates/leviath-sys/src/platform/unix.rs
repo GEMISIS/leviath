@@ -18,6 +18,31 @@ pub(crate) fn configure_detached(cmd: &mut Command) {
     cmd.process_group(0);
 }
 
+/// Create (or truncate) `path` with `mode` already applied, then write
+/// `contents`.
+///
+/// `OpenOptions::mode` sets the mode at `open(2)` time, so the file is never
+/// visible to anyone else — unlike write-then-`chmod`, which leaves it at the
+/// umask default until the second call lands.
+///
+/// The mode applies only when the file is *created*. An existing file keeps its
+/// own permissions, so `set_mode` is called after the write to cover the
+/// overwrite case (re-saving a config that somehow ended up group-readable).
+pub(crate) fn write_with_mode(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(mode)
+        .open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    set_mode(path, mode)
+}
+
 /// Set the exact permission bits on `path`.
 pub(crate) fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))

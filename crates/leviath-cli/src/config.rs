@@ -408,7 +408,9 @@ impl Default for WebhookConfig {
 }
 
 /// Provider configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is hand-written (see below) so the keys cannot be printed.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     /// Anthropic API key
     pub anthropic_api_key: Option<String>,
@@ -441,6 +443,37 @@ pub struct ProviderConfig {
     /// `None` uses [`leviath_providers::claude_code::DEFAULT_EFFORT`].
     #[serde(default)]
     pub claude_code_effort: Option<String>,
+}
+
+/// Hand-written so the API keys can never be printed.
+///
+/// A `#[derive(Debug)]` here meant one `tracing::debug!(?config)` anywhere in
+/// the workspace — or one `dbg!`, or an `anyhow` context that formats a struct
+/// holding this — would put every provider key into the logs. Nothing did that
+/// today, which is exactly when it is cheap to foreclose: the type now cannot
+/// leak, so nobody has to remember not to.
+///
+/// Reports whether each key is *set*, which is what a debug line is actually
+/// asking, and mirrors the `RedactedConfig` the `/api/config` handler returns.
+impl std::fmt::Debug for ProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderConfig")
+            .field("anthropic_api_key", &redacted(&self.anthropic_api_key))
+            .field("openai_api_key", &redacted(&self.openai_api_key))
+            .field("google_api_key", &redacted(&self.google_api_key))
+            .field("claude_code_enabled", &self.claude_code_enabled)
+            .field("claude_code_binary", &self.claude_code_binary)
+            .field("claude_code_effort", &self.claude_code_effort)
+            .finish()
+    }
+}
+
+/// `"<set>"` or `"<unset>"` for an optional secret, for [`Debug`] output.
+fn redacted(value: &Option<String>) -> &'static str {
+    match value {
+        Some(_) => "<set>",
+        None => "<unset>",
+    }
 }
 
 /// Optional overrides for a Rhai script provider, from `[model_providers.<name>]`.
@@ -619,12 +652,13 @@ impl Config {
         // Config contains only primitive-typed fields; toml serialization is infallible.
         let content = toml::to_string_pretty(self).expect("Config serialization is infallible");
 
-        std::fs::write(path, content).map_err(|e| {
+        // `write_private`, not `fs::write` + `chmod`. This file holds every
+        // provider API key, and the two-step version left it at the umask
+        // default (typically 0644) between the write and the mode change — so
+        // every save had a moment where any local user could read the keys.
+        leviath_sys::write_private(path, content.as_bytes()).map_err(|e| {
             anyhow::anyhow!("Failed to write config to '{}': {}", path.display(), e)
         })?;
-
-        // Set restrictive permissions on the config file
-        set_file_permissions(path);
 
         let path_display = path.display();
         tracing::debug!("Saved config to {}", path_display);
@@ -752,26 +786,6 @@ fn check_permissions_at_with(
         }
         Ok(None) => {}
         Err(e) => tracing::warn!("Failed to fix config file permissions: {}", e),
-    }
-}
-
-/// Set restrictive permissions on the config file.
-fn set_file_permissions(path: &std::path::Path) {
-    set_file_permissions_with(path, leviath_sys::secure_file_perms);
-}
-
-/// Core of [`set_file_permissions`] with the hardening operation injected, so
-/// the "failed" arm is coverable on every OS. `leviath_sys`'s Windows fallback
-/// is infallible (always `Ok`), so that `Err` arm is otherwise unreachable
-/// there -- and even a missing path fails only on Unix. A `fn` pointer (not
-/// `impl Fn`) keeps this to a single monomorphization, mirroring
-/// [`check_permissions_at_with`].
-fn set_file_permissions_with(
-    path: &std::path::Path,
-    secure: fn(&std::path::Path) -> std::io::Result<()>,
-) {
-    if let Err(e) = secure(path) {
-        tracing::warn!("Failed to set config file permissions: {}", e);
     }
 }
 
@@ -1289,16 +1303,6 @@ google_api_key = "AIza-existing"
     }
 
     #[test]
-    fn set_file_permissions_error_branch_logs_not_panics() {
-        with_tracing(|| {
-            set_file_permissions_with(
-                std::path::Path::new("/does/not/matter"),
-                always_failing_secure,
-            )
-        }); // hits the Err arm, must not panic
-    }
-
-    #[test]
     fn set_dir_permissions_error_branch_logs_not_panics() {
         with_tracing(|| {
             set_dir_permissions_with(
@@ -1331,17 +1335,58 @@ google_api_key = "AIza-existing"
         assert_eq!(mode & 0o777, 0o700);
     }
 
+    /// The config holds every provider API key, so it must never be readable by
+    /// anyone else — not even for the instant between a `write` and a `chmod`,
+    /// which is how it used to be saved. `write_private` creates the file with
+    /// the mode already applied.
     #[cfg(unix)]
+    /// One `tracing::debug!(?config)` would otherwise put every provider key in
+    /// the logs.
     #[test]
-    fn set_file_permissions_sets_0600() {
+    fn provider_config_debug_never_prints_the_keys() {
+        let providers = ProviderConfig {
+            anthropic_api_key: Some("sk-ant-SECRET-VALUE".to_string()),
+            openai_api_key: Some("sk-openai-SECRET-VALUE".to_string()),
+            google_api_key: Some("AIza-SECRET-VALUE".to_string()),
+            claude_code_enabled: true,
+            claude_code_binary: None,
+            claude_code_effort: None,
+        };
+        let rendered = format!("{providers:?}");
+        assert!(!rendered.contains("SECRET-VALUE"), "key leaked: {rendered}");
+        // "is it configured" is what a debug line is actually asking.
+        assert!(rendered.contains("<set>"), "{rendered}");
+        assert!(rendered.contains("claude_code_enabled: true"), "{rendered}");
+
+        let empty = format!(
+            "{:?}",
+            ProviderConfig {
+                anthropic_api_key: None,
+                openai_api_key: None,
+                google_api_key: None,
+                claude_code_enabled: false,
+                claude_code_binary: None,
+                claude_code_effort: None,
+            }
+        );
+        assert!(empty.contains("<unset>"), "{empty}");
+    }
+
+    #[test]
+    fn saving_a_config_never_leaves_it_group_or_world_readable() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("f.toml");
-        std::fs::write(&path, "").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        set_file_permissions(&path);
+        let path = dir.path().join("config.toml");
+
+        Config::default().save_to_path(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(mode & 0o777, 0o600, "fresh config must be owner-only");
+
+        // Overwriting a file that somehow became permissive tightens it again.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        Config::default().save_to_path(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "re-saving must re-tighten");
     }
 
     #[cfg(unix)]
