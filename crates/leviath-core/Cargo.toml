@@ -15,5 +15,10 @@ chrono = { workspace = true }
 toml = { workspace = true }
 url = { workspace = true }
 
+[dev-dependencies]
+# Real directories and real symlinks: the path-containment tests are about what
+# the filesystem actually does, so a mock would test the mock.
+tempfile = "3"
+
 [lints]
 workspace = true

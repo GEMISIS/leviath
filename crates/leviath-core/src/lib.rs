@@ -20,6 +20,7 @@ pub mod lifecycle;
 pub mod manifest;
 pub mod net;
 pub mod panic_payload;
+pub mod paths;
 pub mod policy;
 pub mod region;
 pub mod run_archive;
@@ -39,6 +40,7 @@ pub use layout::{BudgetSpec, ContextLayout, RegionDefinition};
 pub use lifecycle::{CompactionConfig, CompactionStrategy, EvictionPolicy};
 pub use net::{UrlRejection, check_url, is_restricted_addr};
 pub use panic_payload::panic_message;
+pub use paths::resolves_within;
 pub use policy::{AllowlistRule, McpToolOverride, PolicyConfig, ScriptedRule};
 pub use region::{
     ContentFormat, EntryKind, EvictionStrategy, Region, RegionEntry, RegionKind, RegionSchema,
