@@ -2,6 +2,7 @@
 //!
 //! Provides file system and shell tools sandboxed to a working directory.
 
+use leviath_core::resolves_within;
 use leviath_providers::Tool;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -751,7 +752,29 @@ impl BuiltinTools {
 
     /// Resolve a requested path to an absolute path inside the workdir.
     ///
-    /// Rejects paths that would escape the working directory via `../` components.
+    /// Two checks, because either alone is insufficient:
+    ///
+    /// 1. **Lexical.** `..` and `.` are folded out and the result must sit under
+    ///    the workdir. Cheap, and it catches the obvious `../../etc/passwd`.
+    /// 2. **Symbolic.** The deepest *existing* ancestor is canonicalized and the
+    ///    result re-checked. Without this the containment was purely textual: a
+    ///    symlink at `<workdir>/link` pointing at `/` made
+    ///    `read_file("link/etc/passwd")` normalize to a path that starts with the
+    ///    workdir, pass, and then be followed by `fs::read_to_string`. The same
+    ///    hole let `write_file` overwrite `~/.ssh/authorized_keys`.
+    ///
+    /// That mattered most where the containment is load-bearing. Leviath's file
+    /// tools run **on the host over the bind-mounted workdir** even when the
+    /// stage's `shell` is confined to a container — so a symlink the agent
+    /// created inside the container escaped the container through the file
+    /// tools. It also matters for a freshly cloned repository, which is exactly
+    /// what a coding agent operates on and which can carry a checked-in symlink
+    /// pointing anywhere.
+    ///
+    /// The check is not TOCTOU-proof: a symlink planted between this call and the
+    /// subsequent `open` still wins. Closing that needs `openat`/`O_NOFOLLOW`
+    /// throughout, which is a larger change; this stops the planted-symlink case,
+    /// which is the one an agent can actually arrange.
     fn resolve(&self, requested: &str) -> anyhow::Result<PathBuf> {
         let raw = if Path::new(requested).is_absolute() {
             PathBuf::from(requested)
@@ -774,6 +797,12 @@ impl BuiltinTools {
 
         if !normalized.starts_with(&self.ctx.workdir) {
             anyhow::bail!("path '{}' would escape the working directory", requested);
+        }
+
+        if !resolves_within(&normalized, &self.ctx.workdir) {
+            anyhow::bail!(
+                "path '{requested}' resolves outside the working directory through a symlink"
+            );
         }
 
         Ok(normalized)
@@ -1405,6 +1434,81 @@ mod tests {
         let tools = make_tools(&dir);
         let result = tools.resolve("../../etc/passwd");
         assert!(result.is_err());
+    }
+
+    /// The escape a lexical check cannot see. `<workdir>/link -> /` makes
+    /// `link/etc/passwd` textually contained the whole way, and the old
+    /// `starts_with` containment let `fs::read_to_string` follow it straight out.
+    ///
+    /// This matters most where the containment is load-bearing: Leviath's file
+    /// tools run on the *host* over the bind-mounted workdir even when the
+    /// stage's `shell` is confined to a container, so a symlink the agent made
+    /// inside the container escaped the container through these tools. It is also
+    /// reachable from a checked-in symlink in a freshly cloned repository, which
+    /// is exactly what a coding agent is pointed at.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_rejects_symlink_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().join("workspace");
+        fs::create_dir(&workdir).unwrap();
+        std::os::unix::fs::symlink("/", workdir.join("link")).unwrap();
+        let tools = make_tools(&workdir);
+
+        // Precondition: this is textually inside the workdir, so the lexical
+        // `starts_with` containment the old code relied on would have passed it.
+        // Built from `ctx.workdir` rather than `workdir` because the context
+        // canonicalizes (on macOS `/var` becomes `/private/var`).
+        let normalized = tools.ctx.workdir.join("link/etc/hosts");
+        assert!(normalized.starts_with(&tools.ctx.workdir));
+
+        let err = tools.resolve("link/etc/hosts").unwrap_err().to_string();
+        assert!(err.contains("symlink"), "got: {err}");
+
+        // And the tool itself refuses rather than returning the file.
+        let out = tools.read_file(&json!({ "path": "link/etc/hosts" })).await;
+        assert!(out.contains("[error]"), "got: {out}");
+    }
+
+    /// A write through an escaping symlink is refused too — this was the path
+    /// that could overwrite `~/.ssh/authorized_keys`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_file_rejects_symlink_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let workdir = dir.path().join("workspace");
+        fs::create_dir(&workdir).unwrap();
+        std::os::unix::fs::symlink(outside.path(), workdir.join("link")).unwrap();
+        let tools = make_tools(&workdir);
+
+        let out = tools
+            .write_file(&json!({ "path": "link/pwned.txt", "content": "x" }))
+            .await;
+        assert!(out.contains("[error]"), "got: {out}");
+        assert!(
+            !outside.path().join("pwned.txt").exists(),
+            "nothing may be written outside the workdir"
+        );
+    }
+
+    /// A symlink that stays *inside* the workdir keeps working — the rule is
+    /// about where the path lands, not whether a symlink was involved. Agents
+    /// operate on real repositories, which contain plenty of internal symlinks.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_allows_symlink_within_workdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().join("workspace");
+        fs::create_dir(&workdir).unwrap();
+        fs::create_dir(workdir.join("real")).unwrap();
+        fs::write(workdir.join("real/file.txt"), "contents").unwrap();
+        std::os::unix::fs::symlink(workdir.join("real"), workdir.join("link")).unwrap();
+        let tools = make_tools(&workdir);
+
+        assert!(tools.resolve("link/file.txt").is_ok());
+        let out = tools.read_file(&json!({ "path": "link/file.txt" })).await;
+        assert_eq!(out, "contents");
     }
 
     #[test]

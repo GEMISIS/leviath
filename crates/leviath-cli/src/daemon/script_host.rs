@@ -250,8 +250,9 @@ impl DaemonScriptHost {
         self
     }
 
-    /// Resolve a script-supplied `read_file` path against the workdir, rejecting
-    /// any `..` escape (mirrors `BuiltinTools::resolve`).
+    /// Resolve a script-supplied file path against the workdir, rejecting both a
+    /// `..` escape and a symlink that leaves the directory (mirrors
+    /// `BuiltinTools::resolve`, which documents the reasoning).
     fn resolve_in_workdir(&self, requested: &str) -> Result<PathBuf, String> {
         let raw = if Path::new(requested).is_absolute() {
             PathBuf::from(requested)
@@ -272,6 +273,13 @@ impl DaemonScriptHost {
         if !normalized.starts_with(&self.workdir) {
             return Err(format!(
                 "path '{requested}' would escape the working directory"
+            ));
+        }
+        // The lexical check above is textual only: a symlink inside the workdir
+        // pointing outside it satisfies `starts_with` while reading anywhere.
+        if !leviath_core::resolves_within(&normalized, &self.workdir) {
+            return Err(format!(
+                "path '{requested}' resolves outside the working directory through a symlink"
             ));
         }
         Ok(normalized)
