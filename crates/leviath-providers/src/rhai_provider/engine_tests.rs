@@ -1,11 +1,18 @@
 //! Tests for [`super::engine`]. Separate file → excluded from the coverage
 //! gate (only production code must hit 100%).
 use super::*;
+use std::sync::Arc;
 use tokio::sync::mpsc;
+
+/// No credential-shaped variable is allowlisted — the default posture, and the
+/// one these tests should be checking against.
+fn no_env_allowlist() -> Arc<Vec<String>> {
+    Arc::new(Vec::new())
+}
 
 #[test]
 fn pure_fns_are_callable_from_script() {
-    let engine = build_init_engine();
+    let engine = build_init_engine(no_env_allowlist());
     // parse_json + to_json round-trip
     let out: String = engine
         .eval(r#"let m = parse_json("{\"a\":1}"); to_json(m)"#)
@@ -26,7 +33,7 @@ fn pure_fns_are_callable_from_script() {
 
 #[test]
 fn parse_json_reports_error() {
-    let engine = build_init_engine();
+    let engine = build_init_engine(no_env_allowlist());
     let err = engine
         .eval::<Dynamic>(r#"parse_json("{not json}")"#)
         .unwrap_err();
@@ -35,7 +42,7 @@ fn parse_json_reports_error() {
 
 #[test]
 fn parse_sse_variants() {
-    let engine = build_init_engine();
+    let engine = build_init_engine(no_env_allowlist());
     assert!(
         engine
             .eval::<Dynamic>(r#"parse_sse("data: [DONE]")"#)
@@ -62,21 +69,68 @@ fn parse_sse_variants() {
 
 #[test]
 fn env_var_present_and_absent() {
-    let engine = build_init_engine();
-    temp_env::with_var("LEVIATH_TEST_ENVX", Some("val"), || {
-        let v: String = engine.eval(r#"env_var("LEVIATH_TEST_ENVX")"#).unwrap();
+    let engine = build_init_engine(no_env_allowlist());
+    // An ordinary (non-credential-shaped) name reads normally. Note this is
+    // deliberately *not* `LEVIATH_`-prefixed: that whole namespace is treated as
+    // sensitive, since it holds the API token and the config-path redirects.
+    temp_env::with_var("PROVIDER_TEST_REGION", Some("val"), || {
+        let v: String = engine.eval(r#"env_var("PROVIDER_TEST_REGION")"#).unwrap();
         assert_eq!(v, "val");
     });
     let missing = engine
-        .eval::<Dynamic>(r#"env_var("LEVIATH_DEFINITELY_UNSET_XYZ")"#)
+        .eval::<Dynamic>(r#"env_var("PROVIDER_DEFINITELY_UNSET_XYZ")"#)
         .unwrap();
     assert!(missing.is_unit());
+}
+
+/// A provider script runs during inference, not through a tool call, so nothing
+/// it does passes an approval prompt. An unallowlisted credential name therefore
+/// reads as unset — scripts already handle "my key isn't in the environment" by
+/// falling back to their `initialize` config, so this puts them on that path
+/// rather than failing the whole inference.
+#[test]
+fn env_var_refuses_credential_names_unless_allowlisted() {
+    let engine = build_init_engine(no_env_allowlist());
+    temp_env::with_var("ANTHROPIC_API_KEY", Some("sk-ant-secret"), || {
+        let v = engine
+            .eval::<Dynamic>(r#"env_var("ANTHROPIC_API_KEY")"#)
+            .unwrap();
+        assert!(v.is_unit(), "the key must not reach the script");
+    });
+}
+
+#[test]
+fn env_var_allowlist_permits_exactly_the_named_variable() {
+    let engine = build_init_engine(Arc::new(vec!["MY_PROVIDER_KEY".to_string()]));
+    temp_env::with_vars(
+        [
+            ("MY_PROVIDER_KEY", Some("mine")),
+            ("ANTHROPIC_API_KEY", Some("sk-ant-secret")),
+        ],
+        || {
+            let allowed: String = engine.eval(r#"env_var("MY_PROVIDER_KEY")"#).unwrap();
+            assert_eq!(allowed, "mine");
+            let refused = engine
+                .eval::<Dynamic>(r#"env_var("ANTHROPIC_API_KEY")"#)
+                .unwrap();
+            assert!(refused.is_unit(), "allowlisting one name allows only it");
+        },
+    );
+}
+
+/// `eval` and `import` are both disabled: either would reach code that never
+/// passed whatever review the script itself did.
+#[test]
+fn eval_and_module_imports_are_disabled() {
+    let engine = build_init_engine(no_env_allowlist());
+    assert!(engine.eval::<i64>(r#"eval("1 + 1")"#).is_err());
+    assert!(engine.eval::<i64>(r#"import "other" as m; 1"#).is_err());
 }
 
 #[test]
 fn to_json_rejects_unconvertible() {
     // A function pointer has no JSON representation.
-    let engine = build_init_engine();
+    let engine = build_init_engine(no_env_allowlist());
     let err = engine.eval::<String>(r#"to_json(|x| x)"#).unwrap_err();
     // Either a from_dynamic error or a type-mismatch; the point is it errors.
     let _ = err;
@@ -145,6 +199,7 @@ fn stream_request_errors_when_broker_gone() {
     let (job_tx, job_rx) = mpsc::unbounded_channel::<BrokerJob>();
     drop(job_rx);
     let engine = build_exec_engine(ExecConfig {
+        env_allowlist: no_env_allowlist(),
         jobs: job_tx,
         timeout_secs: None,
         chunk_tx: None,
@@ -158,13 +213,13 @@ fn stream_request_errors_when_broker_gone() {
 #[test]
 fn print_and_debug_are_silenced() {
     // Drives the no-op on_print/on_debug hooks (sandbox: no data leakage).
-    let engine = build_init_engine();
+    let engine = build_init_engine(no_env_allowlist());
     engine.run(r#"print("hello"); debug("world");"#).unwrap();
 }
 
 #[test]
 fn encode_uri_passes_unreserved_and_encodes_rest() {
-    let engine = build_init_engine();
+    let engine = build_init_engine(no_env_allowlist());
     let out: String = engine.eval(r#"encode_uri("Aa0-_.~ /?")"#).unwrap();
     // Unreserved chars pass through; space/slash/question are percent-encoded.
     assert_eq!(out, "Aa0-_.~%20%2F%3F");

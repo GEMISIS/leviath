@@ -930,7 +930,10 @@ fn build_agent_inner(
         // `[security] allow_local_network`. Off by default, so a `web_fetch` URL
         // the model picked out of attacker-influenced context cannot reach cloud
         // metadata, the user's own `lev serve`, or their LAN.
-        .with_local_network(config.security.allow_local_network),
+        .with_local_network(config.security.allow_local_network)
+        // `[security] allow_env_vars`. Empty by default, so a script tool cannot
+        // read the user's provider keys and post them somewhere.
+        .with_env_allowlist(config.security.allow_env_vars.clone()),
     );
     // Build the dynamic-tools re-resolution context (issue #97 escape hatch) and
     // tag the entity `DynamicTools` so the runtime polls it for mid-run re-scans.

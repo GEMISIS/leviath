@@ -5,6 +5,11 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
+/// No credential-shaped variable is allowlisted — the default posture.
+fn no_env_allowlist() -> Arc<Vec<String>> {
+    Arc::new(Vec::new())
+}
+
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 
@@ -90,6 +95,7 @@ fn build(src: &str, executor: Arc<FakeExecutor>) -> Result<RhaiProvider> {
         None,
         None,
         executor,
+        no_env_allowlist(),
     )
 }
 
@@ -106,6 +112,7 @@ fn build_rl(
         rate_limit,
         None,
         executor,
+        no_env_allowlist(),
     )
     .unwrap()
 }
@@ -151,6 +158,7 @@ fn from_source_initialize_receives_config() {
         None,
         None,
         FakeExecutor::new(),
+        no_env_allowlist(),
     )
     .unwrap();
     let out = tokio_block(p.infer(request("ignored")));
@@ -166,6 +174,7 @@ fn from_script_reads_missing_file() {
         HashMap::new(),
         None,
         None,
+        no_env_allowlist(),
     )
     .err()
     .unwrap();
@@ -188,6 +197,7 @@ fn from_script_loads_real_file() {
         HashMap::new(),
         None,
         None,
+        no_env_allowlist(),
     )
     .unwrap();
     assert_eq!(p.name(), "test");
@@ -398,6 +408,7 @@ fn capabilities_and_metadata() {
         None,
         None,
         FakeExecutor::new(),
+        no_env_allowlist(),
     )
     .unwrap();
 
@@ -677,6 +688,7 @@ fn sample_groq_script_compiles_and_initializes() {
         None,
         None,
         FakeExecutor::new(),
+        no_env_allowlist(),
     )
     .unwrap();
     assert_eq!(p.meta().provider.as_deref(), Some("groq"));

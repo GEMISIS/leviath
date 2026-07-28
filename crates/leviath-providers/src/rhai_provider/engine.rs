@@ -2,6 +2,7 @@
 //! helper functions, and the channel-backed HTTP host functions.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use base64::Engine as _;
 use rhai::{Dynamic, Engine, EvalAltResult, FnPtr, Map, NativeCallContext};
@@ -19,19 +20,23 @@ const MAX_OPERATIONS: u64 = 500_000;
 /// Build a sandboxed engine with the pure Leviath helper functions registered
 /// but **no** network host functions. Used to run `initialize` offline and as
 /// the base for the per-call execution engine.
-pub fn build_init_engine() -> Engine {
+///
+/// `env_allowlist` is `[security] allow_env_vars`: the credential-shaped
+/// environment variables this script may read. Provider scripts are the most
+/// privileged script surface Leviath has — they run during inference, not
+/// through a tool call, so nothing about them passes an approval prompt — and
+/// `env_var` was previously unrestricted here with no permission layer of any
+/// kind. Anything that could write one file into `~/.leviath/providers/` could
+/// read every key in the process and post it out on the next inference.
+pub fn build_init_engine(env_allowlist: Arc<Vec<String>>) -> Engine {
     let mut engine = Engine::new();
-    engine.set_max_operations(MAX_OPERATIONS);
+    leviath_scripting::harden(&mut engine, MAX_OPERATIONS);
+    // Provider scripts assemble whole request/response bodies in memory, so they
+    // get more headroom than the shared defaults allow.
     engine.set_max_string_size(2_000_000);
     engine.set_max_array_size(50_000);
     engine.set_max_map_size(50_000);
-    // Explicit, generous expression-nesting depth. Rhai's default is much lower
-    // in debug builds (stack-overflow guard for unoptimized code), which would
-    // otherwise reject legitimate provider scripts under `cargo test`.
-    engine.set_max_expr_depths(128, 128);
-    engine.on_print(|_| {});
-    engine.on_debug(|_, _, _| {});
-    register_pure_fns(&mut engine);
+    register_pure_fns(&mut engine, env_allowlist);
     engine
 }
 
@@ -43,12 +48,14 @@ pub struct ExecConfig {
     pub timeout_secs: Option<u64>,
     /// When streaming, the sink `__emit_chunk` feeds parsed chunks into.
     pub chunk_tx: Option<mpsc::UnboundedSender<crate::Result<StreamChunk>>>,
+    /// `[security] allow_env_vars` — see [`build_init_engine`].
+    pub env_allowlist: Arc<Vec<String>>,
 }
 
 /// Build the per-call execution engine: the hardened base plus `http_get`,
 /// `http_post`, `stream_request`, and (when streaming) `__emit_chunk`.
 pub fn build_exec_engine(cfg: ExecConfig) -> Engine {
-    let mut engine = build_init_engine();
+    let mut engine = build_init_engine(cfg.env_allowlist.clone());
     register_http_fns(&mut engine, cfg.jobs.clone(), cfg.timeout_secs);
     register_stream_request(&mut engine, cfg.jobs, cfg.timeout_secs);
     if let Some(tx) = cfg.chunk_tx {
@@ -59,7 +66,7 @@ pub fn build_exec_engine(cfg: ExecConfig) -> Engine {
 
 // ─── Pure helpers ────────────────────────────────────────────────────────────
 
-fn register_pure_fns(engine: &mut Engine) {
+fn register_pure_fns(engine: &mut Engine, env_allowlist: Arc<Vec<String>>) {
     engine.register_fn("parse_json", parse_json_fn);
     engine.register_fn("to_json", to_json_fn);
     engine.register_fn("parse_sse", parse_sse_fn);
@@ -67,7 +74,9 @@ fn register_pure_fns(engine: &mut Engine) {
     engine.register_fn("encode_base64", |s: &str| {
         base64::engine::general_purpose::STANDARD.encode(s)
     });
-    engine.register_fn("env_var", env_var_fn);
+    engine.register_fn("env_var", move |name: &str| {
+        env_var_fn(name, &env_allowlist)
+    });
     engine.register_fn("count_tokens_heuristic", count_tokens_heuristic_fn);
 }
 
@@ -102,8 +111,23 @@ fn parse_sse_fn(chunk: &str) -> Dynamic {
     }
 }
 
-/// `env_var(name)` → the value string, or `()` when unset.
-fn env_var_fn(name: &str) -> Dynamic {
+/// `env_var(name)` → the value string, or `()` when unset **or refused**.
+///
+/// A credential-shaped name the user has not allowlisted reads as unset rather
+/// than raising: a provider script's job is to configure itself, and the
+/// existing scripts already handle "my key isn't in the environment" by falling
+/// back to their `initialize` config. Returning `()` puts them on that path
+/// instead of failing the whole inference. The refusal is logged so the reason
+/// is discoverable rather than silent.
+fn env_var_fn(name: &str, allowlist: &[String]) -> Dynamic {
+    if !leviath_core::script_env_allowed(name, allowlist) {
+        tracing::warn!(
+            var = %name,
+            "provider script tried to read a credential-shaped environment variable; \
+             add it to `[security] allow_env_vars` if that is intended"
+        );
+        return Dynamic::UNIT;
+    }
     match std::env::var(name) {
         Ok(v) => Dynamic::from(v),
         Err(_) => Dynamic::UNIT,

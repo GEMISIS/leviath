@@ -427,6 +427,7 @@ fn attach_script_layer(
         overrides,
         config.model_capabilities.clone(),
         config.request_timeout_secs,
+        config.security.allow_env_vars.clone(),
     );
     registry.with_script_layer(std::sync::Arc::new(layer))
 }

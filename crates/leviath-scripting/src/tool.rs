@@ -473,13 +473,7 @@ fn dynamic_to_result_string(value: Dynamic) -> String {
 /// script-tool host functions registered.
 fn build_tool_engine(host: Arc<dyn ScriptHost>) -> Engine {
     let mut engine = Engine::new();
-    // Same hardening as `ScriptEngine::new`.
-    engine.set_max_operations(SCRIPT_TOOL_MAX_OPERATIONS);
-    engine.set_max_string_size(1_000_000);
-    engine.set_max_array_size(10_000);
-    engine.set_max_map_size(10_000);
-    engine.on_print(|_| {});
-    engine.on_debug(|_, _, _| {});
+    crate::harden(&mut engine, SCRIPT_TOOL_MAX_OPERATIONS);
     crate::functions::register_functions(&mut engine);
     crate::types::register_types(&mut engine);
     register_host_functions(&mut engine, host);

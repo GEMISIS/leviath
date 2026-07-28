@@ -11,6 +11,10 @@ debug-http = []
 
 [dependencies]
 leviath-core = { workspace = true }
+# For the shared Rhai sandbox limits (`leviath_scripting::harden`), so provider
+# scripts and tool scripts are hardened by one definition rather than two copies.
+# No cycle: `leviath-scripting` depends only on `leviath-core`.
+leviath-scripting = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

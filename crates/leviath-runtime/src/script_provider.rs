@@ -49,6 +49,11 @@ pub struct ScriptProviderLayer {
     overrides: HashMap<String, ScriptProviderSpec>,
     default_caps: HashMap<String, ModelCapabilities>,
     request_timeout_secs: Option<u64>,
+    /// `[security] allow_env_vars`: credential-shaped environment variables a
+    /// provider script may read. Empty by default — a provider script runs
+    /// during inference, not through a tool call, so nothing it does passes an
+    /// approval prompt.
+    env_allowlist: Arc<Vec<String>>,
     cache: Mutex<HashMap<String, Cached>>,
 }
 
@@ -60,20 +65,31 @@ impl ScriptProviderLayer {
         overrides: HashMap<String, ScriptProviderSpec>,
         default_caps: HashMap<String, ModelCapabilities>,
         request_timeout_secs: Option<u64>,
+        env_allowlist: Vec<String>,
     ) -> Self {
         Self {
             dir,
             overrides,
             default_caps,
             request_timeout_secs,
+            env_allowlist: Arc::new(env_allowlist),
             cache: Mutex::new(HashMap::new()),
         }
     }
 
     /// Resolve `<name>` to its script path: an explicit `script` override
-    /// (absolute path, or a stem/filename under the providers dir), else
+    /// (an absolute path, or a stem/filename under the providers dir), else
     /// `<name>.rhai` in the providers dir.
-    fn resolve_path(&self, name: &str) -> PathBuf {
+    ///
+    /// A *relative* override is confined to the providers directory. It used to
+    /// be joined verbatim, so `script = "../../tools/evil"` reached outside it —
+    /// and whatever it reached is compiled and run as a provider, which is the
+    /// most privileged script surface there is. An absolute path is still
+    /// honored: that is the documented way to point at a script kept elsewhere,
+    /// and it can only come from the user's own config, not from a blueprint.
+    ///
+    /// `None` when the override escapes; the caller reports it and loads nothing.
+    fn resolve_path(&self, name: &str) -> Option<PathBuf> {
         let stem = self
             .overrides
             .get(name)
@@ -81,13 +97,23 @@ impl ScriptProviderLayer {
             .unwrap_or(name);
         let candidate = PathBuf::from(stem);
         if candidate.is_absolute() {
-            return candidate;
+            return Some(candidate);
         }
-        if stem.ends_with(".rhai") {
-            self.dir.join(stem)
-        } else {
-            self.dir.join(format!("{stem}.rhai"))
+        let filename = match stem.ends_with(".rhai") {
+            true => stem.to_string(),
+            false => format!("{stem}.rhai"),
+        };
+        // Reject any traversal component outright rather than normalizing it
+        // away: a provider path has no legitimate reason to contain `..`, so
+        // "what did the user mean by this" is the wrong question to ask.
+        let joined = PathBuf::from(&filename);
+        if joined
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return None;
         }
+        Some(self.dir.join(joined))
     }
 
     /// Get (or lazily load / reload) the provider named `name`, or `None` when
@@ -106,7 +132,14 @@ impl ScriptProviderLayer {
     /// wasted work, never a wrong answer, and it self-corrects on the next
     /// lookup because entries are validated by mtime.
     pub fn get_or_load(&self, name: &str) -> Option<Arc<dyn Provider>> {
-        let path = self.resolve_path(name);
+        let Some(path) = self.resolve_path(name) else {
+            tracing::warn!(
+                provider = %name,
+                "script provider path escapes the providers directory — refusing to load"
+            );
+            self.evict(name);
+            return None;
+        };
         let Some(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()).ok() else {
             // File gone (or unreadable): drop any stale entry, no provider.
             self.evict(name);
@@ -129,6 +162,7 @@ impl ScriptProviderLayer {
             self.default_caps.clone(),
             rate_limit,
             self.request_timeout_secs,
+            self.env_allowlist.clone(),
         ) {
             Ok(p) => {
                 let provider: Arc<dyn Provider> = Arc::new(p);
@@ -197,7 +231,7 @@ mod tests {
     }
 
     fn layer(dir: PathBuf) -> ScriptProviderLayer {
-        ScriptProviderLayer::new(dir, HashMap::new(), HashMap::new(), None)
+        ScriptProviderLayer::new(dir, HashMap::new(), HashMap::new(), None, Vec::new())
     }
 
     #[test]
@@ -293,11 +327,76 @@ mod tests {
                 ..Default::default()
             },
         );
-        let l = ScriptProviderLayer::new(dir.path().to_path_buf(), overrides, HashMap::new(), None);
-        assert_eq!(l.resolve_path("a"), dir.path().join("custom.rhai"));
-        assert_eq!(l.resolve_path("b"), dir.path().join("custom.rhai"));
-        assert_eq!(l.resolve_path("c"), abs);
-        assert_eq!(l.resolve_path("z"), dir.path().join("z.rhai"));
+        let l = ScriptProviderLayer::new(
+            dir.path().to_path_buf(),
+            overrides,
+            HashMap::new(),
+            None,
+            Vec::new(),
+        );
+        assert_eq!(l.resolve_path("a"), Some(dir.path().join("custom.rhai")));
+        assert_eq!(l.resolve_path("b"), Some(dir.path().join("custom.rhai")));
+        assert_eq!(l.resolve_path("c"), Some(abs));
+        assert_eq!(l.resolve_path("z"), Some(dir.path().join("z.rhai")));
+    }
+
+    /// A relative `script` override may not climb out of the providers
+    /// directory. Whatever it reached would be compiled and run as a provider —
+    /// the one script surface with no permission layer in front of it — so the
+    /// traversal is refused outright rather than normalized away.
+    #[test]
+    fn relative_script_override_cannot_escape_the_providers_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut overrides = HashMap::new();
+        for (name, script) in [
+            ("a", "../../tools/evil"),
+            ("b", "../evil.rhai"),
+            ("c", "sub/../../evil"),
+        ] {
+            overrides.insert(
+                name.to_string(),
+                ScriptProviderSpec {
+                    script: Some(script.to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+        let l = ScriptProviderLayer::new(
+            dir.path().to_path_buf(),
+            overrides,
+            HashMap::new(),
+            None,
+            Vec::new(),
+        );
+        for name in ["a", "b", "c"] {
+            assert_eq!(l.resolve_path(name), None, "{name} should be refused");
+            assert!(l.get_or_load(name).is_none(), "{name} must not load");
+        }
+    }
+
+    /// A nested path *inside* the directory is still fine — only `..` is refused.
+    #[test]
+    fn nested_relative_override_inside_the_dir_still_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "a".to_string(),
+            ScriptProviderSpec {
+                script: Some("vendor/custom".to_string()),
+                ..Default::default()
+            },
+        );
+        let l = ScriptProviderLayer::new(
+            dir.path().to_path_buf(),
+            overrides,
+            HashMap::new(),
+            None,
+            Vec::new(),
+        );
+        assert_eq!(
+            l.resolve_path("a"),
+            Some(dir.path().join("vendor/custom.rhai"))
+        );
     }
 
     #[test]
@@ -318,7 +417,13 @@ mod tests {
                 ..Default::default()
             },
         );
-        let l = ScriptProviderLayer::new(dir.path().to_path_buf(), overrides, HashMap::new(), None);
+        let l = ScriptProviderLayer::new(
+            dir.path().to_path_buf(),
+            overrides,
+            HashMap::new(),
+            None,
+            Vec::new(),
+        );
         assert!(l.get_or_load("echo").is_some());
     }
 }
