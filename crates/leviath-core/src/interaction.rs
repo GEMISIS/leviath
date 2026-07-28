@@ -180,6 +180,36 @@ impl InteractionRequest {
     }
 
     /// Create a new tool-approval request.
+    /// The part of a tool call a person needs to see before approving it.
+    ///
+    /// "Allow tool call: `bash`?" is not a question anyone can answer — it asks
+    /// whether to run *a shell command* without saying which one, so the only
+    /// safe answer is no and the only practical one is yes. The argument that
+    /// decides the answer is the command itself, and for the file tools it is
+    /// the path.
+    ///
+    /// Truncated, because a prompt is a line in a terminal: a heredoc that
+    /// scrolls the decision off screen is the same problem again.
+    fn approval_detail(tool: &str, arguments: &serde_json::Value) -> Option<String> {
+        let field = match tool {
+            "bash" | "shell" => "command",
+            "write_file" | "edit_file" | "read_file" => "path",
+            _ => return None,
+        };
+        let raw = arguments.get(field)?.as_str()?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        // One line: a multi-line command is summarised by its first line so the
+        // prompt stays readable, with the rest available in `tool_arguments`.
+        let first = raw.lines().next().unwrap_or(raw);
+        let mut shown: String = first.chars().take(120).collect();
+        if shown.chars().count() < first.chars().count() || first.len() < raw.len() {
+            shown.push('…');
+        }
+        Some(format!("`{shown}`"))
+    }
+
     pub fn tool_approval(
         id: impl Into<String>,
         tool_name: impl Into<String>,
@@ -187,7 +217,10 @@ impl InteractionRequest {
         stage: impl Into<String>,
     ) -> Self {
         let tool = tool_name.into();
-        let prompt = format!("Allow tool call: `{}`?", tool);
+        let prompt = match Self::approval_detail(&tool, &arguments) {
+            Some(detail) => format!("Allow tool call: `{tool}` — {detail}?"),
+            None => format!("Allow tool call: `{tool}`?"),
+        };
         Self {
             id: id.into(),
             kind: InteractionKind::ToolApproval,
@@ -297,6 +330,82 @@ pub fn make_interaction_id(stage_idx: usize, iteration: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "Allow tool call: `bash`?" asks whether to run a shell command without
+    /// saying which one — the only safe answer is no and the only practical one
+    /// is yes, so in practice everything gets approved unread.
+    #[test]
+    fn a_tool_approval_says_what_it_is_asking_about() {
+        let req = InteractionRequest::tool_approval(
+            "id",
+            "bash",
+            serde_json::json!({"command": "rm -rf build && make"}),
+            "implement",
+        );
+        assert!(
+            req.prompt.contains("rm -rf build && make"),
+            "{}",
+            req.prompt
+        );
+
+        // File tools name the path.
+        let req = InteractionRequest::tool_approval(
+            "id",
+            "write_file",
+            serde_json::json!({"path": "src/main.rs", "content": "..."}),
+            "implement",
+        );
+        assert!(req.prompt.contains("src/main.rs"), "{}", req.prompt);
+    }
+
+    /// A prompt is one line in a terminal. A heredoc that scrolls the decision
+    /// off screen is the same problem as showing nothing.
+    #[test]
+    fn a_long_or_multiline_command_is_summarised() {
+        let long = "echo ".to_string() + &"x".repeat(400);
+        let req = InteractionRequest::tool_approval(
+            "id",
+            "bash",
+            serde_json::json!({ "command": long }),
+            "s",
+        );
+        assert!(req.prompt.chars().count() < 200, "{}", req.prompt);
+        assert!(req.prompt.contains('…'), "{}", req.prompt);
+
+        let req = InteractionRequest::tool_approval(
+            "id",
+            "bash",
+            serde_json::json!({"command": "cat <<'EOF' > f\nline two\nEOF"}),
+            "s",
+        );
+        assert!(req.prompt.contains("cat <<'EOF' > f"), "{}", req.prompt);
+        assert!(!req.prompt.contains("line two"), "{}", req.prompt);
+        // The whole thing is still available to a richer UI.
+        assert!(req.tool_arguments.is_some());
+    }
+
+    /// A tool with no argument worth showing keeps the plain question rather
+    /// than gaining an empty pair of backticks.
+    #[test]
+    fn a_tool_without_a_telling_argument_reads_as_before() {
+        let req = InteractionRequest::tool_approval("id", "list_dir", serde_json::json!({}), "s");
+        assert_eq!(req.prompt, "Allow tool call: `list_dir`?");
+        let req = InteractionRequest::tool_approval(
+            "id",
+            "bash",
+            serde_json::json!({"command": "   "}),
+            "s",
+        );
+        assert_eq!(req.prompt, "Allow tool call: `bash`?");
+        // Present but not a string: still nothing worth showing.
+        let req = InteractionRequest::tool_approval(
+            "id",
+            "bash",
+            serde_json::json!({"command": 42}),
+            "s",
+        );
+        assert_eq!(req.prompt, "Allow tool call: `bash`?");
+    }
 
     // ─── InteractionRequest / InteractionResponse constructors ─────────────
 

@@ -208,6 +208,24 @@ pub fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPolicy {
     match tool_name {
         "read_file" | "list_dir" => ToolPolicy::Allow,
         "write_file" | "edit_file" | "bash" => ToolPolicy::Ask,
+        // The sub-agent tools default to `Allow`, and the point of routing them
+        // through this function at all is the *config*, not the prompt.
+        //
+        // They used to skip policy resolution entirely, so a user's
+        // `[tool_permissions] spawn_agent = "deny"` was silently ignored — the
+        // "a configured deny is terminal" guarantee did not cover these five
+        // names. That is the hole worth closing, and it is closed by being here.
+        //
+        // Defaulting them to `Ask` instead would change what working agents do:
+        // every fan-out would stop on a prompt, and an unattended run would
+        // block on an approval nothing is there to give. `spawn_agent` can only
+        // name an agent the user installed, the tree is depth-capped, and
+        // children inherit `--no-seed-commands`, so the default keeps the
+        // behaviour that existed while making the user's own setting count. Set
+        // `spawn_agent = "ask"` to be prompted.
+        "spawn_agent" | "check_agent" | "wait_for_agent" | "send_to_agent" | "kill_agent" => {
+            ToolPolicy::Allow
+        }
         // These tools ARE the human-in-the-loop mechanism — gating them behind
         // a separate tool-approval prompt would mean asking the user "may I
         // ask you something?" before actually asking them.

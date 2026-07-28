@@ -80,6 +80,47 @@ pub fn client(timeouts: ClientTimeouts) -> reqwest::Client {
         .expect("building an HTTP client fails only on TLS backend init")
 }
 
+/// A client that re-runs [`check_url`] on every redirect hop.
+///
+/// A hop is a destination the caller's original check never saw: a perfectly
+/// public endpoint answering `307 Location: http://169.254.169.254/…` lands on
+/// the cloud metadata service just the same, and 307/308 preserve the method
+/// *and the body*. Capping the hop count does not help — the first hop is
+/// already somewhere else.
+///
+/// Use this wherever the URL came from outside: a model, a request body, a
+/// config file. [`client`] is for destinations Leviath itself chose.
+/// Whether a redirect hop may be followed, and why not if it may not.
+///
+/// Split out of the policy closure so it can be tested without standing up a
+/// redirecting server: the closure is then only the reqwest plumbing.
+fn redirect_decision(
+    previous_hops: usize,
+    url: &url::Url,
+    allow_local: bool,
+) -> Result<(), String> {
+    if previous_hops >= 5 {
+        return Err("too many redirects".to_string());
+    }
+    check_url(url, allow_local).map_err(|e| format!("refused to follow redirect: {e}"))
+}
+
+pub fn checked_client(timeouts: ClientTimeouts, allow_local: bool) -> reqwest::Client {
+    client_builder(timeouts)
+        .redirect(reqwest::redirect::Policy::custom(
+            move |attempt| match redirect_decision(
+                attempt.previous().len(),
+                attempt.url(),
+                allow_local,
+            ) {
+                Ok(()) => attempt.follow(),
+                Err(e) => attempt.error(e),
+            },
+        ))
+        .build()
+        .expect("building an HTTP client fails only on TLS backend init")
+}
+
 /// Why a URL was refused. Rendered into the tool result the model sees, so it
 /// says what to do differently rather than just failing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,6 +323,115 @@ pub(crate) fn check_url_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Stand up a server that answers the first `hops` requests with a redirect
+    /// to `target` and then `204`s, closing once `hops + 1` connections have
+    /// been served so the task ends with the test.
+    #[cfg(test)]
+    async fn redirecting_server(target: String, hops: usize) -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for i in 0..=hops {
+                // `.expect`, not a fallible arm: an accept on a listener this
+                // test owns does not fail, and the arm would be a region no
+                // test can drive.
+                let (mut sock, _) = listener.accept().await.expect("accept");
+                // Read the request first: writing before the client has finished
+                // sending confuses the connection and surfaces as a transport
+                // error rather than the redirect under test.
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let body = match i < hops {
+                    true => format!(
+                        "HTTP/1.1 307 Temporary Redirect\r\nLocation: {target}\r\n\
+                         Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    ),
+                    false => "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\
+                              Connection: close\r\n\r\n"
+                        .to_string(),
+                };
+                let _ = sock.write_all(body.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        addr
+    }
+
+    /// The client itself, following a real redirect: a public-looking endpoint
+    /// answering `307 Location: http://169.254.169.254/…` reaches the metadata
+    /// service unless every hop is re-checked, and 307 preserves the method and
+    /// the body.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn checked_client_refuses_a_redirect_to_a_restricted_address() {
+        let addr = redirecting_server("http://169.254.169.254/latest/".to_string(), 1).await;
+
+        // The policy only sees *redirects*, never the URL the caller passed, so
+        // the initial connect to loopback proceeds regardless of this flag —
+        // what it governs is whether the hop onward to link-local is followed.
+        let client = checked_client(ClientTimeouts::default(), false);
+        let err = client
+            .get(format!("http://{addr}/hook"))
+            .send()
+            .await
+            .expect_err("the hop to 169.254.169.254 must be refused");
+
+        // reqwest wraps the policy's message in its source chain, so the reason
+        // lives below the top-level "error sending request".
+        let mut chain = err.to_string();
+        let mut src: Option<&dyn std::error::Error> = std::error::Error::source(&err);
+        while let Some(e) = src {
+            chain.push_str(&format!(": {e}"));
+            src = e.source();
+        }
+        let refused = chain.contains("refused to follow redirect");
+        assert!(refused, "{chain}");
+    }
+
+    /// And a permitted hop is actually followed — so the policy is deciding per
+    /// address rather than refusing every redirect.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn checked_client_follows_a_permitted_redirect() {
+        // Somewhere real to land, then a server that points at it once.
+        let destination = redirecting_server(String::new(), 0).await;
+        let addr = redirecting_server(format!("http://{destination}/done"), 1).await;
+
+        let client = checked_client(ClientTimeouts::default(), true);
+        let resp = client
+            .get(format!("http://{addr}/hook"))
+            .send()
+            .await
+            .expect("a permitted hop is followed to its destination");
+        assert_eq!(resp.status().as_u16(), 204);
+    }
+
+    /// A hop is a destination the caller's original check never saw. 307/308
+    /// preserve the method *and* the body, so a public endpoint answering with a
+    /// redirect to a private address turns a webhook into a request primitive
+    /// against the internal network — capping the hop count does not help,
+    /// because the first hop is already somewhere else.
+    #[test]
+    fn a_redirect_hop_is_checked_like_any_other_url() {
+        let private = "http://169.254.169.254/latest/".parse().unwrap();
+        assert!(redirect_decision(0, &private, false).is_err());
+        assert!(redirect_decision(0, &"http://127.0.0.1/x".parse().unwrap(), false).is_err());
+
+        // The deliberate opt-out still works, so the check reads the address
+        // rather than refusing every redirect.
+        assert!(redirect_decision(0, &private, true).is_ok());
+    }
+
+    /// And a loop is bounded even when every hop is permitted, so a server
+    /// cannot hold a delivery open by bouncing it forever.
+    #[test]
+    fn a_redirect_loop_is_bounded_regardless_of_destination() {
+        let ok = "http://127.0.0.1/x".parse().unwrap();
+        assert!(redirect_decision(4, &ok, true).is_ok());
+        let err = redirect_decision(5, &ok, true).expect_err("the sixth hop is refused");
+        assert!(err.contains("too many redirects"), "{err}");
+    }
 
     fn u(s: &str) -> url::Url {
         url::Url::parse(s).expect("test URL parses")

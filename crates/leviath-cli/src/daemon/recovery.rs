@@ -649,6 +649,7 @@ mod tests {
                     kind: leviath_core::region::EntryKind::UserMessage,
                     metadata: None,
                     key: None,
+                    taint: Default::default(),
                 }],
             }],
         };

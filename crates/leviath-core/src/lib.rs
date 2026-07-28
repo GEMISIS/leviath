@@ -43,7 +43,8 @@ pub use error::{Error, Result, ValidationError};
 pub use layout::{BudgetSpec, ContextLayout, RegionDefinition};
 pub use lifecycle::{CompactionConfig, CompactionStrategy, EvictionPolicy};
 pub use net::{
-    ClientTimeouts, UrlRejection, check_url, client, client_builder, is_restricted_addr,
+    ClientTimeouts, UrlRejection, check_url, checked_client, client, client_builder,
+    is_restricted_addr,
 };
 pub use panic_payload::panic_message;
 pub use paths::{

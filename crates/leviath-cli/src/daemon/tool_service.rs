@@ -111,6 +111,22 @@ pub struct DynamicToolCtx {
 /// dispatches to the Rhai engine; the compiled script and permission-enforcing
 /// host run on a blocking thread (the engine is synchronous).
 async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -> String {
+    // Sub-agent tools (spawn/check/wait/send/kill) reach the world through the
+    // host rather than the builtin/MCP executors.
+    //
+    // Dispatched here, *after* the policy gate, rather than short-circuiting
+    // before it. They used to take an early return in `dispatch_tools` that
+    // skipped `resolve_policy` entirely: no approval prompt was ever raised for
+    // them, and a user's `[tool_permissions] spawn_agent = "deny"` was silently
+    // ignored — the "a configured deny is terminal" guarantee simply did not
+    // cover these five names. That mattered because `spawn_agent` runs a whole
+    // second agent, with that manifest's own command seeds and MCP servers.
+    if crate::daemon::subagent::is_subagent_tool(&tc.name) {
+        return match &state.subagent {
+            Some(handle) => crate::daemon::subagent::handle(handle, tc).await,
+            None => "[error] sub-agent tools are unavailable for this agent".to_string(),
+        };
+    }
     if state
         .script_tool_names
         .lock()
@@ -224,17 +240,6 @@ pub async fn dispatch_tools(
             dispatch_dynamic_interaction(interaction, &tc.name, &tc.id, &tc.arguments, &stage_name)
                 .await
         {
-            slots.push((tc.id, Some(result)));
-            continue;
-        }
-
-        // Sub-agent tools (spawn/check/wait/send/kill) reach the world through
-        // the host, not the builtin/MCP executors.
-        if crate::daemon::subagent::is_subagent_tool(&tc.name) {
-            let result = match &state.subagent {
-                Some(handle) => crate::daemon::subagent::handle(handle, &tc).await,
-                None => "[error] sub-agent tools are unavailable for this agent".to_string(),
-            };
             slots.push((tc.id, Some(result)));
             continue;
         }
@@ -1337,6 +1342,52 @@ mod tests {
             !plain.contains("[denied]"),
             "the approved command itself must still run, got: {plain}"
         );
+    }
+
+    /// The hole this closes: sub-agent calls took an early return that skipped
+    /// `resolve_policy`, so a user's `[tool_permissions] spawn_agent = "deny"`
+    /// was silently ignored and the "a configured deny is terminal" guarantee
+    /// did not cover these five names.
+    #[tokio::test]
+    async fn a_configured_deny_now_covers_the_sub_agent_tools() {
+        let hub = InteractionHub::new();
+        let mut perms = HashMap::new();
+        perms.insert("spawn_agent".to_string(), ToolPolicy::Deny);
+        let state = state_with(&hub, leviath_mcp::ToolExecutor::new(), perms);
+
+        let out = dispatch_tools(
+            state,
+            vec![call(
+                "c1",
+                "spawn_agent",
+                serde_json::json!({"blueprint": "coder", "task": "t"}),
+            )],
+        )
+        .await;
+        let result = out[0].1.clone();
+        assert!(
+            result.contains("[denied]"),
+            "a denied spawn must not run: {result}"
+        );
+    }
+
+    /// And with nothing configured they still run, so gating them did not turn
+    /// every fan-out into a prompt or an unattended block.
+    #[tokio::test]
+    async fn the_sub_agent_tools_still_run_by_default() {
+        let hub = InteractionHub::new();
+        let state = state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new());
+        let out = dispatch_tools(
+            state,
+            vec![call(
+                "c1",
+                "check_agent",
+                serde_json::json!({"agent_id": "x"}),
+            )],
+        )
+        .await;
+        let result = out[0].1.clone();
+        assert!(!result.contains("[denied]"), "{result}");
     }
 
     #[tokio::test]

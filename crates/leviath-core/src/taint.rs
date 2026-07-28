@@ -242,6 +242,23 @@ impl RegionTaint {
     }
 
     /// Get the taint level of a specific entry by index.
+    /// Rebuild from a persisted list of per-entry taints.
+    ///
+    /// `current_level` is derived rather than stored, so a restored region ends
+    /// up at exactly the level its entries justify — and recovers as they evict,
+    /// the same as one that was never persisted.
+    pub fn from_entry_taints(entry_taints: Vec<TaintLevel>) -> Self {
+        let current_level = entry_taints
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(TaintLevel::Public);
+        Self {
+            current_level,
+            entry_taints,
+        }
+    }
+
     pub fn entry_taint(&self, index: usize) -> Option<TaintLevel> {
         self.entry_taints.get(index).copied()
     }
@@ -494,6 +511,27 @@ pub fn builtin_tool_classification(tool_name: &str) -> ToolClassification {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Taint was not persisted at all, so every restart, resume or page-in
+    /// brought a region back `Public` while the gate reported itself armed —
+    /// silently unblocking outbound tools it had been blocking.
+    #[test]
+    fn taint_rebuilds_from_persisted_entries_at_the_highest_level() {
+        let restored = RegionTaint::from_entry_taints(vec![
+            TaintLevel::Public,
+            TaintLevel::Private,
+            TaintLevel::Internal,
+        ]);
+        assert_eq!(restored.level(), TaintLevel::Private);
+        assert_eq!(restored.entry_taint(1), Some(TaintLevel::Private));
+
+        // An empty region is Public, which is also what an older snapshot with
+        // no taint field restores as.
+        assert_eq!(
+            RegionTaint::from_entry_taints(Vec::new()).level(),
+            TaintLevel::Public
+        );
+    }
 
     // ─── TaintLevel ─────────────────────────────────────────────────────────
 

@@ -599,6 +599,32 @@ pub fn collect_interaction_point(
             PointOutcome::Approve { user_text } => {
                 state.status = AgentStatus::Active;
                 inject(&mut window, &name, "", &user_text);
+                // Say plainly that this was approved *after* being changed.
+                //
+                // A model that has already concluded something tends to keep the
+                // conclusion and apply the correction only to the document. That
+                // happened: an agent that had created a file during discovery
+                // read it back while planning, decided "already created — no
+                // further action is needed", was told to use a different
+                // filename, updated the plan to say so, and still ended the run
+                // without renaming anything. The plan changed; its reading of
+                // the world did not.
+                //
+                // `round` counts revision rounds on this point, so a non-zero
+                // value means the approved text is not what the model first
+                // proposed.
+                if round > 0 {
+                    inject(
+                        &mut window,
+                        &name,
+                        "",
+                        "The plan above was revised before you approved it. Work from \
+                         the approved text as written — any conclusion you reached \
+                         from the earlier version, including that something is \
+                         already done, may no longer hold and should be re-checked \
+                         against the plan rather than assumed.",
+                    );
+                }
                 let next = idx + 1;
                 if next >= npoints {
                     proceed(&mut e); // all points satisfied ⇒ transition
@@ -1415,6 +1441,40 @@ mod tests {
         assert_eq!(
             world.get::<PlanBodyOverride>(e).unwrap().0,
             "the revised plan"
+        );
+    }
+
+    /// An approval that followed a revision has to say so. A model that had
+    /// already concluded "this is done" kept the conclusion and applied the
+    /// correction only to the document — the plan changed, its reading of the
+    /// world did not. The note is only injected when there *was* a revision.
+    #[test]
+    fn collect_approve_after_a_revision_says_the_plan_changed() {
+        let (mut world, tx) = collect_world();
+
+        let first_try = spawn_awaiting(&mut world, vec![plan_point()]);
+        let revised = spawn_awaiting(&mut world, vec![plan_point()]);
+        world.entity_mut(revised).insert(InteractionPointRounds(2));
+
+        for e in [first_try, revised] {
+            tx.send(InteractionPointOutcome {
+                entity: e,
+                decision: PointOutcome::Approve {
+                    user_text: "Approve".to_string(),
+                },
+            })
+            .unwrap();
+        }
+        run_collect(&mut world);
+
+        let plain = world
+            .get::<ContextWindow>(first_try)
+            .unwrap()
+            .current_tokens;
+        let noted = world.get::<ContextWindow>(revised).unwrap().current_tokens;
+        assert!(
+            noted > plain,
+            "a revised-then-approved plan carries the re-check note ({noted} vs {plain})"
         );
     }
 

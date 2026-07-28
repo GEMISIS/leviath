@@ -272,7 +272,21 @@ async fn real_daemon_stop() -> anyhow::Result<()> {
         println!("daemon not running");
         return Ok(());
     }
-    commands::daemon::send_shutdown(&control_client()?).await?;
+    // Ask politely first. If the control channel refuses or is wedged, fall back
+    // to signalling the recorded process — otherwise a daemon that cannot be
+    // talked to cannot be stopped either, and `lev daemon restart` (which stops
+    // before it starts) could never recover.
+    if let Err(e) = commands::daemon::send_shutdown(&control_client()?).await {
+        let dir = leviath_cli::daemon::setup::control_dir()
+            .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the daemon pid"))?;
+        match leviath_runtime::control_socket::ControlToken::read_pid(&dir) {
+            Some(pid) => {
+                eprintln!("control channel did not answer ({e}); signalling pid {pid}");
+                let _ = leviath_sys::kill_process_group(pid);
+            }
+            None => return Err(e),
+        }
+    }
     for _ in 0..100 {
         if !is_daemon_running(&id) {
             println!("daemon stopped");
@@ -409,6 +423,9 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
     let control_dir = leviath_cli::daemon::setup::control_dir()
         .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control token"))?;
     let token = leviath_runtime::control_socket::ControlToken::create(&control_dir)?;
+    // Recorded so `lev daemon stop` can fall back to signalling us if the
+    // control channel ever stops answering.
+    let _ = leviath_runtime::control_socket::ControlToken::write_pid(&control_dir);
     // Record the build we started from so a later CLI can detect stale code and
     // restart us (must happen right after we win the single-instance bind).
     leviath_cli::daemon::setup::write_build_marker();
@@ -454,7 +471,7 @@ fn control_client() -> anyhow::Result<leviath_runtime::control_socket::ControlCl
         .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control token"))?;
     Ok(leviath_runtime::control_socket::ControlClient::for_home(
         id, &dir,
-    )?)
+    ))
 }
 
 /// Real `lev dash`: supplies the real crossterm terminal backend and event

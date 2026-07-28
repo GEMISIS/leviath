@@ -5,7 +5,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rand::RngCore;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 
 /// A PKCE verifier/challenge pair plus the CSRF `state` for one authorization.

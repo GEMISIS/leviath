@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use leviath_runtime::host::WorldEvent;
 use sha2::Sha256;
 
@@ -24,7 +24,16 @@ pub(super) async fn event_loop(state: AppState, backoff: Duration) {
     // endpoint that accepts a connection and never answers hung this delivery
     // forever. The shared factory supplies a connect+total timeout floor and
     // caps redirects.
-    let client = leviath_core::client(leviath_core::ClientTimeouts::default());
+    // `checked_client`, not `client`: the webhook URL comes from a request body,
+    // and it was checked once at `POST /api/agents` and then never again. A
+    // caller registered a public endpoint that answered `307 Location:
+    // http://169.254.169.254/…`, and since 307 preserves the method *and* the
+    // body, that was a repeatable POST primitive against the internal network —
+    // re-followed on every retry.
+    let client = leviath_core::checked_client(
+        leviath_core::ClientTimeouts::default(),
+        state.limits.allow_local_network,
+    );
     loop {
         consume_once(&state, &client).await;
         // The stream ended (daemon closed / restarted) or was unreachable; back

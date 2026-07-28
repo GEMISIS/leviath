@@ -643,6 +643,7 @@ mod tests {
             kind: crate::region::EntryKind::Text,
             metadata: None,
             key: None,
+            taint: Default::default(),
         }
     }
 

@@ -3103,7 +3103,7 @@ mode = "autonomous"
     }
 
     #[test]
-    fn software_engineer_plan_stage_has_error_edge_and_can_abort() {
+    fn software_engineer_plan_routes_errors_and_cannot_end_the_run() {
         let manifest_content = include_str!("../../../agents/software-engineer/agent.leviath");
         let bp = parse_manifest(manifest_content).unwrap();
         let plan = bp.find_stage("plan").unwrap();
@@ -3117,9 +3117,20 @@ mode = "autonomous"
                 .unwrap_or(false)
         );
 
-        // allow_complete lets the model respond DONE (e.g. when the user
-        // chose "Abort") instead of being forced into 'implement' or 'plan'.
-        assert!(plan.allow_complete);
+        // Planning must NOT be able to end the run. Abort is the engine's path
+        // (abort_options on the plan_approval point), so `allow_complete` was
+        // only ever a way for the model to stop early — and it did: one that had
+        // created a file during `discover` read it back here, decided "already
+        // created — no further action is needed", and completed without ever
+        // reaching `implement`, taking the user's plan correction with it.
+        assert!(!plan.allow_complete);
+        // Every way out leads somewhere that does the work.
+        for target in ["implement", "prototype"] {
+            assert!(
+                transitions.contains_key(target),
+                "plan must be able to reach {target}"
+            );
+        }
     }
 
     #[test]

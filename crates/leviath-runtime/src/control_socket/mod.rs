@@ -44,6 +44,13 @@ pub use windows::{
     control_id, control_id_from_str, is_daemon_running,
 };
 
+/// Prefix on every response that means "you are not authenticated".
+///
+/// Shared by both sides rather than matched as prose: the client turns it back
+/// into an actionable error naming the token file, and a message the two ends
+/// spelled differently would silently stop being recognised.
+const AUTH_REQUIRED: &str = "authentication";
+
 /// A shared secret that proves a control-channel caller is this same user.
 ///
 /// # Why this exists
@@ -84,12 +91,40 @@ impl ControlToken {
         dir.join("control.token")
     }
 
+    /// Where the daemon records its own process id.
+    ///
+    /// So `lev daemon stop` has a way through when the control channel does not
+    /// answer — a wedged daemon, or a token file that went missing. Without it
+    /// the only recovery was `pkill`, and the advice to "restart it" was advice
+    /// that could not work: `restart` stops before it starts, and the stop was
+    /// the part that failed.
+    pub fn pid_path(dir: &Path) -> PathBuf {
+        dir.join("daemon.pid")
+    }
+
+    /// Record this process as the running daemon.
+    pub fn write_pid(dir: &Path) -> std::io::Result<()> {
+        leviath_sys::write_private(
+            &Self::pid_path(dir),
+            std::process::id().to_string().as_bytes(),
+        )
+    }
+
+    /// The recorded daemon pid, if one was written and still parses.
+    pub fn read_pid(dir: &Path) -> Option<u32> {
+        std::fs::read_to_string(Self::pid_path(dir))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
     /// Generate a fresh token and write it owner-only.
     ///
     /// Called at bind, so a restarted daemon invalidates every previous token —
     /// a stale one cannot be replayed against the new process.
     pub fn create(dir: &Path) -> std::io::Result<Self> {
-        use rand::Rng as _;
+        use rand::RngExt as _;
         // 256 bits from the OS generator. Hex rather than raw bytes so the file
         // is a single printable line that a human can compare, and so the value
         // survives being read back as text.
@@ -500,6 +535,8 @@ fn timeout_for(req: &ControlRequest) -> std::time::Duration {
 pub struct ControlClient {
     id: ControlId,
     token: Option<ControlToken>,
+    /// Where the token was looked for, so a refusal can name the file.
+    token_dir: Option<PathBuf>,
 }
 
 impl ControlClient {
@@ -512,6 +549,7 @@ impl ControlClient {
         Self {
             id: id.into(),
             token: None,
+            token_dir: None,
         }
     }
 
@@ -523,20 +561,39 @@ impl ControlClient {
 
     /// A client that reads the daemon's token out of `dir`.
     ///
-    /// The error says what to do about it: a missing token file almost always
-    /// means no daemon is running, not that anything is broken.
-    pub fn for_home(id: impl Into<ControlId>, dir: &Path) -> std::io::Result<Self> {
-        let token = ControlToken::load(dir).map_err(|e| {
-            std::io::Error::new(
-                e.kind(),
-                format!(
-                    "could not read the daemon's control token at {}: {e}. \
-                     Is the daemon running? Start it with `lev daemon start`.",
-                    ControlToken::path(dir).display()
-                ),
-            )
-        })?;
-        Ok(Self::new(id).with_token(token))
+    /// A missing token file is **not** an error here. It has two very different
+    /// causes — no daemon is running, or one is running that predates tokens —
+    /// and the client cannot tell them apart, while the daemon can. Refusing to
+    /// even construct a client made the second case unrecoverable: a CLI that
+    /// had been upgraded could not ask the old daemon to shut down, so it could
+    /// neither stop it nor start a replacement, and the error it printed
+    /// ("Is the daemon running? Start it with `lev daemon start`") was advice
+    /// the user was already following.
+    ///
+    /// The daemon is the enforcer. A client with no token connects, is refused
+    /// if the daemon requires one, and reports *that* — which is accurate.
+    pub fn for_home(id: impl Into<ControlId>, dir: &Path) -> Self {
+        Self {
+            id: id.into(),
+            token: ControlToken::load(dir).ok(),
+            token_dir: Some(dir.to_path_buf()),
+        }
+    }
+
+    /// Why the daemon refused us, said in terms of what the user can do.
+    fn refused(&self) -> std::io::Error {
+        let detail = match (&self.token, &self.token_dir) {
+            (None, Some(dir)) => format!(
+                "no control token was found at {}. If a daemon is running, it was \
+                 started by a different user or before this file existed — restart \
+                 it with `lev daemon restart`.",
+                ControlToken::path(dir).display()
+            ),
+            _ => "the daemon refused this client's control token. Restart it with \
+                  `lev daemon restart` to issue a fresh one."
+                .to_string(),
+        };
+        std::io::Error::new(std::io::ErrorKind::PermissionDenied, detail)
     }
 
     /// Send one request and await its response. Errors if the daemon can't be
@@ -566,7 +623,10 @@ impl ControlClient {
         let mut lines = BufReader::new(read_half).lines();
 
         // Authenticate first, on every connection: the client opens a fresh one
-        // per request, so there is no session to carry the proof across.
+        // per request, so there is no session to carry the proof across. With no
+        // token we send nothing and go straight to the request — a daemon that
+        // predates tokens serves it, and one that requires them refuses, which
+        // is the outcome we want to report either way.
         if let Some(token) = &self.token {
             let hello = ControlRequest::Authenticate {
                 token: token.expose().to_string(),
@@ -581,13 +641,7 @@ impl ControlClient {
             match lines.next_line().await.ok().flatten() {
                 Some(resp) => match serde_json::from_str::<ControlResponse>(&resp) {
                     Ok(ControlResponse::Ok { ok: true }) => {}
-                    _ => {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::PermissionDenied,
-                            "the daemon refused this client's control token. \
-                             Restart it with `lev daemon restart` to issue a fresh one.",
-                        ));
-                    }
+                    _ => return Err(self.refused()),
                 },
                 None => {
                     return Err(std::io::Error::new(
@@ -605,8 +659,19 @@ impl ControlClient {
         let _ = write_half.write_all(line.as_bytes()).await;
 
         match lines.next_line().await? {
-            Some(resp_line) => serde_json::from_str(&resp_line)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+            Some(resp_line) => {
+                let parsed: ControlResponse = serde_json::from_str(&resp_line)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                // A daemon that refused us: report what to do about it, not the
+                // wire message. Reached when this client had no token to send
+                // and so never ran the handshake.
+                match &parsed {
+                    ControlResponse::Error { message } if message.starts_with(AUTH_REQUIRED) => {
+                        Err(self.refused())
+                    }
+                    _ => Ok(parsed),
+                }
+            }
             None => Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "control connection closed before a response",
@@ -680,6 +745,33 @@ mod tests {
 
     // ── Control-channel authentication ──────────────────────────────────────
 
+    /// `lev daemon stop` needs a way through when the control channel does not
+    /// answer, because `restart` stops before it starts — so a daemon that had
+    /// lost its token file could not be restarted, only `pkill`ed.
+    #[test]
+    fn the_daemon_pid_round_trips_and_a_missing_or_junk_file_is_no_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            ControlToken::read_pid(dir.path()),
+            None,
+            "no file yet is not a pid"
+        );
+
+        ControlToken::write_pid(dir.path()).unwrap();
+        assert_eq!(
+            ControlToken::read_pid(dir.path()),
+            Some(std::process::id()),
+            "what was written is what comes back"
+        );
+
+        // Trailing whitespace is tolerated; anything that is not a number is
+        // not a pid, and must not be reported as one.
+        std::fs::write(ControlToken::pid_path(dir.path()), " 4242\n").unwrap();
+        assert_eq!(ControlToken::read_pid(dir.path()), Some(4242));
+        std::fs::write(ControlToken::pid_path(dir.path()), "not-a-pid").unwrap();
+        assert_eq!(ControlToken::read_pid(dir.path()), None);
+    }
+
     /// The token is what stands between another local user and a
     /// tool-executing agent on Windows, where there is no kernel peer check.
     #[test]
@@ -744,16 +836,31 @@ mod tests {
         assert!(rendered.contains("redacted"), "{rendered}");
     }
 
-    /// Loading from a directory with no daemon says what to do about it.
+    /// A missing token file must not stop a client from being built. It has two
+    /// causes the client cannot tell apart — no daemon, or one running that
+    /// predates tokens — and refusing here made an upgrade unrecoverable: the
+    /// CLI could not ask the old daemon to shut down, so it could neither stop
+    /// it nor start a replacement, while printing advice the user was already
+    /// following.
     #[test]
-    fn a_missing_token_is_an_actionable_error() {
+    fn a_missing_token_still_builds_a_client() {
         let dir = tempfile::tempdir().unwrap();
-        // `.err()` rather than `expect_err`, which would need `Debug` on the
-        // client -- a type that holds the token.
-        let err = ControlClient::for_home(control_id(dir.path()), dir.path())
-            .err()
-            .expect("no daemon, no token");
-        assert!(err.to_string().contains("lev daemon start"), "{err}");
+        let client = ControlClient::for_home(control_id(dir.path()), dir.path());
+        let err = client.refused().to_string();
+        assert!(err.contains("no control token was found"), "{err}");
+        assert!(err.contains("lev daemon restart"), "{err}");
+    }
+
+    /// And when we *did* present one and were still refused, the message says
+    /// that instead — the two situations need different fixes.
+    #[test]
+    fn a_rejected_token_reads_differently_from_a_missing_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let _token = ControlToken::create(dir.path()).unwrap();
+        let client = ControlClient::for_home(control_id(dir.path()), dir.path());
+        let err = client.refused().to_string();
+        assert!(err.contains("refused this client's control token"), "{err}");
+        assert!(!err.contains("no control token was found"), "{err}");
     }
     use super::*;
     use tokio::sync::mpsc;
@@ -1123,16 +1230,15 @@ mod tests {
         });
 
         // A client with no token at all: its first request is `List`, which the
-        // daemon must refuse rather than answer.
+        // daemon must refuse rather than answer. The client turns that refusal
+        // into a typed error naming the fix, rather than handing the caller a
+        // protocol-level `Error` response to interpret.
         let err = ControlClient::new(id)
             .list()
             .await
-            .expect("the daemon answers, then hangs up");
-        let rendered = format!("{err:?}");
-        assert!(
-            rendered.contains("authentication required"),
-            "an unauthenticated List must not be served: {rendered}"
-        );
+            .expect_err("an unauthenticated List must not be served");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains("token"), "{err}");
         // The refusal closes the connection, so the server task ends on its own.
         server.await.unwrap();
     }
@@ -1180,7 +1286,7 @@ mod tests {
         });
 
         // Loaded the way a real client does, out of the daemon's directory.
-        let client = ControlClient::for_home(id, dir.path()).unwrap();
+        let client = ControlClient::for_home(id, dir.path());
         let response = client
             .list()
             .await
