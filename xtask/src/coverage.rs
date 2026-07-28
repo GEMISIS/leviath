@@ -147,12 +147,90 @@ fn gate_package(runner: &dyn Runner, pkg: &str) -> Result<()> {
         &html_dir,
     ];
     if !runner.cargo(&args)? {
+        // Say *what* is uncovered, not just that something is. "Open the HTML
+        // report" is useless on a CI runner, whose filesystem nobody will ever
+        // see — and a gap that only appears on one OS (a `#[cfg(target_os)]`
+        // block, or a test the other platform skips) can only be diagnosed
+        // from that machine's own run.
+        let uncovered = uncovered_regions(runner, pkg).unwrap_or_default();
+        if !uncovered.is_empty() {
+            println!("[coverage] {pkg}: uncovered region entries (file:line:col):");
+            for entry in &uncovered {
+                println!("  {entry}");
+            }
+        }
         anyhow::bail!(
-            "[coverage] {pkg} is below 100% (or its build/tests failed). Open \
-             {html_dir}/html/index.html to see exactly which lines are uncovered."
+            "[coverage] {pkg} is below 100% (or its build/tests failed). \
+             {html_dir}/html/index.html has the annotated source."
         );
     }
     Ok(())
+}
+
+/// Where the JSON export used by [`uncovered_regions`] is written.
+const REPORT_JSON: &str = "coverage/uncovered.json";
+
+/// The `file:line:col` of every region entry llvm-cov counted zero times.
+///
+/// Re-exports the *same* profile data the gate just measured (no rebuild, no
+/// re-run) as JSON and reads the region entries out of it. Best effort: if the
+/// export or the parse fails, the caller still reports the failure, just without
+/// the detail.
+fn uncovered_regions(runner: &dyn Runner, pkg: &str) -> Option<Vec<String>> {
+    let ok = runner
+        .cargo(&[
+            "llvm-cov",
+            "report",
+            "--package",
+            pkg,
+            // No `--all-features` here: `report` re-reads the profile data the
+            // gate just produced and rejects the flag outright.
+            "--ignore-filename-regex",
+            r"[\\/]main\.rs$",
+            "--json",
+            "--output-path",
+            REPORT_JSON,
+        ])
+        .ok()?;
+    if !ok {
+        return None;
+    }
+    let text = std::fs::read_to_string(REPORT_JSON).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    Some(parse_uncovered(&json))
+}
+
+/// Pull zero-count region entries out of an llvm-cov JSON export.
+///
+/// A `segments` entry is `[line, col, count, has_count, is_region_entry,
+/// is_gap]`. A region *entry* with a count of zero is the start of code that
+/// never ran — which is exactly what the gate is complaining about. Non-entry
+/// segments and gap regions are noise here.
+pub fn parse_uncovered(json: &serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let files = json["data"][0]["files"].as_array();
+    for file in files.into_iter().flatten() {
+        let Some(name) = file["filename"].as_str() else {
+            continue;
+        };
+        // Trim to something readable: the workspace-relative tail.
+        let short = name.rsplit_once("/src/").map_or(name, |(_, tail)| tail);
+        let mut seen = std::collections::BTreeSet::new();
+        for seg in file["segments"].as_array().into_iter().flatten() {
+            let s = seg.as_array().filter(|s| s.len() >= 6);
+            let Some(s) = s else { continue };
+            let is_entry = s[4].as_bool().unwrap_or(false);
+            let has_count = s[3].as_bool().unwrap_or(false);
+            let count = s[2].as_u64().unwrap_or(1);
+            if is_entry && has_count && count == 0 {
+                seen.insert((s[0].as_u64().unwrap_or(0), s[1].as_u64().unwrap_or(0)));
+            }
+        }
+        for (line, col) in seen {
+            out.push(format!("{short}:{line}:{col}"));
+        }
+    }
+    out
 }
 
 /// Parse workspace package names from `cargo metadata` JSON. `xtask` itself is
@@ -233,6 +311,62 @@ mod tests {
     }
 
     // ── CoverageMode::parse ───────────────────────────────────────────────────
+
+    /// The gate's failure message is only useful if it names real regions.
+    /// A segment is `[line, col, count, has_count, is_region_entry, is_gap]`;
+    /// only a *region entry* with a recorded count of zero is code that never
+    /// ran.
+    #[test]
+    fn parse_uncovered_reports_only_zero_count_region_entries() {
+        let json = serde_json::json!({
+            "data": [{
+                "files": [{
+                    "filename": "/w/crates/leviath-sys/src/perms.rs",
+                    "segments": [
+                        [191, 1, 0, true, true, false],   // uncovered entry
+                        [192, 8, 0, true, true, false],   // uncovered entry
+                        [191, 1, 0, true, true, false],   // duplicate, collapsed
+                        [200, 4, 7, true, true, false],   // covered
+                        [210, 2, 0, true, false, false],  // not a region entry
+                        [220, 2, 0, false, true, false],  // no recorded count
+                        [230, 1],                          // malformed, skipped
+                    ]
+                }]
+            }]
+        });
+        assert_eq!(
+            parse_uncovered(&json),
+            vec!["perms.rs:191:1".to_string(), "perms.rs:192:8".to_string()]
+        );
+    }
+
+    /// A report with nothing uncovered says nothing, and a shape that is not an
+    /// llvm-cov export does not panic.
+    #[test]
+    fn parse_uncovered_is_quiet_when_there_is_nothing_to_report() {
+        let covered = serde_json::json!({
+            "data": [{"files": [{
+                "filename": "/w/crates/x/src/a.rs",
+                "segments": [[1, 1, 3, true, true, false]]
+            }]}]
+        });
+        assert!(parse_uncovered(&covered).is_empty());
+        assert!(parse_uncovered(&serde_json::json!({})).is_empty());
+        assert!(parse_uncovered(&serde_json::json!({"data": []})).is_empty());
+    }
+
+    /// A filename with no `/src/` segment is reported whole rather than
+    /// silently dropped.
+    #[test]
+    fn parse_uncovered_keeps_a_path_it_cannot_shorten() {
+        let json = serde_json::json!({
+            "data": [{"files": [{
+                "filename": "build.rs",
+                "segments": [[4, 2, 0, true, true, false]]
+            }]}]
+        });
+        assert_eq!(parse_uncovered(&json), vec!["build.rs:4:2".to_string()]);
+    }
 
     #[test]
     fn parse_no_args_is_all() {
