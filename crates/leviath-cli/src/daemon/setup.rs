@@ -79,6 +79,11 @@ pub async fn setup_daemon_host(
     runs_dir: std::path::PathBuf,
     runtime: Handle,
 ) -> WorldHost {
+    // Apply the machine-wide outbound-network policy before anything can fetch.
+    // It lives in a process-wide atomic because the shared blocking HTTP client's
+    // redirect policy has no per-agent context to consult; see
+    // `script_host::set_local_network_allowed`.
+    crate::daemon::script_host::set_local_network_allowed(config.security.allow_local_network);
     let providers = build_provider_registry_from_config(&config);
     // MCP connections are shared across agents; the workdir here only seeds the
     // (discarded) built-ins — each agent gets its own over its own workdir.
