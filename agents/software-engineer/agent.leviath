@@ -157,6 +157,12 @@ ask_user_choice to ask BEFORE producing the plan — don't guess on things
 only the user can answer. Don't ask about things you can reasonably decide
 yourself.
 
+This stage does not touch the codebase. You have no tool here that writes or
+edits a file, and calling one is refused — planning that starts writing is how a
+run ends up with code nobody approved. Describe the change; `implement` makes it.
+If a claim in the plan needs proving before it is worth writing down, that is what
+`prototype` is for.
+
 Be specific — the implement stage will execute exactly what you write here.
 End with:
 
@@ -438,6 +444,11 @@ Use the `changelog` region to see exactly which files changed (the
 `implementation` region holds the mechanical record of every write the framework
 saw, if the changelog looks incomplete), and `decisions` to understand why choices
 were made before you question them. Read those files and provide a quality review:
+You review here; you do not repair. There is no write or edit tool in this
+stage and calling one is refused — a reviewer who fixes what they find is the
+same person marking their own work. Report the problem and route back to
+`implement`, which is where changes are made and re-reviewed.
+
 - Correctness: does it match the plan AND the original task in `task`?
 - Edge cases: what inputs or conditions could cause failures?
 - Code quality: clarity, naming, error handling, conventions.

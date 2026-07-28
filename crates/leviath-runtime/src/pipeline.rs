@@ -742,6 +742,62 @@ fn merge_in_call_order(
         .collect()
 }
 
+/// Whether a tool result describes a call whose side effect never happened.
+///
+/// `[error]` (it ran and failed), `[denied]` (policy refused it) and
+/// `[unavailable]` (the stage never offered it) all mean the same thing to
+/// anything reasoning about what the agent *did*: file tracking must not record
+/// a write that was not written, and the modification counters behind a
+/// transition gate must not count it as work. Three separate prefix lists is
+/// exactly how a fourth prefix gets missed — `[unavailable]` was, when dispatch
+/// began refusing unoffered tools and both call sites still listed only two.
+fn call_had_no_effect(result: &str) -> bool {
+    result.starts_with("[error]")
+        || result.starts_with("[denied]")
+        || result.starts_with("[unavailable]")
+}
+
+/// The effective tool names this stage advertised, canonicalised.
+///
+/// The same narrowing the request builder applies: `tools`, then `tool_filter`
+/// when it is set and non-empty. Deriving both from one function is what keeps
+/// "what the model was offered" and "what the model may call" the same set.
+fn offered_tool_names(stage: &StageInference) -> Vec<&str> {
+    stage
+        .tools
+        .iter()
+        .filter(|t| match stage.tool_filter.as_deref() {
+            Some(filter) if !filter.is_empty() => filter.iter().any(|f| f == &t.name),
+            _ => true,
+        })
+        .map(|t| leviath_tools::canonical_tool_name(&t.name))
+        .collect()
+}
+
+/// `Some(message)` when `name` is not among the stage's advertised tools.
+///
+/// The message is written for the model, not the user: it says plainly that the
+/// tool does not exist *here* and lists what does, so the next turn is a usable
+/// call rather than a retry of the same one. A stage advertising nothing says so
+/// instead of printing an empty list.
+fn unoffered_tool_refusal(stage: &StageInference, name: &str) -> Option<String> {
+    let canonical = leviath_tools::canonical_tool_name(name);
+    let offered = offered_tool_names(stage);
+    if offered.contains(&canonical) {
+        return None;
+    }
+    Some(match offered.is_empty() {
+        true => format!(
+            "[unavailable] '{name}' is not available in this stage, which has no \
+             tools at all. Answer directly instead of calling a tool."
+        ),
+        false => format!(
+            "[unavailable] '{name}' is not available in this stage. You may call: {}.",
+            offered.join(", ")
+        ),
+    })
+}
+
 /// Tool-dispatch system: for each `ReadyForTools` agent, apply its `context_*`
 /// tool calls inline (they mutate the ECS window) and hand the rest to the
 /// sequential tool lane, moving it to `AwaitingTools`. If a batch is *all*
@@ -755,6 +811,7 @@ pub fn dispatch_tools(
         (
             Entity,
             &AgentState,
+            &StageInference,
             &crate::components::InferenceResult,
             &mut ContextWindow,
             Option<&crate::components::ToolResultRoutingComponent>,
@@ -785,6 +842,7 @@ pub fn dispatch_tools(
     for (
         entity,
         state,
+        stage_inf,
         result,
         mut window,
         routing,
@@ -817,6 +875,29 @@ pub fn dispatch_tools(
             leviath_core::TaintLevel,
         )> = Vec::new();
         for c in &result.tool_calls {
+            // Layer 1, enforced rather than merely advertised.
+            //
+            // A stage's `available_tools` was applied only when building the
+            // schema list sent to the model. Nothing checked it again here, so a
+            // model that *named* a tool it had never been offered got that call
+            // dispatched anyway — reaching the permission gate, and for a
+            // default-`Ask` tool surfacing to the user as an approval prompt for
+            // something the stage was never granted.
+            //
+            // That is not hypothetical. A `plan` stage granting only
+            // `read_file`/`list_dir`/`ask_user_*`/`edit_document` emitted
+            // `write_file` with a complete source file in it, and the user was
+            // asked to approve writing code from the planning stage. Declining
+            // it was the only thing that stopped it.
+            //
+            // Checked against `StageInference`, which *is* the set advertised
+            // for this stage — resolved at spawn, swapped on every transition,
+            // and rewritten by the dynamic-tools refresh — so enforcement cannot
+            // drift from advertising the way a second copy of the rule would.
+            if let Some(refusal) = unoffered_tool_refusal(stage_inf, &c.name) {
+                context_results.push((c.tool_id.clone(), refusal));
+                continue;
+            }
             if crate::context_tools::is_context_tool(&c.name) {
                 let text =
                     crate::context_tools::handle_context_tool(&c.name, &c.arguments, &mut window);
@@ -1199,7 +1280,7 @@ fn apply_file_tracking(
         return;
     }
     for (call, (_id, result)) in tool_calls.iter().zip(merged.iter_mut()) {
-        if result.starts_with("[error]") || result.starts_with("[denied]") {
+        if call_had_no_effect(result) {
             continue;
         }
         let Some(path) = call.arguments.get("path").and_then(|v| v.as_str()) else {
@@ -1288,7 +1369,7 @@ fn record_modifications(
             }
             continue;
         }
-        if result.starts_with("[error]") {
+        if call_had_no_effect(result) {
             continue;
         }
         if let Some(progress) = progress.as_mut() {
@@ -5293,7 +5374,18 @@ mod tests {
 
     // ── process-response routing ──
 
-    fn infer_result(with_tools: bool) -> crate::components::InferenceResult {
+    /// An inference result, paired with the advertisement that makes its call
+    /// legal — see [`infer_with`]. `false` yields no calls and so offers
+    /// nothing, which is what a stage with no tools looks like.
+    fn infer_result(with_tools: bool) -> (StageInference, crate::components::InferenceResult) {
+        let offers = offering(match with_tools {
+            true => &["n"],
+            false => &[],
+        });
+        (offers, infer_result_only(with_tools))
+    }
+
+    fn infer_result_only(with_tools: bool) -> crate::components::InferenceResult {
         crate::components::InferenceResult {
             response: "r".to_string(),
             tool_calls: if with_tools {
@@ -5818,13 +5910,41 @@ mod tests {
         assert!(jrx.try_recv().is_err());
     }
 
-    fn infer_with(calls: Vec<crate::components::ToolCall>) -> crate::components::InferenceResult {
-        crate::components::InferenceResult {
-            response: "r".to_string(),
-            tool_calls: calls,
-            tokens_used: 0,
-            timestamp: 0,
+    /// A stage advertising exactly `names`.
+    fn offering(names: &[&str]) -> StageInference {
+        StageInference {
+            provider_name: "p".to_string(),
+            model: "m".to_string(),
+            tools: names
+                .iter()
+                .map(|n| leviath_providers::Tool {
+                    name: (*n).to_string(),
+                    description: String::new(),
+                    parameters: serde_json::json!({}),
+                })
+                .collect(),
+            tool_filter: None,
         }
+    }
+
+    /// An inference result **and** the advertisement that makes its own calls
+    /// legal — dispatch refuses a tool the stage never offered, so a fixture
+    /// that calls one has to offer it. Returned together as a bundle so every
+    /// test exercising some *other* part of dispatch is not restating its own
+    /// call list. Tests about the Layer-1 check itself build the two separately.
+    fn infer_with(
+        calls: Vec<crate::components::ToolCall>,
+    ) -> (StageInference, crate::components::InferenceResult) {
+        let offers = offering(&calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>());
+        (
+            offers,
+            crate::components::InferenceResult {
+                response: "r".to_string(),
+                tool_calls: calls,
+                tokens_used: 0,
+                timestamp: 0,
+            },
+        )
     }
 
     fn ctx_call(id: &str, region: &str, content: &str) -> crate::components::ToolCall {
@@ -5878,6 +5998,217 @@ mod tests {
                 .current_tokens
                 > 0
         );
+    }
+
+    /// The text dispatch left in the agent's conversation for the model to read.
+    /// A batch with no lane work is applied inline, so there is no
+    /// `ContextToolResults` to inspect — the window is the only record.
+    fn conversation_text(world: &World, e: Entity) -> String {
+        world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .get_region("conversation")
+            .unwrap()
+            .content
+            .iter()
+            .map(|entry| entry.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The reason this check exists, as it actually happened: a `plan` stage
+    /// granting only reads emitted `write_file` with a complete source file in
+    /// it. `available_tools` was applied when building the schema list and never
+    /// again, so the call was dispatched anyway and the *user* was asked to
+    /// approve writing code from the planning stage. It never reaches the lane
+    /// or the permission gate now — the model is told, and the turn continues.
+    #[tokio::test]
+    async fn dispatch_tools_refuses_a_tool_the_stage_never_offered() {
+        let (jtx, mut jrx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+        world.insert_resource(ToolStage(jtx));
+        let (_, result) = infer_with(vec![tc("c1", "write_file"), tc("c2", "read_file")]);
+        let e = world
+            .spawn((
+                agent_state(),
+                offering(&["read_file", "list_dir"]),
+                result,
+                conv_window(),
+                ReadyForTools,
+            ))
+            .id();
+
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_tools);
+        s.run(&mut world);
+
+        let stashed = &world.get::<ContextToolResults>(e).unwrap().0;
+        assert_eq!(
+            stashed.len(),
+            1,
+            "only the unoffered call was answered here"
+        );
+        assert_eq!(stashed[0].0, "c1");
+        let refusal = stashed[0].1.clone();
+        assert!(refusal.contains("not available in this stage"), "{refusal}");
+        // And it names what the model *can* use, so the next turn is a usable
+        // call rather than a retry of the same one.
+        assert!(refusal.contains("read_file"), "{refusal}");
+
+        // The offered call still went to the lane: this refuses what was not
+        // granted, it does not refuse everything.
+        let job = jrx.try_recv().expect("the offered call still runs");
+        assert_eq!(job.entity, e);
+    }
+
+    /// A stage may advertise nothing at all (`available_tools = []` is a real
+    /// setting, not "unset"). Saying "you may call: " with an empty list would
+    /// read as a bug, so it says what is true instead.
+    #[tokio::test]
+    async fn dispatch_tools_tells_a_toolless_stage_to_answer_directly() {
+        let (jtx, _jrx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+        world.insert_resource(ToolStage(jtx));
+        let (_, result) = infer_with(vec![tc("c1", "read_file")]);
+        let e = world
+            .spawn((
+                agent_state(),
+                offering(&[]),
+                result,
+                conv_window(),
+                ReadyForTools,
+            ))
+            .id();
+
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_tools);
+        s.run(&mut world);
+
+        let text = conversation_text(&world, e);
+        assert!(
+            text.contains("no tools at all") && text.contains("Answer directly"),
+            "{text}"
+        );
+    }
+
+    /// Aliases resolve on both sides. A manifest says `bash` and the model calls
+    /// `shell` (or the reverse) — matching the raw strings would refuse a tool
+    /// the stage plainly granted, which is a worse failure than the one this
+    /// check exists to prevent.
+    #[tokio::test]
+    async fn dispatch_tools_matches_an_offered_tool_through_its_alias() {
+        let (jtx, mut jrx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+        world.insert_resource(ToolStage(jtx));
+        let canonical = leviath_tools::canonical_tool_name("bash");
+        assert_ne!(
+            canonical, "bash",
+            "this test needs a real alias to be a test"
+        );
+        let (_, result) = infer_with(vec![tc("c1", canonical)]);
+        let e = world
+            .spawn((
+                agent_state(),
+                offering(&["bash"]),
+                result,
+                conv_window(),
+                ReadyForTools,
+            ))
+            .id();
+
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_tools);
+        s.run(&mut world);
+
+        assert!(
+            world.get::<ContextToolResults>(e).unwrap().0.is_empty(),
+            "nothing was refused"
+        );
+        assert!(jrx.try_recv().is_ok(), "the aliased call ran");
+    }
+
+    /// `tool_filter` narrows what a request advertises, so it has to narrow what
+    /// dispatch accepts too — otherwise the filtered-out tool is callable by
+    /// name, which is the exact hole this check closes one level up.
+    #[tokio::test]
+    async fn dispatch_tools_honours_the_stage_tool_filter() {
+        let (jtx, _jrx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+        world.insert_resource(ToolStage(jtx));
+        let mut offers = offering(&["read_file", "write_file"]);
+        offers.tool_filter = Some(vec!["read_file".to_string()]);
+        let (_, result) = infer_with(vec![tc("c1", "write_file")]);
+        let e = world
+            .spawn((agent_state(), offers, result, conv_window(), ReadyForTools))
+            .id();
+
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_tools);
+        s.run(&mut world);
+
+        let text = conversation_text(&world, e);
+        assert!(text.contains("not available in this stage"), "{text}");
+    }
+
+    /// An empty `tool_filter` means "no narrowing", matching the request
+    /// builder — not "nothing is allowed".
+    #[tokio::test]
+    async fn dispatch_tools_treats_an_empty_tool_filter_as_no_narrowing() {
+        let (jtx, mut jrx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+        world.insert_resource(ToolStage(jtx));
+        let mut offers = offering(&["read_file"]);
+        offers.tool_filter = Some(vec![]);
+        let (_, result) = infer_with(vec![tc("c1", "read_file")]);
+        let e = world
+            .spawn((agent_state(), offers, result, conv_window(), ReadyForTools))
+            .id();
+
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_tools);
+        s.run(&mut world);
+
+        assert!(
+            world.get::<ContextToolResults>(e).unwrap().0.is_empty(),
+            "nothing was refused"
+        );
+        assert!(jrx.try_recv().is_ok(), "the call ran");
+    }
+
+    /// Context tools go through the same gate. They are applied inline rather
+    /// than on the lane, so a check that lived only in the lane would have left
+    /// `context_write` callable from a stage that never granted it.
+    #[tokio::test]
+    async fn dispatch_tools_refuses_an_unoffered_context_tool() {
+        let (jtx, _jrx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+        world.insert_resource(ToolStage(jtx));
+        let (_, result) = infer_with(vec![ctx_call("c1", "notes", "smuggled")]);
+        let e = world
+            .spawn((
+                agent_state(),
+                offering(&["read_file"]),
+                result,
+                notes_window(),
+                ReadyForTools,
+            ))
+            .id();
+
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_tools);
+        s.run(&mut world);
+
+        let text = conversation_text(&world, e);
+        assert!(text.contains("not available in this stage"), "{text}");
+        // And nothing was written to the region.
+        let w = world.get::<ContextWindow>(e).unwrap();
+        assert!(w.get_region("notes").unwrap().content.is_empty());
     }
 
     #[tokio::test]
@@ -9344,6 +9675,13 @@ mod tests {
             fcall("3", "list_dir", serde_json::json!({"path": "d"})),  // untracked tool
             fcall("4", "write_file", serde_json::json!({"path": "e"})), // no content
             fcall("5", "read_file", serde_json::json!({"path": "f"})), // result is denied
+            // Never offered by this stage: the write did not happen, so tracking
+            // it would put a file in the region that does not exist on disk.
+            fcall(
+                "6",
+                "write_file",
+                serde_json::json!({"path": "g", "content": "print(1)"}),
+            ),
         ];
         let mut merged = vec![
             ("1".to_string(), "[error] boom".to_string()),
@@ -9351,6 +9689,10 @@ mod tests {
             ("3".to_string(), "listing".to_string()),
             ("4".to_string(), "written".to_string()),
             ("5".to_string(), "[denied] nope".to_string()),
+            (
+                "6".to_string(),
+                "[unavailable] 'write_file' is not available in this stage.".to_string(),
+            ),
         ];
         apply_file_tracking(&mut w, &ft, &calls, &mut merged);
         for (_, r) in &merged {
@@ -9535,6 +9877,36 @@ mod tests {
         );
         assert_eq!(progress.modifying_tool_calls, 0);
         assert_eq!(progress.blocked_modification_calls, 1);
+        assert_eq!(flags.modified_file_count, 0);
+        assert!(flags.modified_files.is_empty());
+    }
+
+    /// A write the stage never offered is not a modification. It matters twice
+    /// over: `modified_files` in `meta.json` would name a file that was never
+    /// written, and `modifying_tool_calls` is what a `require_modifications`
+    /// transition gate reads — so a stage that had every write refused could
+    /// still answer "yes, I did work" on the way out.
+    #[test]
+    fn collect_tools_ignores_a_write_the_stage_never_offered() {
+        let (progress, flags) = count_modifications(
+            &[
+                (
+                    "write_file",
+                    serde_json::json!({"path": "smuggled.py"}),
+                    "[unavailable] 'write_file' is not available in this stage. \
+                     You may call: read_file, list_dir.",
+                ),
+                (
+                    "edit_file",
+                    serde_json::json!({"path": "also-not.rs"}),
+                    "[unavailable] 'edit_file' is not available in this stage.",
+                ),
+            ],
+            &[],
+        );
+        assert_eq!(progress.modifying_tool_calls, 0);
+        // Not "blocked" either — nobody declined it; the stage never had it.
+        assert_eq!(progress.blocked_modification_calls, 0);
         assert_eq!(flags.modified_file_count, 0);
         assert!(flags.modified_files.is_empty());
     }

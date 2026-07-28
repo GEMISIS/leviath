@@ -222,6 +222,120 @@ mod tests {
         }
     }
 
+    /// Every name in a stage's `available_tools` has to resolve to a tool that
+    /// exists, and every `[stages.X.tool_permissions]` key has to be a tool that
+    /// stage actually grants.
+    ///
+    /// A typo used to be invisible: `filter_tools_by_available` silently omits a
+    /// name matching nothing, so the stage just quietly advertised one tool
+    /// fewer. Now that dispatch refuses anything a stage did not offer, the same
+    /// typo means the model is told the tool does not exist and the stage cannot
+    /// do its job — a silent omission became a silent failure, which is worth a
+    /// test. A permission entry for an ungranted tool is the same drift seen
+    /// from the other side: it reads as a grant and is not one.
+    ///
+    /// An invariant over all discovered agents rather than a list of names —
+    /// naming them would stop testing the property the moment the list drifted.
+    #[test]
+    fn every_stage_tool_name_resolves_and_every_permission_names_a_granted_tool() {
+        // Sub-agent tools are provided by the host, not `BuiltinTools`.
+        const SUBAGENT: &[&str] = &[
+            "spawn_agent",
+            "check_agent",
+            "wait_for_agent",
+            "send_to_agent",
+            "kill_agent",
+        ];
+        let builtin = leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(
+            std::path::PathBuf::from("."),
+        ))
+        .names();
+
+        for agent in BUNDLED_AGENTS {
+            // This agent's own Rhai tools: `tools/<name>.rhai` defines `<name>`.
+            let scripts: Vec<&str> = agent
+                .files
+                .iter()
+                .filter_map(|(rel, _)| rel.strip_prefix("tools/"))
+                .filter_map(|f| f.strip_suffix(".rhai"))
+                .collect();
+            let manifest = agent
+                .files
+                .iter()
+                .find(|(rel, _)| *rel == "agent.leviath")
+                .map(|(_, c)| *c)
+                .expect("every bundled agent has a manifest");
+            let parsed = leviath_core::manifest::parse_manifest(manifest);
+            assert!(
+                parsed.is_ok(),
+                "bundled agent {} does not parse",
+                agent.name
+            );
+            let blueprint = parsed.expect("asserted Ok just above");
+
+            for stage in &blueprint.stages {
+                for tool in &stage.available_tools {
+                    // `server__tool` is an MCP tool, resolvable only once that
+                    // server is installed — not something a manifest can be
+                    // checked against here.
+                    let known = tool.contains("__")
+                        || builtin.iter().any(|b| b == tool)
+                        || SUBAGENT.contains(&tool.as_str())
+                        || scripts.contains(&tool.as_str());
+                    assert!(
+                        known,
+                        "{}: stage '{}' grants '{}', which is not a built-in,                          a sub-agent tool, or one of this agent's own tools/*.rhai",
+                        agent.name, stage.name, tool
+                    );
+                }
+                for granted in stage.tool_permissions.keys() {
+                    assert!(
+                        stage.available_tools.contains(granted),
+                        "{}: stage '{}' sets a permission for '{}', which it does                          not grant in available_tools",
+                        agent.name,
+                        stage.name,
+                        granted
+                    );
+                }
+            }
+        }
+    }
+
+    /// The invariant above can actually fail — a check over shipped data that
+    /// happens to pass says nothing about whether it would catch drift.
+    #[test]
+    fn the_stage_tool_invariant_rejects_a_typo_and_an_orphan_permission() {
+        let builtin = leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(
+            std::path::PathBuf::from("."),
+        ))
+        .names();
+        assert!(
+            !builtin.iter().any(|b| b == "raed_file"),
+            "a misspelled tool must not resolve"
+        );
+
+        let manifest = r#"
+[agent]
+name = "x"
+version = "0.1.0"
+description = "x"
+
+[stages.only]
+model = { provider = "anthropic", model = "m" }
+available_tools = ["read_file"]
+
+[stages.only.tool_permissions]
+write_file = "allow"
+"#;
+        let bp = leviath_core::manifest::parse_manifest(manifest)
+            .expect("the fixture parses; it is the invariant that should object");
+        let stage = &bp.stages[0];
+        assert!(
+            !stage.available_tools.contains(&"write_file".to_string()),
+            "the orphan-permission arm has something to catch"
+        );
+    }
+
     #[test]
     fn bundled_agent_names_are_unique() {
         let mut names: Vec<&str> = BUNDLED_AGENTS.iter().map(|a| a.name).collect();

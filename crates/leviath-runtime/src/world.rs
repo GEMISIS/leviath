@@ -846,11 +846,24 @@ mod tests {
         }
     }
 
+    /// A stage advertising the tools the scripted responses here actually call.
+    ///
+    /// It used to advertise none, which stopped mattering the moment dispatch
+    /// began refusing tools a stage never offered: every end-to-end test that
+    /// drives a tool call short-circuited into a refusal, and the tool service
+    /// was never reached at all.
     fn stage(model: &str) -> StageInference {
         StageInference {
             provider_name: "script".to_string(),
             model: model.to_string(),
-            tools: vec![],
+            tools: ["do", "read"]
+                .iter()
+                .map(|n| leviath_providers::Tool {
+                    name: (*n).to_string(),
+                    description: String::new(),
+                    parameters: serde_json::json!({}),
+                })
+                .collect(),
             tool_filter: None,
         }
     }

@@ -110,7 +110,8 @@ nothing is skipped:
 
 For each finding give: location, the concrete failure scenario (inputs/state →
 wrong result or crash), a severity (critical / warning / info), and a recommended
-fix. Append each finding to `findings` (context_append).
+fix. Recommend it — do not apply it. This agent reads and judges; no stage here
+has a tool that writes or edits a file, and calling one is refused. Append each finding to `findings` (context_append).
 
 Keep a running tally in the `severity_index` region: rewrite it with
 context_write each time the counts change, e.g. "critical: 2, warning: 5, info: 3".
