@@ -35,9 +35,11 @@ ignore = [
     # advisory reports abandonment, not a defect. It reaches us through ratatui
     # 0.29 and tui-textarea, neither of which we control, and it is a proc-macro:
     # it runs at build time and contributes no code to the shipped binary.
-    # Tracked for removal with the ratatui 0.30 upgrade — re-check this entry
-    # then and delete it if the dependency is gone.
-    { id = "RUSTSEC-2024-0436", reason = "unmaintained-only advisory on a build-time proc-macro pulled in by ratatui; revisit with the ratatui 0.30 upgrade" },
+    # Removing it means upgrading to ratatui 0.30, which is currently blocked:
+    # tui-textarea's latest release (0.7.0) is pinned to ratatui 0.29, and
+    # bumping ratatui alone puts two incompatible crossterm `KeyEvent` types in
+    # the graph. Re-check when tui-textarea publishes a ratatui-0.30 release.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained-only advisory on a build-time proc-macro pulled in by ratatui 0.29; the upgrade past it is blocked on tui-textarea" },
 ]
 
 [licenses]

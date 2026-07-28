@@ -1503,7 +1503,8 @@ mod tests {
     fn collect_drops_outcome_for_missing_agent() {
         let (mut world, tx) = collect_world();
         tx.send(InteractionPointOutcome {
-            entity: Entity::from_raw(999),
+            entity: Entity::from_raw_u32(999)
+                .expect("a small literal index is always a valid entity id"),
             decision: PointOutcome::Abort,
         })
         .unwrap();
@@ -1521,7 +1522,7 @@ mod tests {
         let task = {
             let hub = hub.clone();
             tokio::spawn(run_interaction_point(
-                Entity::from_raw(1),
+                Entity::from_raw_u32(1).expect("a small literal index is always a valid entity id"),
                 hub,
                 "run".to_string(),
                 point,
@@ -1589,7 +1590,7 @@ mod tests {
         let task = {
             let hub = hub.clone();
             tokio::spawn(run_interaction_point(
-                Entity::from_raw(1),
+                Entity::from_raw_u32(1).expect("a small literal index is always a valid entity id"),
                 hub,
                 "run".to_string(),
                 plan_point(),

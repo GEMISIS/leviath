@@ -55,8 +55,8 @@ leviath-tools = { path = "crates/leviath-tools" }
 leviath-sys = { path = "crates/leviath-sys" }
 
 # External dependencies
-bevy_ecs = { version = "0.15", features = ["multi_threaded"] }
-bevy_tasks = "0.15"
+bevy_ecs = { version = "0.19", features = ["multi_threaded"] }
+bevy_tasks = "0.19"
 tokio = { version = "1.41", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -69,7 +69,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2.0"
-toml = { version = "0.8", features = ["preserve_order"] }
+toml = { version = "1.0", features = ["preserve_order"] }
 anyhow = "1.0"
 chrono = "0.4"
 rhai = { version = "1.20", features = ["sync", "serde"] }
@@ -78,7 +78,7 @@ glob = "0.3"
 # the outbound-URL policy (`leviath_core::net`) without depending on reqwest.
 # `reqwest::Url` IS this crate's `Url`, so the two interoperate directly.
 url = "2.5"
-tiktoken-rs = "0.5"
+tiktoken-rs = "0.12"
 async-trait = "0.1"
 futures = "0.3"
 sha2 = "0.10"
@@ -97,11 +97,17 @@ libc = "0.2"
 # "socket" is for the control socket's peer-credential check (SO_PEERCRED on
 # Linux, LOCAL_PEERCRED on macOS/BSD), which is what stops another local user
 # from driving the daemon.
-nix = { version = "0.28", default-features = false, features = ["signal", "process", "user", "socket"] }
+nix = { version = "0.31", default-features = false, features = ["signal", "process", "user", "socket"] }
 temp-env = "0.3"
+# Held at 0.28/0.29 by `tui-textarea`, whose latest release (0.7.0) is pinned to
+# ratatui 0.29 and crossterm 0.28. Bumping ratatui alone puts two incompatible
+# `KeyEvent` types in the graph, which fails at the `Input: From<KeyEvent>`
+# boundary. Revisit when tui-textarea publishes a ratatui-0.30 release; that also
+# clears the RUSTSEC-2024-0436 (`paste`) ignore in deny.toml, which arrives
+# through ratatui 0.29.
 crossterm = "0.28"
 ratatui = "0.29"
-pulldown-cmark = "0.12"
+pulldown-cmark = "0.13"
 tui-textarea = { version = "0.7", features = ["crossterm"] }
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["cors"] }

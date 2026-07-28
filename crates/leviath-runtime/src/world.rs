@@ -68,7 +68,9 @@ const MAX_TICK_FAILURES_PER_ROUND: usize = 8;
 /// the (thread-local) [`crate::tick_scope`] (issue #109).
 fn tick_schedule() -> Schedule {
     let mut schedule = Schedule::default();
-    schedule.set_executor_kind(bevy_ecs::schedule::ExecutorKind::SingleThreaded);
+    // bevy_ecs 0.19 replaced `set_executor_kind(ExecutorKind::…)` with
+    // `set_executor(<executor instance>)`.
+    schedule.set_executor(bevy_ecs::schedule::SingleThreadedExecutor::new());
     schedule
 }
 
@@ -500,7 +502,10 @@ impl PipelineWorld {
     #[cfg(test)]
     pub(crate) fn add_test_system<M>(
         &mut self,
-        system: impl bevy_ecs::schedule::IntoSystemConfigs<M>,
+        // `IntoSystemConfigs` became `IntoScheduleConfigs<ScheduleSystem, _>` in
+        // bevy_ecs 0.19 (it now also describes observer and other schedulables,
+        // so the schedulable kind is an explicit parameter).
+        system: impl bevy_ecs::schedule::IntoScheduleConfigs<bevy_ecs::system::ScheduleSystem, M>,
     ) {
         self.schedule.add_systems(system);
     }
@@ -647,12 +652,18 @@ fn run_isolated(schedule: &mut Schedule, world: &mut World) -> Result<(), TickPa
 /// tick silently skips them and only runs the tail of the chain — a partial
 /// tick that would, among other things, keep `dispatch_persistence` from ever
 /// seeing an agent we just failed. Swapping the executor kind and back is the
-/// public API for forcing a rebuild (`set_executor_kind` is a no-op when the
-/// kind is unchanged).
+/// public API for forcing a rebuild.
+///
+/// One call suffices on bevy_ecs 0.19: `set_executor` takes an executor
+/// *instance* and unconditionally replaces `schedule.executor` with it (clearing
+/// `executor_initialized` too), so the fresh `SingleThreadedExecutor` arrives
+/// with an empty `completed_systems`.
+///
+/// On 0.15 this had to set two different *kinds* and swap back, because
+/// `set_executor_kind` was a no-op when the kind was unchanged — and
+/// `SimpleExecutor`, the other kind it used, no longer exists.
 fn reset_executor(schedule: &mut Schedule) {
-    use bevy_ecs::schedule::ExecutorKind;
-    schedule.set_executor_kind(ExecutorKind::Simple);
-    schedule.set_executor_kind(ExecutorKind::SingleThreaded);
+    schedule.set_executor(bevy_ecs::schedule::SingleThreadedExecutor::new());
 }
 
 #[cfg(test)]
@@ -685,7 +696,10 @@ mod tests {
         // A system that panics *while working on a specific agent* — the shape
         // every real pipeline system has.
         fn boom_on_agent_system() {
-            crate::tick_scope::enter(Entity::from_raw(41));
+            crate::tick_scope::enter(
+                Entity::from_raw_u32(41)
+                    .expect("a small literal index is always a valid entity id"),
+            );
             panic!("agent-scoped panic");
         }
         let mut world = World::new();
@@ -709,7 +723,13 @@ mod tests {
         blamed.add_systems(boom_on_agent_system);
         let err = with_silent_panics(|| run_isolated(&mut blamed, &mut world))
             .expect_err("the panic must be caught");
-        assert_eq!(err.entity, Some(Entity::from_raw(41)));
+        assert_eq!(
+            err.entity,
+            Some(
+                Entity::from_raw_u32(41)
+                    .expect("a small literal index is always a valid entity id")
+            )
+        );
         assert_eq!(err.message, "agent-scoped panic");
 
         // A later clean tick must not inherit the previous tick's entity.
@@ -1220,7 +1240,13 @@ mod tests {
     #[tokio::test]
     async fn agent_status_is_none_for_unknown_entity() {
         let world = build_world(registry_with(vec![]));
-        assert_eq!(world.agent_status(Entity::from_raw(999)), None);
+        assert_eq!(
+            world.agent_status(
+                Entity::from_raw_u32(999)
+                    .expect("a small literal index is always a valid entity id")
+            ),
+            None
+        );
     }
 
     #[tokio::test]
@@ -1257,9 +1283,15 @@ mod tests {
     #[tokio::test]
     async fn status_ops_return_false_for_unknown_entity() {
         let mut world = build_world(registry_with(vec![]));
-        assert!(!world.pause(Entity::from_raw(999)));
-        assert!(!world.resume(Entity::from_raw(999)));
-        assert!(!world.cancel(Entity::from_raw(999)));
+        assert!(!world.pause(
+            Entity::from_raw_u32(999).expect("a small literal index is always a valid entity id")
+        ));
+        assert!(!world.resume(
+            Entity::from_raw_u32(999).expect("a small literal index is always a valid entity id")
+        ));
+        assert!(!world.cancel(
+            Entity::from_raw_u32(999).expect("a small literal index is always a valid entity id")
+        ));
     }
 
     #[tokio::test]

@@ -355,7 +355,8 @@ pub enum WorldEvent {
 /// per-agent [`WorldEvent::Log`] lines — into the same stream the control
 /// transport serves. Absent in worlds that don't stream (test / `lev run`), where
 /// systems that depend on it become no-ops.
-#[derive(bevy_ecs::system::Resource, Clone)]
+// `Resource` moved from `bevy_ecs::system` to `bevy_ecs::resource` in 0.19.
+#[derive(bevy_ecs::resource::Resource, Clone)]
 pub struct WorldEventSink(pub broadcast::Sender<WorldEvent>);
 
 /// A short, stable status label for [`WorldEvent`].
@@ -2541,7 +2542,7 @@ mod tests {
         assert!(p.infer(req).await.is_err()); // exhausted
 
         let exec = NoTools.exec_for(
-            Entity::from_raw(1),
+            Entity::from_raw_u32(1).expect("a small literal index is always a valid entity id"),
             vec![leviath_providers::ToolCall {
                 id: "c".to_string(),
                 name: "n".to_string(),

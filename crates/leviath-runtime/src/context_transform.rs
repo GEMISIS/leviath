@@ -816,7 +816,8 @@ mod tests {
         .unwrap();
         // A stale (despawned) entity is skipped without panic.
         tx.send(CompactionOutcome {
-            entity: Entity::from_raw(9999),
+            entity: Entity::from_raw_u32(9999)
+                .expect("a small literal index is always a valid entity id"),
             result: Ok(vec![("task".to_string(), "ignored".to_string())]),
         })
         .unwrap();

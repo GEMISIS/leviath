@@ -1030,7 +1030,8 @@ mod tests {
         let e = spawn_parent(&mut world, bp, r#"[{"id":"deep"}]"#);
         // Parent is itself a depth-3 sub-agent ⇒ child would be depth 4 > 3.
         world.entity_mut(e).insert(ParentRef {
-            parent_entity: Entity::from_raw(999),
+            parent_entity: Entity::from_raw_u32(999)
+                .expect("a small literal index is always a valid entity id"),
             parent_agent_id: "root".to_string(),
             depth: 3,
         });
@@ -1052,7 +1053,10 @@ mod tests {
         );
         // Pre-existing children container with a generous cap.
         world.entity_mut(e).insert(SubAgentChildren {
-            children: vec![Entity::from_raw(1000)],
+            children: vec![
+                Entity::from_raw_u32(1000)
+                    .expect("a small literal index is always a valid entity id"),
+            ],
             max_child_depth: 9,
         });
         fan_out_split(&mut world);
@@ -1111,7 +1115,14 @@ mod tests {
         let running = world.spawn(parent_state()).id(); // Active
         assert_eq!(worker_terminal_result(&world, running), None);
 
-        assert!(worker_terminal_result(&world, Entity::from_raw(4242)).is_some_and(|r| r.is_err()));
+        assert!(
+            worker_terminal_result(
+                &world,
+                Entity::from_raw_u32(4242)
+                    .expect("a small literal index is always a valid entity id")
+            )
+            .is_some_and(|r| r.is_err())
+        );
     }
 
     #[test]
@@ -1147,8 +1158,19 @@ mod tests {
     #[test]
     fn set_status_is_a_noop_for_a_missing_agent() {
         let mut world = World::new();
-        set_status(&mut world, Entity::from_raw(77), AgentStatus::Complete);
-        assert_eq!(agent_status(&world, Entity::from_raw(77)), None);
+        set_status(
+            &mut world,
+            Entity::from_raw_u32(77).expect("a small literal index is always a valid entity id"),
+            AgentStatus::Complete,
+        );
+        assert_eq!(
+            agent_status(
+                &world,
+                Entity::from_raw_u32(77)
+                    .expect("a small literal index is always a valid entity id")
+            ),
+            None
+        );
     }
 
     // ── force_transition (pipeline helper) edge cases via fan-out ─────────────
@@ -1181,7 +1203,11 @@ mod tests {
         assert!(world.get::<ReadyToInfer>(e).is_some());
 
         // Despawned entity: no panic, no effect.
-        force_transition(&mut world, Entity::from_raw(9191), 1);
+        force_transition(
+            &mut world,
+            Entity::from_raw_u32(9191).expect("a small literal index is always a valid entity id"),
+            1,
+        );
     }
 
     #[test]

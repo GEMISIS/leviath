@@ -110,11 +110,11 @@ mod tests {
     fn enter_records_and_clear_forgets() {
         clear();
         assert_eq!(current(), None);
-        let e = Entity::from_raw(7);
+        let e = Entity::from_raw_u32(7).expect("a small literal index is always a valid entity id");
         enter(e);
         assert_eq!(current(), Some(e));
         // A second enter replaces rather than nests.
-        let f = Entity::from_raw(9);
+        let f = Entity::from_raw_u32(9).expect("a small literal index is always a valid entity id");
         enter(f);
         assert_eq!(current(), Some(f));
         clear();
@@ -126,7 +126,7 @@ mod tests {
         // The whole point: the slot must survive unwinding, which is why there
         // is no `Drop` guard.
         clear();
-        let e = Entity::from_raw(3);
+        let e = Entity::from_raw_u32(3).expect("a small literal index is always a valid entity id");
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         let caught = std::panic::catch_unwind(|| {
