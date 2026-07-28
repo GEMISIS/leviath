@@ -30,16 +30,44 @@ impl AgentBundler {
     /// Create a new bundler.
     pub fn new() -> Self {
         Self {
+            // A publishing denylist has to be exhaustive to be correct, and this
+            // one was not: it named `.env`, `.env.local` and `.env.production`
+            // but matched exact names and `*.suffix` only, so `.env.staging`,
+            // `.env.test`, `id_rsa`, `.netrc`, `.npmrc`, `credentials.json` and
+            // `service-account.json` were all bundled and shipped.
+            //
+            // Still a denylist — an allowlist would break every agent that ships
+            // an unanticipated data file — but a `.env*` prefix rule now covers
+            // the whole family, and the exact-name entries are the credential
+            // files that actually turn up in project directories.
             exclude_patterns: vec![
                 ".git".to_string(),
                 ".DS_Store".to_string(),
                 "target".to_string(),
-                ".env".to_string(),
-                ".env.local".to_string(),
-                ".env.production".to_string(),
+                // Every `.env` variant, not three of them.
+                ".env*".to_string(),
                 "*.key".to_string(),
                 "*.pem".to_string(),
                 "*.p12".to_string(),
+                "*.pfx".to_string(),
+                "*.jks".to_string(),
+                "*.keystore".to_string(),
+                "id_rsa*".to_string(),
+                "id_dsa*".to_string(),
+                "id_ecdsa*".to_string(),
+                "id_ed25519*".to_string(),
+                ".netrc".to_string(),
+                ".npmrc".to_string(),
+                ".pypirc".to_string(),
+                ".htpasswd".to_string(),
+                "credentials".to_string(),
+                "credentials.json".to_string(),
+                "service-account.json".to_string(),
+                "secrets.json".to_string(),
+                "secrets.yaml".to_string(),
+                "secrets.yml".to_string(),
+                ".aws".to_string(),
+                ".ssh".to_string(),
                 "config.toml".to_string(),
                 ".leviath".to_string(),
                 "*.leviath-bundle".to_string(),
@@ -148,10 +176,23 @@ impl AgentBundler {
     ///
     /// Supports wildcard patterns like `*.key` (matches any file ending in `.key`)
     /// and exact filename matches like `.env`.
+    /// Whether `filename` matches any exclusion pattern.
+    ///
+    /// Three shapes, which is all the patterns here need:
+    ///
+    /// - `*.ext` — matches by extension (`server.key`).
+    /// - `prefix*` — matches by leading text (`.env*` covers `.env`,
+    ///   `.env.staging`, `.env.test`; `id_rsa*` covers `id_rsa` and
+    ///   `id_rsa.pub`). Added because the exact-name-only matcher shipped
+    ///   `.env.staging` while excluding `.env.production`, which is precisely
+    ///   the kind of gap a hand-listed denylist accumulates.
+    /// - anything else — matched exactly.
     pub fn should_exclude(&self, filename: &str) -> bool {
         self.exclude_patterns.iter().any(|pattern| {
             if let Some(suffix) = pattern.strip_prefix("*.") {
                 filename.ends_with(&format!(".{}", suffix))
+            } else if let Some(prefix) = pattern.strip_suffix('*') {
+                filename.starts_with(prefix)
             } else {
                 filename == pattern
             }
@@ -226,6 +267,63 @@ mod tests {
         assert!(bundler.should_exclude(".env"));
         assert!(bundler.should_exclude(".env.local"));
         assert!(bundler.should_exclude(".env.production"));
+    }
+
+    /// The variants the old exact-name list shipped. `.env.production` was
+    /// excluded and `.env.staging` was not, which is the gap a hand-maintained
+    /// denylist accumulates — so the pattern covers the family now.
+    #[test]
+    fn excludes_every_env_variant_not_just_the_three_that_were_listed() {
+        let bundler = AgentBundler::new();
+        for name in [
+            ".env.staging",
+            ".env.test",
+            ".env.development",
+            ".env.local.backup",
+        ] {
+            assert!(bundler.should_exclude(name), "{name} must not be bundled");
+        }
+    }
+
+    /// Credential files that turn up in real project directories and were all
+    /// bundled and shipped.
+    #[test]
+    fn excludes_common_credential_files() {
+        let bundler = AgentBundler::new();
+        for name in [
+            "id_rsa",
+            "id_rsa.pub",
+            "id_ed25519",
+            ".netrc",
+            ".npmrc",
+            ".pypirc",
+            "credentials.json",
+            "service-account.json",
+            "secrets.yaml",
+            ".aws",
+            ".ssh",
+            "keystore.jks",
+            "cert.pfx",
+        ] {
+            assert!(bundler.should_exclude(name), "{name} must not be bundled");
+        }
+    }
+
+    /// The patterns must not swallow ordinary agent files.
+    #[test]
+    fn does_not_exclude_ordinary_agent_files() {
+        let bundler = AgentBundler::new();
+        for name in [
+            "agent.leviath",
+            "README.md",
+            "prompt.txt",
+            "web_fetch.rhai",
+            "environment.md",
+            "identity.md",
+            "config.json",
+        ] {
+            assert!(!bundler.should_exclude(name), "{name} should be bundled");
+        }
     }
 
     #[test]

@@ -529,12 +529,25 @@ impl Config {
     /// After loading from file (or using defaults), environment variables are
     /// checked as fallbacks. Env vars override config file values if set.
     pub fn load() -> anyhow::Result<Self> {
-        // Load .env file from current directory (silently ignored if missing).
-        // `LEVIATH_SKIP_DOTENV` lets tests fully isolate `Config::load()` from
-        // a real `.env` in a parent directory (dotenvy walks upward looking
-        // for one, and won't override env vars a test has already cleared).
+        // Load a `.env` from the current directory only.
+        //
+        // `dotenvy::dotenv()` searches the cwd *and every ancestor*, which is
+        // the wrong shape for a coding agent: `lev` is designed to be run inside
+        // cloned repositories, so an untrusted repo's `.env` — or one in any
+        // directory above it — was loaded into the process environment. That is
+        // load-bearing well beyond provider keys: `PATH` and `SHELL` decide what
+        // gets executed, `EDITOR`/`VISUAL` are split and spawned, `OLLAMA_HOST`
+        // redirects inference to an attacker's endpoint, `LEVIATH_HOME`
+        // relocates the directories agent scripts are discovered from, and
+        // `LEVIATH_API_TOKEN` sets a known credential on the agent-spawning API.
+        //
+        // `from_filename` reads only `./.env`. Still the user's own working
+        // directory, so this is not a trust boundary on its own — but it is one
+        // directory the user chose rather than an unbounded walk up the tree.
+        //
+        // `LEVIATH_SKIP_DOTENV` lets tests isolate `Config::load()` completely.
         if std::env::var_os("LEVIATH_SKIP_DOTENV").is_none() {
-            let _ = dotenvy::dotenv();
+            let _ = dotenvy::from_filename(".env");
         }
 
         let config = Self::load_from_path(&Self::config_path())?;

@@ -42,6 +42,6 @@ pub use process::peer_uid;
 pub use process::{configure_detached, current_uid, kill_process_group};
 pub use sandbox::{
     ContainerRunSpec, KNOWN_ENGINES, container_exec_argv, container_rm_argv, container_run_argv,
-    detect_container_engine, namespace_argv, namespace_supported,
+    detect_container_engine, mount_allowed, namespace_argv, namespace_supported,
 };
 pub use tty::osc52_write_via;

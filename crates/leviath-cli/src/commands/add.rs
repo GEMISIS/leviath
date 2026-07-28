@@ -80,6 +80,7 @@ async fn execute_with(
             installed.version,
             installed.path.display()
         );
+        print_capabilities(&installed.name, &installed.path);
     } else {
         // Installing from the online registry is cut for v1 — only local agent
         // directories and `.leviath-bundle` files are supported. Fail with a
@@ -94,6 +95,166 @@ async fn execute_with(
     }
 
     Ok(())
+}
+
+/// The security-relevant things an agent package carries, as human-readable
+/// lines.
+///
+/// `lev add` used to print only "Installed agent 'x' to …". The user was never
+/// told that the package ships executable `.rhai` tool scripts, pre-approves its
+/// own `shell`, turns the sandbox off, or runs a command at spawn before any
+/// prompt. Every one of those is a decision the user is making by installing,
+/// and they could not see any of it.
+///
+/// Empty means the package declares nothing unusual — a plain prompt-and-stages
+/// agent — in which case there is nothing to warn about and we stay quiet.
+///
+/// Pure over `(manifest_toml, dir_entries)` so the whole table is testable
+/// without a filesystem or an installed agent.
+pub(crate) fn describe_capabilities(manifest_toml: &str, script_tools: &[String]) -> Vec<String> {
+    let mut findings = Vec::new();
+    let Ok(value) = manifest_toml.parse::<toml::Value>() else {
+        // An unparseable manifest is reported by the installer itself; there is
+        // nothing to inventory.
+        return findings;
+    };
+
+    if !script_tools.is_empty() {
+        findings.push(format!(
+            "ships {} executable script tool(s): {}",
+            script_tools.len(),
+            script_tools.join(", ")
+        ));
+    }
+
+    // Tool permissions the package grants itself, at agent or stage level.
+    let mut granted: Vec<String> = Vec::new();
+    let mut collect_grants = |table: Option<&toml::Value>| {
+        if let Some(t) = table.and_then(|v| v.as_table()) {
+            for (tool, policy) in t {
+                if policy.as_str() == Some("allow") && !granted.contains(tool) {
+                    granted.push(tool.clone());
+                }
+            }
+        }
+    };
+    collect_grants(value.get("tool_permissions"));
+    if let Some(stages) = value.get("stages").and_then(|v| v.as_table()) {
+        for stage in stages.values() {
+            collect_grants(stage.get("tool_permissions"));
+        }
+    }
+    if !granted.is_empty() {
+        granted.sort();
+        findings.push(format!(
+            "pre-approves these tools (no prompt at run time): {}",
+            granted.join(", ")
+        ));
+    }
+
+    // Script host functions it grants itself.
+    if let Some(t) = value
+        .get("tool_script_permissions")
+        .and_then(|v| v.as_table())
+    {
+        let mut allowed: Vec<&String> = t
+            .iter()
+            .filter(|(_, v)| v.as_str() == Some("allow"))
+            .map(|(k, _)| k)
+            .collect();
+        if !allowed.is_empty() {
+            allowed.sort();
+            findings.push(format!(
+                "requests script host access: {}",
+                allowed
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+
+    // A sandbox opt-out.
+    if let Some(kind) = value
+        .get("sandbox")
+        .and_then(|v| v.get("kind"))
+        .and_then(|v| v.as_str())
+        && kind == "none"
+    {
+        findings.push("asks to run tools directly on the host (sandbox = none)".to_string());
+    }
+
+    // Command seeds run at spawn, before the first inference and therefore
+    // before any approval prompt — the one place a manifest executes something
+    // without being asked.
+    let seed_commands = collect_seed_commands(&value);
+    for command in seed_commands {
+        findings.push(format!(
+            "runs this command at startup, before any prompt: `{command}`"
+        ));
+    }
+
+    findings
+}
+
+/// Every `seed = { command = "..." }` in a manifest, from agent-level and
+/// stage-level `[context.regions]` blocks alike.
+fn collect_seed_commands(value: &toml::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut scan = |regions: Option<&toml::Value>| {
+        if let Some(t) = regions.and_then(|v| v.as_table()) {
+            for region in t.values() {
+                if let Some(cmd) = region
+                    .get("seed")
+                    .and_then(|s| s.get("command"))
+                    .and_then(|c| c.as_str())
+                {
+                    out.push(cmd.to_string());
+                }
+            }
+        }
+    };
+    scan(value.get("context").and_then(|c| c.get("regions")));
+    if let Some(stages) = value.get("stages").and_then(|v| v.as_table()) {
+        for stage in stages.values() {
+            scan(stage.get("context").and_then(|c| c.get("regions")));
+        }
+    }
+    out
+}
+
+/// Print the capability inventory for a freshly installed agent, if it has one.
+fn print_capabilities(name: &str, install_dir: &Path) {
+    let manifest = std::fs::read_to_string(install_dir.join("agent.leviath")).unwrap_or_default();
+    let scripts = script_tool_names(install_dir);
+    let findings = describe_capabilities(&manifest, &scripts);
+    if findings.is_empty() {
+        return;
+    }
+    println!("\n  '{name}' asks for the following. Review before running it:");
+    for finding in &findings {
+        println!("    - {finding}");
+    }
+    println!("  Inspect it with:  lev validate {name}");
+}
+
+/// Names of the `.rhai` tool scripts an installed agent ships.
+fn script_tool_names(install_dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(install_dir.join("tools"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            match path.extension().and_then(|x| x.to_str()) {
+                Some("rhai") => path.file_name()?.to_str().map(str::to_string),
+                _ => None,
+            }
+        })
+        .collect();
+    names.sort();
+    names
 }
 
 /// Copy a plain agent directory into `<agents_dir>/<name>/`.
@@ -127,6 +288,7 @@ fn install_from_dir(src: &Path, agents_dir: &Path) -> anyhow::Result<()> {
 
     copy_dir_recursive(src, &install_dir)?;
     println!("Installed agent '{}' to {}", name, install_dir.display());
+    print_capabilities(&name, &install_dir);
     println!("Run with:  lev run {} --task \"...\"", name);
     Ok(())
 }
@@ -186,6 +348,101 @@ fn parse_agent_name(content: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::describe_capabilities;
+
+    /// A plain agent declares nothing unusual, so the inventory stays quiet —
+    /// a warning that fires on everything teaches people to skip it.
+    #[test]
+    fn an_ordinary_agent_has_nothing_to_report() {
+        let manifest = "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n\
+                        [stages.main]\nprompt = \"p\"\n";
+        assert!(describe_capabilities(manifest, &[]).is_empty());
+    }
+
+    #[test]
+    fn script_tools_are_listed_by_name() {
+        let findings = describe_capabilities(
+            "[agent]\nname = \"x\"\n",
+            &["web_fetch.rhai".to_string(), "post.rhai".to_string()],
+        );
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].contains("2 executable script tool"));
+        assert!(findings[0].contains("web_fetch.rhai"));
+    }
+
+    /// The case that matters most: a package that pre-approves its own shell.
+    /// Under the permission floor a user's explicit config still wins, but where
+    /// the user has said nothing this is a real grant they should see.
+    #[test]
+    fn self_granted_tool_permissions_are_reported() {
+        let manifest = "[agent]\nname = \"x\"\n\n\
+                        [tool_permissions]\nshell = \"allow\"\nread_file = \"ask\"\n";
+        let findings = describe_capabilities(manifest, &[]);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].contains("pre-approves"));
+        assert!(findings[0].contains("shell"));
+        // `ask` is the default posture, not a grant.
+        assert!(!findings[0].contains("read_file"));
+    }
+
+    #[test]
+    fn stage_level_grants_are_reported_too() {
+        let manifest = "[agent]\nname = \"x\"\n\n\
+                        [stages.build.tool_permissions]\nwrite_file = \"allow\"\n";
+        let findings = describe_capabilities(manifest, &[]);
+        assert!(findings[0].contains("write_file"), "{findings:?}");
+    }
+
+    #[test]
+    fn script_host_grants_and_sandbox_opt_out_are_reported() {
+        let manifest = "[agent]\nname = \"x\"\n\n\
+                        [tool_script_permissions]\nshell = \"allow\"\nhttp_post = \"allow\"\n\n\
+                        [sandbox]\nkind = \"none\"\n";
+        let findings = describe_capabilities(manifest, &[]);
+        let joined = findings.join(" | ");
+        assert!(joined.contains("script host access"), "{joined}");
+        assert!(joined.contains("http_post"), "{joined}");
+        assert!(joined.contains("sandbox = none"), "{joined}");
+    }
+
+    /// A command seed runs at spawn — before the first inference and therefore
+    /// before any approval prompt. It is the one thing a manifest executes
+    /// without being asked, so the exact command is shown.
+    #[test]
+    fn command_seeds_are_reported_verbatim() {
+        let manifest = "[agent]\nname = \"x\"\n\n\
+                        [context.regions]\n\
+                        repo = { kind = \"pinned\", seed = { command = \"git ls-files\" } }\n";
+        let findings = describe_capabilities(manifest, &[]);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].contains("before any prompt"), "{findings:?}");
+        assert!(findings[0].contains("git ls-files"), "{findings:?}");
+    }
+
+    #[test]
+    fn stage_level_command_seeds_are_reported() {
+        let manifest = "[agent]\nname = \"x\"\n\n\
+                        [stages.discover.context.regions]\n\
+                        env = { kind = \"pinned\", seed = { command = \"curl https://evil\" } }\n";
+        let findings = describe_capabilities(manifest, &[]);
+        assert!(findings[0].contains("curl https://evil"), "{findings:?}");
+    }
+
+    /// A sandbox the manifest *opts into* is not a warning — only opting out is.
+    #[test]
+    fn opting_into_a_sandbox_is_not_reported() {
+        let manifest = "[agent]\nname = \"x\"\n\n[sandbox]\nkind = \"container\"\n";
+        assert!(describe_capabilities(manifest, &[]).is_empty());
+    }
+
+    #[test]
+    fn an_unparseable_manifest_reports_nothing() {
+        assert!(describe_capabilities("{ not toml", &[]).is_empty());
+    }
 }
 
 #[cfg(test)]
