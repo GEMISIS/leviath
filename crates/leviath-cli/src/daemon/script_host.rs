@@ -198,6 +198,9 @@ pub struct DaemonScriptHost {
     /// loopback / private / link-local addresses. Off unless the user turned it
     /// on — see [`check_outbound`].
     allow_local_network: bool,
+    /// `[security] allow_env_vars`: credential-shaped environment variables this
+    /// agent's scripts may read. Empty by default.
+    allow_env_vars: Vec<String>,
 }
 
 impl DaemonScriptHost {
@@ -212,6 +215,7 @@ impl DaemonScriptHost {
             sandbox: None,
             shell_timeout: Duration::from_secs(60),
             allow_local_network: false,
+            allow_env_vars: Vec::new(),
         }
     }
 
@@ -219,6 +223,13 @@ impl DaemonScriptHost {
     /// `[security] allow_local_network`. Consuming builder used at spawn.
     pub fn with_local_network(mut self, allow: bool) -> Self {
         self.allow_local_network = allow;
+        self
+    }
+
+    /// Permit scripts to read these credential-shaped environment variables,
+    /// from `[security] allow_env_vars`. Consuming builder used at spawn.
+    pub fn with_env_allowlist(mut self, names: Vec<String>) -> Self {
+        self.allow_env_vars = names;
         self
     }
 
@@ -352,6 +363,18 @@ impl ScriptHost for DaemonScriptHost {
     fn env_var(&self, name: &str) -> Result<String, String> {
         if !self.allow.env_var {
             return Err(denied("env_var"));
+        }
+        // A script tool ships inside the agent bundle, so this call is
+        // attacker-authored in exactly the case that matters. Ordinary variables
+        // pass; a credential-shaped name needs the user to have listed it. Two
+        // lines — `env_var("ANTHROPIC_API_KEY")` then `http_post(...)` — was
+        // otherwise a working exfiltration path with no prompt in it anywhere.
+        if !leviath_core::script_env_allowed(name, &self.allow_env_vars) {
+            return Err(format!(
+                "[denied] '{name}' looks like a credential. Add it to `[security] \
+                 allow_env_vars` in ~/.leviath/config.toml if this agent is meant \
+                 to read it."
+            ));
         }
         self.io.env_var(name)
     }
@@ -991,6 +1014,52 @@ mod tests {
             "a refused URL must never reach the I/O backend: {:?}",
             io.calls.lock().unwrap()
         );
+    }
+
+    /// The exfiltration half of the chain: a `.rhai` tool that ships inside an
+    /// installed agent bundle calling `env_var("ANTHROPIC_API_KEY")`. Paired with
+    /// the SSRF guard above, the two-line "read a key, POST it out" script no
+    /// longer has either half available to it.
+    #[test]
+    fn env_var_refuses_credential_names_by_default() {
+        let io = RecordingIo::arc();
+        let host = DaemonScriptHost::with_io(all_allowed(), std::env::temp_dir(), io.clone());
+        for name in [
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "GITHUB_TOKEN",
+            "LEVIATH_API_TOKEN",
+        ] {
+            let err = host.env_var(name).unwrap_err();
+            assert!(err.starts_with("[denied]"), "{name} → {err}");
+            assert!(err.contains("allow_env_vars"), "{name} → {err}");
+        }
+        assert!(
+            io.calls.lock().unwrap().is_empty(),
+            "a refused read must never reach the I/O backend"
+        );
+    }
+
+    /// Ordinary variables are unaffected — a script reading `PATH` or its own
+    /// app's setting is normal, and the gate would be useless if it broke that.
+    #[test]
+    fn env_var_allows_ordinary_names() {
+        let io = RecordingIo::arc();
+        let host = DaemonScriptHost::with_io(all_allowed(), std::env::temp_dir(), io.clone());
+        assert_eq!(host.env_var("PATH").unwrap(), "e");
+        assert_eq!(host.env_var("MY_APP_REGION").unwrap(), "e");
+    }
+
+    /// The user allowlisting a name is them saying "yes, this agent is meant to
+    /// have that one" — and only that one.
+    #[test]
+    fn env_var_allowlist_permits_exactly_the_named_variable() {
+        let io = RecordingIo::arc();
+        let host = DaemonScriptHost::with_io(all_allowed(), std::env::temp_dir(), io.clone())
+            .with_env_allowlist(vec!["MY_PROVIDER_KEY".to_string()]);
+        assert_eq!(host.env_var("MY_PROVIDER_KEY").unwrap(), "e");
+        assert!(host.env_var("ANTHROPIC_API_KEY").is_err());
     }
 
     /// A malformed URL is refused rather than passed through for the HTTP client

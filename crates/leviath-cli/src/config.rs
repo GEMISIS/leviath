@@ -243,6 +243,28 @@ pub struct SecurityConfig {
     /// [`leviath_core::net`].
     #[serde(default)]
     pub allow_local_network: bool,
+
+    /// Credential-shaped environment variables that agent scripts may read.
+    ///
+    /// A Rhai script tool or script provider calling `env_var("NAME")` gets any
+    /// ordinary variable — `PATH`, `TZ`, an app's own config. A name that *looks
+    /// like a credential* (see [`leviath_core::secrets::is_sensitive_env_name`])
+    /// is refused unless it appears here, because a two-line script tool reading
+    /// `ANTHROPIC_API_KEY` and POSTing it elsewhere was otherwise a working
+    /// exfiltration path with no prompt anywhere in it.
+    ///
+    /// List the exact names a script legitimately needs — typically the key for
+    /// a custom provider script:
+    ///
+    /// ```toml
+    /// [security]
+    /// allow_env_vars = ["MY_PROVIDER_KEY"]
+    /// ```
+    ///
+    /// Matching is case-insensitive and exact. There is no wildcard: `"*"` is
+    /// read as a variable literally named `*`, not as "allow everything".
+    #[serde(default)]
+    pub allow_env_vars: Vec<String>,
 }
 
 impl Default for SecurityConfig {
@@ -250,6 +272,7 @@ impl Default for SecurityConfig {
         Self {
             allow_seed_commands: true,
             allow_local_network: false,
+            allow_env_vars: Vec::new(),
         }
     }
 }
@@ -2024,6 +2047,7 @@ anthropic_api_key = "sk-ant-test-key"
             security: SecurityConfig {
                 allow_seed_commands: false,
                 allow_local_network: true,
+                allow_env_vars: vec!["MY_PROVIDER_KEY".to_string()],
             },
         };
 

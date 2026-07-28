@@ -12,16 +12,7 @@ impl ScriptEngine {
     /// Create a new sandboxed script engine.
     pub fn new() -> Self {
         let mut engine = Engine::new();
-
-        // Sandbox: disable dangerous features
-        engine.set_max_operations(100_000); // Prevent infinite loops
-        engine.set_max_string_size(1_000_000); // Limit string size
-        engine.set_max_array_size(10_000); // Limit array size
-        engine.set_max_map_size(10_000); // Limit map size
-
-        // Disable print/debug to prevent data leakage
-        engine.on_print(|_| {});
-        engine.on_debug(|_, _, _| {});
+        crate::harden(&mut engine, 100_000);
 
         // Register Leviath functions and types
         crate::functions::register_functions(&mut engine);

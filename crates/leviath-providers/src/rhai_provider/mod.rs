@@ -69,6 +69,10 @@ pub struct RhaiProvider {
     has_stream: bool,
     has_count_tokens: bool,
     has_list_models: bool,
+    /// `[security] allow_env_vars`: credential-shaped environment variables this
+    /// script may read via `env_var`. Held so each per-call execution engine is
+    /// built with the same policy the init engine was.
+    env_allowlist: Arc<Vec<String>>,
 }
 
 impl RhaiProvider {
@@ -83,6 +87,7 @@ impl RhaiProvider {
         caps: HashMap<String, ModelCapabilities>,
         rate_limit: Option<RateLimitConfig>,
         request_timeout_secs: Option<u64>,
+        env_allowlist: Arc<Vec<String>>,
     ) -> Result<Self> {
         let src = std::fs::read_to_string(script_path).map_err(|e| {
             ProviderError::Other(format!(
@@ -98,6 +103,7 @@ impl RhaiProvider {
             rate_limit,
             request_timeout_secs,
             Arc::new(ReqwestExecutor::new()),
+            env_allowlist,
         )
     }
 
@@ -112,9 +118,10 @@ impl RhaiProvider {
         rate_limit: Option<RateLimitConfig>,
         request_timeout_secs: Option<u64>,
         executor: Arc<dyn HttpExecutor>,
+        env_allowlist: Arc<Vec<String>>,
     ) -> Result<Self> {
         let meta = parse_provider_annotations(src);
-        let init_engine = build_init_engine();
+        let init_engine = build_init_engine(env_allowlist.clone());
         let ast = init_engine
             .compile(src)
             .map_err(|e| ProviderError::Other(format!("compile provider script {name}: {e}")))?;
@@ -142,6 +149,7 @@ impl RhaiProvider {
             has_stream,
             has_count_tokens,
             has_list_models,
+            env_allowlist,
         })
     }
 
@@ -163,11 +171,13 @@ impl RhaiProvider {
     /// every caller's regions merge into one, keeping coverage exact.
     async fn dispatch(&self, timeout_secs: Option<u64>, call: ScriptCall) -> Result<Dynamic> {
         let (job_tx, mut job_rx) = mpsc::unbounded_channel::<BrokerJob>();
+        let env_allowlist = self.env_allowlist.clone();
         let mut join: JoinHandle<Result<Dynamic>> = tokio::task::spawn_blocking(move || {
             let engine = build_exec_engine(ExecConfig {
                 jobs: job_tx,
                 timeout_secs,
                 chunk_tx: None,
+                env_allowlist,
             });
             call(&engine)
         });
@@ -350,12 +360,14 @@ impl Provider for RhaiProvider {
         let (job_tx, mut job_rx) = mpsc::unbounded_channel::<BrokerJob>();
         let (chunk_tx, chunk_rx) = mpsc::unbounded_channel::<Result<StreamChunk>>();
         let err_tx = chunk_tx.clone();
+        let env_allowlist = self.env_allowlist.clone();
 
         let mut join: JoinHandle<Result<()>> = tokio::task::spawn_blocking(move || {
             let engine = build_exec_engine(ExecConfig {
                 jobs: job_tx,
                 timeout_secs: timeout,
                 chunk_tx: Some(chunk_tx),
+                env_allowlist,
             });
             // "__emit_chunk" is a fixed valid identifier registered above.
             let on_chunk = FnPtr::new("__emit_chunk").expect("__emit_chunk is a valid identifier");

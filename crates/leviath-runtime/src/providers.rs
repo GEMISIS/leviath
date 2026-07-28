@@ -134,6 +134,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             None,
+            Vec::new(),
         );
         let mut reg = ProviderRegistry::new().with_script_layer(Arc::new(layer));
         reg.register("anthropic".to_string(), mock());
