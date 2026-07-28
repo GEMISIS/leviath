@@ -62,12 +62,28 @@ impl ControlListener {
     /// lives in `Result`, not in a branch of this function — the happy path is
     /// the only thing this source expresses, keeping it fully covered while still
     /// propagating any real connect/create failure.
-    pub async fn accept(&mut self) -> std::io::Result<ServerStream> {
+    ///
+    /// # The `Option` is always `Some` here, and that is a real gap
+    ///
+    /// The Unix listener returns `Ok(None)` for a connection from another user,
+    /// having checked the peer's uid with `SO_PEERCRED`. There is no equivalent
+    /// check on this side: the Windows analogue is
+    /// `ImpersonateNamedPipeClient` plus a token comparison, which is genuine
+    /// work and is not done. The shape matches so the daemon's accept loop is
+    /// one piece of code on both platforms, but on Windows every connection the
+    /// pipe accepts is served.
+    ///
+    /// What stands between another local user and this channel on Windows is
+    /// therefore the pipe's security descriptor alone — and this code does not
+    /// set one, so it is the default. That is weaker than the Unix side, where
+    /// the kernel-reported uid is the gate. Documented in `SECURITY.md` rather
+    /// than papered over; see the Unix module for what the check buys.
+    pub async fn accept(&mut self) -> std::io::Result<Option<ServerStream>> {
         self.pending
             .connect()
             .await
             .and_then(|()| ServerOptions::new().create(&self.name))
-            .map(|next| std::mem::replace(&mut self.pending, next))
+            .map(|next| Some(std::mem::replace(&mut self.pending, next)))
     }
 }
 
