@@ -78,7 +78,7 @@ pretending otherwise would be worse than saying so:
 | What | Where | Mode |
 |---|---|---|
 | Provider API keys | `~/.leviath/config.toml`, or the OS keychain | `0600` |
-| MCP OAuth access + refresh tokens | `~/.leviath/mcp-auth.json` | `0600` |
+| MCP OAuth access + refresh tokens | `~/.leviath/mcp-auth.json`, or the OS keychain | `0600` |
 | Run artifacts (prompts, conversations) | `~/.leviath/runs/<id>/` | `0600` in a `0700` dir |
 | Control socket | `~/.leviath/control.sock` | `0600`, same-uid peers only |
 | API server token | `LEVIATH_API_TOKEN` or `--token` | not persisted |
@@ -109,9 +109,16 @@ lev auth migrate --to-file  # and back again
 lev auth status           # which backend, and what it holds
 ```
 
+Both kinds of secret move: provider API keys and MCP OAuth grants. In keychain
+mode `mcp-auth.json` keeps only the *server names*, since the OS stores cannot be
+enumerated and `lev mcp list` still has to be able to say what is logged in — a
+server name is not a secret, the access and refresh tokens are.
+
 `lev auth migrate` writes the destination and reads each secret back before
 removing the source, so a store that accepts writes but does not persist them
-cannot cost you your API keys.
+cannot cost you your API keys. Nothing silently falls back to the file: if the
+keychain is configured but unreachable, a write fails loudly rather than putting
+plaintext tokens on disk.
 
 This is opt-in rather than the default because an unavailable keychain is not a
 degraded experience but a broken one — every inference fails at once — and the

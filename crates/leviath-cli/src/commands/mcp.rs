@@ -99,6 +99,17 @@ pub struct McpEnv {
     /// every external tool provider, not only MCP servers (issue #97). `None`
     /// disables the script scan (used by tests that only care about servers).
     pub tools_dir: Option<std::path::PathBuf>,
+    /// Where OAuth grants are kept, already resolved. `lev mcp login` writes a
+    /// refresh token, so it has to write it where the user asked for it to be
+    /// kept.
+    ///
+    /// Resolved by the caller rather than here, and *before* any subcommand
+    /// runs: a keychain that was asked for but cannot be reached has to fail the
+    /// command outright, because falling back to the file would put a refresh
+    /// token on disk that the user asked to keep out of it. Doing that once at
+    /// the edge also means these code paths carry no error arm that only an
+    /// unreachable keychain could take.
+    pub credential_store: Option<Box<dyn leviath_core::CredentialStore>>,
 }
 
 /// Run a `lev mcp` subcommand against the injected environment.
@@ -193,7 +204,7 @@ async fn login(name: &str, env: &McpEnv) -> anyhow::Result<()> {
         }
     };
 
-    let mut store = AuthStore::load(&env.store_path)?;
+    let mut store = AuthStore::load_with(&env.store_path, env.credential_store.as_deref())?;
     // Reuse a prior registration if we have one, so re-login doesn't re-register.
     let reuse = store.get(name).map(|a| a.client_id.clone());
     let auth = OAuthClient::new()
@@ -206,15 +217,15 @@ async fn login(name: &str, env: &McpEnv) -> anyhow::Result<()> {
         )
         .await?;
     store.set(name, auth);
-    store.save(&env.store_path)?;
+    store.save_with(&env.store_path, env.credential_store.as_deref())?;
     println!("✓ Authenticated with '{name}'.");
     Ok(())
 }
 
 fn logout(name: &str, env: &McpEnv) -> anyhow::Result<()> {
-    let mut store = AuthStore::load(&env.store_path)?;
+    let mut store = AuthStore::load_with(&env.store_path, env.credential_store.as_deref())?;
     if store.remove(name) {
-        store.save(&env.store_path)?;
+        store.save_with(&env.store_path, env.credential_store.as_deref())?;
         println!("Removed stored credentials for '{name}'.");
     } else {
         println!("No stored credentials for '{name}'.");
@@ -231,9 +242,9 @@ fn remove_server(remove: RemoveArgs, env: &McpEnv) -> anyhow::Result<()> {
     }
     config.save_to_path_public(&env.config_path)?;
     // Drop any stored credentials too, so a removed server leaves nothing behind.
-    let mut store = AuthStore::load(&env.store_path)?;
+    let mut store = AuthStore::load_with(&env.store_path, env.credential_store.as_deref())?;
     if store.remove(&remove.name) {
-        store.save(&env.store_path)?;
+        store.save_with(&env.store_path, env.credential_store.as_deref())?;
     }
     println!("Removed MCP server '{}'.", remove.name);
     Ok(())
@@ -259,7 +270,7 @@ async fn test(name: &str, env: &McpEnv) -> anyhow::Result<()> {
 
 fn list_servers(list: ListArgs, env: &McpEnv) -> anyhow::Result<()> {
     let config = Config::load_from_path_public(&env.config_path)?;
-    let store = AuthStore::load(&env.store_path)?;
+    let store = AuthStore::load_with(&env.store_path, env.credential_store.as_deref())?;
 
     let mut rows: Vec<ServerRow> = config
         .mcp_servers
@@ -392,6 +403,7 @@ mod tests {
             // Default: no script scan, so server-focused tests stay hermetic. The
             // script-row path has its own dedicated test with a seeded dir.
             tools_dir: None,
+            credential_store: None,
         }
     }
 
@@ -1014,6 +1026,7 @@ for line in sys.stdin:
             opener: std::sync::Arc::new(never_opens),
             now: 0,
             tools_dir: None,
+            credential_store: None,
         }
     }
 
@@ -1091,6 +1104,7 @@ for line in sys.stdin:
             opener: std::sync::Arc::new(never_opens),
             now: 0,
             tools_dir: None,
+            credential_store: None,
         };
         assert!(
             execute_with(

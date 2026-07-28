@@ -37,6 +37,14 @@ impl ToolRegistry {
             let oauth = leviath_mcp::OAuthClient::new();
             let store_path = leviath_mcp::AuthStore::default_path();
             let now = unix_now_secs();
+            // Resolved once for the whole loop. An unreachable keychain is a
+            // warning rather than a hard failure: MCP servers that need no
+            // OAuth still work, and refusing to build any tools at all over a
+            // locked keychain would be a worse outcome than losing the ones
+            // that need it.
+            let credentials = credential_store_or_warn(crate::credentials::store_for(
+                config.security.credential_store,
+            ));
             for server_cfg in &config.mcp_servers {
                 // For an HTTP server, resolve a stored OAuth token (refreshing
                 // it non-interactively if it has lapsed) and inject it as the
@@ -47,6 +55,7 @@ impl ToolRegistry {
                     &server_cfg.name,
                     store_path.as_deref(),
                     now,
+                    credentials.as_deref(),
                 )
                 .await
                 {
@@ -152,14 +161,38 @@ pub(crate) fn unix_now_secs() -> u64 {
 ///
 /// Split out of [`ToolRegistry::build`] so the store-present / store-absent and
 /// refresh-failure paths are unit-testable without the real home directory.
+/// The configured credential backend, or `None` with a warning if it cannot be
+/// reached.
+///
+/// Used on the *read* paths, where a locked keychain should cost the servers
+/// that need OAuth rather than every tool the agent has. The write paths do not
+/// use this: there, a store that cannot be written is a hard error, because
+/// falling back would put refresh tokens on disk.
+pub(crate) fn credential_store_or_warn(
+    resolved: crate::credentials::Resolved,
+) -> Option<Box<dyn leviath_core::CredentialStore>> {
+    match resolved {
+        Ok(store) => store,
+        Err(e) => {
+            tracing::warn!("{e}. MCP servers needing OAuth will appear logged out.");
+            None
+        }
+    }
+}
+
 pub(crate) async fn resolve_bearer(
     oauth: &leviath_mcp::OAuthClient,
     server_name: &str,
     store_path: Option<&std::path::Path>,
     now: u64,
+    credentials: Option<&dyn leviath_core::CredentialStore>,
 ) -> anyhow::Result<Option<(String, String)>> {
     match store_path {
-        Some(path) => oauth.authorization_header(server_name, path, now).await,
+        Some(path) => {
+            oauth
+                .authorization_header_with(server_name, path, now, credentials)
+                .await
+        }
         None => Ok(None),
     }
 }
@@ -566,10 +599,28 @@ for line in sys.stdin:
         assert!(registry.mcp_tool_defs.is_empty());
     }
 
+    /// A locked keychain costs the MCP servers that need OAuth, not every tool
+    /// the agent has -- so the read path warns and carries on.
+    #[test]
+    fn an_unreachable_credential_store_warns_rather_than_failing_tool_setup() {
+        assert!(
+            credential_store_or_warn(Err("no keychain here".to_string())).is_none(),
+            "an unreachable store yields no credentials"
+        );
+        assert!(
+            credential_store_or_warn(Ok(None)).is_none(),
+            "and so does the file backend"
+        );
+        assert!(
+            credential_store_or_warn(Ok(Some(Box::new(leviath_core::MemoryStore::new()))))
+                .is_some()
+        );
+    }
+
     #[tokio::test]
     async fn resolve_bearer_without_a_store_is_none() {
         let oauth = leviath_mcp::OAuthClient::new();
-        let header = resolve_bearer(&oauth, "srv", None, 0).await.unwrap();
+        let header = resolve_bearer(&oauth, "srv", None, 0, None).await.unwrap();
         assert!(header.is_none());
     }
 

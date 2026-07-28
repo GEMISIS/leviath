@@ -29,6 +29,11 @@ pub struct McpPool {
     /// mutex (held only briefly, never across `.await`) so the sync spawner can
     /// read it from a runtime thread without `blocking_lock`'s panic.
     connected: StdMutex<HashMap<String, Vec<Tool>>>,
+    /// Where MCP OAuth grants are kept, so a refreshed token is written back to
+    /// the backend it came from. Defaults to the file store, which is also the
+    /// config default -- a pool built without being told reads `mcp-auth.json`,
+    /// exactly as before this field existed.
+    credential_store: leviath_core::CredentialStoreKind,
 }
 
 /// A stable dedup key for a server config: its full serialized form. Two
@@ -47,7 +52,14 @@ impl McpPool {
             shared,
             reserved,
             connected: StdMutex::new(HashMap::new()),
+            credential_store: leviath_core::CredentialStoreKind::default(),
         }
+    }
+
+    /// Read and write MCP grants through `kind`'s backend.
+    pub fn with_credential_store(mut self, kind: leviath_core::CredentialStoreKind) -> Self {
+        self.credential_store = kind;
+        self
     }
 
     /// Build the daemon's shared pool over `shared_mcp`: reserve built-in and
@@ -58,13 +70,33 @@ impl McpPool {
         shared_mcp: Arc<Mutex<ToolExecutor>>,
         config_servers: &[MCPServerConfig],
     ) -> Arc<Self> {
+        Self::for_daemon_with(
+            shared_mcp,
+            config_servers,
+            leviath_core::CredentialStoreKind::default(),
+        )
+    }
+
+    /// [`for_daemon`](Self::for_daemon) reading and writing MCP OAuth grants
+    /// through `credential_store`'s backend.
+    ///
+    /// The pool refreshes lapsed tokens and writes them back, so it has to write
+    /// them where the user asked for them to be kept -- otherwise the first
+    /// refresh after a keychain migration would put a fresh refresh token back
+    /// on disk.
+    pub fn for_daemon_with(
+        shared_mcp: Arc<Mutex<ToolExecutor>>,
+        config_servers: &[MCPServerConfig],
+        credential_store: leviath_core::CredentialStoreKind,
+    ) -> Arc<Self> {
         let mut reserved: HashSet<String> =
             leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(std::env::temp_dir()))
                 .names()
                 .into_iter()
                 .collect();
         reserved.extend(leviath_tools::BuiltinTools::subagent_tool_names());
-        let pool = Arc::new(Self::new(shared_mcp, reserved));
+        let pool =
+            Arc::new(Self::new(shared_mcp, reserved).with_credential_store(credential_store));
         for server in config_servers {
             pool.seed(server, Vec::new());
         }
@@ -99,11 +131,15 @@ impl McpPool {
         // static-header servers. Mirrors `ToolRegistry::build`.
         let oauth = leviath_mcp::OAuthClient::new();
         let store_path = leviath_mcp::AuthStore::default_path();
+        let credentials = crate::tools::credential_store_or_warn(crate::credentials::store_for(
+            self.credential_store,
+        ));
         let auth = match crate::tools::resolve_bearer(
             &oauth,
             &config.name,
             store_path.as_deref(),
             crate::tools::unix_now_secs(),
+            credentials.as_deref(),
         )
         .await
         {
