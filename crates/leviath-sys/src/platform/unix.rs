@@ -69,6 +69,29 @@ pub(crate) fn current_uid() -> u32 {
     nix::unistd::getuid().as_raw()
 }
 
+/// The effective uid of the process on the other end of a connected
+/// Unix-domain socket, from the kernel rather than from anything the peer said.
+///
+/// Two spellings of the same idea, because the platforms disagree:
+/// `SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on macOS and the BSDs. Both are safe
+/// `nix` wrappers, so `unsafe_code = "forbid"` still holds.
+///
+/// `None` when the option is unavailable, which the caller must treat as "do not
+/// trust this connection" — an unidentifiable peer is not an authorized one.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) fn peer_uid(sock: &impl std::os::fd::AsFd) -> Option<u32> {
+    nix::sys::socket::getsockopt(sock, nix::sys::socket::sockopt::PeerCredentials)
+        .ok()
+        .map(|creds| creds.uid())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub(crate) fn peer_uid(sock: &impl std::os::fd::AsFd) -> Option<u32> {
+    nix::sys::socket::getsockopt(sock, nix::sys::socket::sockopt::LocalPeerCred)
+        .ok()
+        .map(|xucred| xucred.uid())
+}
+
 /// SIGKILL the process group led by `pgid`.
 ///
 /// `nix::sys::signal::killpg` with a negated pid is the safe wrapper around

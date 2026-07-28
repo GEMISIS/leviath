@@ -41,6 +41,21 @@ pub(super) async fn spawn_agent(
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default()
     });
+    // A caller-supplied workdir was accepted verbatim, so `{"workdir": "/"}`
+    // pointed a tool-executing agent at the whole filesystem. `--workdir-root`
+    // is the operator's answer to "where is this API allowed to work".
+    state
+        .limits
+        .check_workdir(std::path::Path::new(&workdir))
+        .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
+    // Likewise `{"yolo": true}` waived every approval prompt for an agent
+    // running on the host, from a request. `--no-remote-yolo` refuses it.
+    if body.yolo && state.limits.no_remote_yolo {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "this server refuses `yolo` on spawn requests (--no-remote-yolo)".to_string(),
+        ));
+    }
     let run_id = runstate::new_run_id(&body.blueprint);
     let args = SpawnArgs {
         run_id,
@@ -100,20 +115,24 @@ pub(super) async fn list_agents(Query(query): Query<ListAgentsQuery>) -> Json<Ve
         });
     }
 
-    Json(runs)
+    // `.redacted()`: `RunMeta` carries the webhook signing secret, and this
+    // handler serializes it whole.
+    Json(runs.iter().map(RunMeta::redacted).collect())
 }
 
 pub(super) async fn get_agent(
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<RunMeta>, (StatusCode, Json<ErrorResponse>)> {
-    runstate::read_meta(&id).map(Json).map_err(|_| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("Agent run '{}' not found", id),
-            }),
-        )
-    })
+    runstate::read_meta(&id)
+        .map(|m| Json(m.redacted()))
+        .map_err(|_| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Agent run '{}' not found", id),
+                }),
+            )
+        })
 }
 
 pub(super) async fn agent_children(AxumPath(id): AxumPath<String>) -> Json<Vec<RunMeta>> {
@@ -121,6 +140,7 @@ pub(super) async fn agent_children(AxumPath(id): AxumPath<String>) -> Json<Vec<R
     let children: Vec<RunMeta> = runs
         .into_iter()
         .filter(|r| r.parent_run_id.as_deref() == Some(&id))
+        .map(|r| r.redacted())
         .collect();
     Json(children)
 }
@@ -264,7 +284,50 @@ mod tests {
             event_tx: tx,
             control: no_daemon(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            limits: Default::default(),
         }
+    }
+
+    /// `--workdir-root` bounds where an API caller may point an agent. Without
+    /// it, `{"workdir": "/"}` handed a tool-executing agent the whole
+    /// filesystem.
+    #[test]
+    fn workdir_root_bounds_the_requested_workdir() {
+        let root = tempfile::tempdir().unwrap();
+        let inside = root.path().join("project");
+        std::fs::create_dir(&inside).unwrap();
+        let limits = ServeLimits {
+            workdir_root: Some(root.path().to_path_buf()),
+            ..Default::default()
+        };
+
+        assert!(limits.check_workdir(&inside).is_ok());
+        assert!(limits.check_workdir(root.path()).is_ok());
+        let err = limits.check_workdir(std::path::Path::new("/")).unwrap_err();
+        assert!(err.contains("--workdir-root"), "{err}");
+    }
+
+    /// The containment is symlink-aware, so a link planted under the root cannot
+    /// be used to walk out of it.
+    #[cfg(unix)]
+    #[test]
+    fn workdir_root_is_not_fooled_by_a_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("escape")).unwrap();
+        let limits = ServeLimits {
+            workdir_root: Some(root.path().to_path_buf()),
+            ..Default::default()
+        };
+        assert!(limits.check_workdir(&root.path().join("escape")).is_err());
+    }
+
+    /// With no `--workdir-root`, behavior is unchanged — the flag is opt-in for
+    /// operators, not a new hard requirement on every deployment.
+    #[test]
+    fn no_workdir_root_permits_anything() {
+        let limits = ServeLimits::default();
+        assert!(limits.check_workdir(std::path::Path::new("/")).is_ok());
     }
 
     fn unique_run_id(prefix: &str) -> String {
@@ -296,6 +359,7 @@ mod tests {
             event_tx: tx,
             control,
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            limits: Default::default(),
         }
     }
 
@@ -1052,6 +1116,7 @@ prompt = "Plan the work"
             event_tx: tx,
             control,
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            limits: Default::default(),
         };
         let app = Router::new()
             .route("/api/agents/{id}", delete(kill_agent))

@@ -94,7 +94,10 @@ tar = "0.4"
 dirs = "6.0.0"
 dotenvy = "0.15"
 libc = "0.2"
-nix = { version = "0.28", default-features = false, features = ["signal", "process", "user"] }
+# "socket" is for the control socket's peer-credential check (SO_PEERCRED on
+# Linux, LOCAL_PEERCRED on macOS/BSD), which is what stops another local user
+# from driving the daemon.
+nix = { version = "0.28", default-features = false, features = ["signal", "process", "user", "socket"] }
 temp-env = "0.3"
 crossterm = "0.28"
 ratatui = "0.29"

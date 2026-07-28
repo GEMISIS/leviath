@@ -11,11 +11,39 @@ use super::types::*;
 use leviath_core::manifest::parse_manifest;
 
 /// Resolve the installed agents directory.
+///
+/// Goes through the shared home resolver so `LEVIATH_HOME` applies here too. It
+/// previously called `dirs::home_dir()` directly, which meant these handlers
+/// read and wrote a *different* directory from the one `lev add` installs into
+/// whenever that override was set.
 pub(super) fn agents_dir() -> PathBuf {
-    dirs::home_dir()
+    crate::config::leviath_home_dir()
         .unwrap_or_default()
         .join(".leviath")
         .join("agents")
+}
+
+/// Resolve `<agents_dir>/<name>`, refusing a name that is not a single safe path
+/// component.
+///
+/// `Path::join` neither normalizes `..` nor resists an absolute path, so an
+/// unvalidated `name` from a REST body or URL segment reached anywhere on the
+/// filesystem: `POST /api/blueprints` with `name = "../../../../tmp/x"` created
+/// a directory and wrote attacker-controlled TOML into it, and
+/// `DELETE /api/blueprints/{name}` recursively deleted whatever it landed on.
+fn blueprint_dir(name: &str) -> Result<PathBuf, (StatusCode, Json<ErrorResponse>)> {
+    if !leviath_core::is_safe_path_component(name) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!(
+                    "Invalid blueprint name '{name}': names may contain only letters, \
+                     digits, '.', '_' and '-'"
+                ),
+            }),
+        ));
+    }
+    Ok(agents_dir().join(name))
 }
 
 /// Scan for blueprints from installed agents dir and configured agent_paths.
@@ -94,7 +122,7 @@ pub(super) async fn create_blueprint(
         )
     })?;
 
-    let dir = agents_dir().join(&body.name);
+    let dir = blueprint_dir(&body.name)?;
     std::fs::create_dir_all(&dir).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -136,7 +164,7 @@ pub(super) async fn update_blueprint(
         )
     })?;
 
-    let dir = agents_dir().join(&name);
+    let dir = blueprint_dir(&name)?;
     let manifest_path = dir.join("agent.leviath");
     if !manifest_path.exists() {
         return Err((
@@ -168,7 +196,7 @@ pub(super) async fn update_blueprint(
 pub(super) async fn delete_blueprint(
     AxumPath(name): AxumPath<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    let dir = agents_dir().join(&name);
+    let dir = blueprint_dir(&name)?;
     if !dir.exists() {
         return Err((
             StatusCode::NOT_FOUND,
@@ -235,6 +263,7 @@ mod tests {
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            limits: Default::default(),
         }
     }
 
@@ -401,6 +430,72 @@ prompt = "Plan the work"
         assert_eq!(info["stages"].as_array().unwrap().len(), 1);
 
         let _ = std::fs::remove_dir_all(agents_dir().join(&name));
+    }
+
+    /// `POST /api/blueprints` with a traversing name created a directory and
+    /// wrote attacker-controlled TOML wherever it pointed. `Path::join` neither
+    /// normalizes `..` nor resists an absolute path, so the name had to be
+    /// validated rather than trusted.
+    #[tokio::test]
+    async fn create_blueprint_rejects_traversing_names() {
+        let manifest = r#"
+[agent]
+name = "x"
+version = "1.0.0"
+description = "d"
+
+[stages.plan]
+prompt = "p"
+"#;
+        for name in [
+            "../../../../tmp/leviath-traversal-probe",
+            "/tmp/leviath-traversal-probe",
+            "..",
+            "a/b",
+        ] {
+            let app = Router::new().route("/api/blueprints", post(create_blueprint));
+            let body = serde_json::json!({ "name": name, "manifest": manifest });
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/blueprints")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                axum::http::StatusCode::BAD_REQUEST,
+                "name {name:?} should be refused"
+            );
+        }
+        assert!(
+            !std::path::Path::new("/tmp/leviath-traversal-probe").exists(),
+            "nothing may be created outside the agents directory"
+        );
+    }
+
+    /// `DELETE /api/blueprints/{name}` reached `fs::remove_dir_all` on the same
+    /// unvalidated join — arbitrary recursive deletion for any token holder.
+    /// A percent-encoded `..%2f` decodes *after* segment matching, so the
+    /// decoded form is what has to be rejected.
+    #[tokio::test]
+    async fn delete_blueprint_rejects_traversing_names() {
+        let victim = std::env::temp_dir().join("leviath-delete-probe");
+        std::fs::create_dir_all(&victim).unwrap();
+
+        let app = Router::new().route(
+            "/api/blueprints/{name}",
+            axum::routing::delete(delete_blueprint),
+        );
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/blueprints/..%2f..%2f..%2f..%2ftmp%2fleviath-delete-probe")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(victim.exists(), "the directory must not have been deleted");
+        let _ = std::fs::remove_dir_all(&victim);
     }
 
     #[tokio::test]

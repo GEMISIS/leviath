@@ -341,6 +341,9 @@ mod tests {
             host: "127.0.0.1".to_string(),
             cors: "*".to_string(),
             token: Some("test-token".to_string()),
+            allow_admin: false,
+            workdir_root: None,
+            no_remote_yolo: false,
         };
         let result = dispatch(Commands::Serve(args), &MockRisky).await;
         assert!(result.is_ok());

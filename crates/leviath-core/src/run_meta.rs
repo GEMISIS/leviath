@@ -84,6 +84,11 @@ pub struct RunMeta {
     pub callback_url: Option<String>,
     /// Optional shared secret used to HMAC-SHA256 sign the webhook body
     /// (`X-Leviath-Signature` header) so the receiver can verify authenticity.
+    ///
+    /// Persisted, because the daemon must still be able to sign a webhook for a
+    /// run it reloaded after a restart. **Never serve it** — strip it with
+    /// [`RunMeta::redacted`] before any of this struct leaves the process. See
+    /// that method for what went wrong.
     #[serde(default)]
     pub callback_secret: Option<String>,
     /// Links sub-agent runs to their parent run.
@@ -155,6 +160,25 @@ impl RunFlags {
 }
 
 impl RunMeta {
+    /// This run's metadata with the webhook signing secret removed, for anything
+    /// that leaves the process.
+    ///
+    /// `GET /api/agents`, `/api/agents/{id}` and `/api/agents/{id}/children` all
+    /// serialized `RunMeta` whole, so any holder of the API token could read
+    /// every run's `callback_secret` — the key that authenticates Leviath's
+    /// webhooks to their receivers. Mirrors the `RedactedConfig` pattern the
+    /// `/api/config` handler already uses correctly.
+    ///
+    /// Returns an owned copy rather than mutating in place so a caller cannot
+    /// accidentally redact the record the daemon still needs for signing.
+    #[must_use]
+    pub fn redacted(&self) -> Self {
+        Self {
+            callback_secret: None,
+            ..self.clone()
+        }
+    }
+
     pub fn new(
         run_id: String,
         agent_name: String,
@@ -317,6 +341,33 @@ mod tests {
             "/work".to_string(),
             3,
         )
+    }
+
+    /// The webhook signing secret must not survive into anything served over
+    /// the API — `GET /api/agents` used to hand it to any token holder.
+    #[test]
+    fn redacted_drops_the_callback_secret_and_keeps_everything_else() {
+        let mut m = sample_meta();
+        m.callback_secret = Some("shhh".to_string());
+        m.callback_url = Some("https://example.com/hook".to_string());
+
+        let r = m.redacted();
+        assert_eq!(r.callback_secret, None);
+        // The URL is not a secret and stays: a caller needs to see where its own
+        // webhook was pointed.
+        assert_eq!(r.callback_url.as_deref(), Some("https://example.com/hook"));
+        assert_eq!(r.run_id, m.run_id);
+        assert_eq!(r.task, m.task);
+
+        // Serializing the redacted form must not mention it at all — a `None`
+        // that still emitted `"callback_secret": null` would be fine, but an
+        // assertion on the wire format is what a reviewer actually checks.
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(!json.contains("shhh"), "{json}");
+
+        // ...and the original is untouched, because the daemon still needs it to
+        // sign the webhook for a run it reloaded after a restart.
+        assert_eq!(m.callback_secret.as_deref(), Some("shhh"));
     }
 
     #[test]

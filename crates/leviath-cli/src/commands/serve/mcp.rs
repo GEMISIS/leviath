@@ -345,6 +345,7 @@ mod tests {
                 opener: Arc::new(opener),
                 clock: fixed_clock,
             },
+            limits: Default::default(),
         }
     }
 
@@ -700,6 +701,7 @@ for line in sys.stdin:
                 opener: Arc::new(never_opens),
                 clock: fixed_clock,
             },
+            limits: Default::default(),
         }
     }
 
@@ -753,6 +755,7 @@ for line in sys.stdin:
                 opener: Arc::new(never_opens),
                 clock: fixed_clock,
             },
+            limits: Default::default(),
         };
         let app = router(state);
         let (status_code, _) = send(

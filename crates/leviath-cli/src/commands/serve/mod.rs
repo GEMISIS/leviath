@@ -16,6 +16,7 @@ mod tree;
 mod types;
 mod websocket;
 
+use types::ServeLimits;
 pub use types::{AppState, ServeArgs, ServerEvent};
 
 use std::net::SocketAddr;
@@ -97,6 +98,10 @@ async fn execute_with_shutdown(
         event_tx: event_tx.clone(),
         control,
         mcp: mcp::McpAdmin::default(),
+        limits: Arc::new(ServeLimits {
+            workdir_root: args.workdir_root.clone(),
+            no_remote_yolo: args.no_remote_yolo,
+        }),
     };
 
     // Background world-event consumer: subscribes to the daemon's pushed
@@ -171,12 +176,9 @@ async fn execute_with_shutdown(
             "/api/agents/{id}/interaction",
             get(interactions::get_interaction).post(interactions::submit_interaction),
         )
-        // MCP servers
-        .route(
-            "/api/mcp/servers",
-            get(mcp::list_servers).post(mcp::add_server),
-        )
-        .route("/api/mcp/servers/{name}", delete(mcp::remove_server))
+        // MCP servers — read-only surface. The mutating half is mounted below,
+        // behind `--allow-admin`.
+        .route("/api/mcp/servers", get(mcp::list_servers))
         .route("/api/mcp/servers/{name}/status", get(mcp::status))
         .route("/api/mcp/servers/{name}/login", post(mcp::login))
         .route("/api/mcp/servers/{name}/test", post(mcp::test_server))
@@ -185,7 +187,23 @@ async fn execute_with_shutdown(
         .route("/api/models", get(config::get_models))
         // WebSocket
         .route("/ws", get(websocket::ws_global))
-        .route("/ws/agents/{id}", get(websocket::ws_agent))
+        .route("/ws/agents/{id}", get(websocket::ws_agent));
+
+    // The MCP administration endpoints are remote code execution by
+    // construction: `add_server` writes a `command` and `args` into
+    // `~/.leviath/config.toml`, and Leviath then spawns exactly that — for this
+    // run and every future one. The rest of the API can only run agents the user
+    // already installed. Not mounted unless the operator asked for them, so an
+    // unmounted route 404s rather than relying on a check inside the handler
+    // that someone could later route around.
+    let app = match args.allow_admin {
+        true => app
+            .route("/api/mcp/servers", post(mcp::add_server))
+            .route("/api/mcp/servers/{name}", delete(mcp::remove_server)),
+        false => app,
+    };
+
+    let app = app
         // Require a valid token on every route; CORS stays outermost so browser
         // preflight (OPTIONS) is answered before the auth check.
         .layer(axum::middleware::from_fn_with_state(
@@ -331,6 +349,7 @@ mod tests {
             event_tx: tx,
             control: no_daemon_control(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            limits: Default::default(),
         }
     }
 
@@ -788,6 +807,9 @@ prompt = "Run"
             host: "127.0.0.1".to_string(),
             cors: "*".to_string(),
             token: Some("test-token".to_string()),
+            allow_admin: false,
+            workdir_root: None,
+            no_remote_yolo: false,
         };
         assert_eq!(args.port, 3000);
         assert_eq!(args.host, "127.0.0.1");
@@ -883,6 +905,9 @@ prompt = "Run"
                     host: "127.0.0.1".to_string(),
                     cors: "*".to_string(),
                     token: Some("test-token".to_string()),
+                    allow_admin: false,
+                    workdir_root: None,
+                    no_remote_yolo: false,
                 };
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 let handle = tokio::spawn(execute_with_shutdown(
@@ -941,6 +966,9 @@ prompt = "Run"
                     host: "127.0.0.1".to_string(),
                     cors: "https://example.com".to_string(),
                     token: Some("test-token".to_string()),
+                    allow_admin: false,
+                    workdir_root: None,
+                    no_remote_yolo: false,
                 };
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 let handle = tokio::spawn(execute_with_shutdown(
@@ -969,6 +997,9 @@ prompt = "Run"
             host: "not a valid host".to_string(),
             cors: "*".to_string(),
             token: Some("test-token".to_string()),
+            allow_admin: false,
+            workdir_root: None,
+            no_remote_yolo: false,
         };
         let result = execute(args, no_daemon_control()).await;
         assert!(result.is_err());
@@ -1000,6 +1031,9 @@ prompt = "Run"
                     host: "127.0.0.1".to_string(),
                     cors: "*".to_string(),
                     token: Some("test-token".to_string()),
+                    allow_admin: false,
+                    workdir_root: None,
+                    no_remote_yolo: false,
                 };
                 let result = execute(args, no_daemon_control()).await;
                 assert_execute_failed_on_malformed_config(&result);
@@ -1027,6 +1061,9 @@ prompt = "Run"
             host: "127.0.0.1".to_string(),
             cors: "*".to_string(),
             token: Some("test-token".to_string()),
+            allow_admin: false,
+            workdir_root: None,
+            no_remote_yolo: false,
         };
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1070,6 +1107,9 @@ prompt = "Run"
             host: "192.0.2.1".to_string(),
             cors: "*".to_string(),
             token: Some("test-token".to_string()),
+            allow_admin: false,
+            workdir_root: None,
+            no_remote_yolo: false,
         };
         let result = execute(args, no_daemon_control()).await;
         assert_execute_failed_on_port_in_use(&result);
@@ -1084,6 +1124,9 @@ prompt = "Run"
                 host: "127.0.0.1".to_string(),
                 cors: "*".to_string(),
                 token: None,
+                allow_admin: false,
+                workdir_root: None,
+                no_remote_yolo: false,
             };
             let result = execute(args, no_daemon_control()).await;
             assert!(result.is_err(), "must refuse to start unauthenticated");
@@ -1103,6 +1146,9 @@ prompt = "Run"
                     host: "127.0.0.1".to_string(),
                     cors: "*".to_string(),
                     token: Some("test-token".to_string()),
+                    allow_admin: false,
+                    workdir_root: None,
+                    no_remote_yolo: false,
                 };
 
                 let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1148,6 +1194,9 @@ prompt = "Run"
                     host: "127.0.0.1".to_string(),
                     cors: "*".to_string(),
                     token: Some("test-token".to_string()),
+                    allow_admin: false,
+                    workdir_root: None,
+                    no_remote_yolo: false,
                 };
 
                 let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();

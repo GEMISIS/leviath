@@ -29,8 +29,36 @@ pub struct ServeArgs {
     /// API token clients must present (`Authorization: Bearer <token>`, or
     /// `?token=` for WebSockets). Overrides the LEVIATH_API_TOKEN env var; the
     /// server refuses to start if neither is set.
+    ///
+    /// Prefer the environment variable: an argument is visible in `ps` to every
+    /// local user for the lifetime of the process.
     #[arg(long)]
     pub token: Option<String>,
+
+    /// Enable the MCP administration endpoints (`POST`/`DELETE
+    /// /api/mcp/servers`).
+    ///
+    /// **Off by default, because they are remote code execution by
+    /// construction.** Adding an MCP server writes a `command` and `args` into
+    /// `~/.leviath/config.toml`, and Leviath then spawns exactly that — so any
+    /// token holder could run an arbitrary process, persistently, for every
+    /// future run. The rest of the API can only run agents the user already
+    /// installed; this one adds new executables to the machine.
+    #[arg(long)]
+    pub allow_admin: bool,
+
+    /// Restrict agent working directories to this root.
+    ///
+    /// Without it, `POST /api/agents` accepts any `workdir` — including `/` —
+    /// so a token holder can point a tool-executing agent at the whole
+    /// filesystem. Set this to the directory the API is meant to work in.
+    #[arg(long)]
+    pub workdir_root: Option<PathBuf>,
+
+    /// Refuse `"yolo": true` on spawn requests, so an API caller cannot waive
+    /// every approval prompt for an agent running on the host.
+    #[arg(long)]
+    pub no_remote_yolo: bool,
 }
 
 // ─── Shared state ────────────────────────────────────────────────────────────
@@ -99,6 +127,48 @@ pub struct AppState {
     pub(super) control: leviath_runtime::control_socket::ControlClient,
     /// Paths + seams for the MCP management endpoints.
     pub(super) mcp: super::mcp::McpAdmin,
+    /// The spawn-request restrictions from [`ServeArgs`], resolved once at
+    /// startup so every handler reads the same decision.
+    pub(super) limits: Arc<ServeLimits>,
+}
+
+/// What this server refuses regardless of who is asking.
+///
+/// A valid API token proves the caller is allowed to *use* the server; it does
+/// not mean they should be able to reconfigure the machine or point an agent at
+/// the filesystem root. These are the operator's answers to that, fixed at
+/// startup rather than negotiable per request.
+///
+/// `--allow-admin` is deliberately absent: it decides whether a route is
+/// *mounted at all*, so it is consumed once at router construction rather than
+/// carried here for a handler to consult. An unmounted route 404s; a mounted one
+/// guarded by a field is one refactor away from being reachable.
+#[derive(Debug, Clone, Default)]
+pub(super) struct ServeLimits {
+    /// `--workdir-root`: the directory agent workdirs must sit under.
+    pub(super) workdir_root: Option<PathBuf>,
+    /// `--no-remote-yolo`: whether a spawn request may set `"yolo": true`.
+    pub(super) no_remote_yolo: bool,
+}
+
+impl ServeLimits {
+    /// Check a requested agent workdir against `--workdir-root`.
+    ///
+    /// Uses the same symlink-aware containment the file tools use, so a symlink
+    /// under the root cannot be used to point an agent outside it.
+    pub(super) fn check_workdir(&self, workdir: &std::path::Path) -> Result<(), String> {
+        let Some(root) = &self.workdir_root else {
+            return Ok(());
+        };
+        match leviath_core::resolves_within(workdir, root) {
+            true => Ok(()),
+            false => Err(format!(
+                "workdir '{}' is outside the configured --workdir-root '{}'",
+                workdir.display(),
+                root.display()
+            )),
+        }
+    }
 }
 
 // ─── Error response ─────────────────────────────────────────────────────────

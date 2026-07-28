@@ -66,6 +66,7 @@ mod tests {
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            limits: Default::default(),
         }
     }
 
@@ -89,6 +90,7 @@ mod tests {
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            limits: Default::default(),
         }
     }
 
@@ -158,6 +160,7 @@ mod tests {
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            limits: Default::default(),
         };
         let app = Router::new()
             .route("/api/config", get(get_config))
@@ -192,6 +195,7 @@ mod tests {
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            limits: Default::default(),
         }
     }
 
