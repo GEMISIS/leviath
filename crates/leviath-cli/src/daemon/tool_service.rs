@@ -240,7 +240,16 @@ pub async fn dispatch_tools(
         }
 
         let is_builtin = state.builtin_names.contains(&tc.name);
-        let policy = if state.session_allows.lock().await.contains(&tc.name) {
+        // What a session-scoped approval for *this specific call* would be
+        // remembered under. For a shell call that is the command's leading words,
+        // not the bare tool name — see `session_approval_key`.
+        let approval_key = crate::tools::session_approval_key(&tc.name, &tc.arguments);
+        let session_approved = match &approval_key {
+            Some(key) => state.session_allows.lock().await.contains(key),
+            // A call with no reusable key can never match an earlier grant.
+            None => false,
+        };
+        let policy = if session_approved {
             ToolPolicy::Allow
         } else {
             let stage_snap = state
@@ -274,8 +283,15 @@ pub async fn dispatch_tools(
                 );
                 let response = state.interaction.ask(req).await;
                 if response.approved.unwrap_or(false) {
-                    if response.scope == Some(ApprovalScope::Session) {
-                        state.session_allows.lock().await.insert(tc.name.clone());
+                    // Record the grant under the key that describes what was
+                    // actually approved. `None` means this call is not reusable
+                    // (a chained shell command), so "for this session" degrades
+                    // to "this once" — the safe direction, and the only honest
+                    // one when the command's leading words don't characterize it.
+                    if response.scope == Some(ApprovalScope::Session)
+                        && let Some(key) = &approval_key
+                    {
+                        state.session_allows.lock().await.insert(key.clone());
                     }
                     slots.push((tc.id.clone(), None));
                     queued.push((slot, is_builtin, tc));

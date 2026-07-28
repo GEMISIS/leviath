@@ -2,7 +2,48 @@
 
 use flate2::read::GzDecoder;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+
+/// Largest decompressed size a bundle may unpack to.
+///
+/// Bounds a decompression bomb: gzip reaches ratios well past 1000:1, so a
+/// bundle small enough to look unremarkable could fill the disk. 256 MiB is far
+/// above any real agent bundle (they are manifests, prompts, and a few `.rhai`
+/// files) and far below "fills the disk".
+const MAX_UNPACKED_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Refuse an unpacked bundle that contains symlinks.
+///
+/// tar-rs blocks entries that *extract* outside the destination, but a symlink
+/// entry lands inside it perfectly legally — and then points wherever it likes.
+/// Since the installed tree is later scanned for `.rhai` tool scripts and read
+/// by the file tools, a link is a way to smuggle content in (or to have a later
+/// write follow it out). Nothing in a legitimate agent bundle needs one.
+fn reject_symlinks(dir: &Path) -> anyhow::Result<()> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // The directory was just unpacked; an unreadable one is a real error,
+        // but it will surface on the next read rather than here.
+        Err(_) => return Ok(()),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // `symlink_metadata` does not follow the link, which is the point.
+        let meta = fs::symlink_metadata(&path)
+            .map_err(|e| anyhow::anyhow!("Failed to inspect '{}': {e}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            anyhow::bail!(
+                "Package contains a symlink ('{}'), which is not permitted in an agent bundle",
+                path.display()
+            );
+        }
+        if meta.is_dir() {
+            reject_symlinks(&path)?;
+        }
+    }
+    Ok(())
+}
 
 /// Information about an installed agent.
 #[derive(Debug, Clone)]
@@ -71,9 +112,22 @@ impl AgentInstaller {
     }
 
     /// Install an agent from in-memory bytes.
+    ///
+    /// `name` becomes a directory under the install dir, so it must be a single
+    /// safe path component. `install` derives it from `file_stem()` (which
+    /// already strips directories), but this is `pub` and any future caller
+    /// passing a downloaded or user-supplied name would otherwise get a
+    /// traversal for free — `Path::join` does not normalize, and an absolute
+    /// name replaces the base entirely.
     pub fn install_from_bytes(&self, name: &str, data: &[u8]) -> anyhow::Result<InstalledAgent> {
         tracing::info!(name = %name, "Installing agent from bytes");
 
+        if !leviath_core::is_safe_path_component(name) {
+            anyhow::bail!(
+                "invalid agent name '{name}': names may contain only letters, digits, \
+                 '.', '_' and '-'"
+            );
+        }
         let agent_dir = self.install_dir.join(name);
 
         // Create installation directory
@@ -85,13 +139,34 @@ impl AgentInstaller {
             )
         })?;
 
-        // Extract tar.gz archive
-        let decoder = GzDecoder::new(data);
+        // Extract tar.gz archive.
+        //
+        // `Read::take` bounds the *decompressed* stream. Without it a ~1 MB
+        // bundle could expand to fill the disk — the classic decompression bomb
+        // — and nothing downstream would notice until the write failed.
+        //
+        // `set_preserve_permissions(false)` and `set_unpack_xattrs(false)`:
+        // otherwise an attacker-authored archive chooses the modes and extended
+        // attributes of the files it drops into the user's home.
+        //
+        // tar-rs already rejects `..` components and validates every entry
+        // against the destination (including hard links), so classic zip-slip is
+        // covered by the dependency — which is a reason to keep `cargo audit`
+        // watching it, not a reason to assume it always will.
+        let decoder = GzDecoder::new(data).take(MAX_UNPACKED_BYTES);
         let mut archive = tar::Archive::new(decoder);
+        archive.set_preserve_permissions(false);
+        archive.set_unpack_xattrs(false);
 
-        archive
-            .unpack(&agent_dir)
-            .map_err(|e| anyhow::anyhow!("Failed to extract package: {}", e))?;
+        archive.unpack(&agent_dir).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to extract package: {}. (Bundles are limited to {} MiB \
+                 uncompressed.)",
+                e,
+                MAX_UNPACKED_BYTES / (1024 * 1024)
+            )
+        })?;
+        reject_symlinks(&agent_dir)?;
 
         // Read agent.leviath to get metadata
         let manifest_path = agent_dir.join("agent.leviath");
@@ -276,6 +351,89 @@ description = "{}"
             archive.finish().unwrap();
         }
         encoder.finish().unwrap()
+    }
+
+    /// `install_from_bytes` is `pub` and joins `name` onto the install dir.
+    /// `Path::join` does not normalize `..` and an absolute name replaces the
+    /// base entirely, so an unvalidated name reached anywhere on the filesystem.
+    #[test]
+    fn install_from_bytes_rejects_traversing_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+        let bundle = make_bundle("x", "1.0.0", "d");
+        for name in ["../escape", "../../tmp/escape", "/tmp/escape", "a/b", ".."] {
+            let err = installer
+                .install_from_bytes(name, &bundle)
+                .expect_err("{name} must be refused");
+            assert!(err.to_string().contains("invalid agent name"), "{err}");
+        }
+        assert!(
+            !std::path::Path::new("/tmp/escape").exists(),
+            "nothing may be created outside the install dir"
+        );
+    }
+
+    /// A gzip bomb: a small archive that expands without bound. `Read::take`
+    /// stops it mid-stream, so the unpack fails instead of filling the disk.
+    #[test]
+    fn install_from_bytes_refuses_a_decompression_bomb() {
+        // 512 MiB of zeros, which gzip compresses to a few hundred KiB — past
+        // the 256 MiB cap, so extraction must fail.
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        {
+            let mut archive = tar::Builder::new(&mut encoder);
+            let size = 512 * 1024 * 1024u64;
+            let mut header = tar::Header::new_gnu();
+            header.set_size(size);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, "big.bin", std::io::repeat(0).take(size))
+                .unwrap();
+            archive.finish().unwrap();
+        }
+        let bomb = encoder.finish().unwrap();
+        assert!(
+            bomb.len() < 5 * 1024 * 1024,
+            "precondition: the bomb is small on disk ({} bytes)",
+            bomb.len()
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+        let err = installer
+            .install_from_bytes("bomb", &bomb)
+            .expect_err("an oversized bundle must be refused");
+        assert!(err.to_string().contains("Failed to extract"), "{err}");
+    }
+
+    /// tar-rs blocks entries that *extract* outside the destination, but a
+    /// symlink entry lands inside it legally and then points wherever it likes.
+    /// The installed tree is later scanned for `.rhai` tool scripts, so a link
+    /// is a way to smuggle content in.
+    #[cfg(unix)]
+    #[test]
+    fn install_from_bytes_refuses_a_symlink_entry() {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        {
+            let mut archive = tar::Builder::new(&mut encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(0);
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_mode(0o777);
+            archive
+                .append_link(&mut header, "escape", "/etc/passwd")
+                .unwrap();
+            archive.finish().unwrap();
+        }
+        let bundle = encoder.finish().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+        let err = installer
+            .install_from_bytes("linky", &bundle)
+            .expect_err("a symlink entry must be refused");
+        assert!(err.to_string().contains("symlink"), "{err}");
     }
 
     #[test]

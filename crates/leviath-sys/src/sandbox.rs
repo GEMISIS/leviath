@@ -74,8 +74,70 @@ pub struct ContainerRunSpec<'a> {
     pub name: &'a str,
 }
 
+/// Host paths that must never be bind-mounted into an agent's container.
+///
+/// `mounts` comes from the blueprint — a file the user downloaded — and was
+/// interpolated straight into `-v {m}:{m}`. `mounts = ["/var/run/docker.sock"]`
+/// is a one-line container escape (the container can then create a *privileged*
+/// container on the host), and `mounts = ["/"]` makes the isolation decorative.
+///
+/// Matched as path prefixes, so `/var/run/docker.sock/..`-style near-misses and
+/// anything under a forbidden root are refused together.
+const FORBIDDEN_MOUNTS: &[&str] = &[
+    "/",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/etc",
+    "/boot",
+    "/var/run",
+    "/run",
+    // The container runtime's own socket, under either common path.
+    "/var/run/docker.sock",
+    "/run/docker.sock",
+    "/var/run/podman",
+];
+
+/// Whether `path` is safe to bind-mount into an agent container.
+///
+/// Refuses a fixed set of host-infrastructure roots and anything beneath them
+/// (`/`, `/proc`, `/sys`, `/dev`, `/etc`, `/boot`, `/run`, `/var/run`, and the
+/// container engines' own sockets), plus any
+/// relative path (which the engine would resolve against its own cwd, not ours)
+/// and anything containing `..`.
+pub fn mount_allowed(path: &str) -> bool {
+    let p = std::path::Path::new(path);
+    if !p.is_absolute()
+        || p.components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    // Normalize a trailing slash so "/etc/" and "/etc" compare alike.
+    let normalized = path.trim_end_matches('/');
+    let normalized = match normalized.is_empty() {
+        true => "/",
+        false => normalized,
+    };
+    !FORBIDDEN_MOUNTS.iter().any(|forbidden| {
+        normalized == *forbidden
+            || (*forbidden != "/" && normalized.starts_with(&format!("{forbidden}/")))
+            || *forbidden == "/" && normalized == "/"
+    })
+}
+
 /// argv to start a detached, auto-removed container that idles (`sleep
 /// infinity`) so shell calls can `exec` into it repeatedly (warm container).
+///
+/// Hardened beyond plain `run`: the container drops every capability, cannot
+/// regain privileges via setuid binaries, and is bounded in processes and
+/// memory. Without these it ran as **root inside** with the default capability
+/// set — so "sandboxed" bought isolation of the filesystem view and nothing
+/// else, and anything written to the bind-mounted workdir came back root-owned
+/// on the host.
+///
+/// `mounts` entries are filtered through [`mount_allowed`]; a refused entry is
+/// dropped rather than silently honored.
 pub fn container_run_argv(spec: &ContainerRunSpec) -> Vec<String> {
     let mut v = vec![
         spec.engine.to_string(),
@@ -84,6 +146,19 @@ pub fn container_run_argv(spec: &ContainerRunSpec) -> Vec<String> {
         "--rm".to_string(),
         "--name".to_string(),
         spec.name.to_string(),
+        // No capabilities: an agent's shell needs none of them, and `CAP_SYS_ADMIN`
+        // or `CAP_DAC_OVERRIDE` in particular turn a container into a foothold.
+        "--cap-drop".to_string(),
+        "ALL".to_string(),
+        // A setuid binary inside the image cannot escalate back to root.
+        "--security-opt".to_string(),
+        "no-new-privileges".to_string(),
+        // Bound fork bombs and runaway memory so one agent cannot take the host
+        // down with it.
+        "--pids-limit".to_string(),
+        "512".to_string(),
+        "--memory".to_string(),
+        "2g".to_string(),
     ];
     if !spec.network {
         v.push("--network".to_string());
@@ -94,7 +169,7 @@ pub fn container_run_argv(spec: &ContainerRunSpec) -> Vec<String> {
     // identical paths.
     v.push("-v".to_string());
     v.push(format!("{0}:{0}", spec.workdir));
-    for m in spec.mounts {
+    for m in spec.mounts.iter().filter(|m| mount_allowed(m)) {
         v.push("-v".to_string());
         v.push(format!("{m}:{m}"));
     }
@@ -147,8 +222,20 @@ pub fn container_rm_argv(engine: &str, name: &str) -> Vec<String> {
 /// without root, plus fresh mount + PID namespaces (`--mount --pid --fork
 /// --mount-proc`). `network = false` adds `--net`, giving an empty network
 /// namespace with no connectivity. The caller sets the child's working
-/// directory, so no `cd` is embedded here. Unlike containers, this shares the
-/// host root filesystem, so the host-detected `shell`/`flag` are correct.
+/// directory, so no `cd` is embedded here.
+///
+/// # This is not a filesystem sandbox
+///
+/// There is no `pivot_root`, no `chroot`, and no seccomp filter: the command
+/// **shares the host root filesystem** and can read `~/.ssh` or write
+/// `~/.leviath/providers/*.rhai` exactly as an unsandboxed command could. What
+/// `namespace` actually buys is PID isolation and, with `network = false`, no
+/// connectivity — genuinely useful, and not what most people mean by "sandbox".
+///
+/// Choose `kind = "container"` when the goal is to contain what an agent can
+/// *reach*. This mode is for bounding what it can *see running* and talk to.
+/// Said plainly here because a caller who assumes otherwise gets a weaker
+/// guarantee than they think, and the name invites that assumption.
 pub fn namespace_argv(shell: &str, flag: &str, command: &str, network: bool) -> Vec<String> {
     let mut v = vec![
         "unshare".to_string(),
@@ -212,6 +299,71 @@ mod tests {
         assert_eq!(namespace_supported(), cfg!(target_os = "linux"));
     }
 
+    /// `mounts` comes from a downloaded blueprint. Mounting the engine's own
+    /// socket lets the container create a privileged container on the host —
+    /// a one-line escape — and mounting `/` makes the isolation decorative.
+    #[test]
+    fn forbidden_mounts_are_refused() {
+        for path in [
+            "/",
+            "/proc",
+            "/sys",
+            "/dev",
+            "/etc",
+            "/etc/shadow",
+            "/var/run",
+            "/var/run/docker.sock",
+            "/run/docker.sock",
+            "/var/run/podman/podman.sock",
+        ] {
+            assert!(!mount_allowed(path), "{path} must be refused");
+        }
+    }
+
+    /// Relative paths resolve against the *engine's* cwd, not ours, so they are
+    /// never what the author meant; `..` is traversal.
+    #[test]
+    fn relative_and_traversing_mounts_are_refused() {
+        for path in ["data", "./data", "/work/../etc", "../etc"] {
+            assert!(!mount_allowed(path), "{path} must be refused");
+        }
+    }
+
+    /// Ordinary project directories still mount — the denylist is about host
+    /// infrastructure, not about making the feature unusable.
+    #[test]
+    fn ordinary_mounts_are_allowed() {
+        for path in [
+            "/data",
+            "/home/user/project",
+            "/Users/me/code",
+            "/opt/cache",
+            // Not `/etc` itself, and not under it.
+            "/etcetera",
+        ] {
+            assert!(mount_allowed(path), "{path} should be allowed");
+        }
+    }
+
+    /// A refused mount is dropped from the argv rather than passed through.
+    #[test]
+    fn container_run_argv_drops_forbidden_mounts() {
+        let spec = ContainerRunSpec {
+            engine: "docker",
+            image: "ubuntu:24.04",
+            workdir: "/work",
+            network: true,
+            mounts: &["/var/run/docker.sock".to_string(), "/data".to_string()],
+            name: "lev-abc",
+        };
+        let argv = container_run_argv(&spec);
+        assert!(
+            !argv.iter().any(|a| a.contains("docker.sock")),
+            "the engine socket must never reach the argv: {argv:?}"
+        );
+        assert!(argv.iter().any(|a| a == "/data:/data"));
+    }
+
     #[test]
     fn container_run_argv_with_network() {
         let spec = ContainerRunSpec {
@@ -231,6 +383,17 @@ mod tests {
                 "--rm",
                 "--name",
                 "lev-abc",
+                // Hardening flags: no capabilities, no privilege regain, and
+                // bounded processes/memory. Without them the container ran as
+                // root inside with the default capability set.
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--pids-limit",
+                "512",
+                "--memory",
+                "2g",
                 "-v",
                 "/work:/work",
                 "-v",
