@@ -36,7 +36,7 @@ pub mod sandbox;
 pub mod tty;
 
 pub use browser::{open_url, open_url_via};
-pub use perms::{ensure_file_private, secure_dir_perms, secure_file_perms};
+pub use perms::{ensure_file_private, secure_dir_perms, secure_file_perms, write_private};
 #[cfg(unix)]
 pub use process::peer_uid;
 pub use process::{configure_detached, current_uid, kill_process_group};

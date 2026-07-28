@@ -218,7 +218,7 @@ Message a running agent from the terminal or dashboard — input is injected bet
 
 **🛡️ Taint-Tracked Data Flow**
 
-A deterministic sensitivity model (Public / Internal / Private) tags every context region — set by the runtime, never by model output. Tools declare a direction and clearance, so an outbound call carrying data above its level is blocked before it fires — returned as `[blocked]`, or, in the daemon, surfaced as an *allow once / allow for this session / deny* prompt — and taint recovers automatically as entries evict. Configure it with an opt-in `[security]` block, layer on allowlists and Rhai policy rules, and dry-run any tool with `lev policy test`.
+A deterministic sensitivity model (Public / Internal / Private) tags every context region — set by the runtime, never by model output. Tools declare a direction and clearance, so an outbound call carrying data above its level is blocked before it fires — returned as `[blocked]`, or, in the daemon, surfaced as an *allow once / allow for this session / deny* prompt — and taint recovers automatically as entries evict. Every tool that can carry bytes off the machine is Outbound and therefore gated — `shell`, `web_fetch`, `http_get`/`http_post`, and any MCP or script tool, since an unrecognized tool fails closed rather than open. Configure it with an opt-in `[security]` block, layer on allowlists and Rhai policy rules, and dry-run any tool with `lev policy test`. An agent's own manifest can turn tracking *on*, never off.
 
 </td>
 </tr>
@@ -228,6 +228,8 @@ A deterministic sensitivity model (Public / Internal / Private) tags every conte
 **📦 Sandboxed Tool Execution**
 
 By default an agent's shell commands run **directly on your machine** — no runtime, nothing to install. Opt in per agent *or* per stage to route them into an isolated environment instead: a **container** (Docker, Podman, or any Docker-CLI-compatible engine — Leviath isn't prescriptive) or a fresh set of Linux **namespaces** (no runtime needed). Run analysis on the host and implementation in a networkless container. The daemon creates a warm container per agent and tears it down at reap, so no orphans; file tools keep working over the bind-mounted workdir.
+
+Containers drop every capability, forbid privilege regain, and are bounded in processes and memory. `namespace` is the lighter option and a narrower one: it isolates PIDs and, with `network = false`, connectivity — but it **shares the host root filesystem**, so it is not a filesystem sandbox. Choose `container` when the goal is to contain what an agent can reach. An installed agent can tighten either but never turn one off.
 
 ```toml
 [sandbox]
@@ -396,8 +398,17 @@ The two coding agents can also detour through an optional **`prototype`** spike 
 
 `lev serve` exposes a REST + WebSocket API — integrate from Python, TypeScript, Go, or anything that speaks HTTP. No SDK required.
 
+The API can spawn tool-executing agents, so it refuses to start without a token
+(`--token` or, preferably, `LEVIATH_API_TOKEN` — an argument is visible in `ps`).
+It binds to `127.0.0.1` by default and warns loudly if you bind it anywhere else.
+
 ```bash
 lev serve --port 3000
+
+# Exposed beyond your own machine? Bound it:
+lev serve --workdir-root /srv/workspaces --no-remote-yolo
+# `--allow-admin` (the MCP admin endpoints) is off by default — adding an MCP
+# server writes a spawn command into your config, which is RCE by construction.
 
 # spawn an agent (with a completion webhook + signing secret)
 curl -X POST http://localhost:3000/api/agents \
@@ -613,6 +624,19 @@ Each channel tag is a *rolling* release — deleted and recreated on every publi
 Separately, every **stable** deploy also cuts an **immutable versioned release** (`vX.Y.Z`, which carries GitHub's "Latest" badge). Those never change, so they're what Homebrew and Scoop pin to and what `cargo install --tag vX.Y.Z` fetches. Seeing both a `vX.Y.Z` release *and* a `latest` release for the same version is by design — one is the permanent archive, the other the moving pointer.
 
 Install commands for each channel live in the [distribution repo](https://github.com/Sun-Forge-AI/leviath-dist).
+
+## 🔐 Security
+
+Leviath runs LLM-driven tools on your machine, so [SECURITY.md](SECURITY.md)
+states plainly what it defends against — a malicious agent package, prompt
+injection reaching an agent's tools, a hostile MCP server, another local user,
+a repository you pointed it at — and what it does not, including that the model
+can do anything you granted it and that `namespace` isolation is not a
+filesystem sandbox.
+
+It also covers how to report a vulnerability, where every secret lives and with
+what permissions, how to harden a `lev serve` deployment, and how to verify a
+release's signed build provenance.
 
 ## 📄 License
 

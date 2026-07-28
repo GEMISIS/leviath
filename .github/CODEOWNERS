@@ -1,0 +1,36 @@
+# Default owner for everything.
+*                                   @gemisis
+
+# Security-critical surfaces. Called out separately not because the owner
+# differs today, but because these are the files where a change deserves a
+# second look regardless of how small the diff is — each one is a control that
+# something else assumes is holding.
+
+# The permission floor: what an installed agent may and may not grant itself.
+/crates/leviath-cli/src/tools.rs            @gemisis
+/crates/leviath-cli/src/daemon/script_host.rs @gemisis
+/crates/leviath-core/src/sandbox.rs         @gemisis
+/crates/leviath-core/src/taint.rs           @gemisis
+
+# Outbound-request policy, path containment, secret handling.
+/crates/leviath-core/src/net.rs             @gemisis
+/crates/leviath-core/src/paths.rs           @gemisis
+/crates/leviath-core/src/secrets.rs         @gemisis
+
+# Credential storage and the OAuth flow.
+/crates/leviath-mcp/src/auth/               @gemisis
+/crates/leviath-cli/src/config.rs           @gemisis
+
+# The agent-spawning API and the control channel.
+/crates/leviath-cli/src/commands/serve/     @gemisis
+/crates/leviath-runtime/src/control_socket/ @gemisis
+
+# File and process primitives (permissions, peer credentials, sandbox argv).
+/crates/leviath-sys/                        @gemisis
+
+# Supply chain and release integrity.
+/Cargo.lock                                 @gemisis
+/deny.toml                                  @gemisis
+/rust-toolchain.toml                        @gemisis
+/.github/workflows/                         @gemisis
+/SECURITY.md                                @gemisis

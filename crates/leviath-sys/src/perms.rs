@@ -24,6 +24,23 @@ pub fn ensure_file_private(path: &Path) -> io::Result<Option<u32>> {
     crate::platform::ensure_private(path, 0o600)
 }
 
+/// Write `contents` to `path` such that it is **never** readable by anyone but
+/// the owner, not even briefly.
+///
+/// `fs::write` followed by a `chmod` is the obvious shape and has a window: the
+/// file is created at `0o666 & ~umask` — typically `0o644` — and is
+/// world-readable until the `chmod` lands. Both files that hold Leviath's
+/// secrets were written that way, so `config.toml` (every provider API key) and
+/// `mcp-auth.json` (OAuth access and refresh tokens) each had a moment of being
+/// readable by any local user, on every save.
+///
+/// Creating the file with the mode already set closes that. On non-Unix this is
+/// a plain write — the mode argument has no meaning there, and Windows ACL
+/// handling is a separate piece of work rather than something to fake here.
+pub fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
+    crate::platform::write_with_mode(path, contents, 0o600)
+}
+
 // Cross-platform tests: they run on every OS so the public API (and, on
 // non-Unix, the `fallback` no-op impls) is covered everywhere. Only the
 // Unix-specific *assertions* about concrete mode bits are gated behind

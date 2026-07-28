@@ -42,8 +42,15 @@ pub(super) fn resolve_token(arg: Option<&str>) -> anyhow::Result<String> {
 /// `state` check used plain `==` until it was pointed at this one.
 use leviath_core::constant_time_eq;
 
-/// The token a request presents: `Authorization: Bearer <token>`, else the
-/// `token` query parameter (for WebSocket clients that can't set headers).
+/// The token a request presents: `Authorization: Bearer <token>`, else — **on
+/// the WebSocket routes only** — the `token` query parameter.
+///
+/// The query form exists because a browser cannot set request headers on a
+/// WebSocket upgrade. It used to be accepted on *every* route, which meant an
+/// ordinary REST call could authenticate with the token in its URL — and a URL
+/// ends up in reverse-proxy access logs, browser history, and `Referer` headers
+/// on any outbound link. Restricting it to the routes that genuinely cannot use
+/// a header keeps the escape hatch without spreading the credential.
 fn presented_token(req: &Request) -> Option<String> {
     if let Some(bearer) = req
         .headers()
@@ -53,10 +60,18 @@ fn presented_token(req: &Request) -> Option<String> {
     {
         return Some(bearer.trim().to_string());
     }
+    if !is_websocket_route(req.uri().path()) {
+        return None;
+    }
     req.uri()
         .query()
         .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("token=")))
         .map(|t| t.to_string())
+}
+
+/// Whether `path` is one of the WebSocket upgrade routes (`/ws`, `/ws/...`).
+fn is_websocket_route(path: &str) -> bool {
+    path == "/ws" || path.starts_with("/ws/")
 }
 
 /// Middleware: allow the request through only when it presents the expected
@@ -83,9 +98,15 @@ mod tests {
     use axum::http::Request as HttpRequest;
 
     fn req(auth: Option<&str>, query: Option<&str>) -> Request {
+        req_to("/api/agents", auth, query)
+    }
+
+    /// The `?token=` escape hatch is scoped to the WebSocket routes, so tests
+    /// have to say which path they are exercising.
+    fn req_to(path: &str, auth: Option<&str>, query: Option<&str>) -> Request {
         let uri = match query {
-            Some(q) => format!("http://x/api/agents?{q}"),
-            None => "http://x/api/agents".to_string(),
+            Some(q) => format!("http://x{path}?{q}"),
+            None => format!("http://x{path}"),
         };
         let mut b = HttpRequest::builder().uri(uri);
         if let Some(a) = auth {
@@ -121,23 +142,51 @@ mod tests {
     }
 
     #[test]
-    fn presented_token_reads_header_then_query() {
+    fn presented_token_reads_the_bearer_header_on_any_route() {
         assert_eq!(
             presented_token(&req(Some("Bearer tok123"), None)).as_deref(),
             Some("tok123")
         );
-        // Non-bearer header ⇒ falls to query.
-        assert_eq!(
-            presented_token(&req(Some("Basic x"), Some("token=qtok"))).as_deref(),
-            Some("qtok")
-        );
-        assert_eq!(
-            presented_token(&req(None, Some("foo=1&token=qtok"))).as_deref(),
-            Some("qtok")
-        );
         assert!(presented_token(&req(None, None)).is_none());
-        // A different key that ends in "token" isn't mistaken for it.
-        assert!(presented_token(&req(None, Some("mytoken=x"))).is_none());
+    }
+
+    /// A browser cannot set headers on a WebSocket upgrade, so `?token=` is
+    /// accepted there.
+    #[test]
+    fn the_query_token_works_on_the_websocket_routes() {
+        for path in ["/ws", "/ws/agents/run-1"] {
+            assert_eq!(
+                presented_token(&req_to(path, None, Some("token=qtok"))).as_deref(),
+                Some("qtok"),
+                "{path}"
+            );
+            assert_eq!(
+                presented_token(&req_to(path, None, Some("foo=1&token=qtok"))).as_deref(),
+                Some("qtok"),
+                "{path}"
+            );
+            // Non-bearer header ⇒ falls through to the query.
+            assert_eq!(
+                presented_token(&req_to(path, Some("Basic x"), Some("token=qtok"))).as_deref(),
+                Some("qtok"),
+                "{path}"
+            );
+            // A different key that merely ends in "token" is not mistaken for it.
+            assert!(presented_token(&req_to(path, None, Some("mytoken=x"))).is_none());
+        }
+    }
+
+    /// ...and nowhere else. A URL carrying the token ends up in reverse-proxy
+    /// access logs, browser history and `Referer` headers; a REST client can set
+    /// a header, so it has no reason to put the credential there.
+    #[test]
+    fn the_query_token_is_refused_on_ordinary_routes() {
+        for path in ["/api/agents", "/api/config", "/wsomething", "/"] {
+            assert!(
+                presented_token(&req_to(path, None, Some("token=qtok"))).is_none(),
+                "{path} must not accept a query token"
+            );
+        }
     }
 
     #[tokio::test]
@@ -159,13 +208,14 @@ mod tests {
             .unwrap();
         assert_eq!(ok.status(), StatusCode::OK);
 
-        // Valid via query param ⇒ 200.
-        let okq = app
+        // The right token in the query string, on a non-WebSocket route ⇒ 401.
+        // The credential does not belong in a URL where a header will do.
+        let query_on_rest = app
             .clone()
             .oneshot(req(None, Some("token=secret")))
             .await
             .unwrap();
-        assert_eq!(okq.status(), StatusCode::OK);
+        assert_eq!(query_on_rest.status(), StatusCode::UNAUTHORIZED);
 
         // Missing token ⇒ 401.
         let missing = app.clone().oneshot(req(None, None)).await.unwrap();

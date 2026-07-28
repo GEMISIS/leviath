@@ -22,9 +22,17 @@ pub struct ServeArgs {
     #[arg(short = 'H', long, default_value = "127.0.0.1")]
     pub host: String,
 
-    /// Allow CORS from origin (default: *)
-    #[arg(long, default_value = "*")]
-    pub cors: String,
+    /// Allow browser requests from this origin (e.g. `http://localhost:5173`).
+    ///
+    /// Defaults to **none**: the API is for programmatic clients, which are not
+    /// subject to CORS at all, so a browser-facing default of `*` gave nothing
+    /// to the normal case and widened the surface for the unusual one. A
+    /// dashboard served from another origin sets this explicitly.
+    ///
+    /// `*` is still accepted and still means "any origin". It is now a decision
+    /// someone typed rather than what you get by not thinking about it.
+    #[arg(long)]
+    pub cors: Option<String>,
 
     /// API token clients must present (`Authorization: Bearer <token>`, or
     /// `?token=` for WebSockets). Overrides the LEVIATH_API_TOKEN env var; the

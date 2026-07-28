@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 /// The authorization-server endpoints and client id learned for one server,
 /// plus its current tokens. Everything needed to refresh without re-running
 /// discovery.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+/// `Debug` is hand-written (below) so the tokens cannot be printed.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerAuth {
     /// The `resource` value bound into every token (RFC 8707): the canonical
     /// MCP endpoint URL.
@@ -38,6 +39,34 @@ pub struct ServerAuth {
     /// Granted scope, for display.
     #[serde(default)]
     pub scope: String,
+}
+
+/// Hand-written so the access and refresh tokens can never be printed.
+///
+/// These are live credentials for a third-party server, and this struct is
+/// carried through error paths that format their context — one `{:?}` would put
+/// them in the logs. The endpoints and expiry are the useful part of a debug
+/// line anyway.
+impl std::fmt::Debug for ServerAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerAuth")
+            .field("resource", &self.resource)
+            .field("issuer", &self.issuer)
+            .field("authorization_endpoint", &self.authorization_endpoint)
+            .field("token_endpoint", &self.token_endpoint)
+            .field("client_id", &self.client_id)
+            .field("access_token", &"<redacted>")
+            .field(
+                "refresh_token",
+                match self.refresh_token {
+                    Some(_) => &"<redacted>",
+                    None => &"<none>",
+                },
+            )
+            .field("expires_at", &self.expires_at)
+            .field("scope", &self.scope)
+            .finish()
+    }
 }
 
 impl ServerAuth {
@@ -79,14 +108,12 @@ impl AuthStore {
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         create_parent_dir(path)?;
         let content = serde_json::to_string_pretty(self).expect("AuthStore is always serializable");
-        std::fs::write(path, content)
+        // `write_private`, not `fs::write` + `chmod`. The two-step version left
+        // this file — access *and refresh* tokens for every MCP server — at the
+        // umask default (typically 0644) between the write and the mode change,
+        // so every save had a moment where any local user could read it.
+        leviath_sys::write_private(path, content.as_bytes())
             .map_err(|e| anyhow::anyhow!("Failed to write MCP auth store: {}", e))?;
-        // Tokens are secrets: lock the file down to the owner, same as the
-        // config that holds provider API keys. Setting the mode on a file we
-        // just wrote and own cannot fail (and is a no-op on non-Unix), so this
-        // is an assertion, not a fallible step.
-        leviath_sys::secure_file_perms(path)
-            .expect("securing a just-written, owned file cannot fail");
         Ok(())
     }
 
@@ -163,6 +190,39 @@ mod tests {
             expires_at: 10_000,
             scope: "openid".to_string(),
         }
+    }
+
+    /// The tokens are live credentials for a third-party server, and this
+    /// struct is carried through error paths that format their context.
+    #[test]
+    fn debug_output_never_contains_the_tokens() {
+        // Distinctive values: the shared `sample()` uses "at"/"rt", which occur
+        // as substrings of "authorization_endpoint" and would make this pass or
+        // fail for the wrong reason.
+        let mut auth = sample();
+        auth.access_token = "ACCESS-TOKEN-SECRET".to_string();
+        auth.refresh_token = Some("REFRESH-TOKEN-SECRET".to_string());
+
+        let rendered = format!("{auth:?}");
+        assert!(
+            !rendered.contains("ACCESS-TOKEN-SECRET"),
+            "access token leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains("REFRESH-TOKEN-SECRET"),
+            "refresh token leaked: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        // The parts that make a debug line useful survive.
+        assert!(rendered.contains("auth.example.com"), "{rendered}");
+        assert!(rendered.contains("client-123"), "{rendered}");
+    }
+
+    #[test]
+    fn debug_distinguishes_an_absent_refresh_token() {
+        let mut auth = sample();
+        auth.refresh_token = None;
+        assert!(format!("{auth:?}").contains("<none>"));
     }
 
     // ─── expiry ───────────────────────────────────────────────────────────
@@ -326,6 +386,30 @@ mod tests {
             mode.is_none(),
             "already private after save, got remediation {mode:?}"
         );
+    }
+
+    /// Access *and refresh* tokens for every MCP server. Written with the mode
+    /// already applied, so there is no window — however brief — where another
+    /// local user could read them. The previous `fs::write` + `chmod` left the
+    /// file at the umask default (typically 0644) in between, on every save.
+    #[cfg(unix)]
+    #[test]
+    fn saving_never_leaves_the_token_store_group_or_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp-auth.json");
+
+        let mut store = AuthStore::default();
+        store.set("s", sample());
+        store.save(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        // And a re-save over a file that became permissive tightens it again.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        store.save(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     // ─── default_path / LEVIATH_HOME ──────────────────────────────────────
