@@ -20,7 +20,13 @@ pub(super) const RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
 /// reconnecting (after `backoff`) whenever the stream ends or the daemon is
 /// briefly unreachable. Never returns; tests pass a zero backoff.
 pub(super) async fn event_loop(state: AppState, backoff: Duration) {
-    let client = reqwest::Client::new();
+    // Was a bare `Client::new()`, which has no timeouts at all: a webhook
+    // endpoint that accepts a connection and never answers hung this delivery
+    // forever. The shared factory supplies a connect+total timeout floor and
+    // caps redirects.
+    let client = leviath_core::client_builder(leviath_core::ClientTimeouts::default())
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     loop {
         consume_once(&state, &client).await;
         // The stream ended (daemon closed / restarted) or was unreachable; back

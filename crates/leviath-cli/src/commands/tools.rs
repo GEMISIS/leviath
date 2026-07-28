@@ -17,11 +17,18 @@ pub struct ToolsArgs {
     pub(crate) json: bool,
 }
 
-/// The global script-tools directory (`<leviath-home>/tools/`), mirroring the
+/// The global script-tools directory (`~/.leviath/tools/`), mirroring the
 /// daemon's own global scan in `spawn::script_scan_dirs`. `None` when no home
 /// directory resolves.
+///
+/// This resolved to `$HOME/tools/` until the shared resolver landed — the
+/// `"tools"` component was joined onto the *user home* rather than the
+/// `.leviath` data root, unlike `providers/`, `agents/` and `runs/`. Every
+/// `.rhai` file found here is compiled and offered to **every** agent as an
+/// executable tool, and `$HOME/tools` is an ordinary directory a developer may
+/// already have.
 fn global_tools_dir() -> Option<PathBuf> {
-    crate::config::leviath_home_dir().map(|h| h.join("tools"))
+    leviath_core::tools_dir()
 }
 
 /// The outcome of scanning a tools directory: the tools that compiled and the
@@ -335,10 +342,19 @@ mod tests {
     }
 
     #[test]
-    fn global_tools_dir_reads_home() {
+    fn global_tools_dir_is_under_the_leviath_data_dir() {
         let home = tempfile::tempdir().unwrap();
         temp_env::with_var("LEVIATH_HOME", Some(home.path().to_str().unwrap()), || {
-            assert_eq!(global_tools_dir(), Some(home.path().join("tools")));
+            // `<home>/.leviath/tools`, alongside `providers/` and `agents/`.
+            // This asserted `<home>/tools` before — the `"tools"` component was
+            // joined onto the user home rather than the data root. Every `.rhai`
+            // file in this directory becomes an executable tool for *every*
+            // agent, so it belongs inside Leviath's own directory rather than in
+            // a plausible-looking one at the top of the user's home.
+            assert_eq!(
+                global_tools_dir(),
+                Some(home.path().join(".leviath").join("tools"))
+            );
         });
     }
 }

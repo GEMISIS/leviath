@@ -2,37 +2,20 @@
 //!
 //! When enabled, logs full request/response details for every provider HTTP call.
 
-/// Redact an API key for logging, showing only the last 4 characters.
+/// Redact credential-bearing headers in a header map for safe logging.
 ///
-/// Counts *characters*, not bytes, for the same two reasons as `lev setup`'s
-/// redactor: `key.len() - 4` can land inside a multi-byte character and panic
-/// (the shape of issue #115), and a 5-byte 2-character key is longer than 4
-/// *bytes*, so the byte branch would print the whole thing behind four stars.
-fn redact_api_key(key: &str) -> String {
-    let chars: Vec<char> = key.chars().collect();
-    if chars.len() <= 4 {
-        "****".to_string()
-    } else {
-        format!(
-            "****{}",
-            chars[chars.len() - 4..].iter().collect::<String>()
-        )
-    }
-}
-
-/// Redact authorization headers in a header map for safe logging.
+/// Both halves come from `leviath_core::secrets` now. The local copies named
+/// exactly `authorization`, `x-api-key` and `api-key`, which meant Gemini's
+/// `x-goog-api-key` was logged **in full** whenever this feature was on — the
+/// one provider header that did not happen to be on the list.
 fn redact_headers(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
     headers
         .iter()
         .map(|(name, value)| {
-            let name_lower = name.as_str().to_lowercase();
-            let val = if name_lower == "authorization"
-                || name_lower == "x-api-key"
-                || name_lower == "api-key"
-            {
-                redact_api_key(value.to_str().unwrap_or("<non-utf8>"))
-            } else {
-                value.to_str().unwrap_or("<non-utf8>").to_string()
+            let raw = value.to_str().unwrap_or("<non-utf8>");
+            let val = match leviath_core::is_secret_header(name.as_str()) {
+                true => leviath_core::redact(raw),
+                false => raw.to_string(),
             };
             (name.to_string(), val)
         })
@@ -93,25 +76,9 @@ pub fn log_error(provider: &str, url: &str, error: &str) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn redact_api_key_short() {
-        assert_eq!(redact_api_key("abc"), "****");
-        assert_eq!(redact_api_key("abcd"), "****");
-    }
-
-    #[test]
-    fn redact_api_key_long() {
-        assert_eq!(redact_api_key("sk-ant-api03-abc123xyz"), "****3xyz");
-    }
-
-    #[test]
-    fn redact_api_key_multibyte() {
-        // Issue #115: `key.len() - 4` used to land inside the last '日' and panic.
-        assert_eq!(redact_api_key("sk-日本語日本語"), "****語日本語");
-        // 2 characters but 6 bytes — the byte-length guard called this "long" and
-        // printed the whole key. Character counting redacts it.
-        assert_eq!(redact_api_key("日本"), "****");
-    }
+    // The `redact` / `is_secret_header` unit tests live with their definitions
+    // in `leviath_core::secrets`. What matters here is that this module's
+    // header pass actually uses them.
 
     #[test]
     fn redact_headers_hides_auth() {
@@ -121,18 +88,26 @@ mod tests {
             "Bearer sk-secret-key-1234".parse().unwrap(),
         );
         headers.insert("x-api-key", "sk-ant-api03-realkey".parse().unwrap());
+        // Gemini's header. The old exact-name list did not include it, so this
+        // key was logged in full whenever `debug-http` was enabled.
+        headers.insert("x-goog-api-key", "AIzaSyRealGoogleKey".parse().unwrap());
         headers.insert("content-type", "application/json".parse().unwrap());
 
         let redacted = redact_headers(&headers);
         for (name, value) in &redacted {
-            if name == "authorization" || name == "x-api-key" {
-                assert!(value.starts_with("****"), "expected redacted: {value}");
-                assert!(!value.contains("sk-secret"), "key leaked: {value}");
-                assert!(!value.contains("realkey"), "key leaked: {value}");
-            }
             if name == "content-type" {
                 assert_eq!(value, "application/json");
+                continue;
             }
+            assert!(value.starts_with("****"), "{name} not redacted: {value}");
+        }
+        let joined = redacted
+            .iter()
+            .map(|(_, v)| v.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for leak in ["sk-secret", "realkey", "AIzaSyRealGoogleKey"] {
+            assert!(!joined.contains(leak), "{leak} leaked: {joined}");
         }
     }
 }

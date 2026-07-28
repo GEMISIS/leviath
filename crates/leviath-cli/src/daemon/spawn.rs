@@ -146,7 +146,7 @@ fn script_scan_dirs(
         .map(|d| d.join("tools"))
         .into_iter()
         .chain(extra)
-        .chain(crate::config::leviath_home_dir().map(|h| h.join("tools")))
+        .chain(leviath_core::tools_dir())
         .collect()
 }
 

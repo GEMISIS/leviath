@@ -24,6 +24,48 @@
 //! surface for a model that is picking URLs rather than running an attack.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+use std::time::Duration;
+
+/// The floor every outbound HTTP client in the workspace gets.
+///
+/// Two clients were built with a bare `reqwest::Client::new()` and therefore had
+/// **no timeouts at all**: webhook delivery (so an endpoint that accepts a
+/// connection and never answers hung that delivery forever) and the package
+/// registry. `Client::new()` is an easy default to reach for and a bad one for
+/// anything talking to a host we do not control.
+///
+/// Values are deliberately generous — this is a floor to stop a hang, not a
+/// performance budget. A caller with a real reason for different numbers builds
+/// its own client and says why, as the provider and MCP transports do.
+#[derive(Debug, Clone, Copy)]
+pub struct ClientTimeouts {
+    /// Cap on establishing the TCP+TLS connection.
+    pub connect: Duration,
+    /// Cap on the whole request/response.
+    pub total: Duration,
+}
+
+impl Default for ClientTimeouts {
+    fn default() -> Self {
+        Self {
+            connect: Duration::from_secs(10),
+            total: Duration::from_secs(60),
+        }
+    }
+}
+
+/// A `reqwest` client builder carrying the shared timeout floor and a redirect
+/// cap.
+///
+/// The redirect cap matters independently of timeouts: reqwest follows up to ten
+/// hops by default, and every hop is a fresh destination that the caller's
+/// original URL check never saw.
+pub fn client_builder(timeouts: ClientTimeouts) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .connect_timeout(timeouts.connect)
+        .timeout(timeouts.total)
+        .redirect(reqwest::redirect::Policy::limited(5))
+}
 
 /// Why a URL was refused. Rendered into the tool result the model sees, so it
 /// says what to do differently rather than just failing.

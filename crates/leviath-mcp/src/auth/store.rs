@@ -135,16 +135,16 @@ fn create_parent_dir(path: &Path) -> anyhow::Result<()> {
     }
 }
 
-/// `$LEVIATH_HOME`, else `~/.leviath`, else `None`.
+/// Leviath's data root, from the shared resolver.
 ///
-/// Mirrors the resolution the CLI's config uses. `dirs::home_dir` cannot be
-/// redirected by `$HOME` on macOS/Windows, so `LEVIATH_HOME` is the single
-/// override every home-relative path (including this one) honors under test.
+/// This used to be a local copy that read `LEVIATH_HOME` as the `.leviath`
+/// directory *itself*, while the CLI reads it as the user home and appends
+/// `.leviath`. With the override set — which is how every test and every
+/// sandboxed run works — the OAuth token store therefore landed in a different
+/// directory from the config naming those very servers. The default
+/// (`~/.leviath/mcp-auth.json`) is unchanged.
 fn leviath_home() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("LEVIATH_HOME") {
-        return Some(PathBuf::from(home));
-    }
-    dirs::home_dir().map(|home| home.join(".leviath"))
+    leviath_core::data_dir()
 }
 
 #[cfg(test)]
@@ -330,12 +330,20 @@ mod tests {
 
     // ─── default_path / LEVIATH_HOME ──────────────────────────────────────
 
+    /// `LEVIATH_HOME` names the *home*, and `.leviath` is appended — the same
+    /// reading the CLI's config, runs dir, agents dir and control socket use.
+    ///
+    /// This asserted `<LEVIATH_HOME>/mcp-auth.json` before, because this module
+    /// carried its own copy of the resolver that treated the override as the
+    /// `.leviath` directory itself. With the override set — which is how every
+    /// test and every sandboxed run works — the OAuth token store therefore sat
+    /// in a different directory from the config naming those very servers.
     #[test]
     fn default_path_honors_leviath_home() {
         temp_env::with_var("LEVIATH_HOME", Some("/tmp/lev-home-test"), || {
             assert_eq!(
                 AuthStore::default_path(),
-                Some(PathBuf::from("/tmp/lev-home-test/mcp-auth.json"))
+                Some(PathBuf::from("/tmp/lev-home-test/.leviath/mcp-auth.json"))
             );
         });
     }
