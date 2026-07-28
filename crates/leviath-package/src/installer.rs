@@ -20,10 +20,6 @@ const MAX_UNPACKED_BYTES: u64 = 256 * 1024 * 1024;
 /// Since the installed tree is later scanned for `.rhai` tool scripts and read
 /// by the file tools, a link is a way to smuggle content in (or to have a later
 /// write follow it out). Nothing in a legitimate agent bundle needs one.
-fn reject_symlinks(dir: &Path) -> anyhow::Result<()> {
-    reject_symlinks_with(dir, classify)
-}
-
 /// What an entry is, as far as this check cares.
 ///
 /// A three-way answer rather than a `FileType`, because `FileType` cannot be
@@ -49,7 +45,8 @@ fn classify(path: &Path) -> Entry {
     }
 }
 
-/// Core of [`reject_symlinks`] with the classifier injected.
+/// Refuse a bundle containing any symlink, at any depth, with the entry
+/// classifier injected.
 ///
 /// A `fn` pointer (not `impl Fn`) so there is one monomorphization, matching the
 /// seam idiom used elsewhere in the workspace. The seam exists because the
@@ -153,6 +150,18 @@ impl AgentInstaller {
     /// traversal for free — `Path::join` does not normalize, and an absolute
     /// name replaces the base entirely.
     pub fn install_from_bytes(&self, name: &str, data: &[u8]) -> anyhow::Result<InstalledAgent> {
+        self.install_from_bytes_with(name, data, classify)
+    }
+
+    /// Core of [`install_from_bytes`](Self::install_from_bytes) with the entry
+    /// classifier injected — see [`reject_symlinks_with`] for why the seam
+    /// exists. A `fn` pointer, so there is one monomorphization.
+    fn install_from_bytes_with(
+        &self,
+        name: &str,
+        data: &[u8],
+        classify: fn(&Path) -> Entry,
+    ) -> anyhow::Result<InstalledAgent> {
         tracing::info!(name = %name, "Installing agent from bytes");
 
         if !leviath_core::is_safe_path_component(name) {
@@ -199,7 +208,7 @@ impl AgentInstaller {
                 MAX_UNPACKED_BYTES / (1024 * 1024)
             )
         })?;
-        reject_symlinks(&agent_dir)?;
+        reject_symlinks_with(&agent_dir, classify)?;
 
         // Read agent.leviath to get metadata
         let manifest_path = agent_dir.join("agent.leviath");
@@ -532,6 +541,46 @@ description = "{}"
         assert!(err.to_string().contains("symlink or unreadable"), "{err}");
     }
 
+    /// The refusal has to propagate out of a *nested* directory too — a bundle
+    /// plants its `tools/` subdirectory, not its root.
+    #[test]
+    fn reject_symlinks_refuses_an_entry_nested_in_a_subdirectory() {
+        /// Refuses only the leaf, so the recursion has to reach it.
+        fn refuse_the_leaf(path: &Path) -> Entry {
+            match path.file_name().and_then(|n| n.to_str()) {
+                Some("web_fetch.rhai") => Entry::Refused,
+                _ => classify(path),
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("tools");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("web_fetch.rhai"), b"x").unwrap();
+
+        let err = reject_symlinks_with(dir.path(), refuse_the_leaf)
+            .expect_err("a refused entry one level down is still refused");
+        assert!(err.to_string().contains("web_fetch.rhai"), "{err}");
+    }
+
+    /// And the refusal fails the *install*, rather than being computed and
+    /// discarded — the bundle must not be left in place.
+    #[test]
+    fn install_refuses_a_bundle_whose_entries_cannot_be_certified() {
+        fn all_refused(_: &Path) -> Entry {
+            Entry::Refused
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+        let bundle = make_bundle("probe", "1.0.0", "a probe");
+
+        let err = installer
+            .install_from_bytes_with("probe", &bundle, all_refused)
+            .expect_err("an uncertifiable bundle must not install");
+        assert!(err.to_string().contains("symlink or unreadable"), "{err}");
+    }
+
     /// Ordinary files and nested directories pass, so the test above is not
     /// passing merely because everything is refused.
     #[test]
@@ -542,7 +591,7 @@ description = "{}"
         std::fs::write(nested.join("web_fetch.rhai"), b"x").unwrap();
         std::fs::write(dir.path().join("agent.leviath"), b"x").unwrap();
 
-        reject_symlinks(dir.path()).expect("an ordinary bundle passes");
+        reject_symlinks_with(dir.path(), classify).expect("an ordinary bundle passes");
         // And the classifier itself agrees about what it saw.
         assert_eq!(classify(&nested), Entry::Dir);
         assert_eq!(classify(&nested.join("web_fetch.rhai")), Entry::File);

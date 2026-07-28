@@ -1832,6 +1832,10 @@ google_api_key = "AIza-existing"
         assert!(empty.contains("<unset>"), "{empty}");
     }
 
+    /// Unix-only: the assertion is about POSIX mode bits, which Windows does
+    /// not have. `write_private`'s Windows path is a plain write, exercised by
+    /// every other `save_to_path` test.
+    #[cfg(unix)]
     #[test]
     fn saving_a_config_never_leaves_it_group_or_world_readable() {
         use std::os::unix::fs::PermissionsExt;
