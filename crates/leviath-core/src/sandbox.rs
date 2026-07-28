@@ -104,21 +104,27 @@ impl ToolSandboxConfig {
 /// Resolve the effective [`ToolSandboxConfig`] for a stage: the most specific
 /// present config (stage over agent), or the global default, or host when nothing
 /// is set. Mirrors [`crate::taint::resolve_security`].
+///
+/// **A blueprint cannot turn off a sandbox the user turned on.** The `agent` and
+/// `stage` configs come from `agent.leviath` — a downloaded file — so when the
+/// user's global config asks for isolation, a manifest asking for
+/// [`SandboxKind::None`] is ignored and the global stands. A manifest may still
+/// *choose a different isolated kind* (a stage that wants its own container
+/// image, say), and it may still opt **in** when the user set nothing. What it
+/// may not do is opt the user's machine back out.
 pub fn resolve_sandbox(
     global: Option<&ToolSandboxConfig>,
     agent: Option<&ToolSandboxConfig>,
     stage: Option<&ToolSandboxConfig>,
 ) -> ToolSandboxConfig {
-    if let Some(s) = stage {
-        return s.clone();
+    let narrowest = stage.or(agent);
+    match (narrowest, global) {
+        // The manifest would drop isolation the user asked for: refuse it.
+        (Some(n), Some(g)) if !n.is_active() && g.is_active() => g.clone(),
+        (Some(n), _) => n.clone(),
+        (None, Some(g)) => g.clone(),
+        (None, None) => ToolSandboxConfig::default(),
     }
-    if let Some(a) = agent {
-        return a.clone();
-    }
-    if let Some(g) = global {
-        return g.clone();
-    }
-    ToolSandboxConfig::default()
 }
 
 #[cfg(test)]
@@ -186,6 +192,51 @@ mod tests {
     fn nothing_set_is_host() {
         let r = resolve_sandbox(None, None, None);
         assert_eq!(r.kind, SandboxKind::None);
+    }
+
+    /// A downloaded manifest cannot drop the user back onto the host. Both the
+    /// agent and stage levels come from `agent.leviath`, so `kind = "none"`
+    /// there was previously enough to defeat a global `kind = "container"`.
+    #[test]
+    fn manifest_cannot_disable_the_users_sandbox() {
+        let global = ToolSandboxConfig {
+            kind: SandboxKind::Container,
+            image: Some("ubuntu:24.04".into()),
+            ..Default::default()
+        };
+        let off = ToolSandboxConfig {
+            kind: SandboxKind::None,
+            ..Default::default()
+        };
+        // Agent level.
+        let r = resolve_sandbox(Some(&global), Some(&off), None);
+        assert_eq!(r.kind, SandboxKind::Container);
+        assert_eq!(r.image.as_deref(), Some("ubuntu:24.04"));
+        // Stage level.
+        let r = resolve_sandbox(Some(&global), None, Some(&off));
+        assert_eq!(r.kind, SandboxKind::Container);
+    }
+
+    /// It may still opt *in* when the user set nothing — that only tightens.
+    #[test]
+    fn manifest_may_opt_into_a_sandbox_the_user_did_not_set() {
+        let agent = ToolSandboxConfig {
+            kind: SandboxKind::Container,
+            image: Some("node:22-slim".into()),
+            ..Default::default()
+        };
+        let r = resolve_sandbox(None, Some(&agent), None);
+        assert_eq!(r.kind, SandboxKind::Container);
+
+        // And a `none` manifest with no global stays host, as before.
+        let off = ToolSandboxConfig {
+            kind: SandboxKind::None,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_sandbox(None, Some(&off), None).kind,
+            SandboxKind::None
+        );
     }
 
     #[test]

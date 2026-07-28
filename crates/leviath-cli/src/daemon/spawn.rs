@@ -285,6 +285,7 @@ fn build_tool_state(
     entry_index: usize,
     stage_perms_by_index: Vec<HashMap<String, String>>,
     agent_perms: HashMap<String, String>,
+    agent_name: &str,
     launch_overrides: HashMap<String, crate::config::ToolPolicy>,
     subagent: Option<SubAgentHandle>,
     sandbox: Option<Arc<crate::daemon::sandbox_manager::SandboxManager>>,
@@ -307,7 +308,11 @@ fn build_tool_state(
         stage_perms: Arc::new(StdMutex::new(entry_perms)),
         stage_perms_by_index: Arc::new(stage_perms_by_index),
         agent_perms: Arc::new(agent_perms),
-        global_perms: Arc::new(config.tool_permissions.clone()),
+        // The ceiling a blueprint may tighten but not loosen: the user's global
+        // `[tool_permissions]` plus any `[agent_tool_permissions.<name>]` grant
+        // they made for this specific agent. Resolved once here so every later
+        // `resolve_policy` reads one flat map.
+        global_perms: Arc::new(config.permissions_for_agent(agent_name)),
         interaction: hub.backend_for(run_id),
         unattended,
         stage_name: Arc::new(StdMutex::new(entry_stage.to_string())),
@@ -806,7 +811,7 @@ fn build_agent_inner(
     // compaction settings).
     let metadata = RunMetadata {
         run_id: args.run_id.clone(),
-        agent_name,
+        agent_name: agent_name.clone(),
         agent_path: args.blueprint_path.clone(),
         task: args.task.clone(),
         model: model_label,
@@ -948,6 +953,7 @@ fn build_agent_inner(
         entry_index,
         stage_perms_by_index,
         agent_perms,
+        &agent_name,
         launch_overrides,
         Some(subagent),
         sandbox,
@@ -1702,7 +1708,9 @@ mod tests {
         let (mut world, cli) = test_world();
         let hub = InteractionHub::new();
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
-        // Config denies read_file; the launch overrides must win.
+        // The user's config denies read_file. Neither `--yolo` nor an explicit
+        // `--allow read_file` lifts that: a deny rule is a decision, and skipping
+        // *prompts* is all `--yolo` is for.
         let config = Config {
             tool_permissions: HashMap::from([(
                 "read_file".to_string(),
@@ -1729,8 +1737,7 @@ mod tests {
         .expect("spawn succeeds");
         assert_eq!(world.agent_status(entity), Some(AgentStatus::Active));
 
-        // `--yolo` overrides the config deny: read_file executes (an error reading
-        // a missing file) rather than being `[denied]`.
+        // The config deny stands: read_file is refused, not executed.
         let out = leviath_runtime::pipeline::ToolService::exec_for(
             cli.as_ref(),
             entity,
@@ -1741,7 +1748,29 @@ mod tests {
             }],
         )()
         .await;
-        assert!(!out[0].1.contains("[denied]"));
+        assert!(
+            out[0].1.contains("[denied]"),
+            "a configured deny must survive --yolo, got: {}",
+            out[0].1
+        );
+
+        // `--yolo` still does its job for a tool the config did not deny:
+        // `list_dir` runs unattended with no approval prompt.
+        let out = leviath_runtime::pipeline::ToolService::exec_for(
+            cli.as_ref(),
+            entity,
+            vec![leviath_providers::ToolCall {
+                id: "c2".to_string(),
+                name: "list_dir".to_string(),
+                arguments: serde_json::json!({"path": "."}),
+            }],
+        )()
+        .await;
+        assert!(
+            !out[0].1.contains("[denied]"),
+            "--yolo must still waive approval where nothing denies, got: {}",
+            out[0].1
+        );
     }
 
     #[tokio::test]

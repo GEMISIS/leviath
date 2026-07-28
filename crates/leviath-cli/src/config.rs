@@ -121,11 +121,30 @@ pub struct Config {
 
     /// Global tool permission overrides.
     ///
-    /// Keys are tool names (e.g. `"bash"`, `"write_file"`).  Values override
-    /// the built-in Claude Code-style defaults.  Narrower scopes (agent,
-    /// stage, launch flags) take precedence over these.
+    /// Keys are tool names (e.g. `"bash"`, `"write_file"`). Values override the
+    /// built-in defaults, and act as a **ceiling** that a blueprint's own
+    /// `[tool_permissions]` may tighten but never loosen — see
+    /// [`crate::tools::resolve_policy`]. To grant one agent more than this
+    /// without loosening it everywhere, use [`Self::agent_tool_permissions`].
     #[serde(default)]
     pub tool_permissions: HashMap<String, ToolPolicy>,
+
+    /// Per-agent tool permission grants, keyed by agent name.
+    ///
+    /// ```toml
+    /// [agent_tool_permissions.coder]
+    /// shell = "allow"
+    /// ```
+    ///
+    /// This is the escape hatch for the ceiling in [`Self::tool_permissions`].
+    /// Because a blueprint may only tighten what the user configured, a global
+    /// `shell = "ask"` would otherwise stop a trusted agent from pre-approving
+    /// its own shell. Naming the agent here is the user saying "I trust this
+    /// one" — a decision that lives in the user's config, not the downloaded
+    /// manifest's. Entries replace the global value for that agent, and are then
+    /// the ceiling the blueprint is clamped against.
+    #[serde(default)]
+    pub agent_tool_permissions: HashMap<String, HashMap<String, ToolPolicy>>,
 
     /// Title-generation configuration.
     ///
@@ -433,6 +452,7 @@ impl Default for Config {
             model_capabilities: HashMap::new(),
             model_providers: HashMap::new(),
             tool_permissions: HashMap::new(),
+            agent_tool_permissions: HashMap::new(),
             title: TitleConfig::default(),
             request_timeout_secs: None,
             taint_tracking: false,
@@ -447,6 +467,21 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The permission ceiling to apply to `agent_name`: the global
+    /// `[tool_permissions]` with that agent's `[agent_tool_permissions.<name>]`
+    /// entries laid over it.
+    ///
+    /// Returned by value (rather than as two maps threaded through
+    /// [`crate::tools::resolve_policy`]) so the ceiling is resolved exactly once,
+    /// at spawn, and every later lookup reads a single flat map.
+    pub fn permissions_for_agent(&self, agent_name: &str) -> HashMap<String, ToolPolicy> {
+        let mut merged = self.tool_permissions.clone();
+        if let Some(per_agent) = self.agent_tool_permissions.get(agent_name) {
+            merged.extend(per_agent.iter().map(|(k, v)| (k.clone(), *v)));
+        }
+        merged
+    }
+
     /// Load configuration from the default location (~/.leviath/config.toml).
     ///
     /// After loading from file (or using defaults), environment variables are
@@ -1931,6 +1966,7 @@ anthropic_api_key = "sk-ant-test-key"
             model_capabilities: model_caps,
             model_providers: HashMap::new(),
             tool_permissions: tool_perms,
+            agent_tool_permissions: HashMap::new(),
             title: TitleConfig {
                 enabled: false,
                 provider: Some("openai".to_string()),

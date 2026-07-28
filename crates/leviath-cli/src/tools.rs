@@ -185,14 +185,50 @@ pub fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPolicy {
     }
 }
 
-/// Resolve the effective policy for a tool call, narrowest scope first.
+/// How restrictive a policy is, for clamping. `Allow` < `Ask` < `Deny`.
+fn restrictiveness(p: ToolPolicy) -> u8 {
+    match p {
+        ToolPolicy::Allow => 0,
+        ToolPolicy::Ask => 1,
+        ToolPolicy::Deny => 2,
+    }
+}
+
+/// The more restrictive of two policies.
+fn stricter(a: ToolPolicy, b: ToolPolicy) -> ToolPolicy {
+    if restrictiveness(b) > restrictiveness(a) {
+        b
+    } else {
+        a
+    }
+}
+
+/// Resolve the effective policy for a tool call.
 ///
-/// Precedence (first match wins):
-/// 1. `launch_overrides` — from `--allow`/`--ask`/`--deny` / `--yolo` flags
-/// 2. `stage_permissions` — `[stages.x.tool_permissions]` in agent.leviath
-/// 3. `agent_permissions` — `[tool_permissions]` in agent.leviath
-/// 4. `global_permissions` — `[tool_permissions]` in `~/.leviath/config.toml`
-/// 5. Built-in defaults
+/// Scope order is narrowest-first — stage, then agent, then the user's global
+/// config, then the built-in default — but *narrower does not mean stronger*.
+/// The stage and agent layers come out of `agent.leviath`, which for any agent
+/// installed with `lev add` is a file the user downloaded. So a blueprint may
+/// only ever **tighten** what the user configured, never loosen it: whatever the
+/// user explicitly wrote in `[tool_permissions]` is a ceiling on how permissive
+/// a manifest can be for that tool.
+///
+/// Only an *explicitly configured* global entry acts as a ceiling. A tool the
+/// user has said nothing about falls through to [`default_tool_policy`], and a
+/// blueprint is free to set it — otherwise no shipped agent could pre-approve
+/// its own tools (the researcher's `web_fetch = "allow"` would stop working) and
+/// the model would become a wall rather than a floor.
+///
+/// A user who wants to grant one specific agent more than their global setting
+/// says so in their own config, keyed by agent name — see
+/// [`crate::config::Config::permissions_for_agent`], which is folded into
+/// `global_permissions` at spawn.
+///
+/// `launch_overrides` (`--allow`/`--ask`/`--deny`/`--yolo`) come from the person
+/// at the terminal, so they may relax `Ask` to `Allow`. They may **not** override
+/// a `Deny`: a denied tool stays denied under `--yolo`, matching the guarantee
+/// other agent runtimes make about their deny rules. To lift a `Deny`, edit the
+/// config that set it.
 pub fn resolve_policy(
     tool_name: &str,
     is_builtin: bool,
@@ -201,32 +237,31 @@ pub fn resolve_policy(
     agent_permissions: &HashMap<String, String>,
     global_permissions: &HashMap<String, ToolPolicy>,
 ) -> ToolPolicy {
-    // 1. Launch overrides (highest priority)
-    if let Some(p) = launch_overrides.get(tool_name) {
-        return *p;
-    }
-    // Wildcard launch allow ("--yolo")
-    if let Some(p) = launch_overrides.get("*") {
-        return *p;
+    let ceiling = global_permissions.get(tool_name).copied();
+
+    // Blueprint layers: stage over agent, each clamped by the user's ceiling.
+    let blueprint = stage_permissions
+        .get(tool_name)
+        .or_else(|| agent_permissions.get(tool_name))
+        .map(|s| parse_policy_str(s));
+
+    let configured = match (blueprint, ceiling) {
+        (Some(b), Some(c)) => stricter(b, c),
+        (Some(b), None) => b,
+        (None, Some(c)) => c,
+        (None, None) => default_tool_policy(tool_name, is_builtin),
+    };
+
+    // A `Deny` is terminal — no launch flag lifts it.
+    if configured == ToolPolicy::Deny {
+        return ToolPolicy::Deny;
     }
 
-    // 2. Stage-level (from blueprint string map "allow"/"ask"/"deny")
-    if let Some(s) = stage_permissions.get(tool_name) {
-        return parse_policy_str(s);
-    }
-
-    // 3. Agent-level
-    if let Some(s) = agent_permissions.get(tool_name) {
-        return parse_policy_str(s);
-    }
-
-    // 4. Global config
-    if let Some(p) = global_permissions.get(tool_name) {
-        return *p;
-    }
-
-    // 5. Built-in defaults
-    default_tool_policy(tool_name, is_builtin)
+    launch_overrides
+        .get(tool_name)
+        .or_else(|| launch_overrides.get("*"))
+        .copied()
+        .unwrap_or(configured)
 }
 
 fn parse_policy_str(s: &str) -> ToolPolicy {
@@ -565,8 +600,31 @@ mod policy_tests {
         assert_eq!(policy, ToolPolicy::Allow);
     }
 
+    /// A stage may tighten the user's setting.
     #[test]
-    fn test_resolve_policy_stage_beats_global() {
+    fn test_resolve_policy_stage_may_tighten_global() {
+        let mut stage = HashMap::new();
+        stage.insert("bash".to_string(), "deny".to_string());
+        let mut global = HashMap::new();
+        global.insert("bash".to_string(), ToolPolicy::Allow);
+        let policy = resolve_policy(
+            "bash",
+            true,
+            &HashMap::new(),
+            &stage,
+            &HashMap::new(),
+            &global,
+        );
+        assert_eq!(policy, ToolPolicy::Deny);
+    }
+
+    /// ...but it may NOT loosen it. `agent.leviath` is a file the user
+    /// downloaded; letting its `[stages.x.tool_permissions]` overrule the user's
+    /// own `[tool_permissions]` meant an installed agent could self-grant the
+    /// shell the user had explicitly denied. (This test previously asserted the
+    /// opposite — that stage "beats" global — which is the bug, not the design.)
+    #[test]
+    fn test_resolve_policy_stage_cannot_loosen_global() {
         let mut stage = HashMap::new();
         stage.insert("bash".to_string(), "allow".to_string());
         let mut global = HashMap::new();
@@ -576,6 +634,100 @@ mod policy_tests {
             true,
             &HashMap::new(),
             &stage,
+            &HashMap::new(),
+            &global,
+        );
+        assert_eq!(policy, ToolPolicy::Deny);
+    }
+
+    /// The ceiling is only what the user *explicitly* configured. A tool they
+    /// have said nothing about is still the blueprint's to set — otherwise the
+    /// shipped researcher agent could not pre-approve its own `web_fetch`.
+    #[test]
+    fn test_resolve_policy_blueprint_free_when_user_silent() {
+        let mut agent = HashMap::new();
+        agent.insert("web_fetch".to_string(), "allow".to_string());
+        let policy = resolve_policy(
+            "web_fetch",
+            false,
+            &HashMap::new(),
+            &HashMap::new(),
+            &agent,
+            &HashMap::new(),
+        );
+        assert_eq!(policy, ToolPolicy::Allow);
+    }
+
+    /// `--yolo` must not lift a `Deny` the user configured. Skipping *prompts*
+    /// is what `--yolo` is for; skipping a deny rule is not. An earlier test
+    /// asserted the reverse ("--yolo overrides the config deny"), which made a
+    /// denied tool reachable from any unattended run.
+    #[test]
+    fn test_yolo_does_not_override_configured_deny() {
+        let mut launch = HashMap::new();
+        launch.insert("*".to_string(), ToolPolicy::Allow);
+        let mut global = HashMap::new();
+        global.insert("bash".to_string(), ToolPolicy::Deny);
+        let policy = resolve_policy(
+            "bash",
+            true,
+            &launch,
+            &HashMap::new(),
+            &HashMap::new(),
+            &global,
+        );
+        assert_eq!(policy, ToolPolicy::Deny);
+    }
+
+    /// The same holds for a named `--allow`, not just the `--yolo` wildcard.
+    #[test]
+    fn test_named_allow_does_not_override_configured_deny() {
+        let mut launch = HashMap::new();
+        launch.insert("bash".to_string(), ToolPolicy::Allow);
+        let mut global = HashMap::new();
+        global.insert("bash".to_string(), ToolPolicy::Deny);
+        let policy = resolve_policy(
+            "bash",
+            true,
+            &launch,
+            &HashMap::new(),
+            &HashMap::new(),
+            &global,
+        );
+        assert_eq!(policy, ToolPolicy::Deny);
+    }
+
+    /// A blueprint's own `deny` is terminal too — an agent that declares it
+    /// never needs a tool doesn't get handed it by an unattended `--yolo`.
+    #[test]
+    fn test_yolo_does_not_override_blueprint_deny() {
+        let mut launch = HashMap::new();
+        launch.insert("*".to_string(), ToolPolicy::Allow);
+        let mut agent = HashMap::new();
+        agent.insert("bash".to_string(), "deny".to_string());
+        let policy = resolve_policy(
+            "bash",
+            true,
+            &launch,
+            &HashMap::new(),
+            &agent,
+            &HashMap::new(),
+        );
+        assert_eq!(policy, ToolPolicy::Deny);
+    }
+
+    /// What `--yolo` *does* still do: collapse `Ask` to `Allow`.
+    #[test]
+    fn test_yolo_still_collapses_ask_to_allow() {
+        let mut launch = HashMap::new();
+        launch.insert("*".to_string(), ToolPolicy::Allow);
+        let mut global = HashMap::new();
+        global.insert("bash".to_string(), ToolPolicy::Ask);
+        let policy = resolve_policy(
+            "bash",
+            true,
+            &launch,
+            &HashMap::new(),
             &HashMap::new(),
             &global,
         );
@@ -606,8 +758,9 @@ mod policy_tests {
 
     // ─── resolve_policy additional scenarios ───────────────────────────────
 
+    /// The agent layer is clamped the same way the stage layer is.
     #[test]
-    fn test_resolve_policy_agent_beats_global() {
+    fn test_resolve_policy_agent_cannot_loosen_global() {
         let mut agent = HashMap::new();
         agent.insert("bash".to_string(), "allow".to_string());
         let mut global = HashMap::new();
@@ -620,7 +773,26 @@ mod policy_tests {
             &agent,
             &global,
         );
-        assert_eq!(policy, ToolPolicy::Allow);
+        assert_eq!(policy, ToolPolicy::Deny);
+    }
+
+    /// A global `ask` still bounds a blueprint's `allow` — the user gets their
+    /// prompt rather than silent execution.
+    #[test]
+    fn test_resolve_policy_global_ask_bounds_blueprint_allow() {
+        let mut agent = HashMap::new();
+        agent.insert("write_file".to_string(), "allow".to_string());
+        let mut global = HashMap::new();
+        global.insert("write_file".to_string(), ToolPolicy::Ask);
+        let policy = resolve_policy(
+            "write_file",
+            true,
+            &HashMap::new(),
+            &HashMap::new(),
+            &agent,
+            &global,
+        );
+        assert_eq!(policy, ToolPolicy::Ask);
     }
 
     #[test]
@@ -756,8 +928,28 @@ mod policy_tests {
 
     // ─── resolve_policy full precedence chain ─────────────────────────────
 
+    /// A launch flag outranks a stage's `ask`, which is the point of `--allow`.
     #[test]
-    fn test_resolve_policy_launch_overrides_stage() {
+    fn test_resolve_policy_launch_overrides_stage_ask() {
+        let mut launch = HashMap::new();
+        launch.insert("bash".to_string(), ToolPolicy::Allow);
+        let mut stage = HashMap::new();
+        stage.insert("bash".to_string(), "ask".to_string());
+        let policy = resolve_policy(
+            "bash",
+            true,
+            &launch,
+            &stage,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(policy, ToolPolicy::Allow);
+    }
+
+    /// It does not outrank a stage's `deny` — see
+    /// `test_yolo_does_not_override_blueprint_deny` for the rationale.
+    #[test]
+    fn test_resolve_policy_launch_cannot_override_stage_deny() {
         let mut launch = HashMap::new();
         launch.insert("bash".to_string(), ToolPolicy::Allow);
         let mut stage = HashMap::new();
@@ -770,7 +962,7 @@ mod policy_tests {
             &HashMap::new(),
             &HashMap::new(),
         );
-        assert_eq!(policy, ToolPolicy::Allow);
+        assert_eq!(policy, ToolPolicy::Deny);
     }
 
     #[test]
@@ -1040,8 +1232,11 @@ mod policy_tests {
 
     // ─── resolve_policy full chain: all four levels present ───────────────
 
+    /// With every level saying `deny`, nothing lifts it — not the stage, not the
+    /// agent, not `--allow`. Previously this asserted `Allow`, i.e. that a launch
+    /// flag beat a unanimous deny.
     #[test]
-    fn test_resolve_policy_full_chain_launch_highest() {
+    fn test_resolve_policy_full_chain_deny_is_terminal() {
         let mut launch = HashMap::new();
         launch.insert("bash".to_string(), ToolPolicy::Allow);
         let mut stage = HashMap::new();
@@ -1050,6 +1245,23 @@ mod policy_tests {
         agent.insert("bash".to_string(), "deny".to_string());
         let mut global = HashMap::new();
         global.insert("bash".to_string(), ToolPolicy::Deny);
+
+        let policy = resolve_policy("bash", true, &launch, &stage, &agent, &global);
+        assert_eq!(policy, ToolPolicy::Deny);
+    }
+
+    /// The full chain with nothing denying: stage `ask` is the tightest
+    /// configured level, and the launch flag relaxes it.
+    #[test]
+    fn test_resolve_policy_full_chain_launch_relaxes_ask() {
+        let mut launch = HashMap::new();
+        launch.insert("bash".to_string(), ToolPolicy::Allow);
+        let mut stage = HashMap::new();
+        stage.insert("bash".to_string(), "ask".to_string());
+        let mut agent = HashMap::new();
+        agent.insert("bash".to_string(), "ask".to_string());
+        let mut global = HashMap::new();
+        global.insert("bash".to_string(), ToolPolicy::Ask);
 
         let policy = resolve_policy("bash", true, &launch, &stage, &agent, &global);
         assert_eq!(policy, ToolPolicy::Allow);
