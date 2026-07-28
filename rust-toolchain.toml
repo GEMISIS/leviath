@@ -1,3 +1,13 @@
+# Pinned rather than floating on `stable`.
+#
+# Release binaries were previously built by whatever stable happened to be
+# current the night the workflow ran, so two builds of the same commit could
+# differ and neither recorded which compiler produced it. With Cargo.lock now
+# committed, this is the other half of a reproducible build: same commit, same
+# lockfile, same toolchain, same binary.
+#
+# Bump deliberately — its own commit, CI green on all three OSes — rather than
+# by drifting.
 [toolchain]
-channel = "stable"
+channel = "1.97.0"
 components = ["llvm-tools", "rustfmt", "clippy"]

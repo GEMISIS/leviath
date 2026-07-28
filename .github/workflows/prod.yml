@@ -20,7 +20,7 @@ jobs:
       skip: ${{ steps.beta.outputs.skip }}
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
@@ -41,6 +41,14 @@ jobs:
           gh release download beta --pattern "COMMIT_SHA" --dir /tmp/beta/ 2>/dev/null || true
           if [ -f /tmp/beta/COMMIT_SHA ]; then
             sha=$(cat /tmp/beta/COMMIT_SHA)
+            # This value comes out of a *release asset*, which is attacker-
+            # controlled input for anyone who can write a release. It flows into
+            # a `git show` command and into the published release's
+            # `target_commitish`, so pin its shape before it goes anywhere.
+            if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+              echo "ERROR: COMMIT_SHA in the beta release is not a 40-hex commit id."
+              exit 1
+            fi
             echo "sha=$sha" >> $GITHUB_OUTPUT
             echo "sha_short=${sha:0:7}" >> $GITHUB_OUTPUT
           else
@@ -68,10 +76,15 @@ jobs:
       - name: Get version from Cargo.toml
         id: version
         if: steps.beta.outputs.skip != 'true'
+        env:
+          # Through `env` rather than interpolated into the script: `${{ }}` is
+          # expanded before bash parses the line, so a crafted value would run
+          # as a command rather than be read as one.
+          BETA_SHA: ${{ steps.beta.outputs.sha }}
         run: |
           # Read the version from the promoted commit, not the tip of main --
           # main may have moved past the beta build since it was cut.
-          version=$(git show "${{ steps.beta.outputs.sha }}:Cargo.toml" | grep '^version' | head -1 | sed 's/.*"\(.*\)"/\1/')
+          version=$(git show "$BETA_SHA:Cargo.toml" | grep '^version' | head -1 | sed 's/.*"\(.*\)"/\1/')
           echo "version=$version" >> $GITHUB_OUTPUT
 
   approve:
@@ -91,7 +104,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
@@ -103,21 +116,41 @@ jobs:
           gh release download beta --dir release/
           ls -la release/
 
+          # Verify the checksums before republishing these binaries as a
+          # permanent versioned release. `SHA256SUMS` was generated at alpha and
+          # then carried through beta and prod without ever being checked, so a
+          # tampered asset propagated all the way to `latest` with its stale
+          # checksum shipped next to it.
+          if [ -f release/SHA256SUMS ]; then
+            (cd release && grep -v '^SHA256SUMS$' SHA256SUMS | sha256sum -c -)
+          else
+            echo "ERROR: no SHA256SUMS in the beta release — refusing to promote unverified binaries."
+            exit 1
+          fi
+
       - name: Determine version tag
         env:
           GH_TOKEN: ${{ github.token }}
+          BETA_VERSION: ${{ needs.check-beta.outputs.version }}
+          REPO: ${{ github.repository }}
         run: |
-          VERSION="v${{ needs.check-beta.outputs.version }}"
+          # `BETA_VERSION` derives from the `Cargo.toml` of a commit named by a
+          # release asset, so it is validated here rather than trusted.
+          if ! printf '%s' "$BETA_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: '$BETA_VERSION' is not a valid semver version."
+            exit 1
+          fi
+          VERSION="v$BETA_VERSION"
           # If the tag was already released (version not bumped since the
           # last prod deploy), disambiguate with the date rather than
           # moving the existing tag.
-          if gh api repos/${{ github.repository }}/git/refs/tags/$VERSION >/dev/null 2>&1; then
+          if gh api "repos/$REPO/git/refs/tags/$VERSION" >/dev/null 2>&1; then
             VERSION="${VERSION}+$(date -u +%Y%m%d)"
           fi
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
       - name: Publish prod release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           tag_name: ${{ env.VERSION }}
           target_commitish: ${{ needs.check-beta.outputs.sha }}
@@ -171,7 +204,7 @@ jobs:
         run: gh release delete latest --yes --cleanup-tag --repo ${{ github.repository }} || true
 
       - name: Publish latest channel release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           tag_name: latest
           target_commitish: ${{ needs.check-beta.outputs.sha }}

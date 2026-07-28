@@ -1,0 +1,86 @@
+# cargo-deny configuration.
+#
+# Leviath ships a binary that executes model-chosen tool calls on a user's
+# machine, so the dependency graph is part of its attack surface. This file is
+# what makes that graph reviewable: `cargo deny check` runs in CI and fails on a
+# security advisory, an unvetted licence, or an unexpected source registry.
+#
+# Run locally with:  cargo deny check
+
+[graph]
+# Check every target we actually ship (see the release matrix in
+# .github/workflows/alpha.yml). Without this, an advisory in a Windows-only or
+# Linux-only dependency is invisible from a macOS developer machine.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+all-features = true
+
+[advisories]
+# Any advisory fails the build. There is no "warn and carry on" tier here: an
+# unfixed advisory in a shipped binary is a decision someone should make
+# explicitly, by adding an `ignore` entry below with a reason and a date.
+version = 2
+yanked = "deny"
+ignore = [
+    # Format:
+    #   { id = "RUSTSEC-0000-0000", reason = "why this is acceptable here" },
+    # Every entry needs a reason. An ignore with no justification is a silent
+    # acceptance of risk, which is what this file exists to prevent.
+    # `paste` is unmaintained (archived by its author), not vulnerable — the
+    # advisory reports abandonment, not a defect. It reaches us through ratatui
+    # 0.29 and tui-textarea, neither of which we control, and it is a proc-macro:
+    # it runs at build time and contributes no code to the shipped binary.
+    # Tracked for removal with the ratatui 0.30 upgrade — re-check this entry
+    # then and delete it if the dependency is gone.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained-only advisory on a build-time proc-macro pulled in by ratatui; revisit with the ratatui 0.30 upgrade" },
+]
+
+[licenses]
+version = 2
+# Permissive licences only. Leviath is MIT; a copyleft dependency would change
+# the obligations of anyone shipping a build of it, which is not a decision to
+# make by accident.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+    "Unlicense",
+    "BSL-1.0",
+    # Public-domain dedication. Reached via bevy_ecs → bevy_utils → ahash →
+    # const-random → tiny-keccak.
+    "CC0-1.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# `warn`, not `deny`: duplicate versions are a real signal (two copies of a
+# crypto crate means two sets of advisories to track) but they are routine in a
+# graph this size and blocking on them would make every dependency bump a
+# yak-shave. CI surfaces them; a human decides.
+multiple-versions = "warn"
+wildcards = "deny"
+# Leviath's own crates depend on each other by `path` with no version, which
+# reads as a wildcard. That is how a workspace is supposed to work — these are
+# not third-party requirements — so path deps are exempt and every *external*
+# wildcard still fails.
+allow-wildcard-paths = true
+# Crates that must never appear, with the reason. Empty for now — this is the
+# place to record "we decided against X" so the decision survives.
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -27,12 +27,12 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: stable
           components: rustfmt,clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Build
         run: cargo build --all-targets
       - name: Test
@@ -48,7 +48,7 @@ jobs:
       # (and reports failure) even when the Test step above failed.
       - name: Publish test status badge
         if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: schneegans/dynamic-badges-action@v1.7.0
+        uses: schneegans/dynamic-badges-action@e9a478b16159b4d31420099ba146cdc50f134483 # v1.7.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}
           gistID: ${{ vars.COVERAGE_GIST_ID }}
@@ -61,12 +61,12 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: stable
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
@@ -74,13 +74,48 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: stable
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+  # Supply chain. Leviath ships a binary that executes model-chosen tool calls on
+  # a user's machine, so its ~370 transitive crates are part of the attack
+  # surface. This job is what makes that graph reviewable:
+  #
+  #   - `cargo deny check advisories` fails on any RUSTSEC advisory or yanked
+  #     crate. Accepting one requires an explicit `ignore` entry in deny.toml
+  #     with a written reason.
+  #   - `licenses` keeps the graph permissively licensed (Leviath is MIT).
+  #   - `bans` catches wildcard requirements; duplicate versions only warn.
+  #   - `sources` refuses anything not from crates.io.
+  #
+  # None of this could run before: `cargo audit`/`cargo deny` need a lockfile,
+  # and Cargo.lock was gitignored, so every CI run re-resolved the whole graph
+  # and there was nothing pinned to audit.
+  supply-chain:
+    name: Supply chain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2
+        with:
+          tool: cargo-deny
+      - name: Check advisories, licenses, bans and sources
+        run: cargo deny --all-features check
+
+      # The lockfile is the point of the job above, so prove it is actually
+      # current. `--locked` fails if Cargo.toml and Cargo.lock disagree, which
+      # catches a dependency edit committed without the lockfile update — the
+      # exact case that would silently reintroduce floating resolution.
+      - name: Verify Cargo.lock is up to date
+        run: cargo metadata --locked --format-version 1 > /dev/null
 
   # Rejects broken or private intra-doc links and stray HTML tags in doc
   # comments (`-D warnings` promotes every rustdoc lint to an error). Cheap and
@@ -89,11 +124,11 @@ jobs:
     name: Docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Check docs
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
@@ -133,14 +168,14 @@ jobs:
           - leviath-cli
           - leviath-sys
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: stable
           components: llvm-tools
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2
         with:
           tool: cargo-llvm-cov
       # Gates this one package at a hard 100% (regions/lines/functions) via
@@ -150,7 +185,7 @@ jobs:
         run: cargo xtask coverage --package ${{ matrix.package }}
       - name: Upload HTML coverage report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: coverage-html-${{ matrix.os }}-${{ matrix.package }}
           path: coverage/html/
@@ -175,7 +210,7 @@ jobs:
         run: echo "All packages gated at a hard 100% in the per-package coverage jobs."
       - name: Update lines coverage badge
         if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: schneegans/dynamic-badges-action@v1.7.0
+        uses: schneegans/dynamic-badges-action@e9a478b16159b4d31420099ba146cdc50f134483 # v1.7.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}
           gistID: ${{ vars.COVERAGE_GIST_ID }}
@@ -185,7 +220,7 @@ jobs:
           color: brightgreen
       - name: Update regions coverage badge
         if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: schneegans/dynamic-badges-action@v1.7.0
+        uses: schneegans/dynamic-badges-action@e9a478b16159b4d31420099ba146cdc50f134483 # v1.7.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}
           gistID: ${{ vars.COVERAGE_GIST_ID }}
@@ -195,7 +230,7 @@ jobs:
           color: brightgreen
       - name: Update functions coverage badge
         if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: schneegans/dynamic-badges-action@v1.7.0
+        uses: schneegans/dynamic-badges-action@e9a478b16159b4d31420099ba146cdc50f134483 # v1.7.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}
           gistID: ${{ vars.COVERAGE_GIST_ID }}
@@ -214,9 +249,9 @@ jobs:
     name: Check coverage suppression markers
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install ast-grep
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2
         with:
           tool: ast-grep
       - name: Scan for coverage suppression markers
@@ -249,7 +284,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
       - name: Require maintainer override to change main.rs
