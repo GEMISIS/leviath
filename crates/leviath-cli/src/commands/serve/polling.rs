@@ -276,6 +276,7 @@ mod tests {
                 event_tx: tx,
                 control,
                 mcp: crate::commands::serve::mcp::McpAdmin::default(),
+                limits: Default::default(),
             },
             rx,
         )

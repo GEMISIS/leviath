@@ -224,6 +224,7 @@ mod tests {
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            limits: Default::default(),
         }
     }
 
@@ -512,6 +513,7 @@ mod tests {
             event_tx: tx.clone(),
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            limits: Default::default(),
         };
         let addr = spawn_test_server(state).await;
 
@@ -638,6 +640,7 @@ mod tests {
             event_tx: tx.clone(),
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            limits: Default::default(),
         };
         let (addr, shutdown_tx, handle) = spawn_test_server_with_shutdown(state).await;
 

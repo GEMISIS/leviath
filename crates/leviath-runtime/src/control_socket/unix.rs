@@ -1,7 +1,12 @@
 //! Unix-domain-socket transport for the control channel.
 //!
-//! A [`ControlId`] is a filesystem path; the socket's access is governed by
-//! ordinary file permissions, and it is never reachable off the machine.
+//! A [`ControlId`] is a filesystem path; the socket is never reachable off the
+//! machine, and access to it is governed by ordinary file permissions —
+//! permissions [`bind_control_listener`] now actually sets. It previously only
+//! asserted that in this comment: neither the socket nor the directory it
+//! creates was ever `chmod`ed, so both landed at the process umask (typically
+//! 0755, and group-writable under a 0002 umask). Anyone who can connect can
+//! spawn a tool-executing agent and answer its approval prompts.
 
 use std::path::{Path, PathBuf};
 
@@ -34,9 +39,43 @@ pub fn is_daemon_running(id: &Path) -> bool {
 pub struct ControlListener(tokio::net::UnixListener);
 
 impl ControlListener {
-    /// Accept the next control connection.
+    /// Accept the next control connection **from this user**.
+    ///
+    /// A connection from another uid is closed and skipped rather than returned,
+    /// so the daemon loop above never sees it and no `handle_connection` runs
+    /// for it. There was no authentication here at all before, and the ops this
+    /// channel accepts spawn tool-executing agents and answer their approval
+    /// prompts.
+    ///
+    /// The socket's 0600 mode is not sufficient on its own: on macOS and the
+    /// BSDs, permissions on a Unix socket are not consulted at `connect` time.
+    /// The peer's uid comes from the kernel, so it is the check that actually
+    /// holds on every platform.
+    ///
+    /// A peer whose uid cannot be determined is refused. An unidentifiable
+    /// caller is not an authorized one, and failing open here would undo the
+    /// whole point on any platform where the lookup is unavailable.
     pub async fn accept(&mut self) -> std::io::Result<ServerStream> {
-        self.0.accept().await.map(|(stream, _addr)| stream)
+        loop {
+            let (stream, _addr) = self.0.accept().await?;
+            let ours = leviath_sys::current_uid();
+            match leviath_sys::peer_uid(&stream) {
+                Some(peer) if peer == ours => return Ok(stream),
+                Some(peer) => {
+                    tracing::warn!(
+                        peer_uid = peer,
+                        daemon_uid = ours,
+                        "refused a control connection from another user"
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        "refused a control connection whose peer uid could not be determined"
+                    );
+                }
+            }
+            // `stream` drops here, closing the connection.
+        }
     }
 }
 
@@ -61,7 +100,20 @@ pub fn bind_control_listener(id: &Path) -> std::io::Result<ControlListener> {
     // A control-socket path always has a parent directory.
     let parent = id.parent().expect("control socket path has a parent");
     std::fs::create_dir_all(parent)?;
-    Ok(ControlListener(tokio::net::UnixListener::bind(id)?))
+    // Lock the directory down before binding. `create_dir_all` uses the ambient
+    // umask, so on a 0002 umask this was a group-writable directory holding the
+    // daemon's control channel. Best-effort: the directory may already exist and
+    // be owned by someone else, in which case the socket's own mode below is
+    // what carries the guarantee.
+    let _ = leviath_sys::secure_dir_perms(parent);
+
+    let listener = tokio::net::UnixListener::bind(id)?;
+    // Owner-only on the socket itself. On Linux the mode is enforced on
+    // `connect`; on macOS and the BSDs it historically is not, which is why the
+    // per-connection peer check in `accept_authorized` is the real gate and this
+    // is defence in depth rather than the whole story.
+    leviath_sys::secure_file_perms(id)?;
+    Ok(ControlListener(listener))
 }
 
 /// Connect to the daemon's control socket at `id`.
@@ -87,6 +139,43 @@ mod tests {
             control_id_from_str("/tmp/my.sock"),
             PathBuf::from("/tmp/my.sock")
         );
+    }
+
+    /// The module doc claimed "access is governed by ordinary file permissions"
+    /// while setting none of them — both the socket and the directory landed at
+    /// the process umask. Anyone who could connect could spawn a tool-executing
+    /// agent.
+    #[tokio::test]
+    async fn bind_locks_down_the_socket_and_its_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        // A nested path so `bind_control_listener` is the one creating the
+        // directory, which is the case that inherited the umask.
+        let id = dir.path().join("nested").join("control.sock");
+        let _listener = bind_control_listener(&id).unwrap();
+
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&id), 0o600, "socket must be owner-only");
+        assert_eq!(
+            mode(id.parent().unwrap()),
+            0o700,
+            "socket directory must be owner-only"
+        );
+    }
+
+    /// A connection from this same user is accepted — the peer check must not
+    /// lock the daemon out of its own socket.
+    #[tokio::test]
+    async fn accept_admits_a_connection_from_the_same_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = dir.path().join("control.sock");
+        let mut listener = bind_control_listener(&id).unwrap();
+
+        let client = tokio::spawn(async move { connect(&id).await });
+        let accepted = listener.accept().await;
+        assert!(accepted.is_ok(), "same-uid peer must be admitted");
+        client.await.unwrap().unwrap();
     }
 
     #[tokio::test]

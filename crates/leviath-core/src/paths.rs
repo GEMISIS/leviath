@@ -1,6 +1,33 @@
-//! Path containment: keeping a tool's file access inside its workspace.
+//! Path containment: keeping file access inside the directory it belongs in.
 
 use std::path::{Path, PathBuf};
+
+/// Whether `name` is safe to use as a single path component.
+///
+/// Accepts `[A-Za-z0-9._-]+` and nothing else. Everything a caller supplies as
+/// "the name of a thing" — a blueprint name from a REST body, a run id from a
+/// URL segment — must pass this before it is `join`ed onto a directory, because
+/// `Path::join` does not normalize and does not resist an absolute path:
+///
+/// ```text
+/// agents_dir().join("../../../../tmp/x")   // escapes
+/// agents_dir().join("/etc/cron.d/x")       // replaces the base entirely
+/// ```
+///
+/// That was reachable from `POST /api/blueprints` (arbitrary directory creation
+/// and manifest write) and `DELETE /api/blueprints/{name}` (arbitrary recursive
+/// deletion, via a percent-encoded `..%2f` that decodes after segment matching).
+///
+/// A leading `.` is allowed (dotted names are ordinary) but `.` and `..`
+/// themselves are not, since both are traversal rather than names.
+pub fn is_safe_path_component(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
 
 /// Whether `path` still lands inside `root` once symlinks are followed.
 ///
@@ -59,6 +86,38 @@ fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn safe_components_are_ordinary_names() {
+        for name in ["coder", "my-agent", "agent_2", "v1.2.3", ".hidden", "a"] {
+            assert!(is_safe_path_component(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn traversal_and_separators_are_refused() {
+        for name in [
+            "",
+            ".",
+            "..",
+            "../evil",
+            "../../../../tmp/x",
+            "/etc/passwd",
+            "a/b",
+            "a\\b",
+            // Percent-encoding decodes before this is called; the decoded form
+            // is what must be rejected.
+            "..%2fevil",
+            // NUL and other control characters truncate paths in C APIs.
+            "a\0b",
+            "a b",
+            "a;rm -rf",
+            // A drive-relative Windows path.
+            "C:evil",
+        ] {
+            assert!(!is_safe_path_component(name), "{name:?} should be refused");
+        }
+    }
 
     #[test]
     fn plain_paths_inside_the_root_are_contained() {

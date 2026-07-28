@@ -34,6 +34,25 @@ pub fn current_uid() -> u32 {
     crate::platform::current_uid()
 }
 
+/// The effective uid of the process on the other end of a connected
+/// Unix-domain socket.
+///
+/// The kernel's answer, not the peer's claim, so it cannot be spoofed by
+/// anything the peer sends. This is what makes the daemon's control socket
+/// safe: file permissions on a Unix socket are advisory on macOS and the BSDs
+/// (the mode is not consulted on `connect`), so the mode alone was never the
+/// guarantee it was documented to be.
+///
+/// `None` when the platform cannot report it — which the caller must treat as
+/// "refuse", since an unidentifiable peer is not an authorized one.
+///
+/// Unix-only: on Windows the control channel is not a Unix socket, so there is
+/// no fd to interrogate and no caller for this.
+#[cfg(unix)]
+pub fn peer_uid(sock: &impl std::os::fd::AsFd) -> Option<u32> {
+    crate::platform::peer_uid(sock)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

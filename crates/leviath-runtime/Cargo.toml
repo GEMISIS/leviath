@@ -9,6 +9,9 @@ authors.workspace = true
 [dependencies]
 leviath-core = { workspace = true }
 leviath-providers = { workspace = true }
+# For the control socket's file permissions and peer-uid check. `leviath-sys`
+# has no leviath dependencies of its own, so this adds no cycle.
+leviath-sys = { workspace = true }
 leviath-tools = { workspace = true }
 bevy_ecs = { workspace = true }
 bevy_tasks = { workspace = true }

@@ -107,7 +107,21 @@ pub fn runs_dir() -> PathBuf {
 }
 
 /// Directory for a specific run.
+///
+/// A `run_id` that is not a single safe path component resolves to
+/// `<runs_dir>/<invalid>`, a name that cannot exist — so a caller that passes an
+/// attacker-supplied id gets a miss rather than a traversal. `run_id` reaches
+/// this from URL segments on `GET /api/agents/{id}/logs` and friends, where
+/// `Path::join` would otherwise happily accept `../../` or an absolute path.
+///
+/// Returning a definitely-missing path rather than an `Option` keeps every
+/// caller's "no such run" branch as the single failure path, instead of adding a
+/// second one that all of them would have to handle identically.
 pub fn run_dir(run_id: &str) -> PathBuf {
+    if !leviath_core::is_safe_path_component(run_id) {
+        tracing::warn!(run_id = %run_id, "rejected an unsafe run id");
+        return runs_dir().join("<invalid>");
+    }
     runs_dir().join(run_id)
 }
 
