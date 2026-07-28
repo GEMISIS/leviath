@@ -1,9 +1,10 @@
-//! Non-Unix fallback implementations.
+//! Implementations for targets that are neither Unix nor Windows.
 //!
-//! Windows does not use POSIX permission bits, so file-permission hardening is
-//! a no-op here (access control is left to the platform's own ACLs). This
-//! module is `#[cfg(not(unix))]`, so it is never compiled on the Linux
-//! coverage run and never counts toward coverage.
+//! There is no permission model to apply here, so the hardening calls are
+//! no-ops that succeed. That is a real gap on such a target — secrets are
+//! written with whatever protection the platform gives by default — and it is
+//! stated rather than papered over. Unix uses POSIX modes and Windows uses
+//! ACLs; both are implemented in their own modules.
 
 use std::io;
 use std::path::Path;
@@ -12,9 +13,8 @@ pub(crate) fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
     Ok(())
 }
 
-/// A plain write: this platform has no POSIX mode bits, and faking one here
-/// would claim a protection that is not being applied. Windows ACL handling is
-/// its own piece of work.
+/// A plain write: this platform has no permission model to apply, and faking
+/// one here would claim a protection that is not being applied.
 pub(crate) fn write_with_mode(path: &Path, contents: &[u8], _mode: u32) -> io::Result<()> {
     std::fs::write(path, contents)
 }
@@ -25,8 +25,8 @@ pub(crate) fn ensure_private(_path: &Path, _mode: u32) -> io::Result<Option<u32>
 
 pub(crate) fn configure_detached(_cmd: &mut std::process::Command) {}
 
-/// Windows has no POSIX uid; the value is only used to address a per-user
-/// launchd/systemd domain, neither of which exists here.
+/// No POSIX uid here; the value is only used to address a per-user
+/// launchd/systemd domain, neither of which exists on such a target.
 pub(crate) fn current_uid() -> u32 {
     0
 }
