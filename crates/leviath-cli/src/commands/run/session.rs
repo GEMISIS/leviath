@@ -136,9 +136,16 @@ fn resolve_task_with_editor(
             // Build a commented template file for the editor
             let template = build_task_template(agent_name, description);
 
-            // Write to a temp file
-            let tmp_path = tmp_dir_fn().join(format!("lev-task-{}.txt", std::process::id()));
-            write_task_template(&tmp_path, &template)?;
+            // A randomly named file created `O_EXCL`, not `lev-task-<pid>.txt`.
+            // The old name was fully predictable, and `fs::write` follows
+            // symlinks: on a shared host another user pre-created that path as a
+            // link to `~/.leviath/config.toml` or `~/.ssh/authorized_keys`, and
+            // the next `lev run` wrote the template — and then everything the
+            // user typed into their editor — straight through it. `tempfile`
+            // also creates it owner-only, so the task prompt is not world
+            // readable while the editor holds it open.
+            let tmp = write_task_template(&tmp_dir_fn(), &template)?;
+            let tmp_path = tmp.path().to_path_buf();
 
             // Launch the editor (exits only when the user closes it)
             let result = launch_editor_fn(&tmp_path);
@@ -174,8 +181,30 @@ fn build_task_template(agent_name: &str, description: Option<&str>) -> String {
     template
 }
 
-fn write_task_template(path: &std::path::Path, content: &str) -> anyhow::Result<()> {
-    std::fs::write(path, content)
+fn write_task_template(
+    dir: &std::path::Path,
+    content: &str,
+) -> anyhow::Result<tempfile::NamedTempFile> {
+    use std::io::Write as _;
+
+    // Creating and writing in one fallible step, through the handle the builder
+    // opened. Two steps would mean re-opening by path between them — a window in
+    // which the name could be swapped — and a second error arm that a freshly
+    // created, writable handle can never actually take.
+    // A combinator chain rather than `?`s: each `?` would be an error arm that
+    // a freshly created, writable handle can never take, and the whole point of
+    // reporting here is the one failure that is real -- the file could not be
+    // created at all.
+    tempfile::Builder::new()
+        .prefix("lev-task-")
+        .suffix(".txt")
+        .tempfile_in(dir)
+        .and_then(|mut file| {
+            file.as_file_mut()
+                .write_all(content.as_bytes())
+                .and_then(|()| file.as_file_mut().flush())
+                .map(|()| file)
+        })
         .map_err(|e| anyhow::anyhow!("Failed to create task temp file: {}", e))
 }
 
@@ -1920,16 +1949,15 @@ mod tests {
 
     // ─── write_task_template: error path ─────────────────────────────────
 
-    // A path whose parent directory doesn't exist fails `fs::write` with
-    // "not found" on both Unix (ENOENT) and Windows (ERROR_PATH_NOT_FOUND),
-    // so this test is cross-platform rather than needing a `#[cfg(unix)]`
-    // twin.
+    /// A temp file that cannot be created is reported rather than swallowed.
     #[test]
     fn write_task_template_error_on_bad_path() {
-        let bad_path = std::env::temp_dir()
-            .join("lev-definitely-nonexistent-parent-dir-xyz")
-            .join("task.txt");
-        let result = write_task_template(&bad_path, "content");
+        // A directory that is not one: creation fails, which is the single
+        // error this reports.
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let result = write_task_template(&blocker, "content");
         assert!(result.is_err());
         assert!(
             result

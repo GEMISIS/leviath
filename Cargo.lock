@@ -1988,6 +1988,7 @@ dependencies = [
  "futures-core",
  "leviath-core",
  "leviath-scripting",
+ "leviath-sys",
  "reqwest",
  "rhai",
  "serde",

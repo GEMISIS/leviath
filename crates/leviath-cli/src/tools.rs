@@ -69,7 +69,11 @@ impl ToolRegistry {
                 // static-header or stdio server resolves to `None`).
                 let auth_was_resolved = auth_header.is_some();
                 match discovery
-                    .discover_from_config_with_auth(server_cfg, auth_header)
+                    .discover_from_config_with_auth(
+                        server_cfg,
+                        auth_header,
+                        &config.security.allow_env_vars,
+                    )
                     .await
                 {
                     Ok((_tool_metas, mut client)) => {

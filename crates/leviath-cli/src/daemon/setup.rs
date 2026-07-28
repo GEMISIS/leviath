@@ -104,6 +104,7 @@ pub async fn setup_daemon_host(
         registry.mcp.clone(),
         &config.mcp_servers,
         config.security.credential_store,
+        config.security.allow_env_vars.clone(),
     );
     mcp_pool.warm_recovered(&runs_dir).await;
     build_host(

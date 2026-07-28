@@ -55,6 +55,11 @@ fn build_http_client() -> reqwest::Client {
         .connect_timeout(Duration::from_secs(30))
         .read_timeout(Duration::from_secs(READ_STALL_TIMEOUT_SECS))
         .tcp_keepalive(Duration::from_secs(30))
+        // Cap redirects, as `leviath_core::client_builder` does for every other
+        // outbound client. reqwest's default of ten hops let a hostile MCP
+        // server chain the daemon around the local network; five is enough for
+        // any legitimate endpoint move and bounds a redirect loop.
+        .redirect(reqwest::redirect::Policy::limited(5))
         .build()
         .expect("failed to build reqwest client")
 }
@@ -65,12 +70,40 @@ fn build_http_client() -> reqwest::Client {
 /// in the environment rather than in a file on disk. An undefined variable
 /// expands to nothing (and warns) rather than leaving the literal `${NAME}` to
 /// be sent as if it were the credential.
+#[cfg(test)]
+pub(crate) fn expand_env(value: &str) -> String {
+    expand_env_allowing(value, &[])
+}
+
+/// [`expand_env`] with the caller's `[security] allow_env_vars` list.
+///
+/// A credential-shaped variable is refused unless the user named it, exactly as
+/// a Rhai script tool's `env_var` is. Without this the two transports disagreed:
+/// a stdio server got a filtered environment, while an HTTP server's `headers`
+/// could interpolate *any* variable the daemon held —
+///
+/// ```toml
+/// headers = { X-A = "${ANTHROPIC_API_KEY}" }
+/// ```
+///
+/// — and post it to whatever URL the same entry named. Anyone who could write an
+/// MCP server entry could exfiltrate every secret in the daemon's environment on
+/// the next connect.
+/// The value of `name`, or `None` if it is unset or credential-shaped and not
+/// on the allowlist.
+fn resolve_var(name: &str, allowlist: &[String]) -> Option<String> {
+    if !leviath_core::script_env_allowed(name, allowlist) {
+        return None;
+    }
+    std::env::var(name).ok()
+}
+
 #[expect(
     clippy::string_slice,
     reason = "`start` and `end` are `find` hits, offset only by the lengths of the ASCII literals \
               `${` and `}` — all char boundaries"
 )]
-pub(crate) fn expand_env(value: &str) -> String {
+pub(crate) fn expand_env_allowing(value: &str, allowlist: &[String]) -> String {
     let mut out = String::with_capacity(value.len());
     let mut rest = value;
 
@@ -80,11 +113,13 @@ pub(crate) fn expand_env(value: &str) -> String {
         match after.find('}') {
             Some(end) => {
                 let name = &after[..end];
-                match std::env::var(name) {
-                    Ok(v) => out.push_str(&v),
-                    Err(_) => tracing::warn!(
+                match resolve_var(name, allowlist) {
+                    Some(v) => out.push_str(&v),
+                    None => tracing::warn!(
                         var = %name,
-                        "MCP header references an unset environment variable"
+                        "MCP header references an environment variable that is unset \
+                         or refused; add it to `[security] allow_env_vars` if the \
+                         server genuinely needs it"
                     ),
                 }
                 rest = &after[end + 1..];
@@ -106,10 +141,10 @@ pub(crate) fn expand_env(value: &str) -> String {
 /// A header that cannot be represented (an invalid name, or a value with
 /// control characters) is skipped with a warning: one bad entry must not stop
 /// the connection.
-fn build_headers(configured: &HashMap<String, String>) -> HeaderMap {
+fn build_headers(configured: &HashMap<String, String>, allow_env: &[String]) -> HeaderMap {
     let mut headers = HeaderMap::new();
     for (name, value) in configured {
-        let expanded = expand_env(value);
+        let expanded = expand_env_allowing(value, allow_env);
         match (
             HeaderName::from_bytes(name.as_bytes()),
             HeaderValue::from_str(&expanded),
@@ -171,13 +206,17 @@ pub(crate) struct HttpTransport {
 impl HttpTransport {
     /// Create a transport for `url`. No network traffic happens until the
     /// first request.
-    pub(crate) fn new(url: &str, headers: &HashMap<String, String>) -> anyhow::Result<Self> {
+    pub(crate) fn new(
+        url: &str,
+        headers: &HashMap<String, String>,
+        allow_env: &[String],
+    ) -> anyhow::Result<Self> {
         let url = Url::parse(url)
             .map_err(|e| anyhow::anyhow!("Invalid MCP server url '{}': {}", url, e))?;
         Ok(Self {
             client: build_http_client(),
             url,
-            headers: build_headers(headers),
+            headers: build_headers(headers, allow_env),
             mode: Mode::Streamable,
             session_id: None,
             protocol_version: None,
@@ -680,9 +719,36 @@ mod tests {
     // ─── expand_env ───────────────────────────────────────────────────────
 
     #[test]
-    fn expand_env_substitutes_a_defined_variable() {
+    fn expand_env_substitutes_an_ordinary_variable() {
+        temp_env::with_var("LEV_MCP_TEST_REGION", Some("eu-west-1"), || {
+            assert_eq!(
+                expand_env("region=${LEV_MCP_TEST_REGION}"),
+                "region=eu-west-1"
+            );
+        });
+    }
+
+    /// A credential-shaped variable is refused unless the user named it — the
+    /// same rule a Rhai script tool's `env_var` follows. Without it, an MCP
+    /// server entry could set `X-A = "${ANTHROPIC_API_KEY}"` against a URL of
+    /// its own choosing and post every secret the daemon holds.
+    #[test]
+    fn expand_env_refuses_a_credential_unless_allowlisted() {
+        let _guard = always_on_tracing_guard();
         temp_env::with_var("LEV_MCP_TEST_TOKEN", Some("s3cret"), || {
-            assert_eq!(expand_env("Bearer ${LEV_MCP_TEST_TOKEN}"), "Bearer s3cret");
+            assert_eq!(
+                expand_env("Bearer ${LEV_MCP_TEST_TOKEN}"),
+                "Bearer ",
+                "a credential-shaped name is not interpolated by default"
+            );
+            // ...and the opt-out, so a server that genuinely needs one works.
+            assert_eq!(
+                expand_env_allowing(
+                    "Bearer ${LEV_MCP_TEST_TOKEN}",
+                    &["LEV_MCP_TEST_TOKEN".to_string()]
+                ),
+                "Bearer s3cret"
+            );
         });
     }
 
@@ -738,8 +804,14 @@ mod tests {
                 "Authorization".to_string(),
                 "Bearer ${LEV_MCP_TEST_TOKEN}".to_string(),
             )]);
-            let headers = build_headers(&configured);
+            // Allowlisted, as a real deployment would have to do for a bearer.
+            let allowed = ["LEV_MCP_TEST_TOKEN".to_string()];
+            let headers = build_headers(&configured, &allowed);
             assert_eq!(headers.get("authorization").unwrap(), "Bearer abc");
+
+            // And without the allowlist entry the secret does not leave.
+            let headers = build_headers(&configured, &[]);
+            assert_eq!(headers.get("authorization").unwrap(), "Bearer ");
         });
     }
 
@@ -751,14 +823,14 @@ mod tests {
             ("Not A Header".to_string(), "x".to_string()),
             ("X-Good".to_string(), "y".to_string()),
         ]);
-        let headers = build_headers(&configured);
+        let headers = build_headers(&configured, &[]);
         assert_eq!(headers.len(), 1);
         assert_eq!(headers.get("x-good").unwrap(), "y");
     }
 
     #[test]
     fn build_headers_of_nothing_is_empty() {
-        assert!(build_headers(&HashMap::new()).is_empty());
+        assert!(build_headers(&HashMap::new(), &[]).is_empty());
     }
 
     // ─── mock MCP servers ─────────────────────────────────────────────────
@@ -777,7 +849,7 @@ mod tests {
     }
 
     fn transport(url: &str) -> HttpTransport {
-        HttpTransport::new(url, &HashMap::new()).expect("url should parse")
+        HttpTransport::new(url, &HashMap::new(), &[]).expect("url should parse")
     }
 
     fn init() -> JsonRpcRequest {
@@ -1084,7 +1156,7 @@ mod tests {
 
     #[test]
     fn an_unparseable_url_is_rejected_up_front() {
-        let err = HttpTransport::new("not a url", &HashMap::new())
+        let err = HttpTransport::new("not a url", &HashMap::new(), &[])
             .err()
             .expect("garbage url must not build");
         assert!(

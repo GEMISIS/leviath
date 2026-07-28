@@ -87,6 +87,8 @@ async fn execute_with_shutdown(
     }
 
     let cfg = Config::load()?;
+    // Read before `cfg` moves into the shared state below.
+    let allow_local_network = cfg.security.allow_local_network;
     for warning in cfg.validate_keys() {
         tracing::warn!("{}", warning);
     }
@@ -101,6 +103,7 @@ async fn execute_with_shutdown(
         limits: Arc::new(ServeLimits {
             workdir_root: args.workdir_root.clone(),
             no_remote_yolo: args.no_remote_yolo,
+            allow_local_network,
         }),
     };
 

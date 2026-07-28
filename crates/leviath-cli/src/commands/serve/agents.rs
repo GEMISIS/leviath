@@ -56,6 +56,14 @@ pub(super) async fn spawn_agent(
             "this server refuses `yolo` on spawn requests (--no-remote-yolo)".to_string(),
         ));
     }
+    // And a completion webhook is a request the daemon makes on the caller's
+    // behalf, so it goes through the same SSRF policy as any model-supplied URL.
+    if let Some(callback) = body.callback_url.as_deref() {
+        state
+            .limits
+            .check_callback_url(callback)
+            .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
+    }
     let run_id = runstate::new_run_id(&body.blueprint);
     let args = SpawnArgs {
         run_id,
@@ -314,6 +322,7 @@ mod tests {
             control: no_daemon(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
             limits: Arc::new(ServeLimits {
+                allow_local_network: false,
                 workdir_root: Some(root.path().to_path_buf()),
                 no_remote_yolo: true,
             }),
@@ -337,6 +346,24 @@ mod tests {
             "{}",
             err.1.0.error
         );
+
+        // Inside the root, but pointing the completion webhook at the cloud
+        // metadata service — a request the daemon would make on the caller's
+        // behalf, from inside the trust boundary.
+        let err = spawn_agent(
+            State(state.clone()),
+            Json(SpawnAgentReq {
+                blueprint: "probe".to_string(),
+                task: "t".to_string(),
+                workdir: Some(root.path().to_string_lossy().to_string()),
+                callback_url: Some("http://169.254.169.254/latest/meta-data/".to_string()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect_err("a webhook aimed at link-local must be refused");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert!(err.1.0.error.contains("callback_url"), "{}", err.1.0.error);
 
         // Inside the root, but asking for yolo.
         let err = spawn_agent(
@@ -376,6 +403,43 @@ mod tests {
         assert!(limits.check_workdir(root.path()).is_ok());
         let err = limits.check_workdir(std::path::Path::new("/")).unwrap_err();
         assert!(err.contains("--workdir-root"), "{err}");
+    }
+
+    /// A completion webhook is a request the daemon makes on the caller's
+    /// behalf, from inside the trust boundary and with retries. Unchecked,
+    /// `"callback_url": "http://169.254.169.254/…"` turned the API into a
+    /// repeatable request primitive against cloud metadata and the local
+    /// network.
+    #[test]
+    fn a_callback_url_goes_through_the_same_ssrf_policy_as_any_other() {
+        let limits = ServeLimits::default();
+        for blocked in [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://127.0.0.1:9200/_shutdown",
+            "http://192.168.1.1/admin",
+            "file:///etc/passwd",
+        ] {
+            let err = limits
+                .check_callback_url(blocked)
+                .expect_err("{blocked} must be refused");
+            assert!(err.contains("callback_url"), "{err}");
+        }
+        assert!(limits.check_callback_url("not a url").is_err());
+    }
+
+    /// The opt-out an operator can take deliberately.
+    #[test]
+    fn allow_local_network_lets_a_webhook_reach_this_host() {
+        let limits = ServeLimits {
+            allow_local_network: true,
+            ..Default::default()
+        };
+        // The same URL the default refuses. That this flips on the setting --
+        // rather than everything being refused either way -- is what shows the
+        // check is reading the address and not just saying no.
+        let url = "http://127.0.0.1:9000/hook";
+        assert!(limits.check_callback_url(url).is_ok());
+        assert!(ServeLimits::default().check_callback_url(url).is_err());
     }
 
     /// The containment is symlink-aware, so a link planted under the root cannot

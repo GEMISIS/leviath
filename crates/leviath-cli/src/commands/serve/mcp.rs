@@ -302,7 +302,7 @@ async fn connect_and_list(
     server: &MCPServerConfig,
     auth_header: Option<(String, String)>,
 ) -> anyhow::Result<Vec<String>> {
-    let mut client = MCPClient::from_config_with_auth(server, auth_header).await?;
+    let mut client = MCPClient::from_config_with_auth(server, auth_header, &[]).await?;
     client.connect().await?;
     let tools = client.list_tools().await?;
     let _ = client.shutdown().await;

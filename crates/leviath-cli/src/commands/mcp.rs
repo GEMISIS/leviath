@@ -110,6 +110,9 @@ pub struct McpEnv {
     /// the edge also means these code paths carry no error arm that only an
     /// unreachable keychain could take.
     pub credential_store: Option<Box<dyn leviath_core::CredentialStore>>,
+    /// `[security] allow_env_vars`: which credential-shaped variables an MCP
+    /// server's `${VAR}` headers may interpolate.
+    pub allow_env_vars: Vec<String>,
 }
 
 /// Run a `lev mcp` subcommand against the injected environment.
@@ -256,7 +259,8 @@ async fn test(name: &str, env: &McpEnv) -> anyhow::Result<()> {
     let auth_header = OAuthClient::new()
         .authorization_header(name, &env.store_path, env.now)
         .await?;
-    let mut client = MCPClient::from_config_with_auth(server, auth_header).await?;
+    let mut client =
+        MCPClient::from_config_with_auth(server, auth_header, &env.allow_env_vars).await?;
     client.connect().await?;
     let tools = client.list_tools().await?;
     println!("✓ '{name}' connected · {} tool(s):", tools.len());
@@ -404,6 +408,7 @@ mod tests {
             // script-row path has its own dedicated test with a seeded dir.
             tools_dir: None,
             credential_store: None,
+            allow_env_vars: Vec::new(),
         }
     }
 
@@ -1027,6 +1032,7 @@ for line in sys.stdin:
             now: 0,
             tools_dir: None,
             credential_store: None,
+            allow_env_vars: Vec::new(),
         }
     }
 
@@ -1105,6 +1111,7 @@ for line in sys.stdin:
             now: 0,
             tools_dir: None,
             credential_store: None,
+            allow_env_vars: Vec::new(),
         };
         assert!(
             execute_with(
