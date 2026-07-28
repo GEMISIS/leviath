@@ -365,7 +365,13 @@ mod tests {
         SubAgentHandle {
             sender,
             parent_run_id: "parent".to_string(),
-            workdir: "/tmp".to_string(),
+            // This crate's own directory, deliberately *not* the system temp
+            // dir: `temp_blueprint()` writes under temp, and on Linux that is
+            // `/tmp` — so a workdir of `/tmp` made every fixture blueprint look
+            // like one the agent had planted in its own workspace, and the
+            // containment guard refused them all. macOS puts tempdirs under
+            // `$TMPDIR` in `/var/folders`, so nothing local caught it.
+            workdir: env!("CARGO_MANIFEST_DIR").to_string(),
             max_depth: 3,
             no_seed_commands: false,
         }
