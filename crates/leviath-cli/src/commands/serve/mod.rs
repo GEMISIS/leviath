@@ -49,6 +49,68 @@ pub async fn execute(
     execute_with_shutdown(args, control, Box::pin(std::future::pending()), None).await
 }
 
+/// Every API route with its production handlers - the single route table,
+/// shared by [`execute_with_shutdown`] and the tests. A hand-copied test
+/// router drifted seven routes behind production, which meant a route could
+/// be added, typo'd, and never exercised. Admin routes, the auth middleware,
+/// CORS, and `with_state` are layered on by the caller.
+fn api_router() -> Router<AppState> {
+    Router::new()
+        // Blueprints
+        .route(
+            "/api/blueprints",
+            get(blueprints::list_blueprints).post(blueprints::create_blueprint),
+        )
+        .route(
+            "/api/blueprints/validate",
+            post(blueprints::validate_blueprint),
+        )
+        .route(
+            "/api/blueprints/{name}",
+            get(blueprints::get_blueprint)
+                .put(blueprints::update_blueprint)
+                .delete(blueprints::delete_blueprint),
+        )
+        // Agents
+        .route(
+            "/api/agents",
+            get(agents::list_agents).post(agents::spawn_agent),
+        )
+        .route("/api/agents/tree", get(tree::agents_tree))
+        .route(
+            "/api/agents/{id}",
+            get(agents::get_agent).delete(agents::kill_agent),
+        )
+        .route("/api/agents/{id}/children", get(agents::agent_children))
+        .route("/api/agents/{id}/context", get(agents::agent_context))
+        .route(
+            "/api/agents/{id}/context/history",
+            get(agents::agent_context_history),
+        )
+        .route("/api/agents/{id}/logs", get(agents::agent_logs))
+        .route("/api/agents/{id}/result", get(agents::agent_result))
+        .route("/api/agents/{id}/tree-status", get(tree::agent_tree_status))
+        // Messages
+        .route("/api/agents/{id}/message", post(interactions::send_message))
+        // Interactions
+        .route(
+            "/api/agents/{id}/interaction",
+            get(interactions::get_interaction).post(interactions::submit_interaction),
+        )
+        // MCP servers - read-only surface. The mutating half is mounted by
+        // `execute_with_shutdown`, behind `--allow-admin`.
+        .route("/api/mcp/servers", get(mcp::list_servers))
+        .route("/api/mcp/servers/{name}/status", get(mcp::status))
+        .route("/api/mcp/servers/{name}/login", post(mcp::login))
+        .route("/api/mcp/servers/{name}/test", post(mcp::test_server))
+        // Config
+        .route("/api/config", get(config::get_config))
+        .route("/api/models", get(config::get_models))
+        // WebSocket
+        .route("/ws", get(websocket::ws_global))
+        .route("/ws/agents/{id}", get(websocket::ws_agent))
+}
+
 /// Core of [`execute`], with an optional shutdown signal so tests can stop
 /// the server gracefully and cover the `Ok(())` return path.
 ///
@@ -148,60 +210,7 @@ async fn execute_with_shutdown(
         }
     };
 
-    let app = Router::new()
-        // Blueprints
-        .route(
-            "/api/blueprints",
-            get(blueprints::list_blueprints).post(blueprints::create_blueprint),
-        )
-        .route(
-            "/api/blueprints/validate",
-            post(blueprints::validate_blueprint),
-        )
-        .route(
-            "/api/blueprints/{name}",
-            get(blueprints::get_blueprint)
-                .put(blueprints::update_blueprint)
-                .delete(blueprints::delete_blueprint),
-        )
-        // Agents
-        .route(
-            "/api/agents",
-            get(agents::list_agents).post(agents::spawn_agent),
-        )
-        .route("/api/agents/tree", get(tree::agents_tree))
-        .route(
-            "/api/agents/{id}",
-            get(agents::get_agent).delete(agents::kill_agent),
-        )
-        .route("/api/agents/{id}/children", get(agents::agent_children))
-        .route("/api/agents/{id}/context", get(agents::agent_context))
-        .route(
-            "/api/agents/{id}/context/history",
-            get(agents::agent_context_history),
-        )
-        .route("/api/agents/{id}/logs", get(agents::agent_logs))
-        .route("/api/agents/{id}/result", get(agents::agent_result))
-        .route("/api/agents/{id}/tree-status", get(tree::agent_tree_status))
-        // Messages
-        .route("/api/agents/{id}/message", post(interactions::send_message))
-        // Interactions
-        .route(
-            "/api/agents/{id}/interaction",
-            get(interactions::get_interaction).post(interactions::submit_interaction),
-        )
-        // MCP servers — read-only surface. The mutating half is mounted below,
-        // behind `--allow-admin`.
-        .route("/api/mcp/servers", get(mcp::list_servers))
-        .route("/api/mcp/servers/{name}/status", get(mcp::status))
-        .route("/api/mcp/servers/{name}/login", post(mcp::login))
-        .route("/api/mcp/servers/{name}/test", post(mcp::test_server))
-        // Config
-        .route("/api/config", get(config::get_config))
-        .route("/api/models", get(config::get_models))
-        // WebSocket
-        .route("/ws", get(websocket::ws_global))
-        .route("/ws/agents/{id}", get(websocket::ws_agent));
+    let app = api_router();
 
     // The MCP administration endpoints are remote code execution by
     // construction: `add_server` writes a `command` and `args` into
@@ -373,36 +382,10 @@ mod tests {
         }
     }
 
+    /// The production route table over a test state - auth, CORS, and the
+    /// admin routes are absent, exactly as `api_router` leaves them.
     fn test_app() -> Router {
-        let state = test_state();
-        Router::new()
-            .route("/api/blueprints", get(blueprints::list_blueprints))
-            .route(
-                "/api/blueprints/validate",
-                post(blueprints::validate_blueprint),
-            )
-            .route(
-                "/api/blueprints/{name}",
-                get(blueprints::get_blueprint).delete(blueprints::delete_blueprint),
-            )
-            .route("/api/agents", get(agents::list_agents))
-            .route("/api/agents/tree", get(tree::agents_tree))
-            .route("/api/agents/{id}", get(agents::get_agent))
-            .route("/api/agents/{id}/children", get(agents::agent_children))
-            .route("/api/agents/{id}/context", get(agents::agent_context))
-            .route(
-                "/api/agents/{id}/context/history",
-                get(agents::agent_context_history),
-            )
-            .route("/api/agents/{id}/logs", get(agents::agent_logs))
-            .route("/api/agents/{id}/result", get(agents::agent_result))
-            .route("/api/agents/{id}/tree-status", get(tree::agent_tree_status))
-            .route(
-                "/api/agents/{id}/interaction",
-                get(interactions::get_interaction).post(interactions::submit_interaction),
-            )
-            .route("/api/config", get(config::get_config))
-            .with_state(state)
+        api_router().with_state(test_state())
     }
 
     #[tokio::test]
@@ -410,6 +393,20 @@ mod tests {
         let app = test_app();
         let req = Request::builder()
             .uri("/api/blueprints")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_router_serves_routes_the_old_hand_copy_missed() {
+        // /api/mcp/servers was one of the seven routes present in production
+        // but absent from the hand-copied test router; with the shared table
+        // it must be reachable here too.
+        let app = test_app();
+        let req = Request::builder()
+            .uri("/api/mcp/servers")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -680,54 +677,9 @@ model = "claude-sonnet-4-6"
         assert!(json2.contains("\"prompt_tokens\":5000"));
     }
 
-    fn full_app() -> Router {
-        let state = test_state();
-        Router::new()
-            .route(
-                "/api/blueprints",
-                get(blueprints::list_blueprints).post(blueprints::create_blueprint),
-            )
-            .route(
-                "/api/blueprints/validate",
-                post(blueprints::validate_blueprint),
-            )
-            .route(
-                "/api/blueprints/{name}",
-                get(blueprints::get_blueprint)
-                    .put(blueprints::update_blueprint)
-                    .delete(blueprints::delete_blueprint),
-            )
-            .route(
-                "/api/agents",
-                get(agents::list_agents).post(agents::spawn_agent),
-            )
-            .route("/api/agents/tree", get(tree::agents_tree))
-            .route(
-                "/api/agents/{id}",
-                get(agents::get_agent).delete(agents::kill_agent),
-            )
-            .route("/api/agents/{id}/children", get(agents::agent_children))
-            .route("/api/agents/{id}/context", get(agents::agent_context))
-            .route(
-                "/api/agents/{id}/context/history",
-                get(agents::agent_context_history),
-            )
-            .route("/api/agents/{id}/logs", get(agents::agent_logs))
-            .route("/api/agents/{id}/result", get(agents::agent_result))
-            .route("/api/agents/{id}/tree-status", get(tree::agent_tree_status))
-            .route("/api/agents/{id}/message", post(interactions::send_message))
-            .route(
-                "/api/agents/{id}/interaction",
-                get(interactions::get_interaction).post(interactions::submit_interaction),
-            )
-            .route("/api/config", get(config::get_config))
-            .route("/api/models", get(config::get_models))
-            .with_state(state)
-    }
-
     #[tokio::test]
     async fn test_full_router_create_blueprint_invalid() {
-        let app = full_app();
+        let app = test_app();
         let body = serde_json::json!({
             "name": "bad-agent",
             "manifest": "not valid toml {{{"
@@ -744,7 +696,7 @@ model = "claude-sonnet-4-6"
 
     #[tokio::test]
     async fn test_full_router_update_blueprint_not_found() {
-        let app = full_app();
+        let app = test_app();
         let body = serde_json::json!({
             "manifest": r#"
 [agent]
@@ -768,7 +720,7 @@ prompt = "Run"
 
     #[tokio::test]
     async fn test_full_router_kill_agent_reaches_daemon() {
-        let app = full_app();
+        let app = test_app();
         let req = Request::builder()
             .method("DELETE")
             .uri("/api/agents/nonexistent-kill-id-xyz")
@@ -780,7 +732,7 @@ prompt = "Run"
 
     #[tokio::test]
     async fn test_full_router_send_message_reaches_daemon() {
-        let app = full_app();
+        let app = test_app();
         let body = serde_json::json!({"message": "hello"});
         let req = Request::builder()
             .method("POST")
@@ -794,7 +746,7 @@ prompt = "Run"
 
     #[tokio::test]
     async fn test_full_router_get_models() {
-        let app = full_app();
+        let app = test_app();
         let req = Request::builder()
             .uri("/api/models")
             .body(Body::empty())
@@ -805,7 +757,7 @@ prompt = "Run"
 
     #[tokio::test]
     async fn test_full_router_spawn_agent_blueprint_not_found() {
-        let app = full_app();
+        let app = test_app();
         let body = serde_json::json!({
             "blueprint": "nonexistent-blueprint-xyz",
             "task": "do something"
@@ -874,7 +826,7 @@ prompt = "Run"
         // The POST-interaction route is wired to the handler, which reaches the
         // (absent-in-test) daemon. The ACCEPTED path is covered by the
         // interactions handler's own tests against a fake daemon.
-        let app = full_app();
+        let app = test_app();
         let body = serde_json::json!({"request_id": "req-1", "value": "do it", "scope": "once"});
         let req = Request::builder()
             .method("POST")
@@ -1032,7 +984,7 @@ prompt = "Run"
 
     #[tokio::test]
     async fn test_agent_list_with_status_filter_full_router() {
-        let app = full_app();
+        let app = test_app();
         let req = Request::builder()
             .uri("/api/agents?status=running,complete")
             .body(Body::empty())
