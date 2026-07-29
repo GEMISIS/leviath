@@ -91,6 +91,12 @@ pub(crate) struct Dashboard {
     /// (and [`new`](Self::new)) inject a no-op so a `y` keypress never touches
     /// the clipboard or TTY.
     pub(super) yank_fn: fn(&str) -> bool,
+    /// The active mouse text selection, if any (see `selection.rs`).
+    pub(super) selection: Option<super::selection::Selection>,
+    /// Screen rects of the panes that accept mouse selection, re-registered by
+    /// each pane's renderer every frame so hit-testing always matches what is
+    /// actually on screen.
+    pub(super) selection_regions: Vec<ratatui::layout::Rect>,
 
     // ── MCP management screen ──────────────────────────────────────────────
     /// True when the full-screen MCP management view is open.
@@ -184,6 +190,8 @@ impl Dashboard {
         Self {
             log_path,
             yank_fn,
+            selection: None,
+            selection_regions: Vec::new(),
             agents: Vec::new(),
             selected: 0,
             log,

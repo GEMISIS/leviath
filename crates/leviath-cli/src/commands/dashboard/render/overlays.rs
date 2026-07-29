@@ -230,6 +230,13 @@ impl Dashboard {
             ]),
             Line::from(vec![
                 Span::styled(
+                    "  drag     ",
+                    Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("Select text; release copies (Shift+drag: terminal select)"),
+            ]),
+            Line::from(vec![
+                Span::styled(
                     "  i        ",
                     Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD),
                 ),

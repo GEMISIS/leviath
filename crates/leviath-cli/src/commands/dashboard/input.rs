@@ -192,7 +192,12 @@ impl Dashboard {
     ///
     /// One place so the keyboard and the mouse wheel cannot disagree about
     /// which pane a gesture moves.
+    ///
+    /// Scrolling clears any mouse selection: the highlight is anchored to
+    /// screen cells, so moving text under it would leave it over the wrong
+    /// content.
     pub(crate) fn scroll_by(&mut self, lines: i32) {
+        self.selection = None;
         let target = match self.scroll_target_is_review() {
             true => &mut self.review_scroll,
             false => &mut self.detail_scroll,
