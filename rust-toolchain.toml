@@ -9,5 +9,5 @@
 # Bump deliberately - its own commit, CI green on all three OSes - rather than
 # by drifting.
 [toolchain]
-channel = "1.97.0"
+channel = "1.97.1"
 components = ["llvm-tools", "rustfmt", "clippy"]
