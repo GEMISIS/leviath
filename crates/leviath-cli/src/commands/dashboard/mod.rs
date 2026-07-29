@@ -5,6 +5,7 @@ mod helpers;
 mod input;
 mod mcp;
 mod render;
+mod selection;
 mod state;
 #[cfg(test)]
 mod test_support;
@@ -178,14 +179,9 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     dashboard.handle_key(key);
                 }
-                // The wheel scrolls the same pane the keyboard does. Three lines
-                // per notch is the usual terminal convention; one felt broken on
-                // a long plan, which is the document people actually scroll.
-                Event::Mouse(m) => match m.kind {
-                    crossterm::event::MouseEventKind::ScrollUp => dashboard.scroll_by(3),
-                    crossterm::event::MouseEventKind::ScrollDown => dashboard.scroll_by(-3),
-                    _ => {}
-                },
+                // Wheel scrolling and click-drag text selection, handled in one
+                // place (`selection.rs`) so they cannot disagree about state.
+                Event::Mouse(m) => dashboard.handle_mouse(m),
                 Event::Resize(_, _) => {
                     // Terminal will redraw automatically on next tick
                 }
@@ -602,24 +598,29 @@ mod tests {
         let mut dashboard = make_test_dashboard();
         let control = no_daemon_control();
         let mut terminal = test_terminal();
-        // A no-op Resize tick, then both wheel directions, then the Esc that
+        // A no-op Resize tick, then both wheel directions, a full
+        // press-drag-release selection over the log panel, and the Esc that
         // triggers quit -- covers every arm of the event match, including the
-        // mouse one that carries scrolling.
-        let wheel = |kind| {
+        // mouse one that carries scrolling and selection.
+        let mouse = |kind, column, row| {
             Event::Mouse(crossterm::event::MouseEvent {
                 kind,
-                column: 0,
-                row: 0,
+                column,
+                row,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             })
         };
+        use crossterm::event::{MouseButton, MouseEventKind};
         let mut events = TestEventSource::new(vec![
             Event::Resize(80, 24),
-            wheel(crossterm::event::MouseEventKind::ScrollUp),
-            wheel(crossterm::event::MouseEventKind::ScrollDown),
-            // A button press is not a scroll and must be ignored rather than
-            // moving the view under the user.
-            wheel(crossterm::event::MouseEventKind::Moved),
+            mouse(MouseEventKind::ScrollUp, 0, 0),
+            mouse(MouseEventKind::ScrollDown, 0, 0),
+            // Cursor motion without a button is not a gesture and must be
+            // ignored rather than moving the view under the user.
+            mouse(MouseEventKind::Moved, 0, 0),
+            mouse(MouseEventKind::Down(MouseButton::Left), 3, 15),
+            mouse(MouseEventKind::Drag(MouseButton::Left), 20, 16),
+            mouse(MouseEventKind::Up(MouseButton::Left), 20, 16),
             key(KeyCode::Esc),
         ]);
 

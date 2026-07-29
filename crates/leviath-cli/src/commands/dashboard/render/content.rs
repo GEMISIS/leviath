@@ -178,6 +178,15 @@ impl Dashboard {
             return;
         }
 
+        // Read-only stage content accepts mouse selection; the rect excludes
+        // the borders (and with them the scrollbar track, which sits on the
+        // right border column). The editor branch above deliberately does not
+        // register: tui-textarea owns those cells.
+        self.selection_regions.push(content_area.inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        }));
+
         let inner_h = content_area.height.saturating_sub(2) as usize;
         let render_width = content_area.width.saturating_sub(2);
         let is_context = self.stage_content_mode == StageContentMode::Context;
@@ -943,6 +952,48 @@ mod tests {
                 dash.render_content_pane(f, area, &agent, 100);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn render_content_pane_registers_its_selection_region() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let agent = make_test_agent("run-selreg", AgentDisplayStatus::Active);
+        let area = Rect::new(0, 0, 100, 20);
+        terminal
+            .draw(|f| dash.render_content_pane(f, area, &agent, 100))
+            .unwrap();
+        // Borders excluded, so mouse selection can never grab the frame or
+        // the scrollbar track on the right border column.
+        assert_eq!(
+            dash.selection_regions,
+            vec![area.inner(ratatui::layout::Margin {
+                vertical: 1,
+                horizontal: 1,
+            })]
+        );
+    }
+
+    #[test]
+    fn render_content_pane_does_not_register_selection_while_editing() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-selreg-edit", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::edit_text(
+            "et2", "Edit", "plan", "line A",
+        ));
+        dash.agents.push(agent.clone());
+        dash.update_display_indices();
+        dash.input_mode = true;
+        assert!(dash.editing_document());
+        terminal
+            .draw(|f| dash.render_content_pane(f, Rect::new(0, 0, 100, 20), &agent, 100))
+            .unwrap();
+        // tui-textarea owns those cells; a selection there would fight the
+        // editor's own cursor and highlighting.
+        assert!(dash.selection_regions.is_empty());
     }
 
     #[test]

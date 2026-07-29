@@ -22,6 +22,13 @@ impl Dashboard {
         review_lines: &[ratatui::text::Line<'static>],
         pending_req: &Option<interaction::InteractionRequest>,
     ) {
+        // The review document accepts mouse selection; borders (and the
+        // scrollbar track on the right border column) are excluded.
+        self.selection_regions.push(review_area.inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        }));
+
         let inner_h = review_area.height.saturating_sub(2) as usize;
 
         // Clamp scroll
@@ -327,6 +334,15 @@ mod tests {
             })
             .unwrap();
         assert!(dash.review_scroll < usize::MAX);
+        // The review pane accepts mouse selection: its inner rect (borders
+        // excluded) is registered for hit-testing.
+        assert_eq!(
+            dash.selection_regions,
+            vec![Rect::new(0, 0, 80, 10).inner(Margin {
+                vertical: 1,
+                horizontal: 1,
+            })]
+        );
     }
 
     #[test]

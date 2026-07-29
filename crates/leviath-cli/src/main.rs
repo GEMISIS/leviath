@@ -587,11 +587,10 @@ impl TerminalSetup for CrosstermSetup {
         io::stdout()
             .execute(EnterAlternateScreen)
             .map_err(anyhow::Error::from)?;
-        // Mouse capture is what delivers wheel events. It also takes over
-        // click-drag, so the terminal's own text selection stops working while
-        // the dashboard is up — hold Shift (or Option on macOS Terminal) to
-        // select as usual. Worth the trade: reading a long plan by wheel is the
-        // common case, copying out of the dashboard is not.
+        // Mouse capture is what delivers wheel events, and it routes click-drag
+        // to the dashboard's own text selection (drag to highlight, release to
+        // copy). Hold Shift (or Option on macOS Terminal) to bypass capture and
+        // use the terminal's native selection instead.
         io::stdout()
             .execute(EnableMouseCapture)
             .map_err(anyhow::Error::from)?;

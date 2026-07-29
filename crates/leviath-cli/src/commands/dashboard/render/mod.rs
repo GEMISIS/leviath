@@ -18,8 +18,15 @@ use super::types::*;
 
 impl Dashboard {
     pub(super) fn draw(&mut self, frame: &mut Frame) {
+        // Selectable panes re-register their rects as they render; anything
+        // still selected in a pane that does not come back this frame is
+        // dropped by the overlay pass below.
+        self.selection_regions.clear();
+
         if self.mcp_screen {
             self.draw_mcp_screen(frame, frame.area());
+            // No pane registered a rect, so this drops any selection.
+            self.validate_selection();
             self.draw_toasts(frame);
             return;
         }
@@ -44,6 +51,10 @@ impl Dashboard {
             self.draw_log_panel(frame, chunks[1]);
             self.draw_help_bar(frame, chunks[2]);
         }
+
+        // Mouse-selection highlight and released-selection copy, painted over
+        // the panes but under the popups below.
+        self.apply_selection_overlay(frame);
 
         // Render toasts (top-right overlay)
         self.draw_toasts(frame);
@@ -304,6 +315,41 @@ mod tests {
         dash.update_display_indices();
         dash.detail_view = true;
         terminal.draw(|f| dash.draw(f)).unwrap();
+    }
+
+    #[test]
+    fn draw_reregisters_selection_regions_every_frame() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        terminal.draw(|f| dash.draw(f)).unwrap();
+        let first_frame = dash.selection_regions.clone();
+        assert!(!first_frame.is_empty());
+        // A second draw replaces the registrations instead of accumulating.
+        terminal.draw(|f| dash.draw(f)).unwrap();
+        assert_eq!(dash.selection_regions, first_frame);
+    }
+
+    #[test]
+    fn draw_mcp_screen_drops_any_selection() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        // Start a drag over the log panel on the normal screen.
+        terminal.draw(|f| dash.draw(f)).unwrap();
+        let region = dash.selection_regions[0];
+        dash.handle_mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: region.x,
+            row: region.y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        assert!(dash.selection.is_some());
+        // The MCP screen has no selectable panes; switching to it clears.
+        dash.mcp_screen = true;
+        terminal.draw(|f| dash.draw(f)).unwrap();
+        assert!(dash.selection.is_none());
+        assert!(dash.selection_regions.is_empty());
     }
 
     #[test]

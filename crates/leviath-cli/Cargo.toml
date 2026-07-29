@@ -47,6 +47,7 @@ chrono = { workspace = true }
 bevy_ecs = { workspace = true }
 crossterm = { workspace = true }
 ratatui = { workspace = true }
+unicode-width = { workspace = true }
 tokio-stream = { workspace = true }
 futures = { workspace = true }
 dotenvy = { workspace = true }

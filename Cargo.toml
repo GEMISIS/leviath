@@ -117,6 +117,10 @@ temp-env = "0.3"
 # tui-textarea moves.
 crossterm = "0.28"
 ratatui = "0.29"
+# Already in the tree via ratatui; named explicitly so the dashboard's mouse
+# selection can measure symbol display widths when reading cells back out of
+# the drawn frame (wide CJK/emoji symbols occupy continuation cells).
+unicode-width = "0.2"
 pulldown-cmark = "0.13"
 tui-textarea = { version = "0.7", features = ["crossterm"] }
 axum = { version = "0.8", features = ["ws"] }
