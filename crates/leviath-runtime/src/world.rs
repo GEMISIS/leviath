@@ -293,7 +293,7 @@ impl PipelineWorld {
     }
 
     /// Enable (or disable) the opt-in exact pre-inference budget guard for this
-    /// world - see [`crate::inference_bridge::InferenceJob::exact_token_counting`].
+    /// world - see `inference_bridge::InferenceJob::exact_token_counting`.
     /// Call once at startup when the run config requests it, before serving.
     pub fn set_exact_token_counting(&mut self, enabled: bool) {
         // `InferenceStage` is inserted by every `PipelineWorld::new` path, so it
@@ -441,7 +441,7 @@ impl PipelineWorld {
     /// with it.
     ///
     /// When the panic can be traced to a specific agent (the usual case - see
-    /// [`crate::tick_scope`]), that agent is failed with the panic message so it
+    /// `tick_scope`), that agent is failed with the panic message so it
     /// stops being driven, its run is persisted as errored, and the host reaps
     /// it. Without that, the world would re-tick the same unchanged state on
     /// every wake and panic again indefinitely.

@@ -4,7 +4,7 @@
 //! Agents are entities; their execution phase is a **marker component**
 //! (`ReadyToInfer`, `AwaitingInference`, …) so systems can query by phase. A
 //! system never blocks on I/O: the dispatch systems hand work to the async
-//! bridges ([`crate::inference_bridge`], [`crate::tool_bridge`]) and the collect
+//! bridges (`inference_bridge`, [`crate::tool_bridge`]) and the collect
 //! systems apply the results on a later tick. This module is built alongside the
 //! existing imperative engine; the two are unified in a later phase.
 
@@ -115,7 +115,7 @@ pub struct InferenceStage {
     /// reported - again a separate lane so a summary isn't mistaken for a turn.
     pub compaction_outcomes: UnboundedSender<crate::compaction_bridge::CompactionOutcome>,
     /// Where completed *content-summary transform* jobs are reported (the
-    /// Summarize context-transform lane - see [`crate::context_transform`]).
+    /// Summarize context-transform lane - see `context_transform`).
     pub content_summary_outcomes: UnboundedSender<crate::compaction_bridge::CompactionOutcome>,
     /// Signalled when an inference completes, to wake the tick loop.
     pub wake: Arc<Notify>,
@@ -123,7 +123,7 @@ pub struct InferenceStage {
     pub runtime: Handle,
     /// Opt-in: perform an exact pre-inference token count and reject requests
     /// that would overflow the model's context window (see
-    /// [`InferenceJob::exact_token_counting`]). Off by default.
+    /// `InferenceJob::exact_token_counting`). Off by default.
     pub exact_token_counting: bool,
 }
 
