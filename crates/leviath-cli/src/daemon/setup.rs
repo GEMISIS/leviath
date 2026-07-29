@@ -211,6 +211,12 @@ pub fn build_host(
         .world_mut()
         .insert_resource(leviath_runtime::pipeline::PolicyGate(policy));
 
+    // Run-title generation settings; spawn only marks a run for titling when
+    // `[title]` is enabled, and the dispatch system reads provider/model here.
+    host.world_mut()
+        .world_mut()
+        .insert_resource(leviath_runtime::title::TitleSettings(config.title.clone()));
+
     // Scripted gate rules (`<config>/leviath/rules/*.rhai`), consulted by the gate
     // after the static allowlist (a no-op checker when there are none).
     let script_checker =

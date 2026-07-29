@@ -51,7 +51,7 @@ use crate::tool_bridge::spawn_tool_pool;
 
 /// Counts of agents in each phase-marker — the world's per-tick "fingerprint".
 /// Two consecutive equal fingerprints mean a tick changed nothing (quiescence).
-type Fingerprint = [usize; 10];
+type Fingerprint = [usize; 12];
 
 /// How many attributed system panics one [`PipelineWorld::run_to_fixed_point`]
 /// round will absorb before it stops driving. Each one fails a different agent,
@@ -135,6 +135,7 @@ impl PipelineWorld {
         let (ip_tx, ip_rx) = unbounded_channel();
         let (gp_tx, gp_rx) = unbounded_channel();
         let (cs_tx, cs_rx) = unbounded_channel();
+        let (title_tx, title_rx) = unbounded_channel();
 
         let tool_tasks = spawn_tool_pool(
             &runtime,
@@ -163,6 +164,8 @@ impl PipelineWorld {
             exact_token_counting: false,
         });
         world.insert_resource(crate::context_transform::ContentSummaryResults(cs_rx));
+        world.insert_resource(crate::title::TitleSink(title_tx));
+        world.insert_resource(crate::title::TitleResults(title_rx));
         world.insert_resource(crate::interaction_points::InteractionPointStage {
             outcomes: ip_tx,
             wake: wake.clone(),
@@ -252,6 +255,11 @@ impl PipelineWorld {
                 // Drive fan-out workers and merge once they finish.
                 crate::fanout::fan_out_collect,
                 sync_tool_stages,
+                // Store any finished run title, then start newly-marked ones.
+                // Collect precedes persistence so a landed title is written on
+                // this same tick.
+                crate::title::collect_title,
+                crate::title::dispatch_title,
                 // Mirror open interaction-hub requests into agent status
                 // (Active ↔ Waiting) so the dashboard surfaces blocked prompts;
                 // must run before persistence so the status change is written.
@@ -528,6 +536,8 @@ impl PipelineWorld {
             self.count::<With<AwaitingTransitionChoice>>(),
             self.count::<With<AwaitingTransitionResponse>>(),
             self.count::<With<AwaitingCompaction>>(),
+            self.count::<With<crate::title::PendingTitle>>(),
+            self.count::<With<crate::title::AwaitingTitle>>(),
         ]
     }
 
@@ -538,6 +548,7 @@ impl PipelineWorld {
             || self.count::<With<AwaitingTools>>() > 0
             || self.count::<With<AwaitingTransitionResponse>>() > 0
             || self.count::<With<AwaitingCompaction>>() > 0
+            || self.count::<With<crate::title::AwaitingTitle>>() > 0
     }
 
     /// Drive the schedule until a tick changes nothing (quiescence). Public so a

@@ -27,11 +27,13 @@ pub struct TitleConfig {
     pub enabled: bool,
 
     /// Provider to use for title generation.
-    /// Defaults to the global `default_provider` when absent.
+    /// Falls back to the run's own first-stage provider when absent.
     pub provider: Option<String>,
 
     /// Model to use for title generation.
-    /// Defaults to a cheap fast model for the resolved provider when absent.
+    /// Falls back to the run's own first-stage model when absent - but only if
+    /// `provider` is also absent or matches the run's provider, since one
+    /// provider's model name means nothing to another.
     pub model: Option<String>,
 }
 

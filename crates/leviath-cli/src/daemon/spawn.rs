@@ -851,6 +851,17 @@ fn build_agent_inner(
             // by `recovery::reload_persisted_agents`.
             leviath_runtime::persistence::RunOutcomeFlags::default(),
         ));
+        // Mark eligible runs for one-shot title generation (the `title` module
+        // fills `RunMetadata.title`, which the dashboard displays and
+        // searches). Root runs only: sub-agents inherit their parent's context
+        // in the run list, and titling every fan-out worker would multiply
+        // cheap-but-nonzero LLM calls for no UX gain.
+        (config.title.enabled && !args.task.is_empty() && args.parent_run_id.is_none())
+            .then_some(leviath_runtime::title::PendingTitle)
+            .into_iter()
+            .for_each(|marker| {
+                entity_mut.insert(marker);
+            });
         // `--yolo` means run unattended, so a blueprint's stage-boundary
         // checkpoints are approved rather than parked on a hub nobody is
         // watching. (`.then_some(..).into_iter()` keeps the non-yolo path
@@ -1419,6 +1430,93 @@ mod tests {
             world
                 .world()
                 .get::<leviath_runtime::components::GateAutoApprove>(entity)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn build_agent_marks_root_runs_for_titling_but_not_subagents() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"titler\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+
+        // Root run with the default-enabled [title] config: marked.
+        let root = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &Config::default(),
+            Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+            sub_tx(),
+        )
+        .expect("spawn succeeds");
+        assert!(
+            world
+                .world()
+                .get::<leviath_runtime::title::PendingTitle>(root)
+                .is_some()
+        );
+
+        // A sub-agent run is never marked: titles serve the top-level run list.
+        let mut child_args = spawn_args(&manifest.to_string_lossy());
+        child_args.run_id = "run-child".to_string();
+        child_args.parent_run_id = Some("run-x".to_string());
+        let child = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &Config::default(),
+            Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            &[],
+            &hub,
+            &child_args,
+            100,
+            sub_tx(),
+        )
+        .expect("spawn succeeds");
+        assert!(
+            world
+                .world()
+                .get::<leviath_runtime::title::PendingTitle>(child)
+                .is_none()
+        );
+
+        // Disabled config: not marked.
+        let config = Config {
+            title: leviath_core::config::TitleConfig {
+                enabled: false,
+                provider: None,
+                model: None,
+            },
+            ..Config::default()
+        };
+        let mut off_args = spawn_args(&manifest.to_string_lossy());
+        off_args.run_id = "run-off".to_string();
+        let off = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &config,
+            Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            &[],
+            &hub,
+            &off_args,
+            100,
+            sub_tx(),
+        )
+        .expect("spawn succeeds");
+        assert!(
+            world
+                .world()
+                .get::<leviath_runtime::title::PendingTitle>(off)
                 .is_none()
         );
     }
