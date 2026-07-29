@@ -267,20 +267,52 @@ async fn execute_test(args: PolicyTestArgs) -> anyhow::Result<()> {
         )
     })?;
 
-    execute_test_with(&args, taint, load_policy())
+    execute_test_with(&args, taint, load_policy(), &rules_dir())
 }
 
-/// Core of [`execute_test`] with the parsed taint level and the loaded policy
-/// (as a `Result`) passed in, so both the `load_policy()?` error arm and the
-/// allowlist-hit branch are unit-testable with crafted configs (the real
-/// default config has an empty allowlist).
+/// Build a one-region context window carrying `taint`, so the diagnostic runs
+/// the same gate code as the daemon instead of re-deriving the verdict.
+fn window_with_taint(
+    taint: leviath_core::TaintLevel,
+) -> leviath_runtime::components::ContextWindow {
+    let mut window = leviath_runtime::components::ContextWindow::new(1024);
+    let mut region = leviath_core::Region::new(
+        "scenario".to_string(),
+        leviath_core::RegionKind::Temporary,
+        512,
+    );
+    region.enable_taint_tracking();
+    window.add_region(region);
+    if taint != leviath_core::TaintLevel::Public {
+        window
+            .add_tainted_to_region("scenario", "sample".to_string(), 8, taint)
+            .expect("infallible: the region was just added");
+    }
+    window
+}
+
+/// Core of [`execute_test`] with the parsed taint level, the loaded policy
+/// (as a `Result`), and the scripted-rules directory passed in, so every
+/// verdict arm is unit-testable with crafted configs and temp rule dirs.
+///
+/// The verdict comes from the same [`leviath_runtime::TaintGate`] the daemon
+/// attaches at spawn - `[mcp_overrides]` applied, static allowlist and
+/// scripted rules consulted - because a diagnostic that re-derives gate
+/// semantics drifts from the enforcer and then lies about it.
 fn execute_test_with(
     args: &PolicyTestArgs,
     taint: leviath_core::TaintLevel,
     loaded: anyhow::Result<leviath_core::PolicyConfig>,
+    rules: &std::path::Path,
 ) -> anyhow::Result<()> {
+    use leviath_core::taint::{GateDecision, GateDecisionSource, SecurityConfig};
+
     let config = loaded?;
-    let classification = leviath_core::taint::builtin_tool_classification(&args.tool);
+    let mut gate = leviath_runtime::TaintGate::new(SecurityConfig {
+        taint_tracking: true,
+    });
+    gate.apply_mcp_overrides(&config.mcp_overrides);
+    let classification = gate.tool_classification(&args.tool);
 
     println!("Tool: {}", args.tool);
     println!("  Sensitivity: {}", classification.sensitivity);
@@ -292,34 +324,52 @@ fn execute_test_with(
     if let Some(target) = &args.target {
         println!("  Target: {}", target);
     }
-
-    if !classification.is_outbound() {
-        println!();
-        println!("Result: ALLOWED (tool is not outbound — no gate check needed)");
-        return Ok(());
-    }
-
-    if classification.check_clearance(taint) {
-        println!();
-        println!(
-            "Result: ALLOWED (taint {} ≤ clearance {})",
-            taint, classification.clearance
-        );
-        return Ok(());
-    }
-
-    // Would be blocked — check allowlist
     println!();
-    println!(
-        "Gate would fire: taint {} > clearance {}",
-        taint, classification.clearance
+
+    let window = window_with_taint(taint);
+    let checker = crate::daemon::gate_rules::build_gate_script_checker(rules);
+    let decision = gate.check_with_policy(
+        "policy-test",
+        &args.tool,
+        &window,
+        args.target.as_deref(),
+        &config,
+        Some(checker.as_ref()),
     );
 
-    if let Some(rule_idx) = config.check_allowlist(&args.tool, args.target.as_deref(), taint) {
-        println!("Result: ALLOWED by allowlist rule #{}", rule_idx + 1);
-    } else {
-        println!("Result: BLOCKED (no matching allowlist rule)");
-        println!("  The user would be prompted to allow/deny.");
+    match decision {
+        GateDecision::Allowed => {
+            let source = gate.audit_log().last().map(|e| e.decision_source.clone());
+            match source {
+                Some(GateDecisionSource::AllowlistRule { rule_index }) => {
+                    println!("Result: ALLOWED by allowlist rule #{}", rule_index + 1);
+                }
+                Some(GateDecisionSource::ScriptedRule { script_name }) => {
+                    println!("Result: ALLOWED by scripted rule '{}'", script_name);
+                }
+                _ if !classification.is_outbound() => {
+                    println!("Result: ALLOWED (tool is not outbound - no gate check needed)");
+                }
+                _ => {
+                    println!(
+                        "Result: ALLOWED (taint {} <= clearance {})",
+                        taint, classification.clearance
+                    );
+                }
+            }
+        }
+        GateDecision::Blocked {
+            taint_level,
+            clearance,
+            ..
+        } => {
+            println!(
+                "Gate fires: taint {} > clearance {}",
+                taint_level, clearance
+            );
+            println!("Result: BLOCKED (no allowlist or scripted rule matched)");
+            println!("  The user would be prompted to allow/deny.");
+        }
     }
 
     Ok(())
@@ -460,14 +510,21 @@ mod tests {
             &args,
             leviath_core::TaintLevel::Private,
             Err(anyhow::anyhow!("boom")),
+            std::env::temp_dir().as_path(),
         );
         assert!(res.is_err());
+    }
+
+    /// An empty scripted-rules directory, so a test exercises only the arm it
+    /// crafts.
+    fn no_rules() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
     }
 
     #[test]
     fn execute_test_with_allowlist_rule_hit() {
         // An outbound tool blocked by clearance but permitted by a matching
-        // allowlist rule exercises the `check_allowlist(...) == Some` branch.
+        // allowlist rule exercises the `AllowlistRule` verdict arm.
         let args = PolicyTestArgs {
             tool: "shell".to_string(),
             target: None,
@@ -482,7 +539,98 @@ mod tests {
             }],
             mcp_overrides: Default::default(),
         };
-        let res = execute_test_with(&args, leviath_core::TaintLevel::Private, Ok(config));
+        let rules = no_rules();
+        let res = execute_test_with(
+            &args,
+            leviath_core::TaintLevel::Private,
+            Ok(config),
+            rules.path(),
+        );
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn execute_test_with_scripted_rule_flips_the_verdict() {
+        // A rules/*.rhai script that allows the call must be reflected by the
+        // diagnostic - the daemon consults scripted rules, so `lev policy
+        // test` has to as well or it reports BLOCKED for a call the runtime
+        // would allow.
+        let args = PolicyTestArgs {
+            tool: "shell".to_string(),
+            target: None,
+            taint: "private".to_string(),
+        };
+        let rules = tempfile::tempdir().unwrap();
+        std::fs::write(
+            rules.path().join("allow-shell.rhai"),
+            "context.tool == \"shell\"",
+        )
+        .unwrap();
+        let res = execute_test_with(
+            &args,
+            leviath_core::TaintLevel::Private,
+            Ok(leviath_core::PolicyConfig::default()),
+            rules.path(),
+        );
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn execute_test_with_mcp_override_changes_the_classification() {
+        // An [mcp_overrides] entry making an unknown (default-internal) MCP
+        // tool outbound with a public clearance must make the gate fire.
+        let args = PolicyTestArgs {
+            tool: "srv.share".to_string(),
+            target: None,
+            taint: "private".to_string(),
+        };
+        let config = leviath_core::PolicyConfig {
+            allowlist: vec![],
+            mcp_overrides: std::collections::HashMap::from([(
+                "srv.share".to_string(),
+                leviath_core::policy::McpToolOverride {
+                    sensitivity: None,
+                    direction: Some("outbound".to_string()),
+                    clearance: Some(leviath_core::TaintLevel::Public),
+                },
+            )]),
+        };
+        let rules = no_rules();
+        let res = execute_test_with(
+            &args,
+            leviath_core::TaintLevel::Private,
+            Ok(config),
+            rules.path(),
+        );
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn execute_test_with_non_outbound_and_clearance_allow_arms() {
+        let rules = no_rules();
+        // read_file is inbound: the not-outbound arm.
+        let res = execute_test_with(
+            &PolicyTestArgs {
+                tool: "read_file".to_string(),
+                target: None,
+                taint: "private".to_string(),
+            },
+            leviath_core::TaintLevel::Private,
+            Ok(leviath_core::PolicyConfig::default()),
+            rules.path(),
+        );
+        assert!(res.is_ok());
+        // shell at public taint: outbound, within clearance.
+        let res = execute_test_with(
+            &PolicyTestArgs {
+                tool: "shell".to_string(),
+                target: Some("localhost".to_string()),
+                taint: "public".to_string(),
+            },
+            leviath_core::TaintLevel::Public,
+            Ok(leviath_core::PolicyConfig::default()),
+            rules.path(),
+        );
         assert!(res.is_ok());
     }
 
