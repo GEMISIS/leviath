@@ -391,11 +391,16 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_list_variant_is_routed() {
-        let args = commands::list::ListArgs {
-            filter: "all".to_string(),
-        };
-        let result = dispatch(Commands::List(args), &MockRisky).await;
-        assert!(result.is_ok());
+        // Isolated: this reaches `Config::load()`, which reads process-wide
+        // environment. Unisolated it races every `temp_env` test in the binary.
+        crate::config::with_isolated_config_path_async("dispatch-list", |_fake_dir| async move {
+            let args = commands::list::ListArgs {
+                filter: "all".to_string(),
+            };
+            let result = dispatch(Commands::List(args), &MockRisky).await;
+            assert!(result.is_ok());
+        })
+        .await;
     }
 
     #[tokio::test]

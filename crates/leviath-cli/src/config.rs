@@ -589,6 +589,32 @@ impl Config {
     /// After loading from file (or using defaults), environment variables are
     /// checked as fallbacks. Env vars override config file values if set.
     pub fn load() -> anyhow::Result<Self> {
+        // In the crate's own test build, refuse to read the *real* environment.
+        //
+        // `Config::load()` reads process-wide state, and `cargo test` runs tests
+        // in parallel threads of one process. `temp_env` serializes its own
+        // calls behind a global lock, but a test that reaches this function
+        // without going through that lock races every test that holds it — so
+        // it sees whatever variables happen to be set or unset at that instant.
+        // That is not hypothetical: the `serve` CORS test failed on CI in two
+        // different places depending on when it lost the race, each time
+        // accusing code that was correct.
+        //
+        // Making it a hard error rather than an audit means the next test to
+        // reach here unisolated fails immediately and locally, with the fix in
+        // the message, instead of flaking on someone else's pull request months
+        // later.
+        #[cfg(test)]
+        assert!(
+            std::env::var_os("LEVIATH_CONFIG_PATH").is_some(),
+            "Config::load() reached from a test that has not isolated the \
+             environment. Wrap the test in `config::with_isolated_config_path` \
+             (or `..._async`), which both points this at a scratch config and \
+             takes the same process-wide lock every other env-touching test \
+             holds. Without it this test races them and fails intermittently, \
+             somewhere else."
+        );
+
         // Load a `.env` from the current directory only.
         //
         // `dotenvy::dotenv()` searches the cwd *and every ancestor*, which is
@@ -1091,6 +1117,50 @@ where
         temp_env::async_with_vars(config_isolation_vars(&fake_dir), f(fake_dir.clone())).await;
     let _ = std::fs::remove_dir_all(&fake_dir);
     result
+}
+
+#[cfg(test)]
+mod dotenv_tests {
+    use super::*;
+
+    /// `Config::load()` reads `./.env`, and every isolated test sets
+    /// `LEVIATH_SKIP_DOTENV` — so that branch would otherwise never run.
+    ///
+    /// It used to be covered by the tests that read the real environment, which
+    /// is to say by the tests that were racing. Covered deliberately here
+    /// instead: still inside `temp_env` (so it holds the same process-wide lock
+    /// as everything else) and still pointed at a scratch config, but with the
+    /// skip flag cleared so the `.env` read actually happens. The probe
+    /// variable is listed in the same call so `temp_env` removes it afterwards
+    /// rather than leaking it into the rest of the run.
+    #[test]
+    fn a_dot_env_in_the_working_directory_is_read() {
+        let _cwd = isolate_cwd_for_test();
+        let dir = make_fake_config_dir("dotenv-read");
+        std::fs::write(dir.join(".env"), "LEV_DOTENV_PROBE=seen\n").unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+
+        temp_env::with_vars(
+            [
+                (
+                    "LEVIATH_CONFIG_PATH",
+                    Some(dir.join("config.toml").into_os_string()),
+                ),
+                ("LEVIATH_SKIP_DOTENV", None),
+                ("LEV_DOTENV_PROBE", None),
+            ],
+            || {
+                let loaded = Config::load();
+                assert!(loaded.is_ok(), "a missing config file is not an error");
+                assert_eq!(
+                    std::env::var("LEV_DOTENV_PROBE").ok().as_deref(),
+                    Some("seen"),
+                    "the .env beside the working directory was read"
+                );
+            },
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
