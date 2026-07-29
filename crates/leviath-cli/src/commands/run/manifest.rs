@@ -97,7 +97,7 @@ mod tests {
 
     #[test]
     fn find_manifest_with_invalid_path() {
-        // See CWD_LOCK's doc comment -- branch 4 depends on CWD state.
+        // See CWD_LOCK's doc comment - branch 4 depends on CWD state.
         let _guard = CWD_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -128,19 +128,19 @@ mod tests {
     #[test]
     fn find_manifest_dir_without_manifest_falls_through() {
         // Branch 4 of find_manifest checks for a bare "agent.leviath" in the
-        // process's current working directory -- process-global state that
+        // process's current working directory - process-global state that
         // find_manifest_cwd_agent_leviath_found deliberately mutates. Without
         // holding CWD_LOCK here too, this test can run while CWD is
         // temporarily pointed at that other test's directory (which does
         // contain agent.leviath), observe branch 4 succeed, and fail this
-        // assertion nondeterministically -- confirmed on CI.
+        // assertion nondeterministically - confirmed on CI.
         let _guard = CWD_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = std::env::temp_dir().join("lev-test-dir-no-manifest-9z7q");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // No agent.leviath inside — the dir branch falls through to the error.
+        // No agent.leviath inside - the dir branch falls through to the error.
         let result = find_manifest(dir.to_str().unwrap());
         assert!(result.is_err());
         let _ = std::fs::remove_dir_all(&dir);
@@ -151,7 +151,7 @@ mod tests {
     /// `if installed.exists()` is false, so we fall through to the error.
     #[test]
     fn find_manifest_installed_agent_not_found_falls_through() {
-        // See CWD_LOCK's doc comment -- branch 4 depends on CWD state.
+        // See CWD_LOCK's doc comment - branch 4 depends on CWD state.
         let _guard = CWD_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);

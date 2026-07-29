@@ -12,7 +12,7 @@
 //! rather than exceptional:
 //!
 //! 1. **Not built in.** The `keychain` feature is on by default but can be
-//!    turned off — for a target the `keyring` crate does not support, or for a
+//!    turned off - for a target the `keyring` crate does not support, or for a
 //!    minimal build that should not link platform credential libraries at all.
 //!    With it off, [`is_supported`] is `false` and every operation returns a
 //!    plain "not supported in this build" error.
@@ -37,7 +37,7 @@
 /// Whether this build can talk to an OS credential store at all.
 ///
 /// `false` when the `keychain` feature is off. Note that `true` does not promise
-/// a *working* store — see the module docs; use [`probe`] for that.
+/// a *working* store - see the module docs; use [`probe`] for that.
 pub const fn is_supported() -> bool {
     cfg!(feature = "keychain")
 }
@@ -96,7 +96,7 @@ mod imp {
     pub(super) fn probe(service: &str) -> Result<(), String> {
         // Never replace a store that is already installed. `keyring::Entry::new`
         // installs the *platform* store unconditionally on first use, so calling
-        // it blindly would clobber a store the embedding process chose -- and,
+        // it blindly would clobber a store the embedding process chose - and,
         // in tests, silently redirect every subsequent operation at the
         // developer's real login keychain, where it would both prompt and write.
         if keyring_core::get_default_store().is_some() {
@@ -181,7 +181,7 @@ mod imp {
 
         /// Install a fresh in-memory store as the process default, holding the
         /// lock for the caller's lifetime. This is what lets the `raw_*`
-        /// functions — the real `keyring_core::Entry` path, unchanged — run in
+        /// functions - the real `keyring_core::Entry` path, unchanged - run in
         /// CI on every platform.
         fn with_mock_store() -> std::sync::MutexGuard<'static, ()> {
             let guard = STORE.lock().expect("store lock");
@@ -218,8 +218,8 @@ mod imp {
         }
 
         /// Accounts do not leak into each other.
-        /// The public shims at the crate root — the path every caller actually
-        /// takes — driven against the mock store under the lock.
+        /// The public shims at the crate root - the path every caller actually
+        /// takes - driven against the mock store under the lock.
         #[test]
         fn the_public_api_delegates_to_this_implementation() {
             let _guard = with_mock_store();
@@ -246,7 +246,7 @@ mod imp {
             assert_eq!(get(SVC, "mcp/github").unwrap().as_deref(), Some("two"));
         }
 
-        /// A locked or absent store is an error, not a silent `None` — the
+        /// A locked or absent store is an error, not a silent `None` - the
         /// distinction the module docs turn on.
         #[test]
         fn a_missing_entry_is_none_but_a_broken_store_is_an_error() {
@@ -273,7 +273,7 @@ mod imp {
         }
 
         /// With no store installed at all, every operation reports rather than
-        /// panicking — the headless-Linux case.
+        /// panicking - the headless-Linux case.
         #[test]
         fn every_operation_reports_when_there_is_no_store() {
             let _guard = STORE.lock().expect("store lock");
@@ -284,8 +284,8 @@ mod imp {
             assert!(delete(SVC, "provider/anthropic").is_err());
         }
 
-        /// The real platform probe. Either outcome is legitimate — a developer
-        /// machine has a credential store and a CI runner does not — so what is
+        /// The real platform probe. Either outcome is legitimate - a developer
+        /// machine has a credential store and a CI runner does not - so what is
         /// asserted is that it answers rather than panicking or prompting. It
         /// contributes no branch of its own, which is why one call covers it on
         /// every platform.
@@ -354,7 +354,7 @@ mod imp {
 mod tests {
     use super::*;
 
-    /// `is_supported` reports what was actually compiled in — a build with the
+    /// `is_supported` reports what was actually compiled in - a build with the
     /// feature off must say so rather than claiming a store it cannot reach.
     ///
     /// The other public shims are exercised from `imp`'s tests, which hold the

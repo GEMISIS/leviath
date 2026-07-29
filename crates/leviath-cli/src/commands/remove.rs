@@ -24,7 +24,7 @@ fn remove_agent(installer: &leviath_package::AgentInstaller, name: &str) -> anyh
 ///
 /// The `uninstall` closure is a trait object so its failure arm can be
 /// exercised on every platform: a genuinely installed agent (which
-/// `get_installed` requires -- an `agent.leviath` under the agent dir) is an
+/// `get_installed` requires - an `agent.leviath` under the agent dir) is an
 /// ordinary removable directory, so `remove_dir_all` only fails on it via a
 /// Unix-only `chmod` on the parent. Production always passes the real
 /// `installer.uninstall`.
@@ -117,7 +117,7 @@ mod tests {
     // ─── execute() ───────────────────────────────────────────────────────
     //
     // `execute()` always constructs a real `AgentInstaller::new()` pointed at
-    // the developer's real `~/.leviath/agents` -- there's no env-var seam for
+    // the developer's real `~/.leviath/agents` - there's no env-var seam for
     // it (unlike `Config`'s `LEVIATH_CONFIG_PATH`), so this can't be driven
     // through a real install/uninstall round trip without touching that real
     // directory. It's still safe to exercise the not-installed error path:

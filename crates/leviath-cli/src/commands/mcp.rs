@@ -1,4 +1,4 @@
-//! `lev mcp` — manage MCP tool servers and their authentication.
+//! `lev mcp` - manage MCP tool servers and their authentication.
 //!
 //! Adding a server that requires OAuth starts the browser login automatically,
 //! the way Claude Code and other clients do, so setup is a single command.
@@ -177,7 +177,7 @@ async fn add_server(add: AddArgs, env: &McpEnv) -> anyhow::Result<()> {
     config.save_to_path_public(&env.config_path)?;
     println!("Added MCP server '{}'.", server.name);
 
-    // Auto-login for an HTTP server that isn't opted out — this is what makes
+    // Auto-login for an HTTP server that isn't opted out - this is what makes
     // `add` a one-step setup for an authenticated server.
     if is_http && !add.no_login {
         match login(&server.name, env).await {
@@ -343,7 +343,7 @@ struct ServerRow {
 
 impl ServerRow {
     fn describe(server: &MCPServerConfig, store: &AuthStore, now: u64) -> Self {
-        // A malformed entry still lists — with its problem shown — rather than
+        // A malformed entry still lists - with its problem shown - rather than
         // being hidden.
         let (transport, endpoint) = match server.resolve() {
             Ok(leviath_mcp::ResolvedTransport::Stdio { command, .. }) => {
@@ -605,7 +605,7 @@ mod tests {
     async fn list_of_nothing_is_friendly() {
         let dir = tempfile::tempdir().unwrap();
         let env = env_at(dir.path(), never_opens, 0);
-        // No config file yet; list must still succeed with an empty result —
+        // No config file yet; list must still succeed with an empty result -
         // routed through execute_with to cover the List dispatch arm.
         execute_with(
             McpArgs {

@@ -1,11 +1,11 @@
 //! Integration tests for [`RhaiProvider`] driven by a fake [`HttpExecutor`] so
-//! no socket is ever bound. Runs on the default current-thread tokio runtime —
+//! no socket is ever bound. Runs on the default current-thread tokio runtime -
 //! the exact flavor the channel broker must survive.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-/// No credential-shaped variable is allowlisted — the default posture.
+/// No credential-shaped variable is allowlisted - the default posture.
 fn no_env_allowlist() -> Arc<Vec<String>> {
     Arc::new(Vec::new())
 }
@@ -253,7 +253,7 @@ async fn infer_single_http_post() {
 
 #[tokio::test]
 async fn infer_uses_two_arg_http_overloads() {
-    // http_get(url, headers) and http_post(url, body) — the shorter overloads.
+    // http_get(url, headers) and http_post(url, body) - the shorter overloads.
     let src = format!(
         "{NOOP_INIT}fn inference(state, request) {{ \
          let a = parse_json(http_get(\"http://a\", #{{ \"H\": \"v\" }})); \

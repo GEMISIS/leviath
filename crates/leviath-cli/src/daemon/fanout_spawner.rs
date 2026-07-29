@@ -3,7 +3,7 @@
 //! the shared world, seeded with its work item.
 //!
 //! The runtime's fan-out systems only *start and track* workers; *finding* the
-//! blueprint is CLI policy, so it lives here — mirroring how [`build_agent`]
+//! blueprint is CLI policy, so it lives here - mirroring how [`build_agent`]
 //! resolves any spawn. For `worker_stage` the worker runs the parent's own
 //! blueprint entered at that stage (via [`leviath_runtime::pipeline::force_transition`]);
 //! for `worker_agent` / `worker_query` it runs a separate installed blueprint.
@@ -35,7 +35,7 @@ pub struct DaemonFanOutSpawner {
     pub config: Config,
     pub shared_mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
     pub mcp_tool_defs: Vec<Tool>,
-    /// Shared MCP pool for per-agent `[[mcp_servers]]` — a fan-out worker
+    /// Shared MCP pool for per-agent `[[mcp_servers]]` - a fan-out worker
     /// advertises its blueprint's already-connected servers and lazily warms any
     /// uncached ones for subsequent workers of the same type (issue #97).
     pub mcp_pool: Arc<crate::daemon::mcp_pool::McpPool>,
@@ -51,7 +51,7 @@ pub struct DaemonFanOutSpawner {
 impl DaemonFanOutSpawner {
     /// A fan-out worker's advertised MCP defs: the global servers' defs plus its
     /// blueprint's already-cached servers. Any uncached server is warmed on a
-    /// detached task (via the current runtime handle — `spawn_worker` runs inside
+    /// detached task (via the current runtime handle - `spawn_worker` runs inside
     /// the daemon's tick, on the runtime) so a subsequent worker of the same type
     /// advertises it. Returns just the global defs when the manifest is unreadable
     /// or declares no servers.
@@ -114,7 +114,7 @@ impl FanOutSpawner for DaemonFanOutSpawner {
 
         // Per-agent MCP (issue #97): advertise the worker blueprint's servers that
         // are already connected in the shared pool (a `worker_stage` worker shares
-        // the parent's — already warmed by the parent's preprocessor; the first
+        // the parent's - already warmed by the parent's preprocessor; the first
         // `worker_agent`/`worker_query` worker warms them here for its siblings).
         let mcp_defs = self.worker_mcp_defs(&args.blueprint_path);
 
@@ -374,7 +374,7 @@ mod tests {
         )
         .unwrap();
         // Seed the pool so the server's tool is already advertised (and the
-        // detached warm task hits the cache — no real connection).
+        // detached warm task hits the cache - no real connection).
         let servers = crate::daemon::mcp_pool::parse_blueprint_mcp_servers(
             &std::fs::read_to_string(&manifest).unwrap(),
         );
@@ -536,7 +536,7 @@ mod tests {
         let (mut world, spawner, parent) = world_with_parent(&manifest.to_string_lossy());
 
         // A worker blueprint that parses but fails validation (transition to a
-        // stage that doesn't exist) — resolve succeeds, build_agent errors.
+        // stage that doesn't exist) - resolve succeeds, build_agent errors.
         let bad_dir = dir.path().join("bad");
         std::fs::create_dir_all(&bad_dir).unwrap();
         std::fs::write(

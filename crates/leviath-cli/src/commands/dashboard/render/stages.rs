@@ -142,7 +142,7 @@ impl Dashboard {
         // Only the tab matching the agent's current stage index may show live
         // (spinner / ticking-duration) treatment. A stage record can be left
         // stuck at `Active` (e.g. a prior stage whose completion was never
-        // recorded) even though the run has moved on — render those as
+        // recorded) even though the run has moved on - render those as
         // Complete instead of animating a spinner on a stage that isn't
         // actually running.
         let is_current_tab = i == agent.stage_index;
@@ -891,7 +891,7 @@ mod tests {
     #[test]
     fn draw_graph_view_dangling_edge_targets_hit_cycle_detection() {
         // Two edges pointing at stage names that don't exist in stage_names
-        // both resolve to "" via unwrap_or(""), so "" gets queued twice —
+        // both resolve to "" via unwrap_or(""), so "" gets queued twice -
         // exercising the `if !set.insert(name) { continue; }` cycle guard
         // when the second "" is popped and already visited.
         let backend = TestBackend::new(120, 10);
@@ -1137,14 +1137,14 @@ mod tests {
     // prior interactive/interactive_points stage whose completion was never
     // recorded) even though the run has moved on to a later stage. Only the
     // tab matching agent.stage_index should ever show the spinner/live
-    // marker — every other tab must render as Complete instead.
+    // marker - every other tab must render as Complete instead.
 
     #[test]
     fn build_stage_tab_title_stale_active_on_non_current_tab_shows_complete() {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-stale", AgentDisplayStatus::Active);
         agent.stage_index = 1; // run has moved on to stage 1 ("implement")
-        // Stage 0 ("plan") record is stuck Active — simulating the bug where
+        // Stage 0 ("plan") record is stuck Active - simulating the bug where
         // on_stage_result was never called for an Interactive/InteractivePoints
         // stage.
         let stale_plan = make_stage_record("plan", StageRunStatus::Active);

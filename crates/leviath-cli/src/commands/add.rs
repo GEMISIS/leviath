@@ -24,7 +24,7 @@ pub async fn execute(args: AddArgs) -> anyhow::Result<()> {
 ///
 /// A thin wrapper over [`agents_dir_or_error`] supplying the real resolved
 /// directory. The `#[cfg(test)]` guard below only lets tests force the
-/// "no home directory" error arm of `execute()` deterministically — the real
+/// "no home directory" error arm of `execute()` deterministically - the real
 /// the shared resolver can't be made to return `None` in any environment a
 /// test may safely create (on macOS `dirs::home_dir()` falls back to a
 /// passwd-database lookup independent of `$HOME`). It does NOT hide the real
@@ -98,15 +98,15 @@ async fn execute_with(
 /// prompt. Every one of those is a decision the user is making by installing,
 /// and they could not see any of it.
 ///
-/// Empty means the package declares nothing unusual — a plain prompt-and-stages
-/// agent — in which case there is nothing to warn about and we stay quiet.
+/// Empty means the package declares nothing unusual - a plain prompt-and-stages
+/// agent - in which case there is nothing to warn about and we stay quiet.
 ///
 /// Pure over `(manifest_toml, dir_entries)` so the whole table is testable
 /// without a filesystem or an installed agent.
 pub(crate) fn describe_capabilities(manifest_toml: &str, script_tools: &[String]) -> Vec<String> {
     let mut findings = Vec::new();
     // `toml::from_str`, not `manifest_toml.parse::<toml::Value>()`. In toml 1.x
-    // `FromStr for Value` parses a single *value*, not a document — so a real
+    // `FromStr for Value` parses a single *value*, not a document - so a real
     // manifest starting with `[agent]` reads as an array literal followed by
     // junk and fails. It still compiles, so the change is silent; the tests are
     // what caught it.
@@ -183,7 +183,7 @@ pub(crate) fn describe_capabilities(manifest_toml: &str, script_tools: &[String]
     }
 
     // Command seeds run at spawn, before the first inference and therefore
-    // before any approval prompt — the one place a manifest executes something
+    // before any approval prompt - the one place a manifest executes something
     // without being asked.
     let seed_commands = collect_seed_commands(&value);
     for command in seed_commands {
@@ -294,7 +294,7 @@ fn install_from_dir(src: &Path, agents_dir: &Path) -> anyhow::Result<()> {
 thread_local! {
     /// Test-only toggle letting a test force the `Err` arm of a
     /// mid-iteration `ReadDir` entry deterministically (see
-    /// [`unwrap_dir_entry`]) -- the real failure mode (the directory handle
+    /// [`unwrap_dir_entry`]) - the real failure mode (the directory handle
     /// becoming invalid mid-iteration: deleted out from under the process,
     /// an NFS ESTALE, or similar) is a genuine OS-level race that can't be
     /// reproduced deterministically across Linux/macOS/Windows CI.
@@ -302,7 +302,7 @@ thread_local! {
 }
 
 /// Unwrap one `ReadDir` iteration result, with a test-only failure-injection
-/// toggle (see [`FORCE_DIR_ENTRY_ERROR`]) so the `Err` arm -- `ReadDir::next()`
+/// toggle (see [`FORCE_DIR_ENTRY_ERROR`]) so the `Err` arm - `ReadDir::next()`
 /// failing after `read_dir` already succeeded in opening the directory --
 /// can be exercised deterministically without needing to actually race the
 /// filesystem.
@@ -351,7 +351,7 @@ fn parse_agent_name(content: &str) -> Option<String> {
 mod capability_tests {
     use super::describe_capabilities;
 
-    /// A plain agent declares nothing unusual, so the inventory stays quiet —
+    /// A plain agent declares nothing unusual, so the inventory stays quiet -
     /// a warning that fires on everything teaches people to skip it.
     #[test]
     fn an_ordinary_agent_has_nothing_to_report() {
@@ -387,7 +387,7 @@ mod capability_tests {
     }
 
     /// A `[tool_script_permissions]` table that only *tightens* is not a grant,
-    /// so it must not appear in the inventory — the same "quiet unless there is
+    /// so it must not appear in the inventory - the same "quiet unless there is
     /// something to say" rule the ordinary-agent case establishes.
     #[test]
     fn a_script_permission_table_that_grants_nothing_is_not_reported() {
@@ -419,7 +419,7 @@ mod capability_tests {
         assert!(joined.contains("sandbox = none"), "{joined}");
     }
 
-    /// A command seed runs at spawn — before the first inference and therefore
+    /// A command seed runs at spawn - before the first inference and therefore
     /// before any approval prompt. It is the one thing a manifest executes
     /// without being asked, so the exact command is shown.
     #[test]
@@ -442,7 +442,7 @@ mod capability_tests {
         assert!(findings[0].contains("curl https://evil"), "{findings:?}");
     }
 
-    /// A sandbox the manifest *opts into* is not a warning — only opting out is.
+    /// A sandbox the manifest *opts into* is not a warning - only opting out is.
     #[test]
     fn opting_into_a_sandbox_is_not_reported() {
         let manifest = "[agent]\nname = \"x\"\n\n[sandbox]\nkind = \"container\"\n";
@@ -465,7 +465,7 @@ mod capability_tests {
         );
     }
 
-    /// An agent with no `tools/` directory at all — the common case.
+    /// An agent with no `tools/` directory at all - the common case.
     #[test]
     fn script_tool_names_is_empty_without_a_tools_directory() {
         let dir = tempfile::tempdir().unwrap();
@@ -686,7 +686,7 @@ description = "test"
         // `unwrap_dir_entry`'s own `Ok(entry?)` `?` still has a real error
         // arm distinct from the `FORCE_DIR_ENTRY_ERROR`-triggered early
         // `bail!` above it (that toggle short-circuits *before* this line
-        // is ever reached) -- `DirEntry` isn't constructible directly, but
+        // is ever reached) - `DirEntry` isn't constructible directly, but
         // its `Result` wrapper doesn't need a real one to test the `Err`
         // case: pass a synthetic `io::Error` straight in.
         let result = unwrap_dir_entry(Err(std::io::Error::other("synthetic entry error")));
@@ -1048,7 +1048,7 @@ name = "second"
     #[test]
     fn execute_real_wrapper_fails_fast_without_touching_real_agents_dir() {
         // Drives the real `execute()` (dirs::home_dir() + AgentInstaller::new()
-        // + delegation to execute_with) -- safe because a nonexistent
+        // + delegation to execute_with) - safe because a nonexistent
         // ".leviath-bundle" path bails out in execute_with's "Package file
         // not found" check before any real file under ~/.leviath/agents is
         // ever touched.

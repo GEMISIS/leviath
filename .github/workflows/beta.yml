@@ -40,8 +40,8 @@ jobs:
           gh release download alpha --pattern "COMMIT_SHA" --dir /tmp/alpha/ 2>/dev/null || true
           if [ -f /tmp/alpha/COMMIT_SHA ]; then
             sha=$(cat /tmp/alpha/COMMIT_SHA)
-            # From a release asset — attacker-controlled for anyone who can write
-            # a release — and it becomes the published release's
+            # From a release asset - attacker-controlled for anyone who can write
+            # a release - and it becomes the published release's
             # `target_commitish`. Pin its shape before it is used.
             if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
               echo "ERROR: COMMIT_SHA in the alpha release is not a 40-hex commit id."
@@ -74,7 +74,7 @@ jobs:
           if [ -f release/SHA256SUMS ]; then
             (cd release && grep -v '^SHA256SUMS$' SHA256SUMS | sha256sum -c -)
           else
-            echo "ERROR: no SHA256SUMS in the alpha release — refusing to promote unverified binaries."
+            echo "ERROR: no SHA256SUMS in the alpha release - refusing to promote unverified binaries."
             exit 1
           fi
 

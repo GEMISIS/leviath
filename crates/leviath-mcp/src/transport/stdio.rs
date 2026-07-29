@@ -52,7 +52,7 @@ impl StderrTail {
 ///
 /// On Windows the npm-family launchers (`npx`, `npm`, `yarn`, `pnpm`) exist
 /// only as `.cmd` shims, and `CreateProcess` will not find them from the bare
-/// name — so `command = "npx"`, far and away the most common MCP server config
+/// name - so `command = "npx"`, far and away the most common MCP server config
 /// in the wild, simply fails to spawn there. Trying the executable suffixes
 /// fixes that.
 ///
@@ -80,7 +80,7 @@ fn command_candidates(command: &str) -> Vec<String> {
 /// Build a clean environment for a spawned MCP server.
 ///
 /// **Allowlist, not denylist.** An MCP server is third-party code by definition,
-/// and we are choosing what to hand it — so the question is "what does it need",
+/// and we are choosing what to hand it - so the question is "what does it need",
 /// not "what must we remember to withhold". The previous substring denylist
 /// (`API_KEY`, `SECRET_KEY`, `ACCESS_TOKEN`, …) passed everything whose name
 /// happened not to match: `AWS_SECRET_ACCESS_KEY` matches neither `API_SECRET`
@@ -92,7 +92,7 @@ fn command_candidates(command: &str) -> Vec<String> {
 /// What survives is [`leviath_core::child_env_allowed`]: enough to find an
 /// interpreter and behave like a terminal program. Anything else a server
 /// legitimately needs is declared in its own `env` block in config, which the
-/// caller applies *after* this filter and which therefore always wins — that is
+/// caller applies *after* this filter and which therefore always wins - that is
 /// the supported way to give a server its token.
 pub fn filter_env(vars: &[(String, String)]) -> HashMap<String, String> {
     vars.iter()
@@ -352,8 +352,8 @@ mod tests {
 
     #[test]
     fn bare_command_gains_launcher_suffixes_on_windows() {
-        // Without `.cmd`, `command = "npx"` — the single most common MCP
-        // server config there is — fails to spawn on Windows.
+        // Without `.cmd`, `command = "npx"` - the single most common MCP
+        // server config there is - fails to spawn on Windows.
         assert_eq!(
             command_candidates_for("npx", true),
             vec!["npx", "npx.cmd", "npx.exe", "npx.bat"]
@@ -398,7 +398,7 @@ mod tests {
     fn stderr_tail_survives_a_poisoned_lock() {
         // The drain task holds this lock; if it ever panicked mid-push the
         // mutex would stay poisoned and every later diagnostic would panic
-        // too — turning a server's error message into a second failure.
+        // too - turning a server's error message into a second failure.
         let tail = StderrTail::default();
         let doomed = tail.clone();
         let _ = std::thread::spawn(move || {
@@ -550,7 +550,7 @@ mod tests {
     }
 
     /// The names the old substring denylist let through. Each of these reached
-    /// every spawned MCP server — third-party code, by definition.
+    /// every spawned MCP server - third-party code, by definition.
     #[test]
     fn filter_env_strips_what_the_old_denylist_missed() {
         let vars = [

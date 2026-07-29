@@ -5,7 +5,7 @@
 //! always fired), these are ordinary tool calls the model makes on its own
 //! judgment, mid-reasoning. Both the background worker (file-based IPC) and
 //! the foreground (stdin) run modes need to intercept these tool names
-//! before they ever reach the generic tool registry — this module holds
+//! before they ever reach the generic tool registry - this module holds
 //! that shared logic behind an [`InteractionBackend`] trait so it can be
 //! unit tested with a mock instead of only living inside untestable
 //! closures.
@@ -118,12 +118,12 @@ pub const UNATTENDED_NO_ANSWER: &str =
 /// see.
 ///
 /// `--yolo` means "run without a human", so a prompt that blocks on one would
-/// park the run forever — a headless run would hang at the first
+/// park the run forever - a headless run would hang at the first
 /// `ask_user_confirm` (issue #107).
 ///
 /// A confirmation is approved: that is exactly what the flag promises. A
-/// *choice* is deliberately **not** made — picking option 0 unseen could select
-/// "Abort" or a destructive branch — so the model is told no one answered and
+/// *choice* is deliberately **not** made - picking option 0 unseen could select
+/// "Abort" or a destructive branch - so the model is told no one answered and
 /// left to decide. An edit submits the document unchanged, and a document put up
 /// for review is acknowledged without comment (a review is a `FreeText` request
 /// carrying a `body`; a question is one without).
@@ -915,7 +915,7 @@ mod tests {
             |_req| InteractionResponse::text("", "");
         let denied = resolve_gate_with_asker(&blocked_decision("shell"), "plan", text_asker);
         assert_eq!(denied, GateResolution::Deny);
-        // A non-block decision short-circuits to AllowOnce without asking — the
+        // A non-block decision short-circuits to AllowOnce without asking - the
         // (already-covered) asker is never invoked.
         let r = resolve_gate_with_asker(
             &leviath_core::taint::GateDecision::Allowed,
@@ -934,7 +934,7 @@ mod tests {
         // must come back with something the model can act on.
         let backend = UnattendedInteraction;
 
-        // A confirmation is approved — that is what the flag promises.
+        // A confirmation is approved - that is what the flag promises.
         let confirmed = dispatch_dynamic_interaction(
             &backend,
             "ask_user_confirm",

@@ -6,7 +6,7 @@
 ///
 /// Both halves come from `leviath_core::secrets` now. The local copies named
 /// exactly `authorization`, `x-api-key` and `api-key`, which meant Gemini's
-/// `x-goog-api-key` was logged **in full** whenever this feature was on — the
+/// `x-goog-api-key` was logged **in full** whenever this feature was on - the
 /// one provider header that did not happen to be on the list.
 fn redact_headers(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
     headers

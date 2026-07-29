@@ -44,7 +44,7 @@ pub(crate) struct AuthServerMetadata {
 #[expect(
     clippy::string_slice,
     reason = "`start` is a `find` hit plus the length of the ASCII needle it matched, and `end` is \
-              a `find` hit or the length — all char boundaries"
+              a `find` hit or the length - all char boundaries"
 )]
 pub(crate) fn resource_metadata_url(www_authenticate: Option<&str>) -> Option<String> {
     let header = www_authenticate?;
@@ -94,8 +94,8 @@ pub(crate) fn is_safe_discovery_url(url: &Url) -> bool {
 /// Whether two URLs share an origin (scheme, host, and effective port).
 ///
 /// Used to bind a server-supplied `resource_metadata` URL to the MCP server that
-/// offered it. That URL arrives in a `WWW-Authenticate` header — entirely under
-/// the remote server's control — and was previously fetched with no check at
+/// offered it. That URL arrives in a `WWW-Authenticate` header - entirely under
+/// the remote server's control - and was previously fetched with no check at
 /// all, which made every MCP connection an SSRF primitive pointed at whatever
 /// the server named, including cloud metadata endpoints.
 pub(crate) fn same_origin(a: &Url, b: &Url) -> bool {

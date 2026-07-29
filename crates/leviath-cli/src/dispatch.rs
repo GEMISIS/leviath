@@ -3,11 +3,11 @@
 //!
 //! This lives in the library crate (not `main.rs`) so its routing logic can be
 //! unit-tested under `cargo llvm-cov`'s `--lib` scope. The subcommands whose
-//! real execution performs I/O a unit test must never trigger — a real
+//! real execution performs I/O a unit test must never trigger - a real
 //! terminal takeover (`dash`), blocking stdin (`setup` interactive,
 //! foreground `run`), binding a real port (`serve`), spawning a detached
-//! worker or running a real inference loop (`run` background / `__run-worker`)
-//! — are routed through the [`RiskyExecutors`] trait rather than called
+//! worker or running a real inference loop (`run` background / `__run-worker`) -
+//! are routed through the [`RiskyExecutors`] trait rather than called
 //! directly. That way:
 //!
 //! * unit tests drive `dispatch()`'s full routing match against a
@@ -105,35 +105,35 @@ pub enum Commands {
 /// (static dispatch, no `dyn`), so no boxing or `Send` bound is required.
 #[allow(async_fn_in_trait)]
 pub trait RiskyExecutors {
-    /// `lev run` — auto-starts the daemon (real process spawn) if needed and
+    /// `lev run` - auto-starts the daemon (real process spawn) if needed and
     /// spawns the agent into the shared world over the control socket.
     async fn run(&self, args: commands::run::RunArgs) -> anyhow::Result<()>;
-    /// `lev ps` — resolves the control-socket path and queries the daemon.
+    /// `lev ps` - resolves the control-socket path and queries the daemon.
     async fn ps(&self, args: commands::ps::PsArgs) -> anyhow::Result<()>;
-    /// `lev msg` — resolves the control-socket path and sends a message.
+    /// `lev msg` - resolves the control-socket path and sends a message.
     async fn msg(&self, args: commands::ctl::MsgArgs) -> anyhow::Result<()>;
-    /// `lev cancel` — resolves the control-socket path and cancels a run.
+    /// `lev cancel` - resolves the control-socket path and cancels a run.
     async fn cancel(&self, args: commands::ctl::CancelArgs) -> anyhow::Result<()>;
-    /// `lev respond` — resolves the control-socket path and answers/lists interactions.
+    /// `lev respond` - resolves the control-socket path and answers/lists interactions.
     async fn respond(&self, args: commands::ctl::RespondArgs) -> anyhow::Result<()>;
-    /// `lev setup` — interactive (blocking stdin) or `--non-interactive`.
+    /// `lev setup` - interactive (blocking stdin) or `--non-interactive`.
     async fn setup(&self, args: commands::setup::SetupArgs) -> anyhow::Result<()>;
-    /// `lev dash` — takes over the real terminal and blocks on real keyboard input.
+    /// `lev dash` - takes over the real terminal and blocks on real keyboard input.
     async fn dashboard(&self, args: commands::dashboard::DashboardArgs) -> anyhow::Result<()>;
-    /// `lev serve` — binds a real port and serves indefinitely.
+    /// `lev serve` - binds a real port and serves indefinitely.
     async fn serve(&self, args: commands::serve::ServeArgs) -> anyhow::Result<()>;
-    /// `lev agent-client` — takes over real stdin/stdout to speak the Agent
+    /// `lev agent-client` - takes over real stdin/stdout to speak the Agent
     /// Client Protocol against the shared-world daemon.
     async fn agent_client(
         &self,
         args: commands::agent_client::AgentClientArgs,
     ) -> anyhow::Result<()>;
-    /// `lev daemon` — binds the control socket and serves the shared world.
+    /// `lev daemon` - binds the control socket and serves the shared world.
     async fn daemon(&self, args: commands::daemon::DaemonArgs) -> anyhow::Result<()>;
-    /// `lev mcp` — rewrites config, opens a browser for OAuth, touches the token store.
+    /// `lev mcp` - rewrites config, opens a browser for OAuth, touches the token store.
     async fn mcp(&self, args: commands::mcp::McpArgs) -> anyhow::Result<()>;
 
-    /// `lev auth` — reads the config file and may write the OS credential store.
+    /// `lev auth` - reads the config file and may write the OS credential store.
     async fn auth(&self, args: commands::auth::AuthArgs) -> anyhow::Result<()>;
 }
 

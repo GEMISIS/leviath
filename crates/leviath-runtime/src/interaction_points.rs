@@ -1,11 +1,11 @@
 //! Declarative stage-boundary interaction points (`StageMode::InteractivePoints`).
 //!
 //! Unlike the model-driven `ask_user_*` / `edit_document` tools (which fire only
-//! if the model chooses to call them — see [`crate::dynamic_interaction`]), an
+//! if the model chooses to call them - see [`crate::dynamic_interaction`]), an
 //! interaction point is declared statically in the blueprint and fired by the
 //! framework at the stage boundary, *always*, before the stage may transition.
 //! The canonical example is `plan_approval`: after the plan stage produces a
-//! plan, the user is shown a choice — approve / revise / edit / abort — and the
+//! plan, the user is shown a choice - approve / revise / edit / abort - and the
 //! answer deterministically routes what happens next.
 //!
 //! This is a first-class ECS lane, mirroring the transition-choice lane:
@@ -22,7 +22,7 @@
 //!   point. Directive/edit loops are bounded by [`MAX_REVISION_ROUNDS`].
 //!
 //! The routing is deterministic (code); only the input capture is a user
-//! interaction — faithfully porting the deleted imperative
+//! interaction - faithfully porting the deleted imperative
 //! `run_interactive_points_stage`.
 
 use std::collections::HashMap;
@@ -140,7 +140,7 @@ pub struct InteractionPointResults(pub UnboundedReceiver<InteractionPointOutcome
 // ─── Pure routing helpers (ported from the deleted imperative stage loop) ─────
 
 /// Normalize an option label for matching: fold Unicode dashes to ASCII `-` and
-/// collapse whitespace, so `"Revise — I'll…"` matches regardless of dash style.
+/// collapse whitespace, so `"Revise - I'll…"` matches regardless of dash style.
 fn normalize_for_followup(s: &str) -> String {
     s.chars()
         .map(|c| match c {
@@ -180,7 +180,7 @@ fn lookup_directive<'a>(
 }
 
 /// Build the interaction request for a point in its declared style, attaching
-/// `body` (the document the stage produced — e.g. the plan) so the client can
+/// `body` (the document the stage produced - e.g. the plan) so the client can
 /// show just this instance's document to review, rather than the full history.
 fn build_point_request(point: &InteractionPoint, id: String, body: &str) -> InteractionRequest {
     let mut req = match point.style {
@@ -281,7 +281,7 @@ async fn run_interaction_point(
         Routed::Edit { user_text } => {
             let edit_req = InteractionRequest::edit_text(
                 format!("{ask_id}-edit"),
-                "Edit the document — your changes replace it, then submit:",
+                "Edit the document - your changes replace it, then submit:",
                 &point.name,
                 body,
             );
@@ -295,7 +295,7 @@ async fn run_interaction_point(
 }
 
 /// Re-arm an agent that was blocked at an interaction point when the daemon stopped,
-/// bringing it back in the *waiting* state with the same open request — rather than
+/// bringing it back in the *waiting* state with the same open request - rather than
 /// the default `Active` + `ReadyToInfer` restore, which would re-issue inference and
 /// drop the prompt (issue #38).
 ///
@@ -312,7 +312,7 @@ async fn run_interaction_point(
 /// stage / the cursor is out of range (e.g. the blueprint changed under the run).
 pub fn restore_interaction_point(world: &mut World, entity: Entity, state: InteractionPointState) {
     // The lane + hub must both be wired (they are in the daemon; absent in a test
-    // world) — otherwise there is nothing to await the re-opened request.
+    // world) - otherwise there is nothing to await the re-opened request.
     let Some(((outcomes, wake, runtime), hub)) = world
         .get_resource::<InteractionPointStage>()
         .map(|s| (s.outcomes.clone(), s.wake.clone(), s.runtime.clone()))
@@ -457,7 +457,7 @@ pub fn dispatch_interaction_point(
     {
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
-            continue; // paused / cancelled — don't open a prompt
+            continue; // paused / cancelled - don't open a prompt
         }
         let idx = pc.map_or(0, |c| c.0);
         let point = stage_points(bp, cursor).and_then(|p| p.get(idx)).cloned();
@@ -476,14 +476,14 @@ pub fn dispatch_interaction_point(
             .map(|o| o.0.clone())
             .unwrap_or_else(|| infer.response.clone());
         // Make this the authoritative document in its pinned region (replacing
-        // any prior version), so revisions build on the current text — the
-        // user's edit included — rather than regenerating from the task. A
+        // any prior version), so revisions build on the current text - the
+        // user's edit included - rather than regenerating from the task. A
         // user edit is marked so the model preserves it deliberately.
         if let Some(region) = &point.document_region
             && !body.trim().is_empty()
         {
             let content = if user_revised {
-                format!("[revised by user — keep these changes]\n{body}")
+                format!("[revised by user - keep these changes]\n{body}")
             } else {
                 body.clone()
             };
@@ -531,7 +531,7 @@ pub fn dispatch_interaction_point(
     }
 }
 
-/// Collect: apply each resolved interaction-point outcome — approve advances
+/// Collect: apply each resolved interaction-point outcome - approve advances
 /// (or transitions when all points are done), abort cancels, a directive injects
 /// the directive and re-infers in-stage, an edit injects the edited text and
 /// re-presents; both revision paths are bounded by [`MAX_REVISION_ROUNDS`].
@@ -561,7 +561,7 @@ pub fn collect_interaction_point(
         };
         crate::tick_scope::enter(out.entity);
         // A run cancelled while its prompt was open is finished, and the arms
-        // below all set `Active`/`ResolveTransition` unconditionally — so without
+        // below all set `Active`/`ResolveTransition` unconditionally - so without
         // this, answering the orphaned prompt (from `lev respond`, the dashboard,
         // or the neutral response a cancel itself delivers) walked the run
         // straight back to `Active` and it carried on as if it had never been
@@ -604,7 +604,7 @@ pub fn collect_interaction_point(
                 // A model that has already concluded something tends to keep the
                 // conclusion and apply the correction only to the document. That
                 // happened: an agent that had created a file during discovery
-                // read it back while planning, decided "already created — no
+                // read it back while planning, decided "already created - no
                 // further action is needed", was told to use a different
                 // filename, updated the plan to say so, and still ended the run
                 // without renaming anything. The plan changed; its reading of
@@ -619,7 +619,7 @@ pub fn collect_interaction_point(
                         &name,
                         "",
                         "The plan above was revised before you approved it. Work from \
-                         the approved text as written — any conclusion you reached \
+                         the approved text as written - any conclusion you reached \
                          from the earlier version, including that something is \
                          already done, may no longer hold and should be re-checked \
                          against the plan rather than assumed.",
@@ -1328,8 +1328,8 @@ mod tests {
 
     /// Answering the prompt of a run that was cancelled while it waited must not
     /// bring the run back. Every non-`Abort` arm sets `Active` unconditionally, so
-    /// without the terminal guard an answer — including the neutral response a
-    /// cancel itself delivers to release the blocked `ask` — walked a cancelled
+    /// without the terminal guard an answer - including the neutral response a
+    /// cancel itself delivers to release the blocked `ask` - walked a cancelled
     /// run straight back into the pipeline.
     #[test]
     fn collect_does_not_resurrect_a_cancelled_run() {
@@ -1446,7 +1446,7 @@ mod tests {
 
     /// An approval that followed a revision has to say so. A model that had
     /// already concluded "this is done" kept the conclusion and applied the
-    /// correction only to the document — the plan changed, its reading of the
+    /// correction only to the document - the plan changed, its reading of the
     /// world did not. The note is only injected when there *was* a revision.
     #[test]
     fn collect_approve_after_a_revision_says_the_plan_changed() {

@@ -34,7 +34,7 @@ pub enum AgentDisplayStatus {
     Idle,
     Cancelled,
     /// On disk the run claims to be live, but the daemon has no such run and its
-    /// metadata has not been touched in a long time — so nothing is driving it.
+    /// metadata has not been touched in a long time - so nothing is driving it.
     ///
     /// Shown distinctly rather than as ACTIVE because the two are not the same
     /// thing to the user: an ACTIVE row implies work is happening. Killable, like
@@ -66,7 +66,7 @@ impl AgentDisplayStatus {
         )
     }
 
-    /// Whether the run can be killed. Anything that has not finished can be —
+    /// Whether the run can be killed. Anything that has not finished can be -
     /// including `Idle` and `Stale`, which the kill action used to skip, leaving
     /// a run the dashboard showed as live with no way to get rid of it.
     pub(super) fn is_killable(&self) -> bool {

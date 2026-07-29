@@ -442,7 +442,7 @@ send_email = { sensitivity = "private", direction = "egress", clearance = "publi
     #[test]
     fn test_from_toml_mcp_override_server_without_tools_table() {
         // A server entry that has no `tools` sub-table exercises the
-        // `if let Some(tools_table)` None branch — nothing is inserted.
+        // `if let Some(tools_table)` None branch - nothing is inserted.
         let toml = r#"
 [mcp_overrides.emptyserver]
 note = "no tools declared here"

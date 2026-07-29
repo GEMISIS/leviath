@@ -4,7 +4,7 @@
 //! Before this existed, the ten blueprints under the workspace's `agents/`
 //! directory were reachable only from a git checkout: `lev add` takes a local
 //! path, and `lev list` looked for an `agents/` directory next to the
-//! executable — a layout no real install has. So a user who downloaded a
+//! executable - a layout no real install has. So a user who downloaded a
 //! release binary got a working runtime and zero agents to run on it.
 //!
 //! `build.rs` now embeds every file of every blueprint via `include_str!` (23
@@ -98,7 +98,7 @@ pub fn install_bundled(agent: &BundledAgent, agents_dir: &Path) -> anyhow::Resul
         // `path.parent()`. `dest.join(rel)` always has a parent, so the `None`
         // arm of `parent()` would be unreachable code pretending to be a
         // handled case; splitting `rel` gives two arms that both actually
-        // happen — nested (`tools/web_fetch.rhai`) and flat (`agent.leviath`).
+        // happen - nested (`tools/web_fetch.rhai`) and flat (`agent.leviath`).
         let parent = match rel.rsplit_once('/') {
             Some((dir, _)) => dest.join(dir),
             None => dest.clone(),
@@ -152,8 +152,8 @@ mod tests {
     /// A tool script shipped under the same filename by more than one agent
     /// must be byte-identical everywhere.
     ///
-    /// Each agent directory is self-contained — that is what lets `lev add
-    /// <dir>` and `lev pack` work — so `web_fetch.rhai` and `web_search.rhai`
+    /// Each agent directory is self-contained - that is what lets `lev add
+    /// <dir>` and `lev pack` work - so `web_fetch.rhai` and `web_search.rhai`
     /// exist as five copies each rather than one shared file. That is fine
     /// until one copy is fixed and the others are not: these scripts are the
     /// agents' network surface, so a hardening change applied to one of five is
@@ -176,7 +176,7 @@ mod tests {
                 match first_seen.get(filename) {
                     Some((other, expected)) => assert!(
                         expected == contents,
-                        "tools/{filename} differs between bundled agents {other} and {} — \
+                        "tools/{filename} differs between bundled agents {other} and {} - \
                          a change to one copy was not applied to the others",
                         agent.name
                     ),
@@ -190,7 +190,7 @@ mod tests {
         // all, the loop above asserts nothing.
         assert!(
             !first_seen.is_empty(),
-            "no bundled agent ships a tools/ script — this invariant is not being tested"
+            "no bundled agent ships a tools/ script - this invariant is not being tested"
         );
     }
 
@@ -208,7 +208,7 @@ mod tests {
             // `.expect`, not `.unwrap_or_else(|e| panic!(...))`: the closure in
             // the latter is a function that never runs on a passing test, which
             // reads to llvm-cov as an uncovered region. For the same reason the
-            // message is a literal — a *call* in an `assert!`'s format args is
+            // message is a literal - a *call* in an `assert!`'s format args is
             // also a region that only the failing path reaches.
             let parsed = leviath_core::manifest::parse_manifest(manifest);
             assert!(
@@ -230,11 +230,11 @@ mod tests {
     /// name matching nothing, so the stage just quietly advertised one tool
     /// fewer. Now that dispatch refuses anything a stage did not offer, the same
     /// typo means the model is told the tool does not exist and the stage cannot
-    /// do its job — a silent omission became a silent failure, which is worth a
+    /// do its job - a silent omission became a silent failure, which is worth a
     /// test. A permission entry for an ungranted tool is the same drift seen
     /// from the other side: it reads as a grant and is not one.
     ///
-    /// An invariant over all discovered agents rather than a list of names —
+    /// An invariant over all discovered agents rather than a list of names -
     /// naming them would stop testing the property the moment the list drifted.
     #[test]
     fn every_stage_tool_name_resolves_and_every_permission_names_a_granted_tool() {
@@ -276,7 +276,7 @@ mod tests {
             for stage in &blueprint.stages {
                 for tool in &stage.available_tools {
                     // `server__tool` is an MCP tool, resolvable only once that
-                    // server is installed — not something a manifest can be
+                    // server is installed - not something a manifest can be
                     // checked against here.
                     let known = tool.contains("__")
                         || builtin.iter().any(|b| b == tool)
@@ -301,7 +301,7 @@ mod tests {
         }
     }
 
-    /// The invariant above can actually fail — a check over shipped data that
+    /// The invariant above can actually fail - a check over shipped data that
     /// happens to pass says nothing about whether it would catch drift.
     #[test]
     fn the_stage_tool_invariant_rejects_a_typo_and_an_orphan_permission() {

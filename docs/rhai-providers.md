@@ -1,7 +1,7 @@
 # Rhai script providers
 
 Add support for any LLM API by dropping a `.rhai` script into
-`~/.leviath/providers/` — no recompile, and no restart.
+`~/.leviath/providers/` - no recompile, and no restart.
 
 A `RhaiProvider` Rust wrapper implements the full `Provider` trait. Your script
 only does **format mapping** (Leviath's request → the API's HTTP body, and the
@@ -21,13 +21,13 @@ whenever the file changes** (the file's mtime is checked on each use). So:
 - a broken script is skipped with a warning (selection falls through to the next
   model), and starts working again once you fix the file.
 
-Scripts are only compiled/run when an agent actually references the name — the
+Scripts are only compiled/run when an agent actually references the name - the
 daemon never scans-and-executes every dropped file at startup.
 
 ## Discovery & config
 
 The provider name is the script's filename stem (`groq.rhai` → `groq`) or the
-key of a `[model_providers.<name>]` table. A config table is **optional** — it
+key of a `[model_providers.<name>]` table. A config table is **optional** - it
 only supplies overrides:
 
 ```toml
@@ -52,7 +52,7 @@ tokens_per_minute   = 100000
 **Required**
 
 ```rhai
-// Runs once when the provider loads. Runs OFFLINE — no HTTP host functions are
+// Runs once when the provider loads. Runs OFFLINE - no HTTP host functions are
 // available here. Return a state map persisted across calls.
 fn initialize(config) -> Map
 
@@ -70,7 +70,7 @@ fn inference(state, request) -> Map
 **Optional**
 
 ```rhai
-// Streaming. `on_chunk` is a function pointer — call it with `on_chunk.call(#{...})`.
+// Streaming. `on_chunk` is a function pointer - call it with `on_chunk.call(#{...})`.
 // Each chunk: { delta, tool_calls: [{index, id, name, arguments_delta}],
 //               tokens: {...}, finish_reason }
 fn stream(state, request, on_chunk)
@@ -105,7 +105,7 @@ fn list_models(state) -> Array   // [{ id, display_name, max_context_tokens, max
   `"anthropic"`, `"gemini"`, or `"general"`.
 
 Rate limiting, request timeouts, retry, and 429/5xx classification are applied
-by the Rust wrapper around these calls — you don't implement them.
+by the Rust wrapper around these calls - you don't implement them.
 
 ## Error handling
 

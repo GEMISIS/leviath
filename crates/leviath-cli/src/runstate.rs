@@ -1,15 +1,15 @@
 //! On-disk run state for background agent executions.
 //!
 //! Each run lives under `~/.leviath/runs/<run-id>/` with:
-//! - `meta.json`    — run metadata, updated atomically (tmp + rename)
-//! - `output.log`  — append-only combined worker stdout (legacy/fallback)
-//! - `stages.json` — index of per-stage records
-//! - `stages/<idx>/output.log` — readable agent output for that stage
-//! - `stages/<idx>/logs.log`   — operational events + tool activity
-//! - `stages/<idx>/context.json` — context snapshot for that stage
+//! - `meta.json`    - run metadata, updated atomically (tmp + rename)
+//! - `output.log`  - append-only combined worker stdout (legacy/fallback)
+//! - `stages.json` - index of per-stage records
+//! - `stages/<idx>/output.log` - readable agent output for that stage
+//! - `stages/<idx>/logs.log`   - operational events + tool activity
+//! - `stages/<idx>/context.json` - context snapshot for that stage
 //!
 //! The dashboard's activity log is persisted separately at:
-//! - `~/.leviath/dashboard.log` — never cleared, appended across sessions
+//! - `~/.leviath/dashboard.log` - never cleared, appended across sessions
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -32,15 +32,15 @@ pub fn write_context_snapshot(run_id: &str, snap: &ContextSnapshot) -> anyhow::R
 /// sibling + rename).
 ///
 /// Non-generic (takes an already-serialized string) so it has a single
-/// monomorphization and every region — including the `std::fs` error `?`
-/// arms — is exercised by real tests. Serialization is performed by the
+/// monomorphization and every region - including the `std::fs` error `?`
+/// arms - is exercised by real tests. Serialization is performed by the
 /// callers, whose concrete production types
 /// (`ContextSnapshot`/`RunMeta`/`&[StageRecord]`) are provably infallible to
 /// serialize (see the `.expect` sites).
 fn write_json_atomic(path: &std::path::Path, json: &str) -> anyhow::Result<()> {
     let tmp = path.with_extension("json.tmp");
     // `write_private`: these files carry the run's full task prompt,
-    // conversation and tool output — and `meta.json` carries the webhook
+    // conversation and tool output - and `meta.json` carries the webhook
     // signing secret. They were written with a plain `fs::write` at the umask
     // default (typically 0644), protected only by the 0700 on the enclosing run
     // directory. That is one `chmod` away from being readable, and defence in
@@ -114,7 +114,7 @@ pub fn runs_dir() -> PathBuf {
 /// Directory for a specific run.
 ///
 /// A `run_id` that is not a single safe path component resolves to
-/// `<runs_dir>/<invalid>`, a name that cannot exist — so a caller that passes an
+/// `<runs_dir>/<invalid>`, a name that cannot exist - so a caller that passes an
 /// attacker-supplied id gets a miss rather than a traversal. `run_id` reaches
 /// this from URL segments on `GET /api/agents/{id}/logs` and friends, where
 /// `Path::join` would otherwise happily accept `../../` or an absolute path.
@@ -146,7 +146,7 @@ fn dashboard_log_path_from(env_override: Option<&str>) -> PathBuf {
 ///
 /// Honours the `LEVIATH_DASHBOARD_LOG_PATH` override when set (tests use it via
 /// `isolate_runs_dir_for_test`); otherwise resolves the real home-relative
-/// path. This function only *computes* a `PathBuf` — it never writes — so both
+/// path. This function only *computes* a `PathBuf` - it never writes - so both
 /// arms are safe to exercise directly in tests. The write side
 /// ([`append_dashboard_log`] and `Dashboard::add_log`) is what must stay off
 /// the user's real log in tests: `append_dashboard_log`'s own tests set the
@@ -161,13 +161,13 @@ pub fn dashboard_log_path() -> PathBuf {
 }
 
 /// Append a timestamped line to the persistent dashboard activity log at the
-/// default [`dashboard_log_path`]. Silently ignores I/O errors — best-effort.
+/// default [`dashboard_log_path`]. Silently ignores I/O errors - best-effort.
 pub fn append_dashboard_log(msg: &str) {
     append_dashboard_log_to(&dashboard_log_path(), msg);
 }
 
 /// Append a timestamped line to the dashboard activity log at an explicit
-/// `path`. Silently ignores I/O errors — the dashboard log is best-effort.
+/// `path`. Silently ignores I/O errors - the dashboard log is best-effort.
 ///
 /// The path is a parameter so `Dashboard` can inject a test-isolated log
 /// location, guaranteeing no dashboard-input test appends to the user's real
@@ -209,7 +209,7 @@ fn rolled_log_path(path: &Path) -> PathBuf {
 
 /// Roll the live log to `<name>.1` once it reaches `max_bytes`, replacing any
 /// existing rolled file, so the live file restarts empty and at most one
-/// previous generation is retained (bounded ~2×cap on disk). Best-effort — a
+/// previous generation is retained (bounded ~2×cap on disk). Best-effort - a
 /// failed rename just leaves the log to keep growing rather than erroring.
 fn roll_log_if_over_cap(path: &Path, max_bytes: u64) {
     let over = std::fs::metadata(path)
@@ -233,7 +233,7 @@ const RUN_ID_ENTROPY_BITS: u32 = 48;
 /// a `lev run --count N` batch inside one process but degenerated to a pure
 /// function of the current second across separate processes: three concurrent
 /// `lev run` invocations all minted `fetcher-1785127214-8b48` and silently shared
-/// one run directory. Nothing downstream detects that — `create_dir_all` is a
+/// one run directory. Nothing downstream detects that - `create_dir_all` is a
 /// no-op on an existing directory and the persistence worker then last-writer-wins
 /// over `meta.json` / `context.json` / `run.lvr`, interleaving two runs'
 /// state irrecoverably.
@@ -256,7 +256,7 @@ pub fn create_run(meta: &RunMeta) -> anyhow::Result<()> {
 /// Create an explicit run directory and write initial metadata into it.
 ///
 /// Callers that already know the directory should prefer this over
-/// [`create_run`], which resolves it from the home directory — the daemon's
+/// [`create_run`], which resolves it from the home directory - the daemon's
 /// spawner stakes out the run dir under its own configured `runs_dir`.
 pub(crate) fn create_run_in(dir: &std::path::Path, meta: &RunMeta) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)?;
@@ -275,7 +275,7 @@ pub fn write_meta(meta: &RunMeta) -> anyhow::Result<()> {
 /// Atomically write `meta.json` into an explicit run directory.
 ///
 /// Callers that already know the directory should prefer this over
-/// [`write_meta`], which resolves it from the home directory — the daemon's
+/// [`write_meta`], which resolves it from the home directory - the daemon's
 /// recovery pass works from its configured `runs_dir` instead.
 pub(crate) fn write_meta_to(dir: &std::path::Path, meta: &RunMeta) -> anyhow::Result<()> {
     let json =
@@ -315,7 +315,7 @@ pub enum ForceCancelOutcome {
 }
 
 impl ForceCancelOutcome {
-    /// Whether the id named a run at all — i.e. whether the cancel had a target,
+    /// Whether the id named a run at all - i.e. whether the cancel had a target,
     /// regardless of whether it needed to write anything.
     pub fn found_run(&self) -> bool {
         !matches!(self, Self::NoSuchRun)
@@ -438,7 +438,7 @@ pub fn tail_file(path: &std::path::Path, max_bytes: u64) -> String {
         Err(_) => return String::new(),
     };
 
-    // Use fstat on the open fd rather than a separate stat() call — avoids the
+    // Use fstat on the open fd rather than a separate stat() call - avoids the
     // TOCTOU window between existence check and metadata read. Falls back to 0
     // (read everything) if fstat somehow fails on an already-open fd.
     let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -959,7 +959,7 @@ mod tests {
         assert_eq!(ids.len(), 100);
     }
 
-    /// Split `<name>-<secs>-<hex>` from the right — the agent name itself may
+    /// Split `<name>-<secs>-<hex>` from the right - the agent name itself may
     /// contain dashes.
     fn split_run_id(id: &str) -> (&str, &str) {
         let mut parts = id.rsplitn(3, '-');
@@ -995,7 +995,7 @@ mod tests {
             largest = largest.max(suffixes.len());
         }
         // 200 calls take microseconds, so they cannot all land in distinct
-        // seconds — without this the assertion above would be vacuous.
+        // seconds - without this the assertion above would be vacuous.
         assert!(
             largest > 1,
             "expected IDs sharing a second, got {by_second:?}"
@@ -1007,7 +1007,7 @@ mod tests {
     #[test]
     fn write_and_read_meta_roundtrip() {
         // Isolated via `isolate_runs_dir_for_test` so write_meta/read_meta
-        // never touch the real ~/.leviath/runs/ -- the temp dir is removed
+        // never touch the real ~/.leviath/runs/ - the temp dir is removed
         // automatically when `_guard` drops, so no manual cleanup needed.
         with_isolated_runs_dir("write-and-read-meta-roundtrip", |_d| {
             let meta = RunMeta::new(
@@ -1236,7 +1236,7 @@ mod tests {
     fn append_dashboard_log_open_failure_is_silently_ignored() {
         // Covers the `if let Ok(mut file) = ... .open(&path)` pattern *not*
         // matching: pre-create the resolved log path as a directory, so
-        // opening it for append fails with `IsADirectory` -- the function
+        // opening it for append fails with `IsADirectory` - the function
         // must swallow this silently (best-effort logging) rather than
         // panic.
         with_isolated_runs_dir("append-dashboard-log-open-failure", |_d| {
@@ -1302,7 +1302,7 @@ mod tests {
     #[test]
     fn dashboard_log_path_structure() {
         // Exercises the real (env-reading) `dashboard_log_path()` on its
-        // fallback branch, so -- like `runs_dir_structure` below -- it forces
+        // fallback branch, so - like `runs_dir_structure` below - it forces
         // `LEVIATH_DASHBOARD_LOG_PATH` unset via `temp_env::with_var_unset`,
         // which also serializes against every other temp-env test so a
         // concurrently-isolated test can't race this assertion.
@@ -1337,7 +1337,7 @@ mod tests {
 
     #[test]
     fn runs_dir_structure() {
-        // See the comment on `dashboard_log_path_structure` above -- same
+        // See the comment on `dashboard_log_path_structure` above - same
         // race, same fix, for `LEVIATH_RUNS_DIR`.
         temp_env::with_var_unset("LEVIATH_RUNS_DIR", || {
             let path = runs_dir();
@@ -1361,7 +1361,7 @@ mod tests {
         assert!(path.ends_with(".leviath\\runs"));
     }
 
-    /// With no `LEVIATH_RUNS_DIR`, the runs dir must follow `LEVIATH_HOME` — the
+    /// With no `LEVIATH_RUNS_DIR`, the runs dir must follow `LEVIATH_HOME` - the
     /// same home every other leviath path resolves through. Without this, setting
     /// `LEVIATH_HOME` isolates a test's config/socket/agents dir while its runs
     /// still land in the real `~/.leviath/runs`.
@@ -1412,7 +1412,7 @@ mod tests {
         // concurrently-isolated test could own `LEVIATH_RUNS_DIR` just before
         // or after this closure's temp-env window): instead assert the helper's
         // own hash-derived path is live *inside* the closure and removed
-        // afterward -- a property no other test can perturb, since none
+        // afterward - a property no other test can perturb, since none
         // produces this exact path.
         let inside = with_isolated_runs_dir("helper-self-test", |base_dir| {
             let expected = base_dir.join("runs");
@@ -1444,7 +1444,7 @@ mod tests {
         // skip to a newline boundary, so it falls through to the `else` arm and
         // returns the whole (newline-free) tail window verbatim. Bytes are
         // written raw (never via `writeln!`, which would append '\n') so that
-        // on *every* OS the tail slice is guaranteed newline-free -- on Windows
+        // on *every* OS the tail slice is guaranteed newline-free - on Windows
         // ordinary text output is `\r\n`-terminated, which would otherwise keep
         // a '\n' in the window and take the `if` arm instead.
         let dir = tempfile::tempdir().unwrap();
@@ -1722,7 +1722,7 @@ mod tests {
     fn list_runs_empty_when_runs_dir_missing_or_empty() {
         // Isolated via `isolate_runs_dir_for_test`, so this is a genuinely
         // empty runs dir (not "the real dir, which we hope has no entry with
-        // this exact bogus id") -- can assert real emptiness instead of just
+        // this exact bogus id") - can assert real emptiness instead of just
         // absence of one specific id.
         with_isolated_runs_dir("list-runs-empty-when-runs-dir-missing-or-empty", |_d| {
             let runs = list_runs();
@@ -1759,7 +1759,7 @@ mod tests {
     fn tail_file_directory_path_returns_empty() {
         // metadata() and File::open() both succeed on a directory (confirmed
         // empirically on macOS/Linux); it's read_to_end() that fails with
-        // "Is a directory" -- and that error is deliberately discarded (`let
+        // "Is a directory" - and that error is deliberately discarded (`let
         // _ = file.read_to_end(&mut buf);`), so this exercises the
         // graceful-empty-buffer fallback at the bottom of the function, not
         // either of the two `Err(_) => return String::new()` early returns.
@@ -1772,7 +1772,7 @@ mod tests {
     fn tail_file_open_permission_denied_returns_empty() {
         // A file with no permissions at all: `Path::exists()`/`fs::metadata()`
         // only need search (execute) permission on the *parent* directories
-        // to stat a path, not read permission on the file itself -- so both
+        // to stat a path, not read permission on the file itself - so both
         // succeed here. `std::fs::File::open()` in read mode, however,
         // genuinely fails with `PermissionDenied`. Unlike the metadata-error
         // arm (only reachable via a delete-between-calls race), this is a
@@ -2109,7 +2109,7 @@ mod tests {
 
     /// A run dir whose metadata can't be parsed still gets terminated. Such a run
     /// is skipped by `list_runs`, so leaving it alone makes it both invisible and
-    /// permanent — the one state from which there is no way back.
+    /// permanent - the one state from which there is no way back.
     #[test]
     fn force_cancel_writes_a_record_over_unreadable_metadata() {
         let base = tempfile::tempdir().unwrap();
@@ -2124,7 +2124,7 @@ mod tests {
         assert!(meta.error.is_some(), "records why it was synthesized");
     }
 
-    /// A directory that exists but can't be written still counts as "found" — the
+    /// A directory that exists but can't be written still counts as "found" - the
     /// caller must not report "no such run" for a run that plainly exists.
     #[test]
     fn force_cancel_reports_a_write_failure_but_still_found_the_run() {

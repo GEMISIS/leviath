@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn count_path_neither_file_nor_dir_counts_zero() {
         // A nonexistent path is neither a file nor a directory, so `count_path`
-        // contributes 0 -- covering the `else` arm on every platform.
+        // contributes 0 - covering the `else` arm on every platform.
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("does-not-exist");
         assert_eq!(count_path(&missing, &real_read_dir), 0);
@@ -508,7 +508,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_invalid_manifest_toml_errors() {
-        // Manifest exists but is invalid TOML — covers parse_manifest ? on line 30.
+        // Manifest exists but is invalid TOML - covers parse_manifest ? on line 30.
         with_tracing(|| {});
         let project = tempfile::tempdir().unwrap();
         std::fs::write(project.path().join("agent.leviath"), "not valid toml ][").unwrap();

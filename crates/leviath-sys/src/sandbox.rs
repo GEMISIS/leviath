@@ -2,7 +2,7 @@
 //!
 //! Builds the argv needed to run a shell command inside a container or a fresh
 //! set of Linux namespaces (`unshare(1)`), plus container-engine detection. This
-//! module is **pure argv assembly + PATH probing** — it never spawns a process
+//! module is **pure argv assembly + PATH probing** - it never spawns a process
 //! itself. The caller (the daemon's `SandboxManager`) owns the actual
 //! `tokio::process::Command` spawn and container lifecycle, so everything here is
 //! deterministic and unit-testable without any runtime installed.
@@ -76,7 +76,7 @@ pub struct ContainerRunSpec<'a> {
 
 /// Host paths that must never be bind-mounted into an agent's container.
 ///
-/// `mounts` comes from the blueprint — a file the user downloaded — and was
+/// `mounts` comes from the blueprint - a file the user downloaded - and was
 /// interpolated straight into `-v {m}:{m}`. `mounts = ["/var/run/docker.sock"]`
 /// is a one-line container escape (the container can then create a *privileged*
 /// container on the host), and `mounts = ["/"]` makes the isolation decorative.
@@ -107,11 +107,11 @@ const FORBIDDEN_MOUNTS: &[&str] = &[
 /// and anything containing `..`.
 pub fn mount_allowed(path: &str) -> bool {
     // POSIX semantics spelled out rather than `std::path::Path`, because these
-    // are paths *inside a Linux container* — the host's rules do not apply to
+    // are paths *inside a Linux container* - the host's rules do not apply to
     // them. On Windows `Path::new("/data").is_absolute()` is false (an absolute
     // path there needs a drive letter), so routing this through `Path` refused
     // every legitimate container mount on Windows while behaving correctly on
-    // Unix. Fail-closed, so not a hole — but containers were unusable, and no
+    // Unix. Fail-closed, so not a hole - but containers were unusable, and no
     // test caught it because the host and the container agreed on every
     // platform the tests ran on.
     let absolute = path.starts_with('/');
@@ -138,7 +138,7 @@ pub fn mount_allowed(path: &str) -> bool {
 /// Hardened beyond plain `run`: the container drops every capability, cannot
 /// regain privileges via setuid binaries, and is bounded in processes and
 /// memory. Without these it ran as **root inside** with the default capability
-/// set — so "sandboxed" bought isolation of the filesystem view and nothing
+/// set - so "sandboxed" bought isolation of the filesystem view and nothing
 /// else, and anything written to the bind-mounted workdir came back root-owned
 /// on the host.
 ///
@@ -190,7 +190,7 @@ pub fn container_run_argv(spec: &ContainerRunSpec) -> Vec<String> {
 /// argv to run one shell command inside a running container.
 ///
 /// `shell`/`flag` are the shell *inside the container* (typically `sh`/`-c`,
-/// which every image ships) — NOT the host's shell, whose absolute path may not
+/// which every image ships) - NOT the host's shell, whose absolute path may not
 /// exist in the image.
 pub fn container_exec_argv(
     engine: &str,
@@ -236,7 +236,7 @@ pub fn container_rm_argv(engine: &str, name: &str) -> Vec<String> {
 /// **shares the host root filesystem** and can read `~/.ssh` or write
 /// `~/.leviath/providers/*.rhai` exactly as an unsandboxed command could. What
 /// `namespace` actually buys is PID isolation and, with `network = false`, no
-/// connectivity — genuinely useful, and not what most people mean by "sandbox".
+/// connectivity - genuinely useful, and not what most people mean by "sandbox".
 ///
 /// Choose `kind = "container"` when the goal is to contain what an agent can
 /// *reach*. This mode is for bounding what it can *see running* and talk to.
@@ -306,8 +306,8 @@ mod tests {
     }
 
     /// `mounts` comes from a downloaded blueprint. Mounting the engine's own
-    /// socket lets the container create a privileged container on the host —
-    /// a one-line escape — and mounting `/` makes the isolation decorative.
+    /// socket lets the container create a privileged container on the host -
+    /// a one-line escape - and mounting `/` makes the isolation decorative.
     #[test]
     fn forbidden_mounts_are_refused() {
         for path in [
@@ -335,7 +335,7 @@ mod tests {
         }
     }
 
-    /// Ordinary project directories still mount — the denylist is about host
+    /// Ordinary project directories still mount - the denylist is about host
     /// infrastructure, not about making the feature unusable.
     /// The rule is POSIX, not host-native: a container path is a Linux path
     /// wherever the daemon happens to be running. Routing it through

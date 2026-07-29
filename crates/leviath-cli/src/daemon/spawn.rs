@@ -1,5 +1,5 @@
 //! The daemon spawner: turns a [`SpawnArgs`] request into a live agent in the
-//! shared world — the CLI-side policy the runtime host calls for a `Spawn`
+//! shared world - the CLI-side policy the runtime host calls for a `Spawn`
 //! control op.
 //!
 //! It loads the blueprint, resolves each stage's provider/model (against the
@@ -7,7 +7,7 @@
 //! [`leviath_runtime::pipeline::spawn_agent`], attaches its run metadata /
 //! token totals / compaction settings, and registers its per-agent tool state
 //! with the [`CliToolService`]. The heavy MCP connections are shared (built once
-//! at daemon startup), so this whole path is synchronous — which lets it run
+//! at daemon startup), so this whole path is synchronous - which lets it run
 //! straight from the host's control loop.
 
 use std::collections::{HashMap, HashSet};
@@ -150,7 +150,7 @@ fn script_scan_dirs(
         .collect()
 }
 
-/// Names already claimed by a built-in, sub-agent, or MCP tool — a discovered
+/// Names already claimed by a built-in, sub-agent, or MCP tool - a discovered
 /// script tool colliding with one of these is dropped (never shadows a core tool).
 fn reserved_tool_names(builtin_names: &HashSet<String>, mcp_tool_defs: &[Tool]) -> HashSet<String> {
     let mut reserved: HashSet<String> = builtin_names.clone();
@@ -183,7 +183,7 @@ fn platform_satisfies_caps(
         .all(|c| script_cap(c).is_some_and(|cap| platform.supports(cap)))
 }
 
-/// Whether the *current* platform can satisfy a script's `@requires` — the same
+/// Whether the *current* platform can satisfy a script's `@requires` - the same
 /// gate `discover_script_tools_in` applies at spawn. Exposed so the read-only CLI
 /// surfaces (`lev tools`, `lev validate`, `lev mcp list`) report a tool's real
 /// availability (and flag an unknown/typo'd capability) instead of listing a tool
@@ -200,7 +200,7 @@ pub(crate) fn current_platform_satisfies(required_caps: &[String]) -> bool {
 /// advertised `Tool` defs.
 ///
 /// A tool whose `@requires` capabilities the current platform can't satisfy is
-/// dropped here (self-declared platform gating, issue #97) — mirroring how
+/// dropped here (self-declared platform gating, issue #97) - mirroring how
 /// built-ins filter against [`PlatformCapabilities`].
 pub(crate) fn discover_script_tools_in(
     dirs: &[std::path::PathBuf],
@@ -219,12 +219,12 @@ pub(crate) fn discover_script_tools_in(
     let mut defs = Vec::new();
     for meta in set.metas() {
         if reserved.contains(&meta.name) {
-            tracing::warn!(tool = %meta.name, "script tool name collides with an existing tool — ignoring");
+            tracing::warn!(tool = %meta.name, "script tool name collides with an existing tool - ignoring");
             continue;
         }
         if !platform_satisfies_caps(&platform, &meta.required_caps) {
             let caps = meta.required_caps.join(", ");
-            tracing::warn!(tool = %meta.name, requires = %caps, "script tool requires a capability this platform lacks — ignoring");
+            tracing::warn!(tool = %meta.name, requires = %caps, "script tool requires a capability this platform lacks - ignoring");
             continue;
         }
         names.insert(meta.name.clone());
@@ -332,12 +332,12 @@ fn build_tool_state(
 /// The caller map is `{ "task": args.task } ∪ args.regions` (a `regions["task"]`
 /// wins). Then:
 /// - `CallerInput { name }` pulls from the caller map; if the region is
-///   `required` and the value is missing/blank this returns `Err` — the
+///   `required` and the value is missing/blank this returns `Err` - the
 ///   required-at-spawn gate, before any inference.
 /// - `Files` / `Glob` read workdir files; `Literal` is verbatim; `Rhai` runs a
 ///   workdir script whose `String` return seeds the region.
 /// - `Command` runs a shell command in the workdir under `commands` (issue
-///   #108) — sandboxed, time- and size-capped, and skippable. Every failure is
+///   #108) - sandboxed, time- and size-capped, and skippable. Every failure is
 ///   non-fatal unless the region is `required`.
 /// - Any caller key (other than `task`) that isn't a declared `CallerInput`
 ///   region is rejected (typo protection, mirrors the CLI-side check).
@@ -379,7 +379,7 @@ fn resolve_seeds(
                             )
                         }));
                     }
-                    // Optional and unprovided — leave the region empty.
+                    // Optional and unprovided - leave the region empty.
                     continue;
                 }
                 seeds.insert(region.name.clone(), value.to_string());
@@ -530,7 +530,7 @@ fn read_and_concat(
 /// [`World`] so it is callable both from the host's spawner (via
 /// `PipelineWorld::world_mut`) and from a fan-out world-system.
 ///
-/// Enforces the required-at-spawn region gate — a fresh spawn whose required
+/// Enforces the required-at-spawn region gate - a fresh spawn whose required
 /// caller-input regions weren't provided fails here. Use
 /// [`build_agent_for_reload`] on the recovery path, where the window is restored
 /// from a snapshot afterward and the gate must not re-fire.
@@ -560,7 +560,7 @@ pub fn build_agent(
     )
 }
 
-/// Like [`build_agent`], but skips the required-at-spawn region gate — used by
+/// Like [`build_agent`], but skips the required-at-spawn region gate - used by
 /// restart recovery, which reloads a run that already passed the gate when first
 /// spawned and whose context window is restored from a snapshot after this call.
 #[allow(clippy::too_many_arguments)]
@@ -632,7 +632,7 @@ fn build_agent_inner(
     if let Some(default_max) = config.limits.default_max_iterations {
         for stage in &mut blueprint.stages {
             // `0` means *unbounded* to the pipeline, and `get_or_insert` only
-            // fills `None` — so a manifest writing `max_iterations = 0` looked
+            // fills `None` - so a manifest writing `max_iterations = 0` looked
             // like "unset" while actually opting out of the user's ceiling
             // entirely, and looped without limit against their API keys. A
             // manifest may still declare its own finite number; it may not
@@ -694,7 +694,7 @@ fn build_agent_inner(
     all_tool_defs.extend(leviath_tools::BuiltinTools::subagent_tool_defs());
     all_tool_defs.extend(mcp_tool_defs.iter().cloned());
     // The non-script defs (built-in + sub-agent + MCP), captured before script
-    // defs are appended — a `dynamic_tools` agent re-filters against these plus a
+    // defs are appended - a `dynamic_tools` agent re-filters against these plus a
     // fresh script scan on each mid-run refresh.
     let static_tool_defs = all_tool_defs.clone();
 
@@ -742,8 +742,8 @@ fn build_agent_inner(
     // config's `taint_tracking`, else off. Cascading through
     // `resolve_security` (rather than `unwrap_or_default`, which forced taint on
     // for every agent because `SecurityConfig::default()` is taint-on) means a
-    // blueprint with no `[security]` block correctly inherits the global setting
-    // — off by default. When on, the agent's outbound tool calls are gated
+    // blueprint with no `[security]` block correctly inherits the global setting -
+    // off by default. When on, the agent's outbound tool calls are gated
     // against its context taint + the policy allowlist; when off no gate is
     // attached (zero enforcement overhead).
     let security = leviath_core::taint::resolve_security(
@@ -785,7 +785,7 @@ fn build_agent_inner(
     // previously always empty.
     let agent_perms = blueprint.agent_tool_permissions();
     // Each stage's `available_tools` (Layer-1 allowlist), captured before the
-    // blueprint moves — a `dynamic_tools` agent re-filters against these on refresh.
+    // blueprint moves - a `dynamic_tools` agent re-filters against these on refresh.
     let stage_available: Vec<Vec<String>> = blueprint
         .stages
         .iter()
@@ -797,7 +797,7 @@ fn build_agent_inner(
 
     // 5. Resolve region seeds (caller input + blueprint-declared sources) into
     // concrete content. On a fresh spawn (`enforce_seeds`), required caller-input
-    // regions that weren't provided fail here — before any inference, so no
+    // regions that weren't provided fail here - before any inference, so no
     // tokens are spent. On reload the window is restored from a snapshot after
     // this, so seeding is skipped entirely.
     // Command seeds (issue #108) run here, so they inherit the entry stage's
@@ -1295,7 +1295,7 @@ mod tests {
     use tokio::runtime::Handle;
 
     fn coder_manifest() -> String {
-        // Self-contained fixture — not the shipped blueprint, so these spawn-logic
+        // Self-contained fixture - not the shipped blueprint, so these spawn-logic
         // tests stay isolated from agents/coder edits.
         crate::test_support::inline_coder_manifest()
     }
@@ -1581,7 +1581,7 @@ mod tests {
     #[tokio::test]
     async fn build_agent_errors_when_required_caller_region_missing() {
         // A required caller-input region that the request doesn't provide makes
-        // build_agent fail (via resolve_seeds) before spawning — no inference.
+        // build_agent fail (via resolve_seeds) before spawning - no inference.
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("agent.leviath");
         std::fs::write(
@@ -1649,7 +1649,7 @@ mod tests {
     #[tokio::test]
     async fn build_agent_errors_when_sandbox_runtime_unavailable() {
         // A container sandbox naming a nonexistent engine fails to start on every
-        // platform (no runtime needed), so build_agent surfaces the error — this
+        // platform (no runtime needed), so build_agent surfaces the error - this
         // covers the `?` on `SandboxManager::build` uniformly across OSes,
         // independent of which container runtimes happen to be installed.
         let dir = tempfile::tempdir().unwrap();
@@ -1763,7 +1763,7 @@ mod tests {
     #[tokio::test]
     async fn build_agent_no_security_block_leaves_taint_off_by_default() {
         // Bug regression: a blueprint with no `[security]` block and a default
-        // (taint-off) global config must NOT attach the taint gate — previously
+        // (taint-off) global config must NOT attach the taint gate - previously
         // `unwrap_or_default()` forced it on for every agent.
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("agent.leviath");
@@ -1963,7 +1963,7 @@ mod tests {
     async fn build_agent_honors_agent_level_tool_permissions() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("agent.leviath");
-        // A top-level `[tool_permissions]` block denying a builtin — no stage
+        // A top-level `[tool_permissions]` block denying a builtin - no stage
         // perms, no launch overrides, no global config deny. Only the agent-level
         // layer can produce the deny, so this proves it is wired through.
         std::fs::write(
@@ -2020,7 +2020,7 @@ mod tests {
         // `write_file` defaults to Ask, and a script-permission `Inherit`
         // permits the host function only on a hard Allow. The grant below
         // lives solely in the user's per-agent block, so the script host can
-        // only see it through the agent-scoped ceiling — the raw global
+        // only see it through the agent-scoped ceiling - the raw global
         // `[tool_permissions]` map is empty here.
         let mut config = Config::default();
         config.agent_tool_permissions.insert(
@@ -2126,7 +2126,7 @@ mod tests {
         let (mut world, cli) = test_world();
         let hub = InteractionHub::new();
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
-        // `None` disables the config default entirely — the stage stays uncapped.
+        // `None` disables the config default entirely - the stage stays uncapped.
         let config = Config {
             limits: crate::config::LimitsConfig {
                 default_max_iterations: None,
@@ -2729,7 +2729,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
 
     #[test]
     fn resolve_seeds_required_command_errors_when_disabled() {
-        // A required region can't be silently left empty — the run stops with a
+        // A required region can't be silently left empty - the run stops with a
         // message naming the switch that turned command seeds off.
         let bp = command_bp(true);
         let args = args_with("t", HashMap::new(), "/tmp");

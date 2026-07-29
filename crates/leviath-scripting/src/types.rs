@@ -48,7 +48,7 @@ pub fn register_types(engine: &mut Engine) {
     });
 
     // Token budget helpers. The operands come from a script (ultimately from
-    // model output), so plain `-` would panic on overflow in a debug build —
+    // model output), so plain `-` would panic on overflow in a debug build -
     // and a panic inside a Rhai native fn used to abort the process (#109).
     engine.register_fn(
         "tokens_remaining",
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn tokens_remaining_saturates_instead_of_overflowing() {
-        // The operands come from a script, so extreme values must not panic —
+        // The operands come from a script, so extreme values must not panic -
         // a panic in a Rhai native fn used to abort the daemon (issue #109).
         let e = engine();
         let low: i64 = e.eval("tokens_remaining(-9223372036854775808, 1)").unwrap();

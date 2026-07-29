@@ -5,7 +5,7 @@ use leviath_core::truncate_at_boundary;
 /// Format a Unix timestamp as a relative time string ("just now", "2m ago", "1h ago").
 pub(super) fn relative_time(ts: i64) -> String {
     if ts == 0 {
-        return "—".to_string();
+        return "-".to_string();
     }
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now()
@@ -59,7 +59,7 @@ pub(super) fn format_tokens(n: usize) -> String {
 /// Format elapsed seconds as a human-readable duration string.
 pub(super) fn elapsed_str(started_at: i64) -> String {
     if started_at == 0 {
-        return "—".to_string();
+        return "-".to_string();
     }
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now()
@@ -79,7 +79,7 @@ pub(super) fn elapsed_str(started_at: i64) -> String {
 /// Format elapsed seconds from `started_at` up to `until` (not current time).
 pub(super) fn elapsed_str_until(started_at: i64, until: i64) -> String {
     if started_at == 0 {
-        return "—".to_string();
+        return "-".to_string();
     }
     let secs = (until - started_at).max(0) as u64;
     if secs < 60 {
@@ -105,7 +105,7 @@ const NATIVE_CLIPBOARD_CMDS: &[(&str, &[&str])] = &[
 ///
 /// `pub` so the binary's `real_dashboard` can build the real dashboard
 /// clipboard fn as `|t| yank_to_clipboard_via(t, leviath_sys::osc52_yank)` and
-/// inject it — keeping the real `/dev/tty` write (which no unit test may
+/// inject it - keeping the real `/dev/tty` write (which no unit test may
 /// trigger) out of the coverage-measured library.
 pub fn yank_to_clipboard_via(text: &str, osc52_fallback: fn(&str) -> bool) -> bool {
     yank_to_clipboard_with(text, NATIVE_CLIPBOARD_CMDS, osc52_fallback)
@@ -124,7 +124,7 @@ fn yank_to_clipboard_with(
     use std::io::Write as IoWrite;
     use std::process::{Command, Stdio};
 
-    // Try native clipboard tools first — most reliable
+    // Try native clipboard tools first - most reliable
     for (cmd, args) in clipboard_cmds {
         if let Ok(mut child) = Command::new(cmd)
             .args(*args)
@@ -134,7 +134,7 @@ fn yank_to_clipboard_with(
             .spawn()
         {
             // `child.stdin` is guaranteed `Some` here because the child was
-            // spawned with `.stdin(Stdio::piped())` above -- an `if let`
+            // spawned with `.stdin(Stdio::piped())` above - an `if let`
             // guard would introduce an implicit "pattern didn't match" branch
             // that could never actually be exercised, since that invariant
             // always holds.
@@ -206,17 +206,17 @@ mod tests {
 
     #[test]
     fn test_relative_time_zero() {
-        assert_eq!(relative_time(0), "—");
+        assert_eq!(relative_time(0), "-");
     }
 
     #[test]
     fn test_elapsed_str_zero() {
-        assert_eq!(elapsed_str(0), "—");
+        assert_eq!(elapsed_str(0), "-");
     }
 
     #[test]
     fn test_elapsed_str_until_zero() {
-        assert_eq!(elapsed_str_until(0, 100), "—");
+        assert_eq!(elapsed_str_until(0, 100), "-");
     }
 
     #[test]
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn test_elapsed_str_until_zero_start_returns_dash() {
-        assert_eq!(elapsed_str_until(0, 60), "—");
+        assert_eq!(elapsed_str_until(0, 60), "-");
     }
 
     // OSC52 encoding and the /dev/tty write path now live in `leviath_sys::tty`
@@ -466,7 +466,7 @@ mod tests {
 
     // Module-scoped (rather than nested inside the test below) so its body
     // can also be exercised directly by
-    // `test_unreachable_osc52_fallback_panics_if_ever_invoked` -- both
+    // `test_unreachable_osc52_fallback_panics_if_ever_invoked` - both
     // branches (never called vs. called-and-panics) need coverage, and the
     // test below can only ever prove the "never called" side.
     fn unreachable_osc52_fallback(_text: &str) -> bool {
@@ -507,7 +507,7 @@ mod tests {
         // success path (the `return true` inside the spawn loop) on every
         // platform, without depending on a real clipboard tool being installed.
         // This only *reads* `PATH` (to resolve `true`/`cmd`), so it takes
-        // temp-env's exclusive lock without changing any var -- serializing it
+        // temp-env's exclusive lock without changing any var - serializing it
         // against the PATH-starving tests so it never observes a starved PATH.
         let (cmd, args) = exit_cmd(true);
         let result = temp_env::with_vars_unset(Vec::<&str>::new(), || {
@@ -524,7 +524,7 @@ mod tests {
     fn test_yank_to_clipboard_native_tool_nonzero_exit_falls_through_to_fallback() {
         // A guaranteed-present command that exits non-zero makes
         // `child.wait().map(|s| s.success())` false, so the loop falls through
-        // to the OSC52 fallback -- the branch the success test doesn't reach.
+        // to the OSC52 fallback - the branch the success test doesn't reach.
         // Reads `PATH` only, so serialize via temp-env's lock without mutating.
         fn fallback_reached(_text: &str) -> bool {
             true
@@ -541,7 +541,7 @@ mod tests {
     //
     // Ambient-`PATH` smoke tests are avoided here: their nested fallback
     // closure only gets covered when a concurrently-running `PATH`-mutating
-    // test races with them -- nondeterministic, the exact kind of flakiness
+    // test races with them - nondeterministic, the exact kind of flakiness
     // this file's `PATH_ENV_LOCK`-guarded tests exist to avoid.
     // `yank_to_clipboard` itself (the public, un-suffixed wrapper) is
     // exercised for real by the dashboard's `key('y')` handler tests in
@@ -552,7 +552,7 @@ mod tests {
     #[test]
     fn test_yank_to_clipboard_falls_back_to_osc52_when_no_native_tool_on_path() {
         // Starve PATH so `Command::new("pbcopy"/"xclip"/"wl-copy").spawn()`
-        // fails with NotFound for all three -- the `if let Ok(mut child) = `
+        // fails with NotFound for all three - the `if let Ok(mut child) = `
         // guard is simply false each time (no external process is ever
         // launched), falling through to the OSC52 fallback. That fallback is
         // injected as a fn pointer that never touches the real TTY (unlike
@@ -567,7 +567,7 @@ mod tests {
             yank_to_clipboard_via("fallback path test content", fake_osc52_fallback)
         });
         // The point of this test is proving the native-tool loop was skipped
-        // entirely and control reached the injected OSC52 fallback -- not
+        // entirely and control reached the injected OSC52 fallback - not
         // exercising the real `osc52_yank_raw` (see its own tests above).
         assert!(result);
     }

@@ -2,10 +2,10 @@
 //!
 //! Two pure pieces the async prompt loop in [`super`] leans on:
 //!
-//! * [`StageTail`] — an incremental, byte-offset reader over a run's per-stage
+//! * [`StageTail`] - an incremental, byte-offset reader over a run's per-stage
 //!   `output.log` files, so agent output streams to the host as it is written
 //!   rather than in one lump at the end.
-//! * [`split_chunks`] — splits a blob of new output into frames no larger than
+//! * [`split_chunks`] - splits a blob of new output into frames no larger than
 //!   [`leviath_agent_client::MAX_FRAME_BYTES`], on char boundaries, so a single
 //!   `session/update` never exceeds a host's line-read limit.
 
@@ -19,7 +19,7 @@ use leviath_core::floor_char_boundary;
 /// Agent output lands in `<runs_dir>/<run_id>/stages/<idx>/output.log`, appended
 /// line-by-line by the persistence lane as the run progresses. [`StageTail`]
 /// remembers how many bytes of each stage it has already surfaced, so
-/// [`pump`](StageTail::pump) returns only what is new since the previous call —
+/// [`pump`](StageTail::pump) returns only what is new since the previous call -
 /// in stage order, completed stages before the current one.
 ///
 /// It reads whole files and slices at the recorded byte offset. Because the
@@ -85,7 +85,7 @@ fn stage_output_path(runs_dir: &Path, run_id: &str, idx: usize) -> PathBuf {
 /// sequence.
 ///
 /// Returns an empty vec for empty input (the caller emits nothing rather than a
-/// zero-length chunk). The common case — output well under one frame — returns a
+/// zero-length chunk). The common case - output well under one frame - returns a
 /// single slice.
 pub fn split_chunks(text: &str) -> Vec<&str> {
     let mut chunks = Vec::new();

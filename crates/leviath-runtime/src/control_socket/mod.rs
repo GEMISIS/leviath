@@ -10,9 +10,9 @@
 //! - **Windows** → a named pipe (`\\.\pipe\…`, guarded by its security
 //!   descriptor).
 //!
-//! Each platform module exposes the same small surface — [`ControlId`],
+//! Each platform module exposes the same small surface - [`ControlId`],
 //! [`control_id`], [`bind_control_listener`], [`ControlListener::accept`],
-//! [`connect`], and [`is_daemon_running`] — over which the shared
+//! [`connect`], and [`is_daemon_running`] - over which the shared
 //! [`handle_connection`] (generic over any `AsyncRead + AsyncWrite`) and
 //! [`ControlClient`] operate. It is the default, always-on management channel
 //! (the opt-in HTTP API that `lev serve` toggles is a separate surface).
@@ -56,7 +56,7 @@ const AUTH_REQUIRED: &str = "authentication";
 /// # Why this exists
 ///
 /// On Unix the daemon asks the kernel which uid is on the other end of the
-/// socket and refuses anything that is not its own — see the peer check in the
+/// socket and refuses anything that is not its own - see the peer check in the
 /// `unix` module. Windows offers an equivalent, but reaching it means calling
 /// `ImpersonateNamedPipeClient` and comparing security identifiers through raw
 /// FFI, and this workspace is `unsafe_code = "forbid"` from top to bottom. So
@@ -67,7 +67,7 @@ const AUTH_REQUIRED: &str = "authentication";
 /// A token closes that without any of the FFI. The daemon writes a fresh random
 /// secret into its own directory, readable only by the owner, and refuses any
 /// connection that cannot quote it. A caller who can read the file is a caller
-/// who can already read `config.toml` — so the token grants nothing that was not
+/// who can already read `config.toml` - so the token grants nothing that was not
 /// already reachable, which is exactly the property wanted.
 ///
 /// It is required on every platform, not only Windows. One protocol is easier to
@@ -94,7 +94,7 @@ impl ControlToken {
     /// Where the daemon records its own process id.
     ///
     /// So `lev daemon stop` has a way through when the control channel does not
-    /// answer — a wedged daemon, or a token file that went missing. Without it
+    /// answer - a wedged daemon, or a token file that went missing. Without it
     /// the only recovery was `pkill`, and the advice to "restart it" was advice
     /// that could not work: `restart` stops before it starts, and the stop was
     /// the part that failed.
@@ -121,7 +121,7 @@ impl ControlToken {
 
     /// Generate a fresh token and write it owner-only.
     ///
-    /// Called at bind, so a restarted daemon invalidates every previous token —
+    /// Called at bind, so a restarted daemon invalidates every previous token -
     /// a stale one cannot be replayed against the new process.
     pub fn create(dir: &Path) -> std::io::Result<Self> {
         use rand::RngExt as _;
@@ -166,7 +166,7 @@ pub enum ControlRequest {
     /// Prove the caller is this user, by quoting the daemon's control token.
     ///
     /// Must be the first request on a connection. Until it succeeds the daemon
-    /// answers nothing else — see [`ControlToken`] for why.
+    /// answers nothing else - see [`ControlToken`] for why.
     Authenticate {
         /// The token read from `<leviath-home>/control.token`.
         token: String,
@@ -423,8 +423,8 @@ where
         }
 
         // Until the caller has proved who it is, `Authenticate` is the only
-        // request that gets an answer. Anything else -- including a malformed
-        // line -- is refused and the connection dropped, so an unauthenticated
+        // request that gets an answer. Anything else - including a malformed
+        // line - is refused and the connection dropped, so an unauthenticated
         // peer cannot sit probing the protocol.
         if !authenticated {
             let refused = match serde_json::from_str::<ControlRequest>(&line) {
@@ -480,7 +480,7 @@ async fn write_line<W>(write_half: &mut W, response: &ControlResponse)
 where
     W: AsyncWrite + Unpin,
 {
-    // `ControlResponse` is a plain serde enum — serialization is infallible.
+    // `ControlResponse` is a plain serde enum - serialization is infallible.
     let mut out = serde_json::to_string(response).expect("ControlResponse serializes");
     out.push('\n');
     let _ = write_half.write_all(out.as_bytes()).await;
@@ -544,7 +544,7 @@ impl ControlClient {
     ///
     /// Only reaches a daemon that runs without one, which in practice means a
     /// test driving the protocol directly. Real callers use
-    /// [`with_token`](Self::with_token) — see [`ControlToken`].
+    /// [`with_token`](Self::with_token) - see [`ControlToken`].
     pub fn new(id: impl Into<ControlId>) -> Self {
         Self {
             id: id.into(),
@@ -562,7 +562,7 @@ impl ControlClient {
     /// A client that reads the daemon's token out of `dir`.
     ///
     /// A missing token file is **not** an error here. It has two very different
-    /// causes — no daemon is running, or one is running that predates tokens —
+    /// causes - no daemon is running, or one is running that predates tokens -
     /// and the client cannot tell them apart, while the daemon can. Refusing to
     /// even construct a client made the second case unrecoverable: a CLI that
     /// had been upgraded could not ask the old daemon to shut down, so it could
@@ -571,7 +571,7 @@ impl ControlClient {
     /// the user was already following.
     ///
     /// The daemon is the enforcer. A client with no token connects, is refused
-    /// if the daemon requires one, and reports *that* — which is accurate.
+    /// if the daemon requires one, and reports *that* - which is accurate.
     pub fn for_home(id: impl Into<ControlId>, dir: &Path) -> Self {
         Self {
             id: id.into(),
@@ -585,7 +585,7 @@ impl ControlClient {
         let detail = match (&self.token, &self.token_dir) {
             (None, Some(dir)) => format!(
                 "no control token was found at {}. If a daemon is running, it was \
-                 started by a different user or before this file existed — restart \
+                 started by a different user or before this file existed - restart \
                  it with `lev daemon restart`.",
                 ControlToken::path(dir).display()
             ),
@@ -602,7 +602,7 @@ impl ControlClient {
     pub async fn request(&self, req: &ControlRequest) -> std::io::Result<ControlResponse> {
         // The daemon services control ops from a single loop, so one op that
         // takes a long time (or a wedged world) delays every other client. With
-        // no deadline, `lev cancel` and the dashboard simply hung — no output, no
+        // no deadline, `lev cancel` and the dashboard simply hung - no output, no
         // error, nothing to act on. A timeout turns that into a failure the
         // caller can fall back from.
         let deadline = timeout_for(req);
@@ -624,7 +624,7 @@ impl ControlClient {
 
         // Authenticate first, on every connection: the client opens a fresh one
         // per request, so there is no session to carry the proof across. With no
-        // token we send nothing and go straight to the request — a daemon that
+        // token we send nothing and go straight to the request - a daemon that
         // predates tokens serves it, and one that requires them refuses, which
         // is the outcome we want to report either way.
         if let Some(token) = &self.token {
@@ -636,7 +636,7 @@ impl ControlClient {
             let _ = write_half.write_all(line.as_bytes()).await;
 
             // `.ok().flatten()`: a read error and a clean EOF are the same fact
-            // here -- the daemon did not answer the handshake -- and giving the
+            // here - the daemon did not answer the handshake - and giving the
             // error its own `?` arm leaves a branch no test can drive.
             match lines.next_line().await.ok().flatten() {
                 Some(resp) => match serde_json::from_str::<ControlResponse>(&resp) {
@@ -746,7 +746,7 @@ mod tests {
     // ── Control-channel authentication ──────────────────────────────────────
 
     /// `lev daemon stop` needs a way through when the control channel does not
-    /// answer, because `restart` stops before it starts — so a daemon that had
+    /// answer, because `restart` stops before it starts - so a daemon that had
     /// lost its token file could not be restarted, only `pkill`ed.
     #[test]
     fn the_daemon_pid_round_trips_and_a_missing_or_junk_file_is_no_pid() {
@@ -837,8 +837,8 @@ mod tests {
     }
 
     /// A missing token file must not stop a client from being built. It has two
-    /// causes the client cannot tell apart — no daemon, or one running that
-    /// predates tokens — and refusing here made an upgrade unrecoverable: the
+    /// causes the client cannot tell apart - no daemon, or one running that
+    /// predates tokens - and refusing here made an upgrade unrecoverable: the
     /// CLI could not ask the old daemon to shut down, so it could neither stop
     /// it nor start a replacement, while printing advice the user was already
     /// following.
@@ -852,7 +852,7 @@ mod tests {
     }
 
     /// And when we *did* present one and were still refused, the message says
-    /// that instead — the two situations need different fixes.
+    /// that instead - the two situations need different fixes.
     #[test]
     fn a_rejected_token_reads_differently_from_a_missing_one() {
         let dir = tempfile::tempdir().unwrap();
@@ -1113,7 +1113,7 @@ mod tests {
     }
 
     /// `create` reports rather than panicking when its directory cannot be
-    /// written -- a read-only home should fail the daemon loudly, not leave it
+    /// written - a read-only home should fail the daemon loudly, not leave it
     /// running with no way for clients to authenticate.
     #[test]
     fn creating_a_token_in_an_unwritable_place_is_an_error() {
@@ -1556,13 +1556,13 @@ mod tests {
 
     /// A daemon that accepts the connection but never answers must not hang the
     /// client. `lev cancel` against a wedged daemon used to block forever with no
-    /// output — nothing to see, nothing to act on, and no way to kill the run.
+    /// output - nothing to see, nothing to act on, and no way to kill the run.
     #[tokio::test]
     async fn client_times_out_on_a_daemon_that_never_answers() {
         let (mut listener, id, _dir) = test_listener();
         // The server reads the request, then hands both halves back and exits.
         // The test holds them, so the connection stays open with no reply ever
-        // sent — a daemon that accepted the work and went quiet. Handing them
+        // sent - a daemon that accepted the work and went quiet. Handing them
         // over (rather than parking the task on a future that never resolves)
         // lets the task actually finish.
         let (tx, rx) = oneshot::channel();
@@ -1616,7 +1616,7 @@ mod tests {
     }
 
     /// A spawn connects the blueprint's MCP servers first (30s each), so it gets
-    /// a longer floor than the interactive ops — otherwise a slow-but-succeeding
+    /// a longer floor than the interactive ops - otherwise a slow-but-succeeding
     /// spawn is reported to the user as a timeout.
     #[test]
     fn spawn_gets_a_longer_deadline_than_other_ops() {

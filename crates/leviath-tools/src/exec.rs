@@ -8,7 +8,7 @@ impl BuiltinTools {
     pub async fn execute(&self, name: &str, args: Value) -> String {
         let canonical = canonical_tool_name(name);
         // A tool whose platform capabilities aren't met never advertises, but a
-        // caller could still dispatch to it directly — reject it here too.
+        // caller could still dispatch to it directly - reject it here too.
         if !self.available(canonical) {
             return format!("[error] tool '{}' is not available on this platform", name);
         }
@@ -29,7 +29,7 @@ impl BuiltinTools {
     /// Refuse to create anything when the working directory itself is gone.
     ///
     /// `write_file` calls `create_dir_all`, which would otherwise silently
-    /// resurrect a workspace an external harness deleted mid-run — leaving the
+    /// resurrect a workspace an external harness deleted mid-run - leaving the
     /// agent writing into an empty tree that no longer resembles the checkout it
     /// reasoned about, and masking the loss from the runtime's health check
     /// (issue #107). Creating *sub*directories inside a live workspace is
@@ -59,7 +59,7 @@ impl BuiltinTools {
     ///
     /// That mattered most where the containment is load-bearing. Leviath's file
     /// tools run **on the host over the bind-mounted workdir** even when the
-    /// stage's `shell` is confined to a container — so a symlink the agent
+    /// stage's `shell` is confined to a container - so a symlink the agent
     /// created inside the container escaped the container through the file
     /// tools. It also matters for a freshly cloned repository, which is exactly
     /// what a coding agent operates on and which can carry a checked-in symlink
@@ -331,8 +331,8 @@ impl BuiltinTools {
     /// for testing.
     ///
     /// `shell_exists` is a trait object (`&dyn Fn(&str) -> bool`) rather
-    /// than `impl Fn(&str) -> bool` so every caller -- production's real
-    /// `Path::exists` closure and each test's distinct closure -- shares
+    /// than `impl Fn(&str) -> bool` so every caller - production's real
+    /// `Path::exists` closure and each test's distinct closure - shares
     /// exactly ONE monomorphization of this function instead of one per
     /// closure type (this function was a confirmed generic-monomorphization
     /// coverage-attribution artifact: every source position had a covered
@@ -346,7 +346,7 @@ impl BuiltinTools {
             && (shell.ends_with("/zsh") || shell.ends_with("/bash") || shell.ends_with("/sh"))
             && shell_exists(&shell)
         {
-            // Only trust `$SHELL` when it actually exists — a stale or
+            // Only trust `$SHELL` when it actually exists - a stale or
             // sandbox-missing `$SHELL` (e.g. `/bin/zsh` in an environment that
             // doesn't ship it) otherwise made every shell call fail to spawn.
             // When it's missing, fall through to the known-path fallback list.
@@ -388,7 +388,7 @@ impl BuiltinTools {
 
         // When a sandbox executor is attached, it builds a command that runs
         // inside a container / namespace (still targeting `workdir`); otherwise
-        // run the shell directly on the host — the exact prior behavior.
+        // run the shell directly on the host - the exact prior behavior.
         let mut cmd = match &self.shell_executor {
             Some(executor) => executor.build_command(shell, flag, command, &workdir),
             None => {
@@ -403,7 +403,7 @@ impl BuiltinTools {
         // cancelled agent (or an elapsed timeout, which drops the future the
         // same way) left its shell running: the run vanished from every listing
         // while its command carried on writing to the workspace. `kill_on_drop`
-        // fixes the shell — but only the shell. Anything the shell itself
+        // fixes the shell - but only the shell. Anything the shell itself
         // started (`sleep 400 && …`) is a *grandchild*, gets reparented to init,
         // and keeps running. Putting the shell in its own process group and
         // signalling the group on drop takes the whole tree down with it.

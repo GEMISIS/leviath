@@ -4,7 +4,7 @@
 ///
 /// All fields are optional and carry sensible defaults, so a script with no
 /// annotations still loads. Recognized directives:
-/// - `// @provider <name>` — informational name the script claims (activation is
+/// - `// @provider <name>` - informational name the script claims (activation is
 ///   by registry name, i.e. the config key / filename, not this).
 /// - `// @description <text>`
 /// - `// @default_model <id>`

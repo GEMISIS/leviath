@@ -80,13 +80,13 @@ pub(crate) fn expand_env(value: &str) -> String {
 /// A credential-shaped variable is refused unless the user named it, exactly as
 /// a Rhai script tool's `env_var` is. Without this the two transports disagreed:
 /// a stdio server got a filtered environment, while an HTTP server's `headers`
-/// could interpolate *any* variable the daemon held —
+/// could interpolate *any* variable the daemon held -
 ///
 /// ```toml
 /// headers = { X-A = "${ANTHROPIC_API_KEY}" }
 /// ```
-///
-/// — and post it to whatever URL the same entry named. Anyone who could write an
+/// -
+/// and post it to whatever URL the same entry named. Anyone who could write an
 /// MCP server entry could exfiltrate every secret in the daemon's environment on
 /// the next connect.
 /// The value of `name`, or `None` if it is unset or credential-shaped and not
@@ -101,7 +101,7 @@ fn resolve_var(name: &str, allowlist: &[String]) -> Option<String> {
 #[expect(
     clippy::string_slice,
     reason = "`start` and `end` are `find` hits, offset only by the lengths of the ASCII literals \
-              `${` and `}` — all char boundaries"
+              `${` and `}` - all char boundaries"
 )]
 pub(crate) fn expand_env_allowing(value: &str, allowlist: &[String]) -> String {
     let mut out = String::with_capacity(value.len());
@@ -125,7 +125,7 @@ pub(crate) fn expand_env_allowing(value: &str, allowlist: &[String]) -> String {
                 rest = &after[end + 1..];
             }
             None => {
-                // Unterminated `${` — emit it literally rather than eating the
+                // Unterminated `${` - emit it literally rather than eating the
                 // rest of the value.
                 out.push_str(&rest[start..]);
                 return out;
@@ -170,7 +170,7 @@ enum Mode {
 /// A message decoded from the legacy event stream.
 ///
 /// The `endpoint` event carries a URL rather than a JSON-RPC frame, so it is a
-/// distinct variant instead of a `Value` the reader has to re-inspect — which
+/// distinct variant instead of a `Value` the reader has to re-inspect - which
 /// would leave an arm that can never be taken.
 enum LegacyEvent {
     /// The `endpoint` event, naming where to POST.
@@ -250,7 +250,7 @@ impl HttpTransport {
         let Some(refresher) = self.refresher.clone() else {
             return Ok(response);
         };
-        tracing::info!("MCP request returned 401 — refreshing the token and retrying");
+        tracing::info!("MCP request returned 401 - refreshing the token and retrying");
         let value = refresher.refresh().await?;
         self.set_auth_header(&value);
         self.post(body).await
@@ -459,7 +459,7 @@ impl HttpTransport {
 
         // The endpoint event is the first thing a legacy server sends; without
         // it there is nowhere to POST. Any frame arriving ahead of it is
-        // discarded — there is no request outstanding for it to answer.
+        // discarded - there is no request outstanding for it to answer.
         let endpoint = loop {
             match rx.recv().await {
                 Some(LegacyEvent::Endpoint(path)) => break path,
@@ -728,7 +728,7 @@ mod tests {
         });
     }
 
-    /// A credential-shaped variable is refused unless the user named it — the
+    /// A credential-shaped variable is refused unless the user named it - the
     /// same rule a Rhai script tool's `env_var` follows. Without it, an MCP
     /// server entry could set `X-A = "${ANTHROPIC_API_KEY}"` against a URL of
     /// its own choosing and post every secret the daemon holds.
@@ -1061,7 +1061,7 @@ mod tests {
     // ─── legacy HTTP+SSE fallback ─────────────────────────────────────────
 
     /// A legacy-only server: `GET /sse` streams events, `POST /messages`
-    /// accepts requests, and `POST /sse` is rejected with 405 — which is how
+    /// accepts requests, and `POST /sse` is rejected with 405 - which is how
     /// the client learns to fall back.
     fn legacy_app(
         endpoint_event: &'static str,
@@ -1584,7 +1584,7 @@ mod tests {
         }));
         let url = format!("{}/sse", serve(app).await);
         let mut t = transport(&url);
-        // The stream then ends, so the request itself fails — but only after
+        // The stream then ends, so the request itself fails - but only after
         // the endpoint was found, which is what this pins.
         let err = t
             .send_request(&init(), DEFAULT_REQUEST_TIMEOUT)
@@ -1935,7 +1935,7 @@ mod tests {
     async fn a_legacy_post_to_a_dead_endpoint_errors() {
         let _guard = always_on_tracing_guard();
         // The endpoint event names an absolute URL on a closed port, so the
-        // stream opens but the follow-up POST fails at the network level —
+        // stream opens but the follow-up POST fails at the network level -
         // reaching the `post()?` arm inside legacy_request.
         let app = Router::new().route(
             "/sse",

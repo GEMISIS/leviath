@@ -36,7 +36,7 @@ pub fn open_command_for(os: &str, url: &str) -> (String, Vec<String>) {
 ///
 /// `spawn` is injected so the real process launch is isolated from the logic:
 /// production passes [`spawn_detached`], tests pass a recording stub. Returns
-/// whether the launcher was spawned successfully — not whether the user
+/// whether the launcher was spawned successfully - not whether the user
 /// actually saw the page, which is unknowable.
 pub fn open_url_via(spawn: fn(&mut Command) -> std::io::Result<()>, url: &str) -> bool {
     let (program, args) = open_command_for(std::env::consts::OS, url);
@@ -108,7 +108,7 @@ mod tests {
 
     /// The failure arm logs, and `tracing::warn!` evaluates its field values
     /// only when a subscriber is interested. Without one installed the `%e`
-    /// field closure never runs — so this test exercised the branch while
+    /// field closure never runs - so this test exercised the branch while
     /// leaving the logging inside it unexecuted. `with_tracing` is the same
     /// always-on-subscriber shim `leviath-cli` uses for exactly this.
     #[test]

@@ -163,7 +163,7 @@ pub struct StageProgress {
     /// another pass. Bounded by the gate's `max_attempts`.
     pub gate_reentries: usize,
     /// Unix seconds of the first tick this agent was ready to infer in the
-    /// stage — the clock a `stuck_after_minutes` threshold reads. Stamped
+    /// stage - the clock a `stuck_after_minutes` threshold reads. Stamped
     /// lazily by [`detect_stuck_stage`] so spawn, `enter_stage` and
     /// [`force_transition`] all get a fresh clock from the `Default` reset
     /// without threading a clock through their signatures.
@@ -195,7 +195,7 @@ pub enum StageOutcome {
 /// seeded at spawn (names + `Pending`) and reconciled by [`dispatch_persistence`]
 /// (status + timestamps), with per-stage tokens accrued by [`collect_inference`].
 /// Serialized to `stages.json` so the dashboard / serve API can show every
-/// stage's real name and status — not just the active one (whose name is the only
+/// stage's real name and status - not just the active one (whose name is the only
 /// one carried in `meta.json`).
 #[derive(Component, Debug, Clone)]
 pub struct StageLedger(pub Vec<leviath_core::run_meta::StageRecord>);
@@ -216,7 +216,7 @@ pub struct StageIoBuffer {
 /// Process-response system: route each `ProcessResponse` agent by whether its
 /// last inference asked for tools. Tool calls present ⇒ `ReadyForTools` (and the
 /// stage's running tool-call count is bumped); none ⇒ `ReadyForTransition`. Pure
-/// routing — no I/O.
+/// routing - no I/O.
 #[allow(clippy::type_complexity)]
 pub fn process_response(
     mut agents: Query<
@@ -272,12 +272,12 @@ pub(crate) const MAX_TEXT_ONLY_NUDGES: usize = 3;
 /// Whether this stage's deliverable *is* its text response.
 ///
 /// A stage with interaction points presents what it writes for the user to
-/// approve, revise or edit — the text is the work product, not a model stalling
+/// approve, revise or edit - the text is the work product, not a model stalling
 /// before it starts. Nudging one is worse than wasteful: the nudge says "use
 /// your tools to complete the task", and a stage built to produce a document
 /// usually has no tool that could. A planning stage told to complete the task
 /// went looking for a way to write the file, found none, and asked the user to
-/// grant it a write tool or create the file by hand — instead of ending the
+/// grant it a write tool or create the file by hand - instead of ending the
 /// stage and presenting the plan it had already finished writing.
 pub(crate) fn stage_output_is_reviewed(bp: &AgentBlueprint, cursor: &StageCursor) -> bool {
     matches!(
@@ -293,7 +293,7 @@ pub(crate) fn stage_output_is_reviewed(bp: &AgentBlueprint, cursor: &StageCursor
 /// "use your tools" nudge are added to context and the agent loops back to
 /// `ReadyToInfer`. Ported from `AgentEngine::loop_handle_empty_tool_calls`.
 ///
-/// A stage whose output is reviewed is never nudged — see
+/// A stage whose output is reviewed is never nudged - see
 /// `stage_output_is_reviewed`.
 #[allow(clippy::type_complexity)]
 pub fn handle_empty_response(

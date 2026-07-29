@@ -2,8 +2,8 @@
 //! from its parent's, when the blueprints declare a mapping.
 //!
 //! A [`Blueprint`](leviath_core::Blueprint) may declare
-//! [`ContextTransform`](leviath_core::blueprint::ContextTransform)s — `{from_blueprint,
-//! to_blueprint, mappings}` — describing how a parent's context regions flow into
+//! [`ContextTransform`](leviath_core::blueprint::ContextTransform)s - `{from_blueprint,
+//! to_blueprint, mappings}` - describing how a parent's context regions flow into
 //! a child's when the parent (blueprint A) spawns a child (blueprint B). This is
 //! how an agent hands work down the tree: the planner's plan region becomes the
 //! implementer's task region, findings become inputs, etc.
@@ -110,7 +110,7 @@ pub fn dispatch_content_summary(
     for (entity, state, pending, settings) in agents.iter() {
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
-            continue; // paused / cancelled — don't start new work
+            continue; // paused / cancelled - don't start new work
         }
         let Some(settings) = settings else {
             // No compaction config ⇒ can't summarize; keep the raw content.
@@ -124,7 +124,7 @@ pub fn dispatch_content_summary(
             continue;
         };
         let Some(permit) = stage.pools.try_acquire(&config.model) else {
-            continue; // pool full — retry next tick (keep the pending marker)
+            continue; // pool full - retry next tick (keep the pending marker)
         };
         let requests = pending
             .0
@@ -218,7 +218,7 @@ fn apply_content_transform(content: &str, transform: &Option<ContentTransform>) 
         Some(ContentTransform::Extract { fields }) => extract_fields(content, fields),
         // Summarize needs an async LLM call that isn't available at spawn time;
         // fall back to a direct copy so the data still transfers. (Follow-up:
-        // route through the compaction lane — tracked separately.)
+        // route through the compaction lane - tracked separately.)
         Some(ContentTransform::Summarize) => content.to_string(),
     }
 }

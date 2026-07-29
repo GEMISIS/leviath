@@ -4,7 +4,7 @@
 //! same operations as `lev mcp`. Add/remove are synchronous file writes done
 //! inline; login and test are long-running (a browser flow, a network round
 //! trip) so they are dispatched to [`mcp_background_loop`] over a channel and
-//! their results drain back as toasts — the same shape the daemon-command lane
+//! their results drain back as toasts - the same shape the daemon-command lane
 //! already uses.
 
 use tokio::sync::mpsc;
@@ -136,7 +136,7 @@ impl Dashboard {
             changed = true;
         }
         // A completed login/test may have changed stored auth, so refresh the
-        // status column — but only while the screen is open, to avoid needless
+        // status column - but only while the screen is open, to avoid needless
         // disk reads every tick.
         if changed && self.mcp_screen {
             self.refresh_mcp_rows();

@@ -11,7 +11,7 @@ use leviath_core::{CredentialStore, CredentialStoreKind};
 /// The provider API keys Leviath knows how to move into a credential store.
 ///
 /// Fixed, because the OS stores offer no portable "list everything under this
-/// service" operation — the accounts to look for have to come from somewhere,
+/// service" operation - the accounts to look for have to come from somewhere,
 /// and for providers that is this list.
 pub const PROVIDER_KEYS: &[&str] = &["anthropic", "openai", "google", "openrouter"];
 
@@ -69,7 +69,7 @@ pub type Resolved = Result<Option<Box<dyn CredentialStore>>, String>;
 /// seam idiom used for the browser opener and the socket peer lookup. The seam
 /// is not a convenience: "no store is installed in this process" and "this
 /// machine has no credential store" are different things, and on a developer's
-/// Mac the first silently becomes the second — the real probe would install the
+/// Mac the first silently becomes the second - the real probe would install the
 /// platform store and every following operation would hit the real login
 /// keychain, prompting and writing. Injecting the probe is what makes an
 /// unavailable keychain testable without that.
@@ -99,7 +99,7 @@ pub(crate) fn no_store_available(_service: &str) -> Result<(), String> {
 ///
 /// `keyring_core`'s default store is one global. Two modules each holding their
 /// *own* mutex would serialize against themselves and race each other, so this
-/// lives here — beside the backend it protects — rather than in each test module.
+/// lives here - beside the backend it protects - rather than in each test module.
 #[cfg(test)]
 pub(crate) mod test_store {
     static STORE: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -136,7 +136,7 @@ mod tests {
     }
 
     /// The adapter over the real `leviath_sys::keychain` path, driven against an
-    /// in-memory store installed as the process default — see the module docs in
+    /// in-memory store installed as the process default - see the module docs in
     /// `leviath-sys` for why reaching a real keychain is not an option in tests.
     #[test]
     fn the_keychain_adapter_round_trips_a_secret() {
@@ -151,7 +151,7 @@ mod tests {
         assert!(!store.delete(&account).unwrap());
     }
 
-    /// `file` is the default and must not consult the OS at all — the probe is
+    /// `file` is the default and must not consult the OS at all - the probe is
     /// never even called, so a machine with no keychain is unaffected.
     #[test]
     fn the_file_backend_never_probes() {
@@ -178,12 +178,12 @@ mod tests {
     }
 
     /// Asking for the keychain on a machine that has none must say which
-    /// setting caused it — otherwise the error looks like a Leviath bug rather
+    /// setting caused it - otherwise the error looks like a Leviath bug rather
     /// than a configuration choice.
     #[test]
     fn asking_for_an_unavailable_keychain_names_the_setting() {
         // `.err()` rather than `expect_err`, which would need `Debug` on the
-        // boxed trait object -- and leaves no unreachable `Ok` arm behind.
+        // boxed trait object - and leaves no unreachable `Ok` arm behind.
         let err = store_for_with(CredentialStoreKind::Keychain, no_store_available)
             .err()
             .expect("a failing probe must not yield a store");

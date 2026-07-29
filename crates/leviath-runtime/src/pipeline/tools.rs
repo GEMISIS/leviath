@@ -8,7 +8,7 @@ use super::*;
 pub struct AwaitingTools;
 
 /// Marker: this agent's advertised tools should be re-resolved before its next
-/// turn — mid-run dynamic tool discovery (issue #97). Consumed by
+/// turn - mid-run dynamic tool discovery (issue #97). Consumed by
 /// [`refresh_advertised_tools`], which asks the [`ToolService`] for the stage's
 /// fresh tool defs and writes them into the live [`StageInference`].
 #[derive(Component, Debug, Clone, Copy)]
@@ -34,8 +34,8 @@ pub trait ToolService: Send + Sync {
     /// Default no-op for services without per-stage policy.
     fn sync_stage(&self, _entity: Entity, _stage_index: usize, _stage_name: &str) {}
 
-    /// Re-resolve `entity`'s advertised tool defs for the stage at `stage_index`
-    /// — e.g. after new tools were discovered on disk. `None` means "no change"
+    /// Re-resolve `entity`'s advertised tool defs for the stage at `stage_index` -
+    /// e.g. after new tools were discovered on disk. `None` means "no change"
     /// (the default, for services without dynamic tools); `Some(tools)` replaces
     /// the stage's advertised set.
     fn refresh_tools(
@@ -107,7 +107,7 @@ pub(crate) fn merge_in_call_order(
 /// anything reasoning about what the agent *did*: file tracking must not record
 /// a write that was not written, and the modification counters behind a
 /// transition gate must not count it as work. Three separate prefix lists is
-/// exactly how a fourth prefix gets missed — `[unavailable]` was, when dispatch
+/// exactly how a fourth prefix gets missed - `[unavailable]` was, when dispatch
 /// began refusing unoffered tools and both call sites still listed only two.
 pub(crate) fn call_had_no_effect(result: &str) -> bool {
     result.starts_with("[error]")
@@ -161,7 +161,7 @@ pub(crate) fn unoffered_tool_refusal(stage: &StageInference, name: &str) -> Opti
 /// sequential tool lane, moving it to `AwaitingTools`. If a batch is *all*
 /// context tools there is nothing for the lane, so the results are applied
 /// immediately and the agent loops straight back to `ReadyToInfer`. The lane
-/// serializes execution, so there is no permit gate — every ready agent is
+/// serializes execution, so there is no permit gate - every ready agent is
 /// enqueued in turn.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn dispatch_tools(
@@ -216,12 +216,12 @@ pub fn dispatch_tools(
         // on a gate prompt no one can answer (taint tracking still records).
         let auto_approve_gates = auto_gate.is_some();
         if state.status != AgentStatus::Active {
-            continue; // paused / waiting / cancelled — don't start new work
+            continue; // paused / waiting / cancelled - don't start new work
         }
 
         // Apply context_* tools inline (they need world access); collect the rest
         // for the async lane. A taint-gated agent's outbound call that would leak
-        // over-cleared data (and isn't allowlisted) is blocked — either returned
+        // over-cleared data (and isn't allowlisted) is blocked - either returned
         // as `[blocked]`, or (interactive) held for a user gate prompt.
         let mut context_results = Vec::new();
         let mut lane_calls = Vec::new();
@@ -238,7 +238,7 @@ pub fn dispatch_tools(
             // A stage's `available_tools` was applied only when building the
             // schema list sent to the model. Nothing checked it again here, so a
             // model that *named* a tool it had never been offered got that call
-            // dispatched anyway — reaching the permission gate, and for a
+            // dispatched anyway - reaching the permission gate, and for a
             // default-`Ask` tool surfacing to the user as an approval prompt for
             // something the stage was never granted.
             //
@@ -249,8 +249,8 @@ pub fn dispatch_tools(
             // it was the only thing that stopped it.
             //
             // Checked against `StageInference`, which *is* the set advertised
-            // for this stage — resolved at spawn, swapped on every transition,
-            // and rewritten by the dynamic-tools refresh — so enforcement cannot
+            // for this stage - resolved at spawn, swapped on every transition,
+            // and rewritten by the dynamic-tools refresh - so enforcement cannot
             // drift from advertising the way a second copy of the rule would.
             if let Some(refusal) = unoffered_tool_refusal(stage_inf, &c.name) {
                 context_results.push((c.tool_id.clone(), refusal));
@@ -360,7 +360,7 @@ pub fn dispatch_tools(
             .remove::<crate::gate_prompt::GateResolved>();
 
         if lane_calls.is_empty() {
-            // Nothing async to run — apply the context results now and loop back.
+            // Nothing async to run - apply the context results now and loop back.
             let merged = merge_in_call_order(&result.tool_calls, &context_results);
             apply_tool_results(
                 &mut window,

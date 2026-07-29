@@ -58,9 +58,9 @@ pub struct AwaitingTransitionChoice(pub Vec<leviath_core::blueprint::TransitionE
 
 /// The outcome of synchronously resolving a completed stage's transition.
 pub(crate) enum StageResolution {
-    /// No valid outgoing transition — the agent is done.
+    /// No valid outgoing transition - the agent is done.
     Terminal,
-    /// The stage errored and has no `error` edge — terminate the run as errored,
+    /// The stage errored and has no `error` edge - terminate the run as errored,
     /// preserving the error status the collect system already set.
     TerminalError,
     /// Advance to this stage index, applying the edge's context transform once
@@ -70,9 +70,9 @@ pub(crate) enum StageResolution {
         leviath_core::blueprint::EdgeTransform,
         Option<leviath_core::blueprint::TransitionGate>,
     ),
-    /// Multiple candidate edges — an LLM must choose among them.
+    /// Multiple candidate edges - an LLM must choose among them.
     Choose(Vec<leviath_core::blueprint::TransitionEdge>),
-    /// Not a transition after all — put the agent back to work in its current
+    /// Not a transition after all - put the agent back to work in its current
     /// stage. Only a stuck interrupt produces this: it fires mid-stage, so when
     /// its escape edge is no longer available the stage must simply continue
     /// (falling through would end a stage the agent never said it had finished).
@@ -105,7 +105,7 @@ pub(crate) fn find_conditioned_edge_ref<'a>(
 }
 
 /// As [`find_conditioned_edge_ref`], projected to the target index and a cloned
-/// edge transform — what the transition systems need.
+/// edge transform - what the transition systems need.
 pub(crate) fn find_conditioned_edge(
     blueprint: &leviath_core::Blueprint,
     stage: &leviath_core::Stage,
@@ -125,8 +125,8 @@ pub const WORKSPACE_CHECK_INTERVAL: usize = 5;
 ///
 /// Issue #107: an external harness deleted the workspace out from under running
 /// agents, which then spent every remaining iteration collecting
-/// `No such file or directory` from their tools — 16-17 of them in the observed
-/// runs — with no way back. Nothing can recreate a deleted checkout from inside
+/// `No such file or directory` from their tools - 16-17 of them in the observed
+/// runs - with no way back. Nothing can recreate a deleted checkout from inside
 /// the agent, so this stops immediately with a message that names the real
 /// problem, instead of routing to error recovery to flail more cheaply.
 #[allow(clippy::type_complexity)]
@@ -244,7 +244,7 @@ pub(crate) fn detect_stuck(
     {
         return Some(format!(
             "you have written or edited '{path}' {hits} times in this stage without \
-             resolving the task — the problem is very likely not in that file"
+             resolving the task - the problem is very likely not in that file"
         ));
     }
     if let Some(limit) = cfg.after_iterations
@@ -288,7 +288,7 @@ pub(crate) fn hottest_edit(
 /// Write the "why you're stuck" note where the next stage will read it: the
 /// blueprint's `stuck_report` region when it declares one, else `conversation`
 /// (which every blueprint is required to declare). Best-effort, like the
-/// repetition nudge — an overflowing region silently drops the note.
+/// repetition nudge - an overflowing region silently drops the note.
 pub(crate) fn note_stuck(window: &mut ContextWindow, stage: &str, reason: &str) {
     let region = if window.get_region(STUCK_REPORT_REGION).is_some() {
         STUCK_REPORT_REGION
@@ -298,7 +298,7 @@ pub(crate) fn note_stuck(window: &mut ContextWindow, stage: &str, reason: &str) 
     let content = format!(
         "[Stuck detected in stage '{stage}'] {reason}. Stop repeating what you have been \
          doing. Re-read the original task, separate what you have actually verified from \
-         what you assumed, and take a different approach — including reverting changes \
+         what you assumed, and take a different approach - including reverting changes \
          that made things worse."
     );
     let tokens = leviath_core::estimate_tokens(&content);
@@ -313,7 +313,7 @@ pub(crate) fn note_stuck(window: &mut ContextWindow, stage: &str, reason: &str) 
 ///
 /// Fires at most once per stage entry (`StageProgress::stuck_fired`, cleared by
 /// `enter_stage`'s progress reset), and never once the stuck edge's target has
-/// spent its `max_revisits` — an exhausted escape hatch must leave the agent
+/// spent its `max_revisits` - an exhausted escape hatch must leave the agent
 /// working the stage normally (its `max_iterations` is still the hard cap) rather
 /// than kick it out down an unrelated edge.
 #[allow(clippy::type_complexity)]
@@ -467,7 +467,7 @@ pub fn is_terminal_status(status: &AgentStatus) -> bool {
 /// `requires_children` gate (exclusive, mirrors the fan-out wait): a stage marked
 /// `requires_children` may not transition while any of the agent's spawned
 /// sub-agents ([`SubAgentChildren`](crate::components::SubAgentChildren)) are
-/// still running — the parent is held `Waiting` (`WaitingForChildren`) and
+/// still running - the parent is held `Waiting` (`WaitingForChildren`) and
 /// resumes (re-inserting `ResolveTransition`, back to `Active`) once every child
 /// is terminal.
 pub fn gate_requires_children(world: &mut World) {
@@ -577,7 +577,7 @@ pub(crate) fn unmet_required_regions(
         .iter()
         .filter(|r| r.required)
         // Caller-input regions are validated (and seeded) at spawn, not written
-        // by the agent — skip them here so this gate never nags the agent to
+        // by the agent - skip them here so this gate never nags the agent to
         // populate a slot the caller owns.
         .filter(|r| {
             !matches!(
@@ -616,7 +616,7 @@ pub(crate) fn inject_required_region_nudges(
 
 /// Required-region gate: before a normally-completed stage transitions, if it can
 /// write context and a `required` region is still empty, inject a nudge and re-run
-/// the stage (loop back to `ReadyToInfer`) instead of transitioning — bounded by
+/// the stage (loop back to `ReadyToInfer`) instead of transitioning - bounded by
 /// the stage's `max_revisits` (or a default cap), after which
 /// it proceeds with a warning. Skipped when the stage ended on an error / max-iter
 /// outcome (those transitions take precedence). Ported from the imperative gate.
@@ -670,9 +670,9 @@ pub fn require_context_regions(
 /// What a chosen edge's gate says about the transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum GateDecision {
-    /// The gate is satisfied (or absent) — follow the edge.
+    /// The gate is satisfied (or absent) - follow the edge.
     Pass,
-    /// The gate is unsatisfied but out of re-run budget — follow the edge and
+    /// The gate is unsatisfied but out of re-run budget - follow the edge and
     /// record it in the run's flags so the run explains itself afterwards.
     Forced,
     /// Hold the agent in this stage and show it this nudge.
@@ -759,7 +759,7 @@ pub(crate) fn gate_blocks(
 
 /// Hold an agent in its current stage after a gate refused the transition: inject
 /// the nudge, count the re-entry, and put it back in front of the model. The
-/// stage is *not* re-entered — `StageProgress` is deliberately preserved so the
+/// stage is *not* re-entered - `StageProgress` is deliberately preserved so the
 /// stage's `max_iterations` still bounds the loop.
 pub(crate) fn hold_for_gate(
     entity: Entity,
@@ -844,7 +844,7 @@ pub fn resolve_transition(
             Some(StageOutcome::Stuck(_)) => {
                 // A stuck interrupt is mid-stage, not a stage end. If the escape
                 // hatch went away between detection and here (its target spent
-                // its last revisit), resume — falling through to
+                // its last revisit), resume - falling through to
                 // `resolve_transition_sync` would end a stage the agent never
                 // said it had finished, e.g. shunting `implement` into `review`
                 // with the work half-done.
@@ -945,11 +945,11 @@ pub fn resolve_transition(
 
 /// Enter the stage at `idx`: update the cursor + current-stage name, reset
 /// per-stage progress, bump the visit count, set `accepts_messages`, and apply the
-/// stage's context setup — swap to its layout (if any) and (re)inject its system
+/// stage's context setup - swap to its layout (if any) and (re)inject its system
 /// prompt as pinned `[Stage instructions: …]` context, replacing the previous
 /// stage's. (Ported from the imperative loop's per-stage setup.)
 ///
-/// Returns `Err` only when the system prompt doesn't fit its region — the same
+/// Returns `Err` only when the system prompt doesn't fit its region - the same
 /// hard failure the imperative loop raises; the caller marks the agent `Error`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn enter_stage(
@@ -986,7 +986,7 @@ pub(crate) fn apply_stage_context(
     }
 
     // Inject stage instructions into the first pinned region (cacheable), or the
-    // conversation region if there is none — clearing any prior stage's first.
+    // conversation region if there is none - clearing any prior stage's first.
     let target = window
         .regions
         .iter()
@@ -1046,7 +1046,7 @@ pub(crate) fn attach_stage_components(
     }
 }
 
-/// Force an agent into the stage at `target_idx` via direct world access — the
+/// Force an agent into the stage at `target_idx` via direct world access - the
 /// same effect as [`resolve_transition`]'s linear-`Next` arm, but callable from
 /// an exclusive system (e.g. the fan-out collector jumping to its `merge_stage`)
 /// or the daemon (spawning a fan-out worker directly at its worker stage) where no
@@ -1054,7 +1054,7 @@ pub(crate) fn attach_stage_components(
 /// marked `Error`, mirroring the transition systems.
 pub fn force_transition(world: &mut World, entity: Entity, target_idx: usize) {
     // Phase 1 (scoped borrow): mutate the agent's own state via `enter_stage`,
-    // returning the components Phase 2 must insert — or `None` if the agent is
+    // returning the components Phase 2 must insert - or `None` if the agent is
     // gone or its system prompt overflowed (already marked `Error` in-place).
     let attach: Option<(StageInference, StageSetup, String)> = {
         let mut q = world.query::<(
@@ -1127,7 +1127,7 @@ pub fn force_transition(world: &mut World, entity: Entity, target_idx: usize) {
 }
 
 /// A blueprint stage resolved to a concrete provider, model, and effective tool
-/// set — the per-stage input to [`spawn_agent`]. The caller (CLI / daemon) owns
+/// set - the per-stage input to [`spawn_agent`]. The caller (CLI / daemon) owns
 /// the model-selection policy (overrides, availability, user defaults) and tool
 /// filtering; the runtime just turns the result into agent data.
 pub struct ResolvedStage {
@@ -1147,7 +1147,7 @@ pub(crate) const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 8192;
 /// Look up a model's context window (for resolving percentage region budgets)
 /// via the registered [`Providers`]. Falls back to
 /// [`DEFAULT_CONTEXT_WINDOW_TOKENS`] with a warning when the provider isn't
-/// registered — non-fatal, and `min_tokens` floors still protect regions.
+/// registered - non-fatal, and `min_tokens` floors still protect regions.
 pub(crate) fn context_window_tokens(world: &World, provider_name: &str, model: &str) -> usize {
     match world
         .get_resource::<Providers>()
@@ -1280,7 +1280,7 @@ pub fn spawn_agent_seeded(
     global_batch_tool_hint: bool,
 ) -> Result<Entity, String> {
     // Resolve any percentage region budgets against each stage's model context
-    // window (the only place the model — and hence the window — is known). The
+    // window (the only place the model - and hence the window - is known). The
     // global layout resolves against the entry stage (stage 0); each per-stage
     // layout resolves against that stage's own model. Absolute layouts resolve to
     // themselves, so this is a no-op for legacy blueprints.
@@ -1461,8 +1461,8 @@ pub(crate) fn build_transition_prompt(
 ///
 /// Models are asked to answer with only the target stage name (or `DONE`), but
 /// frequently wrap it in prose or re-explain the stage. We therefore look for a
-/// clean, standalone decision — scanning the first line, then the concluding
-/// line, for a **whole-word** match against a stage name or `DONE` — instead of
+/// clean, standalone decision - scanning the first line, then the concluding
+/// line, for a **whole-word** match against a stage name or `DONE` - instead of
 /// substring-scanning the whole response, where a stage name mentioned in
 /// passing ("the implementation", "the approved plan") would hijack the routing.
 /// When nothing matches, a stage that may complete ends the run; otherwise the
@@ -1478,8 +1478,8 @@ pub(crate) fn match_transition_choice(
         .filter(|l| !l.is_empty())
         .collect();
     // Candidate decision lines, in priority order: the first line (the model was
-    // told to reply with only the name, so the answer leads), then — only if it
-    // is short and answer-like (≤ 3 words) — the concluding line, which catches
+    // told to reply with only the name, so the answer leads), then - only if it
+    // is short and answer-like (≤ 3 words) - the concluding line, which catches
     // models that reason first and answer last without matching a stage name
     // buried in a prose summary ("the approved plan was implemented").
     let words_in = |line: &str| {
@@ -1543,13 +1543,13 @@ pub fn dispatch_transition_choice(
     for (entity, state, mut window, si, bp, cursor, choice, in_flight) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
-            continue; // paused / waiting / cancelled — don't start new work
+            continue; // paused / waiting / cancelled - don't start new work
         }
         let Some(provider) = providers.0.get(&si.provider_name) else {
-            continue; // provider not registered — retry later
+            continue; // provider not registered - retry later
         };
         let Some(permit) = stage.pools.try_acquire(&si.model) else {
-            continue; // pool full — retry next tick
+            continue; // pool full - retry next tick
         };
 
         let current = &bp.0.stages[cursor.index];
@@ -1680,7 +1680,7 @@ pub fn collect_transition_choice(
                         .position(|s| s.name == target)
                         .unwrap_or(0);
                 // The chosen edge (absent when the matched target has no explicit
-                // edge, e.g. a fallback — then Direct, ungated).
+                // edge, e.g. a fallback - then Direct, ungated).
                 let edge = resp.0.iter().find(|e| e.target == target);
                 let transform = edge.map(|e| e.transform.clone()).unwrap_or_default();
                 // The edge's gate is checked BEFORE its transform runs, so a

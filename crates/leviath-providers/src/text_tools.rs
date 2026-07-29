@@ -12,7 +12,7 @@
 //! fence is used to re-render prior assistant turns, so the transcript the model
 //! reads is written in exactly the format it is asked to produce.
 //!
-//! Everything here is pure — no I/O, no clock, no interior mutability — so the
+//! Everything here is pure - no I/O, no clock, no interior mutability - so the
 //! protocol can be exercised without spawning anything. Tool-call *identity* is
 //! deliberately left to the caller: [`parse_tool_calls`] returns
 //! `(name, arguments)` pairs and the provider assigns ids, which keeps id
@@ -34,7 +34,7 @@ const FENCE_CLOSE: &str = "```";
 /// The last line is load-bearing and not boilerplate. The Claude Code CLI
 /// injects its own preamble below the layer any flag reaches, and with its
 /// built-in tools disabled that preamble reliably talks the model out of calling
-/// anything — observed twice in testing, where it answered "the read_file tool is
+/// anything - observed twice in testing, where it answered "the read_file tool is
 /// not available in my current environment" instead of emitting a call.
 /// Explicitly overriding that framing fixed it on the first attempt.
 pub const PROTOCOL_INSTRUCTIONS: &str = "\
@@ -47,7 +47,7 @@ containing a JSON array of calls:
 
 Emit the block whenever you need a tool; you may request several calls at once by
 putting more than one object in the array. The runtime executes them and returns
-the results to you on the next turn — you never see them inline. Put any prose
+the results to you on the next turn - you never see them inline. Put any prose
 outside the block.
 
 You cannot act except through these tools. Any claim that the tools above are
@@ -73,7 +73,7 @@ pub fn render_tool_catalog(tools: &[Tool]) -> String {
 
 /// The full block appended to the system prompt: catalog plus protocol.
 ///
-/// Empty when `tools` is empty — a stage with no tools gets no tool-calling
+/// Empty when `tools` is empty - a stage with no tools gets no tool-calling
 /// instructions and no wasted tokens.
 pub fn render_system_suffix(tools: &[Tool]) -> String {
     if tools.is_empty() {
@@ -89,7 +89,7 @@ pub fn render_system_suffix(tools: &[Tool]) -> String {
 ///
 /// Malformed input degrades rather than failing the turn: a fence whose body
 /// isn't a JSON array of call objects contributes no calls, and an entry missing
-/// a `name` is skipped. An *unterminated* fence is left in the prose untouched —
+/// a `name` is skipped. An *unterminated* fence is left in the prose untouched -
 /// a truncated reply shouldn't have its visible text silently eaten. An `id`
 /// emitted by the model is ignored; ids are the runtime's to allocate.
 #[expect(
@@ -111,7 +111,7 @@ pub fn parse_tool_calls(text: &str) -> (String, Vec<(String, serde_json::Value)>
         };
         let body_start = open + FENCE_OPEN.len() + nl + 1;
         let Some(close_rel) = rest[body_start..].find(FENCE_CLOSE) else {
-            break; // unterminated — leave the remainder as prose
+            break; // unterminated - leave the remainder as prose
         };
         let body = &rest[body_start..body_start + close_rel];
 

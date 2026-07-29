@@ -1,7 +1,7 @@
 //! A one-shot "stop what you're doing" signal for work already in flight.
 //!
 //! Cancelling an agent sets its status, which stops the dispatch systems from
-//! starting *new* work — but an inference request or tool batch handed to the
+//! starting *new* work - but an inference request or tool batch handed to the
 //! async lanes before that keeps running to completion. For a stalled provider
 //! call that is up to the job timeout; for a tool batch there was no bound at
 //! all, and the batch holds one of the tool lane's fixed number of workers the
@@ -27,7 +27,7 @@ struct Inner {
 }
 
 /// A cloneable cancellation signal. Every clone observes the same state, and
-/// cancelling is idempotent — a token that fires twice (say, a cancel racing a
+/// cancelling is idempotent - a token that fires twice (say, a cancel racing a
 /// reap) is not an error.
 #[derive(Clone, Default)]
 pub struct CancelToken {
@@ -55,7 +55,7 @@ impl CancelToken {
     ///
     /// The waiter is armed *before* the flag is re-checked. `notify_waiters`
     /// only wakes waiters registered at the time it runs, so checking first and
-    /// waiting second would lose a cancel that landed in between — and the job
+    /// waiting second would lose a cancel that landed in between - and the job
     /// would then run to completion despite having been cancelled.
     pub async fn cancelled(&self) {
         let notified = self.inner.notify.notified();

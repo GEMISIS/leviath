@@ -15,7 +15,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
 /// Resolve the API token from `--token` (`arg`) or the `LEVIATH_API_TOKEN`
-/// environment variable. Returns an error — refusing to start — when neither is
+/// environment variable. Returns an error - refusing to start - when neither is
 /// set, so an unauthenticated agent-spawning API can never be launched.
 pub(super) fn resolve_token(arg: Option<&str>) -> anyhow::Result<String> {
     if let Some(t) = arg.map(str::trim).filter(|t| !t.is_empty()) {
@@ -42,12 +42,12 @@ pub(super) fn resolve_token(arg: Option<&str>) -> anyhow::Result<String> {
 /// `state` check used plain `==` until it was pointed at this one.
 use leviath_core::constant_time_eq;
 
-/// The token a request presents: `Authorization: Bearer <token>`, else — **on
-/// the WebSocket routes only** — the `token` query parameter.
+/// The token a request presents: `Authorization: Bearer <token>`, else - **on
+/// the WebSocket routes only** - the `token` query parameter.
 ///
 /// The query form exists because a browser cannot set request headers on a
 /// WebSocket upgrade. It used to be accepted on *every* route, which meant an
-/// ordinary REST call could authenticate with the token in its URL — and a URL
+/// ordinary REST call could authenticate with the token in its URL - and a URL
 /// ends up in reverse-proxy access logs, browser history, and `Referer` headers
 /// on any outbound link. Restricting it to the routes that genuinely cannot use
 /// a header keeps the escape hatch without spreading the credential.

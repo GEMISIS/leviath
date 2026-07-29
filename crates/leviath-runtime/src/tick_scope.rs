@@ -4,7 +4,7 @@
 //! Every agent lives in one shared [`World`](bevy_ecs::world::World) driven by
 //! one [`Schedule`](bevy_ecs::schedule::Schedule), so a caught panic carries no
 //! hint of *whose* data tripped it. Without attribution the daemon can only log
-//! "something panicked" and re-tick the same unchanged state on the next wake —
+//! "something panicked" and re-tick the same unchanged state on the next wake -
 //! panicking again, forever, while every other agent stalls behind it.
 //!
 //! Each per-agent loop in the pipeline therefore calls [`enter`] before touching
@@ -18,7 +18,7 @@
 //! Thread-local rather than a global: parallel tests each drive their own world
 //! on their own thread and would otherwise trample a shared slot. This is sound
 //! because the schedule runs single-threaded (see
-//! [`PipelineWorld::new`](crate::world::PipelineWorld::new)) — systems run on
+//! [`PipelineWorld::new`](crate::world::PipelineWorld::new)) - systems run on
 //! the same thread that catches the panic.
 //!
 //! And plainly set/cleared rather than a `Drop` guard: a guard would clear the
@@ -51,7 +51,7 @@ pub fn enter(entity: Entity) {
     CURRENT.with(|c| c.set(Some(entity)));
 }
 
-/// Forget the current agent — call this when a per-agent loop finishes, so a
+/// Forget the current agent - call this when a per-agent loop finishes, so a
 /// later panic in agent-independent code isn't blamed on the last agent seen.
 pub fn clear() {
     CURRENT.with(|c| c.set(None));
@@ -76,14 +76,14 @@ pub struct PanickedInParallel {
 /// Run one agent's share of a parallel system body, containing a panic to that
 /// agent.
 ///
-/// Catching *here* — inside the closure, where `entity` is in hand — is what
+/// Catching *here* - inside the closure, where `entity` is in hand - is what
 /// makes a compute-pool panic attributable at all: the thread-local scope can't
 /// cross back to the driver thread, and letting the panic unwind out of the task
 /// pool would take down the whole fan-out rather than one agent. The remaining
 /// agents in the batch finish normally.
 ///
 /// `body` is a `&mut dyn FnMut` rather than a generic so every caller shares one
-/// instantiation — the workspace gates a hard 100%, and a generic would give
+/// instantiation - the workspace gates a hard 100%, and a generic would give
 /// each call site its own panic arm to cover.
 pub fn run_agent_parallel(entity: Entity, par_commands: &ParallelCommands, body: &mut dyn FnMut()) {
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));

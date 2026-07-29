@@ -1,4 +1,4 @@
-//! `lev ps` — list the agents running in the shared-world daemon.
+//! `lev ps` - list the agents running in the shared-world daemon.
 //!
 //! Queries the daemon over its control socket and prints one line per run. The
 //! query + formatting cores are tested here; the socket-path resolution + connect

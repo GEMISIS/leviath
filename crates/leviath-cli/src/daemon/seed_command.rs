@@ -1,21 +1,21 @@
 //! Execution of `seed = { command = "..." }` region seeds (issue #108).
 //!
 //! A command seed runs a shell command in the run's workdir at spawn and puts
-//! its combined stdout/stderr into the region — but only when the command
+//! its combined stdout/stderr into the region - but only when the command
 //! *succeeds*; a non-zero exit is reported as an error so a diagnostic never
 //! masquerades as data. It is the only seed source that *executes* anything, and
-//! it does so before the first inference — therefore before any tool-approval
-//! prompt — so it is deliberately hemmed in:
-//!
-//! - it is skipped entirely unless [`SeedCommandPolicy::allowed`] (the
+//! it does so before the first inference - therefore before any tool-approval
+//! prompt - so it is deliberately hemmed in:
+//! -
+//! it is skipped entirely unless [`SeedCommandPolicy::allowed`] (the
 //!   `[security] allow_seed_commands` config switch and the `--no-seed-commands`
-//!   launch flag);
-//! - it runs inside the entry stage's sandbox when the agent declares one,
+//!   launch flag); -
+//! it runs inside the entry stage's sandbox when the agent declares one,
 //!   using the same [`ShellExecutor::build_command`] routing as the built-in
-//!   `shell` tool, so a seed can't escape the isolation the stage asked for;
-//! - it is capped in wall-clock time (`[limits] script_shell_timeout_secs`) and
-//!   in output size (`cap_script_io`);
-//! - it never runs on restart — [`crate::daemon::spawn`] only resolves seeds on
+//!   `shell` tool, so a seed can't escape the isolation the stage asked for; -
+//! it is capped in wall-clock time (`[limits] script_shell_timeout_secs`) and
+//!   in output size (`cap_script_io`); -
+//! it never runs on restart - [`crate::daemon::spawn`] only resolves seeds on
 //!   a fresh spawn.
 
 use std::path::Path;
@@ -62,7 +62,7 @@ impl SeedCommandPolicy {
         }
     }
 
-    /// A policy that never runs anything — used on the reload/restore path and
+    /// A policy that never runs anything - used on the reload/restore path and
     /// wherever seeds are resolved without a live sandbox.
     pub fn disabled() -> Self {
         Self {
@@ -100,7 +100,7 @@ fn seed_command_runner(sandbox: Option<Arc<SandboxManager>>) -> SeedCommandRunne
 }
 
 /// Build the command for a seed: through the agent's sandbox when it has one,
-/// else straight onto the host — both targeting the run's workdir.
+/// else straight onto the host - both targeting the run's workdir.
 ///
 /// Split from execution so the routing decision is assertable without spawning
 /// anything (and without depending on whether the host's namespaces actually
@@ -121,16 +121,16 @@ fn build_seed_command(
 /// stdout+stderr (capped by `cap_script_io`) on success.
 ///
 /// **A non-zero exit is an error, not data.** The combined output of a failed
-/// command is a diagnostic — `git ls-files` outside a repository prints
-/// `fatal: not a git repository` — and returning it as the seed value would
+/// command is a diagnostic - `git ls-files` outside a repository prints
+/// `fatal: not a git repository` - and returning it as the seed value would
 /// plant that text in a pinned region as though it were the file listing the
 /// blueprint promised. The caller logs it and leaves the region empty instead
 /// (or fails the spawn, when the region is `required`).
 ///
 /// This runs on a freshly spawned OS thread with its own current-thread runtime
 /// rather than reusing the ambient one. `resolve_seeds` is a synchronous
-/// function called from an async context, so `Handle::current().block_on(...)`
-/// — the trick `RealScriptIo::run_shell` uses from its `spawn_blocking` thread —
+/// function called from an async context, so `Handle::current().block_on(...)` -
+/// the trick `RealScriptIo::run_shell` uses from its `spawn_blocking` thread -
 /// would panic here. A dedicated thread has no ambient runtime, and going
 /// through tokio (rather than `std::process`) buys a real timeout: dropping the
 /// `output()` future on expiry kills the child via `kill_on_drop`, instead of
@@ -259,7 +259,7 @@ mod tests {
     fn real_runner_times_out_a_long_command() {
         let policy = SeedCommandPolicy::new(true, Duration::from_millis(150), None);
         // Each platform's own idiom for "sleep". `#[cfg]` rather than `cfg!` so
-        // only the arm for THIS platform is compiled — the other would otherwise
+        // only the arm for THIS platform is compiled - the other would otherwise
         // count as unreachable code against the coverage gate.
         #[cfg(windows)]
         let long = "ping -n 30 127.0.0.1 > NUL";
@@ -288,7 +288,7 @@ mod tests {
     }
 
     /// With a sandbox attached the command is built BY the manager rather than
-    /// straight onto the host — the same routing the built-in `shell` tool uses,
+    /// straight onto the host - the same routing the built-in `shell` tool uses,
     /// so a seed can't escape the isolation the entry stage declared.
     ///
     /// This asserts the routing, not the execution: whether a namespace is

@@ -140,7 +140,7 @@ impl RepetitionDetector {
             let count_val = *count;
             return Some(format!(
                 "You have called {tool_name} with the same arguments {count_val} times. \
-                 This appears to be a loop. Take a different action — try writing code \
+                 This appears to be a loop. Take a different action - try writing code \
                  with write_file, editing with edit_file, running commands with bash, \
                  or storing analysis with context_write."
             ));
@@ -152,7 +152,7 @@ impl RepetitionDetector {
             return Some(format!(
                 "You have made {streak} consecutive read-only tool calls \
                  (read_file/list_dir) without any writes or command execution. \
-                 Break this pattern — write a file, edit code, run a command, \
+                 Break this pattern - write a file, edit code, run a command, \
                  or use context_write to store your analysis."
             ));
         }
@@ -231,7 +231,7 @@ mod tests {
                 .is_none()
         );
 
-        // Read again — counter should be back to 1
+        // Read again - counter should be back to 1
         assert!(
             detector
                 .record_call("read_file", r#"{"path":"foo.py"}"#)
@@ -289,7 +289,7 @@ mod tests {
                 .record_call("read_file", r#"{"path":"c.rs"}"#)
                 .is_none()
         );
-        // No nudge — all different args
+        // No nudge - all different args
     }
 
     #[test]
@@ -366,7 +366,7 @@ mod tests {
 
         detector.record_call("read_file", r#"{"path":"a.rs"}"#);
         detector.record_call("read_file", r#"{"path":"b.rs"}"#);
-        // Unknown tool: not readonly, not productive — doesn't increment or reset streak
+        // Unknown tool: not readonly, not productive - doesn't increment or reset streak
         detector.record_call("some_other_tool", r#"{}"#);
         // Streak is still 2
         assert!(

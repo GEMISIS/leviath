@@ -63,7 +63,7 @@ pub(crate) fn apply_tool_results(
         let base_region = match routing {
             Some(r) => {
                 // Match overrides by CANONICAL tool name so a `bash = "..."` override
-                // routes the `shell` tool (bash is an alias — the model calls the
+                // routes the `shell` tool (bash is an alias - the model calls the
                 // canonical `shell`, so a literal-key lookup would silently miss).
                 let canon = leviath_tools::canonical_tool_name(&tool_name);
                 r.tool_overrides
@@ -106,7 +106,7 @@ pub(crate) fn apply_tool_results(
                     let omitted = content.len().saturating_sub(prefix.len());
                     format!("{}... [truncated, {} chars omitted]", prefix, omitted)
                 } else {
-                    "[tool result truncated — context window full]".to_string()
+                    "[tool result truncated - context window full]".to_string()
                 };
                 let trunc_tokens = leviath_core::estimate_tokens(&truncated);
                 if put(window, truncated, trunc_tokens).is_err() {
@@ -135,7 +135,7 @@ pub(crate) fn apply_tool_results(
             // in the message immediately after its tool_use, so the PAIR must stay in
             // `conversation`: we keep a short pointer tool_result there (valid + cheap)
             // and store the FULL output in the target region as TEXT. Text renders as a
-            // stable knowledge block for any region kind — a ToolResult block in a
+            // stable knowledge block for any region kind - a ToolResult block in a
             // second sliding_window would desync from its tool_use (→ API 400), and
             // dropping the conversation tool_result would orphan the tool_use (the
             // assembler strips it, so the model can't see its own call landed → loops).
@@ -146,7 +146,7 @@ pub(crate) fn apply_tool_results(
                 ""
             };
             let pointer = format!(
-                "[output stored in context region '{target_region}' ({result_tokens} tokens) — read that region for the full result. Preview: {preview}{ellipsis}]"
+                "[output stored in context region '{target_region}' ({result_tokens} tokens) - read that region for the full result. Preview: {preview}{ellipsis}]"
             );
             let pointer_tokens = leviath_core::estimate_tokens(&pointer);
             add_kind(
@@ -187,7 +187,7 @@ pub(crate) fn truncate_file(content: String, max_tokens: Option<usize>) -> Strin
 /// File tracking: for each `read_file`/`write_file` result (per the stage's
 /// [`FileTrackingConfig`](leviath_core::blueprint::FileTrackingConfig)), upsert
 /// the file body into the configured HashMap region (keyed by path, so re-reads
-/// de-dup) and replace the inline tool result with a short reference — keeping
+/// de-dup) and replace the inline tool result with a short reference - keeping
 /// large file bodies out of the rolling conversation. No-op unless the region
 /// exists and is a HashMap. `read_file`'s body is the result; `write_file`'s is
 /// its `content` argument (no re-read needed in the ECS).
@@ -270,7 +270,7 @@ pub(crate) fn stage_modifying_tools(
 
 /// Tally this batch's file-modifying tool calls onto the stage's progress and the
 /// run's outcome flags. A result prefixed `[denied]` (permission layer) counts as
-/// *blocked* rather than successful — the agent tried and was refused, which a
+/// *blocked* rather than successful - the agent tried and was refused, which a
 /// gate treats differently from never having tried. `[error]` results (the write
 /// itself failed) count as neither.
 pub(crate) fn record_modifications(

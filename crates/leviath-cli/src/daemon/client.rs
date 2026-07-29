@@ -20,7 +20,7 @@ use crate::runstate::new_run_id;
 /// blueprint's declared caller-input regions.
 ///
 /// `regions` maps a flag name to its raw value. An unknown region name (one the
-/// blueprint doesn't read as caller input) is a hard error here — fast, local
+/// blueprint doesn't read as caller input) is a hard error here - fast, local
 /// typo protection before the daemon is contacted.
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_spawn_args(

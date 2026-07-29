@@ -4,7 +4,7 @@ use super::*;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-/// No credential-shaped variable is allowlisted — the default posture, and the
+/// No credential-shaped variable is allowlisted - the default posture, and the
 /// one these tests should be checking against.
 fn no_env_allowlist() -> Arc<Vec<String>> {
     Arc::new(Vec::new())
@@ -85,7 +85,7 @@ fn env_var_present_and_absent() {
 
 /// A provider script runs during inference, not through a tool call, so nothing
 /// it does passes an approval prompt. An unallowlisted credential name therefore
-/// reads as unset — scripts already handle "my key isn't in the environment" by
+/// reads as unset - scripts already handle "my key isn't in the environment" by
 /// falling back to their `initialize` config, so this puts them on that path
 /// rather than failing the whole inference.
 #[test]

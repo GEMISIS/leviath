@@ -11,7 +11,7 @@
 //!
 //! **Flags that matter, and why:**
 //! - No `--bare`. It looks like the right lockdown switch, but it documents
-//!   itself as "Anthropic auth is strictly ANTHROPIC_API_KEY or apiKeyHelper —
+//!   itself as "Anthropic auth is strictly ANTHROPIC_API_KEY or apiKeyHelper -
 //!   OAuth and keychain are never read", so under a subscription every call
 //!   fails with `Not logged in · Please run /login`. Every mechanism that
 //!   suppresses the CLI's injected context also disables OAuth; the two are
@@ -27,7 +27,7 @@
 //!   asked for.
 //!
 //! **Limitations compared to a direct API provider:**
-//! - The CLI adds ~130 tokens of its own context to every call — a billing
+//! - The CLI adds ~130 tokens of its own context to every call - a billing
 //!   header, an identity line, the current date, and (on the OAuth path) the
 //!   user's account email address. None of it can be disabled.
 //! - No prompt caching: each call is a fresh process with a fresh session.
@@ -133,7 +133,7 @@ impl ClaudeCodeProvider {
     /// The full system prompt: Leviath's assembled system blocks, plus the tool
     /// catalog and protocol when the stage has tools.
     ///
-    /// This is the fix for the transport's central bug — `ContextWindow::assemble`
+    /// This is the fix for the transport's central bug - `ContextWindow::assemble`
     /// puts every structured region except the sliding message window into
     /// `request.system`, and the previous implementation read only messages with
     /// `role == "system"`, a field `assemble()` never populates. The regions were
@@ -220,14 +220,14 @@ impl ClaudeCodeProvider {
         let mut stdin = child
             .stdin
             .take()
-            .expect("stdin pipe was configured — take() always succeeds");
+            .expect("stdin pipe was configured - take() always succeeds");
         let prompt = text_tools::flatten_messages(&request.messages);
         // Feed stdin from a detached task, for two reasons. First, it runs
         // concurrently with reading stdout, so a large response can't deadlock
         // against a large prompt (each side blocked waiting for the other to
         // drain). Second, the write result is deliberately ignored: a CLI that
         // exits before draining stdin closes the pipe, and that broken pipe is
-        // not our failure — the child's exit status and stderr are what matter,
+        // not our failure - the child's exit status and stderr are what matter,
         // and letting the write error win would mask them (e.g. hide a nonzero
         // exit's diagnostics behind "broken pipe"). Dropping `stdin` when the
         // task ends closes it, signalling EOF.
@@ -297,7 +297,7 @@ impl ClaudeCodeProvider {
             .unwrap_or(0) as usize;
 
         // A reply that asked for tools finished for that reason, whatever the
-        // CLI's own `stop_reason` says — it has no concept of our protocol.
+        // CLI's own `stop_reason` says - it has no concept of our protocol.
         let finish_reason = if tool_calls.is_empty() {
             parse_stop_reason(json.get("stop_reason").and_then(|v| v.as_str()))
         } else {
@@ -349,7 +349,7 @@ fn classify_error(json: &serde_json::Value) -> ProviderError {
     // of the substrings `is_transient` looks for, so it stays permanent.
     if lowered.contains("not logged in") || lowered.contains("/login") {
         return ProviderError::ApiError(format!(
-            "{text} — the Claude Code CLI is not authenticated. Run `claude` and sign in, \
+            "{text} - the Claude Code CLI is not authenticated. Run `claude` and sign in, \
              or use a direct provider with an API key."
         ));
     }
@@ -368,8 +368,8 @@ fn prompt_file_error(e: std::io::Error) -> ProviderError {
 
 /// Write the system prompt to a fresh temp file in `dir` and return the handle.
 ///
-/// The file is created 0600 by `tempfile` — the prompt carries the user's task
-/// and their code, so it must not be world-readable even briefly — and is
+/// The file is created 0600 by `tempfile` - the prompt carries the user's task
+/// and their code, so it must not be world-readable even briefly - and is
 /// removed when the returned guard drops, including on every error path in the
 /// caller.
 ///
@@ -404,7 +404,7 @@ fn parse_stop_reason(reason: Option<&str>) -> FinishReason {
 
 /// Run `op` (a spawn attempt), retrying briefly when it fails with
 /// `ETXTBSY`. On POSIX, `exec` fails with "Text file busy" while *any*
-/// process holds a write handle to the executable — including a write fd
+/// process holds a write handle to the executable - including a write fd
 /// inherited by another process's in-flight fork/exec, or an installer
 /// rewriting the claude binary mid-spawn. The condition clears as soon as
 /// the writer closes, so a short bounded retry is the standard remedy
@@ -710,7 +710,7 @@ mod tests {
         let second = provider.assign_ids(vec![("c".to_string(), serde_json::json!({}))]);
         assert_eq!(first[0].id, "cc_call_1");
         assert_eq!(first[1].id, "cc_call_2");
-        // Not restarted at 1 — a transcript pairs results to ids by name.
+        // Not restarted at 1 - a transcript pairs results to ids by name.
         assert_eq!(second[0].id, "cc_call_3");
         assert_eq!(second[0].name, "c");
     }
@@ -912,18 +912,18 @@ mod tests {
     // ─── infer(): stub `claude` binary via with_binary_path ─────────────────
     //
     // ClaudeCodeProvider shells out to a real subprocess, so exercising infer()
-    // means substituting a fake "claude" binary -- a small script that prints
-    // canned output -- via the existing `with_binary_path` test seam.
+    // means substituting a fake "claude" binary - a small script that prints
+    // canned output - via the existing `with_binary_path` test seam.
     //
     // A `#!/bin/sh` shebang script (`chmod +x`'d and spawned directly) is
     // Unix-only: Windows' `CreateProcess` doesn't understand shebangs and can't
-    // execute a `.sh` file as a native binary at all -- every test using one
+    // execute a `.sh` file as a native binary at all - every test using one
     // failed on Windows CI with "%1 is not a valid Win32 application" (os error
     // 193). `.bat` files, on the other hand, Windows *can* launch directly via
     // `Command::new(path)`.
     //
     // `write_stub_script` therefore takes a body for each syntax and internally
-    // writes whichever one applies to the target platform -- so each test below
+    // writes whichever one applies to the target platform - so each test below
     // is a single, platform-agnostic function, just parameterized on two small
     // strings expressing the same canned behavior in each shell's syntax.
     fn write_stub_script(tag: &str, sh_body: &str, bat_body: &str) -> std::path::PathBuf {
@@ -1063,7 +1063,7 @@ mod tests {
     #[tokio::test]
     async fn infer_with_timeout_fires_on_slow_process() {
         // A stub that outlives a short injected timeout, exercising the real
-        // `tokio::time::timeout` branch -- `infer()` hardcodes a 5-minute
+        // `tokio::time::timeout` branch - `infer()` hardcodes a 5-minute
         // timeout, far too long to wait for in a test. Windows has no `sleep`;
         // `ping -n 6 127.0.0.1` is the standard batch-file substitute.
         let script = write_stub_script(
@@ -1087,7 +1087,7 @@ mod tests {
     #[tokio::test]
     async fn infer_honors_per_request_timeout() {
         // `infer()` must read a per-stage `request_timeout_secs` and abort the
-        // subprocess at that deadline instead of the 15-minute default — proving
+        // subprocess at that deadline instead of the 15-minute default - proving
         // the per-stage timeout reaches this (non-HTTP) provider too.
         let script = write_stub_script(
             "infer-per-req",
@@ -1122,7 +1122,7 @@ mod tests {
     }
 
     /// A CLI that exits nonzero without draining stdin must still report its
-    /// real exit status and stderr — the broken pipe from the undrained write is
+    /// real exit status and stderr - the broken pipe from the undrained write is
     /// swallowed, not surfaced in its place. Uses a payload larger than the pipe
     /// buffer so the write genuinely races the early exit (the exact shape that
     /// used to leak a "broken pipe" error over the nonzero-exit diagnostics).

@@ -65,7 +65,7 @@ impl Dashboard {
                     .map(|t| truncate(t.trim_start_matches('#').trim(), 26))
                     .unwrap_or_else(|| truncate(&agent.task, 26));
                 let tok_str = if agent.tokens_in == 0 && agent.tokens_out == 0 {
-                    "—".to_string()
+                    "-".to_string()
                 } else {
                     format!(
                         "{}↑ {}↓",
@@ -565,7 +565,7 @@ mod tests {
     #[test]
     fn draw_agent_table_title_none_falls_back_to_task() {
         // `title` is `None` before title generation completes (or when
-        // disabled) -- exercises the `.unwrap_or_else(|| truncate(&agent.task, 26))`
+        // disabled) - exercises the `.unwrap_or_else(|| truncate(&agent.task, 26))`
         // fallback closure, which every other test in this file never
         // reaches because `make_test_agent` always sets `title: Some(...)`.
         let backend = TestBackend::new(120, 40);
@@ -589,7 +589,7 @@ mod tests {
         // `make_test_agent` defaults to `num_stages: 2`, always taking the
         // `agent.num_stages > 1` branch (stage name + "i/n" counter). A
         // single-stage agent takes the other arm (bare truncated stage
-        // name, no counter) -- never exercised elsewhere in this file.
+        // name, no counter) - never exercised elsewhere in this file.
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
@@ -915,7 +915,7 @@ mod tests {
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("input"));
         assert!(text.contains("[i]"));
-        // 'm' was unified into 'i' — no separate [m] hint should remain.
+        // 'm' was unified into 'i' - no separate [m] hint should remain.
         assert!(!text.contains("[m]"));
     }
 

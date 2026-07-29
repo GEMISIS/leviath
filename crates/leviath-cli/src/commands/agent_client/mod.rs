@@ -1,10 +1,10 @@
-//! `lev agent-client` — serve a Leviath agent over the Agent **Client** Protocol.
+//! `lev agent-client` - serve a Leviath agent over the Agent **Client** Protocol.
 //!
 //! ## Which protocol this is
 //!
 //! This speaks the [Agent Client Protocol][acp]: JSON-RPC 2.0, newline-delimited,
 //! over **stdio**. It is the protocol Zed and Gas City use to drive a headless
-//! agent as a child process — `initialize` / `session/new` / `session/prompt` /
+//! agent as a child process - `initialize` / `session/new` / `session/prompt` /
 //! `session/cancel`, with `session/update` notifications streaming output back.
 //!
 //! It is **not** the Agent *Communication* Protocol (a REST + SSE API from the
@@ -25,7 +25,7 @@
 //! The protocol logic is [`serve_over`], which takes its reader/writer generically
 //! and erases them to trait objects internally, so the whole
 //! handshake→prompt→stream sequence is driven in tests over an in-memory duplex
-//! against a fake daemon — no process, no terminal, no real stdio.
+//! against a fake daemon - no process, no terminal, no real stdio.
 //!
 //! [acp]: https://agentclientprotocol.com
 
@@ -78,7 +78,7 @@ pub struct AgentClientArgs {
     pub max_depth: Option<usize>,
 
     /// Refuse the blueprint's `seed = { command = "..." }` regions. Those run a
-    /// shell command at spawn — before the first inference, and so before any
+    /// shell command at spawn - before the first inference, and so before any
     /// approval prompt.
     #[arg(long)]
     pub no_seed_commands: bool,
@@ -159,7 +159,7 @@ struct Server {
     session: Option<ActiveSession>,
     /// Monotonic id source for agent→client requests.
     next_request_id: i64,
-    /// Working directory to use when a `session/new` omits (or empties) `cwd` —
+    /// Working directory to use when a `session/new` omits (or empties) `cwd` -
     /// the directory `lev agent-client` was launched from. Without this the
     /// agent's workdir was an empty string, so it ran in the daemon's directory
     /// rather than the caller's.
@@ -184,7 +184,7 @@ enum RunStart {
 /// What became of an interaction raised mid-turn.
 enum InteractionOutcome {
     /// The interaction was resolved in-turn (via `session/request_permission`),
-    /// or the client cannot answer it and Leviath will handle it out of band —
+    /// or the client cannot answer it and Leviath will handle it out of band -
     /// either way the turn keeps streaming until the run reaches a done state.
     Continue,
     /// The interaction was surfaced as output and the turn ends now with this
@@ -200,7 +200,7 @@ impl Server {
     async fn run(&mut self, reader: &mut BoxReader) {
         while self.io_alive {
             let Some(line) = read_line(reader).await else {
-                break; // EOF or a read error — the client is gone
+                break; // EOF or a read error - the client is gone
             };
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -272,7 +272,7 @@ impl Server {
     }
 
     /// `session/new`: resolve the blueprint and open a session. No run is spawned
-    /// yet — that waits for the first prompt.
+    /// yet - that waits for the first prompt.
     async fn on_session_new(&mut self, id: serde_json::Value, params: Option<serde_json::Value>) {
         let params: SessionNewParams = params
             .and_then(|p| serde_json::from_value(p).ok())
@@ -397,7 +397,7 @@ impl Server {
             .clone();
         let run_id = match self.start_run(task, regions).await {
             RunStart::Ready(run_id) => run_id,
-            // The agent already finished and won't take another message — the
+            // The agent already finished and won't take another message - the
             // turn is simply over, not a failure.
             RunStart::MessageUndeliverable => return StopReason::EndTurn,
             // The daemon refused to create the run, or was unreachable.
@@ -436,7 +436,7 @@ impl Server {
                         // that's needed.
                         _ => {}
                     }
-                    // A run can reach a done state without a `Completed` event —
+                    // A run can reach a done state without a `Completed` event -
                     // `CompleteInteractive` stays live for follow-up, so it emits
                     // no terminal event. Consult the persisted run status after
                     // every event so the turn ends when (and only when) the run is
@@ -471,7 +471,7 @@ impl Server {
     /// Whether the run has reached a state that should end the current turn,
     /// read from its persisted `meta.json` status. Returns the stop reason to
     /// report, or `None` while the run is still starting / running / blocked on
-    /// input (`WaitingInput`) — the latter must keep the turn in flight so a
+    /// input (`WaitingInput`) - the latter must keep the turn in flight so a
     /// non-interactive client is never told "done" while the agent is actually
     /// waiting on an interaction Leviath is handling out of band.
     fn run_finished(&self, run_id: &str) -> Option<StopReason> {
@@ -537,7 +537,7 @@ impl Server {
     ///   `session/request_permission`, answered in-turn; the run continues.
     /// - **Capable client + any other interaction** → surface the question as
     ///   output and end the turn (`Park`). The client owns the conversation and
-    ///   re-prompts with the answer, which arrives as the next `session/prompt` —
+    ///   re-prompts with the answer, which arrives as the next `session/prompt` -
     ///   the standard Agent Client Protocol turn boundary.
     /// - **Client without capabilities (e.g. Gas City, which reports interaction
     ///   unsupported)** → surface the question as output and **keep the turn in
@@ -734,7 +734,7 @@ fn read_run_status(runs_dir: &std::path::Path, run_id: &str) -> Option<RunStatus
 ///
 /// `CompleteInteractive` counts as finished: the agent completed its required
 /// work and is only idling for optional follow-up, so control returns to the
-/// client. `WaitingInput` does **not** — the agent is blocked on an interaction,
+/// client. `WaitingInput` does **not** - the agent is blocked on an interaction,
 /// which is exactly the state that must not be reported as "done".
 /// The run id carried by any [`WorldEvent`] variant.
 fn world_event_run_id(event: &WorldEvent) -> &str {
@@ -749,7 +749,7 @@ fn world_event_run_id(event: &WorldEvent) -> &str {
     }
 }
 
-/// Mint a session id from the agent name — reuses the run-id generator's
+/// Mint a session id from the agent name - reuses the run-id generator's
 /// collision-resistant `<name>-<timestamp>-<suffix>` scheme.
 fn new_session_id(agent_name: &str) -> String {
     crate::runstate::new_run_id(agent_name)
@@ -790,7 +790,7 @@ mod mapping {
     ///
     /// The three option ids we offer map to allow-once, allow-for-session, and
     /// reject. A `cancelled` outcome, or any option id we did not offer, is
-    /// treated as a one-time rejection — the safe default.
+    /// treated as a one-time rejection - the safe default.
     pub(super) fn interpret_permission(outcome: &PermissionOutcome) -> PermissionChoice {
         match outcome {
             PermissionOutcome::Selected { option_id } if option_id == OPTION_ALLOW_ONCE => {

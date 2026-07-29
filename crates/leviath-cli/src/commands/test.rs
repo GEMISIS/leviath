@@ -50,7 +50,7 @@ pub async fn execute(args: TestArgs) -> anyhow::Result<()> {
     execute_with_registry(args, Box::new(build_registry_from_config)).await
 }
 
-/// Builds the real provider registry from a loaded [`Config`] -- the
+/// Builds the real provider registry from a loaded [`Config`] - the
 /// production `build_registry` passed to [`execute_with_registry`] by
 /// [`execute`].
 fn build_registry_from_config(config: &Config) -> ProviderRegistry {
@@ -102,14 +102,14 @@ fn build_registry_from_config(config: &Config) -> ProviderRegistry {
 ///
 /// `build_registry` is a boxed trait object (`Box<dyn FnOnce(&Config) ->
 /// ProviderRegistry>`) rather than `impl FnOnce(&Config) -> ProviderRegistry`
-/// so every caller -- production's `build_registry_from_config` and every
-/// test's distinct `mock_registry_builder(...)` closure -- shares exactly
+/// so every caller - production's `build_registry_from_config` and every
+/// test's distinct `mock_registry_builder(...)` closure - shares exactly
 /// ONE monomorphization of this (large, many-branch) function instead of
 /// one per closure type. This was a confirmed generic-monomorphization
 /// coverage-attribution artifact: every source position had a covered
 /// instantiation (confirmed via HTML/JSON segment inspection showing no
 /// red/uncovered regions anywhere in this function), but the summary table
-/// still reported 32 regions / 21 lines missed -- the largest such residual
+/// still reported 32 regions / 21 lines missed - the largest such residual
 /// in this crate.
 async fn execute_with_registry(
     args: TestArgs,
@@ -727,7 +727,7 @@ max_tokens = 500
         assert_eq!(truncate_str("abc🎉def", 6), "abc...");
         // A boundary-aligned cut is unaffected.
         assert_eq!(truncate_str("abc🎉def", 7), "abc🎉...");
-        // Every character straddles the cut — the preview degrades to the marker
+        // Every character straddles the cut - the preview degrades to the marker
         // rather than panicking.
         assert_eq!(truncate_str("🎉🎉", 2), "...");
     }
@@ -1140,7 +1140,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     };
 
     /// A mock provider that returns a fixed canned response, entirely in
-    /// memory -- no network calls, no subprocess spawning.
+    /// memory - no network calls, no subprocess spawning.
     struct MockProvider {
         content: String,
         tool_calls: Vec<ToolCall>,
@@ -1797,7 +1797,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     // back to defaults instead of racing some *other*, concurrently-running
     // test's temporarily-malformed config file at the same process-global
     // env var (see `models.rs`'s own `isolate_config_path_for_test` users
-    // for the other side of that race -- without this, this whole group was
+    // for the other side of that race - without this, this whole group was
     // observed to fail intermittently, with a config-parse error instead of
     // the expected test-run outcome, when run alongside `commands::models`'s
     // test suite).
@@ -1877,7 +1877,7 @@ expect_contains = "world"
         // invoked by any other test (all of which pass an explicit `path`).
         // `cargo test`'s cwd is this crate's own source directory, which
         // has no `agent.leviath`, so this deterministically hits the
-        // "No agent.leviath found" bail -- proving the closure ran without
+        // "No agent.leviath found" bail - proving the closure ran without
         // depending on (or mutating) any real project directory.
         let args = TestArgs {
             path: None,
@@ -1956,7 +1956,7 @@ expect_contains = "unmatchable content"
                 };
 
                 // "skip_me" would fail (its expectation never matches the mock
-                // response), but the filter excludes it -- only "keep_me" runs, and
+                // response), but the filter excludes it - only "keep_me" runs, and
                 // it passes, so the whole run succeeds.
                 let result = execute_with_registry(
                     args,
@@ -2215,7 +2215,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
                 write_test_agent(project, manifest);
                 let tests_dir = project.join("tests");
                 std::fs::create_dir_all(&tests_dir).unwrap();
-                // Returns an integer, not a bool -- exercises the `else` arm of the
+                // Returns an integer, not a bool - exercises the `else` arm of the
                 // `result.as_bool()` match (treated as an automatic pass).
                 std::fs::write(tests_dir.join("script.rhai"), "42").unwrap();
 
@@ -2261,7 +2261,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
                     dry_run: false,
                 };
 
-                // Filter excludes the only script -- 0 total, reports "no test files
+                // Filter excludes the only script - 0 total, reports "no test files
                 // found" and succeeds (rather than failing on the script's `false`).
                 let result =
                     execute_with_registry(args, Box::new(mock_registry_builder("unused", vec![])))
@@ -2276,7 +2276,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     //
     // The production registry builder passed to `execute_with_registry` by
     // `execute()`. `Provider::new`/`with_base_url` constructors just store
-    // config -- they don't make network calls -- so this is safe to exercise
+    // config - they don't make network calls - so this is safe to exercise
     // directly with fake keys, registering every provider branch.
 
     #[test]
@@ -2312,7 +2312,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         assert!(!registry.has("openai"));
         assert!(!registry.has("google"));
         assert!(!registry.has("openrouter"));
-        // ollama has no key gate -- always registered, with the default URL
+        // ollama has no key gate - always registered, with the default URL
         // when `ollama_base_url` is unset.
         assert!(registry.has("ollama"));
     }
@@ -2335,7 +2335,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
-        // A .txt file — neither .toml nor .rhai — exercises the implicit else
+        // A .txt file - neither .toml nor .rhai - exercises the implicit else
         // path that simply skips unrecognized files.
         std::fs::write(tests_dir.join("readme.txt"), "this file should be ignored").unwrap();
         let args = TestArgs {

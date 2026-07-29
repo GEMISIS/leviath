@@ -32,7 +32,7 @@ pub fn count_tokens(text: &str, model: &str) -> usize {
 ///
 /// Both halves return `&'static CoreBPE` from tiktoken-rs's cached singletons,
 /// so an unknown model falls back to `cl100k_base` without building a second
-/// encoder — and without the `.expect()` the old fallible `cl100k_base()`
+/// encoder - and without the `.expect()` the old fallible `cl100k_base()`
 /// required, since the singleton accessor cannot fail.
 fn count_tokens_tiktoken(text: &str, model: &str) -> usize {
     let bpe = bpe_for_model(model).unwrap_or_else(|_| tiktoken_rs::cl100k_base_singleton());
@@ -133,8 +133,8 @@ mod tests {
 
     #[test]
     fn an_unrecognized_gpt_model_falls_back_to_cl100k() {
-        // tiktoken-rs resolves plausible future names by prefix — `gpt-5.5`
-        // returns `Ok` — so the fallback needs a name its table genuinely has
+        // tiktoken-rs resolves plausible future names by prefix - `gpt-5.5`
+        // returns `Ok` - so the fallback needs a name its table genuinely has
         // no entry for. Without this, the `unwrap_or_else` arm is never taken
         // and an unknown model would panic in production before anyone noticed.
         assert!(tiktoken_rs::bpe_for_model("gpt-zzz").is_err());

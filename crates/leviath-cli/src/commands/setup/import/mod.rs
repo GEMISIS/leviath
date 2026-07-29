@@ -1,7 +1,7 @@
 //! Discovering MCP servers already configured in other agent harnesses.
 //!
 //! Someone installing Leviath has usually already wired up MCP servers
-//! somewhere else — Claude Code, Cursor, Codex, Zed. Making them retype each
+//! somewhere else - Claude Code, Cursor, Codex, Zed. Making them retype each
 //! one is busywork, and the entries are close enough in shape to convert
 //! mechanically, so `lev setup` offers to import them.
 //!
@@ -10,9 +10,9 @@
 //! Two halves, deliberately separated:
 //!
 //! * [`formats`] turns file *contents* into candidates. Pure, no filesystem, no
-//!   `#[cfg]` — every harness's format is testable on every platform, including
+//!   `#[cfg]` - every harness's format is testable on every platform, including
 //!   ones whose files could never exist there.
-//! * This module knows *where* those files live — the only platform-dependent
+//! * This module knows *where* those files live - the only platform-dependent
 //!   part. It takes its roots as an injected [`Roots`] rather than reading the
 //!   environment, so the whole table is testable against tempdirs, and the one
 //!   genuine per-OS branch is `#[cfg]`-gated in a single place, per the rule
@@ -82,9 +82,9 @@ impl Scan {
 ///
 /// Two config roots, not one, because the harnesses genuinely disagree. Claude
 /// Desktop and VS Code follow the OS convention (`~/Library/Application Support`
-/// on macOS, `%APPDATA%` on Windows, `~/.config` on Linux) — that is
+/// on macOS, `%APPDATA%` on Windows, `~/.config` on Linux) - that is
 /// [`Self::os_config`]. Zed and OpenCode use an XDG-style `~/.config` on macOS
-/// *as well as* Linux — that is [`Self::xdg_config`]. Collapsing them would
+/// *as well as* Linux - that is [`Self::xdg_config`]. Collapsing them would
 /// silently look in the wrong place for half the table on macOS.
 #[derive(Debug, Clone)]
 pub struct Roots {
@@ -125,7 +125,7 @@ fn xdg_config_root(home: &Path, os_config: &Path) -> PathBuf {
 
 /// Platform default for the XDG-style root, with no `$XDG_CONFIG_HOME` set.
 ///
-/// macOS and Linux both use `~/.config` here — that is the whole reason this
+/// macOS and Linux both use `~/.config` here - that is the whole reason this
 /// root is separate from `dirs::config_dir()`, which on macOS points at
 /// Application Support. Windows has no such convention, so tools that would use
 /// it there fall back to the OS config directory.
@@ -251,7 +251,7 @@ pub fn known_sources(roots: &Roots) -> Vec<Source> {
 //
 // The per-OS differences in *where* these files live turn out to be entirely
 // absorbed by `dirs::config_dir()`, which the caller supplies as `Roots.config`
-// — `~/Library/Application Support` on macOS, `%APPDATA%` on Windows,
+// - `~/Library/Application Support` on macOS, `%APPDATA%` on Windows,
 // `~/.config` on Linux. Both vendors below put their file at the same relative
 // path under it on all three, so no `#[cfg]` is needed here. Writing out three
 // identical arms would only claim a difference that does not exist; if one
@@ -281,7 +281,7 @@ fn parse(layout: Layout, contents: &str) -> anyhow::Result<Vec<Candidate>> {
 
 /// Read and parse every known source that exists.
 ///
-/// Sources whose path does not exist are omitted entirely — on a clean machine
+/// Sources whose path does not exist are omitted entirely - on a clean machine
 /// this returns nothing and the wizard's import step is one line of text.
 ///
 /// Anything that *does* exist is kept even when it cannot be read or parsed,
@@ -312,7 +312,7 @@ pub fn scan(roots: &Roots) -> Vec<Scan> {
 /// anything is wrong. Saying so beats a raw `expected value at line 3 column 1`.
 fn describe_parse_error(source: &Source, error: &anyhow::Error) -> String {
     if source.allows_comments {
-        format!("{error} — this file may use comments, which aren't supported")
+        format!("{error} - this file may use comments, which aren't supported")
     } else {
         error.to_string()
     }
@@ -383,7 +383,7 @@ mod tests {
 
     #[test]
     fn known_sources_are_rooted_in_the_injected_directories() {
-        // Nothing may reach past the roots it was handed -- that is what keeps
+        // Nothing may reach past the roots it was handed - that is what keeps
         // the scan testable and keeps it from wandering the real home dir.
         let dir = tempfile::tempdir().unwrap();
         let roots = roots_in(dir.path());
@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn roots_new_falls_back_to_the_platform_default_without_xdg_config_home() {
-        // An empty value counts as unset -- an exported-but-blank variable is
+        // An empty value counts as unset - an exported-but-blank variable is
         // not a directory anyone meant to point at.
         for value in [None, Some("")] {
             temp_env::with_var("XDG_CONFIG_HOME", value, || {

@@ -104,7 +104,7 @@ mod test_doubles {
     /// The crate's single test [`EventSource`]. Two modes, both reachable from
     /// one type:
     /// - scripted: yields a fixed sequence (one `Option<Event>` per
-    ///   `poll_event` call -- `Some(e)` -> `Ok(Some(e))`, `None` -> `Ok(None)`,
+    ///   `poll_event` call - `Some(e)` -> `Ok(Some(e))`, `None` -> `Ok(None)`,
     ///   i.e. a simulated poll-timeout tick), then `None` forever once
     ///   exhausted.
     /// - failing (`fail = true`): every `poll_event` returns `Err`, to drive a
@@ -240,7 +240,7 @@ mod test_doubles {
 
     /// Test [`TerminalSetup`]: a [`TestBackendHarness`] terminal and no-op TTY
     /// operations, so a UI's generic core monomorphizes only over test doubles
-    /// in the measured test build -- never over the real `CrosstermBackend`,
+    /// in the measured test build - never over the real `CrosstermBackend`,
     /// which can't be driven under `cargo test`. The two `_should_fail` flags
     /// drive the `setup.enable()?` and `setup.create_terminal()?` failure arms
     /// deterministically.

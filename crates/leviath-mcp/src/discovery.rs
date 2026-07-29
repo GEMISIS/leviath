@@ -22,7 +22,7 @@ pub struct ToolMetadata {
     pub schema: serde_json::Value,
 }
 
-/// `{"type": "object"}` — the fallback parameter schema for a tool whose
+/// `{"type": "object"}` - the fallback parameter schema for a tool whose
 /// server omitted `inputSchema`.
 fn empty_object_schema() -> serde_json::Value {
     serde_json::json!({"type": "object"})
@@ -123,7 +123,7 @@ impl MCPServerConfig {
     /// Decide which transport this entry describes, rejecting ambiguity.
     ///
     /// With `transport` omitted the choice is inferred from whichever of
-    /// `command`/`url` is present — but only when exactly one is. Guessing
+    /// `command`/`url` is present - but only when exactly one is. Guessing
     /// when both or neither are set would silently connect somewhere the user
     /// did not intend, so those are errors.
     pub fn resolve(&self) -> anyhow::Result<ResolvedTransport<'_>> {
@@ -162,7 +162,7 @@ impl MCPServerConfig {
 
     /// Validate this entry, discarding the resolved value.
     ///
-    /// For callers that only want to know whether the config is usable — a
+    /// For callers that only want to know whether the config is usable - a
     /// broken entry should be caught when the config loads, not at the first
     /// tool call.
     pub fn validate(&self) -> anyhow::Result<()> {

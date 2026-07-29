@@ -33,7 +33,7 @@ pub struct PersistenceStage(pub UnboundedSender<PersistJob>);
 /// Persistence-dispatch system: for each agent carrying run metadata whose
 /// (iteration, stage, status) has changed since its last snapshot, build the
 /// `meta.json` + `context.json` value snapshot and hand it to the persistence
-/// lane. Fire-and-forget — no result to collect; the single-worker lane keeps a
+/// lane. Fire-and-forget - no result to collect; the single-worker lane keeps a
 /// given agent's writes ordered. Agents without [`RunMetadata`] aren't persisted.
 #[allow(clippy::type_complexity)]
 /// Interaction-status reflection system: mirror the shared [`InteractionHub`]'s
@@ -41,7 +41,7 @@ pub struct PersistenceStage(pub UnboundedSender<PersistJob>);
 /// the dashboard / `lev ps` surface its prompt) instead of a silent `Active`.
 ///
 /// An agent's `ask_user_*` / tool-approval / plan-approval call blocks deep in
-/// the async tool lane, invisible to the ECS — which otherwise leaves the agent
+/// the async tool lane, invisible to the ECS - which otherwise leaves the agent
 /// `Active` with meta.json written `running`, so the dashboard (gated on
 /// `WaitingInput`) never shows the prompt and the run looks frozen. This system
 /// closes that gap: an agent whose id has an open hub request flips
@@ -244,13 +244,13 @@ pub fn dispatch_persistence(
         });
         // A parent parked mid fan-out: persist its waiting state so the
         // split/merge resumes after a restart (removed once it's no longer
-        // waiting — see the writer).
+        // waiting - see the writer).
         let fanout = fan_out_waiting
             .map(|w| serde_json::to_string(&w.to_state()).expect("FanOutState always serializes"));
         // An agent parked at a stage-boundary interaction point: persist the open
         // point (cursor/round + the reviewed document) so a restart re-presents the
         // same prompt rather than dropping it and re-inferring (issue #38). The
-        // document comes from the open request in the hub — which is present by the
+        // document comes from the open request in the hub - which is present by the
         // time `reflect_interaction_status` (running just before this system) has
         // flipped the agent to `Waiting`. If the request isn't registered yet, skip
         // this tick; the next persist captures it (removing any stale sidecar).

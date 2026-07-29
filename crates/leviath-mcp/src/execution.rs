@@ -494,7 +494,7 @@ mod tests {
     //
     // Same Python-backed JSON-RPC stub approach used in client.rs/discovery.rs
     // tests. Note: MCPClient::shutdown() always returns Ok(()) by design (it
-    // swallows failures so a dead server can't block cleanup) — so
+    // swallows failures so a dead server can't block cleanup) - so
     // shutdown_all()'s error-collection branch is intentionally left
     // uncovered here; there's no way to make client.shutdown() fail without
     // changing that documented "always succeeds" behavior.

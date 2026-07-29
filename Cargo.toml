@@ -21,7 +21,7 @@ edition = "2024"
 license = "MIT"
 authors = ["Gerald McAlister <gemisis@gmail.com>"]
 repository = "https://github.com/Sun-Forge-AI/leviath"
-description = "A structured agent runtime for LLMs — context memory, multi-stage workflows, and ECS-based orchestration"
+description = "A structured agent runtime for LLMs - context memory, multi-stage workflows, and ECS-based orchestration"
 
 # Lints applied to every workspace member that opts in with `[lints] workspace = true`.
 # `unsafe_code = "forbid"` is a hard compile error that cannot be re-enabled by a
@@ -68,7 +68,7 @@ clap = { version = "4.5", features = ["derive"] }
 # aarch64-linux release target cross-compile without an OpenSSL sysroot.
 # native-roots so system/corporate CA stores are still honored.
 # TLS is rustls, never native-tls: one audited implementation on every platform
-# rather than whatever the OS ships. 0.13 renamed the features —
+# rather than whatever the OS ships. 0.13 renamed the features -
 # `rustls-tls-native-roots` became `rustls` + `rustls-native-certs`, and
 # `macos-system-configuration` became `system-proxy`. `form` and `query`, which
 # used to be always-on, are now opt-in.
@@ -115,7 +115,7 @@ temp-env = "0.3"
 #
 # Re-checked against ratatui 0.30.2 / crossterm 0.29: still blocked, same
 # boundary. 0.30 additionally gives `Backend` an associated `Error` type, so the
-# wizard's generic bounds need `Send + Sync` added — small, but pointless until
+# wizard's generic bounds need `Send + Sync` added - small, but pointless until
 # tui-textarea moves.
 crossterm = "0.28"
 ratatui = "0.29"
@@ -131,8 +131,8 @@ tower-http = { version = "0.7", features = ["cors"] }
 # ── Release profile ──────────────────────────────────────────────────────────
 #
 # There was no `[profile.release]` at all, so shipped binaries used cargo's
-# defaults: no LTO, 16 codegen units, full symbol table, and — the one that
-# matters for correctness — arithmetic overflow wrapping silently.
+# defaults: no LTO, 16 codegen units, full symbol table, and - the one that
+# matters for correctness - arithmetic overflow wrapping silently.
 [profile.release]
 # Overflow panics instead of wrapping. This workspace already treats
 # index/arithmetic mistakes as a real class of bug rather than a theoretical one
@@ -159,7 +159,7 @@ strip = "symbols"
 # The daemon depends on unwinding. Rhai host functions are wrapped in
 # `catch_unwind` (`leviath_scripting::tool::guard_str`/`guard_dyn`) so that a
 # panic inside a native function registered with the script engine becomes an
-# ordinary script error instead of taking the whole daemon down — that was issue
+# ordinary script error instead of taking the whole daemon down - that was issue
 # #109, where a byte-boundary panic inside `decode_entities` aborted the process
 # for every running agent. `panic = "abort"` would remove that safety net and
 # reinstate the bug. The same applies to the pipeline's per-system panic

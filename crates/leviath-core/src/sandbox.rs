@@ -1,6 +1,6 @@
 //! Sandboxed tool-execution configuration.
 //!
-//! Describes *where* an agent's shell/command tools run — directly on the host
+//! Describes *where* an agent's shell/command tools run - directly on the host
 //! ([`SandboxKind::None`], the default), inside a fresh set of Linux namespaces
 //! ([`SandboxKind::Namespace`], via `unshare(1)`), or inside a container
 //! ([`SandboxKind::Container`], via Docker/Podman). Only shell command execution
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxKind {
-    /// Run directly on the host — current behavior, explicit opt-out.
+    /// Run directly on the host - current behavior, explicit opt-out.
     #[default]
     None,
     /// Run under fresh Linux namespaces via `unshare(1)` (Linux only).
@@ -53,7 +53,7 @@ pub struct ToolSandboxConfig {
     pub image: Option<String>,
     /// Container engine binary to use (e.g. `"docker"`, `"podman"`, `"nerdctl"`,
     /// `"finch"`). `None` auto-detects (Docker, then Podman). Leviath isn't
-    /// prescriptive — any Docker-CLI-compatible binary works. Container kind only.
+    /// prescriptive - any Docker-CLI-compatible binary works. Container kind only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine: Option<String>,
     /// Whether the sandbox has network access. `false` isolates the network.
@@ -99,7 +99,7 @@ fn stronger_of(a: SandboxKind, b: SandboxKind) -> SandboxKind {
 
 impl Default for ToolSandboxConfig {
     fn default() -> Self {
-        // A present `[sandbox]` block with no `kind` means "host" (no-op) — unlike
+        // A present `[sandbox]` block with no `kind` means "host" (no-op) - unlike
         // `SecurityConfig`, an empty block is not "turn everything on". Callers
         // still cascade through `resolve_sandbox` so "no block" inherits the global
         // default (also host).
@@ -123,8 +123,8 @@ impl ToolSandboxConfig {
 
     /// This config with any manifest-chosen `engine` removed.
     ///
-    /// `engine` is spawned as argv[0] on the **host** when the sandbox is built
-    /// — before the first inference, and so before any tool-approval prompt.
+    /// `engine` is spawned as argv[0] on the **host** when the sandbox is built -
+    /// before the first inference, and so before any tool-approval prompt.
     /// A downloaded `agent.leviath` naming `engine = "/tmp/payload"` therefore
     /// executed it, and clamping only against a user who had *pinned* an engine
     /// missed the ordinary case: auto-detection is the default, so the ceiling
@@ -156,7 +156,7 @@ impl ToolSandboxConfig {
     /// ```
     ///
     /// silently discarded a user's `network = false` and bind-mounted their home
-    /// directory — including `~/.ssh` and `~/.leviath` — into a container whose
+    /// directory - including `~/.ssh` and `~/.leviath` - into a container whose
     /// shell runs as root. It satisfied "still sandboxed" while handing over
     /// more than running unsandboxed would have made obvious.
     ///
@@ -200,7 +200,7 @@ impl ToolSandboxConfig {
 /// is set. Mirrors [`crate::taint::resolve_security`].
 ///
 /// **A blueprint cannot turn off a sandbox the user turned on.** The `agent` and
-/// `stage` configs come from `agent.leviath` — a downloaded file — so when the
+/// `stage` configs come from `agent.leviath` - a downloaded file - so when the
 /// user's global config asks for isolation, a manifest asking for
 /// [`SandboxKind::None`] is ignored and the global stands. A manifest may still
 /// *choose a different isolated kind* (a stage that wants its own container
@@ -212,7 +212,7 @@ pub fn resolve_sandbox(
     stage: Option<&ToolSandboxConfig>,
 ) -> ToolSandboxConfig {
     // A manifest never chooses the engine, whether or not the user configured a
-    // sandbox at all — see `without_manifest_engine`.
+    // sandbox at all - see `without_manifest_engine`.
     let narrowest = stage
         .or(agent)
         .map(ToolSandboxConfig::without_manifest_engine);
@@ -241,7 +241,7 @@ mod tests {
     }
 
     /// A manifest naming its own `engine` executed that binary on the **host**
-    /// at sandbox-build time — before the first inference, so before any prompt.
+    /// at sandbox-build time - before the first inference, so before any prompt.
     /// Clamping only against a user who had *pinned* an engine missed the
     /// ordinary case, since auto-detection is the default.
     #[test]
@@ -288,7 +288,7 @@ mod tests {
     /// `is_active()` treats both isolating kinds alike, but they are not:
     /// `namespace` shares the host root filesystem. A manifest trading a user's
     /// `container` for `namespace` passed the "still sandboxed" check and got
-    /// read/write on the real `$HOME` — including
+    /// read/write on the real `$HOME` - including
     /// `~/.leviath/providers/*.rhai`, which the runtime later executes.
     #[test]
     fn a_manifest_cannot_trade_a_container_for_a_namespace() {
@@ -313,7 +313,7 @@ mod tests {
             "and the user's pinned image stands"
         );
 
-        // Strengthening is still allowed -- this is a floor, not a pin.
+        // Strengthening is still allowed - this is a floor, not a pin.
         let user = ToolSandboxConfig {
             kind: SandboxKind::Namespace,
             ..Default::default()
@@ -535,7 +535,7 @@ mod tests {
         assert_eq!(r.kind, SandboxKind::Container);
     }
 
-    /// It may still opt *in* when the user set nothing — that only tightens.
+    /// It may still opt *in* when the user set nothing - that only tightens.
     #[test]
     fn manifest_may_opt_into_a_sandbox_the_user_did_not_set() {
         let agent = ToolSandboxConfig {

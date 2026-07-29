@@ -49,7 +49,7 @@ mod tests {
     #[test]
     fn verifier_is_within_the_spec_length_range() {
         // RFC 7636 §4.1: 43–128 characters. `len` is bound first so the
-        // assertion message captures a variable rather than a second call —
+        // assertion message captures a variable rather than a second call -
         // otherwise that call is a region only ever reached on failure.
         let len = Pkce::generate().verifier.len();
         assert!(

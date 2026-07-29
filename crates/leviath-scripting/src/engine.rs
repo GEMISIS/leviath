@@ -221,7 +221,7 @@ mod tests {
         let engine = ScriptEngine::new();
         let input = rhai::Map::new();
 
-        // Returns an integer, not a String — eval_with_scope::<String> should error.
+        // Returns an integer, not a String - eval_with_scope::<String> should error.
         let script = "42";
         let result = engine.transform(script, input);
         assert!(result.is_err());

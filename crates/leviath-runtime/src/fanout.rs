@@ -1,12 +1,12 @@
 //! Fan-out stage handling as ECS systems.
 //!
 //! A `fan_out` stage (see [`leviath_core::blueprint::StageMode::FanOut`]) runs
-//! its single inference as a **split** — its prompt (with the config's
+//! its single inference as a **split** - its prompt (with the config's
 //! `split_prompt` folded in by [`crate::pipeline`]) asks the model for a JSON
 //! array of work items. [`fan_out_split`] intercepts that response (before the
 //! normal `process_response` routing), parses the items, and parks the parent in
-//! [`FanOutWaiting`]. [`fan_out_collect`] then starts one worker per item —
-//! bounded by `max_workers` concurrent workers — via the daemon-installed
+//! [`FanOutWaiting`]. [`fan_out_collect`] then starts one worker per item -
+//! bounded by `max_workers` concurrent workers - via the daemon-installed
 //! [`FanOutSpawner`], tracks them as the parent's `SubAgentChildren`, and once
 //! every worker is terminal applies the failure policy, injects a consolidated
 //! report into the parent's conversation, and transitions to the `merge_stage`
@@ -83,7 +83,7 @@ pub struct FanOutSpawnerRes(pub Arc<dyn FanOutSpawner>);
 
 /// A currently-running fan-out worker: its work-item id, its live entity, and
 /// its run-id (kept so the waiting state can be persisted/restored without a
-/// cross-entity lookup — see [`FanOutState`]).
+/// cross-entity lookup - see [`FanOutState`]).
 struct ActiveWorker {
     item_id: String,
     entity: Entity,
@@ -174,7 +174,7 @@ pub fn restore_fan_out_waiting(
 }
 
 /// Fan-out split system (exclusive): for each `ProcessResponse` agent whose
-/// current stage is a fan-out stage, consume its response as the split output —
+/// current stage is a fan-out stage, consume its response as the split output -
 /// parse the work items and park the agent in [`FanOutWaiting`] (or mark it
 /// `Error` if the split output isn't a JSON array). Removing `ProcessResponse`
 /// here keeps the normal `process_response` routing from touching these agents.
@@ -231,7 +231,7 @@ pub fn fan_out_split(world: &mut World) {
     }
 }
 
-/// Fan-out collect system (exclusive): drive each [`FanOutWaiting`] parent — reap
+/// Fan-out collect system (exclusive): drive each [`FanOutWaiting`] parent - reap
 /// finished workers, start pending ones up to `max_workers`, and once none remain
 /// running apply the failure policy, inject the consolidated report, and
 /// transition to the merge stage (or resolve the stage's own transition).

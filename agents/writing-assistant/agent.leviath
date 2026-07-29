@@ -1,7 +1,7 @@
 [agent]
 name = "writing-assistant"
 version = "0.0.1"
-description = "Research-backed writing — topic to polished draft, with a web-research stage, an interactive outline checkpoint, a draft⇄edit loop, and a final proofread pass"
+description = "Research-backed writing - topic to polished draft, with a web-research stage, an interactive outline checkpoint, a draft⇄edit loop, and a final proofread pass"
 entry_stage = "research"
 
 [tool_permissions]
@@ -28,7 +28,7 @@ Research the topic in `task` to prepare for writing. Gather:
 
 Use web_search + web_fetch for sources and read_file for local material; findings
 land in `research`. For each source you'll rely on, append a bibliography line to
-`sources_index` (context_append): `[n] <title> — <url/path>`. Organize by theme;
+`sources_index` (context_append): `[n] <title> - <url/path>`. Organize by theme;
 mark points well-supported vs speculative; flag anything needing verification. If
 sent back, focus on the gap the user or outline identified.
 """
@@ -67,7 +67,7 @@ You've shown the outline and asked the user what to do:
 - If they want to gather more material first, transition to 'research'.
 """
 system_prompt = """
-Propose an OUTLINE for the piece based on `research` — do NOT write the article
+Propose an OUTLINE for the piece based on `research` - do NOT write the article
 itself and do NOT create any files here. The draft stage writes the piece AFTER
 the user approves this outline; your job is only to get the structure right.
 
@@ -79,15 +79,15 @@ Present, as your response text:
 
 Then let the user steer via the approval prompt. If they revise or expand, produce
 an updated outline grounded in their actual feedback before asking again. Keep it
-to an outline — no prose paragraphs of the finished piece.
+to an outline - no prose paragraphs of the finished piece.
 """
 
 [stages.outline.transitions.draft]
-hint = "Outline approved — write the draft"
+hint = "Outline approved - write the draft"
 transform = "compact"
 
 [stages.outline.transitions.outline]
-hint = "User asked to revise or expand — keep refining the outline"
+hint = "User asked to revise or expand - keep refining the outline"
 transform = "direct"
 
 [stages.outline.transitions.research]
@@ -103,17 +103,17 @@ name     = "outline_approval"
 prompt   = "Review the outline above. What would you like to do?"
 required = true
 style    = "multiple_choice"
-options  = ["Approve — write the draft", "Revise — I'll describe changes", "Expand a section — I'll say which", "Research more first", "Abort — cancel this piece"]
+options  = ["Approve - write the draft", "Revise - I'll describe changes", "Expand a section - I'll say which", "Research more first", "Abort - cancel this piece"]
 
 # "Abort" ends the run immediately (engine-level, deterministic).
-abort_options = ["Abort — cancel this piece"]
+abort_options = ["Abort - cancel this piece"]
 
 # Directives keep the run in the outline stage and tell the agent to gather the
 # user's intent via a tool call before revising, rather than acting on the bare
 # option label.
 [stages.outline.interaction_points.directives]
-"Revise — I'll describe changes" = "The user wants to revise the outline. Call the ask_user_text tool to ask exactly what they want changed, then present an updated outline before asking again."
-"Expand a section — I'll say which" = "The user wants to expand a section. Call the ask_user_text tool to ask which section and what it should cover, then present an updated outline before asking again."
+"Revise - I'll describe changes" = "The user wants to revise the outline. Call the ask_user_text tool to ask exactly what they want changed, then present an updated outline before asking again."
+"Expand a section - I'll say which" = "The user wants to expand a section. Call the ask_user_text tool to ask which section and what it should cover, then present an updated outline before asking again."
 
 # ─── Stage 3: Draft ───────────────────────────────────────────────────────────
 [stages.draft]
@@ -129,14 +129,14 @@ evidence from `research` (cite [n] where relevant). Guidelines:
 - Strong opening that hooks the reader
 - Each section flows logically to the next
 - Concrete examples over abstract statements
-- Clear, direct prose — no filler or hedging
+- Clear, direct prose - no filler or hedging
 - Strong conclusion that ties back to the thesis
 
 Write the complete piece. No placeholders or TODO markers.
 """
 
 [stages.draft.transitions.edit]
-hint = "Draft complete — self-edit"
+hint = "Draft complete - self-edit"
 transform = "compact"
 
 [stages.draft.transitions.error_recovery]
@@ -159,12 +159,12 @@ Decide what happens next:
 """
 system_prompt = """
 Edit the draft for structure and substance (not line-level polish yet):
-1. Accuracy — are claims supported by `research`? Any overstatements?
-2. Clarity — is each idea understandable on first read?
-3. Flow — does each section lead naturally to the next?
-4. Concision — cut anything that doesn't earn its place
-5. Voice — consistent, appropriate for the audience?
-6. Opening/closing — do they land?
+1. Accuracy - are claims supported by `research`? Any overstatements?
+2. Clarity - is each idea understandable on first read?
+3. Flow - does each section lead naturally to the next?
+4. Concision - cut anything that doesn't earn its place
+5. Voice - consistent, appropriate for the audience?
+6. Opening/closing - do they land?
 
 Make the edits directly (write the improved version). Note any substantive changes
 in `revisions` (context_append). Hand to proofread only once the structure is sound.
@@ -173,7 +173,7 @@ in `revisions` (context_append). Hand to proofread only once the structure is so
 # Custom transform: keep task/outline/research/sources pinned, compact the draft
 # discussion into a rewrite brief, clear scratch before rewriting.
 [stages.edit.transitions.draft]
-hint = "Structural issues found — needs a significant rewrite"
+hint = "Structural issues found - needs a significant rewrite"
 transform = "custom"
 [stages.edit.transitions.draft.transform_config]
 carry = ["task", "style_guide", "outline", "research", "sources_index"]
@@ -182,7 +182,7 @@ clear = ["scratch"]
 compact_prompt = "Summarize the structural problems as a numbered rewrite brief."
 
 [stages.edit.transitions.proofread]
-hint = "Structure is sound — do the final line-level pass"
+hint = "Structure is sound - do the final line-level pass"
 transform = "compact"
 
 [stages.edit.transitions.error_recovery]
@@ -213,11 +213,11 @@ Final line-level pass following `style_guide`:
   with web_fetch and correct or hedge it
 - Tighten wording; kill remaining filler
 Write the final polished version. Don't introduce new claims. Ship it (DONE) once
-clean — don't over-polish.
+clean - don't over-polish.
 """
 
 [stages.proofread.transitions.edit]
-hint = "A substantive problem surfaced — back to structural editing"
+hint = "A substantive problem surfaced - back to structural editing"
 transform = "compact"
 
 [stages.proofread.transitions.error_recovery]
@@ -238,7 +238,7 @@ note a workaround, then return to draft to continue with the material available.
 """
 
 [stages.error_recovery.transitions.draft]
-hint = "Recovered — continue drafting"
+hint = "Recovered - continue drafting"
 transform = "compact"
 
 [compaction]

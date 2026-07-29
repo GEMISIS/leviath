@@ -8,7 +8,7 @@ use leviath_runtime::control_socket::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::task::JoinHandle;
 
-/// A control client pointing at an address with no daemon — used by tests that
+/// A control client pointing at an address with no daemon - used by tests that
 /// never exercise agent actions (read/websocket/polling/config paths).
 pub(super) fn no_daemon_client() -> ControlClient {
     ControlClient::new(control_id(std::path::Path::new("/no/such/daemon")))

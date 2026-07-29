@@ -3,7 +3,7 @@
 //! One `draw` per frame, laid out as a fixed header (step breadcrumb), a body
 //! that varies per step, and a footer (message line plus key hints), with an
 //! optional help overlay on top. Every function takes `&Wizard` and produces
-//! widgets — no state changes here, so a render can never be the reason
+//! widgets - no state changes here, so a render can never be the reason
 //! something moved.
 
 use ratatui::{
@@ -228,7 +228,7 @@ fn draw_provider_detail(frame: &mut Frame, area: Rect, wizard: &Wizard) {
             ]));
             if let Some(var) = row.from_env {
                 lines.push(Line::from(Span::styled(
-                    format!("Supplied by ${var} — it will not be written to the config."),
+                    format!("Supplied by ${var} - it will not be written to the config."),
                     Style::default().fg(C_WARN),
                 )));
             }
@@ -712,7 +712,7 @@ mod tests {
         w.enter(Step::ProviderDetail);
 
         let hidden = rendered(&w);
-        // Last four characters, not the first eight — see `catalog::redact`.
+        // Last four characters, not the first eight - see `catalog::redact`.
         assert!(hidden.contains("****here"), "{hidden}");
         assert!(
             !hidden.contains("sk-ant-s"),
@@ -797,7 +797,7 @@ mod tests {
         assert!(rendered(&w).contains("2 models"));
 
         w.providers[0].outcome = crate::commands::setup::verify::Outcome::Failed {
-            message: "rejected — check the key".into(),
+            message: "rejected - check the key".into(),
         };
         assert!(rendered(&w).contains("rejected"));
     }
@@ -945,7 +945,7 @@ mod tests {
         w.providers[0].selected = true;
         w.providers[0].value = "sk-ant-x".to_string();
         w.providers[0].outcome = crate::commands::setup::verify::Outcome::Failed {
-            message: "rejected — check the key".into(),
+            message: "rejected - check the key".into(),
         };
         w.enter(Step::Review);
 

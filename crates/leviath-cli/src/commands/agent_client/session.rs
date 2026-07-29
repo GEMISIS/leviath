@@ -20,7 +20,7 @@ use crate::runstate::new_run_id;
 pub(super) struct ResolvedBlueprint {
     /// Absolute path to the `agent.leviath` manifest.
     pub(super) manifest_path: PathBuf,
-    /// The agent's name — its manifest directory's file name.
+    /// The agent's name - its manifest directory's file name.
     pub(super) agent_name: String,
 }
 

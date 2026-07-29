@@ -109,7 +109,7 @@ fn print_agent_listing(
     // Tracks whether the user has any agent they can actually *run*. The
     // bundled catalog deliberately does not count: it is always non-empty, and
     // treating it as "you have agents" would suppress the get-started guidance
-    // for exactly the person who needs it — someone with a fresh install and
+    // for exactly the person who needs it - someone with a fresh install and
     // nothing installed yet.
     let mut found_runnable = false;
 
@@ -122,7 +122,7 @@ fn print_agent_listing(
             let desc = if info.description.is_empty() {
                 String::new()
             } else {
-                format!(" — {}", info.description)
+                format!(" - {}", info.description)
             };
             println!("  {} (v{}){}", info.name, info.version, desc);
         }
@@ -138,7 +138,7 @@ fn print_agent_listing(
         let desc = if info.description.is_empty() {
             String::new()
         } else {
-            format!(" — {}", info.description)
+            format!(" - {}", info.description)
         };
         println!("Local (current directory):");
         println!("  {} (v{}){}", info.name, info.version, desc);
@@ -158,14 +158,14 @@ fn print_agent_listing(
             let desc = if info.description.is_empty() {
                 String::new()
             } else {
-                format!(" — {}", info.description)
+                format!(" - {}", info.description)
             };
             println!("  {} (v{}){}", info.name, info.version, desc);
         }
         println!();
     }
 
-    // 4. Bundled agents — the blueprints embedded in this binary.
+    // 4. Bundled agents - the blueprints embedded in this binary.
     //
     // This used to scan `<exe_dir>/agents`, a directory no real install has, so
     // the section never printed outside a git checkout. It now reports the
@@ -187,7 +187,7 @@ fn print_agent_listing(
     // No emptiness guard: the embedded catalog is always populated (a build
     // that found no blueprints fails `bundled`'s own invariant test), so an
     // `if !builtin_names.is_empty()` here would be a branch that can never be
-    // false — unreachable code dressed up as a handled case.
+    // false - unreachable code dressed up as a handled case.
     println!("Bundled agents (install with `lev setup`):");
     println!("  {}", builtin_names.join(", "));
     println!();
@@ -217,7 +217,7 @@ fn get_agents_dir_or_error(dir: Option<PathBuf>) -> anyhow::Result<PathBuf> {
 ///
 /// A thin wrapper over [`get_agents_dir_or_error`] supplying the real
 /// resolved directory. The `#[cfg(test)]` guard below only lets tests force the
-/// "no home directory" error arm of `execute()` deterministically — the real
+/// "no home directory" error arm of `execute()` deterministically - the real
 /// the shared resolver can't be made to return `None` in any environment a
 /// test may safely create (on macOS `dirs::home_dir()` falls back to a
 /// passwd-database lookup independent of `$HOME`). It does NOT hide the real
@@ -304,7 +304,7 @@ system = {{ kind = "pinned", max_tokens = 1000 }}
     #[test]
     fn scan_directory_path_is_a_file_returns_empty() {
         // `dir.exists()` is true for a plain file too, so this reaches
-        // `fs::read_dir(dir)` -- which fails with "not a directory",
+        // `fs::read_dir(dir)` - which fails with "not a directory",
         // exercising the `if let Ok(entries) = ...` construct's implicit
         // (no-`else`) false arm that no other test hits.
         let tmp = tempfile::tempdir().unwrap();
@@ -318,7 +318,7 @@ system = {{ kind = "pinned", max_tokens = 1000 }}
     fn scan_directory_direct_manifest_invalid_is_skipped() {
         // The direct-manifest branch (as opposed to the subdirectory-scan
         // branch, covered separately by `scan_directory_subdir_with_invalid_manifest`)
-        // has its own `if let Some(info) = read_agent_info(...)` — this
+        // has its own `if let Some(info) = read_agent_info(...)` - this
         // exercises that branch's `None` arm when the manifest at the
         // directory's own root is present but unparseable.
         let dir = tempfile::tempdir().unwrap();
@@ -494,7 +494,7 @@ system = { kind = "pinned", max_tokens = 1000 }
     #[tokio::test]
     async fn execute_falls_back_to_default_config_when_config_file_is_malformed() {
         // `execute`'s `Config::load().unwrap_or_default()` can only take
-        // its fallback arm when `Config::load()` errors -- every other
+        // its fallback arm when `Config::load()` errors - every other
         // `execute()` test sees either no config file (defaults) or a
         // well-formed one. Redirecting `LEVIATH_CONFIG_PATH` to malformed
         // TOML (the same technique as `config.rs`'s
@@ -549,7 +549,7 @@ system = { kind = "pinned", max_tokens = 1000 }
     // sequence isn't reproducible: NTFS/Win32 refuse to remove a directory
     // that's a live process's current working directory (a sharing
     // violation), so `remove_dir_all` itself fails there instead of
-    // succeeding -- confirmed via real Windows CI. Unix-only.
+    // succeeding - confirmed via real Windows CI. Unix-only.
     #[cfg(unix)]
     #[tokio::test]
     async fn execute_falls_back_to_default_cwd_when_current_dir_is_gone() {
@@ -603,7 +603,7 @@ system = { kind = "pinned", max_tokens = 1000 }
     #[test]
     fn print_agent_listing_nothing_installed() {
         // The bundled catalog is always non-empty, so it must not count as
-        // "you have agents" -- otherwise the get-started guidance would be
+        // "you have agents" - otherwise the get-started guidance would be
         // suppressed for exactly the fresh install that needs it.
         let agents_dir = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();

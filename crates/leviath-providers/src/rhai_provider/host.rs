@@ -5,7 +5,7 @@
 //! [`StreamHttpJob`] over a channel to an async **broker** that performs the
 //! real request through an [`HttpExecutor`]. Production uses [`ReqwestExecutor`];
 //! tests inject a fake so no socket is ever bound. Rate limiting lives in the
-//! provider (around the executor), not here — the executor is pure transport.
+//! provider (around the executor), not here - the executor is pure transport.
 
 use std::collections::BTreeMap;
 

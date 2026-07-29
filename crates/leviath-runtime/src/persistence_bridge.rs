@@ -6,7 +6,7 @@
 //! files under `<runs_dir>/<run_id>/` **one at a time**, so writes for a given
 //! agent never race or land out of order. Each file is written to a temp path and
 //! atomically renamed into place, so a concurrent reader (the dashboard) never
-//! sees a half-written file. All errors are logged and swallowed — persistence is
+//! sees a half-written file. All errors are logged and swallowed - persistence is
 //! best-effort and must never stall or fail the world.
 
 use std::path::{Path, PathBuf};
@@ -49,8 +49,8 @@ pub struct PersistJob {
 /// The single-lane persistence worker: writes each [`PersistJob`]'s files under
 /// `runs_dir`, one at a time, until the job channel closes (world shutdown).
 ///
-/// It also owns this daemon's run-ownership identity — a stable per-machine id
-/// (`<runs_dir>/../machine-id`, created once) and a per-process `world_id` — which
+/// It also owns this daemon's run-ownership identity - a stable per-machine id
+/// (`<runs_dir>/../machine-id`, created once) and a per-process `world_id` - which
 /// it stamps into every run's portable archive so a run copied to another machine
 /// is unambiguously attributable (see [`leviath_core::run_archive`]).
 pub async fn persistence_worker(runs_dir: PathBuf, mut jobs: UnboundedReceiver<PersistJob>) {
@@ -75,7 +75,7 @@ pub async fn persistence_worker(runs_dir: PathBuf, mut jobs: UnboundedReceiver<P
 }
 
 /// Whether a run status is fully terminal (no further snapshots expected).
-/// `CompleteInteractive` is excluded — such an agent stays live for follow-up.
+/// `CompleteInteractive` is excluded - such an agent stays live for follow-up.
 fn is_terminal_run(status: &leviath_core::run_meta::RunStatus) -> bool {
     use leviath_core::run_meta::RunStatus;
     matches!(
@@ -84,7 +84,7 @@ fn is_terminal_run(status: &leviath_core::run_meta::RunStatus) -> bool {
     )
 }
 
-/// A short opaque id derived from the current time + pid. Not cryptographic — it
+/// A short opaque id derived from the current time + pid. Not cryptographic - it
 /// only needs to distinguish concurrent daemons/runs on a shared filesystem.
 fn generate_id() -> String {
     use std::hash::{Hash, Hasher};
@@ -190,13 +190,13 @@ async fn write_snapshot(
 /// The context window (the bulk) is stored as a diff between writes:
 /// - **new archive** (file absent): preamble + a `Header` (identity + metadata)
 ///   + a full `ContextCheckpoint` the diffs rebase on;
-/// - **resumed** (file present, but this worker has no prior context for the run
-///   — e.g. after a daemon restart): an `OwnershipChanged` recording this
+/// - **resumed** (file present, but this worker has no prior context for the
+///   run, e.g. after a daemon restart): an `OwnershipChanged` recording this
 ///   world/machine took over + a fresh `ContextCheckpoint` re-anchor;
 /// - **ongoing** (a prior context is known): a compact `Progress` step carrying
 ///   the updated metadata + a `ContextDiff` since the previous point.
 ///
-/// The archive always folds to the run's latest resumable state. Best-effort —
+/// The archive always folds to the run's latest resumable state. Best-effort -
 /// a failed write is logged and swallowed like the rest of the persistence lane.
 async fn append_run_archive(
     dir: &Path,
@@ -276,7 +276,7 @@ async fn append_run_archive(
 /// Append one line (with a trailing newline) to `stages/<idx>/<file>` under the
 /// run dir, creating the stage directory if needed. Best-effort: a failed
 /// `create_dir_all` just makes the subsequent open fail, and the append write
-/// result is intentionally ignored — persistence must never stall the world.
+/// result is intentionally ignored - persistence must never stall the world.
 async fn append_stage_line(run_dir: &Path, stage_idx: usize, file: &str, line: &str, run_id: &str) {
     let stage_dir = run_dir.join("stages").join(stage_idx.to_string());
     let _ = tokio::fs::create_dir_all(&stage_dir).await;
@@ -708,7 +708,7 @@ mod tests {
     #[tokio::test]
     async fn write_is_skipped_when_runs_dir_unwritable() {
         crate::test_support::with_tracing(|| {});
-        // runs_dir points at a *file*, so create_dir_all fails — must not panic.
+        // runs_dir points at a *file*, so create_dir_all fails - must not panic.
         let file = tempfile::NamedTempFile::new().unwrap();
         write_snapshot(
             file.path(), // a file, not a dir

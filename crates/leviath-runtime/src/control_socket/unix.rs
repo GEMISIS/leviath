@@ -1,7 +1,7 @@
 //! Unix-domain-socket transport for the control channel.
 //!
 //! A [`ControlId`] is a filesystem path; the socket is never reachable off the
-//! machine, and access to it is governed by ordinary file permissions —
+//! machine, and access to it is governed by ordinary file permissions -
 //! permissions [`bind_control_listener`] now actually sets. It previously only
 //! asserted that in this comment: neither the socket nor the directory it
 //! creates was ever `chmod`ed, so both landed at the process umask (typically
@@ -64,8 +64,8 @@ impl ControlListener {
     /// A `fn` pointer (not `impl Fn`) so there is one monomorphization. The seam
     /// exists because the refusal arms cannot be reached otherwise: producing a
     /// connection from a *different* uid needs a second user account or root,
-    /// which no CI runner has. Injecting the lookup lets both refusals — a
-    /// foreign uid and an undeterminable one — be driven against a real socket.
+    /// which no CI runner has. Injecting the lookup lets both refusals - a
+    /// foreign uid and an undeterminable one - be driven against a real socket.
     async fn accept_with(
         &mut self,
         peer_uid: fn(&ServerStream) -> Option<u32>,
@@ -94,7 +94,7 @@ pub fn bind_control_listener(id: &Path) -> std::io::Result<ControlListener> {
                 "a leviath daemon is already running on this control socket",
             ));
         }
-        // Nothing is listening — the socket file is stale; clear it. A failed
+        // Nothing is listening - the socket file is stale; clear it. A failed
         // remove just means the bind below reports the problem instead.
         let _ = std::fs::remove_file(id);
     }
@@ -114,8 +114,8 @@ pub fn bind_control_listener(id: &Path) -> std::io::Result<ControlListener> {
     // per-connection peer check in `accept_authorized` is the real gate and this
     // is defence in depth rather than the whole story.
     // Best-effort, like the directory above: `chmod` on a socket we just created
-    // and own does not realistically fail, and the peer check in `accept` — not
-    // this mode — is what actually holds on macOS and the BSDs, where socket
+    // and own does not realistically fail, and the peer check in `accept` - not
+    // this mode - is what actually holds on macOS and the BSDs, where socket
     // permissions are not consulted at `connect` time.
     let _ = leviath_sys::secure_file_perms(id);
     Ok(ControlListener(listener))
@@ -123,7 +123,7 @@ pub fn bind_control_listener(id: &Path) -> std::io::Result<ControlListener> {
 
 /// Whether an accepted connection's peer is this same user.
 ///
-/// `None` — the platform could not report a uid — is refused. An unidentifiable
+/// `None` - the platform could not report a uid - is refused. An unidentifiable
 /// caller is not an authorized one, and failing open here would undo the whole
 /// point on any platform where the lookup is unavailable.
 fn peer_is_ours(peer: Option<u32>, ours: u32) -> bool {
@@ -170,7 +170,7 @@ mod tests {
     }
 
     /// The module doc claimed "access is governed by ordinary file permissions"
-    /// while setting none of them — both the socket and the directory landed at
+    /// while setting none of them - both the socket and the directory landed at
     /// the process umask. Anyone who could connect could spawn a tool-executing
     /// agent.
     #[tokio::test]
@@ -194,7 +194,7 @@ mod tests {
 
     /// Both refusal arms, driven against a real socket with the peer lookup
     /// injected. A connection from a *different* uid needs a second user account
-    /// or root, which no CI runner has — so the lookup is the seam rather than
+    /// or root, which no CI runner has - so the lookup is the seam rather than
     /// the socket.
     #[tokio::test]
     async fn accept_skips_connections_that_are_not_ours() {
@@ -218,7 +218,7 @@ mod tests {
 
             // Connect first and keep the client alive: a Unix-socket `connect`
             // completes as soon as the listener has queued it, so no spawned
-            // task is needed — and no abort, whose half-run future would read as
+            // task is needed - and no abort, whose half-run future would read as
             // a partially covered region.
             let _client = connect(&id).await.expect("connecting succeeds");
             let accepted = listener
@@ -240,7 +240,7 @@ mod tests {
         assert!(!peer_is_ours(None, 1000), "an unknown peer fails closed");
     }
 
-    /// A connection from this same user is accepted — the peer check must not
+    /// A connection from this same user is accepted - the peer check must not
     /// lock the daemon out of its own socket.
     #[tokio::test]
     async fn accept_admits_a_connection_from_the_same_user() {

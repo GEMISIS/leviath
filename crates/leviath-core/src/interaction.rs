@@ -34,7 +34,7 @@ pub enum BodyFormat {
     /// Plain text body (no special rendering).
     #[default]
     Plain,
-    /// Markdown body — rendered via the dashboard's markdown renderer.
+    /// Markdown body - rendered via the dashboard's markdown renderer.
     Markdown,
 }
 
@@ -182,7 +182,7 @@ impl InteractionRequest {
     /// Create a new tool-approval request.
     /// The part of a tool call a person needs to see before approving it.
     ///
-    /// "Allow tool call: `bash`?" is not a question anyone can answer — it asks
+    /// "Allow tool call: `bash`?" is not a question anyone can answer - it asks
     /// whether to run *a shell command* without saying which one, so the only
     /// safe answer is no and the only practical one is yes. The argument that
     /// decides the answer is the command itself, and for the file tools it is
@@ -218,7 +218,7 @@ impl InteractionRequest {
     ) -> Self {
         let tool = tool_name.into();
         let prompt = match Self::approval_detail(&tool, &arguments) {
-            Some(detail) => format!("Allow tool call: `{tool}` — {detail}?"),
+            Some(detail) => format!("Allow tool call: `{tool}` - {detail}?"),
             None => format!("Allow tool call: `{tool}`?"),
         };
         Self {
@@ -332,7 +332,7 @@ mod tests {
     use super::*;
 
     /// "Allow tool call: `bash`?" asks whether to run a shell command without
-    /// saying which one — the only safe answer is no and the only practical one
+    /// saying which one - the only safe answer is no and the only practical one
     /// is yes, so in practice everything gets approved unread.
     #[test]
     fn a_tool_approval_says_what_it_is_asking_about() {
@@ -828,7 +828,7 @@ mod tests {
 
     #[test]
     fn test_default_true_via_serde_missing_required_field() {
-        // JSON without `required` — should default to true via default_true()
+        // JSON without `required` - should default to true via default_true()
         let json = r#"{
             "id": "dt1",
             "kind": "free_text",

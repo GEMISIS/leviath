@@ -1,7 +1,7 @@
-//! `lev serve` — REST + WebSocket API server.
+//! `lev serve` - REST + WebSocket API server.
 //!
 //! Exposes agent management, blueprint CRUD, and live event streaming over
-//! HTTP. No web UI — the frontend lives in a separate repo.
+//! HTTP. No web UI - the frontend lives in a separate repo.
 
 mod agents;
 mod auth;
@@ -31,7 +31,7 @@ use crate::config::Config;
 
 // ─── Entrypoint ──────────────────────────────────────────────────────────────
 
-/// Aborts a spawned task when dropped — including when dropped mid-flight as
+/// Aborts a spawned task when dropped - including when dropped mid-flight as
 /// part of an outer future's cancellation (e.g. `JoinHandle::abort()` on the
 /// task that owns this guard), not just on normal scope exit.
 struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
@@ -115,9 +115,9 @@ fn api_router() -> Router<AppState> {
 /// the server gracefully and cover the `Ok(())` return path.
 ///
 /// Takes `shutdown` as a boxed trait object (`Pin<Box<dyn Future<...>>>`)
-/// rather than `impl Future<...>` so every caller -- production's
+/// rather than `impl Future<...>` so every caller - production's
 /// `std::future::pending()` and tests' various `async move { ... }` blocks
-/// awaiting a `oneshot::Receiver` -- shares exactly ONE monomorphization of
+/// awaiting a `oneshot::Receiver` - shares exactly ONE monomorphization of
 /// this (large, multi-branch) function instead of one per concrete future
 /// type. Confirmed via HTML/JSON segment inspection that every source
 /// position has a covered instantiation (this is the same trait-object-erasure
@@ -126,7 +126,7 @@ fn api_router() -> Router<AppState> {
 /// `ready`, if given, is sent the real bound `SocketAddr` right after
 /// `TcpListener::bind` succeeds (before serving starts). Production passes
 /// `None`; tests pass `Some(tx)` with `args.port = 0` so the OS picks a free
-/// port and the test learns which one was actually bound directly -- no
+/// port and the test learns which one was actually bound directly - no
 /// probe-bind-drop-rebind dance, which is a genuine TOCTOU race (confirmed
 /// to reproduce on real CI: another process/test could grab the just-freed
 /// port before this function's own bind runs), not just a test-only
@@ -137,13 +137,13 @@ async fn execute_with_shutdown(
     shutdown: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
     ready: Option<tokio::sync::oneshot::Sender<SocketAddr>>,
 ) -> anyhow::Result<()> {
-    // Resolve the API token before binding — refuse to start unauthenticated.
+    // Resolve the API token before binding - refuse to start unauthenticated.
     let auth_token = std::sync::Arc::new(auth::resolve_token(args.token.as_deref())?);
     // The API can spawn tool-executing agents; loudly warn if bound off-host.
     if args.host != "127.0.0.1" && args.host != "localhost" && args.host != "::1" {
         tracing::warn!(
             host = %args.host,
-            "serving the agent API on a non-local address — anyone who can reach \
+            "serving the agent API on a non-local address - anyone who can reach \
              this host and holds the token can spawn agents"
         );
     }
@@ -172,7 +172,7 @@ async fn execute_with_shutdown(
     // Background world-event consumer: subscribes to the daemon's pushed
     // `WorldEvent` stream and forwards each event to WebSocket subscribers.
     // Held behind an abort-on-drop guard so the task is torn down whenever this
-    // function returns *or* is cancelled — e.g. when a test aborts the outer
+    // function returns *or* is cancelled - e.g. when a test aborts the outer
     // `execute()`/`execute_with_shutdown()` task. Without this, aborting only
     // the outer task left the inner `event_loop` (an unconditional
     // subscribe-and-reconnect loop) running detached until the whole runtime
@@ -195,7 +195,7 @@ async fn execute_with_shutdown(
                 .allow_headers(Any),
         ),
         Some(origin) => {
-            // An unparseable value used to fall back to `*` — silently turning a
+            // An unparseable value used to fall back to `*` - silently turning a
             // typo into "allow everything", the opposite of what was asked for.
             // Refuse to start instead.
             let value = origin.parse::<axum::http::HeaderValue>().map_err(|_| {
@@ -214,7 +214,7 @@ async fn execute_with_shutdown(
 
     // The MCP administration endpoints are remote code execution by
     // construction: `add_server` writes a `command` and `args` into
-    // `~/.leviath/config.toml`, and Leviath then spawns exactly that — for this
+    // `~/.leviath/config.toml`, and Leviath then spawns exactly that - for this
     // run and every future one. The rest of the API can only run agents the user
     // already installed. Not mounted unless the operator asked for them, so an
     // unmounted route 404s rather than relying on a check inside the handler
@@ -255,7 +255,7 @@ async fn execute_with_shutdown(
             .expect("infallible: a freshly bound TcpListener always has a local address");
         let _ = ready.send(local_addr);
     }
-    // axum::serve with graceful shutdown always returns Ok(()) — discard the
+    // axum::serve with graceful shutdown always returns Ok(()) - discard the
     // infallible Result so LLVM-cov does not instrument an unreachable Err branch.
     let _ = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
@@ -293,7 +293,7 @@ mod tests {
         assert_execute_failed_on_malformed_config(&Ok(()));
     }
 
-    /// See [`assert_execute_failed_on_malformed_config`] — same rationale,
+    /// See [`assert_execute_failed_on_malformed_config`] - same rationale,
     /// for the bad-API-key startup failure-message region.
     fn assert_connected_with_bad_api_key(connected: bool) {
         assert!(connected, "server should start even with a bad API key");
@@ -305,7 +305,7 @@ mod tests {
         assert_connected_with_bad_api_key(false);
     }
 
-    /// See [`assert_execute_failed_on_malformed_config`] — same rationale,
+    /// See [`assert_execute_failed_on_malformed_config`] - same rationale,
     /// for the graceful-shutdown return-value failure-message region.
     fn assert_execute_returned_ok_after_shutdown(result: &Result<(), anyhow::Error>) {
         assert!(
@@ -320,7 +320,7 @@ mod tests {
         assert_execute_returned_ok_after_shutdown(&Err(anyhow::anyhow!("boom")));
     }
 
-    /// See [`assert_execute_failed_on_malformed_config`] — same rationale,
+    /// See [`assert_execute_failed_on_malformed_config`] - same rationale,
     /// for the port-in-use failure-message region.
     fn assert_execute_failed_on_port_in_use(result: &anyhow::Result<()>) {
         assert!(
@@ -335,7 +335,7 @@ mod tests {
         assert_execute_failed_on_port_in_use(&Ok(()));
     }
 
-    /// See [`assert_execute_failed_on_malformed_config`] — same rationale,
+    /// See [`assert_execute_failed_on_malformed_config`] - same rationale,
     /// for `execute_with_shutdown`'s graceful-shutdown return-value
     /// failure-message region.
     fn assert_execute_with_shutdown_returned_ok(result: &Result<(), anyhow::Error>) {
@@ -351,7 +351,7 @@ mod tests {
         assert_execute_with_shutdown_returned_ok(&Err(anyhow::anyhow!("boom")));
     }
 
-    /// See [`assert_execute_failed_on_malformed_config`] — same rationale,
+    /// See [`assert_execute_failed_on_malformed_config`] - same rationale,
     /// for the HTTP response status-line failure-message region.
     fn assert_response_ok(resp_str: &str) {
         assert!(resp_str.starts_with("HTTP/1.1 200"), "got: {resp_str}");
@@ -569,7 +569,7 @@ model = "claude-sonnet-4-6"
     #[tokio::test]
     async fn test_interaction_route_reaches_daemon() {
         // The route is wired to the handler, which (with no daemon in this test)
-        // reports the daemon unreachable — proving the request reached it.
+        // reports the daemon unreachable - proving the request reached it.
         let app = test_app();
         let req = Request::builder()
             .uri("/api/agents/nonexistent/interaction")
@@ -838,7 +838,7 @@ prompt = "Run"
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
-    // ─── execute() — real server bootstrap ─────────────────────────────────
+    // ─── execute() - real server bootstrap ─────────────────────────────────
     //
     // These drive the actual `execute()` entrypoint (config load, CORS setup,
     // full router construction, real TCP bind, background polling spawn) end
@@ -847,14 +847,14 @@ prompt = "Run"
     // task is aborted once we've proven the server is up and responding.
     //
     // Each holds `isolate_config_path_for_test` even though none of them
-    // care about specific config *content* -- their own `Config::load()`
+    // care about specific config *content* - their own `Config::load()`
     // call needs protecting from a DIFFERENT concurrently-running test that
     // does mutate `LEVIATH_CONFIG_PATH` (e.g. `execute_with_malformed_config_
     // returns_err`, which points it at a file containing invalid TOML for
     // the duration of its own guard). `std::env::set_var` is process-global,
     // not thread-local, so without holding the same lock here, this test's
     // `Config::load()` could transiently observe that other test's malformed
-    // path and fail with a real (if confusing) parse error -- confirmed to
+    // path and fail with a real (if confusing) parse error - confirmed to
     // reproduce locally at default test-thread concurrency, not a hypothetical.
 
     #[tokio::test]
@@ -867,7 +867,7 @@ prompt = "Run"
                 // time; execute_with_shutdown reports the real bound SocketAddr back
                 // via `ready` the instant it's bound, so there's no
                 // probe-bind-drop-rebind gap for another process/test to race into
-                // (that gap is a real, CI-reproducing TOCTOU -- see
+                // (that gap is a real, CI-reproducing TOCTOU - see
                 // execute_with_shutdown's doc comment). Exercises the exact same
                 // production code path execute() does (its own body is just this
                 // call with `ready: None`), so this remains a real end-to-end test
@@ -1076,7 +1076,7 @@ prompt = "Run"
     /// that is never assigned to a local interface, so the bind always fails
     /// with `EADDRNOTAVAIL`. (A prior version reused an already-bound ephemeral
     /// port, which occasionally let the second bind succeed under parallel-test
-    /// load and left this region uncovered — a genuine flake.)
+    /// load and left this region uncovered - a genuine flake.)
     #[tokio::test]
     async fn execute_with_unbindable_address_returns_bind_error() {
         // Isolated: this reaches `Config::load()`, which reads process-wide
@@ -1214,8 +1214,8 @@ prompt = "Run"
     async fn cors_is_off_by_default_explicit_when_asked_and_fatal_when_malformed() {
         // Isolated because `execute_with_shutdown` calls `Config::load()`, which
         // reads process-wide environment. Without this the test raced every
-        // `temp_env` test in the binary — `temp_env` serializes against its own
-        // calls, not against a test that reads the environment directly — and
+        // `temp_env` test in the binary - `temp_env` serializes against its own
+        // calls, not against a test that reads the environment directly - and
         // failed on CI in two different places depending on when it lost.
         crate::config::with_isolated_config_path_async("serve-mod-cors", |_fake_dir| async move {
             fn args_with(cors: Option<&str>) -> ServeArgs {
@@ -1231,7 +1231,7 @@ prompt = "Run"
             }
 
             /// Start, wait until bound, then shut down. Only reached for values that
-            /// are accepted — a rejected one never binds.
+            /// are accepted - a rejected one never binds.
             async fn starts(cors: Option<&str>) {
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
@@ -1244,7 +1244,7 @@ prompt = "Run"
                     Some(ready_tx),
                 ));
                 // `RecvError` here means the sender was dropped, which any early
-                // return from `execute_with_shutdown` does — so this reads as "the
+                // return from `execute_with_shutdown` does - so this reads as "the
                 // server failed to start" without saying why. Left as-is rather
                 // than adding a reporting branch that only a failing run executes,
                 // which the coverage gate would (correctly) flag as dead.

@@ -6,7 +6,7 @@ use super::*;
 /// `InferenceConfig::batch_tool_hint` is set. Identical across every agent,
 /// stage, and run, so it is a stable cache prefix (`CacheHint::Always`). It tells
 /// the model it may emit several `tool_use` blocks per response and should batch
-/// *independent* operations — while explicitly forbidding batching of dependent
+/// *independent* operations - while explicitly forbidding batching of dependent
 /// ones. See issue #17.
 pub(crate) const BATCH_TOOL_HINT: &str = "You can call multiple tools in a single response. \
 When operations are independent (reading, editing, or writing different files, or \
@@ -98,7 +98,7 @@ pub(crate) fn retry_policy_for(
 
 /// The cancellation handles for an agent's currently in-flight async work (its
 /// inference request, its tool batch). Attached when the work is dispatched,
-/// removed when it lands — so the presence of this component means "there is
+/// removed when it lands - so the presence of this component means "there is
 /// something running for this agent that a cancel needs to stop".
 ///
 /// Without it, cancelling only stopped *new* work from being dispatched: a
@@ -145,7 +145,7 @@ pub(crate) fn track_in_flight(
 /// Inference-dispatch system: for every `ReadyToInfer` agent, resolve its
 /// provider and, **if a per-model permit is free**, build the request, spawn the
 /// inference job, and move it to `AwaitingInference`. If its provider is missing
-/// or no slot is free, it stays `ReadyToInfer` and is retried on a later tick —
+/// or no slot is free, it stays `ReadyToInfer` and is retried on a later tick -
 /// no blocking, no wasted task.
 #[allow(clippy::type_complexity)]
 pub fn dispatch_inference(
@@ -171,8 +171,8 @@ pub fn dispatch_inference(
     //
     // This is the one system whose per-agent body runs off the driver thread, so
     // the thread-local `tick_scope` can't carry an entity back to the catcher.
-    // Each agent's share runs under `run_agent_parallel`, which catches there —
-    // where the entity is known — and marks that agent for `tick` to fail
+    // Each agent's share runs under `run_agent_parallel`, which catches there -
+    // where the entity is known - and marks that agent for `tick` to fail
     // (issue #109). Clearing the thread-local keeps a panic in the fan-out
     // machinery *itself* unattributed rather than blamed on whichever agent a
     // previous system left recorded.
@@ -182,13 +182,13 @@ pub fn dispatch_inference(
         .for_each(|(entity, state, window, config, si, in_flight)| {
             crate::tick_scope::run_agent_parallel(entity, &par_commands, &mut || {
                 if state.status != AgentStatus::Active {
-                    return; // paused / waiting / cancelled — don't start new work
+                    return; // paused / waiting / cancelled - don't start new work
                 }
                 let Some(provider) = providers.0.get(&si.provider_name) else {
-                    return; // provider not registered — leave ready, retry later
+                    return; // provider not registered - leave ready, retry later
                 };
                 let Some(permit) = stage.pools.try_acquire(&si.model) else {
-                    return; // pool full — leave ready, retry next tick
+                    return; // pool full - leave ready, retry next tick
                 };
                 let request = build_request(window, config, si, &provider);
                 let job = InferenceJob {

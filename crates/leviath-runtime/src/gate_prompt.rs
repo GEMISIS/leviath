@@ -3,7 +3,7 @@
 //! When the taint gate blocks an outbound tool call (it would leak
 //! over-cleared data), the default is to return a `[blocked]` result. When an
 //! [`InteractionHub`] is available (the daemon), the block instead becomes a
-//! prompt — "Allow once / Allow for this session / Deny" — mirroring tool
+//! prompt - "Allow once / Allow for this session / Deny" - mirroring tool
 //! approval. The user's choice is applied via
 //! [`TaintGate::apply_resolution`](crate::taint::TaintGate::apply_resolution):
 //! allow (once) executes the call; allow-for-session also raises the tool's

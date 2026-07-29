@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 /// `dirs::home_dir()` cannot be redirected by `$HOME` on macOS
 /// (`NSHomeDirectory()`) or `%USERPROFILE%` on Windows
 /// (`SHGetKnownFolderPath`), so `LEVIATH_HOME` is the single override every
-/// home-relative path honors — which is what lets a test (including one that
+/// home-relative path honors - which is what lets a test (including one that
 /// spawns the real `lev` binary) redirect all of them at once.
 ///
 /// `None` when neither resolves; callers decide how to report that rather than
@@ -21,7 +21,7 @@ pub fn home_dir() -> Option<PathBuf> {
 
 /// Leviath's data root: `<home>/.leviath`.
 ///
-/// Every persistent thing Leviath owns lives under here — `config.toml`,
+/// Every persistent thing Leviath owns lives under here - `config.toml`,
 /// `mcp-auth.json`, `runs/`, `agents/`, `providers/`, `tools/`, the control
 /// socket. Having one function say so is the point: there were seven separate
 /// resolvers with **three incompatible readings of `LEVIATH_HOME`**, so with the
@@ -34,7 +34,7 @@ pub fn data_dir() -> Option<PathBuf> {
 
 /// The directory scanned for global drop-in Rhai *tool* scripts.
 ///
-/// `<home>/.leviath/tools`, alongside `providers/` and `agents/` — not
+/// `<home>/.leviath/tools`, alongside `providers/` and `agents/` - not
 /// `<home>/tools`, which is where three call sites landed by joining `"tools"`
 /// onto the *user home* rather than the data root. That mattered: every `.rhai`
 /// file found here is compiled and offered to **every** agent as an executable
@@ -57,8 +57,8 @@ pub fn agents_dir() -> Option<PathBuf> {
 /// Whether `name` is safe to use as a single path component.
 ///
 /// Accepts `[A-Za-z0-9._-]+` and nothing else. Everything a caller supplies as
-/// "the name of a thing" — a blueprint name from a REST body, a run id from a
-/// URL segment — must pass this before it is `join`ed onto a directory, because
+/// "the name of a thing" - a blueprint name from a REST body, a run id from a
+/// URL segment - must pass this before it is `join`ed onto a directory, because
 /// `Path::join` does not normalize and does not resist an absolute path:
 ///
 /// ```text
@@ -88,7 +88,7 @@ pub fn is_safe_path_component(name: &str) -> bool {
 /// `/` satisfies it while pointing anywhere on the filesystem. Every file tool
 /// in Leviath was relying on exactly that check.
 ///
-/// `path` need not exist — a `write_file` creating a new file is the common
+/// `path` need not exist - a `write_file` creating a new file is the common
 /// case. The deepest *existing* ancestor is canonicalized (which is where any
 /// symlink lives) and the unresolved tail re-appended, so a not-yet-created file
 /// under a symlinked parent is still caught.
@@ -97,7 +97,7 @@ pub fn is_safe_path_component(name: &str) -> bool {
 /// symlink to `/private/tmp`, so a root that was stored uncanonicalized would
 /// never prefix-match a canonicalized path and every access would be refused.
 ///
-/// This is not TOCTOU-proof — a symlink planted between this call and the
+/// This is not TOCTOU-proof - a symlink planted between this call and the
 /// subsequent `open` still wins. Closing that needs `openat`/`O_NOFOLLOW`
 /// throughout. This stops the planted-symlink case, which is the one an agent
 /// can arrange for itself.
@@ -146,7 +146,7 @@ mod tests {
 
     /// Everything Leviath persists sits under one root, and `LEVIATH_HOME`
     /// moves all of it together. Seven separate resolvers with three readings of
-    /// that variable is what this replaced — and the consequence was concrete: a
+    /// that variable is what this replaced - and the consequence was concrete: a
     /// run that believed it was isolated wrote to the real
     /// `~/.leviath/config.toml`.
     #[test]
@@ -241,7 +241,7 @@ mod tests {
         let link = root.join("link");
         std::os::unix::fs::symlink("/", &link).unwrap();
 
-        // Lexically this is impeccable — and that was the whole problem.
+        // Lexically this is impeccable - and that was the whole problem.
         let target = link.join("etc/passwd");
         assert!(
             target.starts_with(root),
@@ -250,7 +250,7 @@ mod tests {
         assert!(!resolves_within(&target, root));
     }
 
-    /// A symlink whose target is *inside* the root is fine — the check is about
+    /// A symlink whose target is *inside* the root is fine - the check is about
     /// where the path lands, not whether a symlink was involved.
     #[cfg(unix)]
     #[test]
@@ -276,7 +276,7 @@ mod tests {
     }
 
     /// macOS puts temp dirs under a symlinked `/tmp`, so an uncanonicalized root
-    /// must still work — canonicalizing only the path and not the root would
+    /// must still work - canonicalizing only the path and not the root would
     /// refuse every access on that platform.
     #[test]
     fn an_uncanonicalized_root_still_matches() {

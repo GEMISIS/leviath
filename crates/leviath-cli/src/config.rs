@@ -18,7 +18,7 @@ pub enum ToolPolicy {
     /// Ask the user before each call (or once per session with `allow_session`).
     #[default]
     Ask,
-    /// Never execute — return a denied error to the model.
+    /// Never execute - return a denied error to the model.
     Deny,
 }
 
@@ -38,7 +38,7 @@ pub use leviath_core::config::TitleConfig;
 pub enum ScriptPermission {
     /// The host function may run.
     Allow,
-    /// The host function is blocked — the call returns a `[denied]` error.
+    /// The host function is blocked - the call returns a `[denied]` error.
     Deny,
     /// Defer to the agent's own `tool_permissions` for the equivalent built-in
     /// (`read_file`/`shell`): permitted only when that resolves to
@@ -120,7 +120,7 @@ pub struct Config {
     ///
     /// Keys are tool names (e.g. `"bash"`, `"write_file"`). Values override the
     /// built-in defaults, and act as a **ceiling** that a blueprint's own
-    /// `[tool_permissions]` may tighten but never loosen — see
+    /// `[tool_permissions]` may tighten but never loosen - see
     /// [`crate::tools::resolve_policy`]. To grant one agent more than this
     /// without loosening it everywhere, use [`Self::agent_tool_permissions`].
     #[serde(default)]
@@ -137,7 +137,7 @@ pub struct Config {
     /// Because a blueprint may only tighten what the user configured, a global
     /// `shell = "ask"` would otherwise stop a trusted agent from pre-approving
     /// its own shell. Naming the agent here is the user saying "I trust this
-    /// one" — a decision that lives in the user's config, not the downloaded
+    /// one" - a decision that lives in the user's config, not the downloaded
     /// manifest's. Entries replace the global value for that agent, and are then
     /// the ceiling the blueprint is clamped against.
     #[serde(default)]
@@ -220,14 +220,14 @@ pub struct Config {
 /// `[security]` in `~/.leviath/config.toml`.
 ///
 /// Distinct from a *blueprint's* `[security]` block, which configures taint
-/// tracking for one agent — this one holds machine-wide switches.
+/// tracking for one agent - this one holds machine-wide switches.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SecurityConfig {
     /// Whether a blueprint's `seed = { command = "..." }` regions may run
     /// (issue #108).
     ///
-    /// **On by default.** A command seed executes at spawn — before the first
-    /// inference, and therefore before any tool-approval prompt — so it is the
+    /// **On by default.** A command seed executes at spawn - before the first
+    /// inference, and therefore before any tool-approval prompt - so it is the
     /// one place a manifest can run something without the user being asked.
     /// It is still confined to the run's workdir, routed through the entry
     /// stage's sandbox when the agent declares one, and capped by
@@ -241,15 +241,15 @@ pub struct SecurityConfig {
     /// addresses.
     ///
     /// **Off by default.** An agent's `web_fetch` URL is chosen by the model out
-    /// of context an attacker can influence — a search result, a page fetched a
-    /// moment ago, an issue body — so an unrestricted fetch makes the agent a
+    /// of context an attacker can influence - a search result, a page fetched a
+    /// moment ago, an issue body - so an unrestricted fetch makes the agent a
     /// confused deputy *inside* the user's network. The concrete targets are
     /// `http://169.254.169.254/…` (cloud metadata, which returns instance
     /// credentials), `http://127.0.0.1:3000/api/…` (the user's own `lev serve`),
     /// and anything on the LAN.
     ///
-    /// Turn this on when the agent is genuinely meant to talk to something local
-    /// — a self-hosted model, a dev server under test. It applies to the script
+    /// Turn this on when the agent is genuinely meant to talk to something local -
+    /// a self-hosted model, a dev server under test. It applies to the script
     /// host's `http_get`/`http_post` and to redirect following; see
     /// [`leviath_core::net`].
     #[serde(default)]
@@ -258,13 +258,13 @@ pub struct SecurityConfig {
     /// Credential-shaped environment variables that agent scripts may read.
     ///
     /// A Rhai script tool or script provider calling `env_var("NAME")` gets any
-    /// ordinary variable — `PATH`, `TZ`, an app's own config. A name that *looks
+    /// ordinary variable - `PATH`, `TZ`, an app's own config. A name that *looks
     /// like a credential* (see [`leviath_core::secrets::is_sensitive_env_name`])
     /// is refused unless it appears here, because a two-line script tool reading
     /// `ANTHROPIC_API_KEY` and POSTing it elsewhere was otherwise a working
     /// exfiltration path with no prompt anywhere in it.
     ///
-    /// List the exact names a script legitimately needs — typically the key for
+    /// List the exact names a script legitimately needs - typically the key for
     /// a custom provider script:
     ///
     /// ```toml
@@ -279,7 +279,7 @@ pub struct SecurityConfig {
 
     /// Where provider API keys and MCP OAuth tokens are kept.
     ///
-    /// **`file` by default** — `~/.leviath/config.toml` and
+    /// **`file` by default** - `~/.leviath/config.toml` and
     /// `~/.leviath/mcp-auth.json`, both created `0600` so they are never even
     /// briefly world-readable. This is what Claude Code and Codex do, and it is
     /// the only backend that works headless, in a container, over SSH, and on a
@@ -296,7 +296,7 @@ pub struct SecurityConfig {
     ///
     /// Then run `lev auth migrate` to move the secrets you already have. It is
     /// opt-in rather than the default because an unavailable keychain is not a
-    /// degraded experience but a broken one — every inference fails at once —
+    /// degraded experience but a broken one - every inference fails at once -
     /// and the environments Leviath is most useful in are the least likely to
     /// have a working credential store. `lev auth status` reports whether this
     /// machine actually has one.
@@ -348,7 +348,7 @@ pub struct LimitsConfig {
     #[serde(default = "default_max_concurrent_inferences")]
     pub max_concurrent_inferences: Option<usize>,
 
-    /// Size of the shared tool-execution worker pool — the number of agents whose
+    /// Size of the shared tool-execution worker pool - the number of agents whose
     /// tool batches may run concurrently across the whole daemon (the tool-lane
     /// counterpart of `max_concurrent_inferences`). Defaults to `8`. Clamped to at
     /// least 1.
@@ -462,8 +462,8 @@ pub struct ProviderConfig {
     /// Whether the Claude Code CLI transport is enabled.
     ///
     /// **Opt-in, and never selected for the user.** The CLI injects its own
-    /// context into every call — including the account email address on the
-    /// OAuth (subscription) path — which cannot be disabled. `lev setup` offers
+    /// context into every call - including the account email address on the
+    /// OAuth (subscription) path - which cannot be disabled. `lev setup` offers
     /// it and defaults to declining, so a user who presses Enter through the
     /// wizard ends up with it off.
     #[serde(default)]
@@ -486,8 +486,8 @@ pub struct ProviderConfig {
 /// Hand-written so the API keys can never be printed.
 ///
 /// A `#[derive(Debug)]` here meant one `tracing::debug!(?config)` anywhere in
-/// the workspace — or one `dbg!`, or an `anyhow` context that formats a struct
-/// holding this — would put every provider key into the logs. Nothing did that
+/// the workspace - or one `dbg!`, or an `anyhow` context that formats a struct
+/// holding this - would put every provider key into the logs. Nothing did that
 /// today, which is exactly when it is cheap to foreclose: the type now cannot
 /// leak, so nobody has to remember not to.
 ///
@@ -605,7 +605,7 @@ impl Config {
         // `Config::load()` reads process-wide state, and `cargo test` runs tests
         // in parallel threads of one process. `temp_env` serializes its own
         // calls behind a global lock, but a test that reaches this function
-        // without going through that lock races every test that holds it — so
+        // without going through that lock races every test that holds it - so
         // it sees whatever variables happen to be set or unset at that instant.
         // That is not hypothetical: the `serve` CORS test failed on CI in two
         // different places depending on when it lost the race, each time
@@ -630,8 +630,8 @@ impl Config {
         //
         // `dotenvy::dotenv()` searches the cwd *and every ancestor*, which is
         // the wrong shape for a coding agent: `lev` is designed to be run inside
-        // cloned repositories, so an untrusted repo's `.env` — or one in any
-        // directory above it — was loaded into the process environment. That is
+        // cloned repositories, so an untrusted repo's `.env` - or one in any
+        // directory above it - was loaded into the process environment. That is
         // load-bearing well beyond provider keys: `PATH` and `SHELL` decide what
         // gets executed, `EDITOR`/`VISUAL` are split and spawned, `OLLAMA_HOST`
         // redirects inference to an attacker's endpoint, `LEVIATH_HOME`
@@ -639,7 +639,7 @@ impl Config {
         // `LEVIATH_API_TOKEN` sets a known credential on the agent-spawning API.
         //
         // `from_filename` reads only `./.env`. Still the user's own working
-        // directory, so this is not a trust boundary on its own — but it is one
+        // directory, so this is not a trust boundary on its own - but it is one
         // directory the user chose rather than an unbounded walk up the tree.
         //
         // `LEVIATH_SKIP_DOTENV` lets tests isolate `Config::load()` completely.
@@ -717,13 +717,13 @@ impl Config {
     /// Runs *after* the file and the environment, so precedence is file > env >
     /// keychain: what the user can see wins over what they cannot. In keychain
     /// mode `lev auth migrate` strips the keys out of the file, so in practice
-    /// the keychain is the only source — but a key left behind by hand keeps
+    /// the keychain is the only source - but a key left behind by hand keeps
     /// working rather than being silently ignored, and `lev auth status` reports
     /// when a secret exists in both places.
     ///
     /// A store that cannot be opened is a warning, not a hard failure. The user
     /// may still have working keys in their environment, and refusing to load
-    /// the config at all would take down `lev auth status` — the one command
+    /// the config at all would take down `lev auth status` - the one command
     /// that can explain what is wrong. The resolution is the caller's so that
     /// path is testable: "no store is installed in this process" is not the same
     /// as "this machine has no keychain", and on a developer's Mac the first
@@ -763,7 +763,7 @@ impl Config {
     ///
     /// What gets serialized in keychain mode: the secrets go to the OS store and
     /// the file keeps only the settings. Returning a stripped copy rather than
-    /// mutating in place matters — the caller is usually saving a config it is
+    /// mutating in place matters - the caller is usually saving a config it is
     /// still going to use for inference, and blanking its keys would break the
     /// run that triggered the save.
     fn without_secrets(&self) -> Self {
@@ -801,7 +801,7 @@ impl Config {
         }
 
         // In keychain mode the secrets belong in the OS store, and the file
-        // keeps only the settings -- otherwise `lev setup` would helpfully write
+        // keeps only the settings - otherwise `lev setup` would helpfully write
         // every key back into `config.toml` and quietly undo the migration.
         //
         // A store that cannot be written is *not* silently downgraded to writing
@@ -812,7 +812,7 @@ impl Config {
     }
 
     /// Core of [`save_to_path`](Self::save_to_path) with the backend already
-    /// resolved -- see
+    /// resolved - see
     /// [`fill_from_credential_store_with`](Self::fill_from_credential_store_with)
     /// for why the resolution is the caller's.
     fn write_to(
@@ -838,7 +838,7 @@ impl Config {
 
         // `write_private`, not `fs::write` + `chmod`. This file holds every
         // provider API key, and the two-step version left it at the umask
-        // default (typically 0644) between the write and the mode change — so
+        // default (typically 0644) between the write and the mode change - so
         // every save had a moment where any local user could read the keys.
         leviath_sys::write_private(path, content.as_bytes()).map_err(|e| {
             anyhow::anyhow!("Failed to write config to '{}': {}", path.display(), e)
@@ -867,8 +867,8 @@ impl Config {
     /// along with every other home-relative path.
     ///
     /// It used to honor only the first. `LEVIATH_HOME`'s whole purpose is to
-    /// "redirect every home-relative path at once" — that is what its doc says
-    /// and what tests, sandboxed runs and scratch environments rely on — so a
+    /// "redirect every home-relative path at once" - that is what its doc says
+    /// and what tests, sandboxed runs and scratch environments rely on - so a
     /// config path that quietly ignored it meant a run that believed it was
     /// isolated would read *and write* the developer's real
     /// `~/.leviath/config.toml`, the file holding every provider API key. Found
@@ -892,14 +892,14 @@ impl Config {
             && !key.starts_with("sk-ant-")
         {
             warnings.push(
-                "Anthropic API key doesn't start with 'sk-ant-' — verify it's correct".to_string(),
+                "Anthropic API key doesn't start with 'sk-ant-' - verify it's correct".to_string(),
             );
         }
         if let Some(ref key) = self.providers.openai_api_key
             && !key.starts_with("sk-")
         {
             warnings
-                .push("OpenAI API key doesn't start with 'sk-' — verify it's correct".to_string());
+                .push("OpenAI API key doesn't start with 'sk-' - verify it's correct".to_string());
         }
         warnings
     }
@@ -924,7 +924,7 @@ fn create_config_dir(dir: &std::path::Path) -> anyhow::Result<()> {
 
 /// Check permissions on the config file and auto-fix if too permissive.
 ///
-/// A no-op on non-Unix platforms — see [`leviath_sys::ensure_file_private`].
+/// A no-op on non-Unix platforms - see [`leviath_sys::ensure_file_private`].
 fn check_permissions() {
     check_permissions_at(&Config::config_path());
 }
@@ -940,7 +940,7 @@ fn check_permissions_at(path: &std::path::Path) {
 
 /// Core of [`check_permissions_at`] with the permission-hardening operation
 /// injected, so the "fix failed" arm can be covered deterministically on every
-/// OS. On disk that `Err` only occurs when a file exists but `chmod` fails —
+/// OS. On disk that `Err` only occurs when a file exists but `chmod` fails -
 /// forcing that without root differs per platform (macOS `chflags uchg`, no
 /// portable Linux equivalent), so a `fn` pointer is injected instead of relying
 /// on an OS-specific trick. A `fn` pointer (not `impl Fn`) keeps this to a
@@ -995,15 +995,15 @@ pub(crate) static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Wraps the `MutexGuard` inside a private field specifically so it can be held
 /// across an `.await` in an async test without tripping clippy's
 /// `await_holding_lock` lint, which only looks for a directly-visible
-/// `MutexGuard` local -- not one hidden inside a wrapper struct's field.
+/// `MutexGuard` local - not one hidden inside a wrapper struct's field.
 /// That's not working around a real risk: each `#[tokio::test]` gets its
 /// own private single-threaded runtime, so holding this across an await
 /// can't starve another task in the *same* test: it only serializes
 /// against other CWD-mutating tests, which is exactly the intended effect.
 ///
-/// Was `#[cfg(unix)]` as well, because its only caller —
-/// `commands/list.rs`'s `execute_falls_back_to_default_cwd_when_current_dir_is_gone`
-/// — is Unix-only (the race it reproduces, deleting a directory that is the
+/// Was `#[cfg(unix)]` as well, because its only caller -
+/// `commands/list.rs`'s `execute_falls_back_to_default_cwd_when_current_dir_is_gone` -
+/// is Unix-only (the race it reproduces, deleting a directory that is the
 /// process's live CWD, is a sharing violation on Windows rather than a
 /// reproducible state), which made it dead code there under `-D warnings`.
 /// `a_dot_env_in_the_working_directory_is_read` is a second caller that must run
@@ -1117,7 +1117,7 @@ mod dotenv_tests {
     use super::*;
 
     /// `Config::load()` reads `./.env`, and every isolated test sets
-    /// `LEVIATH_SKIP_DOTENV` — so that branch would otherwise never run.
+    /// `LEVIATH_SKIP_DOTENV` - so that branch would otherwise never run.
     ///
     /// It used to be covered by the tests that read the real environment, which
     /// is to say by the tests that were racing. Covered deliberately here
@@ -1131,7 +1131,7 @@ mod dotenv_tests {
         let dir = make_fake_config_dir("dotenv-read");
         std::fs::write(dir.join(".env"), "LEV_DOTENV_PROBE=seen\n").unwrap();
 
-        // Scoped so the CWD guard drops — restoring the working directory —
+        // Scoped so the CWD guard drops - restoring the working directory -
         // before the cleanup below. Windows refuses to remove a directory that
         // is some process's live CWD.
         {
@@ -1335,7 +1335,7 @@ mod tests {
     }
 
     /// The three resolutions the loader can get back. A keychain that was asked
-    /// for but is unreachable must warn and carry on -- refusing to load the
+    /// for but is unreachable must warn and carry on - refusing to load the
     /// config would take down `lev auth status`, the one command that can
     /// explain the problem.
     #[test]
@@ -1609,7 +1609,7 @@ google_api_key = "AIza-existing"
     #[test]
     fn save_to_path_with_no_parent_skips_create_config_dir() {
         // `Path::parent()` returns `None` only for an empty path or a
-        // filesystem root -- `PathBuf::from("")` triggers the empty case
+        // filesystem root - `PathBuf::from("")` triggers the empty case
         // cross-platform, hitting the `if let Some(parent) = ...` block's
         // `None` arm (skip `create_config_dir`) without a platform-specific
         // root path. The subsequent `fs::write("")` then fails, which is
@@ -1721,12 +1721,12 @@ google_api_key = "AIza-existing"
         assert_eq!(mode & 0o777, 0o600);
     }
 
-    // On macOS/BSD, `chflags uchg` sets the user-immutable flag -- settable
-    // by a regular file owner without root -- which blocks `chmod` (and thus
+    // On macOS/BSD, `chflags uchg` sets the user-immutable flag - settable
+    // by a regular file owner without root - which blocks `chmod` (and thus
     // `std::fs::set_permissions`) with EPERM while leaving `exists()`/
     // The "fix failed" arm of `check_permissions_at` (a file that exists but
     // whose `chmod` fails) is exercised deterministically on every OS by
-    // injecting a failing `ensure` fn — no `chflags uchg`/root trick, which was
+    // injecting a failing `ensure` fn - no `chflags uchg`/root trick, which was
     // macOS-only and left this branch uncovered on Linux CI.
     #[test]
     fn check_permissions_at_with_logs_when_fix_fails() {
@@ -1751,8 +1751,8 @@ google_api_key = "AIza-existing"
 
     // Portable failure injection for the hardening error arms of
     // `set_file_permissions`/`set_dir_permissions`. `leviath_sys`'s Windows
-    // fallback is infallible (always `Ok`) -- and even a missing path fails only
-    // on Unix -- so the only cross-platform way to reach the `Err` arm is to
+    // fallback is infallible (always `Ok`) - and even a missing path fails only
+    // on Unix - so the only cross-platform way to reach the `Err` arm is to
     // inject a hardening op that fails (mirroring `check_permissions_at_with`).
     fn always_failing_secure(_path: &std::path::Path) -> std::io::Result<()> {
         Err(std::io::Error::other(
@@ -1771,7 +1771,7 @@ google_api_key = "AIza-existing"
     }
 
     // ─── create_config_dir / set_file_permissions / set_dir_permissions ───
-    // (already path-parameterized — directly testable without touching the
+    // (already path-parameterized - directly testable without touching the
     // real ~/.leviath/config.toml)
 
     #[test]
@@ -1794,7 +1794,7 @@ google_api_key = "AIza-existing"
     }
 
     /// The config holds every provider API key, so it must never be readable by
-    /// anyone else — not even for the instant between a `write` and a `chmod`,
+    /// anyone else - not even for the instant between a `write` and a `chmod`,
     /// which is how it used to be saved. `write_private` creates the file with
     /// the mode already applied.
     #[cfg(unix)]
@@ -1803,7 +1803,7 @@ google_api_key = "AIza-existing"
     ///
     /// It did not, and the consequence was concrete: a scratch environment that
     /// set `LEVIATH_HOME` and ran `lev mcp add` wrote to the developer's *real*
-    /// `~/.leviath/config.toml` — the file holding every provider API key —
+    /// `~/.leviath/config.toml` - the file holding every provider API key -
     /// while believing it was isolated.
     #[test]
     fn config_path_honors_leviath_home() {
@@ -2161,7 +2161,7 @@ args = ["hello"]
     #[test]
     fn load_rejects_a_malformed_mcp_server_entry() {
         // An entry with neither `command` nor `url` can never connect, so it
-        // must fail at load — naming the server — rather than silently drop its
+        // must fail at load - naming the server - rather than silently drop its
         // tools until the first call.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -2407,7 +2407,7 @@ enabled = false
     fn title_config_missing_enabled_key_uses_default_true() {
         // Unlike `title_config_from_toml_defaults` (which omits the whole
         // `[title]` table, falling back to `Config`'s own `#[serde(default)]`
-        // for the field -- never invoking `TitleConfig`'s own per-field
+        // for the field - never invoking `TitleConfig`'s own per-field
         // parsing at all), this includes `[title]` but omits `enabled`
         // specifically, forcing serde to deserialize `TitleConfig` field by
         // field and fall back to `default_true()` for the missing key.

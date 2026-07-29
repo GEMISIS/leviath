@@ -5,14 +5,14 @@
 //! 1. **What does a child process inherit?** ([`child_env_allowed`]) We are
 //!    *choosing what to hand over*, so an allowlist is right. A denylist here has
 //!    to enumerate every secret name in the ecosystem and loses the moment a new
-//!    one appears — which is exactly what happened: the MCP spawner's substring
+//!    one appears - which is exactly what happened: the MCP spawner's substring
 //!    denylist passed `AWS_SECRET_ACCESS_KEY` (it matches neither `API_SECRET`
 //!    nor `SECRET_KEY`), `GITHUB_TOKEN`, `NPM_TOKEN`, `DATABASE_URL`, and
 //!    Leviath's own `LEVIATH_API_TOKEN`.
 //!
 //! 2. **May a script read *this named* variable?** ([`is_sensitive_env_name`]) A
-//!    script asks for one name it already knows. An allowlist cannot work — no
-//!    fixed list covers every legitimate variable a provider script might read —
+//!    script asks for one name it already knows. An allowlist cannot work - no
+//!    fixed list covers every legitimate variable a provider script might read -
 //!    so the rule inverts: anything that *looks like* a credential is refused
 //!    unless the user allowlisted it, and everything else is fine.
 //!
@@ -48,7 +48,7 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
 /// The **one** redaction policy for the workspace. There were two, and they
 /// disagreed about which end of the value to keep: the HTTP logger showed the
 /// last four, the setup wizard the first eight. Two answers to "how much of a
-/// secret is safe to print" means neither is a policy — and a prefix is the
+/// secret is safe to print" means neither is a policy - and a prefix is the
 /// wrong half to keep, because API keys are structured at the front:
 /// `sk-ant-a…`, `sk-proj-…`, `ghp_…` all identify the issuer and, for a short
 /// token, a meaningful fraction of the value.
@@ -74,7 +74,7 @@ pub fn redact(value: &str) -> String {
 ///
 /// A substring match rather than an exact-name list. The list version named
 /// `authorization`, `x-api-key` and `api-key`, and therefore logged Gemini's
-/// `x-goog-api-key` **in full** under `--features debug-http` — the one
+/// `x-goog-api-key` **in full** under `--features debug-http` - the one
 /// provider whose header did not happen to be on it. A denylist of exact names
 /// has to be complete to be correct, and this one was not; matching on the
 /// shape of the name fails safe as new headers appear.
@@ -92,7 +92,7 @@ pub fn is_secret_header(name: &str) -> bool {
 /// like a terminal program; it does not need the ambient credentials of whoever
 /// started the daemon. Anything else a server legitimately requires is declared
 /// in its own `env` block in config, which is applied *after* this filter and so
-/// always wins — that is the supported way to pass a server its token.
+/// always wins - that is the supported way to pass a server its token.
 const CHILD_ENV_ALLOWLIST: &[&str] = &[
     // Finding and running programs.
     "PATH",
@@ -210,7 +210,7 @@ pub fn is_sensitive_env_name(name: &str) -> bool {
 
 /// Whether a script may read `name`, given the user's `[security] allow_env_vars`.
 ///
-/// Non-credential names pass freely — a script reading `PATH`, `TZ`, or its own
+/// Non-credential names pass freely - a script reading `PATH`, `TZ`, or its own
 /// app's config variable is ordinary. A credential-shaped name passes only if the
 /// user listed it, which is them saying "yes, this agent is meant to have that".
 /// Matching the allowlist is case-insensitive and exact; no wildcards, because
@@ -236,7 +236,7 @@ mod tests {
         assert!(constant_time_eq("", ""));
         assert!(!constant_time_eq("secret", "secreu"));
         // Differing at the very first byte and at the very last must both be
-        // false — the loop does not short-circuit either way.
+        // false - the loop does not short-circuit either way.
         assert!(!constant_time_eq("Xecret", "secret"));
         assert!(!constant_time_eq("secreX", "secret"));
         // Length mismatch is refused before indexing.
@@ -254,7 +254,7 @@ mod tests {
         assert!(!redact("ghp_realgithubtoken").contains("ghp_"));
     }
 
-    /// A short value is hidden entirely — four visible characters out of eight
+    /// A short value is hidden entirely - four visible characters out of eight
     /// is most of it.
     #[test]
     fn redact_hides_short_values_completely() {
@@ -397,7 +397,7 @@ mod tests {
     fn child_allowlist_is_the_short_list_not_the_environment() {
         assert!(child_env_allowed("PATH"));
         assert!(child_env_allowed("LANG"));
-        // Not sensitive, but still not a child's business by default — the point
+        // Not sensitive, but still not a child's business by default - the point
         // of an allowlist is that unknown names are excluded, not just secret
         // ones. A server that needs it declares it in its own `env` block.
         assert!(!child_env_allowed("MY_APP_REGION"));

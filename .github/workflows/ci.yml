@@ -112,7 +112,7 @@ jobs:
 
       # The lockfile is the point of the job above, so prove it is actually
       # current. `--locked` fails if Cargo.toml and Cargo.lock disagree, which
-      # catches a dependency edit committed without the lockfile update — the
+      # catches a dependency edit committed without the lockfile update - the
       # exact case that would silently reintroduce floating resolution.
       - name: Verify Cargo.lock is up to date
         run: cargo metadata --locked --format-version 1 > /dev/null
@@ -137,14 +137,14 @@ jobs:
   # own thresholds: `cargo xtask coverage --package <pkg>` runs `cargo llvm-cov
   # --package <pkg> --fail-under-{lines,functions,regions} 100`, failing the job
   # if that package is below 100% (see xtask/src/coverage.rs). No custom
-  # parsing/merging/aggregation — llvm-cov does the counting and the gating.
+  # parsing/merging/aggregation - llvm-cov does the counting and the gating.
   #
   # Per-PACKAGE (not `--workspace`) is deliberate: `-C instrument-coverage`
-  # records every function in every binary that links it — including binaries
-  # that never call it — so the whole-workspace merge lets a never-run record
+  # records every function in every binary that links it - including binaries
+  # that never call it - so the whole-workspace merge lets a never-run record
   # shadow the covered one and reads genuinely-tested code below 100%. One
   # package at a time keeps llvm-cov's counts accurate (see coverage.rs + the
-  # upstream LLVM bug it links). Branch coverage is not collected — `--branch`
+  # upstream LLVM bug it links). Branch coverage is not collected - `--branch`
   # reliably SIGSEGVs on that same bug. `cargo-llvm-cov` is installed from a
   # prebuilt binary via taiki-e/install-action.
   coverage:
@@ -156,7 +156,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         # The workspace members `parse_workspace_packages` returns (xtask
-        # excluded — it is the coverage tool, not measured by the gate).
+        # excluded - it is the coverage tool, not measured by the gate).
         package:
           - leviath-core
           - leviath-runtime
@@ -196,7 +196,7 @@ jobs:
   # runs once every package on every OS gated green, so its success == the whole
   # workspace is 100%. It keeps the stable `Coverage gate (<os>)` check name and
   # publishes the coverage badges (from ubuntu on push to main). Because the gate
-  # is hard-100%, a green run means 100% by construction — the badges are static.
+  # is hard-100%, a green run means 100% by construction - the badges are static.
   coverage-gate:
     name: Coverage gate (${{ matrix.os }})
     needs: [coverage]
@@ -241,7 +241,7 @@ jobs:
 
   # The zero-exclusions policy scan runs once (it's OS-independent). It uses
   # ast-grep, which matches Rust/YAML *structurally* (via tree-sitter) rather
-  # than by raw text — so a `#[cfg(not(test))]` attribute is caught but a
+  # than by raw text - so a `#[cfg(not(test))]` attribute is caught but a
   # backtick mention of it inside a doc comment is not. Rules live in
   # `.sgrules/` (see `sgconfig.yml`). Explicit scan paths are required because
   # `.github/` is a hidden directory that a bare `ast-grep scan` would skip.
@@ -267,14 +267,14 @@ jobs:
           printf '#[cfg(not(test))]\nfn __probe() {}\n' > "$probe"
           if ast-grep scan crates xtask .github/workflows; then
             rm -f "$probe"
-            echo "::error::ast-grep did NOT catch a planted #[cfg(not(test))] — the suppression lint is misconfigured (bad rules or scan paths)."
+            echo "::error::ast-grep did NOT catch a planted #[cfg(not(test))] - the suppression lint is misconfigured (bad rules or scan paths)."
             exit 1
           fi
           rm -f "$probe"
           echo "Suppression lint confirmed: the planted probe was caught."
 
   # `crates/leviath-cli/src/main.rs` is the ONE file excluded from coverage
-  # measurement — the thin, un-unit-tested composition root where real terminal
+  # measurement - the thin, un-unit-tested composition root where real terminal
   # / stdin / port / subprocess / `/dev/tty` I/O is wired into the tested lib
   # cores. Changing it needs deliberate maintainer sign-off: this job fails any
   # PR that touches main.rs unless the maintainer applies the

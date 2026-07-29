@@ -3,9 +3,9 @@
 //! This binary is deliberately thin: it is the *composition root* where real
 //! I/O is constructed and wired into the library's already-tested command
 //! cores. `cargo xtask coverage` measures `--lib` only, never `--bin`, so the
-//! genuinely un-unit-testable slivers below — taking over the real terminal
+//! genuinely un-unit-testable slivers below - taking over the real terminal
 //! (`lev dash`), reading real stdin (`lev setup` interactive), and delegating
-//! to the library's real command entrypoints — live here rather than behind a
+//! to the library's real command entrypoints - live here rather than behind a
 //! `#[cfg(not(test))]` coverage escape hatch in library code.
 
 use std::fs::File;
@@ -107,7 +107,7 @@ impl RiskyExecutors for RealExecutors {
         &self,
         args: commands::agent_client::AgentClientArgs,
     ) -> anyhow::Result<()> {
-        // Like `serve`, this is a client of the shared-world daemon — ensure it's
+        // Like `serve`, this is a client of the shared-world daemon - ensure it's
         // running, then speak the Agent Client Protocol over real stdio, routing
         // agent actions through its control socket. The protocol loop
         // (`agent_client::serve_over`) is fully unit-tested over an in-memory
@@ -178,7 +178,7 @@ impl RiskyExecutors for RealExecutors {
 
 /// Real `lev run`: ensure the daemon is running (auto-start it detached if not),
 /// then resolve the blueprint + task and spawn the agent into the shared world.
-/// Wiring only — the request-building + daemon exchange (`daemon::client`) are
+/// Wiring only - the request-building + daemon exchange (`daemon::client`) are
 /// unit-tested; the cwd/home resolution, process spawn, and socket connect are
 /// the un-unit-testable slivers kept here.
 async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
@@ -222,7 +222,7 @@ async fn ensure_daemon_running() -> anyhow::Result<()> {
             return Ok(()); // already running the current build
         }
         // A daemon from an older build is running. It cannot pick up new code, so
-        // restart it cleanly — it reloads its persisted agents on startup, so
+        // restart it cleanly - it reloads its persisted agents on startup, so
         // in-flight runs survive the swap.
         eprintln!("leviath daemon is on an older build; restarting to load {CURRENT_BUILD}…");
         // Shut down quietly (straight over the control socket) rather than via
@@ -274,7 +274,7 @@ async fn real_daemon_stop() -> anyhow::Result<()> {
         return Ok(());
     }
     // Ask politely first. If the control channel refuses or is wedged, fall back
-    // to signalling the recorded process — otherwise a daemon that cannot be
+    // to signalling the recorded process - otherwise a daemon that cannot be
     // talked to cannot be stopped either, and `lev daemon restart` (which stops
     // before it starts) could never recover.
     if let Err(e) = commands::daemon::send_shutdown(&control_client()?).await {
@@ -324,15 +324,15 @@ async fn real_daemon_status() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `lev daemon restart`: stop the running daemon (if any), then start a fresh one
-/// — which reloads persisted agents on startup.
+/// `lev daemon restart`: stop the running daemon (if any), then start a fresh one -
+/// which reloads persisted agents on startup.
 async fn real_daemon_restart() -> anyhow::Result<()> {
     real_daemon_stop().await?;
     real_daemon_start().await
 }
 
-/// Resolve the platform's service definition for this installation. Wiring only
-/// — the rendering, paths, and command lines are the tested
+/// Resolve the platform's service definition for this installation. Wiring only -
+/// the rendering, paths, and command lines are the tested
 /// `commands::daemon_service` core; this supplies the real exe path, home
 /// directory, and uid.
 fn resolve_service_unit() -> anyhow::Result<commands::daemon_service::ServiceUnit> {
@@ -351,7 +351,7 @@ fn resolve_service_unit() -> anyhow::Result<commands::daemon_service::ServiceUni
 }
 
 /// Run a supervisor command (`launchctl` / `systemctl`), reporting its stderr on
-/// failure. The real subprocess spawn — the argv it runs is built and tested in
+/// failure. The real subprocess spawn - the argv it runs is built and tested in
 /// `commands::daemon_service`.
 fn run_supervisor(cmd: &(String, Vec<String>)) -> anyhow::Result<()> {
     let out = std::process::Command::new(&cmd.0).args(&cmd.1).output()?;
@@ -395,7 +395,7 @@ fn real_daemon_uninstall() -> anyhow::Result<()> {
 }
 
 /// Real `lev daemon`: bind the platform control socket and drive the shared world
-/// until Ctrl-C. Wiring only — the world, host, tool service, and spawner it
+/// until Ctrl-C. Wiring only - the world, host, tool service, and spawner it
 /// composes (`daemon::setup`) plus the control transport (`control_socket`:
 /// bind/accept/handle) are all unit-tested. Only the real accept loop + signal
 /// I/O are the un-unit-testable slivers kept here in the (coverage-unmeasured)
@@ -477,7 +477,7 @@ fn control_client() -> anyhow::Result<leviath_runtime::control_socket::ControlCl
 
 /// Real `lev dash`: supplies the real crossterm terminal backend and event
 /// source to the library's fully-tested `dashboard::execute_with`. Wiring
-/// only — the loop, rendering, input handling, and engine setup it composes
+/// only - the loop, rendering, input handling, and engine setup it composes
 /// are all exercised under `cargo test`.
 async fn real_dashboard(_args: DashboardArgs) -> anyhow::Result<()> {
     // The dashboard is a client of the shared-world daemon: ensure it's running,
@@ -495,8 +495,8 @@ async fn real_dashboard(_args: DashboardArgs) -> anyhow::Result<()> {
 /// then fall back to writing the OSC52 escape sequence to the real controlling
 /// terminal / stdout. The native-tool + fallback branch logic is unit-tested in
 /// `yank_to_clipboard_via`; `leviath_sys::osc52_write_via`'s branches are
-/// unit-tested via injected fakes. The two real-I/O leaves it composes here —
-/// opening `/dev/tty` and acquiring `stdout()` — are the un-unit-testable slivers.
+/// unit-tested via injected fakes. The two real-I/O leaves it composes here -
+/// opening `/dev/tty` and acquiring `stdout()` - are the un-unit-testable slivers.
 fn real_yank(text: &str) -> bool {
     commands::dashboard::yank_to_clipboard_via(text, |t| {
         let mut out = io::stdout();
@@ -519,7 +519,7 @@ fn open_controlling_tty() -> io::Result<File> {
 
 /// Real `lev setup`: the real config paths, the real environment, a real
 /// browser for the "open the signup page" key, a real TTY check, and the real
-/// network-backed provider verifier — everything the library's tested
+/// network-backed provider verifier - everything the library's tested
 /// `execute_with` takes as a seam.
 ///
 /// The verification task is spawned here rather than inside `execute_with`

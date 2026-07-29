@@ -44,7 +44,7 @@ pub(crate) struct Dashboard {
     pub(super) choice_selected: usize,
     /// Which stage tab is currently focused in the detail view
     pub(super) selected_stage: usize,
-    /// Whether the content pane shows Output or Logs — global across all stage tabs.
+    /// Whether the content pane shows Output or Logs - global across all stage tabs.
     pub(super) stage_content_mode: StageContentMode,
     /// The selected run's context-window history (from its `run.lvr` archive),
     /// loaded lazily when the user starts browsing it in the Context view. Empty
@@ -122,7 +122,7 @@ pub(crate) struct Dashboard {
     /// `init_dashboard`, retained by tests to inject outcomes.
     pub(super) daemon_outcome_tx: Option<mpsc::UnboundedSender<DaemonOutcome>>,
     /// The run ids the daemon currently holds, refreshed each tick. `None` when
-    /// the daemon did not answer — the disk view is then taken at face value
+    /// the daemon did not answer - the disk view is then taken at face value
     /// rather than declaring every run stale.
     pub(super) daemon_run_ids: Option<std::collections::HashSet<String>>,
     /// Wall-clock source, injected so staleness is testable without sleeping.
@@ -480,7 +480,7 @@ impl Dashboard {
 
     /// Push a transient toast, capping the on-screen stack at 4 (oldest drops).
     /// An associated fn over `&mut Vec<Toast>` (not `&mut self`) so it can be
-    /// called while another field of `self` — e.g. `self.agents` — is borrowed.
+    /// called while another field of `self` - e.g. `self.agents` - is borrowed.
     /// Push a toast onto this dashboard with the standard display duration.
     pub(super) fn toast(&mut self, msg: impl Into<String>, level: ToastLevel) {
         Self::push_toast(&mut self.toasts, msg, level, 30);
@@ -527,9 +527,9 @@ impl Dashboard {
     /// it: the daemon does not hold it *and* its metadata has not been touched
     /// in [`STALE_AFTER_SECS`].
     ///
-    /// Both halves are needed. The daemon's list alone is not enough — it is
+    /// Both halves are needed. The daemon's list alone is not enough - it is
     /// empty whenever the daemon is unreachable, which would flip every healthy
-    /// run to STALE. The timestamp alone is not enough either — a run mid-request
+    /// run to STALE. The timestamp alone is not enough either - a run mid-request
     /// legitimately writes nothing for a while.
     fn looks_stale(&self, run: &runstate::RunMeta) -> bool {
         let Some(live) = &self.daemon_run_ids else {
@@ -545,7 +545,7 @@ impl Dashboard {
         for run in runs {
             // A live open prompt from the daemon's hub (populated each tick by
             // `sync_interactions`) is the authoritative signal that this agent is
-            // blocked on us — surface it regardless of the persisted status,
+            // blocked on us - surface it regardless of the persisted status,
             // which can lag a tick behind the hub or (for tool-approval prompts)
             // never flips on its own.
             let pending_request = self.pending_interactions.get(&run.run_id).cloned();
@@ -643,12 +643,12 @@ impl Dashboard {
                         | AgentDisplayStatus::Error(_)
                 );
                 if now_is_waiting {
-                    // Entering or staying in a wait — freeze timer at entry point
+                    // Entering or staying in a wait - freeze timer at entry point
                     if agent.active_until.is_none() {
                         agent.active_until = Some(run.updated_at);
                     }
                 } else {
-                    // Leaving a wait — accumulate how long we were waiting
+                    // Leaving a wait - accumulate how long we were waiting
                     if let Some(wait_start) = agent.active_until.take() {
                         agent.waiting_secs += (run.updated_at - wait_start).max(0) as u64;
                     }
@@ -680,7 +680,7 @@ impl Dashboard {
                                 && waiting_prompt.is_some()
                                 && matches!(run.status, RunStatus::WaitingInput)
                             {
-                                // Newly needs input — toast (not for CompleteInteractive which is optional)
+                                // Newly needs input - toast (not for CompleteInteractive which is optional)
                                 let name = agent
                                     .title
                                     .clone()
@@ -702,7 +702,7 @@ impl Dashboard {
                     agent.last_answered_request_id = None;
                 }
             } else {
-                // New agent — toasts only after the initial sync (avoid flooding on startup)
+                // New agent - toasts only after the initial sync (avoid flooding on startup)
                 if self.initial_sync_done {
                     if needs_input
                         && waiting_prompt.is_some()
@@ -792,7 +792,7 @@ impl Dashboard {
     /// Refresh which runs the daemon actually holds.
     ///
     /// The dashboard lists runs from disk and the daemon lists them from memory,
-    /// and nothing reconciled the two — so a run whose daemon had died sat at
+    /// and nothing reconciled the two - so a run whose daemon had died sat at
     /// ACTIVE with a ticking timer forever. On any transport error this is set
     /// back to `None`, meaning "unknown", so an unreachable daemon does not make
     /// every run look dead.
@@ -887,7 +887,7 @@ impl Dashboard {
     /// Build a tree-ordered list of agent indices with tree connector prefixes.
     ///
     /// Depth-first tree order over the given root agent indices (in the order
-    /// supplied — the caller sorts them), nesting each root's children beneath it.
+    /// supplied - the caller sorts them), nesting each root's children beneath it.
     /// Returns `Vec<(original_index, tree_prefix)>`.
     pub(super) fn build_tree_order(&self, root_order: &[usize]) -> Vec<(usize, String)> {
         let mut result = Vec::new();
@@ -941,7 +941,7 @@ mod tests {
 
     use crate::commands::dashboard::test_support::make_test_dashboard;
 
-    /// Root agent indices (no parent), in agent order — the input the production
+    /// Root agent indices (no parent), in agent order - the input the production
     /// path feeds to `build_tree_order` (there it's the status-sorted roots).
     fn roots_of(dash: &Dashboard) -> Vec<usize> {
         dash.agents
@@ -1354,7 +1354,7 @@ mod tests {
         dash.update_display_indices();
         dash.selected = 1;
         dash.table_state.select(Some(1));
-        // Re-sort without changing agents — selection should be preserved
+        // Re-sort without changing agents - selection should be preserved
         dash.update_display_indices();
         assert_eq!(dash.selected, 1);
     }
@@ -1830,7 +1830,7 @@ mod tests {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
         agent.waiting_prompt = Some("prompt text".to_string());
-        agent.pending_request = None; // no structured request — legacy path
+        agent.pending_request = None; // no structured request - legacy path
         agent.stage_index = 0;
         dash.agents.push(agent);
         dash.update_display_indices();
@@ -1924,7 +1924,7 @@ mod tests {
     // ─── sync_from_run_state ────────────────────────────────────────────────
     //
     // Uses real on-disk run directories (via runstate::create_run), like
-    // runstate.rs's own `list_runs_returns_sorted` test does — unique run_ids
+    // runstate.rs's own `list_runs_returns_sorted` test does - unique run_ids
     // + inclusion checks (not exact-list assertions) so these coexist safely
     // with any other real runs on disk and with concurrently-running tests.
 
@@ -1986,7 +1986,7 @@ mod tests {
 
     /// The reported bug's shape: a run whose `meta.json` claims `starting` /
     /// `running`, which the daemon does not hold and which has not been touched
-    /// in a long time, is not ACTIVE — nothing is driving it.
+    /// in a long time, is not ACTIVE - nothing is driving it.
     #[test]
     fn a_run_the_daemon_does_not_hold_and_has_not_moved_shows_as_stale() {
         crate::runstate::with_isolated_runs_dir("sync-stale-run", |_d| {
@@ -2011,7 +2011,7 @@ mod tests {
         });
     }
 
-    /// A run the daemon *does* hold is active however old its metadata looks —
+    /// A run the daemon *does* hold is active however old its metadata looks -
     /// one long inference legitimately writes nothing for a while.
     #[test]
     fn a_run_the_daemon_holds_is_never_stale() {
@@ -2033,7 +2033,7 @@ mod tests {
         });
     }
 
-    /// An unreachable daemon means "unknown", not "everything is dead" — the
+    /// An unreachable daemon means "unknown", not "everything is dead" - the
     /// list is empty in both cases, so treating them alike would flip every
     /// healthy run to STALE the moment the socket blipped.
     #[test]
@@ -2056,7 +2056,7 @@ mod tests {
         });
     }
 
-    /// A run the daemon doesn't hold but which is still writing is active — it
+    /// A run the daemon doesn't hold but which is still writing is active - it
     /// may simply not be registered yet (a just-spawned run, a fan-out worker).
     #[test]
     fn a_recently_updated_run_is_not_stale_even_if_unregistered() {
@@ -2124,7 +2124,7 @@ mod tests {
     /// above inject a fixed one, so this is the only place it runs).
     #[test]
     fn system_clock_reports_a_wall_clock_time() {
-        // Well after 2020 and before 2100 — i.e. a real epoch second.
+        // Well after 2020 and before 2100 - i.e. a real epoch second.
         let now = system_now_secs();
         assert!(now > 1_577_836_800 && now < 4_102_444_800, "got {now}");
     }
@@ -2295,7 +2295,7 @@ mod tests {
         // The bug fix: a run whose persisted status is still `Running` but which
         // the daemon's hub reports an open interaction for (e.g. a tool-approval
         // prompt, which never flips the persisted status on its own) must show
-        // as Waiting and surface the prompt — not sit silently Active.
+        // as Waiting and surface the prompt - not sit silently Active.
         crate::runstate::with_isolated_runs_dir(
             "sync_from_run_state_running_agent_with_open_prompt_surfaces_it",
             |_d| {
@@ -2393,7 +2393,7 @@ mod tests {
         // but for a brand-new agent that's already `CompleteInteractive`
         // (rather than `WaitingInput`) with a pending request. Exercises the
         // `false` arm of `matches!(run.status, RunStatus::WaitingInput)` in
-        // the "new agent" branch of `sync_from_run_state` -- every other
+        // the "new agent" branch of `sync_from_run_state` - every other
         // test reaching that `if self.initial_sync_done { ... }` block does
         // so with `run.status == WaitingInput`, so that `matches!`'s `false`
         // arm (CompleteInteractive input is optional, no "needs input"
@@ -2579,8 +2579,8 @@ mod tests {
         // `true` by every `sync_from_run_state_existing_agent_*` test above,
         // since they all start from an Active/Waiting agent. Start from an
         // agent that's already `Complete` instead, so that block is skipped
-        // entirely on the next sync -- even though the underlying
-        // `RunStatus` does change -- covering the `prev_status_was_active ==
+        // entirely on the next sync - even though the underlying
+        // `RunStatus` does change - covering the `prev_status_was_active ==
         // false` path.
         crate::runstate::with_isolated_runs_dir(
             "sync_from_run_state_existing_agent_was_already_terminal_skips_transition_toast_block",
@@ -2605,7 +2605,7 @@ mod tests {
                 // `meta2` above has no `.error` set, so the mapped message defaults
                 // to the empty string (`run.error.clone().unwrap_or_default()`).
                 assert_eq!(agent.status, AgentDisplayStatus::Error(String::new()));
-                // No transition toast fires -- the block only runs when the agent
+                // No transition toast fires - the block only runs when the agent
                 // was previously Active/Waiting, which it wasn't here.
                 // Seed an unrelated toast first so `.any()` below actually invokes
                 // its predicate at least once instead of short-circuiting on an
@@ -2637,7 +2637,7 @@ mod tests {
                 dash.sync_from_run_state(); // still Running -> Active, no transition
 
                 // Scoped to this test's (uniquely-named) agent rather than
-                // `dash.toasts.is_empty()` — the dashboard also picks up any other
+                // `dash.toasts.is_empty()` - the dashboard also picks up any other
                 // real/concurrently-running-test runs on disk via list_runs(), whose
                 // own transitions may toast independently of this one.
                 // Seed an unrelated toast first so `.any()` below actually invokes
@@ -2723,7 +2723,7 @@ mod tests {
                     .active_until
                     .unwrap();
 
-                // Now the run resumes (Running) — clear the interaction and re-sync.
+                // Now the run resumes (Running) - clear the interaction and re-sync.
                 dash.pending_interactions.remove(run_id);
                 let mut meta2 = make_run_meta(run_id, RunStatus::Running);
                 meta2.updated_at = entered_wait_at + 25;
@@ -2800,7 +2800,7 @@ mod tests {
                 dash.sync_from_run_state(); // first sync creates the agent, already Waiting -> no toast (new agent, initial sync)
                 dash.toasts.clear();
 
-                // Still waiting, same kind of request — re-sync must not toast again.
+                // Still waiting, same kind of request - re-sync must not toast again.
                 dash.sync_from_run_state();
                 // Seed an unrelated toast first so `.any()` below actually invokes
                 // its predicate at least once instead of short-circuiting on an
@@ -2862,7 +2862,7 @@ mod tests {
         crate::runstate::with_isolated_runs_dir(
             "sync_from_run_state_waiting_with_no_pending_request_leaves_agent_unchanged",
             |_d| {
-                // WaitingInput but no pending.json on disk (e.g. race/cleanup) — the
+                // WaitingInput but no pending.json on disk (e.g. race/cleanup) - the
                 // `if waiting_prompt.is_some()` branch is skipped entirely.
                 let run_id = "test-sync-waiting-no-pending";
                 cleanup_run(run_id);
@@ -2955,7 +2955,7 @@ mod tests {
                 assert!(agent.waiting_prompt.is_some());
                 // Seed a toast that *does* contain `run_id` (but not "needs input")
                 // so the closure below's `has_id && has_tag` actually evaluates
-                // `has_tag` at least once -- the real "completed" toast pushed by
+                // `has_tag` at least once - the real "completed" toast pushed by
                 // `sync_from_run_state` uses `truncate(&agent.blueprint_name, 20)`,
                 // and `run_id` here is longer than 20 chars, so it never contains
                 // the full `run_id` substring on its own.

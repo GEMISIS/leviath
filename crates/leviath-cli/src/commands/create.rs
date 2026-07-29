@@ -20,7 +20,7 @@ pub async fn execute(args: CreateArgs) -> anyhow::Result<()> {
 }
 
 /// Core of `execute()`, parameterized over the file-write primitive so tests
-/// can force any individual write's error arm deterministically -- without a
+/// can force any individual write's error arm deterministically - without a
 /// process-global umask mutation (which is rejected here, for good reason:
 /// `cargo test`'s default thread-based parallelism means a restrictive umask
 /// can't be scoped to one test the way an env var or CWD lock can, so ANY
@@ -136,7 +136,7 @@ list_dir = "codebase"
 
 # Region budgets are percentages of the model's context window (ceilings, may sum
 # past 100%); the absolute max_tokens is an optional guard-rail cap. Every
-# blueprint needs an explicit `conversation` sliding_window — it holds the message
+# blueprint needs an explicit `conversation` sliding_window - it holds the message
 # stream and is carried across stage transitions.
 [context.regions]
 task         = {{ kind = "pinned",          budget = "2%",  max_tokens = 2000, required = true, seed = "task", required_message = "Describe the coding task via --task." }}
@@ -170,7 +170,7 @@ for local material and bash for anything else; raw content lands in `sources`.
 Note where each item came from and the claims it supports.
 """
 # (Tip: drop web_search.rhai / web_fetch.rhai into a `tools/` dir beside this file
-# and add them to available_tools for real web research — see the researcher agent.)
+# and add them to available_tools for real web research - see the researcher agent.)
 [stages.gather.tool_routing]
 default_region = "conversation"
 [stages.gather.tool_routing.overrides]
@@ -259,7 +259,7 @@ mod tests {
     fn name_with_windows_style_backslashes_produces_valid_toml() {
         // Regression test: `lev create` accepts a full path as the blueprint
         // name (used directly as the target directory), and on Windows that
-        // path contains backslashes -- e.g. `C:\Users\RUNNER~1\...\my-agent`.
+        // path contains backslashes - e.g. `C:\Users\RUNNER~1\...\my-agent`.
         // Before escaping, `\U` in the raw TOML string was parsed as the
         // start of an (invalid) 8-digit-hex unicode escape, breaking every
         // template. Confirmed this exact failure on real Windows CI.
@@ -330,7 +330,7 @@ mod tests {
             let regions = &bp.context_layout.regions;
 
             // Explicit conversation sliding_window. (matches! is the FIRST operand
-            // so it's evaluated for every region — non-sliding regions exercise its
+            // so it's evaluated for every region - non-sliding regions exercise its
             // false arm, the conversation region its true arm.)
             let has_conv_sliding = regions.iter().any(|r| {
                 matches!(r.kind, RegionKind::SlidingWindow { .. }) && r.name == "conversation"
@@ -439,7 +439,7 @@ mod tests {
 
     // ─── execute ─────────────────────────────────────────────────────────
     //
-    // `args.name` is used directly as a Path — passing an absolute tempdir
+    // `args.name` is used directly as a Path - passing an absolute tempdir
     // path makes this testable without touching the real CWD.
 
     #[tokio::test]
@@ -498,8 +498,8 @@ mod tests {
     #[tokio::test]
     async fn execute_create_dir_all_fails_when_ancestor_is_a_file() {
         // `blueprint_dir.exists()` (the early bail check) returns `false` for
-        // this path -- `Path::exists()` can't stat through a non-directory
-        // path component -- so execution reaches `fs::create_dir_all(...)?`,
+        // this path - `Path::exists()` can't stat through a non-directory
+        // path component - so execution reaches `fs::create_dir_all(...)?`,
         // which then genuinely fails (ancestor isn't a directory).
         let dir = tempfile::tempdir().unwrap();
         let blocking_file = dir.path().join("not-a-directory");
@@ -518,7 +518,7 @@ mod tests {
     // ─── execute_with: injected write-failure arms ─────────────────────────
     //
     // These exercise the 3 `write_file(...)?` error arms deterministically,
-    // without any process-global umask mutation -- each test injects a plain
+    // without any process-global umask mutation - each test injects a plain
     // local closure that fails for one specific target filename, leaving the
     // others to succeed exactly as production would.
 

@@ -13,7 +13,7 @@ use crate::provider::StreamChunk;
 use super::convert::{chunk_from_dynamic, host_err_to_rhai, runtime_error};
 use super::host::{BrokerJob, HostRequest, HttpJob, HttpMethod, StreamHttpJob};
 
-/// Max Rhai operations per script call — the only wall-clock bound on a pure
+/// Max Rhai operations per script call - the only wall-clock bound on a pure
 /// (non-I/O) runaway loop; HTTP is bounded separately by the request timeout.
 const MAX_OPERATIONS: u64 = 500_000;
 
@@ -23,8 +23,8 @@ const MAX_OPERATIONS: u64 = 500_000;
 ///
 /// `env_allowlist` is `[security] allow_env_vars`: the credential-shaped
 /// environment variables this script may read. Provider scripts are the most
-/// privileged script surface Leviath has — they run during inference, not
-/// through a tool call, so nothing about them passes an approval prompt — and
+/// privileged script surface Leviath has - they run during inference, not
+/// through a tool call, so nothing about them passes an approval prompt - and
 /// `env_var` was previously unrestricted here with no permission layer of any
 /// kind. Anything that could write one file into `~/.leviath/providers/` could
 /// read every key in the process and post it out on the next inference.
@@ -48,7 +48,7 @@ pub struct ExecConfig {
     pub timeout_secs: Option<u64>,
     /// When streaming, the sink `__emit_chunk` feeds parsed chunks into.
     pub chunk_tx: Option<mpsc::UnboundedSender<crate::Result<StreamChunk>>>,
-    /// `[security] allow_env_vars` — see [`build_init_engine`].
+    /// `[security] allow_env_vars` - see [`build_init_engine`].
     pub env_allowlist: Arc<Vec<String>>,
 }
 

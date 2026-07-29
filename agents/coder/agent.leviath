@@ -1,7 +1,7 @@
 [agent]
 name = "coder"
 version = "0.0.1"
-description = "Multi-stage coding agent — discover, analyze, optionally prototype, implement, and review, with stuck detection and graph-based error recovery"
+description = "Multi-stage coding agent - discover, analyze, optionally prototype, implement, and review, with stuck detection and graph-based error recovery"
 entry_stage = "discover"
 
 # Model selection is an ordered fallback list per stage: the first provider
@@ -32,17 +32,17 @@ system_prompt = """
 Before any code is written, answer two questions about THIS repository:
 what is it, and how do I verify my work in it? Do not plan or edit here.
 
-Start from what you already have — do not rediscover it:
+Start from what you already have - do not rediscover it:
 - `repo_files` holds the tracked file list (empty if this isn't a git repo).
 - `conventions` and `architecture` are pre-loaded with the project's style/lint
   rules and design docs.
 - If `.leviath/discovery.md`, `CLAUDE.md`, `AGENTS.md` or
   `.github/copilot-instructions.md` exist, read them and treat them as
-  authoritative — they were written for exactly this purpose.
+  authoritative - they were written for exactly this purpose.
 
 Then fill the gaps with list_dir/read_file, and use bash ONLY to interrogate the
 build/test tooling read-only (e.g. `pytest --collect-only -q`, `cargo test
---list`, `npm run`). Do not modify anything. You have few iterations — spend
+--list`, `npm run`). Do not modify anything. You have few iterations - spend
 them on the area the task touches, not a full tour.
 
 Write `discovery` (context_write) covering:
@@ -55,13 +55,13 @@ Write `discovery` (context_write) covering:
 Then classify the project into exactly one tier and write `workflow`
 (context_write) with the tier, the concrete commands, and the completion bar:
 
-- TIER 1 — no tests, no CI, nothing to verify against. The implement stage must
+- TIER 1 - no tests, no CI, nothing to verify against. The implement stage must
   BUILD its own verification: name the smoke test or assertion it should write,
   and how to run it. Say plainly that there is no baseline to compare against.
-- TIER 2 — some tests exist but coverage is patchy. Name the tests that already
+- TIER 2 - some tests exist but coverage is patchy. Name the tests that already
   cover the area being changed, and the gap the implement stage should fill with
   a new test.
-- TIER 3 — rich test suite. Name the exact subset to run for this task (a full
+- TIER 3 - rich test suite. Name the exact subset to run for this task (a full
   suite run per edit is too slow) and the full-suite command for the final pass.
 
 `workflow` must end with three literal lines the later stages execute verbatim:
@@ -73,7 +73,7 @@ If there is genuinely no way to verify (tier 1 with no runnable code yet), say
 so explicitly in `workflow` rather than inventing a command that won't run.
 """
 
-# Scan output is bulky and single-use — park it in clearable scratch, not the
+# Scan output is bulky and single-use - park it in clearable scratch, not the
 # knowledge regions the later stages read.
 [stages.discover.tool_routing]
 default_region = "conversation"
@@ -101,10 +101,10 @@ max_iterations = 15
 max_revisits = 2
 # Two Always edges out of analyze put it in the LLM-choice lane, so this prompt
 # is what decides whether a task detours through `prototype`. Most tasks should
-# not — the spike is for when the APPROACH is genuinely unknown.
+# not - the spike is for when the APPROACH is genuinely unknown.
 transition_prompt = """
 Plan ready. Choose where to go next:
-- Respond with `prototype` when the APPROACH is uncertain — you are not sure the
+- Respond with `prototype` when the APPROACH is uncertain - you are not sure the
   API/library/algorithm behaves the way the plan assumes, or you could not pin
   down where the behavior you need to change actually lives. A ten-line spike
   settles that far more cheaply than discovering it forty edits into `implement`.
@@ -112,33 +112,33 @@ Plan ready. Choose where to go next:
   pattern that already exists in this codebase, or `discovery` already told you
   where the change belongs.
 
-Prototyping is not free — only take it when you expect to learn something that
+Prototyping is not free - only take it when you expect to learn something that
 would change what you write.
 """
 system_prompt = """
 You are analyzing a coding task to produce a concise implementation plan.
 
-Start by categorizing the task — it drives everything downstream:
+Start by categorizing the task - it drives everything downstream:
 - NEW FEATURE: what to build, where it slots in, which existing patterns to follow.
 - BUGFIX: reproduce first, isolate the root cause, then scope the minimal fix.
 - REFACTOR: preserve behavior; identify the seam and what must stay invariant.
 
 Then:
-1. Read `discovery` and `workflow` first — the discover stage already mapped this
+1. Read `discovery` and `workflow` first - the discover stage already mapped this
    codebase and chose how the work will be verified. Do NOT re-explore what they
    already answer; build on them.
-2. Check `conventions` and `architecture` — pre-loaded style/lint rules and design
+2. Check `conventions` and `architecture` - pre-loaded style/lint rules and design
    docs. Follow them; don't rediscover them.
 3. Estimate scope: which files to create/modify, and roughly how large the change is.
-   Name them — do not create them. This stage has no tool that writes or edits a
+   Name them - do not create them. This stage has no tool that writes or edits a
    file, and calling one is refused; `implement` makes the change you describe.
-4. Identify dependencies — modules, libraries, config, or tests this touches.
+4. Identify dependencies - modules, libraries, config, or tests this touches.
    Use list_dir/read_file ONLY to fill real gaps left by `discovery`. For a fresh
    task with no existing code, skip exploration entirely.
 
 Output a short bullet-list plan: which files to create/modify, what each does, key
 decisions, and the dependencies you found. If `workflow` is TIER 1, the plan must
-include writing the verification the implement stage will run. Be brief — the
+include writing the verification the implement stage will run. Be brief - the
 implement stage does the actual coding and reads this plan from the conversation.
 """
 
@@ -151,11 +151,11 @@ read_file = "codebase"
 list_dir  = "codebase"
 
 [stages.analyze.transitions.implement]
-hint = "The fix location and approach are clear — begin implementation"
+hint = "The fix location and approach are clear - begin implementation"
 transform = "direct"
 
 [stages.analyze.transitions.prototype]
-hint = "The approach is uncertain — spike it before committing to a full implementation"
+hint = "The approach is uncertain - spike it before committing to a full implementation"
 transform = "direct"
 
 [stages.analyze.transitions.error_recovery]
@@ -163,7 +163,7 @@ condition = "error"
 transform = "direct"
 
 # ─── Stage 2b: Prototype (elective) ───────────────────────────────────────────
-# NOT a mandatory hop — `analyze` only routes here when it judges the approach
+# NOT a mandatory hop - `analyze` only routes here when it judges the approach
 # uncertain. The point is to buy information cheaply: prove or kill the riskiest
 # assumption, write down what was ruled out, and REPLACE the plan with one that
 # rests on something that actually ran. `implement` then executes evidence
@@ -177,7 +177,7 @@ max_iterations = 15
 max_revisits = 2
 transition_prompt = """
 Spike complete. Based on what you actually observed:
-- Respond with `implement` if a hypothesis held up — you now know where the
+- Respond with `implement` if a hypothesis held up - you now know where the
   change belongs and what it should do.
 - Respond with `analyze` if every hypothesis failed. The plan rests on a wrong
   premise, so it needs rewriting rather than executing; what you ruled out is in
@@ -191,17 +191,17 @@ that actually runs.
 1. State the assumption in a sentence.
 2. Prove or disprove it: a throwaway script, a failing test that reproduces the
    bug, a bash one-liner that greps for where the behavior really lives. Use the
-   VERIFY command from `workflow` — do not invent your own. For a BUGFIX the
+   VERIFY command from `workflow` - do not invent your own. For a BUGFIX the
    spike IS the reproduction; do not move on without one.
 3. Append the result to the `prototypes` region (context_append): the
    assumption, the verdict, the exact command or snippet that settled it, and
    the file paths you confirmed. Record what you RULED OUT as carefully as what
-   worked — a dead end you don't write down gets retried.
+   worked - a dead end you don't write down gets retried.
 4. Before you leave, write the corrected approach to the `plan` region
    (context_write, key "plan") so `implement` executes what you learned.
 
 Keep this to a handful of iterations. You are buying information, not shipping
-code — do not start the real implementation here, and throw away scaffolding you
+code - do not start the real implementation here, and throw away scaffolding you
 created purely to test a hypothesis.
 """
 
@@ -215,18 +215,18 @@ write_file = "implementation"
 edit_file  = "implementation"
 
 [stages.prototype.transitions.implement]
-hint = "A hypothesis held up — implement it properly"
+hint = "A hypothesis held up - implement it properly"
 transform = "compact"
 
 [stages.prototype.transitions.analyze]
-hint = "Every hypothesis failed — the plan's premise is wrong, re-plan"
+hint = "Every hypothesis failed - the plan's premise is wrong, re-plan"
 transform = "compact"
 
 [stages.prototype.transitions.reassess]
 condition = "stuck"
 stuck_after_iterations = 12
 stuck_after_same_file_edits = 4
-hint = "The spike is going in circles — step back"
+hint = "The spike is going in circles - step back"
 transform = "direct"
 
 [stages.prototype.transitions.error_recovery]
@@ -246,37 +246,37 @@ You are implementing the plan from the `plan` region. Write working,
 production-quality code that matches the project's `conventions`.
 
 Follow the workflow the discover stage synthesized in `workflow`. It ends with
-three literal lines — BASELINE, VERIFY and DONE WHEN. Execute them:
+three literal lines - BASELINE, VERIFY and DONE WHEN. Execute them:
 
 1. BASELINE, before your FIRST edit. Run the BASELINE command with bash and
    context_write the result to `baseline`: which tests pass and which already
    fail. You cannot tell a regression from a pre-existing failure without this.
-   (TIER 1 / no runnable suite: write "no baseline — nothing to run yet" and
+   (TIER 1 / no runnable suite: write "no baseline - nothing to run yet" and
    build the verification the plan calls for as your first change.)
-2. Implement incrementally — one coherent file/change at a time, not one giant
+2. Implement incrementally - one coherent file/change at a time, not one giant
    dump. Use write_file to create files and edit_file to modify existing ones.
-   Do NOT edit files through bash — no `sed -i`, no `tee`, no `>`/`>>`
+   Do NOT edit files through bash - no `sed -i`, no `tee`, no `>`/`>>`
    redirection, no here-docs. Bash is for running tests and builds and for
    read-only exploration. Only write_file/edit_file are recorded in the
    `implementation` region the reviewer reads, and this stage will not hand off
    to review until at least one of them has landed.
    Handle errors explicitly (validate inputs, propagate/return errors, no silent
-   swallowing) — match the error-handling style already in this codebase.
+   swallowing) - match the error-handling style already in this codebase.
    Write or update tests alongside the code when the task warrants it.
 3. VERIFY after each logical change, not just at the end. Run the VERIFY command
    with bash; output is routed to `test_results`.
 4. Compare every VERIFY against `baseline`. If a test that passed in `baseline`
-   now fails, you broke it: say so explicitly — "I broke <test> with my change to
-   <file>, investigating" — and fix it before writing anything else. Never move
+   now fails, you broke it: say so explicitly - "I broke <test> with my change to
+   <file>, investigating" - and fix it before writing anything else. Never move
    on from a regression.
 5. Before finishing, run the full-suite command from `workflow` once.
 
 You are NOT done because most tests pass. You are done when DONE WHEN is met:
 the target tests pass AND nothing that passed in `baseline` fails now. If tests
-are still failing, say how many and keep going — do not stop early and do not
+are still failing, say how many and keep going - do not stop early and do not
 report success you haven't observed.
 
-If a test keeps failing, check the `errors` region — it keeps the recent failures
+If a test keeps failing, check the `errors` region - it keeps the recent failures
 so you can spot a repeating pattern instead of chasing the same wall.
 
 Do NOT spend iterations re-reading the codebase unless you need something
@@ -296,7 +296,7 @@ explicit statement that nothing regressed against `baseline`.
 #
 # write_file/edit_file confirmations persist in `implementation`, which makes it
 # the run's changelog: it is what the review stage is told to read, it survives
-# `conversation` eviction, and — being persisted context — it also satisfies the
+# `conversation` eviction, and - being persisted context - it also satisfies the
 # transition gate below after a daemon restart, when per-stage counters are gone.
 [stages.implement.tool_routing]
 default_region = "conversation"
@@ -325,7 +325,7 @@ condition = "stuck"
 stuck_after_iterations = 20
 stuck_after_minutes = 15
 stuck_after_same_file_edits = 5
-hint = "No forward progress — step back and reassess"
+hint = "No forward progress - step back and reassess"
 transform = "custom"
 # `custom`, not `compact`: a plain compact edge would summarize EVERY
 # stage-specific region including `test_results`, which is the raw evidence
@@ -361,15 +361,15 @@ Minor style nits don't warrant another implementation pass.
 """
 system_prompt = """
 You are reviewing the implementation. Verify it against the ORIGINAL task in the
-`task` region — not just against the plan (the plan can be wrong).
+`task` region - not just against the plan (the plan can be wrong).
 
 You review here; you do not repair. This stage has no write or edit tool and
-calling one is refused — report what you find and route back to `implement`,
+calling one is refused - report what you find and route back to `implement`,
 which is where changes are made and re-reviewed.
 
 1. Read the files that were created or modified (they are tracked in the
    `implementation` region; read_file for anything you need to confirm).
-2. Re-run the tests with bash — use the commands in `workflow`, which the
+2. Re-run the tests with bash - use the commands in `workflow`, which the
    implement stage was told to follow. Output goes to `test_results`. Don't
    approve on unverified claims that "tests pass".
 3. Diff what you just ran against `baseline`: anything that passed there and
@@ -382,8 +382,8 @@ which is where changes are made and re-reviewed.
    code quality/conventions.
 
 End with one of:
-  APPROVED — no significant issues
-  NEEDS CHANGES — <numbered list of specific required fixes>
+  APPROVED - no significant issues
+  NEEDS CHANGES - <numbered list of specific required fixes>
 """
 
 [stages.review.tool_permissions]
@@ -403,7 +403,7 @@ bash      = "test_results"
 # review conversation into a fix list, and clear scratch + test_results before
 # re-implementing so stale failures don't confuse the next pass.
 [stages.review.transitions.implement]
-hint = "Issues found — needs another implementation pass"
+hint = "Issues found - needs another implementation pass"
 transform = "custom"
 [stages.review.transitions.implement.transform_config]
 carry = ["architecture", "conventions", "task", "plan", "codebase", "discovery", "workflow", "baseline"]
@@ -416,7 +416,7 @@ condition = "error"
 transform = "direct"
 
 # ─── Stage 4b: Reassess ───────────────────────────────────────────────────────
-# Reached ONLY via a `stuck` edge (issue #106) — invisible during normal flow,
+# Reached ONLY via a `stuck` edge (issue #106) - invisible during normal flow,
 # exactly like error_recovery. Deliberately has NO write tools: the whole point
 # is to stop editing and start thinking. It reads the runtime's `stuck_report`
 # (which threshold tripped and why), finds the wrong assumption, and REPLACES
@@ -429,13 +429,13 @@ available_tools = ["read_file", "list_dir", "bash", "context_write", "context_ap
 max_iterations = 8
 max_revisits = 2
 system_prompt = """
-You are NOT here to write code — you have no write tools on purpose. You were
+You are NOT here to write code - you have no write tools on purpose. You were
 pulled out of implementation because you stopped making progress. The
 `stuck_report` region says which threshold tripped and why.
 
 Work through this in order:
 1. Re-read the ORIGINAL task in `task`. State in one sentence what "done" means.
-   Not what the plan says — what the task says. Check it against the DONE WHEN
+   Not what the plan says - what the task says. Check it against the DONE WHEN
    line in `workflow`.
 2. Separate what you have VERIFIED (a command you ran and an output you saw)
    from what you ASSUMED. `test_results`, `errors` and `implementation` are your
@@ -468,7 +468,7 @@ list_dir  = "codebase"
 bash      = "test_results"
 
 [stages.reassess.transitions.implement]
-hint = "Corrected plan in hand — retry implementation"
+hint = "Corrected plan in hand - retry implementation"
 transform = "custom"
 [stages.reassess.transitions.implement.transform_config]
 carry = ["discovery", "workflow", "architecture", "conventions", "task", "plan", "codebase", "implementation", "prototypes", "errors", "stuck_report"]
@@ -481,7 +481,7 @@ condition = "error"
 transform = "direct"
 
 # ─── Stage 5: Error recovery ──────────────────────────────────────────────────
-# Only reachable via error edges — invisible during normal flow.
+# Only reachable via error edges - invisible during normal flow.
 [stages.error_recovery]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
@@ -507,7 +507,7 @@ default_region = "conversation"
 read_file = "codebase"
 
 [stages.error_recovery.transitions.implement]
-hint = "Error diagnosed — retry implementation"
+hint = "Error diagnosed - retry implementation"
 transform = "compact"
 
 # ─── Compaction ───────────────────────────────────────────────────────────────
@@ -518,12 +518,12 @@ model = "claude-sonnet-5"
 # ─── Context layout ───────────────────────────────────────────────────────────
 # Budgets are given as a percentage of the model's context window (issue #100),
 # with an absolute `max_tokens`/`threshold_tokens` guard-rail so the layout is
-# sensible on any model. Percentages are ceilings, not reservations — they may
+# sensible on any model. Percentages are ceilings, not reservations - they may
 # sum past 100% since regions rarely fill at once.
 [context.regions]
 # ── Inputs (pinned, stable, cacheable) ──
 task         = { kind = "pinned", budget = "2%", max_tokens = 4000, required = true, required_message = "Describe the coding task via --task (or the API/ACP task field)." }
-# Deterministic repo scan, run once at spawn — the discover stage starts from
+# Deterministic repo scan, run once at spawn - the discover stage starts from
 # facts instead of burning iterations on `ls`. `git ls-files` behaves identically
 # on POSIX and Windows shells; outside a git repo it fails and this is simply
 # left empty (non-fatal), and oversized output is trimmed to the budget.
@@ -535,7 +535,7 @@ conventions  = { kind = "pinned", budget = "2%", max_tokens = 3000, seed = { fil
 architecture = { kind = "pinned", budget = "3%", max_tokens = 6000, seed = { files = ["ARCHITECTURE.md", "DESIGN.md", "docs/ARCHITECTURE.md", "docs/architecture.md", "README.md"] } }
 plan         = { kind = "pinned", budget = "3%", max_tokens = 4000 }
 # Verified findings from a `prototype` spike: the assumption, the verdict, and
-# the command that settled it — including what was RULED OUT. Pinned so neither
+# the command that settled it - including what was RULED OUT. Pinned so neither
 # implement nor reassess redoes the spike.
 prototypes   = { kind = "pinned", budget = "4%", max_tokens = 6000 }
 # Written by the RUNTIME when a `stuck` edge fires (issue #106): which threshold

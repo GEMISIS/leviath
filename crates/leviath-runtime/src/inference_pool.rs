@@ -1,7 +1,7 @@
 //! Per-model inference concurrency pools.
 //!
 //! A single [`InferencePools`] belongs to the world and bounds how many
-//! inference requests are in flight to each model at once — e.g. "at most 3
+//! inference requests are in flight to each model at once - e.g. "at most 3
 //! concurrent requests to `anthropic:claude-opus-4-8`", "at most 1 to a local
 //! `ollama:gemma`". This is the world-level control the ECS inference-dispatch
 //! system consults before issuing a request: an agent only leaves `ReadyToInfer`
@@ -9,7 +9,7 @@
 //! retried on a later tick (so "waiting for a slot" costs nothing but data).
 //!
 //! Why this matters: a single inference can take up to an hour for very large
-//! requests, so a permit may legitimately be held for a very long time — the
+//! requests, so a permit may legitimately be held for a very long time - the
 //! pool is what keeps us from opening an unbounded number of simultaneous
 //! long-lived requests to a provider.
 //!
@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 
-/// How `tokio::sync::Semaphore` represents "effectively unbounded" — its own
+/// How `tokio::sync::Semaphore` represents "effectively unbounded" - its own
 /// maximum permit count. A model with no configured limit gets this many
 /// permits, so `acquire` never actually waits for it.
 const UNBOUNDED_PERMITS: usize = Semaphore::MAX_PERMITS;
@@ -81,7 +81,7 @@ impl InferencePools {
     }
 
     /// Acquire a permit for `model`, waiting for a free slot if the pool is
-    /// full. The returned [`InferencePermit`] releases the slot when dropped —
+    /// full. The returned [`InferencePermit`] releases the slot when dropped -
     /// so the caller holds it for exactly the duration of the inference request.
     pub async fn acquire(&self, model: &str) -> InferencePermit {
         let semaphore = self.semaphore_for(model);
@@ -101,7 +101,7 @@ impl InferencePools {
     pub fn try_acquire(&self, model: &str) -> Option<InferencePermit> {
         let semaphore = self.semaphore_for(model);
         // `try_acquire_owned` errors only on "no permits" (pool full) or
-        // "closed" (never, since we never close) — both mean "no slot now".
+        // "closed" (never, since we never close) - both mean "no slot now".
         match semaphore.try_acquire_owned() {
             Ok(permit) => Some(InferencePermit { _permit: permit }),
             Err(_) => None,
@@ -126,8 +126,8 @@ impl InferencePools {
 
 /// Unwrap an `acquire_owned` result, panicking with a clear message if the
 /// semaphore was closed. Extracted as a free function (rather than an inline
-/// `.expect(...)`) so both arms — the ordinary `Ok` and the never-in-practice
-/// `Err` — are exercised directly by unit tests, keeping the region covered.
+/// `.expect(...)`) so both arms - the ordinary `Ok` and the never-in-practice
+/// `Err` - are exercised directly by unit tests, keeping the region covered.
 fn expect_permit(result: Result<OwnedSemaphorePermit, AcquireError>) -> OwnedSemaphorePermit {
     result.expect("inference pool semaphore is never closed")
 }
@@ -161,9 +161,9 @@ mod tests {
     fn semaphore_for_is_cached_per_model() {
         let pools = InferencePools::new(InferencePoolConfig::new());
         let first = pools.semaphore_for("m");
-        let second = pools.semaphore_for("m"); // cache hit — same Arc
+        let second = pools.semaphore_for("m"); // cache hit - same Arc
         assert!(Arc::ptr_eq(&first, &second));
-        let other = pools.semaphore_for("n"); // cache miss — distinct Arc
+        let other = pools.semaphore_for("n"); // cache miss - distinct Arc
         assert!(!Arc::ptr_eq(&first, &other));
     }
 

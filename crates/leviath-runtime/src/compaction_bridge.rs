@@ -1,4 +1,4 @@
-//! The async worker side of the ECS compaction stage — the sync-ECS ↔ async-I/O
+//! The async worker side of the ECS compaction stage - the sync-ECS ↔ async-I/O
 //! bridge for LLM context compaction.
 //!
 //! When an agent's context crosses the eviction threshold and a region needs
@@ -46,7 +46,7 @@ pub struct CompactionOutcome {
 
 /// Run one compaction job: summarize each region sequentially with the permit
 /// held, release the slot, report the outcome, and wake the tick loop. Stops at
-/// the first error (best-effort — the collect system leaves the context as-is).
+/// the first error (best-effort - the collect system leaves the context as-is).
 pub async fn run_compaction_job(
     job: CompactionJob,
     results: UnboundedSender<CompactionOutcome>,

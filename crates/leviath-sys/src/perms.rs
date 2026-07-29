@@ -28,14 +28,14 @@ pub fn ensure_file_private(path: &Path) -> io::Result<Option<u32>> {
 /// the owner, not even briefly.
 ///
 /// `fs::write` followed by a `chmod` is the obvious shape and has a window: the
-/// file is created at `0o666 & ~umask` — typically `0o644` — and is
+/// file is created at `0o666 & ~umask` - typically `0o644` - and is
 /// world-readable until the `chmod` lands. Both files that hold Leviath's
 /// secrets were written that way, so `config.toml` (every provider API key) and
 /// `mcp-auth.json` (OAuth access and refresh tokens) each had a moment of being
 /// readable by any local user, on every save.
 ///
 /// Creating the file with the mode already set closes that. On non-Unix this is
-/// a plain write — the mode argument has no meaning there, and Windows ACL
+/// a plain write - the mode argument has no meaning there, and Windows ACL
 /// handling is a separate piece of work rather than something to fake here.
 pub fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
     crate::platform::write_with_mode(path, contents, 0o600)
@@ -65,7 +65,7 @@ mod tests {
     /// The point of `write_private` over `fs::write` + `chmod`: there is no
     /// moment where the file exists at the umask default. The absence of that
     /// window cannot be observed after the fact, so what is asserted is the mode
-    /// on a freshly created file — which the two-step version also reaches, but
+    /// on a freshly created file - which the two-step version also reaches, but
     /// only eventually.
     #[test]
     fn write_private_creates_an_owner_only_file_with_the_content() {

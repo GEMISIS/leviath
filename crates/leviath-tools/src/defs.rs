@@ -106,7 +106,7 @@ impl BuiltinTools {
             },
             Tool {
                 name: "present_for_review".to_string(),
-                description: "Present a document, plan, or report to the user for review. The agent run will pause and the dashboard will display the document prominently. Use this when you want the user to read and approve something before you continue — for example, a technical design, an implementation plan, or a summary report. The user can provide feedback or simply acknowledge to continue.".to_string(),
+                description: "Present a document, plan, or report to the user for review. The agent run will pause and the dashboard will display the document prominently. Use this when you want the user to read and approve something before you continue - for example, a technical design, an implementation plan, or a summary report. The user can provide feedback or simply acknowledge to continue.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -124,7 +124,7 @@ impl BuiltinTools {
             },
             Tool {
                 name: "ask_user_text".to_string(),
-                description: "Ask the user a free-form question and wait for their written answer. The run pauses until they respond. Use this when you need clarification, missing information, or a specific detail only the user knows — decide for yourself when this is necessary; don't ask about things you can figure out on your own.".to_string(),
+                description: "Ask the user a free-form question and wait for their written answer. The run pauses until they respond. Use this when you need clarification, missing information, or a specific detail only the user knows - decide for yourself when this is necessary; don't ask about things you can figure out on your own.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -269,7 +269,7 @@ impl BuiltinTools {
             },
             Tool {
                 name: "context_list".to_string(),
-                description: "List available sections of your context window with their current usage — section names, token counts, and number of entries. Use this to see what's available and what you've already stored.".to_string(),
+                description: "List available sections of your context window with their current usage - section names, token counts, and number of entries. Use this to see what's available and what you've already stored.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {

@@ -2,19 +2,19 @@
 //!
 //! Two backends, chosen at runtime by `[security] credential_store`:
 //!
-//! - **`file`** (the default) — provider API keys sit in `~/.leviath/config.toml`
+//! - **`file`** (the default) - provider API keys sit in `~/.leviath/config.toml`
 //!   and MCP OAuth tokens in `~/.leviath/mcp-auth.json`, both written `0600` by
 //!   `leviath_sys::write_private` so they are never briefly world-readable. This
 //!   is what Claude Code and Codex do, and it is a reasonable default: it works
 //!   headless, in containers, over SSH, and on a CI runner, none of which have
 //!   an unlocked keychain.
-//! - **`keychain`** — the OS credential store. Secrets never touch disk in
+//! - **`keychain`** - the OS credential store. Secrets never touch disk in
 //!   Leviath's own files, so a stolen `~/.leviath` directory yields nothing, and
 //!   on macOS the OS gates access per-application.
 //!
 //! `file` stays the default deliberately. A keychain that is unavailable is not
-//! a degraded experience, it is a broken one — every inference fails with no
-//! obvious cause — and the environments where Leviath is most useful are exactly
+//! a degraded experience, it is a broken one - every inference fails with no
+//! obvious cause - and the environments where Leviath is most useful are exactly
 //! the ones least likely to have a working credential store. Opting in is one
 //! line; being unable to opt out would be a support burden.
 //!
@@ -87,7 +87,7 @@ pub trait CredentialStore: Send + Sync {
     /// Every one of `accounts` that is present, with its secret.
     ///
     /// The OS stores offer no portable "list everything under this service"
-    /// operation, so the caller supplies the accounts to look for — it knows
+    /// operation, so the caller supplies the accounts to look for - it knows
     /// them: the provider list is fixed and the MCP server list comes from the
     /// config.
     ///

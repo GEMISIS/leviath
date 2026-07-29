@@ -7,7 +7,7 @@
 //!
 //! Exactly one of these is compiled per target, so the others are never emitted
 //! and never count as a coverage gap. [`fallback`] covers targets that are
-//! neither — it applies no protection, and says so rather than pretending.
+//! neither - it applies no protection, and says so rather than pretending.
 
 #[cfg(unix)]
 mod unix;

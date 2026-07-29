@@ -2,7 +2,7 @@
 //! interaction hub + the blueprint spawner) ready to be driven by
 //! [`WorldHost::serve`]. The async setup (provider registry, MCP connections)
 //! happens in the binary and is passed in; this wiring is synchronous and
-//! testable — spawning an agent through the installed spawner exercises the whole
+//! testable - spawning an agent through the installed spawner exercises the whole
 //! path.
 
 use std::sync::Arc;
@@ -53,11 +53,11 @@ pub fn build_marker_path() -> Option<std::path::PathBuf> {
 }
 
 /// Record [`CURRENT_BUILD`] so the CLI can detect a stale daemon later.
-/// Best-effort — a missing marker just triggers a restart on the next command.
+/// Best-effort - a missing marker just triggers a restart on the next command.
 pub fn write_build_marker() {
     // Combinators (rather than `if let`) so the "no home dir" / "no parent"
     // fallbacks don't add branches that can't be exercised where a home always
-    // resolves — mirroring `control_address`'s `.map` style.
+    // resolves - mirroring `control_address`'s `.map` style.
     build_marker_path().into_iter().for_each(|path| {
         let _ = path.parent().map(std::fs::create_dir_all);
         let _ = std::fs::write(&path, CURRENT_BUILD);
@@ -72,7 +72,7 @@ pub fn read_build_marker() -> Option<String> {
 }
 
 /// Whether a running daemon should be restarted because it is on a different
-/// build than this CLI (or recorded no build at all — e.g. it predates this
+/// build than this CLI (or recorded no build at all - e.g. it predates this
 /// check).
 pub fn daemon_build_is_stale(recorded: Option<&str>) -> bool {
     recorded != Some(CURRENT_BUILD)
@@ -93,11 +93,11 @@ pub async fn setup_daemon_host(
     crate::daemon::script_host::set_local_network_allowed(config.security.allow_local_network);
     let providers = build_provider_registry_from_config(&config);
     // MCP connections are shared across agents; the workdir here only seeds the
-    // (discarded) built-ins — each agent gets its own over its own workdir.
+    // (discarded) built-ins - each agent gets its own over its own workdir.
     let registry = ToolRegistry::build(std::env::temp_dir(), &config).await;
     // The shared MCP pool: seed the connected global servers, then reconnect the
     // per-agent MCP servers of any non-terminal persisted run so a run reloaded on
-    // restart can still execute its blueprint MCP tools (recovery warming — the
+    // restart can still execute its blueprint MCP tools (recovery warming - the
     // async counterpart of the live-spawn preprocessor, done here before the
     // sync reload inside build_host).
     let mcp_pool = crate::daemon::mcp_pool::McpPool::for_daemon_with(
@@ -121,7 +121,7 @@ pub async fn setup_daemon_host(
 
 /// The reap hook installed on the host: drops a reaped agent's tool state and
 /// tears down its sandbox via [`CliToolService::reap`]. Factored out (rather than
-/// an inline closure) so its body is exercised by a unit test — the daemon itself
+/// an inline closure) so its body is exercised by a unit test - the daemon itself
 /// only ever fires the reaper from the private `serve()` loop.
 fn make_reaper(tool_service: Arc<CliToolService>) -> leviath_runtime::host::Reaper {
     Box::new(move |_world, entity| tool_service.reap(entity))
@@ -252,7 +252,7 @@ pub fn build_host(
 
     // Last resort for a cancel the world can't service: force the run's on-disk
     // state to `Cancelled`. The reloader above declines whenever a run can't be
-    // rebuilt — deleted blueprint, unreadable metadata, died mid-spawn — and
+    // rebuilt - deleted blueprint, unreadable metadata, died mid-spawn - and
     // without this a cancel in that state wrote nothing at all, so `meta.json`
     // went on claiming the run was live and nothing could ever clear it.
     let terminate_runs = runs_dir.clone();
@@ -263,17 +263,17 @@ pub fn build_host(
     // Reap hook: when a terminal agent is reaped, tear down its sandbox and drop
     // its per-agent tool state (the latter also fixing a prior leak where tool
     // state was never released). Factored into `make_reaper` so the closure body
-    // is unit-testable — the daemon only ever drives it from `serve()`.
+    // is unit-testable - the daemon only ever drives it from `serve()`.
     host.set_reaper(make_reaper(tool_service.clone()));
 
     // The shared MCP pool (created + recovery-warmed by the caller). Per-agent
     // `[[mcp_servers]]` connect lazily through it.
 
     // Preprocessor: before the sync spawner runs, connect the blueprint's declared
-    // MCP servers into the shared pool (lazy, deduped) so they're warm to advertise
-    // — and pre-warm the servers declared by any `worker_agent`/`worker_query`
+    // MCP servers into the shared pool (lazy, deduped) so they're warm to advertise -
+    // and pre-warm the servers declared by any `worker_agent`/`worker_query`
     // fan-out worker this blueprint will spawn, so the *first* such worker already
-    // advertises them (they'd otherwise land one turn late — issue #97).
+    // advertises them (they'd otherwise land one turn late - issue #97).
     let pp_pool = mcp_pool.clone();
     let pp_agents_dir = leviath_core::paths::agents_dir();
     host.set_spawn_preprocessor(Box::new(move |args| {
@@ -295,7 +295,7 @@ pub fn build_host(
         // Stake out the run directory before anything that can fail: blueprint
         // parsing, sandbox creation, provider resolution and seed validation all
         // come later, and until now a failure at any of them left no trace on
-        // disk at all — no run dir, no meta.json, nothing to diagnose (#107).
+        // disk at all - no run dir, no meta.json, nothing to diagnose (#107).
         // The reload path deliberately doesn't do this: it must not overwrite a
         // recovering run's own metadata.
         write_placeholder_meta(&spawn_runs_dir, args);
@@ -318,11 +318,11 @@ pub fn build_host(
 /// Create the run directory and write a `Starting` `meta.json` for a run that is
 /// about to be built, so a spawn that dies partway through still leaves something
 /// on disk to explain itself (issue #107: 3/13 empty runs crashed before any
-/// state existed). Everything the agent hasn't resolved yet — model, stage names,
-/// stage count — is left blank; the first persistence tick overwrites the file
+/// state existed). Everything the agent hasn't resolved yet - model, stage names,
+/// stage count - is left blank; the first persistence tick overwrites the file
 /// with the real thing. Best-effort: a failure here must not block the spawn.
 ///
-/// Writes under the host's configured `runs_dir` — the same directory the
+/// Writes under the host's configured `runs_dir` - the same directory the
 /// persistence lane and the reloader use. It deliberately does *not* go through
 /// `runstate::create_run`, which resolves the runs dir globally from
 /// `dirs::home_dir()`: that ignored a daemon configured with a different runs dir
@@ -331,7 +331,7 @@ pub fn build_host(
 /// developer's own `~/.leviath/runs` (where they then showed as permanently
 /// ACTIVE, since nothing would ever advance them).
 fn write_placeholder_meta(runs_dir: &std::path::Path, args: &leviath_runtime::host::SpawnArgs) {
-    // The real agent name lives in the blueprint, which hasn't been parsed yet —
+    // The real agent name lives in the blueprint, which hasn't been parsed yet -
     // but the run id is `<agent>-<unix-secs>-<hex4>`, so its prefix is the name
     // (dashes inside the agent name included).
     let agent_name = args
@@ -409,7 +409,7 @@ async fn warm_fanout_worker_mcp(
 }
 
 /// The per-agent MCP tool defs: the global servers' defs plus this blueprint's
-/// declared servers' cached defs (the pool must already be warm — the
+/// declared servers' cached defs (the pool must already be warm - the
 /// preprocessor ran). A missing/unreadable manifest yields just the global defs.
 /// Extracted from the spawner closure so its body is unit-testable.
 fn per_agent_mcp_defs(
@@ -585,7 +585,7 @@ mod tests {
     #[test]
     fn placeholder_meta_failure_is_logged_not_fatal() {
         // An unwritable runs dir (here: a path *under a regular file*) must not
-        // stop the spawn — the placeholder is a diagnostic, not a prerequisite.
+        // stop the spawn - the placeholder is a diagnostic, not a prerequisite.
         crate::test_support::with_tracing(|| {
             let dir = tempfile::tempdir().unwrap();
             let blocker = dir.path().join("not-a-dir");
@@ -607,7 +607,7 @@ mod tests {
     /// This is an isolation invariant, not a convenience: `runstate::run_dir()`
     /// goes through `dirs::home_dir()`, which ignores a `$HOME` override on macOS,
     /// so a spawner that used it wrote into the developer's real `~/.leviath/runs`
-    /// from any test that drove a real host — leaving `status: "starting"` runs
+    /// from any test that drove a real host - leaving `status: "starting"` runs
     /// that no daemon owned and nothing could ever advance. Asserting the global
     /// dir is untouched is what keeps that from coming back.
     #[tokio::test]
@@ -653,7 +653,7 @@ mod tests {
     }
 
     /// End-to-end for the reported bug: a run whose blueprint no longer exists
-    /// cannot be rebuilt, so the reloader declines — and the cancel used to stop
+    /// cannot be rebuilt, so the reloader declines - and the cancel used to stop
     /// there, replying "no such run" and writing nothing, leaving `meta.json`
     /// claiming the run was live with no way to ever clear it. It must now be
     /// terminated on disk instead.
@@ -668,13 +668,13 @@ mod tests {
         .await;
 
         // Staked out *after* startup, so the recovery sweep (which marks
-        // un-reloadable runs as crashed) hasn't already dealt with it — this is
+        // un-reloadable runs as crashed) hasn't already dealt with it - this is
         // the live case: the daemon is up and the run cannot be paged in.
         let run_dir = runs.path().join("gone-1234-ab12");
         let meta = leviath_core::run_meta::RunMeta::new(
             "gone-1234-ab12".to_string(),
             "gone".to_string(),
-            // A blueprint path that does not exist — the deleted-manifest case.
+            // A blueprint path that does not exist - the deleted-manifest case.
             "/no/such/dir/agent.leviath".to_string(),
             "t".to_string(),
             None,
@@ -1226,7 +1226,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
             || 100,
         );
 
-        // Persist a running run only now — build_host's startup reload already ran,
+        // Persist a running run only now - build_host's startup reload already ran,
         // so it is on disk but absent from the world.
         let run_dir = runs.path().join("late");
         std::fs::create_dir_all(&run_dir).unwrap();

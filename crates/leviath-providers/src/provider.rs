@@ -38,18 +38,18 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
-    /// Whether this failure is worth retrying — a transient network or
-    /// server-side issue (connection reset, timeout, 429, 5xx / "overloaded")
-    /// — as opposed to a permanent one (auth, invalid request, token limit)
+    /// Whether this failure is worth retrying - a transient network or
+    /// server-side issue (connection reset, timeout, 429, 5xx / "overloaded") -
+    /// as opposed to a permanent one (auth, invalid request, token limit)
     /// that would just fail again.
     pub fn is_transient(&self) -> bool {
         match self {
             // Network-level failures: connection reset, timeout, DNS, TLS.
             ProviderError::RequestFailed(_) => true,
-            // 429 — back off and retry.
+            // 429 - back off and retry.
             ProviderError::RateLimitExceeded => true,
             // We only have the message, so match the common server-side (5xx)
-            // signals — including Anthropic's 529 "overloaded". 4xx client
+            // signals - including Anthropic's 529 "overloaded". 4xx client
             // errors carry none of these and stay permanent.
             ProviderError::ApiError(msg) => {
                 let m = msg.to_ascii_lowercase();
@@ -250,10 +250,10 @@ pub struct Message {
     /// Role (system, user, assistant)
     pub role: String,
 
-    /// Message content — plain text or structured content blocks.
+    /// Message content - plain text or structured content blocks.
     pub content: MessageContent,
 
-    /// If true, this message is a cache breakpoint -- the provider should
+    /// If true, this message is a cache breakpoint - the provider should
     /// mark everything up to and including this message as cacheable.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cache_breakpoint: bool,
@@ -414,9 +414,9 @@ pub struct RateLimitConfig {
 /// [`apply_request_timeout`]), the claude-code provider as its subprocess
 /// timeout, and the dispatch layer as the `RetryPolicy.job_timeout` backstop
 /// that frees the pool slot even if a provider's own timer is defeated (e.g. by
-/// trickle keep-alive). 15 minutes is generous for any real inference —
+/// trickle keep-alive). 15 minutes is generous for any real inference -
 /// including large-prompt Anthropic cache creation, which can take several
-/// minutes to first byte — while still guaranteeing a hung call cannot run
+/// minutes to first byte - while still guaranteeing a hung call cannot run
 /// forever. A per-stage `[stages.<name>.model] request_timeout_secs` overrides
 /// it, so a slow stage can wait longer and a fast one can fail sooner.
 pub const DEFAULT_INFERENCE_TIMEOUT_SECS: u64 = 900;
@@ -425,7 +425,7 @@ pub const DEFAULT_INFERENCE_TIMEOUT_SECS: u64 = 900;
 ///
 /// When `request_timeout_secs` is `Some`, sets a hard per-request total timeout
 /// (reqwest's `RequestBuilder::timeout`) so the call is aborted after that many
-/// seconds regardless of connection state — this is what makes a per-stage
+/// seconds regardless of connection state - this is what makes a per-stage
 /// timeout *longer* than any global default actually take effect, and a shorter
 /// one fail fast. When `None`, no per-request cap is added and the call is bound
 /// only by the client-level timeout (if any) and the dispatch `job_timeout`
@@ -443,13 +443,13 @@ pub fn apply_request_timeout(
 /// Build a `reqwest::Client` for talking to an LLM HTTP API.
 ///
 /// All providers should use this instead of `Client::new()`. It applies:
-/// - **`pool_max_idle_per_host(0)`** — never reuse an idle connection. A large
+/// - **`pool_max_idle_per_host(0)`** - never reuse an idle connection. A large
 ///   request sent over a *reused* pooled connection to `api.anthropic.com`
 ///   stalls indefinitely (the server never responds), 100% reproducibly on some
 ///   setups, while the *same* large request over a *fresh* connection succeeds
 ///   (confirmed via `curl`: a 40KB POST on a fresh connection returns HTTP 200,
 ///   and small requests, which don't trigger the stall, share the pool fine).
-///   It is transport-independent — it reproduces over both HTTP/2 and HTTP/1.1 —
+///   It is transport-independent - it reproduces over both HTTP/2 and HTTP/1.1 -
 ///   so forcing a fresh connection per request, not the protocol, is the fix.
 ///   The cost is a TLS handshake per request, negligible for the sequential
 ///   request/response calls these providers make. **This** is the real fix for
@@ -1138,7 +1138,7 @@ mod tests {
 
     /// Regression for the read_files hang: a connection where the server
     /// accepts the request but never sends a response must ERROR, not block
-    /// forever. This is the exact shape of the hang the user hit — a large
+    /// forever. This is the exact shape of the hang the user hit - a large
     /// request accepted by Anthropic (h2 WindowUpdate seen) with no response
     /// ever returned. The bound is now the per-request timeout applied by
     /// [`apply_request_timeout`] (on top of the fresh-connection fix), so this

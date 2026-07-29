@@ -1,4 +1,4 @@
-//! Rhai *script tools* — drop-in tool definitions for agent blueprints (issue #97).
+//! Rhai *script tools* - drop-in tool definitions for agent blueprints (issue #97).
 //!
 //! A `.rhai` file in an agent's `tools/` directory (or the global
 //! `~/.leviath/tools/`) defines one custom tool. Its metadata comes from comment
@@ -13,7 +13,7 @@
 //! tests can inject a fake; the other three (`parse_json`, `to_json`,
 //! `encode_uri`) are pure and defined here.
 //!
-//! Errors never bubble as a `Result` to the agent — [`execute`] always returns a
+//! Errors never bubble as a `Result` to the agent - [`execute`] always returns a
 //! `String`, using the `[error] …` prefix convention the rest of the tool layer
 //! uses, so a failing script surfaces to the model the same way a built-in
 //! tool's error does.
@@ -42,8 +42,8 @@ pub struct ParamSpec {
     pub description: String,
     /// An optional raw JSON-Schema fragment for this parameter, used verbatim as
     /// the property's schema instead of the flat `{ type, description }`. Lets a
-    /// `tool.toml` author express what annotations can't — enums, array `items`,
-    /// numeric bounds, nested object shapes, formats, defaults — matching the
+    /// `tool.toml` author express what annotations can't - enums, array `items`,
+    /// numeric bounds, nested object shapes, formats, defaults - matching the
     /// richness built-in and MCP tools advertise. `None` = the flat default.
     pub schema: Option<serde_json::Value>,
 }
@@ -58,8 +58,8 @@ pub struct ScriptToolMeta {
     /// Declared parameters, in declaration order.
     pub params: Vec<ParamSpec>,
     /// Platform capabilities the tool declares it needs (e.g. `network`, `shell`,
-    /// `filesystem`). The host drops the tool when the platform can't provide one
-    /// — a script self-declares what it depends on. Empty = always available.
+    /// `filesystem`). The host drops the tool when the platform can't provide one -
+    /// a script self-declares what it depends on. Empty = always available.
     pub required_caps: Vec<String>,
 }
 
@@ -97,10 +97,10 @@ impl ScriptToolMeta {
 /// Parse a script tool's metadata from its `.rhai` source comment annotations.
 ///
 /// Recognized leading `//`-comment directives (order-independent):
-/// - `// @tool <name>` — required; names the tool.
-/// - `// @description <text>` — optional one-liner.
-/// - `// @param <name> <type> <required|optional> "<description>"` — repeatable.
-/// - `// @requires <cap> [<cap>...]` — platform capabilities the tool needs
+/// - `// @tool <name>` - required; names the tool.
+/// - `// @description <text>` - optional one-liner.
+/// - `// @param <name> <type> <required|optional> "<description>"` - repeatable.
+/// - `// @requires <cap> [<cap>...]` - platform capabilities the tool needs
 ///   (`network`, `shell`, `filesystem`); comma/space-separated, repeatable.
 ///
 /// Non-comment / unrecognized lines are ignored, so a script can mix ordinary
@@ -136,13 +136,13 @@ pub fn parse_annotations(src: &str) -> Result<ScriptToolMeta> {
             }
             "description" => description = arg.to_string(),
             "param" => params.push(parse_param_directive(arg)?),
-            // `@requires <cap> [<cap>...]` — whitespace/comma-separated, repeatable.
+            // `@requires <cap> [<cap>...]` - whitespace/comma-separated, repeatable.
             "requires" => required_caps.extend(
                 arg.split([' ', ',', '\t'])
                     .filter(|c| !c.is_empty())
                     .map(str::to_string),
             ),
-            _ => {} // unknown directive — ignore
+            _ => {} // unknown directive - ignore
         }
     }
 
@@ -311,7 +311,7 @@ pub struct ScriptTool {
 }
 
 /// A `.rhai` file that could not be turned into a tool (bad annotations,
-/// `tool.toml`, or a compile error). Surfaced so the caller can log it — the
+/// `tool.toml`, or a compile error). Surfaced so the caller can log it - the
 /// library itself does no logging, keeping that policy decision in the host.
 #[derive(Debug, Clone)]
 pub struct SkippedTool {
@@ -434,7 +434,7 @@ pub const SCRIPT_TOOL_MAX_OPERATIONS: u64 = 500_000;
 /// A panic raised by a native (host) function never unwinds through this call:
 /// it is caught at the native-function boundary by `guard_str`/`guard_dyn`
 /// and arrives here as an ordinary script error (issue #109). Anything that
-/// still escapes — a panic from Rhai's own internals — is contained one level
+/// still escapes - a panic from Rhai's own internals - is contained one level
 /// up, where the daemon runs this on a `spawn_blocking` task and turns the
 /// resulting `JoinError` into a tool error.
 pub fn execute(tool: &ScriptTool, args: serde_json::Value, host: Arc<dyn ScriptHost>) -> String {
@@ -511,7 +511,7 @@ fn panic_to_rhai(name: &str, payload: Box<dyn std::any::Any + Send>) -> Box<Eval
 /// `ArgBackup` whenever the first argument is a variable reference (which is
 /// every real call shape, e.g. `http_get(params.url)`), and restores it *after*
 /// the call returns. A panicking native function skips that restore, and
-/// `ArgBackup`'s destructor then asserts during unwinding — a second panic while
+/// `ArgBackup`'s destructor then asserts during unwinding - a second panic while
 /// panicking, which Rust turns into `abort()`. That aborted the whole daemon,
 /// killing every concurrent run. Catching here means the unwind never reaches
 /// Rhai's frame at all.
@@ -528,7 +528,7 @@ fn guard_str(name: &str, f: &mut dyn FnMut() -> HostRes<String>) -> HostRes<Stri
 }
 
 /// [`guard_str`] for the one native function that returns a `Dynamic`
-/// (`parse_json`). Same rationale, different return type — kept non-generic for
+/// (`parse_json`). Same rationale, different return type - kept non-generic for
 /// the same coverage reason.
 fn guard_dyn(name: &str, f: &mut dyn FnMut() -> HostRes<Dynamic>) -> HostRes<Dynamic> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
@@ -553,7 +553,7 @@ fn headers_from_map(map: &Map) -> BTreeMap<String, String> {
 /// **Every** registration goes through [`guard_str`] / [`guard_dyn`], so a panic
 /// anywhere in a native function becomes an ordinary Rhai runtime error instead
 /// of unwinding into Rhai and aborting the process (issue #109). The pure
-/// helpers are guarded too — they run on untrusted, model- and network-supplied
+/// helpers are guarded too - they run on untrusted, model- and network-supplied
 /// input, so "this one can't panic" is not a property worth betting the daemon on.
 fn register_host_functions(engine: &mut Engine, host: Arc<dyn ScriptHost>) {
     // http_get(url) / http_get(url, headers)
@@ -675,7 +675,7 @@ fn hex_digit(nibble: u8) -> char {
 
 /// `html_to_text(html)` host function: best-effort HTML → readable plain text.
 /// Drops `<script>`/`<style>` blocks, strips tags, decodes common entities, and
-/// collapses whitespace — so a script tool (e.g. `web_fetch`) can hand the model
+/// collapses whitespace - so a script tool (e.g. `web_fetch`) can hand the model
 /// prose from a server-rendered page instead of markup. Not a full HTML parser;
 /// content injected by client-side JS is not present in the source and cannot be
 /// recovered here.
@@ -716,7 +716,7 @@ fn strip_element(html: &str, tag: &str) -> String {
                     i += rel + close.len();
                     continue;
                 }
-                None => break, // unclosed element — drop the rest
+                None => break, // unclosed element - drop the rest
             }
         }
         let ch = html[i..].chars().next().unwrap();
@@ -757,7 +757,7 @@ const ENTITY_SCAN_CHARS: usize = 12;
 /// byte-12 cut-off slices mid-character on any multi-byte text
 /// (`"&日本語日本"` → *"byte index 12 is not a char boundary"*), and
 /// `html_to_text` runs this over every fetched page. Clamping the byte window
-/// down to a boundary also worked, but only because `&` is single-byte — an
+/// down to a boundary also worked, but only because `&` is single-byte - an
 /// unstated invariant that a later edit could quietly break. Indices from
 /// `char_indices` are boundaries by construction, so there is nothing left to
 /// get wrong. Entities are all ASCII, so the two bounds agree on any real one.
@@ -806,7 +806,7 @@ fn decode_one_entity(e: &str) -> Option<char> {
         "quot" => Some('"'),
         "apos" => Some('\''),
         "nbsp" => Some(' '),
-        "mdash" => Some('—'),
+        "mdash" => Some('\u{2014}'),
         "ndash" => Some('–'),
         "hellip" => Some('…'),
         _ => {
@@ -1648,7 +1648,10 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
             <p>Hello&nbsp;world &#39;quoted&#39; &#x2014; done.</p></body></html>";
         let text = html_to_text(html);
         assert!(text.contains("Tit&le"), "entity decoded: {text}");
-        assert!(text.contains("Hello world 'quoted' — done."), "got: {text}");
+        assert!(
+            text.contains("Hello world 'quoted' \u{2014} done."),
+            "got: {text}"
+        );
         assert!(!text.contains("color:red"), "style content dropped");
         assert!(!text.contains("var x"), "script content dropped");
         assert!(!text.contains('<'), "tags stripped");
@@ -1678,7 +1681,7 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
         assert_eq!(decode_entities("a&amp;b"), "a&b");
         assert_eq!(decode_entities("&lt;&gt;&quot;&apos;"), "<>\"'");
         assert_eq!(decode_entities("x&nbsp;y"), "x y");
-        assert_eq!(decode_entities("&mdash;&ndash;&hellip;"), "—–…");
+        assert_eq!(decode_entities("&mdash;&ndash;&hellip;"), "\u{2014}–…");
         assert_eq!(decode_entities("&#65;&#x42;&#X43;"), "ABC");
         // Unknown entity kept verbatim.
         assert_eq!(decode_entities("&bogus;"), "&bogus;");
@@ -1697,7 +1700,7 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
     fn decode_entities_survives_multibyte_after_an_ampersand() {
         // Regression for issue #109: the entity-scan window is a byte count, so
         // a bare '&' followed by multi-byte text used to slice mid-character and
-        // panic ("byte index 12 is not a char boundary") — inside a Rhai native
+        // panic ("byte index 12 is not a char boundary") - inside a Rhai native
         // fn, which aborted the daemon. Every one of these is a real shape from
         // fetched HTML.
         assert_eq!(decode_entities("&日本語日本"), "&日本語日本");
@@ -1705,7 +1708,7 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
         assert_eq!(decode_entities("&🎉🎉🎉🎉"), "&🎉🎉🎉🎉");
         assert_eq!(
             decode_entities("&\u{2014}\u{2014}\u{2014}\u{2014}"),
-            "&————"
+            "&\u{2014}\u{2014}\u{2014}\u{2014}"
         );
         // A real entity immediately followed by multi-byte text still decodes.
         assert_eq!(decode_entities("&amp;日本語"), "&日本語");

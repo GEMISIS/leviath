@@ -348,7 +348,7 @@ mod tests {
         );
 
         // Inside the root, but pointing the completion webhook at the cloud
-        // metadata service — a request the daemon would make on the caller's
+        // metadata service - a request the daemon would make on the caller's
         // behalf, from inside the trust boundary.
         let err = spawn_agent(
             State(state.clone()),
@@ -435,7 +435,7 @@ mod tests {
             ..Default::default()
         };
         // The same URL the default refuses. That this flips on the setting --
-        // rather than everything being refused either way -- is what shows the
+        // rather than everything being refused either way - is what shows the
         // check is reading the address and not just saying no.
         let url = "http://127.0.0.1:9000/hook";
         assert!(limits.check_callback_url(url).is_ok());
@@ -457,7 +457,7 @@ mod tests {
         assert!(limits.check_workdir(&root.path().join("escape")).is_err());
     }
 
-    /// With no `--workdir-root`, behavior is unchanged — the flag is opt-in for
+    /// With no `--workdir-root`, behavior is unchanged - the flag is opt-in for
     /// operators, not a new hard requirement on every deployment.
     #[test]
     fn no_workdir_root_permits_anything() {
@@ -682,7 +682,7 @@ prompt = "Plan the work"
                 create_run(&meta).unwrap();
 
                 // Create a second run with Running status so the filtered list is
-                // non-empty — this makes the map/any closure in the assertion actually
+                // non-empty - this makes the map/any closure in the assertion actually
                 // execute, covering the closure body in LLVM's instrumentation.
                 let run_id2 = unique_run_id("list-filter-excl-running");
                 let mut meta2 = make_run(&run_id2);

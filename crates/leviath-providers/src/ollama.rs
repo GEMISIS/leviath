@@ -63,7 +63,7 @@ impl OllamaProvider {
 
     /// Return built-in capability defaults for a model based on its name pattern.
     fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
-        // Llama 3.x and Qwen 2.x/3 — tool-capable, 128K context
+        // Llama 3.x and Qwen 2.x/3 - tool-capable, 128K context
         if model.contains("llama3")
             || model.contains("llama-3")
             || model.contains("qwen2.5")
@@ -78,7 +78,7 @@ impl OllamaProvider {
                 max_context_tokens: 131_072,
                 max_output_tokens: 8192,
             }
-        // Mistral / Mixtral — tool-capable
+        // Mistral / Mixtral - tool-capable
         } else if model.contains("mistral") || model.contains("mixtral") {
             ModelCapabilities {
                 supports_temperature: true,
@@ -88,7 +88,7 @@ impl OllamaProvider {
                 max_context_tokens: 32_768,
                 max_output_tokens: 4096,
             }
-        // Phi-4 — tool-capable, 128K context
+        // Phi-4 - tool-capable, 128K context
         } else if model.contains("phi-4") || model.contains("phi4") {
             ModelCapabilities {
                 supports_temperature: true,
@@ -98,7 +98,7 @@ impl OllamaProvider {
                 max_context_tokens: 131_072,
                 max_output_tokens: 8192,
             }
-        // DeepSeek R1 — reasoning, no tool calls
+        // DeepSeek R1 - reasoning, no tool calls
         } else if model.contains("deepseek-r1") {
             ModelCapabilities {
                 supports_temperature: true,
@@ -108,7 +108,7 @@ impl OllamaProvider {
                 max_context_tokens: 131_072,
                 max_output_tokens: 8192,
             }
-        // DeepSeek general — tool-capable
+        // DeepSeek general - tool-capable
         } else if model.contains("deepseek") {
             ModelCapabilities {
                 supports_temperature: true,
@@ -118,7 +118,7 @@ impl OllamaProvider {
                 max_context_tokens: 131_072,
                 max_output_tokens: 8192,
             }
-        // Gemma — no tool support
+        // Gemma - no tool support
         } else if model.contains("gemma") {
             ModelCapabilities {
                 supports_temperature: true,
@@ -128,7 +128,7 @@ impl OllamaProvider {
                 max_context_tokens: 131_072,
                 max_output_tokens: 8192,
             }
-        // CodeLlama — no tool support
+        // CodeLlama - no tool support
         } else if model.contains("codellama") {
             ModelCapabilities {
                 supports_temperature: true,
@@ -1623,7 +1623,7 @@ mod tests {
             }
         }
 
-        // Send data WITHOUT trailing newline — it's in the remaining buffer
+        // Send data WITHOUT trailing newline - it's in the remaining buffer
         let chunk1 =
             b"{\"message\":{\"role\":\"assistant\",\"content\":\"leftover\"},\"done\":false}"
                 .to_vec();
@@ -1866,7 +1866,7 @@ mod tests {
             }
         }
 
-        // Done chunk without tool_calls — should still be FinishReason::Complete
+        // Done chunk without tool_calls - should still be FinishReason::Complete
         let chunk1 = b"{\"message\":{\"content\":\"done\"},\"done\":true,\"eval_count\":1,\"prompt_eval_count\":1}\n".to_vec();
         let static_stream = StaticStream {
             data: vec![chunk1],
@@ -1999,7 +1999,7 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
         // Send a Content-Length larger than the actual body, then close the
-        // connection early -- this produces a genuine mid-stream reqwest::Error
+        // connection early - this produces a genuine mid-stream reqwest::Error
         // (there's no public constructor to fake one).
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

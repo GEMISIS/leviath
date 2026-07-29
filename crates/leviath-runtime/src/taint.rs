@@ -19,7 +19,7 @@ pub enum GateResolution {
     AllowOnce,
     /// Allow this tool for the rest of the run (session allow).
     AlwaysAllow,
-    /// Deny the call — it is not executed; the model gets a blocked result.
+    /// Deny the call - it is not executed; the model gets a blocked result.
     Deny,
 }
 
@@ -40,7 +40,7 @@ pub trait GatePrompt: Send + Sync {
 /// `Send + Sync` so a boxed checker can live in a shared-world resource.
 pub type ScriptRuleChecker = dyn Fn(&str, Option<&str>, TaintLevel) -> Option<String> + Send + Sync;
 
-/// Taint gate — checks whether a tool invocation is allowed given the
+/// Taint gate - checks whether a tool invocation is allowed given the
 /// current taint state of the context window. Attached per-agent (as an ECS
 /// component) when the agent's blueprint opts into taint tracking.
 #[derive(Debug, Clone, bevy_ecs::component::Component)]
@@ -845,11 +845,11 @@ mod tests {
 
         let window = make_window_with_taint(TaintLevel::Private);
 
-        // tool_a has Internal clearance — should be blocked by Private taint
+        // tool_a has Internal clearance - should be blocked by Private taint
         let decision_a = gate.check_traditional("agent-1", "tool_a", &window);
         assert!(!decision_a.is_allowed());
 
-        // tool_b has Private clearance — should be allowed
+        // tool_b has Private clearance - should be allowed
         let decision_b = gate.check_traditional("agent-1", "tool_b", &window);
         assert!(decision_b.is_allowed());
     }

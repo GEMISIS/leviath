@@ -1,7 +1,7 @@
 [agent]
 name = "wide-researcher"
 version = "0.0.1"
-description = "Broad multi-topic survey — cast a wide net, compare approaches, dive on the interesting threads, and produce a landscape overview"
+description = "Broad multi-topic survey - cast a wide net, compare approaches, dive on the interesting threads, and produce a landscape overview"
 entry_stage = "survey"
 
 [tool_permissions]
@@ -29,7 +29,7 @@ over depth:
 Run web_search across the distinct facets, web_fetch a few representative sources
 per facet, read_file for local material. Landscape material lands in `landscape`.
 For each source you use, append a bibliography line to `sources_index`
-(context_append): `[n] <title> — <url/path> — credibility: <high/med/low>`.
+(context_append): `[n] <title> - <url/path> - credibility: <high/med/low>`.
 Note interesting threads worth pulling on later. If sent back, focus on the named
 coverage gap.
 """
@@ -43,7 +43,7 @@ read_file  = "landscape"
 list_dir   = "landscape"
 
 [stages.survey.transitions.compare]
-hint = "Landscape mapped — ready to compare approaches"
+hint = "Landscape mapped - ready to compare approaches"
 transform = "direct"
 
 [stages.survey.transitions.error_recovery]
@@ -77,7 +77,7 @@ can rank them fairly. Help the reader see the shape of the field.
 """
 
 [stages.compare.transitions.survey]
-hint = "Coverage gaps — survey additional areas"
+hint = "Coverage gaps - survey additional areas"
 transform = "compact"
 
 [stages.compare.transitions.deep_dive]
@@ -85,7 +85,7 @@ hint = "An interesting thread deserves a focused deep read"
 transform = "compact"
 
 [stages.compare.transitions.summarize]
-hint = "Comparison complete — write the overview"
+hint = "Comparison complete - write the overview"
 transform = "compact"
 
 [stages.compare.transitions.error_recovery]
@@ -105,7 +105,7 @@ Compare flagged a specific thread for a focused read. web_search / web_fetch the
 best sources on JUST that thread, read them, and append the findings to
 `landscape` plus a note to `deep_dives` capturing what makes it notable (with
 source refs) and a bibliography line to `sources_index`. Then hand back to compare.
-Stay on the flagged thread — this is depth on one item, not a new broad survey.
+Stay on the flagged thread - this is depth on one item, not a new broad survey.
 """
 
 [stages.deep_dive.tool_routing]
@@ -116,7 +116,7 @@ web_fetch  = "landscape"
 read_file  = "landscape"
 
 [stages.deep_dive.transitions.compare]
-hint = "Thread explored — resume comparing"
+hint = "Thread explored - resume comparing"
 transform = "compact"
 
 [stages.deep_dive.transitions.error_recovery]
@@ -140,7 +140,7 @@ citing `sources_index` per the rules in `format`. Include:
 - Trends and trajectory
 - Recommendations (what to look at first, by goal)
 
-Write concisely — the reader wants the lay of the land quickly. Cite sources for
+Write concisely - the reader wants the lay of the land quickly. Cite sources for
 non-obvious claims.
 """
 
@@ -161,7 +161,7 @@ gap, and return to compare to continue with the coverage you have.
 """
 
 [stages.error_recovery.transitions.compare]
-hint = "Recovered — continue comparing"
+hint = "Recovered - continue comparing"
 transform = "compact"
 
 [compaction]

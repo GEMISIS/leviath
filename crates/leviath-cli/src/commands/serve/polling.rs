@@ -1,6 +1,6 @@
 //! World-event consumer: subscribe to the daemon's pushed [`WorldEvent`] stream,
 //! map each event to a [`ServerEvent`] for WebSocket subscribers, and fire a
-//! completion webhook when a run finishes. Replaces the old filesystem poll — the
+//! completion webhook when a run finishes. Replaces the old filesystem poll - the
 //! daemon now pushes changes, so there is no polling interval.
 
 use std::time::Duration;
@@ -28,7 +28,7 @@ pub(super) async fn event_loop(state: AppState, backoff: Duration) {
     // and it was checked once at `POST /api/agents` and then never again. A
     // caller registered a public endpoint that answered `307 Location:
     // http://169.254.169.254/…`, and since 307 preserves the method *and* the
-    // body, that was a repeatable POST primitive against the internal network —
+    // body, that was a repeatable POST primitive against the internal network -
     // re-followed on every retry.
     let client = leviath_core::checked_client(
         leviath_core::ClientTimeouts::default(),
@@ -308,7 +308,7 @@ mod tests {
     /// Spawn a fake webhook receiver that answers the i-th request with
     /// `statuses[i]` (each on its own connection, `Connection: close`), capturing
     /// every request's raw bytes. Serves exactly `statuses.len()` requests then
-    /// stops — so a test asserts the attempt count by matching `statuses.len()`
+    /// stops - so a test asserts the attempt count by matching `statuses.len()`
     /// to the number of requests the receiver's join handle yields.
     async fn fake_receiver(statuses: Vec<u16>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -553,7 +553,7 @@ mod tests {
 
     #[tokio::test]
     async fn fire_webhook_retries_transient_then_succeeds() {
-        // Two 503s then a 200 — delivery must make exactly three attempts.
+        // Two 503s then a 200 - delivery must make exactly three attempts.
         let (url, server) = fake_receiver(vec![503, 503, 200]).await;
         fire_webhook(
             reqwest::Client::new(),
@@ -583,7 +583,7 @@ mod tests {
 
     #[tokio::test]
     async fn fire_webhook_does_not_retry_a_permanent_4xx() {
-        // A 400 is a permanent rejection — exactly one attempt, no retries.
+        // A 400 is a permanent rejection - exactly one attempt, no retries.
         let (url, server) = fake_receiver(vec![400]).await;
         fire_webhook(
             reqwest::Client::new(),
@@ -773,8 +773,8 @@ mod tests {
         // Deterministically prove the loop reconnects: a daemon streams one event
         // per subscribe pass and closes; awaiting two events forces the loop
         // through consume_once → backoff → re-subscribe (its loop-back edge). A
-        // zero backoff keeps it prompt, but the `recv().await`s — not scheduler
-        // timing — are what gate the assertions, so this is platform-stable.
+        // zero backoff keeps it prompt, but the `recv().await`s - not scheduler
+        // timing - are what gate the assertions, so this is platform-stable.
         let dir = tempfile::tempdir().unwrap();
         let (control, server) = reconnecting_daemon(dir.path(), 2);
         let (state, mut rx) = state_with(control);

@@ -1,4 +1,4 @@
-//! In-memory interaction hub — the shared-world replacement for the imperative
+//! In-memory interaction hub - the shared-world replacement for the imperative
 //! worker's `pending.json`/`response.json` file polling.
 //!
 //! When an agent's tool execution needs human input (an `ask_user_*` /
@@ -6,7 +6,7 @@
 //! [`HubInteractionBackend::ask`] registers the [`InteractionRequest`] with the
 //! [`InteractionHub`] and awaits a oneshot for the answer. The daemon surfaces
 //! open requests over the control channel via [`InteractionHub::pending`] and
-//! delivers answers with [`InteractionHub::answer`] — no filesystem, no polling.
+//! delivers answers with [`InteractionHub::answer`] - no filesystem, no polling.
 //!
 //! `ask` blocks the calling tool worker until the request is answered or
 //! cancelled; with the tool lane sequential today that serializes interactive
@@ -141,7 +141,7 @@ impl InteractionHub {
     /// closed. Each one's `submit` wakes with the neutral response.
     ///
     /// This is the per-agent counterpart of [`Self::cancel`], which is keyed by
-    /// request id — an id a canceller of a *run* doesn't have. Without it,
+    /// request id - an id a canceller of a *run* doesn't have. Without it,
     /// cancelling a run left its `ask` future blocked forever: the future holds a
     /// tool-lane worker (the lane has a fixed worker count, so enough of them
     /// stall every other agent's tool batches), and the orphaned request keeps
@@ -252,7 +252,7 @@ mod tests {
         let hub = InteractionHub::new();
         let wake = Arc::new(Notify::new());
         hub.attach_wake(wake.clone());
-        // A second attach is ignored — the handle is set once at startup.
+        // A second attach is ignored - the handle is set once at startup.
         hub.attach_wake(Arc::new(Notify::new()));
 
         let backend = hub.backend_for("agent-a");

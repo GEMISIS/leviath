@@ -3,8 +3,8 @@
 //! JSON-RPC 2.0 messages, newline-delimited, one compact message per line. Field
 //! names are camelCase and discriminator *values* are snake_case, per the spec.
 //!
-//! Every type a client sends us is permissive on deserialize — unknown fields are
-//! ignored and every optional field carries `#[serde(default)]` — because real
+//! Every type a client sends us is permissive on deserialize - unknown fields are
+//! ignored and every optional field carries `#[serde(default)]` - because real
 //! hosts differ in how much of the spec they populate. Gas City, for instance,
 //! sends `initialize` with only `protocolVersion` and `clientInfo` and no
 //! `clientCapabilities` at all.
@@ -16,8 +16,8 @@ pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The largest single JSON frame (one line) we will ever write.
 ///
-/// Hosts read the stdio stream line-by-line with a bounded buffer and drop —
-/// or error on — anything longer: Gas City's `bufio.Scanner` is capped at 1 MiB
+/// Hosts read the stdio stream line-by-line with a bounded buffer and drop -
+/// or error on - anything longer: Gas City's `bufio.Scanner` is capped at 1 MiB
 /// and abandons its read loop on an oversized frame, which would strand the
 /// session. Callers streaming agent output must therefore split it into chunks
 /// no larger than this, leaving generous headroom for JSON escaping (a
@@ -276,7 +276,7 @@ pub struct SessionNewParams {
     /// Absolute working directory for the session.
     #[serde(default)]
     pub cwd: String,
-    /// MCP servers the client wants attached. Captured verbatim — Leviath
+    /// MCP servers the client wants attached. Captured verbatim - Leviath
     /// blueprints declare their own MCP servers, so these are logged and not
     /// injected (see the module docs of `leviath_cli::commands::agent_client`).
     #[serde(default)]
@@ -564,7 +564,7 @@ mod tests {
                 },
             })
         );
-        // No `id` key at all — a notification must never invite a response.
+        // No `id` key at all - a notification must never invite a response.
         assert!(!json(&msg).contains("\"id\""));
         assert!(msg.is_notification());
     }

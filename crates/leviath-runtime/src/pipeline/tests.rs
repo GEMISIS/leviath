@@ -137,7 +137,7 @@ fn build_request_passes_through_extra_params() {
 }
 
 /// A window whose pinned region carries a real entry, so `assemble` yields a
-/// non-empty `system` — required for the batch-hint tests to actually iterate
+/// non-empty `system` - required for the batch-hint tests to actually iterate
 /// the assembled blocks (an empty `system` would skip every closure).
 fn window_with_sys() -> ContextWindow {
     let mut w = window();
@@ -531,8 +531,8 @@ fn run_abort(world: &mut World) {
 }
 
 /// `track_in_flight` accumulates rather than replaces, so an agent that has
-/// something outstanding when a second job is dispatched keeps both handles
-/// — dropping the first would make that job uncancellable.
+/// something outstanding when a second job is dispatched keeps both handles -
+/// dropping the first would make that job uncancellable.
 #[test]
 fn track_in_flight_accumulates_across_dispatches() {
     fn add_one(agents: Query<(Entity, Option<&InFlightWork>)>, mut commands: Commands) {
@@ -609,7 +609,7 @@ fn abort_terminal_work_leaves_a_running_agent_alone() {
 
 /// A response that lands after the run was cancelled is discarded. The
 /// dispatch guard stops *new* inferences, but one already in flight still
-/// returns — and applying it advanced the run to `ProcessResponse`, from
+/// returns - and applying it advanced the run to `ProcessResponse`, from
 /// which it carried on as if nothing had happened.
 #[test]
 fn collect_inference_drops_a_response_for_a_cancelled_run() {
@@ -1014,7 +1014,7 @@ fn dispatch_persistence_broadcasts_buffered_lines_as_log_events() {
 
     run_dispatch_persistence(&mut world);
 
-    // Output lines stream first, then operational logs — each as a `Log`
+    // Output lines stream first, then operational logs - each as a `Log`
     // carrying the agent's run/agent ids and the raw line.
     let first = sink_rx.try_recv().expect("output log event");
     assert_eq!(
@@ -1353,7 +1353,7 @@ fn collect_drops_outcome_for_non_awaiting_agent() {
 
     run_collect(&mut world);
 
-    // Untouched — the stale outcome was dropped.
+    // Untouched - the stale outcome was dropped.
     assert_eq!(world.get::<AgentState>(e).unwrap().iteration, 0);
     assert!(world.get::<ProcessResponse>(e).is_none());
 }
@@ -1394,7 +1394,7 @@ fn collect_inference_accumulates_token_totals() {
 // ── process-response routing ──
 
 /// An inference result, paired with the advertisement that makes its call
-/// legal — see [`infer_with`]. `false` yields no calls and so offers
+/// legal - see [`infer_with`]. `false` yields no calls and so offers
 /// nothing, which is what a stage with no tools looks like.
 fn infer_result(with_tools: bool) -> (StageInference, crate::components::InferenceResult) {
     let offers = offering(match with_tools {
@@ -1602,8 +1602,8 @@ fn empty_response_finishes_after_max_nudges() {
 
 /// A stage that presents its output for review is finished when it produces
 /// that output. This is the whole failure, from a real run: `plan` wrote a
-/// complete plan on its first turn — correctly, with no tool calls, because
-/// writing the plan *is* the job — and the nudge read that as a model
+/// complete plan on its first turn - correctly, with no tool calls, because
+/// writing the plan *is* the job - and the nudge read that as a model
 /// stalling and told it to "use your tools to complete the task". `plan`
 /// has no tool that writes anything, so the model went looking for one,
 /// could not find it, and asked the user to grant it a write tool or create
@@ -1636,7 +1636,7 @@ fn empty_response_never_nudges_a_stage_whose_output_is_reviewed() {
         0,
         "and not counted as a nudge"
     );
-    // Nothing was injected — the model is not told to go do work it has no
+    // Nothing was injected - the model is not told to go do work it has no
     // tool for, which is what sent it asking the user for one.
     assert!(
         world
@@ -2018,7 +2018,7 @@ fn offering(names: &[&str]) -> StageInference {
 }
 
 /// An inference result **and** the advertisement that makes its own calls
-/// legal — dispatch refuses a tool the stage never offered, so a fixture
+/// legal - dispatch refuses a tool the stage never offered, so a fixture
 /// that calls one has to offer it. Returned together as a bundle so every
 /// test exercising some *other* part of dispatch is not restating its own
 /// call list. Tests about the Layer-1 check itself build the two separately.
@@ -2092,7 +2092,7 @@ async fn dispatch_tools_applies_all_context_inline() {
 
 /// The text dispatch left in the agent's conversation for the model to read.
 /// A batch with no lane work is applied inline, so there is no
-/// `ContextToolResults` to inspect — the window is the only record.
+/// `ContextToolResults` to inspect - the window is the only record.
 fn conversation_text(world: &World, e: Entity) -> String {
     world
         .get::<ContextWindow>(e)
@@ -2111,7 +2111,7 @@ fn conversation_text(world: &World, e: Entity) -> String {
 /// it. `available_tools` was applied when building the schema list and never
 /// again, so the call was dispatched anyway and the *user* was asked to
 /// approve writing code from the planning stage. It never reaches the lane
-/// or the permission gate now — the model is told, and the turn continues.
+/// or the permission gate now - the model is told, and the turn continues.
 #[tokio::test]
 async fn dispatch_tools_refuses_a_tool_the_stage_never_offered() {
     let (jtx, mut jrx) = mpsc::unbounded_channel();
@@ -2184,7 +2184,7 @@ async fn dispatch_tools_tells_a_toolless_stage_to_answer_directly() {
 }
 
 /// Aliases resolve on both sides. A manifest says `bash` and the model calls
-/// `shell` (or the reverse) — matching the raw strings would refuse a tool
+/// `shell` (or the reverse) - matching the raw strings would refuse a tool
 /// the stage plainly granted, which is a worse failure than the one this
 /// check exists to prevent.
 #[tokio::test]
@@ -2221,7 +2221,7 @@ async fn dispatch_tools_matches_an_offered_tool_through_its_alias() {
 }
 
 /// `tool_filter` narrows what a request advertises, so it has to narrow what
-/// dispatch accepts too — otherwise the filtered-out tool is callable by
+/// dispatch accepts too - otherwise the filtered-out tool is callable by
 /// name, which is the exact hole this check closes one level up.
 #[tokio::test]
 async fn dispatch_tools_honours_the_stage_tool_filter() {
@@ -2245,7 +2245,7 @@ async fn dispatch_tools_honours_the_stage_tool_filter() {
 }
 
 /// An empty `tool_filter` means "no narrowing", matching the request
-/// builder — not "nothing is allowed".
+/// builder - not "nothing is allowed".
 #[tokio::test]
 async fn dispatch_tools_treats_an_empty_tool_filter_as_no_narrowing() {
     let (jtx, mut jrx) = mpsc::unbounded_channel();
@@ -2525,7 +2525,7 @@ async fn dispatch_tools_falls_through_for_a_resolved_agents_unprompted_call() {
     // An agent still carrying GateResolved, with a call that is in neither
     // `approved` nor `denied` (it was allowed on the first pass and never
     // prompted), falls through the resolution bypass to the normal gate
-    // check — which allows the inbound `read_file` and sends it to the lane.
+    // check - which allows the inbound `read_file` and sends it to the lane.
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
@@ -2704,7 +2704,7 @@ fn apply_adds_assistant_turn_and_result_to_conversation() {
 
 #[test]
 fn apply_falls_back_when_region_missing() {
-    let mut w = ctx(&[]); // no "conversation" region — every add errors
+    let mut w = ctx(&[]); // no "conversation" region - every add errors
     // Exhausts the forced-add fallback to the placeholder without panicking.
     apply_tool_results(
         &mut w,
@@ -2771,7 +2771,7 @@ fn routing_away_pointer_previews_and_truncates_long_results() {
 fn routing_away_keeps_pair_in_conversation_and_text_in_region() {
     // Regression: routing a tool result to a knowledge region must keep the
     // tool_use/tool_result PAIR in `conversation` (a pointer) and store the full
-    // output in the region as TEXT — so assemble() produces a valid, orphan-free
+    // output in the region as TEXT - so assemble() produces a valid, orphan-free
     // message sequence (no ToolResult block outside conversation → no API 400;
     // no orphaned tool_use → no write-loop).
     let mut w = ContextWindow::new(100_000);
@@ -2951,7 +2951,7 @@ fn apply_no_truncation_when_result_under_max() {
         &mut w,
         "r",
         &[tc("c1", "read")],
-        &[("c1".to_string(), "short".to_string())], // 5 chars — under budget
+        &[("c1".to_string(), "short".to_string())], // 5 chars - under budget
         Some(&r),
         None,
     );
@@ -2985,7 +2985,7 @@ fn apply_truncates_to_available_when_region_nearly_full() {
         90,
     )
     .unwrap();
-    let big = "y".repeat(600); // ~150 tokens — won't fit the ~110 remaining
+    let big = "y".repeat(600); // ~150 tokens - won't fit the ~110 remaining
     apply_tool_results(
         &mut w,
         "r",
@@ -3144,7 +3144,7 @@ fn deliver_holds_for_non_accepting_agent() {
 
     run_deliver(&mut world);
 
-    // Not delivered — waits in the inbox for a stage that accepts messages.
+    // Not delivered - waits in the inbox for a stage that accepts messages.
     assert_eq!(world.get::<MessageInbox>(e).unwrap().messages.len(), 1);
     assert_eq!(
         world
@@ -4644,7 +4644,7 @@ fn detect_stuck_reports_same_file_churn_first() {
     assert!(reason.contains('4'), "got: {reason}");
 }
 
-/// The churn threshold must not fire when no file was edited at all —
+/// The churn threshold must not fire when no file was edited at all -
 /// `hottest_edit` is `None` and the next trigger takes over.
 #[test]
 fn detect_stuck_falls_through_churn_when_nothing_was_edited() {
@@ -4748,7 +4748,7 @@ fn note_stuck_prefers_the_stuck_report_region_then_conversation() {
         0
     );
 
-    // Blueprints that declare no stuck_report still get the diagnosis —
+    // Blueprints that declare no stuck_report still get the diagnosis -
     // every blueprint is required to declare `conversation`.
     let mut fallback = ctx(&[("conversation", 10_000)]);
     note_stuck(&mut fallback, "implement", "you are looping");
@@ -4922,7 +4922,7 @@ fn detect_stuck_stage_is_a_noop_without_an_available_stuck_edge() {
         Some(2),
         VisitCounts::default(),
     );
-    // (c) the escape hatch is spent — the agent must keep working the stage
+    // (c) the escape hatch is spent - the agent must keep working the stage
     //     (bounded by max_iterations) rather than be kicked out elsewhere.
     let mut spent = VisitCounts::default();
     spent.0.insert("b".to_string(), 5);
@@ -5045,7 +5045,7 @@ fn resolve_transition_routes_error_to_error_edge() {
 
 #[test]
 fn resolve_transition_errors_terminally_without_an_error_edge() {
-    // Stage 'a' has only an Always edge to 'b' — no error edge.
+    // Stage 'a' has only an Always edge to 'b' - no error edge.
     let a = stage_named(
         "a",
         Some(vec![("go".to_string(), plain_edge("b"))]),
@@ -5128,12 +5128,12 @@ fn resolve_transition_routes_stuck_down_the_stuck_edge() {
 }
 
 /// A stuck interrupt fires MID-stage, so when its escape edge is gone the
-/// agent must go back to work — falling through to a normal transition
+/// agent must go back to work - falling through to a normal transition
 /// would end a stage the agent never said it had finished (e.g. shunting
 /// `implement` into `review` with the work half-done).
 #[test]
 fn resolve_transition_resumes_the_stage_when_the_stuck_edge_is_gone() {
-    // Stage 'a' has only an ordinary edge to 'b' — no stuck edge at all,
+    // Stage 'a' has only an ordinary edge to 'b' - no stuck edge at all,
     // which is what an exhausted revisit budget looks like from here.
     let a = stage_named(
         "a",
@@ -5228,7 +5228,7 @@ fn unmet_required_regions_flags_empty_clears_when_filled_and_skips_without_tool(
 fn unmet_required_regions_skips_caller_input_seeded_regions() {
     // A required region whose content comes from the caller at spawn must NOT
     // be flagged by the agent-facing gate, even when empty and the stage can
-    // write context — the caller owns it, not the agent.
+    // write context - the caller owns it, not the agent.
     let region =
         leviath_core::layout::RegionDefinition::new("plan".to_string(), RegionKind::Pinned, 4000)
             .with_required(true, None)
@@ -5573,7 +5573,7 @@ fn resolve_transition_holds_the_stage_when_a_gate_blocks() {
         .map(|entry| entry.content.clone())
         .collect::<String>();
     assert!(conv.contains("[System] No file modifications"));
-    // Not yet forced — the budget hasn't run out.
+    // Not yet forced - the budget hasn't run out.
     assert_eq!(
         world
             .get::<crate::persistence::RunOutcomeFlags>(e)
@@ -5603,7 +5603,7 @@ fn resolve_transition_records_a_forced_gate_and_advances() {
         .insert(progress_with(0, 0, 3))
         .insert(crate::persistence::RunOutcomeFlags::default());
     // An agent with no flags component (fan-out workers, older runs) still
-    // transitions — it just has nowhere to record the forced gate.
+    // transitions - it just has nowhere to record the forced gate.
     let unflagged = spawn_transition_agent(
         &mut world,
         bp,
@@ -5958,7 +5958,7 @@ fn collect_tools_separates_failed_denied_and_non_modifying_calls() {
 /// A write the stage never offered is not a modification. It matters twice
 /// over: `modified_files` in `meta.json` would name a file that was never
 /// written, and `modifying_tool_calls` is what a `require_modifications`
-/// transition gate reads — so a stage that had every write refused could
+/// transition gate reads - so a stage that had every write refused could
 /// still answer "yes, I did work" on the way out.
 #[test]
 fn collect_tools_ignores_a_write_the_stage_never_offered() {
@@ -5979,7 +5979,7 @@ fn collect_tools_ignores_a_write_the_stage_never_offered() {
         &[],
     );
     assert_eq!(progress.modifying_tool_calls, 0);
-    // Not "blocked" either — nobody declined it; the stage never had it.
+    // Not "blocked" either - nobody declined it; the stage never had it.
     assert_eq!(progress.blocked_modification_calls, 0);
     assert_eq!(flags.modified_file_count, 0);
     assert!(flags.modified_files.is_empty());
@@ -6463,7 +6463,7 @@ fn collect_compaction_summary_for_unpaired_region_is_skipped() {
     tx.send(CompactionOutcome {
         entity: e,
         // "lone" exists but is unpaired (history None); "gone" doesn't exist
-        // at all (get_region_mut None) — both no-op branches.
+        // at all (get_region_mut None) - both no-op branches.
         result: Ok(vec![
             ("lone".to_string(), "s".to_string()),
             ("gone".to_string(), "s2".to_string()),
@@ -6606,7 +6606,7 @@ async fn reflect_flips_active_to_waiting_and_back_when_prompt_clears() {
 #[tokio::test]
 async fn reflect_does_not_flip_a_non_active_agent_with_an_open_prompt() {
     // A terminal agent that happens to still have an open hub entry is left
-    // as-is (the inner `status == Active` guard) — no spurious Waiting.
+    // as-is (the inner `status == Active` guard) - no spurious Waiting.
     let hub = InteractionHub::new();
     let asking = open_request(&hub, "a", "q1").await;
 
@@ -6770,7 +6770,7 @@ fn match_choice_exact_and_word_and_fallback() {
 #[test]
 fn match_choice_ignores_stage_names_buried_in_prose() {
     // Regression: a review stage's verbose transition response that mentions
-    // "the implementation" must NOT be routed back to the `implement` edge —
+    // "the implementation" must NOT be routed back to the `implement` edge -
     // "implementation" is not the whole word "implement". With no clear
     // decision and allow_complete, the run ends (the review approved).
     let edges = vec![plain_edge("implement"), plain_edge("error_recovery")];
@@ -7124,7 +7124,7 @@ fn collect_choice_applies_the_chosen_edge_transform() {
 
 #[test]
 fn collect_choice_holds_the_stage_when_the_chosen_edge_is_gated() {
-    // The LLM-choice path enforces the same gate as the linear path — and
+    // The LLM-choice path enforces the same gate as the linear path - and
     // must do so before the edge transform reshapes the context it needs.
     let (mut world, tx) = world_with_transition_results();
     let bp = blueprint(vec![
@@ -7174,7 +7174,7 @@ fn collect_choice_records_a_forced_gate_and_enters_the_stage() {
         // Budget already spent.
         .insert(progress_with(0, 0, 3))
         .insert(crate::persistence::RunOutcomeFlags::default());
-    // An agent with no flags component still transitions — it just has
+    // An agent with no flags component still transitions - it just has
     // nowhere to record the forced gate.
     let unflagged = spawn_responding_agent(&mut world, bp, vec![si("m0"), si("m1")], vec![edge]);
     world.entity_mut(unflagged).insert(progress_with(0, 0, 3));

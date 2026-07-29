@@ -1,10 +1,10 @@
-//! `lev daemon install` / `lev daemon uninstall` — hand the daemon to the OS
+//! `lev daemon install` / `lev daemon uninstall` - hand the daemon to the OS
 //! supervisor so it comes back by itself after a crash.
 //!
 //! Nothing restarted the daemon when it died (issue #109): a long-running agent
 //! simply stopped, and the next `lev run` was the only thing that would bring
 //! the daemon back. Registering a launchd agent (macOS) or a systemd *user*
-//! unit (Linux) with a restart policy closes that gap — and on the next start
+//! unit (Linux) with a restart policy closes that gap - and on the next start
 //! the daemon's own recovery pass reloads every interrupted run.
 //!
 //! This module is the tested core: rendering the unit file, resolving where it
@@ -76,7 +76,7 @@ pub fn config_home(user_home: &Path) -> Result<PathBuf> {
 }
 
 /// A launchd user agent that starts the daemon at login and restarts it
-/// whenever it exits — including the `abort()` this issue was about.
+/// whenever it exits - including the `abort()` this issue was about.
 #[cfg(target_os = "macos")]
 fn launchd_plist(exe: &Path, home: &Path, log: &Path) -> String {
     format!(
@@ -136,7 +136,7 @@ fn xml_escape(s: &str) -> String {
 // ── Linux: a systemd user unit ───────────────────────────────────────────────
 
 /// Build the service definition for this platform (see the macOS variant for
-/// the argument contract; `uid` is unused here — systemd's `--user` mode
+/// the argument contract; `uid` is unused here - systemd's `--user` mode
 /// already addresses the calling user's manager).
 #[cfg(target_os = "linux")]
 pub fn service_unit(exe: &Path, home: &Path, config_home: &Path, _uid: u32) -> Result<ServiceUnit> {
@@ -190,7 +190,7 @@ pub fn config_home(user_home: &Path) -> Result<PathBuf> {
 /// `pub` (in an already-public module) rather than private-plus-`allow(dead_code)`:
 /// on a non-Linux build nothing calls it, and suppressing the warning would be
 /// hiding the fact rather than stating it. It is genuinely part of this module's
-/// surface — the systemd renderer's input contract.
+/// surface - the systemd renderer's input contract.
 pub fn unit_safe(label: &str, value: &Path) -> Result<String> {
     let s = display(value);
     if s.contains('\n') || s.contains('\r') {
@@ -284,7 +284,7 @@ pub fn format_supervision(installed: bool, path: &Path) -> String {
     }
 }
 
-/// A path as a string, lossily — these are user home paths, valid UTF-8 in
+/// A path as a string, lossily - these are user home paths, valid UTF-8 in
 /// every case that matters, and a lossy rendering beats failing.
 ///
 /// Not gated to the platforms with a supervisor, even though only they build a
@@ -459,7 +459,7 @@ mod tests {
         /// through `systemd_unit` directly: this is the Linux-only call site,
         /// and `LEVIATH_HOME` is the value an attacker controls.
         ///
-        /// It needs its own test because the propagation only exists on Linux —
+        /// It needs its own test because the propagation only exists on Linux -
         /// on macOS this function is not compiled, so a macOS-only coverage run
         /// cannot see the arm at all. That is exactly how it was missed.
         #[test]
@@ -502,7 +502,7 @@ mod tests {
         /// interpolated path starts a new *directive*. `home` derives from
         /// `LEVIATH_HOME`, so this wrote an `ExecStartPre=` that then ran at
         /// every login. There is no general quoting for this position in
-        /// systemd, so the value is refused rather than escaped — and no
+        /// systemd, so the value is refused rather than escaped - and no
         /// legitimate path contains a newline.
         #[test]
         fn a_newline_in_an_interpolated_path_is_refused() {
@@ -527,7 +527,7 @@ mod tests {
             assert!(systemd_unit(good, good, evil).is_err(), "log");
         }
 
-        /// A carriage return is a line break too — systemd tolerates CRLF.
+        /// A carriage return is a line break too - systemd tolerates CRLF.
         #[test]
         fn a_carriage_return_is_refused_too() {
             assert!(

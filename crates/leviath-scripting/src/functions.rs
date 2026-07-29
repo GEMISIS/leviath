@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn is_markdown_plain_nonempty_text_returns_true_via_nonempty_fallback() {
         let e = engine();
-        // Text with none of the markdown markers — falls through to !text.is_empty()
+        // Text with none of the markdown markers - falls through to !text.is_empty()
         let result: bool = e.eval(r#"is_markdown("just plain text")"#).unwrap();
         assert!(result);
     }
