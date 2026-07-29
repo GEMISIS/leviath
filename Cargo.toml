@@ -118,7 +118,10 @@ temp-env = "0.3"
 # wizard's generic bounds need `Send + Sync` added - small, but pointless until
 # tui-textarea moves.
 crossterm = "0.28"
-ratatui = "0.29"
+# unstable-rendered-line-info: `Paragraph::line_count`, which the dashboard
+# uses to scroll wrapped text by display rows ("unstable" = API may change
+# between ratatui versions; this workspace pins 0.29).
+ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
 # Already in the tree via ratatui; named explicitly so the dashboard's mouse
 # selection can measure symbol display widths when reading cells back out of
 # the drawn frame (wide CJK/emoji symbols occupy continuation cells).

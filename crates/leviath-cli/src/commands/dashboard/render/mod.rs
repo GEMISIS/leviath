@@ -18,15 +18,16 @@ use super::types::*;
 
 impl Dashboard {
     pub(super) fn draw(&mut self, frame: &mut Frame) {
-        // Selectable panes re-register their rects as they render; anything
-        // still selected in a pane that does not come back this frame is
-        // dropped by the overlay pass below.
+        // The whole frame accepts mouse selection, exactly like native
+        // terminal selection; re-registered per frame so a resize (the one
+        // event that moves text under a screen-anchored highlight without a
+        // scroll) drops the selection.
         self.selection_regions.clear();
+        self.selection_regions.push(frame.area());
 
         if self.mcp_screen {
             self.draw_mcp_screen(frame, frame.area());
-            // No pane registered a rect, so this drops any selection.
-            self.validate_selection();
+            self.apply_selection_overlay(frame);
             self.draw_toasts(frame);
             return;
         }
@@ -318,38 +319,41 @@ mod tests {
     }
 
     #[test]
-    fn draw_reregisters_selection_regions_every_frame() {
+    fn draw_registers_the_whole_frame_for_selection() {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
         terminal.draw(|f| dash.draw(f)).unwrap();
-        let first_frame = dash.selection_regions.clone();
-        assert!(!first_frame.is_empty());
-        // A second draw replaces the registrations instead of accumulating.
+        // One region, the frame itself: selection works anywhere, exactly
+        // like native terminal selection.
+        assert_eq!(
+            dash.selection_regions,
+            vec![ratatui::layout::Rect::new(0, 0, 120, 40)]
+        );
+        // A second draw replaces the registration instead of accumulating.
         terminal.draw(|f| dash.draw(f)).unwrap();
-        assert_eq!(dash.selection_regions, first_frame);
+        assert_eq!(dash.selection_regions.len(), 1);
     }
 
     #[test]
-    fn draw_mcp_screen_drops_any_selection() {
+    fn a_selection_survives_switching_to_the_mcp_screen() {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
-        // Start a drag over the log panel on the normal screen.
         terminal.draw(|f| dash.draw(f)).unwrap();
-        let region = dash.selection_regions[0];
         dash.handle_mouse(crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            column: region.x,
-            row: region.y,
+            column: 2,
+            row: 2,
             modifiers: crossterm::event::KeyModifiers::NONE,
         });
         assert!(dash.selection.is_some());
-        // The MCP screen has no selectable panes; switching to it clears.
+        // The frame is the region, so a view switch keeps the drag alive -
+        // native terminal selection behaves the same way when content
+        // redraws underneath it.
         dash.mcp_screen = true;
         terminal.draw(|f| dash.draw(f)).unwrap();
-        assert!(dash.selection.is_none());
-        assert!(dash.selection_regions.is_empty());
+        assert!(dash.selection.is_some());
     }
 
     #[test]

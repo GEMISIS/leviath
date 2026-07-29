@@ -22,32 +22,25 @@ impl Dashboard {
         review_lines: &[ratatui::text::Line<'static>],
         pending_req: &Option<interaction::InteractionRequest>,
     ) {
-        // The review document accepts mouse selection; borders (and the
-        // scrollbar track on the right border column) are excluded.
-        self.selection_regions.push(review_area.inner(Margin {
-            vertical: 1,
-            horizontal: 1,
-        }));
-
         let inner_h = review_area.height.saturating_sub(2) as usize;
+        let render_width = review_area.width.saturating_sub(2);
 
-        // Clamp scroll
-        let max_rv_scroll = review_lines.len().saturating_sub(inner_h);
+        // Scroll in display rows (long lines wrap at draw time), so the
+        // bottom of the document is genuinely reachable - the same fix as the
+        // content pane, measured the same way.
+        let total_rows = super::content::wrapped_rows(review_lines, render_width);
+        let max_rv_scroll = total_rows.saturating_sub(inner_h);
         if self.review_scroll > max_rv_scroll {
             self.review_scroll = max_rv_scroll;
         }
-        let rv_start = review_lines
-            .len()
-            .saturating_sub(inner_h + self.review_scroll);
-        let rv_end = (rv_start + inner_h).min(review_lines.len());
-        let visible_review: Vec<Line> = review_lines[rv_start..rv_end].to_vec();
+        let rv_scroll_y = max_rv_scroll - self.review_scroll;
 
         let rv_title = if let Some(req) = &pending_req {
             format!(" {} ", truncate(&req.prompt, 50))
         } else {
             " Review ".to_string()
         };
-        let rv_scroll_info = if review_lines.len() > inner_h {
+        let rv_scroll_info = if total_rows > inner_h {
             let pct = 100
                 - (self.review_scroll.min(max_rv_scroll) * 100)
                     .checked_div(max_rv_scroll)
@@ -56,7 +49,7 @@ impl Dashboard {
         } else {
             String::new()
         };
-        let review_widget = Paragraph::new(visible_review)
+        let review_widget = Paragraph::new(review_lines.to_vec())
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -68,16 +61,16 @@ impl Dashboard {
                     ))
                     .title_bottom(Span::styled(rv_scroll_info, Style::default().fg(C_DIM))),
             )
-            .wrap(Wrap { trim: false });
+            .wrap(Wrap { trim: false })
+            .scroll((rv_scroll_y.min(u16::MAX as usize) as u16, 0));
         frame.render_widget(review_widget, review_area);
 
-        // Scrollbar for review body
-        if review_lines.len() > inner_h {
+        // Scrollbar for review body, in display rows.
+        if total_rows > inner_h {
             let rv_scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("↑"))
                 .end_symbol(Some("↓"));
-            let mut rv_sb = ScrollbarState::new(max_rv_scroll)
-                .position(max_rv_scroll.saturating_sub(self.review_scroll));
+            let mut rv_sb = ScrollbarState::new(max_rv_scroll).position(rv_scroll_y);
             frame.render_stateful_widget(
                 rv_scrollbar,
                 review_area.inner(Margin {
@@ -315,6 +308,36 @@ mod tests {
             .unwrap();
     }
 
+    /// Same display-row fix as the content pane: a review document whose
+    /// lines wrap must still show its final line when scrolled to the bottom.
+    #[test]
+    fn wrapped_review_shows_its_last_line_at_the_bottom() {
+        let backend = TestBackend::new(50, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.review_scroll = 0;
+        let lines: Vec<ratatui::text::Line<'static>> = vec![
+            ratatui::text::Line::from("plan step ".repeat(30)),
+            ratatui::text::Line::from("detail text ".repeat(25)),
+            ratatui::text::Line::from("REVIEW-FINAL-LINE"),
+        ];
+        let pending: Option<interaction::InteractionRequest> = None;
+        terminal
+            .draw(|f| dash.render_review_body(f, Rect::new(0, 0, 48, 12), &lines, &pending))
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            screen.contains("REVIEW-FINAL-LINE"),
+            "the review tail must be visible at review_scroll 0:\n{screen}"
+        );
+    }
+
     #[test]
     fn render_review_body_clamps_out_of_range_scroll() {
         let backend = TestBackend::new(120, 40);
@@ -334,15 +357,6 @@ mod tests {
             })
             .unwrap();
         assert!(dash.review_scroll < usize::MAX);
-        // The review pane accepts mouse selection: its inner rect (borders
-        // excluded) is registered for hit-testing.
-        assert_eq!(
-            dash.selection_regions,
-            vec![Rect::new(0, 0, 80, 10).inner(Margin {
-                vertical: 1,
-                horizontal: 1,
-            })]
-        );
     }
 
     #[test]

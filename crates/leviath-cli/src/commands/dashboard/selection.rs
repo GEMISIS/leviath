@@ -7,11 +7,12 @@
 //! is read back from those same cells. This is the semantics of native
 //! terminal selection, which mouse capture otherwise takes away.
 //!
-//! Lifecycle: a left-button press inside a registered pane starts a drag,
-//! dragging extends the highlight (clamped to that pane), and release copies
-//! the highlighted cells through the same clipboard seam as `y` yank. A plain
-//! click, any scroll, or a frame that no longer draws the pane clears the
-//! selection - the highlight must never outlive the text it was drawn over.
+//! Lifecycle: a left-button press anywhere starts a drag (the whole frame is
+//! one selection region, exactly like native terminal selection - a
+//! multi-row drag spans panes and borders alike), dragging extends the
+//! highlight, and release copies the highlighted cells through the same
+//! clipboard seam as `y` yank. A plain click, any scroll, or a resize (which
+//! moves text under a screen-anchored highlight) clears the selection.
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
@@ -28,8 +29,8 @@ use super::types::ToastLevel;
 /// Coordinates are absolute screen cells `(column, row)`, both endpoints
 /// inclusive and always inside `region`.
 pub(super) struct Selection {
-    /// The pane's inner rect (borders excluded) as registered by the pane's
-    /// renderer on the frame where the drag started.
+    /// The selectable region the drag started in - the whole frame, as
+    /// registered by `draw()` each frame.
     pub(super) region: Rect,
     /// Where the drag started.
     pub(super) anchor: (u16, u16),

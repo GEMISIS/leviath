@@ -394,7 +394,7 @@ The two coding agents can also detour through an optional **`prototype`** spike 
   <img src="docs/assets/dashboard-final.png" alt="lev dash - the Leviath terminal dashboard showing the agent list and live activity log" width="900">
 </p>
 
-`lev dash` is a full TUI for managing concurrent agents: stage tabs, context-window visualization, markdown rendering, search/filter, sub-agent tree view, and full mouse support. Scroll with the wheel, or click-drag to select text in any pane; releasing the drag copies it to your clipboard (works over SSH via OSC52), and `y` still yanks a whole pane at once. Shift+drag reaches your terminal's native selection. Press **`m`** to open the MCP management screen - add, remove, log in to, and test tool servers without leaving the dashboard.
+`lev dash` is a full TUI for managing concurrent agents: stage tabs, context-window visualization, markdown rendering, search/filter, sub-agent tree view, and full mouse support. Scroll with the wheel, or click-drag to select text anywhere on screen, exactly like native terminal selection; releasing the drag copies it to your clipboard (works over SSH via OSC52), and `y` still yanks a whole pane at once. Shift+drag reaches your terminal's native selection. Press **`m`** to open the MCP management screen - add, remove, log in to, and test tool servers without leaving the dashboard.
 
 ## 🌐 API Server
 
