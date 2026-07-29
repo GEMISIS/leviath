@@ -38,7 +38,9 @@ Pick a pre-built agent or write your own, run it, and watch it actually remember
 
 > **Claude Code transport (opt-in):** if you have [Claude Code](https://claude.com/claude-code) installed and signed in, enable it in `lev setup` to run Leviath on your Claude subscription with no API key. Leviath's structured regions work normally - it drives the CLI as a plain inference relay, keeping the context window, the tool loop, and the iteration count on Leviath's side.
 >
-> Caveats, measured rather than estimated: the CLI adds ~130 tokens of its own context to **every** call, including **your account email address** and the current date. This cannot be disabled - every flag that suppresses it also disables subscription auth. There is no prompt caching, and each call spawns a subprocess (~200 ms). Anthropic models only. For full control over what reaches the model, use a direct provider.
+> **⚠️ Terms of service:** Anthropic's terms [state](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) that third-party developers may not offer claude.ai login or subscription rate limits for their products without prior approval. Using this transport routes inference through your Claude subscription via the CLI's OAuth session. **By enabling it, you accept responsibility for compliance with Anthropic's terms.** For unambiguous compliance, use a direct Anthropic API key instead.
+>
+> Technical caveats, measured rather than estimated: the CLI adds ~130 tokens of its own context to **every** call, including **your account email address** and the current date. This cannot be disabled - every flag that suppresses it also disables subscription auth. There is no prompt caching, and each call spawns a subprocess (~200 ms). Anthropic models only. For full control over what reaches the model, use a direct provider.
 
 ## 🚀 Quick Start
 

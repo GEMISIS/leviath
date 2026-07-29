@@ -249,6 +249,19 @@ fn draw_provider_detail(frame: &mut Frame, area: Rect, wizard: &Wizard) {
                 "← / → to change.  Sign in with `claude` if you have not already.",
                 Style::default().fg(C_DIM),
             )));
+            // The transport is opt-in, so the terms risk has to be on the
+            // screen where it is opted into - not only in the README.
+            for warning in [
+                "⚠️  Anthropic's terms prohibit third-party use of subscription auth",
+                "    without prior approval. By enabling this transport you accept",
+                "    responsibility for compliance with their terms.",
+                "    For unambiguous compliance, use a direct Anthropic API key.",
+            ] {
+                lines.push(Line::from(Span::styled(
+                    warning,
+                    Style::default().fg(C_WARN),
+                )));
+            }
         }
     }
 
@@ -498,6 +511,24 @@ fn draw_review(frame: &mut Frame, area: Rect, wizard: &Wizard) {
             lines.push(Line::from(Span::styled(
                 format!("  • {failure}"),
                 Style::default().fg(C_ERROR),
+            )));
+        }
+    }
+
+    if wizard
+        .providers
+        .iter()
+        .any(|r| r.selected && r.provider.id == "claude-code")
+    {
+        lines.push(Line::from(""));
+        for warning in [
+            "Claude Code transport: Anthropic's terms may prohibit third-party use of",
+            "subscription auth without prior approval. By enabling it you accept",
+            "responsibility for compliance with their terms.",
+        ] {
+            lines.push(Line::from(Span::styled(
+                warning,
+                Style::default().fg(C_WARN),
             )));
         }
     }
@@ -819,6 +850,33 @@ mod tests {
             screen.contains("email"),
             "the privacy cost must be on screen"
         );
+        assert!(
+            screen.contains("terms"),
+            "the terms-of-service risk must be on screen:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn the_review_screen_warns_about_the_claude_code_terms() {
+        let (_dir, mut w) = wizard();
+        let index = w
+            .providers
+            .iter()
+            .position(|r| r.provider.id == "claude-code")
+            .expect("the transport is offered");
+        w.enter(Step::Review);
+        assert!(
+            !rendered(&w).contains("Claude Code transport: Anthropic"),
+            "the warning is only for a setup that enables it"
+        );
+
+        w.providers[index].selected = true;
+        let screen = rendered(&w);
+        assert!(
+            screen.contains("Claude Code transport: Anthropic"),
+            "{screen}"
+        );
+        assert!(screen.contains("responsibility for compliance"), "{screen}");
     }
 
     #[test]

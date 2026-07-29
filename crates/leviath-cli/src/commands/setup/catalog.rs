@@ -97,8 +97,9 @@ pub fn providers() -> Vec<Provider> {
             id: "claude-code",
             display: "Claude Code transport",
             blurb: "Runs on your Claude subscription instead of an API key. \
-                    The CLI adds ~130 tokens of its own context to every call, \
-                    including your account email and the date. This cannot be \
+                    ⚠️ May conflict with Anthropic's terms for third-party \
+                    apps. The CLI adds ~130 tokens of its own context to every \
+                    call, including your account email. This cannot be \
                     disabled.",
             credential: Credential::None,
             hint: "",
@@ -242,6 +243,8 @@ mod tests {
             .expect("the transport is offered");
         assert!(cc.blurb.contains("email"));
         assert!(cc.blurb.contains("cannot be disabled"));
+        // Enabling it is a terms decision as much as a privacy one.
+        assert!(cc.blurb.contains("terms"));
         assert_eq!(cc.credential, Credential::None);
         assert!(!Config::default().providers.claude_code_enabled);
     }
