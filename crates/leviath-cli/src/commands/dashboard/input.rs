@@ -116,9 +116,9 @@ impl Dashboard {
             .and_then(|r| r.body.clone());
         self.input_textarea = match seed {
             Some(body) => {
-                tui_textarea::TextArea::new(body.lines().map(|s| s.to_string()).collect())
+                ratatui_textarea::TextArea::new(body.lines().map(|s| s.to_string()).collect())
             }
-            None => tui_textarea::TextArea::default(),
+            None => ratatui_textarea::TextArea::default(),
         };
     }
 
@@ -228,20 +228,21 @@ impl Dashboard {
                     }
                     KeyCode::Esc => {
                         self.input_mode = false;
-                        self.input_textarea = tui_textarea::TextArea::default();
+                        self.input_textarea = ratatui_textarea::TextArea::default();
                         self.choice_selected = 0;
                     }
                     KeyCode::PageUp if self.has_scrollable_document() => self.scroll_by(10),
                     KeyCode::PageDown if self.has_scrollable_document() => self.scroll_by(-10),
                     _ => {
-                        self.input_textarea.input(tui_textarea::Input::from(key));
+                        self.input_textarea
+                            .input(ratatui_textarea::Input::from(key));
                     }
                 }
             }
             _ => match key_code {
                 KeyCode::Esc => {
                     self.input_mode = false;
-                    self.input_textarea = tui_textarea::TextArea::default();
+                    self.input_textarea = ratatui_textarea::TextArea::default();
                     self.choice_selected = 0;
                 }
                 KeyCode::Enter => {
@@ -467,7 +468,7 @@ impl Dashboard {
             a.waiting_prompt = None;
             a.pending_request = None;
             self.input_mode = false;
-            self.input_textarea = tui_textarea::TextArea::default();
+            self.input_textarea = ratatui_textarea::TextArea::default();
             self.add_log(format!("{}: kill requested", agent_id));
         }
     }
@@ -736,7 +737,7 @@ impl Dashboard {
         };
 
         self.input_mode = false;
-        self.input_textarea = tui_textarea::TextArea::default();
+        self.input_textarea = ratatui_textarea::TextArea::default();
         self.choice_selected = 0;
 
         let answered_id = resp.request_id.clone();
@@ -1461,8 +1462,10 @@ mod tests {
         dash.detail_view = true;
         dash.input_mode = true;
 
-        dash.input_textarea =
-            tui_textarea::TextArea::new(vec!["  indented".to_string(), "second line".to_string()]);
+        dash.input_textarea = ratatui_textarea::TextArea::new(vec![
+            "  indented".to_string(),
+            "second line".to_string(),
+        ]);
         dash.submit_input();
 
         assert!(!dash.input_mode);
@@ -1492,7 +1495,7 @@ mod tests {
         dash.input_mode = true;
 
         // Whitespace-only edit → trimmed empty → "(no changes)" display path.
-        dash.input_textarea = tui_textarea::TextArea::new(vec!["   ".to_string()]);
+        dash.input_textarea = ratatui_textarea::TextArea::new(vec!["   ".to_string()]);
         dash.submit_input();
 
         assert!(!dash.input_mode);

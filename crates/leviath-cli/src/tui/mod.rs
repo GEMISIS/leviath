@@ -193,7 +193,20 @@ mod test_doubles {
         }
     }
 
+    /// ratatui 0.30's `TestBackend` is infallible (`Error = Infallible`);
+    /// the harness keeps `io::Error` so the fail-draw switch still exercises
+    /// the loops' error arms. `into_ok` converts the inner results: an
+    /// `Infallible` error is a proof no error exists, so the conversion has
+    /// no failure branch.
+    fn into_ok<T>(result: Result<T, std::convert::Infallible>) -> std::io::Result<T> {
+        match result {
+            Ok(value) => Ok(value),
+        }
+    }
+
     impl ratatui::backend::Backend for TestBackendHarness {
+        type Error = std::io::Error;
+
         fn draw<'a, I>(&mut self, content: I) -> std::io::Result<()>
         where
             I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
@@ -201,35 +214,38 @@ mod test_doubles {
             if self.fail_draw {
                 return Err(std::io::Error::other("simulated draw failure"));
             }
-            self.inner.draw(content)
+            into_ok(self.inner.draw(content))
         }
 
         fn hide_cursor(&mut self) -> std::io::Result<()> {
-            self.inner.hide_cursor()
+            into_ok(self.inner.hide_cursor())
         }
         fn show_cursor(&mut self) -> std::io::Result<()> {
-            self.inner.show_cursor()
+            into_ok(self.inner.show_cursor())
         }
         fn get_cursor_position(&mut self) -> std::io::Result<ratatui::layout::Position> {
-            self.inner.get_cursor_position()
+            into_ok(self.inner.get_cursor_position())
         }
         fn set_cursor_position<P: Into<ratatui::layout::Position>>(
             &mut self,
             position: P,
         ) -> std::io::Result<()> {
-            self.inner.set_cursor_position(position)
+            into_ok(self.inner.set_cursor_position(position))
         }
         fn clear(&mut self) -> std::io::Result<()> {
-            self.inner.clear()
+            into_ok(self.inner.clear())
+        }
+        fn clear_region(&mut self, region: ratatui::backend::ClearType) -> std::io::Result<()> {
+            into_ok(self.inner.clear_region(region))
         }
         fn size(&self) -> std::io::Result<ratatui::layout::Size> {
-            self.inner.size()
+            into_ok(self.inner.size())
         }
         fn window_size(&mut self) -> std::io::Result<ratatui::backend::WindowSize> {
-            self.inner.window_size()
+            into_ok(self.inner.window_size())
         }
         fn flush(&mut self) -> std::io::Result<()> {
-            self.inner.flush()
+            into_ok(self.inner.flush())
         }
     }
 
@@ -444,6 +460,7 @@ mod tests {
                 .is_ok()
         );
         assert!(ok.clear().is_ok());
+        assert!(ok.clear_region(ratatui::backend::ClearType::All).is_ok());
         assert!(ok.size().is_ok());
         assert!(ok.window_size().is_ok());
         assert!(ok.flush().is_ok());

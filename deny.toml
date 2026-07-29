@@ -31,15 +31,6 @@ ignore = [
     #   { id = "RUSTSEC-0000-0000", reason = "why this is acceptable here" },
     # Every entry needs a reason. An ignore with no justification is a silent
     # acceptance of risk, which is what this file exists to prevent.
-    # `paste` is unmaintained (archived by its author), not vulnerable - the
-    # advisory reports abandonment, not a defect. It reaches us through ratatui
-    # 0.29 and tui-textarea, neither of which we control, and it is a proc-macro:
-    # it runs at build time and contributes no code to the shipped binary.
-    # Removing it means upgrading to ratatui 0.30, which is currently blocked:
-    # tui-textarea's latest release (0.7.0) is pinned to ratatui 0.29, and
-    # bumping ratatui alone puts two incompatible crossterm `KeyEvent` types in
-    # the graph. Re-check when tui-textarea publishes a ratatui-0.30 release.
-    { id = "RUSTSEC-2024-0436", reason = "unmaintained-only advisory on a build-time proc-macro pulled in by ratatui 0.29; the upgrade past it is blocked on tui-textarea" },
 ]
 
 [licenses]

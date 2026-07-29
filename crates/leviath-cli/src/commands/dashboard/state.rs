@@ -2,9 +2,9 @@
 
 use leviath_runtime::control_socket::{ControlClient, ControlRequest, ControlResponse};
 use ratatui::widgets::TableState;
+use ratatui_textarea::TextArea;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
-use tui_textarea::TextArea;
 
 use super::graph::load_graph_info;
 use super::helpers::truncate;

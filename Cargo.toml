@@ -106,28 +106,20 @@ libc = "0.2"
 # from driving the daemon.
 nix = { version = "0.31", default-features = false, features = ["signal", "process", "user", "socket"] }
 temp-env = "0.3"
-# Held at 0.28/0.29 by `tui-textarea`, whose latest release (0.7.0) is pinned to
-# ratatui 0.29 and crossterm 0.28. Bumping ratatui alone puts two incompatible
-# `KeyEvent` types in the graph, which fails at the `Input: From<KeyEvent>`
-# boundary. Revisit when tui-textarea publishes a ratatui-0.30 release; that also
-# clears the RUSTSEC-2024-0436 (`paste`) ignore in deny.toml, which arrives
-# through ratatui 0.29.
-#
-# Re-checked against ratatui 0.30.2 / crossterm 0.29: still blocked, same
-# boundary. 0.30 additionally gives `Backend` an associated `Error` type, so the
-# wizard's generic bounds need `Send + Sync` added - small, but pointless until
-# tui-textarea moves.
-crossterm = "0.28"
+crossterm = "0.29"
 # unstable-rendered-line-info: `Paragraph::line_count`, which the dashboard
 # uses to scroll wrapped text by display rows ("unstable" = API may change
-# between ratatui versions; this workspace pins 0.29).
-ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
+# between ratatui versions; this workspace pins 0.30).
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 # Already in the tree via ratatui; named explicitly so the dashboard's mouse
 # selection can measure symbol display widths when reading cells back out of
 # the drawn frame (wide CJK/emoji symbols occupy continuation cells).
 unicode-width = "0.2"
 pulldown-cmark = "0.13"
-tui-textarea = { version = "0.7", features = ["crossterm"] }
+# The ratatui org's adoption of the dormant rhysd/tui-textarea (unreleased
+# since 2024-10 and unable to follow ratatui past 0.29). Same widget lineage,
+# maintained alongside the framework itself.
+ratatui-textarea = { version = "0.9", features = ["crossterm"] }
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.7", features = ["cors"] }
 
