@@ -156,20 +156,13 @@ plan         = { kind = "pinned", budget = "20%" }
 
 ## 🧩 Features
 
-<table>
-<tr>
-<td width="33%" valign="top">
-
-**🧠 Structured Context Memory**
+### 🧠 Structured Context Memory
 
 Six region types with deterministic eviction - architecture stays pinned, tool results evict first, conversation auto-compacts into summaries. Route reads to specific regions so a file dump can't push out your system prompt.
 
 [Learn more →](https://leviath.dev/docs/context)
 
-</td>
-<td width="33%" valign="top">
-
-**🔀 Multi-Stage Workflows**
+### 🔀 Multi-Stage Workflows
 
 Each stage gets its own model, tools, and context layout. Run them linearly or as a [directed graph](https://leviath.dev/docs/stages#graph) with conditional transitions, error recovery, and LLM-driven routing - check it with `lev validate`.
 
@@ -188,46 +181,27 @@ Set any subset - whichever trips first wins, and each stage arms its own. The ru
 
 [Learn more →](https://leviath.dev/docs/stages)
 
-</td>
-<td width="33%" valign="top">
-
-**🎮 ECS Agent Engine**
+### 🎮 ECS Agent Engine
 
 Agents run as entities in a [bevy_ecs](https://bevyengine.org/) world. Dozens share one process with game-engine-style scheduling, instead of that many OS processes fighting for resources.
 
 [Learn more →](https://leviath.dev/docs/engine)
 
-</td>
-</tr>
-<tr>
-<td width="33%" valign="top">
-
-**🧬 Sub-Agents & Fan-Out**
+### 🧬 Sub-Agents & Fan-Out
 
 Agents spawn children with different blueprints. A **fan-out** stage splits a task into work items and runs one sub-agent worker per item concurrently (bounded by `max_workers`), then merges their results back into the parent - all in the same process, over one shared lock-free inference driver. Any sub-agent, at any depth, can ask the user questions directly - no fire-and-forget, no routing through the parent.
 
 [Learn more →](https://leviath.dev/docs/sub-agents)
 
-</td>
-<td width="33%" valign="top">
-
-**🙋 Human-in-the-Loop**
+### 🙋 Human-in-the-Loop
 
 Message a running agent from the terminal or dashboard - input is injected between inference calls, so you redirect, answer, or add constraints without restarting. Force checkpoints with a stage's `interaction_points` - approve, request revisions, or **edit the agent's output directly** (e.g. tweak the plan before it's implemented, and your edits stick through later revisions) - or grant `ask_user_*` tools so the agent asks on its own judgment. All gated by per-stage tool permissions.
 
-</td>
-<td width="33%" valign="top">
-
-**🛡️ Taint-Tracked Data Flow**
+### 🛡️ Taint-Tracked Data Flow
 
 A deterministic sensitivity model (Public / Internal / Private) tags every context region - set by the runtime, never by model output. Tools declare a direction and clearance, so an outbound call carrying data above its level is blocked before it fires - returned as `[blocked]`, or, in the daemon, surfaced as an *allow once / allow for this session / deny* prompt - and taint recovers automatically as entries evict. Every tool that can carry bytes off the machine is Outbound and therefore gated - `shell`, `web_fetch`, `http_get`/`http_post`, and any MCP or script tool, since an unrecognized tool fails closed rather than open. Configure it with an opt-in `[security]` block, layer on allowlists and Rhai policy rules, and dry-run any tool with `lev policy test`. An agent's own manifest can turn tracking *on*, never off.
 
-</td>
-</tr>
-<tr>
-<td width="33%" valign="top">
-
-**📦 Sandboxed Tool Execution**
+### 📦 Sandboxed Tool Execution
 
 By default an agent's shell commands run **directly on your machine** - no runtime, nothing to install. Opt in per agent *or* per stage to route them into an isolated environment instead: a **container** (Docker, Podman, or any Docker-CLI-compatible engine - Leviath isn't prescriptive) or a fresh set of Linux **namespaces** (no runtime needed). Run analysis on the host and implementation in a networkless container. The daemon creates a warm container per agent and tears it down at reap, so no orphans; file tools keep working over the bind-mounted workdir.
 
@@ -245,10 +219,7 @@ image = "node:22-slim"
 network = false      # isolate this stage
 ```
 
-</td>
-<td width="33%" valign="top">
-
-**🧭 Codebase Discovery & Workflow Synthesis**
+### 🧭 Codebase Discovery & Workflow Synthesis
 
 The coding agents open with a `discover` stage that answers *what is this codebase* and *how do I verify my work here* before a line is written - then writes a concrete verification workflow (`BASELINE` / `VERIFY` / `DONE WHEN`) into a pinned region. `implement` captures the baseline **before** its first edit and diffs every later run against it, so a test that used to pass and now fails is caught immediately instead of at review time. Both regions are `required`, so the runtime re-runs `discover` until they're actually populated - the workflow is a commitment the review stage holds the run to, not a suggestion.
 
@@ -266,10 +237,6 @@ repo_files = { kind = "pinned", max_tokens = 4000,
 [security]
 allow_seed_commands = false
 ```
-
-</td>
-</tr>
-</table>
 
 ## 📊 Benchmarks
 
@@ -394,7 +361,7 @@ The two coding agents can also detour through an optional **`prototype`** spike 
   <img src="docs/assets/dashboard-final.png" alt="lev dash - the Leviath terminal dashboard showing the agent list and live activity log" width="900">
 </p>
 
-`lev dash` is a full TUI for managing concurrent agents: stage tabs, context-window visualization, markdown rendering, search/filter, sub-agent tree view, and full mouse support. Scroll with the wheel, or click-drag to select text anywhere on screen, exactly like native terminal selection; releasing the drag copies it to your clipboard (works over SSH via OSC52), and `y` still yanks a whole pane at once. Shift+drag reaches your terminal's native selection. Press **`m`** to open the MCP management screen - add, remove, log in to, and test tool servers without leaving the dashboard.
+`lev dash` is a full TUI for managing concurrent agents: stage tabs, context-window visualization, markdown rendering, search/filter, sub-agent tree view, auto-generated run titles (`[title]` in the config), and full mouse support. Scroll with the wheel, or click-drag to select text anywhere on screen, exactly like native terminal selection; releasing the drag copies it to your clipboard (works over SSH via OSC52), and `y` still yanks a whole pane at once. Shift+drag reaches your terminal's native selection. Press **`m`** to open the MCP management screen - add, remove, log in to, and test tool servers without leaving the dashboard.
 
 ## 🌐 API Server
 
@@ -473,6 +440,10 @@ For a clean "sling a task and get a result" flow with Gas City, prefer **autonom
 | `lev pack` / `lev add` / `lev remove` | Package management |
 | `lev list` | List installed agents |
 | `lev test` | Run agent tests |
+| `lev tools` | List and validate the global Rhai script tools |
+| `lev policy list\|add\|test` | Manage taint-tracking policy rules (`test` runs the real gate) |
+| `lev context <run-id>` | Show a run's context-window history |
+| `lev auth status\|migrate` | Inspect and move the secrets Leviath holds |
 | `lev mcp add\|list\|remove\|login\|logout\|test` | Manage MCP tool servers (auto-logs in on `add`) |
 | `lev setup` / `lev models` | Configuration |
 
@@ -513,6 +484,14 @@ daemon runs.
 | Ollama | *none (local)* |
 | Claude Code | *none (subscription)* |
 
+Optional client-side rate limits per provider, enforced before each call:
+
+```toml
+[rate_limits.anthropic]
+requests_per_minute = 50
+tokens_per_minute = 40000
+```
+
 ## 🏗️ Architecture
 
 ```mermaid
@@ -524,7 +503,7 @@ graph TD
     PROV["leviath-providers<br/><i>Anthropic · OpenAI · Google<br/>OpenRouter · Ollama · Claude Code</i>"]
     MCP["leviath-mcp<br/><i>MCP tool integration (stdio + HTTP/SSE)</i>"]
     SCRIPT["leviath-scripting<br/><i>Rhai sandbox</i>"]
-    PKG["leviath-package<br/><i>Bundling & registry</i>"]
+    PKG["leviath-package<br/><i>Agent bundling & install</i>"]
     TOOLS["leviath-tools<br/><i>Built-in tool implementations</i>"]
     SYS["leviath-sys<br/><i>All OS-specific syscalls (perms, signals, TTY)</i>"]
 
