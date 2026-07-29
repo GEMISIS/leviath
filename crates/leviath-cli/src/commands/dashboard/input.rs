@@ -150,10 +150,33 @@ impl Dashboard {
             .map(str::to_string)
     }
 
-    /// Whether the pending request carries a scrollable review document.
-    /// `EditText` also uses `body`, but for editing (not scrolling), so it is
-    /// explicitly excluded here.
-    fn has_scrollable_review(&self) -> bool {
+    /// Whether the separate review pane is **on screen right now**, and so is
+    /// what a scroll gesture should move.
+    ///
+    /// This must mirror the condition the renderer uses, not merely ask whether
+    /// a review body exists. The pane is suppressed in input mode (where the
+    /// document is drawn in the content pane instead) and whenever the output
+    /// pane is already showing the same body — and in both of those cases a
+    /// scroll aimed at `review_scroll` moves a pane nobody can see. That is
+    /// exactly what happened: with a plan open for approval, every scroll key
+    /// updated state that was not being rendered, so the plan sat still.
+    ///
+    /// `EditText` also uses `body`, but for editing rather than scrolling, so
+    /// it is excluded.
+    fn scroll_target_is_review(&self) -> bool {
+        let content_shows_body =
+            self.stage_content_mode == StageContentMode::Output && self.reviewing_body().is_some();
+        !self.input_mode && !content_shows_body && self.has_scrollable_document()
+    }
+
+    /// Whether there is a review document on screen *somewhere* — the review
+    /// pane or the content pane.
+    ///
+    /// "Is there anything to scroll", as distinct from
+    /// [`Self::scroll_target_is_review`]'s "which pane holds it". Conflating
+    /// those two questions is what aimed the scroll keys at a pane that was not
+    /// being rendered.
+    fn has_scrollable_document(&self) -> bool {
         use interaction::InteractionKind;
         self.selected_agent()
             .and_then(|a| a.pending_request.as_ref())
@@ -170,7 +193,7 @@ impl Dashboard {
     /// One place so the keyboard and the mouse wheel cannot disagree about
     /// which pane a gesture moves.
     pub(crate) fn scroll_by(&mut self, lines: i32) {
-        let target = match self.has_scrollable_review() {
+        let target = match self.scroll_target_is_review() {
             true => &mut self.review_scroll,
             false => &mut self.detail_scroll,
         };
@@ -203,8 +226,8 @@ impl Dashboard {
                         self.input_textarea = tui_textarea::TextArea::default();
                         self.choice_selected = 0;
                     }
-                    KeyCode::PageUp if self.has_scrollable_review() => self.scroll_by(10),
-                    KeyCode::PageDown if self.has_scrollable_review() => self.scroll_by(-10),
+                    KeyCode::PageUp if self.has_scrollable_document() => self.scroll_by(10),
+                    KeyCode::PageDown if self.has_scrollable_document() => self.scroll_by(-10),
                     _ => {
                         self.input_textarea.input(tui_textarea::Input::from(key));
                     }
@@ -323,39 +346,14 @@ impl Dashboard {
                     self.seed_input_textarea();
                 }
             }
-            KeyCode::Up => {
-                // When a review body is present, Up scrolls the review document
-                let has_review = self.has_scrollable_review();
-                if has_review {
-                    self.review_scroll = self.review_scroll.saturating_add(1);
-                } else {
-                    self.detail_scroll = self.detail_scroll.saturating_add(1);
-                }
-            }
-            KeyCode::Down => {
-                let has_review = self.has_scrollable_review();
-                if has_review {
-                    self.review_scroll = self.review_scroll.saturating_sub(1);
-                } else {
-                    self.detail_scroll = self.detail_scroll.saturating_sub(1);
-                }
-            }
-            KeyCode::PageUp => {
-                let has_review = self.has_scrollable_review();
-                if has_review {
-                    self.review_scroll = self.review_scroll.saturating_add(10);
-                } else {
-                    self.detail_scroll = self.detail_scroll.saturating_add(10);
-                }
-            }
-            KeyCode::PageDown => {
-                let has_review = self.has_scrollable_review();
-                if has_review {
-                    self.review_scroll = self.review_scroll.saturating_sub(10);
-                } else {
-                    self.detail_scroll = self.detail_scroll.saturating_sub(10);
-                }
-            }
+            // All four go through `scroll_by`, which is the one place that
+            // decides which pane a gesture moves. They used to carry their own
+            // copy of that decision, which is how the keyboard and the renderer
+            // came to disagree about where the document was.
+            KeyCode::Up => self.scroll_by(1),
+            KeyCode::Down => self.scroll_by(-1),
+            KeyCode::PageUp => self.scroll_by(10),
+            KeyCode::PageDown => self.scroll_by(-10),
             KeyCode::Char('b') => {
                 self.detail_scroll = usize::MAX;
                 self.review_scroll = usize::MAX;
@@ -1164,25 +1162,30 @@ mod tests {
     #[test]
     fn a_plan_can_be_scrolled_while_its_approval_prompt_is_open() {
         let mut dash = dashboard_awaiting_a_plan();
-        assert_eq!(dash.review_scroll, 0);
+        assert_eq!(dash.detail_scroll, 0);
 
+        // In input mode the plan is drawn in the content pane — the separate
+        // review pane is suppressed — so that is what has to move. Verified
+        // against the real dashboard through a pty: the pane's own position
+        // readout went 100% → 91% → 81% on two PageUps.
         dash.handle_key(key(KeyCode::PageUp));
-        assert_eq!(dash.review_scroll, 10, "PageUp scrolls the plan");
+        assert_eq!(dash.detail_scroll, 10, "PageUp scrolls the plan");
+        assert_eq!(dash.review_scroll, 0, "and not a pane nobody can see");
         dash.handle_key(key(KeyCode::PageDown));
-        assert_eq!(dash.review_scroll, 0, "and PageDown comes back");
+        assert_eq!(dash.detail_scroll, 0, "and PageDown comes back");
 
         // Down still selects rather than scrolling — the plan keys were added
         // beside the choice keys, not on top of them.
         dash.choice_selected = 0;
         dash.handle_key(key(KeyCode::Down));
         assert_eq!(dash.choice_selected, 1);
-        assert_eq!(dash.review_scroll, 0);
+        assert_eq!(dash.detail_scroll, 0);
 
         // Home/End jump the length of the document without overflowing.
         dash.handle_key(key(KeyCode::Home));
-        assert!(dash.review_scroll > 0);
+        assert!(dash.detail_scroll > 0);
         dash.handle_key(key(KeyCode::End));
-        assert_eq!(dash.review_scroll, 0);
+        assert_eq!(dash.detail_scroll, 0);
     }
 
     /// A free-text prompt can carry a document too (an agent asking a question
@@ -1207,13 +1210,13 @@ mod tests {
         dash.input_mode = true;
 
         dash.handle_key(key(KeyCode::PageUp));
-        assert_eq!(dash.review_scroll, 10, "the document scrolls");
+        assert_eq!(dash.detail_scroll, 10, "the document scrolls");
         assert!(
             dash.input_textarea.lines().concat().is_empty(),
             "and the key did not land in the answer box"
         );
         dash.handle_key(key(KeyCode::PageDown));
-        assert_eq!(dash.review_scroll, 0);
+        assert_eq!(dash.detail_scroll, 0);
 
         // EditText: the body is the thing being edited, so the guard is false
         // and the key goes to the text area instead.
@@ -1224,10 +1227,10 @@ mod tests {
                 "plan",
                 "## Plan\n1. a step",
             ));
-        dash.review_scroll = 0;
+        dash.detail_scroll = 0;
         dash.handle_key(key(KeyCode::PageUp));
         assert_eq!(
-            dash.review_scroll, 0,
+            dash.detail_scroll, 0,
             "an edit target is not scrolled out from under the cursor"
         );
     }
@@ -1237,19 +1240,20 @@ mod tests {
     fn the_mouse_wheel_scrolls_the_review_and_falls_back_to_the_detail_pane() {
         let mut dash = dashboard_awaiting_a_plan();
         dash.scroll_by(3);
-        assert_eq!(dash.review_scroll, 3);
-        assert_eq!(dash.detail_scroll, 0, "the detail pane did not move");
+        assert_eq!(dash.detail_scroll, 3);
         dash.scroll_by(-3);
-        assert_eq!(dash.review_scroll, 0);
+        assert_eq!(dash.detail_scroll, 0);
         // Past the top it stops rather than wrapping.
         dash.scroll_by(-3);
-        assert_eq!(dash.review_scroll, 0);
+        assert_eq!(dash.detail_scroll, 0);
 
-        // With no review document, the same gesture scrolls the detail pane.
-        dash.agents[0].pending_request = None;
-        dash.scroll_by(5);
-        assert_eq!(dash.detail_scroll, 5);
-        assert_eq!(dash.review_scroll, 0);
+        // Out of input mode and with the content pane on logs, the review pane
+        // is what is rendered — and so what the wheel moves.
+        dash.input_mode = false;
+        dash.handle_key(key(KeyCode::Char('l')));
+        dash.scroll_by(3);
+        assert_eq!(dash.review_scroll, 3);
+        assert_eq!(dash.detail_scroll, 0, "the content pane did not move");
     }
 
     #[test]
@@ -1941,19 +1945,30 @@ mod tests {
         dash.update_display_indices();
         dash.detail_view = true;
 
-        // Up should scroll review_scroll (not detail_scroll)
+        // In the default Output mode the content pane is already showing the
+        // body, so the separate review pane is suppressed and the content pane
+        // is what a scroll must move. This test used to assert `review_scroll`
+        // here — a pane that is not on screen — which is precisely why a plan
+        // sat still while every scroll key "worked".
         dash.handle_key(key(KeyCode::Up));
-        assert_eq!(dash.review_scroll, 1);
-        assert_eq!(dash.detail_scroll, 0);
+        assert_eq!(dash.detail_scroll, 1);
+        assert_eq!(dash.review_scroll, 0);
 
         dash.handle_key(key(KeyCode::Down));
-        assert_eq!(dash.review_scroll, 0);
+        assert_eq!(dash.detail_scroll, 0);
 
         dash.handle_key(key(KeyCode::PageUp));
-        assert_eq!(dash.review_scroll, 10);
+        assert_eq!(dash.detail_scroll, 10);
 
         dash.handle_key(key(KeyCode::PageDown));
-        assert_eq!(dash.review_scroll, 0);
+        assert_eq!(dash.detail_scroll, 0);
+
+        // Switch the content pane to logs and the review pane *is* rendered, so
+        // now the same keys move it instead.
+        dash.handle_key(key(KeyCode::Char('l')));
+        dash.handle_key(key(KeyCode::PageUp));
+        assert_eq!(dash.review_scroll, 10, "the review pane is on screen now");
+        assert_eq!(dash.detail_scroll, 0);
     }
 
     // ─── handle_input_mode_key for ToolApproval ──────────────────────────
