@@ -3,8 +3,9 @@
 ## Reporting a vulnerability
 
 Report privately, not as a public issue: use [GitHub's private vulnerability
-reporting](https://github.com/Sun-Forge-AI/leviath/security/advisories/new), or
-email **security@sunforge.ai** if you prefer.
+reporting](https://github.com/Sun-Forge-AI/leviath/security/advisories/new).
+Everything about a report happens there - filing, discussion, the fix, and
+the advisory.
 
 Please include what you need to and nothing you don't - a description of the
 issue, the version or commit, and enough to reproduce it. A proof of concept
