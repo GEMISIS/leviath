@@ -1005,27 +1005,36 @@ mod tests {
         );
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
         // Re-run the command capture directly so we can read stderr.
-        let out = std::process::Command::new(&script)
-            .args([
-                "--print",
-                "--output-format",
-                "json",
-                "--no-session-persistence",
-                "--tools",
-                "",
-                "--setting-sources",
-                "",
-                "--strict-mcp-config",
-                "--disable-slash-commands",
-                "--model",
-                "claude-sonnet-4-6",
-                "--effort",
-                "medium",
-                "--system-prompt-file",
-                "/tmp/x",
-            ])
-            .output()
-            .unwrap();
+        //
+        // Through `retry_etxtbsy` for the same reason production spawns are: a
+        // write fd inherited by another test's in-flight fork makes `exec` fail
+        // with "Text file busy" even though this stub was written, synced and
+        // closed before `chmod`. It is a race against the rest of the suite, so
+        // it fails perhaps one CI run in twenty and always somewhere unrelated.
+        let out = retry_etxtbsy(|| {
+            std::process::Command::new(&script)
+                .args([
+                    "--print",
+                    "--output-format",
+                    "json",
+                    "--no-session-persistence",
+                    "--tools",
+                    "",
+                    "--setting-sources",
+                    "",
+                    "--strict-mcp-config",
+                    "--disable-slash-commands",
+                    "--model",
+                    "claude-sonnet-4-6",
+                    "--effort",
+                    "medium",
+                    "--system-prompt-file",
+                    "/tmp/x",
+                ])
+                .output()
+        })
+        .await
+        .expect("the stub runs once no other process holds a write fd to it");
         let argv = String::from_utf8_lossy(&out.stderr).to_string();
         assert!(!argv.contains("--bare"), "argv must never carry --bare");
         assert!(!argv.contains("--allowed-tools"));
