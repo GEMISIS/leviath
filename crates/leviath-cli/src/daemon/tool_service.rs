@@ -76,7 +76,7 @@ pub struct AgentToolState {
     /// `Arc` is also an ECS component (for teardown at reap) and is wired into
     /// `builtins` as the shell tool's executor.
     pub sandbox: Option<std::sync::Arc<crate::daemon::sandbox_manager::SandboxManager>>,
-    /// The agent's discovered Rhai script tools (issue #97), compiled at spawn.
+    /// The agent's discovered Rhai script tools, compiled at spawn.
     /// Behind a mutex so a `dynamic_tools` agent's mid-run re-scan can swap the
     /// set in place; static agents never mutate it.
     pub script_tools: Arc<StdMutex<leviath_scripting::ScriptToolSet>>,
@@ -87,7 +87,7 @@ pub struct AgentToolState {
     /// enforcement (Layer 3) already baked in.
     pub script_host: Arc<dyn leviath_scripting::ScriptHost>,
     /// Present only for `dynamic_tools` agents: everything needed to re-discover
-    /// and re-advertise this agent's tools mid-run (issue #97).
+    /// and re-advertise this agent's tools mid-run.
     pub dynamic: Option<Arc<DynamicToolCtx>>,
 }
 
@@ -115,12 +115,12 @@ async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -
     // host rather than the builtin/MCP executors.
     //
     // Dispatched here, *after* the policy gate, rather than short-circuiting
-    // before it. They used to take an early return in `dispatch_tools` that
-    // skipped `resolve_policy` entirely: no approval prompt was ever raised for
-    // them, and a user's `[tool_permissions] spawn_agent = "deny"` was silently
-    // ignored - the "a configured deny is terminal" guarantee simply did not
-    // cover these five names. That mattered because `spawn_agent` runs a whole
-    // second agent, with that manifest's own command seeds and MCP servers.
+    // before it. An early return in `dispatch_tools` that skipped
+    // `resolve_policy` would raise no approval prompt for them and silently
+    // ignore a user's `[tool_permissions] spawn_agent = "deny"` - the "a
+    // configured deny is terminal" guarantee would simply not cover these five
+    // names. That matters because `spawn_agent` runs a whole second agent, with
+    // that manifest's own command seeds and MCP servers.
     if crate::daemon::subagent::is_subagent_tool(&tc.name) {
         return match &state.subagent {
             Some(handle) => crate::daemon::subagent::handle(handle, tc).await,
@@ -194,10 +194,9 @@ async fn execute_script_tool(state: &AgentToolState, tc: &ToolCall) -> String {
 /// a tool error rather than taking the daemon (and every other run) with it.
 ///
 /// A free function applied via `unwrap_or_else` - not a `match` arm - because
-/// the arm can no longer be reached from a test now that panics are contained
-/// inside `leviath_scripting` (issue #109), while this body is directly
-/// unit-testable with a real `JoinError`. Mirrors
-/// `leviath_providers::rhai_provider`'s `task_failed`.
+/// panics are contained inside `leviath_scripting`, leaving the arm unreachable
+/// from a test, while this body is directly unit-testable with a real
+/// `JoinError`. Mirrors `leviath_providers::rhai_provider`'s `task_failed`.
 fn script_tool_join_failed(e: tokio::task::JoinError) -> String {
     format!("[error] script tool panicked: {e}")
 }
@@ -733,7 +732,7 @@ mod tests {
     #[test]
     fn a_poisoned_state_map_does_not_wedge_every_other_agent() {
         // `states` holds *every* agent's tool state. A panic while holding it
-        // used to poison it, so from then on `.lock().unwrap()` panicked for all
+        // poisons it, and a bare `.lock().unwrap()` then panics for all
         // agents - one bad agent taking the whole daemon's tool dispatch with it
         // (issue #109). Recovering the guard keeps the map usable.
         let svc = CliToolService::new();
@@ -1622,10 +1621,10 @@ for line in sys.stdin:
 "#;
 
     /// Returns a tool *execution* error. The error flag's wire name is
-    /// `isError`; this stub previously wrote `is_error`, which only worked
-    /// because the client read the same wrong name - so the pair agreed and
-    /// the bug stayed invisible here while every real server's tool errors
-    /// were being reported to the model as successes.
+    /// `isError`, and the stub must spell it exactly that way: a stub writing
+    /// `is_error` against a client reading the same wrong name agrees with
+    /// itself, so the bug stays invisible here while every real server's tool
+    /// errors are reported to the model as successes.
     const MCP_STUB_ERROR: &str = r#"
 import sys, json
 def respond(id_, result):

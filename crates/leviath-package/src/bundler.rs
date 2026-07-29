@@ -269,9 +269,9 @@ mod tests {
         assert!(bundler.should_exclude(".env.production"));
     }
 
-    /// The variants the old exact-name list shipped. `.env.production` was
-    /// excluded and `.env.staging` was not, which is the gap a hand-maintained
-    /// denylist accumulates - so the pattern covers the family now.
+    /// Variants an exact-name denylist ships: one that excludes
+    /// `.env.production` but not `.env.staging` shows the gap a hand-maintained
+    /// list accumulates - so the pattern must cover the whole family.
     #[test]
     fn excludes_every_env_variant_not_just_the_three_that_were_listed() {
         let bundler = AgentBundler::new();

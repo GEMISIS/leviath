@@ -1,9 +1,9 @@
 //! `lev daemon install` / `lev daemon uninstall` - hand the daemon to the OS
 //! supervisor so it comes back by itself after a crash.
 //!
-//! Nothing restarted the daemon when it died (issue #109): a long-running agent
-//! simply stopped, and the next `lev run` was the only thing that would bring
-//! the daemon back. Registering a launchd agent (macOS) or a systemd *user*
+//! Without supervision, nothing restarts the daemon when it dies: a
+//! long-running agent simply stops, and the next `lev run` is the only thing
+//! that brings the daemon back. Registering a launchd agent (macOS) or a systemd *user*
 //! unit (Linux) with a restart policy closes that gap - and on the next start
 //! the daemon's own recovery pass reloads every interrupted run.
 //!

@@ -16,7 +16,7 @@
 //! `interactions.json` sidecar while blocked. For those, `reload_one` calls
 //! [`leviath_runtime::interaction_points::restore_interaction_point`] to bring the
 //! agent back in the *waiting* state with the same prompt re-opened, rather than
-//! re-inferring and dropping it (issue #38). Model-initiated dynamic tools
+//! re-inferring and dropping it. Model-initiated dynamic tools
 //! (`ask_user_*`, `present_for_review`, `edit_document`) and taint-gate prompts are
 //! not persisted - they block inside the transient tool-worker turn, so on restart
 //! they take the ordinary re-inference path and the model simply re-asks.
@@ -249,9 +249,9 @@ fn totals_from(meta: &RunMeta) -> TokenTotals {
 /// The daemon is the sole owner of these runs, so anything still marked
 /// `running` at startup is by definition not running. Runs that *can* be
 /// reloaded are resumed (that is the whole point of this module); this is only
-/// for the ones that can't - which used to be logged and then left claiming
-/// `"status": "running"` on disk forever, so `lev ps` and the dashboard showed
-/// a live run that no longer existed (issue #109).
+/// for the ones that can't. Logging the failure without this write would leave
+/// them claiming `"status": "running"` on disk forever, so `lev ps` and the
+/// dashboard would show a live run that no longer exists.
 ///
 /// Best-effort: a write failure here is logged, never fatal - the daemon is
 /// mid-startup and the rest of the recovery pass must still run.
@@ -720,7 +720,7 @@ mod tests {
         assert_eq!(totals.prompt_tokens, 99);
     }
 
-    /// The issue #43 fix: when the atomic journal (`run.lvr`) and the separate
+    /// Torn-snapshot pairing: when the atomic journal (`run.lvr`) and the separate
     /// `context.json` disagree - the crash-window state where a new `meta.json`
     /// sits next to a stale `context.json` - resume restores the journal's
     /// consistent `{meta, context}` pair, not the stale JSON.

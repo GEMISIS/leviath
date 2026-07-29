@@ -195,9 +195,9 @@ async fn execute_with_shutdown(
                 .allow_headers(Any),
         ),
         Some(origin) => {
-            // An unparseable value used to fall back to `*` - silently turning a
-            // typo into "allow everything", the opposite of what was asked for.
-            // Refuse to start instead.
+            // An unparseable value must not fall back to `*` - that silently
+            // turns a typo into "allow everything", the opposite of what was
+            // asked for. Refuse to start instead.
             let value = origin.parse::<axum::http::HeaderValue>().map_err(|_| {
                 anyhow::anyhow!("--cors value '{origin}' is not a valid origin header")
             })?;

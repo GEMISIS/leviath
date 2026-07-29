@@ -1,5 +1,5 @@
 //! Which agent the pipeline is currently working on, so a panic inside a
-//! schedule system can be blamed on the run that caused it (issue #109).
+//! schedule system can be blamed on the run that caused it.
 //!
 //! Every agent lives in one shared [`World`](bevy_ecs::world::World) driven by
 //! one [`Schedule`](bevy_ecs::schedule::Schedule), so a caught panic carries no

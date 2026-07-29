@@ -119,7 +119,7 @@ pub const UNATTENDED_NO_ANSWER: &str =
 ///
 /// `--yolo` means "run without a human", so a prompt that blocks on one would
 /// park the run forever - a headless run would hang at the first
-/// `ask_user_confirm` (issue #107).
+/// `ask_user_confirm`.
 ///
 /// A confirmation is approved: that is exactly what the flag promises. A
 /// *choice* is deliberately **not** made - picking option 0 unseen could select

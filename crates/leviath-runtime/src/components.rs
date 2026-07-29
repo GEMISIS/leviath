@@ -89,8 +89,8 @@ pub struct GateAutoApprove;
 ///
 /// A stage-boundary checkpoint (`plan_approval` and friends) blocks on the
 /// interaction hub exactly like a tool approval does, so an unattended run
-/// would park at the first one forever - the same dead end issue #107 is about,
-/// reached a different way. When present,
+/// would park at the first one forever - the same dead end a blocking tool
+/// approval poses for a headless run, reached a different way. When present,
 /// [`dispatch_interaction_point`](crate::interaction_points::dispatch_interaction_point)
 /// still publishes the document to its region (so the decision is inspectable
 /// afterwards) but resolves the point as approved.

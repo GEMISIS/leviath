@@ -309,9 +309,9 @@ mod tests {
 
     #[test]
     fn claude_code_reads_its_binary_and_effort_options() {
-        // The registry arm used to discard both, always constructing a default
-        // provider, so a configured binary path or effort level was silently
-        // ignored.
+        // The registry arm must thread both options through: constructing a
+        // default provider here would silently ignore a configured binary path
+        // or effort level.
         let mut creds = ProviderCreds::simple("claude-code");
         creds
             .options

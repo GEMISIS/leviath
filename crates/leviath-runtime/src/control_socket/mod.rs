@@ -564,11 +564,11 @@ impl ControlClient {
     /// A missing token file is **not** an error here. It has two very different
     /// causes - no daemon is running, or one is running that predates tokens -
     /// and the client cannot tell them apart, while the daemon can. Refusing to
-    /// even construct a client made the second case unrecoverable: a CLI that
-    /// had been upgraded could not ask the old daemon to shut down, so it could
-    /// neither stop it nor start a replacement, and the error it printed
-    /// ("Is the daemon running? Start it with `lev daemon start`") was advice
-    /// the user was already following.
+    /// even construct a client would make the second case unrecoverable: an
+    /// upgraded CLI could not ask the still-running pre-token daemon to shut
+    /// down, so it could neither stop it nor start a replacement, and the error
+    /// it printed ("Is the daemon running? Start it with `lev daemon start`")
+    /// would be advice the user was already following.
     ///
     /// The daemon is the enforcer. A client with no token connects, is refused
     /// if the daemon requires one, and reports *that* - which is accurate.
@@ -838,10 +838,10 @@ mod tests {
 
     /// A missing token file must not stop a client from being built. It has two
     /// causes the client cannot tell apart - no daemon, or one running that
-    /// predates tokens - and refusing here made an upgrade unrecoverable: the
-    /// CLI could not ask the old daemon to shut down, so it could neither stop
-    /// it nor start a replacement, while printing advice the user was already
-    /// following.
+    /// predates tokens - and refusing here would make an upgrade unrecoverable:
+    /// the CLI could not ask the still-running pre-token daemon to shut down,
+    /// so it could neither stop it nor start a replacement, while printing
+    /// advice the user was already following.
     #[test]
     fn a_missing_token_still_builds_a_client() {
         let dir = tempfile::tempdir().unwrap();
@@ -1555,8 +1555,9 @@ mod tests {
     }
 
     /// A daemon that accepts the connection but never answers must not hang the
-    /// client. `lev cancel` against a wedged daemon used to block forever with no
-    /// output - nothing to see, nothing to act on, and no way to kill the run.
+    /// client: without a timeout, `lev cancel` against a wedged daemon blocks
+    /// forever with no output - nothing to see, nothing to act on, and no way
+    /// to kill the run.
     #[tokio::test]
     async fn client_times_out_on_a_daemon_that_never_answers() {
         let (mut listener, id, _dir) = test_listener();

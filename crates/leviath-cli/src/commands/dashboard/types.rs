@@ -67,8 +67,8 @@ impl AgentDisplayStatus {
     }
 
     /// Whether the run can be killed. Anything that has not finished can be -
-    /// including `Idle` and `Stale`, which the kill action used to skip, leaving
-    /// a run the dashboard showed as live with no way to get rid of it.
+    /// `Idle` and `Stale` included: skipping those would leave a run the
+    /// dashboard shows as live with no way to get rid of it.
     pub(super) fn is_killable(&self) -> bool {
         !self.is_terminal()
     }
@@ -164,9 +164,9 @@ pub(super) enum DaemonCommand {
 
 /// The result of a [`DaemonCommand`], drained each tick.
 ///
-/// The dashboard used to discard these. A cancel that the daemon refused looked
-/// identical to one that worked: the row flashed CANCEL, the log said "Killed",
-/// and the next disk sync put it back to ACTIVE with no explanation.
+/// Discarding these would make a cancel the daemon refused look identical to
+/// one that worked: the row flashes CANCEL, the log says "Killed", and the
+/// next disk sync puts it back to ACTIVE with no explanation.
 #[derive(Debug, PartialEq)]
 pub(super) struct DaemonOutcome {
     /// The run the command targeted.

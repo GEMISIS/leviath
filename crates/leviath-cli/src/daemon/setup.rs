@@ -317,18 +317,19 @@ pub fn build_host(
 
 /// Create the run directory and write a `Starting` `meta.json` for a run that is
 /// about to be built, so a spawn that dies partway through still leaves something
-/// on disk to explain itself (issue #107: 3/13 empty runs crashed before any
-/// state existed). Everything the agent hasn't resolved yet - model, stage names,
-/// stage count - is left blank; the first persistence tick overwrites the file
-/// with the real thing. Best-effort: a failure here must not block the spawn.
+/// on disk to explain itself (in one live batch, 3 of 13 empty runs crashed
+/// before any state existed). Everything the agent hasn't resolved yet - model,
+/// stage names, stage count - is left blank; the first persistence tick
+/// overwrites the file with the real thing. Best-effort: a failure here must not
+/// block the spawn.
 ///
 /// Writes under the host's configured `runs_dir` - the same directory the
 /// persistence lane and the reloader use. It deliberately does *not* go through
 /// `runstate::create_run`, which resolves the runs dir globally from
-/// `dirs::home_dir()`: that ignored a daemon configured with a different runs dir
-/// and, because `dirs::home_dir()` cannot be redirected by `$HOME` on macOS, let
-/// any test that spawned through a real host write placeholder runs into the
-/// developer's own `~/.leviath/runs` (where they then showed as permanently
+/// `dirs::home_dir()`: that ignores a daemon configured with a different runs
+/// dir and, because `dirs::home_dir()` cannot be redirected by `$HOME` on macOS,
+/// lets any test that spawns through a real host write placeholder runs into the
+/// developer's own `~/.leviath/runs` (where they then show as permanently
 /// ACTIVE, since nothing would ever advance them).
 fn write_placeholder_meta(runs_dir: &std::path::Path, args: &leviath_runtime::host::SpawnArgs) {
     // The real agent name lives in the blueprint, which hasn't been parsed yet -
@@ -367,7 +368,7 @@ async fn warm_blueprint_mcp(pool: &crate::daemon::mcp_pool::McpPool, blueprint_p
 
 /// Pre-warm the MCP servers declared by this blueprint's `worker_agent` /
 /// `worker_query` fan-out workers, so the *first* worker spawned advertises them
-/// immediately instead of one turn late (issue #97). `worker_stage` workers reuse
+/// immediately instead of one turn late. `worker_stage` workers reuse
 /// the parent's own blueprint, already warmed by [`warm_blueprint_mcp`], so they
 /// are skipped here. A worker source that can't be read/resolved is skipped.
 /// Extracted from the preprocessor closure so its body is unit-testable.
@@ -533,9 +534,10 @@ mod tests {
         assert_eq!(rx.await.unwrap(), Ok("run-s".to_string()));
     }
 
-    /// Issue #107: 3/13 empty runs died before any state existed, leaving nothing
-    /// on disk to diagnose. The spawner stakes out the run directory first, so a
-    /// spawn that fails at *any* later step still leaves a `meta.json`.
+    /// A spawn can die before any state exists (3 of 13 empty runs in one live
+    /// batch), leaving nothing on disk to diagnose. The spawner stakes out the
+    /// run directory first, so a spawn that fails at *any* later step still
+    /// leaves a `meta.json`.
     #[tokio::test]
     async fn spawner_pre_creates_the_run_dir_even_when_the_spawn_fails() {
         let runs = tempfile::tempdir().unwrap();
@@ -652,11 +654,11 @@ mod tests {
         );
     }
 
-    /// End-to-end for the reported bug: a run whose blueprint no longer exists
-    /// cannot be rebuilt, so the reloader declines - and the cancel used to stop
-    /// there, replying "no such run" and writing nothing, leaving `meta.json`
-    /// claiming the run was live with no way to ever clear it. It must now be
-    /// terminated on disk instead.
+    /// End-to-end for the unkillable-run shape: a run whose blueprint no longer
+    /// exists cannot be rebuilt, so the reloader declines - and a cancel that
+    /// stops there, replying "no such run" and writing nothing, leaves
+    /// `meta.json` claiming the run is live with no way to ever clear it. It
+    /// must be terminated on disk instead.
     #[tokio::test]
     async fn cancelling_an_unreloadable_run_terminates_it_on_disk() {
         let runs = tempfile::tempdir().unwrap();

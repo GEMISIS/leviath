@@ -20,9 +20,9 @@ const STDERR_TAIL_LINES: usize = 20;
 
 /// A bounded, shared tail of the child's stderr.
 ///
-/// A server that fails to start writes its reason to stderr and exits. That
-/// used to go to `/dev/null`, so the user saw a bare "connection closed" and no
-/// hint of the missing package, bad flag, or absent runtime that actually
+/// A server that fails to start writes its reason to stderr and exits.
+/// Sending that to `/dev/null` leaves the user a bare "connection closed" and
+/// no hint of the missing package, bad flag, or absent runtime that actually
 /// caused it. Bounded so a chatty server can't grow this without limit.
 #[derive(Clone, Default)]
 pub(crate) struct StderrTail(Arc<Mutex<VecDeque<String>>>);
@@ -197,8 +197,8 @@ impl StdioTransport {
     /// Read one frame from the server, or `Ok(None)` at end of stream.
     async fn read_frame(&mut self) -> anyhow::Result<Option<Value>> {
         let mut line = String::new();
-        // Propagated, never unwrapped: this used to `.expect()`, so a server
-        // dying mid-read panicked the whole daemon rather than failing one call.
+        // Propagated, never unwrapped: an `.expect()` here turns a server dying
+        // mid-read into a whole-daemon panic rather than one failed call.
         // `read_line` also fails outright on non-UTF-8 output, which a server
         // writing raw bytes or a mis-encoded log line really does produce.
         let read = self
@@ -549,7 +549,7 @@ mod tests {
         assert!(!filtered.contains_key("SAFE_VAR"));
     }
 
-    /// The names the old substring denylist let through. Each of these reached
+    /// Names a substring denylist lets through. Each of these would reach
     /// every spawned MCP server - third-party code, by definition.
     #[test]
     fn filter_env_strips_what_the_old_denylist_missed() {
@@ -730,8 +730,8 @@ for line in sys.stdin:
     #[tokio::test]
     async fn closed_connection_is_an_error_not_a_panic() {
         let _guard = always_on_tracing_guard();
-        // Regression guard: reading used to `.expect()`, so a server dying
-        // mid-request panicked the daemon rather than failing the call.
+        // Regression guard: an `.expect()` on the read turns a server dying
+        // mid-request into a daemon panic rather than a failed call.
         let script = "import sys\nsys.stdin.readline()\nsys.stdout.close()\n";
         let mut t = spawn_stub(script).await;
         let err = t

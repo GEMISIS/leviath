@@ -37,7 +37,7 @@ pub struct DaemonFanOutSpawner {
     pub mcp_tool_defs: Vec<Tool>,
     /// Shared MCP pool for per-agent `[[mcp_servers]]` - a fan-out worker
     /// advertises its blueprint's already-connected servers and lazily warms any
-    /// uncached ones for subsequent workers of the same type (issue #97).
+    /// uncached ones for subsequent workers of the same type.
     pub mcp_pool: Arc<crate::daemon::mcp_pool::McpPool>,
     pub hub: InteractionHub,
     pub subagent_tx: UnboundedSender<SubAgentOp>,

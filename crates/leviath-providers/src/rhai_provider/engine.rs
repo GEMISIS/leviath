@@ -25,8 +25,8 @@ const MAX_OPERATIONS: u64 = 500_000;
 /// environment variables this script may read. Provider scripts are the most
 /// privileged script surface Leviath has - they run during inference, not
 /// through a tool call, so nothing about them passes an approval prompt - and
-/// `env_var` was previously unrestricted here with no permission layer of any
-/// kind. Anything that could write one file into `~/.leviath/providers/` could
+/// this allowlist is the only permission layer `env_var` has here. Without
+/// it, anything that could write one file into `~/.leviath/providers/` could
 /// read every key in the process and post it out on the next inference.
 pub fn build_init_engine(env_allowlist: Arc<Vec<String>>) -> Engine {
     let mut engine = Engine::new();

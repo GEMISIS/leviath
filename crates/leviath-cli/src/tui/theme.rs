@@ -1,10 +1,10 @@
 //! Color palette, glyph constants, and spinner frames shared by every Leviath
 //! terminal UI (`lev dash`, the `lev setup` wizard, and the markdown renderer).
 //!
-//! These used to live in `commands/dashboard/theme.rs` as `pub(super)` consts,
-//! with a second hand-copied palette in `render.rs`. Two surfaces drifting apart
-//! is a real cost the moment a third one exists, so the single definition lives
-//! here and the old paths re-export it.
+//! This is the single definition: `commands/dashboard/theme` is an alias of
+//! this module and `render.rs` imports from here, rather than each surface
+//! carrying its own hand-copied palette. Two surfaces drifting apart is a real
+//! cost the moment a third one exists.
 
 use ratatui::style::Color;
 

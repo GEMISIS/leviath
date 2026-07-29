@@ -123,8 +123,8 @@ pub const WORKSPACE_CHECK_INTERVAL: usize = 5;
 
 /// Workspace health guard: fail a run whose working directory has disappeared.
 ///
-/// Issue #107: an external harness deleted the workspace out from under running
-/// agents, which then spent every remaining iteration collecting
+/// The motivating failure: an external harness deleted the workspace out from
+/// under running agents, which then spent every remaining iteration collecting
 /// `No such file or directory` from their tools - 16-17 of them in the observed
 /// runs - with no way back. Nothing can recreate a deleted checkout from inside
 /// the agent, so this stops immediately with a message that names the real
@@ -682,8 +682,9 @@ pub(crate) enum GateDecision {
 /// Decide whether a chosen edge's [gate](leviath_core::blueprint::TransitionGate)
 /// blocks the transition.
 ///
-/// Issue #107: an agent can read and reason about a codebase entirely through
-/// `shell` and arrive at the review stage having changed nothing, producing a run
+/// The failure this guards against: an agent can read and reason about a
+/// codebase entirely through `shell` and arrive at the review stage having
+/// changed nothing, producing a run
 /// with no output. A `require_modifications` gate keeps it in the stage until it
 /// has actually written something.
 ///
@@ -1773,7 +1774,7 @@ pub fn sync_tool_stages(
 /// inference request advertises, read fresh by `build_request`) and the matching
 /// [`StageInferences`] catalog entry (so a later revisit of this stage keeps the
 /// updated set). Always consumes the marker. This is the mechanism behind
-/// mid-run dynamic tool discovery and lazily-listed MCP tools (issue #97).
+/// mid-run dynamic tool discovery and lazily-listed MCP tools.
 pub fn refresh_advertised_tools(
     service: Res<ToolServiceRes>,
     mut agents: Query<

@@ -1467,7 +1467,7 @@ fn process_response_bumps_tool_calls_in_token_totals() {
 }
 
 /// Per-path churn is counted from the REQUESTED calls, which is what feeds
-/// the `stuck_after_same_file_edits` threshold (#106).
+/// the `stuck_after_same_file_edits` threshold.
 #[test]
 fn process_response_counts_edits_by_path() {
     let call = |name: &str, path: Option<&str>| crate::components::ToolCall {

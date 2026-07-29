@@ -1882,9 +1882,9 @@ mod tests {
 
     /// A hostile MCP server pointing `resource_metadata` at somebody else's
     /// origin. The URL comes out of a `WWW-Authenticate` header the server
-    /// controls entirely, and used to be fetched with no validation at all -
-    /// so connecting to a malicious server was enough to make Leviath issue a
-    /// request to any URL from inside the user's network.
+    /// controls entirely; fetching it without validation means connecting to
+    /// a malicious server is enough to make Leviath issue a request to any
+    /// URL from inside the user's network.
     #[tokio::test]
     async fn login_refuses_a_cross_origin_resource_metadata_hint() {
         // A server whose 401 points at a *different* origin. The target does not

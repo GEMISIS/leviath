@@ -1,4 +1,4 @@
-//! Lazy, hot-reloading resolution of Rhai *script providers* (issue #101).
+//! Lazy, hot-reloading resolution of Rhai *script providers*.
 //!
 //! Native providers are built eagerly at daemon startup. Script providers are
 //! not: a `.rhai` file in the providers directory becomes a live provider only
@@ -125,7 +125,7 @@ impl ScriptProviderLayer {
     /// user-authored `.rhai` file. That call is the slowest and least
     /// trustworthy thing this layer does; holding a process-wide lock across it
     /// serialized every agent's provider lookup behind one compile, and a panic
-    /// inside it poisoned the cache for the whole daemon (issue #109).
+    /// inside it poisoned the cache for the whole daemon.
     ///
     /// The cost is that two callers racing on the same cold name may both
     /// compile it. Both get a working provider and the later `insert` wins -

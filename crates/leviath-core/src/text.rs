@@ -8,9 +8,9 @@
 //! explaining why - and two sites (`lev test`'s response preview and `lev
 //! setup`'s key redactor) never grew one at all and panicked on any emoji.
 //!
-//! That is the shape of issues #109 and #115: a byte cut-off through a flag
-//! emoji inside a Rhai host function, which double-panicked and aborted the
-//! whole daemon. Keeping the walk-back in one tested place means a new
+//! That failure has happened for real: a byte cut-off through a flag emoji
+//! inside a Rhai host function double-panicked and aborted the whole daemon.
+//! Keeping the walk-back in one tested place means a new
 //! truncation site cannot forget it. The workspace also denies
 //! `clippy::string_slice`, so reaching for a raw `&s[..n]` instead of these
 //! helpers is a compile error unless the boundary is proven at the call site.

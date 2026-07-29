@@ -32,7 +32,7 @@ pub fn harden(engine: &mut rhai::Engine, max_operations: u64) {
     engine.set_max_map_size(10_000);
     // Bound *recursion*: without a call-depth cap, a script recursing to
     // exhaustion overflows the native stack, which aborts the process rather
-    // than raising a catchable Rhai error. This was previously set nowhere.
+    // than raising a catchable Rhai error. Rhai does not cap this by default.
     engine.set_max_call_levels(64);
     // Generous expression nesting. Rhai's default is much lower in debug builds
     // (a stack-overflow guard for unoptimized code) and would reject legitimate

@@ -22,7 +22,7 @@ fn maybe_dump_request(body: &serde_json::Value) {
 /// Choose which system-block indices carry a `cache_control` breakpoint.
 ///
 /// Anthropic allows at most 4 `cache_control` blocks per request, counted
-/// across BOTH system blocks and message content (issue #12). Emitting one per
+/// across BOTH system blocks and message content. Emitting one per
 /// cacheable region overruns that the moment a blueprint has 5+ pinned/cached
 /// regions - a hard `400 "A maximum of 4 blocks with cache_control may be
 /// provided"`.

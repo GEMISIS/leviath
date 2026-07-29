@@ -8,13 +8,13 @@ use super::*;
 pub struct AwaitingTools;
 
 /// Marker: this agent's advertised tools should be re-resolved before its next
-/// turn - mid-run dynamic tool discovery (issue #97). Consumed by
+/// turn - mid-run dynamic tool discovery. Consumed by
 /// [`refresh_advertised_tools`], which asks the [`ToolService`] for the stage's
 /// fresh tool defs and writes them into the live [`StageInference`].
 #[derive(Component, Debug, Clone, Copy)]
 pub struct ToolsNeedRefresh;
 
-/// Marker: this agent opted into `dynamic_tools` (issue #97). Only such agents
+/// Marker: this agent opted into `dynamic_tools`. Only such agents
 /// are polled by [`poll_dynamic_tool_refresh`] for a pending tool re-scan, so the
 /// default (static) agent pays nothing.
 #[derive(Component, Debug, Clone, Copy)]

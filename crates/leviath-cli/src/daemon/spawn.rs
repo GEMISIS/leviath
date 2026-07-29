@@ -200,7 +200,7 @@ pub(crate) fn current_platform_satisfies(required_caps: &[String]) -> bool {
 /// advertised `Tool` defs.
 ///
 /// A tool whose `@requires` capabilities the current platform can't satisfy is
-/// dropped here (self-declared platform gating, issue #97) - mirroring how
+/// dropped here (self-declared platform gating) - mirroring how
 /// built-ins filter against [`PlatformCapabilities`].
 pub(crate) fn discover_script_tools_in(
     dirs: &[std::path::PathBuf],
@@ -254,7 +254,7 @@ pub fn filter_tools_by_available(all: &[Tool], available: &[String]) -> Vec<Tool
         .collect()
 }
 
-/// Discover the agent's Rhai script tools (issue #97) and build their `Tool`
+/// Discover the agent's Rhai script tools and build their `Tool`
 /// defs (the spawn-time entry point). `extra_dir` adds the run workdir's `tools/`
 /// for `dynamic_tools` agents.
 fn discover_script_tools(
@@ -336,8 +336,8 @@ fn build_tool_state(
 ///   required-at-spawn gate, before any inference.
 /// - `Files` / `Glob` read workdir files; `Literal` is verbatim; `Rhai` runs a
 ///   workdir script whose `String` return seeds the region.
-/// - `Command` runs a shell command in the workdir under `commands` (issue
-///   #108) - sandboxed, time- and size-capped, and skippable. Every failure is
+/// - `Command` runs a shell command in the workdir under `commands` -
+///   sandboxed, time- and size-capped, and skippable. Every failure is
 ///   non-fatal unless the region is `required`.
 /// - Any caller key (other than `task`) that isn't a declared `CallerInput`
 ///   region is rejected (typo protection, mirrors the CLI-side check).
@@ -781,8 +781,8 @@ fn build_agent_inner(
         .collect();
     // Agent-level tool permissions (the manifest's top-level `[tool_permissions]`,
     // recorded in blueprint metadata). Populates the tool state's agent-level
-    // policy layer (between stage and global in `resolve_policy`), which was
-    // previously always empty.
+    // policy layer (between stage and global in `resolve_policy`) - without this
+    // the manifest's top-level block would be silently ignored.
     let agent_perms = blueprint.agent_tool_permissions();
     // Each stage's `available_tools` (Layer-1 allowlist), captured before the
     // blueprint moves - a `dynamic_tools` agent re-filters against these on refresh.
@@ -1763,8 +1763,9 @@ mod tests {
     #[tokio::test]
     async fn build_agent_no_security_block_leaves_taint_off_by_default() {
         // Bug regression: a blueprint with no `[security]` block and a default
-        // (taint-off) global config must NOT attach the taint gate - previously
-        // `unwrap_or_default()` forced it on for every agent.
+        // (taint-off) global config must NOT attach the taint gate - an
+        // `unwrap_or_default()` on the resolved security forces it on for
+        // every agent.
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("agent.leviath");
         std::fs::write(

@@ -88,8 +88,8 @@ mod tests {
             "Bearer sk-secret-key-1234".parse().unwrap(),
         );
         headers.insert("x-api-key", "sk-ant-api03-realkey".parse().unwrap());
-        // Gemini's header. The old exact-name list did not include it, so this
-        // key was logged in full whenever `debug-http` was enabled.
+        // Gemini's header. An exact-name list that omits it logs this key in
+        // full whenever `debug-http` is enabled.
         headers.insert("x-goog-api-key", "AIzaSyRealGoogleKey".parse().unwrap());
         headers.insert("content-type", "application/json".parse().unwrap());
 

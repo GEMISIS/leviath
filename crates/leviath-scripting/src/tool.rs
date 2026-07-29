@@ -1,4 +1,4 @@
-//! Rhai *script tools* - drop-in tool definitions for agent blueprints (issue #97).
+//! Rhai *script tools* - drop-in tool definitions for agent blueprints.
 //!
 //! A `.rhai` file in an agent's `tools/` directory (or the global
 //! `~/.leviath/tools/`) defines one custom tool. Its metadata comes from comment
@@ -433,7 +433,7 @@ pub const SCRIPT_TOOL_MAX_OPERATIONS: u64 = 500_000;
 ///
 /// A panic raised by a native (host) function never unwinds through this call:
 /// it is caught at the native-function boundary by `guard_str`/`guard_dyn`
-/// and arrives here as an ordinary script error (issue #109). Anything that
+/// and arrives here as an ordinary script error. Anything that
 /// still escapes - a panic from Rhai's own internals - is contained one level
 /// up, where the daemon runs this on a `spawn_blocking` task and turns the
 /// resulting `JoinError` into a tool error.
@@ -507,14 +507,13 @@ fn panic_to_rhai(name: &str, payload: Box<dyn std::any::Any + Send>) -> Box<Eval
 /// Run a `String`-returning native function so a panic inside it **never**
 /// unwinds into Rhai.
 ///
-/// This is the primary fix for issue #109. Rhai's `exec_native_fn_call` takes an
-/// `ArgBackup` whenever the first argument is a variable reference (which is
-/// every real call shape, e.g. `http_get(params.url)`), and restores it *after*
-/// the call returns. A panicking native function skips that restore, and
-/// `ArgBackup`'s destructor then asserts during unwinding - a second panic while
-/// panicking, which Rust turns into `abort()`. That aborted the whole daemon,
-/// killing every concurrent run. Catching here means the unwind never reaches
-/// Rhai's frame at all.
+/// Rhai's `exec_native_fn_call` takes an `ArgBackup` whenever the first
+/// argument is a variable reference (which is every real call shape, e.g.
+/// `http_get(params.url)`), and restores it *after* the call returns. A
+/// panicking native function skips that restore, and `ArgBackup`'s destructor
+/// then asserts during unwinding - a second panic while panicking, which Rust
+/// turns into `abort()`, taking down the whole daemon and every concurrent
+/// run. Catching here means the unwind never reaches Rhai's frame at all.
 ///
 /// Deliberately **not generic**: a generic guard monomorphizes per closure, and
 /// each instantiation's panic arm would then need its own test to hold the
@@ -552,7 +551,7 @@ fn headers_from_map(map: &Map) -> BTreeMap<String, String> {
 ///
 /// **Every** registration goes through [`guard_str`] / [`guard_dyn`], so a panic
 /// anywhere in a native function becomes an ordinary Rhai runtime error instead
-/// of unwinding into Rhai and aborting the process (issue #109). The pure
+/// of unwinding into Rhai and aborting the process. The pure
 /// helpers are guarded too - they run on untrusted, model- and network-supplied
 /// input, so "this one can't panic" is not a property worth betting the daemon on.
 fn register_host_functions(engine: &mut Engine, host: Arc<dyn ScriptHost>) {
@@ -752,13 +751,13 @@ const ENTITY_SCAN_CHARS: usize = 12;
 /// Decode common HTML entities (named + numeric decimal/hex). Unknown or
 /// unterminated entities are left verbatim.
 ///
-/// The scan is bounded by **characters**, not bytes. Bounding it by bytes is
-/// what aborted the daemon in issue #109: `after` begins at an `&`, so a fixed
+/// The scan is bounded by **characters**, not bytes. Bounding it by bytes
+/// aborts the daemon: `after` begins at an `&`, so a fixed
 /// byte-12 cut-off slices mid-character on any multi-byte text
 /// (`"&日本語日本"` → *"byte index 12 is not a char boundary"*), and
 /// `html_to_text` runs this over every fetched page. Clamping the byte window
-/// down to a boundary also worked, but only because `&` is single-byte - an
-/// unstated invariant that a later edit could quietly break. Indices from
+/// down to a boundary would also work, but only because `&` is single-byte -
+/// an unstated invariant that a later edit could quietly break. Indices from
 /// `char_indices` are boundaries by construction, so there is nothing left to
 /// get wrong. Entities are all ASCII, so the two bounds agree on any real one.
 #[expect(
@@ -1699,9 +1698,9 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
     #[test]
     fn decode_entities_survives_multibyte_after_an_ampersand() {
         // Regression for issue #109: the entity-scan window is a byte count, so
-        // a bare '&' followed by multi-byte text used to slice mid-character and
+        // a bare '&' followed by multi-byte text can slice mid-character and
         // panic ("byte index 12 is not a char boundary") - inside a Rhai native
-        // fn, which aborted the daemon. Every one of these is a real shape from
+        // fn, which aborts the daemon. Every one of these is a real shape from
         // fetched HTML.
         assert_eq!(decode_entities("&日本語日本"), "&日本語日本");
         assert_eq!(decode_entities("R&D 日本語です"), "R&D 日本語です");
@@ -1716,8 +1715,8 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
         assert_eq!(decode_entities("tail&"), "tail&");
         // Issue #115 re-reported the same crash with a flag emoji. '&' plus nine
         // ASCII bytes puts the four-byte regional indicator at bytes 10..14, so
-        // the old byte-12 window cut straight through it. Pinned verbatim so the
-        // reported input, not just an equivalent one, stays covered.
+        // a fixed byte-12 window cuts straight through it. Pinned verbatim so
+        // the reported input, not just an equivalent one, stays covered.
         assert_eq!(decode_entities("&abcdefghi🇸"), "&abcdefghi🇸");
     }
 

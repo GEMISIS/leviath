@@ -1,12 +1,11 @@
 //! Unix-domain-socket transport for the control channel.
 //!
 //! A [`ControlId`] is a filesystem path; the socket is never reachable off the
-//! machine, and access to it is governed by ordinary file permissions -
-//! permissions [`bind_control_listener`] now actually sets. It previously only
-//! asserted that in this comment: neither the socket nor the directory it
-//! creates was ever `chmod`ed, so both landed at the process umask (typically
-//! 0755, and group-writable under a 0002 umask). Anyone who can connect can
-//! spawn a tool-executing agent and answer its approval prompts.
+//! machine, and access to it is governed by ordinary file permissions - which
+//! [`bind_control_listener`] must set explicitly, never assume. An un-`chmod`ed
+//! socket and directory land at the process umask (typically 0755, and
+//! group-writable under a 0002 umask), and anyone who can connect can spawn a
+//! tool-executing agent and answer its approval prompts.
 
 use std::path::{Path, PathBuf};
 
@@ -43,9 +42,9 @@ impl ControlListener {
     ///
     /// A connection from another uid is closed and skipped rather than returned,
     /// so the daemon loop above never sees it and no `handle_connection` runs
-    /// for it. There was no authentication here at all before, and the ops this
-    /// channel accepts spawn tool-executing agents and answer their approval
-    /// prompts.
+    /// for it. This uid check is the channel's authentication, and it cannot be
+    /// skipped: the ops this channel accepts spawn tool-executing agents and
+    /// answer their approval prompts.
     ///
     /// The socket's 0600 mode is not sufficient on its own: on macOS and the
     /// BSDs, permissions on a Unix socket are not consulted at `connect` time.

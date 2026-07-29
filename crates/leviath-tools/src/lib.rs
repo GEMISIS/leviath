@@ -391,8 +391,8 @@ mod tests {
         std::os::unix::fs::symlink("/", workdir.join("link")).unwrap();
         let tools = make_tools(&workdir);
 
-        // Precondition: this is textually inside the workdir, so the lexical
-        // `starts_with` containment the old code relied on would have passed it.
+        // Precondition: this is textually inside the workdir, so a lexical
+        // `starts_with` containment check alone would pass it.
         // Built from `ctx.workdir` rather than `workdir` because the context
         // canonicalizes (on macOS `/var` becomes `/private/var`).
         let normalized = tools.ctx.workdir.join("link/etc/hosts");

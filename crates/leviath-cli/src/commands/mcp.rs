@@ -96,7 +96,7 @@ pub struct McpEnv {
     pub now: u64,
     /// The global Rhai script-tools directory (`<leviath-home>/tools/`). `lev mcp
     /// list` also surfaces these tools (labeled `script`) so the listing covers
-    /// every external tool provider, not only MCP servers (issue #97). `None`
+    /// every external tool provider, not only MCP servers. `None`
     /// disables the script scan (used by tests that only care about servers).
     pub tools_dir: Option<std::path::PathBuf>,
     /// Where OAuth grants are kept, already resolved. `lev mcp login` writes a

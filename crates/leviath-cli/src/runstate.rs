@@ -93,10 +93,10 @@ fn now_secs() -> i64 {
 ///
 /// The fallback resolves through [`crate::config::leviath_home_dir`], not
 /// `dirs::home_dir` directly, so `LEVIATH_HOME` redirects the runs dir like it
-/// redirects the config, the control socket and the agents dir. It used to use
-/// `dirs::home_dir` alone, which meant a test that set `LEVIATH_HOME` was
-/// isolated everywhere *except* here and still wrote runs into the developer's
-/// real `~/.leviath/runs`. `LEVIATH_RUNS_DIR` still wins over both.
+/// redirects the config, the control socket and the agents dir. With the raw
+/// OS home instead, a test that sets `LEVIATH_HOME` would be isolated
+/// everywhere *except* here and still write runs into the developer's real
+/// `~/.leviath/runs`. `LEVIATH_RUNS_DIR` wins over both.
 fn runs_dir_from(env_override: Option<&str>) -> PathBuf {
     if let Some(dir) = env_override {
         return PathBuf::from(dir);
@@ -228,15 +228,15 @@ const RUN_ID_ENTROPY_BITS: u32 = 48;
 
 /// Generate a unique run ID: `<agent_name>-<timestamp>-<random>`.
 ///
-/// The suffix is **random**, not derived. It used to be
-/// `(now ^ (now >> 16) ^ counter)` over a process-local counter, which defended
-/// a `lev run --count N` batch inside one process but degenerated to a pure
+/// The suffix is **random**, not derived. A derived suffix like
+/// `(now ^ (now >> 16) ^ counter)` over a process-local counter defends a
+/// `lev run --count N` batch inside one process but degenerates to a pure
 /// function of the current second across separate processes: three concurrent
-/// `lev run` invocations all minted `fetcher-1785127214-8b48` and silently shared
+/// `lev run` invocations all mint `fetcher-1785127214-8b48` and silently share
 /// one run directory. Nothing downstream detects that - `create_dir_all` is a
-/// no-op on an existing directory and the persistence worker then last-writer-wins
-/// over `meta.json` / `context.json` / `run.lvr`, interleaving two runs'
-/// state irrecoverably.
+/// no-op on an existing directory and the persistence worker then
+/// last-writer-wins over `meta.json` / `context.json` / `run.lvr`, interleaving
+/// two runs' state irrecoverably.
 ///
 /// The `<name>-<secs>-<hex>` shape is preserved: the timestamp keeps IDs sorting
 /// and reading chronologically, and the dashboard's short-ID display
@@ -970,11 +970,11 @@ mod tests {
 
     #[test]
     fn new_run_id_suffix_is_random_not_derived_from_the_clock() {
-        // The collision this guards against was *across processes*: the suffix
-        // used to be `(now ^ (now >> 16) ^ counter)` over a process-local
-        // counter that every new process starts at 0, so it degenerated to a
-        // pure function of the current second. Three concurrent `lev run`
-        // invocations all minted `fetcher-1785127214-8b48` and silently shared
+        // The collision this guards against is *across processes*: a suffix
+        // derived as `(now ^ (now >> 16) ^ counter)` over a process-local
+        // counter that every new process starts at 0 degenerates to a pure
+        // function of the current second. Three concurrent `lev run`
+        // invocations all mint `fetcher-1785127214-8b48` and silently share
         // one run directory. A fresh process has no state to vary, so the
         // property that has to hold is: IDs that share a timestamp still differ.
         let ids: Vec<String> = (0..200).map(|_| new_run_id("same-agent")).collect();
@@ -1314,9 +1314,9 @@ mod tests {
     }
 
     /// With no `LEVIATH_DASHBOARD_LOG_PATH`, the dashboard log must follow
-    /// `LEVIATH_HOME` like every other data path. It resolved through the raw
-    /// OS home before, so a fully isolated test session still appended to the
-    /// developer's real `~/.leviath/dashboard.log`.
+    /// `LEVIATH_HOME` like every other data path. Resolving through the raw
+    /// OS home would leave a fully isolated test session still appending to
+    /// the developer's real `~/.leviath/dashboard.log`.
     #[test]
     fn dashboard_log_path_honors_leviath_home() {
         temp_env::with_vars(

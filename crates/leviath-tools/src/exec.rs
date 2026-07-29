@@ -31,9 +31,9 @@ impl BuiltinTools {
     /// `write_file` calls `create_dir_all`, which would otherwise silently
     /// resurrect a workspace an external harness deleted mid-run - leaving the
     /// agent writing into an empty tree that no longer resembles the checkout it
-    /// reasoned about, and masking the loss from the runtime's health check
-    /// (issue #107). Creating *sub*directories inside a live workspace is
-    /// untouched; only a missing workspace root is refused.
+    /// reasoned about, and masking the loss from the runtime's health check.
+    /// Creating *sub*directories inside a live workspace is untouched; only a
+    /// missing workspace root is refused.
     pub(crate) fn ensure_workspace(&self) -> Result<(), String> {
         if std::fs::metadata(&self.ctx.workdir).is_ok_and(|m| m.is_dir()) {
             return Ok(());

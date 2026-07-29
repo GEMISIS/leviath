@@ -1,4 +1,4 @@
-//! Drop-in LLM providers defined by a Rhai script (issue #101).
+//! Drop-in LLM providers defined by a Rhai script.
 //!
 //! A `.rhai` script in `~/.leviath/providers/` implements the API-specific
 //! *format mapping* (request → HTTP body, response JSON → Leviath types); this

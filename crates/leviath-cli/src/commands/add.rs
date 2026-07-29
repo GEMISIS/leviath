@@ -92,11 +92,11 @@ async fn execute_with(
 /// The security-relevant things an agent package carries, as human-readable
 /// lines.
 ///
-/// `lev add` used to print only "Installed agent 'x' to …". The user was never
-/// told that the package ships executable `.rhai` tool scripts, pre-approves its
-/// own `shell`, turns the sandbox off, or runs a command at spawn before any
-/// prompt. Every one of those is a decision the user is making by installing,
-/// and they could not see any of it.
+/// A bare "Installed agent 'x' to …" would never tell the user that the
+/// package ships executable `.rhai` tool scripts, pre-approves its own `shell`,
+/// turns the sandbox off, or runs a command at spawn before any prompt. Every
+/// one of those is a decision the user is making by installing, so `lev add`
+/// must surface them.
 ///
 /// Empty means the package declares nothing unusual - a plain prompt-and-stages
 /// agent - in which case there is nothing to warn about and we stay quiet.

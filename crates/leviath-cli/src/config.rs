@@ -27,8 +27,9 @@ pub enum ToolPolicy {
 // dependency. Re-exported here so `crate::config::TitleConfig` paths resolve.
 pub use leviath_core::config::TitleConfig;
 
-/// Permission for one Rhai *script-tool* host function (Layer 3 of the four-layer
-/// model in issue #97). Gates what a registered script may *do*, independent of
+/// Permission for one Rhai *script-tool* host function (Layer 3 of the
+/// four-layer permission model). Gates what a registered script may *do*,
+/// independent of
 /// whether the tool itself is visible ([`available_tools`]) or approved at
 /// runtime ([`ToolPolicy`]).
 ///
@@ -107,7 +108,7 @@ pub struct Config {
     #[serde(default)]
     pub model_capabilities: HashMap<String, ModelCapabilities>,
 
-    /// Optional overrides for Rhai *script providers* (issue #101). Key is the
+    /// Optional overrides for Rhai *script providers*. Key is the
     /// provider name an agent references (e.g. `"groq"`). A script activates by
     /// being referenced + its `.rhai` file existing in the providers dir; an
     /// entry here only supplies overrides (an API key not read from env, a
@@ -223,8 +224,7 @@ pub struct Config {
 /// tracking for one agent - this one holds machine-wide switches.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SecurityConfig {
-    /// Whether a blueprint's `seed = { command = "..." }` regions may run
-    /// (issue #108).
+    /// Whether a blueprint's `seed = { command = "..." }` regions may run.
     ///
     /// **On by default.** A command seed executes at spawn - before the first
     /// inference, and therefore before any tool-approval prompt - so it is the
@@ -866,13 +866,13 @@ impl Config {
     /// exactly, and `LEVIATH_HOME` (via [`leviath_core::data_dir`]) redirects it
     /// along with every other home-relative path.
     ///
-    /// It used to honor only the first. `LEVIATH_HOME`'s whole purpose is to
-    /// "redirect every home-relative path at once" - that is what its doc says
-    /// and what tests, sandboxed runs and scratch environments rely on - so a
-    /// config path that quietly ignored it meant a run that believed it was
-    /// isolated would read *and write* the developer's real
-    /// `~/.leviath/config.toml`, the file holding every provider API key. Found
-    /// by doing exactly that during live testing.
+    /// Honoring both matters. `LEVIATH_HOME`'s whole purpose is to "redirect
+    /// every home-relative path at once" - that is what its doc says and what
+    /// tests, sandboxed runs and scratch environments rely on - so a config
+    /// path that quietly ignored it would let a run that believes it is
+    /// isolated read *and write* the developer's real `~/.leviath/config.toml`,
+    /// the file holding every provider API key. Found by doing exactly that
+    /// during live testing.
     pub fn config_path() -> PathBuf {
         if let Ok(override_path) = std::env::var("LEVIATH_CONFIG_PATH") {
             return PathBuf::from(override_path);
@@ -1119,8 +1119,8 @@ mod dotenv_tests {
     /// `Config::load()` reads `./.env`, and every isolated test sets
     /// `LEVIATH_SKIP_DOTENV` - so that branch would otherwise never run.
     ///
-    /// It used to be covered by the tests that read the real environment, which
-    /// is to say by the tests that were racing. Covered deliberately here
+    /// Leaving it to the tests that read the real environment would leave it to
+    /// exactly the tests that race. Covered deliberately here
     /// instead: still inside `temp_env` (so it holds the same process-wide lock
     /// as everything else) and still pointed at a scratch config, but with the
     /// skip flag cleared so the `.env` read actually happens. The probe
@@ -1794,17 +1794,16 @@ google_api_key = "AIza-existing"
     }
 
     /// The config holds every provider API key, so it must never be readable by
-    /// anyone else - not even for the instant between a `write` and a `chmod`,
-    /// which is how it used to be saved. `write_private` creates the file with
-    /// the mode already applied.
+    /// anyone else - not even for the instant between a `write` and a follow-up
+    /// `chmod`. `write_private` creates the file with the mode already applied.
     #[cfg(unix)]
     /// `LEVIATH_HOME` must redirect the config too, not just the runs and
     /// agents directories.
     ///
-    /// It did not, and the consequence was concrete: a scratch environment that
-    /// set `LEVIATH_HOME` and ran `lev mcp add` wrote to the developer's *real*
-    /// `~/.leviath/config.toml` - the file holding every provider API key -
-    /// while believing it was isolated.
+    /// Without that redirect the consequence is concrete: a scratch environment
+    /// that sets `LEVIATH_HOME` and runs `lev mcp add` writes to the developer's
+    /// *real* `~/.leviath/config.toml` - the file holding every provider API key
+    /// - while believing it is isolated.
     #[test]
     fn config_path_honors_leviath_home() {
         temp_env::with_vars(

@@ -84,7 +84,7 @@ impl OpenRouterProvider {
         let mut breakpoint_count = 0usize;
 
         let mut messages: Vec<serde_json::Value> = Vec::new();
-        // System blocks first (previously dropped).
+        // System blocks go first; dropping them silently loses the system prompt.
         for block in &request.system {
             messages.push(serde_json::json!({ "role": "system", "content": block.text }));
         }

@@ -1,13 +1,13 @@
 //! The agent blueprints shipped inside the `lev` binary, and the planner that
 //! decides what to do with them.
 //!
-//! Before this existed, the ten blueprints under the workspace's `agents/`
-//! directory were reachable only from a git checkout: `lev add` takes a local
-//! path, and `lev list` looked for an `agents/` directory next to the
-//! executable - a layout no real install has. So a user who downloaded a
-//! release binary got a working runtime and zero agents to run on it.
+//! Embedding is what makes the ten blueprints under the workspace's `agents/`
+//! directory reachable outside a git checkout: `lev add` takes a local path,
+//! and an `agents/` directory next to the executable is a layout no real
+//! install has, so without the bundle a user who downloads a release binary
+//! gets a working runtime and zero agents to run on it.
 //!
-//! `build.rs` now embeds every file of every blueprint via `include_str!` (23
+//! `build.rs` embeds every file of every blueprint via `include_str!` (23
 //! files, ~170 KB of text) and generates the [`BUNDLED_AGENTS`] table included
 //! below. `lev setup` offers to install them; `lev list` reports them.
 
@@ -157,7 +157,7 @@ mod tests {
     /// exist as five copies each rather than one shared file. That is fine
     /// until one copy is fixed and the others are not: these scripts are the
     /// agents' network surface, so a hardening change applied to one of five is
-    /// four agents still carrying the old behaviour, with nothing to say so.
+    /// four agents still carrying the unfixed behaviour, with nothing to say so.
     ///
     /// This turns that silent drift into a test failure. Deliberately keyed on
     /// filename over *all* discovered agents rather than naming the five, so it
@@ -226,12 +226,12 @@ mod tests {
     /// exists, and every `[stages.X.tool_permissions]` key has to be a tool that
     /// stage actually grants.
     ///
-    /// A typo used to be invisible: `filter_tools_by_available` silently omits a
-    /// name matching nothing, so the stage just quietly advertised one tool
-    /// fewer. Now that dispatch refuses anything a stage did not offer, the same
-    /// typo means the model is told the tool does not exist and the stage cannot
-    /// do its job - a silent omission became a silent failure, which is worth a
-    /// test. A permission entry for an ungranted tool is the same drift seen
+    /// A typo here is invisible on its own: `filter_tools_by_available` silently
+    /// omits a name matching nothing, so the stage just quietly advertises one
+    /// tool fewer. And because dispatch refuses anything a stage did not offer,
+    /// the same typo means the model is told the tool does not exist and the
+    /// stage cannot do its job - a silent omission that is really a silent
+    /// failure, which is worth a test. A permission entry for an ungranted tool is the same drift seen
     /// from the other side: it reads as a grant and is not one.
     ///
     /// An invariant over all discovered agents rather than a list of names -
