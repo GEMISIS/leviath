@@ -2093,7 +2093,6 @@ dependencies = [
  "temp-env",
  "tempfile",
  "tokio",
- "tokio-stream",
  "toml",
  "tower",
  "tower-http 0.7.0",
@@ -2131,7 +2130,6 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.23.0",
- "dirs",
  "form_urlencoded",
  "futures",
  "leviath-core",
@@ -2143,7 +2141,6 @@ dependencies = [
  "sha2 0.11.0",
  "temp-env",
  "tempfile",
- "thiserror 2.0.19",
  "tokio",
  "toml",
  "tracing",
@@ -2163,7 +2160,6 @@ dependencies = [
  "serde_json",
  "tar",
  "tempfile",
- "thiserror 2.0.19",
  "tokio",
  "toml",
  "tracing",
@@ -2174,7 +2170,6 @@ dependencies = [
 name = "leviath-providers"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "base64 0.23.0",
  "bytes",
@@ -2199,7 +2194,6 @@ dependencies = [
 name = "leviath-runtime"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "bevy_ecs",
  "bevy_tasks",
@@ -2213,7 +2207,6 @@ dependencies = [
  "serde_json",
  "temp-env",
  "tempfile",
- "thiserror 2.0.19",
  "tokio",
  "tracing",
 ]
@@ -2256,7 +2249,6 @@ dependencies = [
  "temp-env",
  "tempfile",
  "tokio",
- "tracing",
 ]
 
 [[package]]

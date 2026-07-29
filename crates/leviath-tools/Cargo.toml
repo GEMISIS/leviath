@@ -19,7 +19,6 @@ leviath-providers = { workspace = true }
 leviath-sys = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
-tracing = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]

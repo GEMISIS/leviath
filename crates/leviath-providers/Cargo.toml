@@ -29,7 +29,6 @@ reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 tracing = { workspace = true }
 tiktoken-rs = { workspace = true }
 async-trait = "0.1"
