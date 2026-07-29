@@ -74,11 +74,6 @@ impl TaintGate {
         }
     }
 
-    /// Whether taint tracking is enabled.
-    pub fn is_enabled(&self) -> bool {
-        self.config.taint_tracking
-    }
-
     /// Get the security config.
     pub fn config(&self) -> &SecurityConfig {
         &self.config
@@ -410,7 +405,7 @@ mod tests {
     #[test]
     fn gate_disabled_always_allows() {
         let mut gate = TaintGate::disabled();
-        assert!(!gate.is_enabled());
+        assert!(!gate.config().taint_tracking);
 
         let window = make_window_with_taint(TaintLevel::Private);
         let decision = gate.check_traditional("agent-1", "shell", &window);
@@ -643,7 +638,7 @@ mod tests {
             taint_tracking: true,
         };
         let gate = TaintGate::new(config.clone());
-        assert!(gate.is_enabled());
+        assert!(gate.config().taint_tracking);
         assert!(gate.config().taint_tracking);
     }
 

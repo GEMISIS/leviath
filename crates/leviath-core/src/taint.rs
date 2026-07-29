@@ -262,14 +262,6 @@ impl RegionTaint {
     pub fn entry_taint(&self, index: usize) -> Option<TaintLevel> {
         self.entry_taints.get(index).copied()
     }
-
-    /// Get the taint level for a range of entries (for pointer mode).
-    pub fn range_taint(&self, start: usize, end: usize) -> TaintLevel {
-        self.entry_taints
-            .get(start..end)
-            .map(|slice| slice.iter().copied().max().unwrap_or(TaintLevel::Public))
-            .unwrap_or(TaintLevel::Public)
-    }
 }
 
 impl Default for RegionTaint {
@@ -792,20 +784,6 @@ mod tests {
         assert_eq!(rt.entry_taint(0), Some(TaintLevel::Public));
         assert_eq!(rt.entry_taint(1), Some(TaintLevel::Private));
         assert_eq!(rt.entry_taint(2), None);
-    }
-
-    #[test]
-    fn region_taint_range_taint() {
-        let mut rt = RegionTaint::new();
-        rt.add_entry(TaintLevel::Public);
-        rt.add_entry(TaintLevel::Internal);
-        rt.add_entry(TaintLevel::Public);
-
-        assert_eq!(rt.range_taint(0, 2), TaintLevel::Internal);
-        assert_eq!(rt.range_taint(2, 3), TaintLevel::Public);
-        assert_eq!(rt.range_taint(0, 3), TaintLevel::Internal);
-        // Out of bounds returns Public
-        assert_eq!(rt.range_taint(5, 10), TaintLevel::Public);
     }
 
     #[test]

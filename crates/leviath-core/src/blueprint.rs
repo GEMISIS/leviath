@@ -1120,25 +1120,6 @@ impl PartialEq for EdgeTransform {
 }
 impl Eq for EdgeTransform {}
 
-/// Result of running a stage, used for transition condition evaluation.
-#[derive(Debug, Clone)]
-pub enum StageResult {
-    /// Stage completed normally
-    Success,
-    /// Stage encountered an error
-    Error,
-    /// Stage hit max_iterations without LLM signaling completion
-    MaxIterations,
-}
-
-impl PartialEq for StageResult {
-    #[inline(never)]
-    fn eq(&self, other: &Self) -> bool {
-        std::mem::discriminant(self) == std::mem::discriminant(other)
-    }
-}
-impl Eq for StageResult {}
-
 /// Content transformation type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ContentTransform {
@@ -1800,13 +1781,6 @@ mod tests {
     fn test_edge_transform_default() {
         let t = EdgeTransform::default();
         assert_eq!(t, EdgeTransform::Direct);
-    }
-
-    #[test]
-    fn test_stage_result_variants() {
-        assert_eq!(StageResult::Success, StageResult::Success);
-        assert_ne!(StageResult::Error, StageResult::Success);
-        assert_ne!(StageResult::MaxIterations, StageResult::Error);
     }
 
     #[test]
