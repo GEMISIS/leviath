@@ -65,4 +65,4 @@ pub use taint::{
     GateDecision, GateDecisionSource, GateEvent, RegionTaint, SecurityConfig, TaintLevel,
     ToolClassification, ToolDirection,
 };
-pub use text::{floor_char_boundary, truncate_at_boundary};
+pub use text::{estimate_tokens, floor_char_boundary, truncate_at_boundary};

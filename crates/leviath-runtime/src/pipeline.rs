@@ -648,14 +648,14 @@ pub fn handle_empty_response(
                 .insert(ResolveTransition);
         } else {
             progress.text_only_nudges += 1;
-            let response_tokens = infer.response.len() / 4 + 1;
+            let response_tokens = leviath_core::estimate_tokens(&infer.response);
             let _ = window.add_typed_entry(
                 "conversation",
                 leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
                 infer.response.clone(),
                 response_tokens,
             );
-            let nudge_tokens = NUDGE_TEXT.len() / 4 + 1;
+            let nudge_tokens = leviath_core::estimate_tokens(NUDGE_TEXT);
             let _ = window.add_typed_entry(
                 "conversation",
                 leviath_core::EntryKind::UserMessage,
@@ -1125,7 +1125,7 @@ fn apply_tool_results(
     routing: Option<&leviath_core::blueprint::ToolResultRouting>,
     sensitivities: Option<&std::collections::HashMap<String, leviath_core::TaintLevel>>,
 ) {
-    let response_tokens = response_content.len() / 4;
+    let response_tokens = leviath_core::estimate_tokens(response_content);
     let serialized: Vec<leviath_core::SerializedToolCall> = tool_calls
         .iter()
         .map(|tc| leviath_core::SerializedToolCall {
@@ -1160,7 +1160,7 @@ fn apply_tool_results(
                 result_text.push_str("\n[...truncated]");
             }
         }
-        let result_tokens = result_text.len() / 4 + 1;
+        let result_tokens = leviath_core::estimate_tokens(&result_text);
 
         let base_region = match routing {
             Some(r) => {
@@ -1210,7 +1210,7 @@ fn apply_tool_results(
                 } else {
                     "[tool result truncated — context window full]".to_string()
                 };
-                let trunc_tokens = truncated.len() / 4 + 1;
+                let trunc_tokens = leviath_core::estimate_tokens(&truncated);
                 if put(window, truncated, trunc_tokens).is_err() {
                     let _ = put(window, "[result omitted]".to_string(), 5);
                 }
@@ -1250,7 +1250,7 @@ fn apply_tool_results(
             let pointer = format!(
                 "[output stored in context region '{target_region}' ({result_tokens} tokens) — read that region for the full result. Preview: {preview}{ellipsis}]"
             );
-            let pointer_tokens = pointer.len() / 4 + 1;
+            let pointer_tokens = leviath_core::estimate_tokens(&pointer);
             add_kind(
                 window,
                 "conversation",
@@ -1323,7 +1323,7 @@ fn apply_file_tracking(
             _ => continue,
         };
         let body = truncate_file(body, ft.max_file_tokens);
-        let tokens = body.len() / 4 + 1;
+        let tokens = leviath_core::estimate_tokens(&body);
         window
             .get_region_mut(&ft.region)
             .expect("region presence checked above")
@@ -1508,7 +1508,7 @@ pub fn collect_tools(
                 .collect();
             for nudge in nudges {
                 let content = format!("[System] {nudge}");
-                let tokens = content.len() / 4 + 1;
+                let tokens = leviath_core::estimate_tokens(&content);
                 let _ = window.add_to_region("conversation", content, tokens);
             }
         }
@@ -1647,7 +1647,7 @@ pub fn collect_compaction(
         crate::tick_scope::enter(outcome.entity);
         if let Ok(summaries) = outcome.result {
             for (region_name, summary) in summaries {
-                let summary_tokens = summary.len() / 4;
+                let summary_tokens = leviath_core::estimate_tokens(&summary);
                 let history = window
                     .regions
                     .iter()
@@ -2172,7 +2172,7 @@ pub fn deliver_messages(
         }
         for msg in inbox.drain_all() {
             let region = msg.target_region.as_deref().unwrap_or("conversation");
-            let tokens = msg.content.len() / 4 + 1;
+            let tokens = leviath_core::estimate_tokens(&msg.content);
             let _ = window.add_typed_entry(
                 region,
                 leviath_core::EntryKind::UserMessage,
@@ -2480,7 +2480,7 @@ fn note_stuck(window: &mut ContextWindow, stage: &str, reason: &str) {
          what you assumed, and take a different approach — including reverting changes \
          that made things worse."
     );
-    let tokens = content.len() / 4 + 1;
+    let tokens = leviath_core::estimate_tokens(&content);
     let _ = window.add_to_region(region, content, tokens);
 }
 
@@ -2785,7 +2785,7 @@ fn inject_required_region_nudges(window: &mut ContextWindow, unmet: &[(String, O
             )
         });
         let content = format!("[System] {text}");
-        let tokens = content.len() / 4 + 1;
+        let tokens = leviath_core::estimate_tokens(&content);
         let _ = window.add_to_region("conversation", content, tokens);
     }
 }
@@ -2945,7 +2945,7 @@ fn hold_for_gate(
     commands: &mut Commands,
 ) {
     let content = format!("[System] {nudge}");
-    let tokens = content.len() / 4 + 1;
+    let tokens = leviath_core::estimate_tokens(&content);
     let _ = window.add_to_region("conversation", content, tokens);
     progress.gate_reentries += 1;
     commands
@@ -3171,7 +3171,7 @@ fn apply_stage_context(setup: &StageSetup, window: &mut ContextWindow) -> Result
     }
     if let Some(sp) = &setup.system_prompt {
         let content = format!("[Stage instructions: {sp}]");
-        let tokens = content.len() / 4 + 1;
+        let tokens = leviath_core::estimate_tokens(&content);
         window
             .add_to_region(&target, content, tokens)
             .map_err(|e| {
@@ -3727,7 +3727,7 @@ pub fn dispatch_transition_choice(
 
         let current = &bp.0.stages[cursor.index];
         let prompt = build_transition_prompt(current, &choice.0);
-        let tokens = prompt.len() / 4 + 1;
+        let tokens = leviath_core::estimate_tokens(&prompt);
         let _ = window.add_typed_entry(
             "conversation",
             leviath_core::EntryKind::UserMessage,
@@ -3836,7 +3836,7 @@ pub fn collect_transition_choice(
         };
 
         let choice = response.content.trim().to_string();
-        let tokens = choice.len() / 4 + 1;
+        let tokens = leviath_core::estimate_tokens(&choice);
         let _ = window.add_typed_entry(
             "conversation",
             leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
