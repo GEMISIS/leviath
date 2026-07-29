@@ -179,6 +179,20 @@ mod tests {
         });
     }
 
+    /// Serializes the tests that depend on `USERNAME`.
+    ///
+    /// One of them unsets it process-wide to prove the error propagates, and
+    /// another reads it to restrict a real file. `cargo test` runs them in
+    /// parallel threads of one process, so without this the second sees the
+    /// first's unset environment and fails with "USERNAME is not set" — a real
+    /// CI failure on an unrelated PR, and a confusing one, because the code it
+    /// accuses is correct.
+    ///
+    /// `temp_env` locks against its own calls, not against a test that reads
+    /// the variable directly, so both sides have to take *this* guard. Same
+    /// shape as the credential-store lesson: two guards are not a guard.
+    static USERNAME_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn a_missing_username_is_an_explained_error() {
         assert_eq!(resolve_user(Some("gerald".into())).unwrap(), "gerald");
@@ -211,6 +225,7 @@ mod tests {
     /// your API keys.
     #[test]
     fn restricting_a_real_file_keeps_other_users_out() {
+        let _env = USERNAME_ENV.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret");
         std::fs::write(&path, b"the key").unwrap();
@@ -244,6 +259,7 @@ mod tests {
     /// is protected when it is not.
     #[test]
     fn restricting_fails_when_there_is_no_account_to_grant() {
+        let _env = USERNAME_ENV.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret");
         std::fs::write(&path, b"x").unwrap();
