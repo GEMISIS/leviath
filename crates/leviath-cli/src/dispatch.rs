@@ -407,7 +407,6 @@ mod tests {
     async fn dispatch_add_variant_is_routed() {
         let args = commands::add::AddArgs {
             package: "definitely-not-a-real-bundle-xyz.leviath-bundle".to_string(),
-            registry: None,
         };
         let result = dispatch(Commands::Add(args), &MockRisky).await;
         assert!(result.is_err());

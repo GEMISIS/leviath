@@ -1029,7 +1029,7 @@ prompt = "Run"
         // Write a config with an anthropic key that fails validate_keys().
         std::fs::write(
             Config::config_path(),
-            "default_provider = \"anthropic\"\nregistries = []\nagent_paths = []\n[providers]\nanthropic_api_key = \"bad-key-not-sk-ant\"\n",
+            "default_provider = \"anthropic\"\nagent_paths = []\n[providers]\nanthropic_api_key = \"bad-key-not-sk-ant\"\n",
         )
         .unwrap();
 

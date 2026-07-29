@@ -364,7 +364,6 @@ pub(super) struct RedactedConfig {
     pub(super) has_openrouter_key: bool,
     pub(super) ollama_base_url: Option<String>,
     pub(super) agent_paths: Vec<PathBuf>,
-    pub(super) registries: Vec<String>,
     pub(super) mcp_server_count: usize,
 }
 
@@ -511,7 +510,6 @@ mod tests {
             has_openrouter_key: false,
             ollama_base_url: None,
             agent_paths: vec![],
-            registries: vec![],
             mcp_server_count: 0,
         };
         let json = serde_json::to_string(&config).unwrap();
