@@ -4,7 +4,7 @@
 
 **A structured agent runtime for LLMs**
 
-Structured memory, multi-stage workflows, and an ECS engine — so agents stay coherent
+Structured memory, multi-stage workflows, and an ECS engine - so agents stay coherent
 on long tasks, use the right model for each phase, and don't melt your machine when
 you run a dozen at once.
 
@@ -22,7 +22,7 @@ you run a dozen at once.
 
 ---
 
-Most agent tools hand an LLM a flat message array and hope for the best. Leviath gives it **structure** — so it stays coherent across hundreds of tool calls, uses the right model for each phase of a task, and runs dozens of agents in a single process instead of one OS process each.
+Most agent tools hand an LLM a flat message array and hope for the best. Leviath gives it **structure** - so it stays coherent across hundreds of tool calls, uses the right model for each phase of a task, and runs dozens of agents in a single process instead of one OS process each.
 
 Pick a pre-built agent or write your own, run it, and watch it actually remember what it read 50 tool calls ago.
 
@@ -32,26 +32,26 @@ Pick a pre-built agent or write your own, run it, and watch it actually remember
 
 ## 📋 Requirements
 
-- An API key from [Anthropic](https://console.anthropic.com/), [OpenAI](https://platform.openai.com/), [Google AI](https://aistudio.google.com/), or [OpenRouter](https://openrouter.ai/) — or, with no key at all, run [Ollama](https://ollama.com) locally or use the Claude Code transport below
+- An API key from [Anthropic](https://console.anthropic.com/), [OpenAI](https://platform.openai.com/), [Google AI](https://aistudio.google.com/), or [OpenRouter](https://openrouter.ai/) - or, with no key at all, run [Ollama](https://ollama.com) locally or use the Claude Code transport below
 - macOS, Linux, or Windows
-- No runtime dependencies — a single binary, no Node/Python/Docker required
+- No runtime dependencies - a single binary, no Node/Python/Docker required
 
-> **Claude Code transport (opt-in):** if you have [Claude Code](https://claude.com/claude-code) installed and signed in, enable it in `lev setup` to run Leviath on your Claude subscription with no API key. Leviath's structured regions work normally — it drives the CLI as a plain inference relay, keeping the context window, the tool loop, and the iteration count on Leviath's side.
+> **Claude Code transport (opt-in):** if you have [Claude Code](https://claude.com/claude-code) installed and signed in, enable it in `lev setup` to run Leviath on your Claude subscription with no API key. Leviath's structured regions work normally - it drives the CLI as a plain inference relay, keeping the context window, the tool loop, and the iteration count on Leviath's side.
 >
-> Caveats, measured rather than estimated: the CLI adds ~130 tokens of its own context to **every** call, including **your account email address** and the current date. This cannot be disabled — every flag that suppresses it also disables subscription auth. There is no prompt caching, and each call spawns a subprocess (~200 ms). Anthropic models only. For full control over what reaches the model, use a direct provider.
+> Caveats, measured rather than estimated: the CLI adds ~130 tokens of its own context to **every** call, including **your account email address** and the current date. This cannot be disabled - every flag that suppresses it also disables subscription auth. There is no prompt caching, and each call spawns a subprocess (~200 ms). Anthropic models only. For full control over what reaches the model, use a direct provider.
 
 ## 🚀 Quick Start
 
 ### 1. Install
 
-> **Private alpha:** the repo and its releases are currently private, so installing needs a GitHub Personal Access Token (`repo` scope) — exported as `GITHUB_TOKEN` for the install scripts, and `HOMEBREW_GITHUB_API_TOKEN` for Homebrew. The [distribution repo](https://github.com/Sun-Forge-AI/leviath-dist) has the one-time token setup and full instructions.
+> **Private alpha:** the repo and its releases are currently private, so installing needs a GitHub Personal Access Token (`repo` scope) - exported as `GITHUB_TOKEN` for the install scripts, and `HOMEBREW_GITHUB_API_TOKEN` for Homebrew. The [distribution repo](https://github.com/Sun-Forge-AI/leviath-dist) has the one-time token setup and full instructions.
 
 **macOS (Homebrew):**
 
 ```bash
 brew tap sun-forge-ai/leviath https://github.com/Sun-Forge-AI/leviath-dist.git
 brew trust sun-forge-ai/leviath          # newer Homebrew requires trusting third-party taps
-brew install leviath                     # stable — or: leviath-beta, leviath-alpha
+brew install leviath                     # stable - or: leviath-beta, leviath-alpha
 ```
 
 **Linux:**
@@ -78,7 +78,7 @@ cargo install --git https://github.com/Sun-Forge-AI/leviath.git --bin lev
 
 ### 2. Configure a provider
 
-You need at least one LLM provider. The interactive wizard walks you through API keys for Anthropic, OpenAI, or OpenRouter — or pointing at a local [Ollama](https://ollama.com) instance (no key needed):
+You need at least one LLM provider. The interactive wizard walks you through API keys for Anthropic, OpenAI, or OpenRouter - or pointing at a local [Ollama](https://ollama.com) instance (no key needed):
 
 ```bash
 lev setup
@@ -103,7 +103,7 @@ lev run deep-researcher --task "Survey the current state of solid-state battery 
 one shared world, so runs keep going after your terminal closes. The daemon
 starts automatically on first use (run it yourself with `lev daemon` to watch its
 logs). For unattended, long-running agents, `lev daemon install` hands it to the
-OS supervisor — launchd on macOS, a systemd `--user` unit on Linux — so it starts
+OS supervisor - launchd on macOS, a systemd `--user` unit on Linux - so it starts
 at login and comes back on its own if it ever dies; on the next start it reloads
 every interrupted run. Inspect and steer running agents from any terminal:
 
@@ -129,7 +129,7 @@ cd my-agent
 lev run . --task "Your task here"
 ```
 
-This writes an `agent.leviath` config you can customize — models per stage, context regions, tools, and workflow graph. See [agent configuration →](https://leviath.dev/docs/agents)
+This writes an `agent.leviath` config you can customize - models per stage, context regions, tools, and workflow graph. See [agent configuration →](https://leviath.dev/docs/agents)
 
 Region budgets can be expressed as **percentages of the model's context window** so a
 blueprint's intent ("implementation gets the bulk") stays correct across models of
@@ -160,7 +160,7 @@ plan         = { kind = "pinned", budget = "20%" }
 
 **🧠 Structured Context Memory**
 
-Six region types with deterministic eviction — architecture stays pinned, tool results evict first, conversation auto-compacts into summaries. Route reads to specific regions so a file dump can't push out your system prompt.
+Six region types with deterministic eviction - architecture stays pinned, tool results evict first, conversation auto-compacts into summaries. Route reads to specific regions so a file dump can't push out your system prompt.
 
 [Learn more →](https://leviath.dev/docs/context)
 
@@ -169,9 +169,9 @@ Six region types with deterministic eviction — architecture stays pinned, tool
 
 **🔀 Multi-Stage Workflows**
 
-Each stage gets its own model, tools, and context layout. Run them linearly or as a [directed graph](https://leviath.dev/docs/stages#graph) with conditional transitions, error recovery, and LLM-driven routing — check it with `lev validate`.
+Each stage gets its own model, tools, and context layout. Run them linearly or as a [directed graph](https://leviath.dev/docs/stages#graph) with conditional transitions, error recovery, and LLM-driven routing - check it with `lev validate`.
 
-A `stuck` edge escapes a stage that is making no progress — measured, not self-reported, so it fires even when the agent hasn't noticed:
+A `stuck` edge escapes a stage that is making no progress - measured, not self-reported, so it fires even when the agent hasn't noticed:
 
 ```toml
 [stages.implement.transitions.reassess]
@@ -182,7 +182,7 @@ stuck_after_same_file_edits = 5    # write/edit calls against one path
 stuck_after_tool_calls      = 60   # tool calls in this stage
 ```
 
-Set any subset — whichever trips first wins, and each stage arms its own. The runtime writes *why* into the target stage's context.
+Set any subset - whichever trips first wins, and each stage arms its own. The runtime writes *why* into the target stage's context.
 
 [Learn more →](https://leviath.dev/docs/stages)
 
@@ -202,7 +202,7 @@ Agents run as entities in a [bevy_ecs](https://bevyengine.org/) world. Dozens sh
 
 **🧬 Sub-Agents & Fan-Out**
 
-Agents spawn children with different blueprints. A **fan-out** stage splits a task into work items and runs one sub-agent worker per item concurrently (bounded by `max_workers`), then merges their results back into the parent — all in the same process, over one shared lock-free inference driver. Any sub-agent, at any depth, can ask the user questions directly — no fire-and-forget, no routing through the parent.
+Agents spawn children with different blueprints. A **fan-out** stage splits a task into work items and runs one sub-agent worker per item concurrently (bounded by `max_workers`), then merges their results back into the parent - all in the same process, over one shared lock-free inference driver. Any sub-agent, at any depth, can ask the user questions directly - no fire-and-forget, no routing through the parent.
 
 [Learn more →](https://leviath.dev/docs/sub-agents)
 
@@ -211,14 +211,14 @@ Agents spawn children with different blueprints. A **fan-out** stage splits a ta
 
 **🙋 Human-in-the-Loop**
 
-Message a running agent from the terminal or dashboard — input is injected between inference calls, so you redirect, answer, or add constraints without restarting. Force checkpoints with a stage's `interaction_points` — approve, request revisions, or **edit the agent's output directly** (e.g. tweak the plan before it's implemented, and your edits stick through later revisions) — or grant `ask_user_*` tools so the agent asks on its own judgment. All gated by per-stage tool permissions.
+Message a running agent from the terminal or dashboard - input is injected between inference calls, so you redirect, answer, or add constraints without restarting. Force checkpoints with a stage's `interaction_points` - approve, request revisions, or **edit the agent's output directly** (e.g. tweak the plan before it's implemented, and your edits stick through later revisions) - or grant `ask_user_*` tools so the agent asks on its own judgment. All gated by per-stage tool permissions.
 
 </td>
 <td width="33%" valign="top">
 
 **🛡️ Taint-Tracked Data Flow**
 
-A deterministic sensitivity model (Public / Internal / Private) tags every context region — set by the runtime, never by model output. Tools declare a direction and clearance, so an outbound call carrying data above its level is blocked before it fires — returned as `[blocked]`, or, in the daemon, surfaced as an *allow once / allow for this session / deny* prompt — and taint recovers automatically as entries evict. Every tool that can carry bytes off the machine is Outbound and therefore gated — `shell`, `web_fetch`, `http_get`/`http_post`, and any MCP or script tool, since an unrecognized tool fails closed rather than open. Configure it with an opt-in `[security]` block, layer on allowlists and Rhai policy rules, and dry-run any tool with `lev policy test`. An agent's own manifest can turn tracking *on*, never off.
+A deterministic sensitivity model (Public / Internal / Private) tags every context region - set by the runtime, never by model output. Tools declare a direction and clearance, so an outbound call carrying data above its level is blocked before it fires - returned as `[blocked]`, or, in the daemon, surfaced as an *allow once / allow for this session / deny* prompt - and taint recovers automatically as entries evict. Every tool that can carry bytes off the machine is Outbound and therefore gated - `shell`, `web_fetch`, `http_get`/`http_post`, and any MCP or script tool, since an unrecognized tool fails closed rather than open. Configure it with an opt-in `[security]` block, layer on allowlists and Rhai policy rules, and dry-run any tool with `lev policy test`. An agent's own manifest can turn tracking *on*, never off.
 
 </td>
 </tr>
@@ -227,9 +227,9 @@ A deterministic sensitivity model (Public / Internal / Private) tags every conte
 
 **📦 Sandboxed Tool Execution**
 
-By default an agent's shell commands run **directly on your machine** — no runtime, nothing to install. Opt in per agent *or* per stage to route them into an isolated environment instead: a **container** (Docker, Podman, or any Docker-CLI-compatible engine — Leviath isn't prescriptive) or a fresh set of Linux **namespaces** (no runtime needed). Run analysis on the host and implementation in a networkless container. The daemon creates a warm container per agent and tears it down at reap, so no orphans; file tools keep working over the bind-mounted workdir.
+By default an agent's shell commands run **directly on your machine** - no runtime, nothing to install. Opt in per agent *or* per stage to route them into an isolated environment instead: a **container** (Docker, Podman, or any Docker-CLI-compatible engine - Leviath isn't prescriptive) or a fresh set of Linux **namespaces** (no runtime needed). Run analysis on the host and implementation in a networkless container. The daemon creates a warm container per agent and tears it down at reap, so no orphans; file tools keep working over the bind-mounted workdir.
 
-Containers drop every capability, forbid privilege regain, and are bounded in processes and memory. `namespace` is the lighter option and a narrower one: it isolates PIDs and, with `network = false`, connectivity — but it **shares the host root filesystem**, so it is not a filesystem sandbox. Choose `container` when the goal is to contain what an agent can reach. An installed agent can tighten either but never turn one off.
+Containers drop every capability, forbid privilege regain, and are bounded in processes and memory. `namespace` is the lighter option and a narrower one: it isolates PIDs and, with `network = false`, connectivity - but it **shares the host root filesystem**, so it is not a filesystem sandbox. Choose `container` when the goal is to contain what an agent can reach. An installed agent can tighten either but never turn one off.
 
 ```toml
 [sandbox]
@@ -248,7 +248,7 @@ network = false      # isolate this stage
 
 **🧭 Codebase Discovery & Workflow Synthesis**
 
-The coding agents open with a `discover` stage that answers *what is this codebase* and *how do I verify my work here* before a line is written — then writes a concrete verification workflow (`BASELINE` / `VERIFY` / `DONE WHEN`) into a pinned region. `implement` captures the baseline **before** its first edit and diffs every later run against it, so a test that used to pass and now fails is caught immediately instead of at review time. Both regions are `required`, so the runtime re-runs `discover` until they're actually populated — the workflow is a commitment the review stage holds the run to, not a suggestion.
+The coding agents open with a `discover` stage that answers *what is this codebase* and *how do I verify my work here* before a line is written - then writes a concrete verification workflow (`BASELINE` / `VERIFY` / `DONE WHEN`) into a pinned region. `implement` captures the baseline **before** its first edit and diffs every later run against it, so a test that used to pass and now fails is caught immediately instead of at review time. Both regions are `required`, so the runtime re-runs `discover` until they're actually populated - the workflow is a commitment the review stage holds the run to, not a suggestion.
 
 Seed a region from a command so discovery starts from facts instead of `ls`:
 
@@ -258,7 +258,7 @@ repo_files = { kind = "pinned", max_tokens = 4000,
                seed = { command = "git ls-files" } }
 ```
 
-⚠️ A command seed runs **at spawn — before the first inference, and so before any tool-approval prompt**. It is confined to the workdir, routed through the entry stage's sandbox when one is configured, and capped in time and output size; a failure is non-fatal unless the region is `required`. `lev validate <agent>` prints every command seed so you can audit an agent before installing it. Refuse them per-run with `--no-seed-commands`, or machine-wide:
+⚠️ A command seed runs **at spawn - before the first inference, and so before any tool-approval prompt**. It is confined to the workdir, routed through the entry stage's sandbox when one is configured, and capped in time and output size; a failure is non-fatal unless the region is `required`. `lev validate <agent>` prints every command seed so you can audit an agent before installing it. Refuse them per-run with `--no-seed-commands`, or machine-wide:
 
 ```toml
 [security]
@@ -273,11 +273,11 @@ allow_seed_commands = false
 
 ### Why these benchmarks exist
 
-Leviath is **not** a replacement for Claude Code, Codex, or any other coding agent — it's a runtime that orchestrates them. Today, orchestration tools that need multiple agents (parallel issue fixing, decomposed tasks, review loops) typically spawn each one as a **separate OS process**. That works, but it means every agent carries the full weight of a Node.js or Go runtime, and every agent manages its own flat context window — re-reading files, losing specs to eviction, and burning tokens.
+Leviath is **not** a replacement for Claude Code, Codex, or any other coding agent - it's a runtime that orchestrates them. Today, orchestration tools that need multiple agents (parallel issue fixing, decomposed tasks, review loops) typically spawn each one as a **separate OS process**. That works, but it means every agent carries the full weight of a Node.js or Go runtime, and every agent manages its own flat context window - re-reading files, losing specs to eviction, and burning tokens.
 
 Leviath addresses both problems:
-1. **Structured context** — regions prevent important information from being evicted, cutting redundant reads and token waste
-2. **ECS engine** — all agents share a single Rust process, so spinning up 10 agents doesn't mean 10× the device RAM
+1. **Structured context** - regions prevent important information from being evicted, cutting redundant reads and token waste
+2. **ECS engine** - all agents share a single Rust process, so spinning up 10 agents doesn't mean 10× the device RAM
 
 These benchmarks measure each claim independently.
 
@@ -285,11 +285,11 @@ These benchmarks measure each claim independently.
 
 ### Context Quality: Structured vs Flat
 
-Both approaches build the same 12-file multi-tenant event processing platform from 11 spec files and 4 config files. Same model (Claude Sonnet 5), same tools, same task. Quality is measured by a **hidden validation suite** of 69 tests the agent never sees — no self-grading.
+Both approaches build the same 12-file multi-tenant event processing platform from 11 spec files and 4 config files. Same model (Claude Sonnet 5), same tools, same task. Quality is measured by a **hidden validation suite** of 69 tests the agent never sees - no self-grading.
 
 <p align="center">
   <picture>
-    <img src="docs/benchmarks/hero-comparison.svg" alt="Leviath v3 vs Flat Baseline — headline metrics" width="800">
+    <img src="docs/benchmarks/hero-comparison.svg" alt="Leviath v3 vs Flat Baseline - headline metrics" width="800">
   </picture>
 </p>
 
@@ -306,13 +306,13 @@ Both approaches build the same 12-file multi-tenant event processing platform fr
 
 <p align="center">
   <picture>
-    <img src="docs/benchmarks/efficiency.svg" alt="Efficiency comparison — cost, tool calls, runtime" width="750">
+    <img src="docs/benchmarks/efficiency.svg" alt="Efficiency comparison - cost, tool calls, runtime" width="750">
   </picture>
 </p>
 
 </details>
 
-> **Context benchmark methodology:** The "flat baseline" is an independent Rust binary calling the same Anthropic API with the same tools and system prompt — no Leviath dependency, no shared code. Both approaches receive identical seed files and task descriptions. Results are averaged across multiple independent runs. Quality is measured by 69 hidden validation tests covering 13 categories (happy path, schema validation, auth, rate limiting, DLQ, etc.) that neither agent sees during the task. Full methodology and raw data: [leviath-benchmarks](https://github.com/Sun-Forge-AI/leviath-benchmarks).
+> **Context benchmark methodology:** The "flat baseline" is an independent Rust binary calling the same Anthropic API with the same tools and system prompt - no Leviath dependency, no shared code. Both approaches receive identical seed files and task descriptions. Results are averaged across multiple independent runs. Quality is measured by 69 hidden validation tests covering 13 categories (happy path, schema validation, auth, rate limiting, DLQ, etc.) that neither agent sees during the task. Full methodology and raw data: [leviath-benchmarks](https://github.com/Sun-Forge-AI/leviath-benchmarks).
 
 ---
 
@@ -320,27 +320,27 @@ Both approaches build the same 12-file multi-tenant event processing platform fr
 
 When orchestration tools run multiple agents, each one is typically its own OS process. Anthropic's own [Agent SDK hosting docs](https://code.claude.com/docs/en/agent-sdk/hosting.md) confirm: *"Running N concurrent sessions means N subprocesses, each with its own process tree."* This adds up fast.
 
-Leviath's ECS architecture runs all agents as entities in a single Rust process — no per-agent process overhead. We measured peak device RAM (RSS) for Leviath against four popular coding agents at 1, 3, 5, and 10 concurrent instances:
+Leviath's ECS architecture runs all agents as entities in a single Rust process - no per-agent process overhead. We measured peak device RAM (RSS) for Leviath against four popular coding agents at 1, 3, 5, and 10 concurrent instances:
 
 <p align="center">
   <picture>
-    <img src="docs/benchmarks/resource-footprint.svg" alt="Device RAM scaling — Leviath ECS vs process-per-agent tools" width="800">
+    <img src="docs/benchmarks/resource-footprint.svg" alt="Device RAM scaling - Leviath ECS vs process-per-agent tools" width="800">
   </picture>
 </p>
 
-At 10 concurrent agents, Leviath uses **18 MB** of device RAM vs. **3,209 MB** for Claude Code — **178× lighter**. All data points are measured, not projected.
+At 10 concurrent agents, Leviath uses **18 MB** of device RAM vs. **3,209 MB** for Claude Code - **178× lighter**. All data points are measured, not projected.
 
 > **Resource benchmark methodology:** Each tool was launched N times concurrently (same coding task, separate git-initialized temp directories). RSS was sampled every 1 second for 15 seconds after an 8-second warmup. Peak total RSS across all instances was recorded. All instances were verified alive at time of measurement. System: macOS 15.5, Apple Silicon, 16 GB. Tool versions: Claude Code 2.1.86, Codex CLI 0.144.1, Pi (latest), OpenCode 0.0.55. Leviath was measured via `lev serve` with tasks submitted through the API. Full data: [leviath-benchmarks](https://github.com/Sun-Forge-AI/leviath-benchmarks).
 >
-> **Note:** This compares the runtime footprint of the orchestration layer, not the inference cost or quality of each tool's underlying model. Claude Code, Codex, Pi, and OpenCode are excellent coding agents — the point is that wrapping them in a process-per-agent pattern has a measurable device cost that an ECS engine avoids.
+> **Note:** This compares the runtime footprint of the orchestration layer, not the inference cost or quality of each tool's underlying model. Claude Code, Codex, Pi, and OpenCode are excellent coding agents - the point is that wrapping them in a process-per-agent pattern has a measurable device cost that an ECS engine avoids.
 
 ## 🤖 Pre-built Agents
 
-Ten agents ship out of the box — each a multi-stage directed graph with structured context regions, per-stage model fallback (Anthropic → OpenAI → local), and error recovery. The research and writing agents also carry drop-in `web_search`/`web_fetch` script tools.
+Ten agents ship out of the box - each a multi-stage directed graph with structured context regions, per-stage model fallback (Anthropic → OpenAI → local), and error recovery. The research and writing agents also carry drop-in `web_search`/`web_fetch` script tools.
 
 Every agent also has an `error_recovery` stage (omitted from the graphs) that catches failed tool calls and hands back into the main flow. Diamonds are LLM-routed or human-in-the-loop decisions; dotted edges fire automatically on a runtime condition rather than by the agent's choice.
 
-The two coding agents can also detour through an optional **`prototype`** spike when the approach is uncertain — the planner elects it per task and folds what it learns back into the plan — and are pulled into **`reassess`** by a `stuck` edge when they burn turns or keep editing one file without progress.
+The two coding agents can also detour through an optional **`prototype`** spike when the approach is uncertain - the planner elects it per task and folds what it learns back into the plan - and are pulled into **`reassess`** by a `stuck` edge when they burn turns or keep editing one file without progress.
 
 <table>
 <tr><th align="left">Agent</th><th align="left">Workflow</th></tr>
@@ -357,7 +357,7 @@ The two coding agents can also detour through an optional **`prototype`** spike 
 <td><img src="docs/assets/agents/reviewer.svg" alt="reviewer workflow graph" width="520"></td>
 </tr>
 <tr>
-<td valign="middle" width="30%"><b>parallel-fixer</b><br>Fixing many failing tests at once — one worker per failure</td>
+<td valign="middle" width="30%"><b>parallel-fixer</b><br>Fixing many failing tests at once - one worker per failure</td>
 <td><img src="docs/assets/agents/parallel-fixer.svg" alt="parallel-fixer workflow graph" width="520"></td>
 </tr>
 <tr>
@@ -389,17 +389,17 @@ The two coding agents can also detour through an optional **`prototype`** spike 
 ## 🖥️ Dashboard
 
 <p align="center">
-  <img src="docs/assets/dashboard-final.png" alt="lev dash — the Leviath terminal dashboard showing the agent list and live activity log" width="900">
+  <img src="docs/assets/dashboard-final.png" alt="lev dash - the Leviath terminal dashboard showing the agent list and live activity log" width="900">
 </p>
 
-`lev dash` is a full TUI for managing concurrent agents: stage tabs, context-window visualization, markdown rendering, search/filter, sub-agent tree view, and full mouse support. Scroll with the wheel, or click-drag to select text in any pane; releasing the drag copies it to your clipboard (works over SSH via OSC52), and `y` still yanks a whole pane at once. Shift+drag reaches your terminal's native selection. Press **`m`** to open the MCP management screen — add, remove, log in to, and test tool servers without leaving the dashboard.
+`lev dash` is a full TUI for managing concurrent agents: stage tabs, context-window visualization, markdown rendering, search/filter, sub-agent tree view, and full mouse support. Scroll with the wheel, or click-drag to select text in any pane; releasing the drag copies it to your clipboard (works over SSH via OSC52), and `y` still yanks a whole pane at once. Shift+drag reaches your terminal's native selection. Press **`m`** to open the MCP management screen - add, remove, log in to, and test tool servers without leaving the dashboard.
 
 ## 🌐 API Server
 
-`lev serve` exposes a REST + WebSocket API — integrate from Python, TypeScript, Go, or anything that speaks HTTP. No SDK required.
+`lev serve` exposes a REST + WebSocket API - integrate from Python, TypeScript, Go, or anything that speaks HTTP. No SDK required.
 
 The API can spawn tool-executing agents, so it refuses to start without a token
-(`--token` or, preferably, `LEVIATH_API_TOKEN` — an argument is visible in `ps`).
+(`--token` or, preferably, `LEVIATH_API_TOKEN` - an argument is visible in `ps`).
 It binds to `127.0.0.1` by default and warns loudly if you bind it anywhere else.
 
 ```bash
@@ -407,7 +407,7 @@ lev serve --port 3000
 
 # Exposed beyond your own machine? Bound it:
 lev serve --workdir-root /srv/workspaces --no-remote-yolo
-# `--allow-admin` (the MCP admin endpoints) is off by default — adding an MCP
+# `--allow-admin` (the MCP admin endpoints) is off by default - adding an MCP
 # server writes a spawn command into your config, which is RCE by construction.
 
 # spawn an agent (with a completion webhook + signing secret)
@@ -420,17 +420,17 @@ curl -X POST http://localhost:3000/api/agents \
 
 Covers agent lifecycle, human-in-the-loop interaction, blueprint management, per-agent WebSocket streaming, and webhook callbacks on completion. [Full API reference →](https://leviath.dev/docs/api)
 
-When a run finishes, Leviath POSTs the completion payload to `callback_url`, retrying transient failures (network errors, timeouts, 5xx, 429) with exponential backoff — tune it under `[webhook]` in your config (`max_retries`, `base_delay_ms`, `max_delay_ms`, `timeout_secs`). If you set `callback_secret`, each delivery carries an `X-Leviath-Signature: sha256=<hex>` header — the HMAC-SHA256 of the exact request body keyed on your secret — so the receiver can verify the payload is authentic.
+When a run finishes, Leviath POSTs the completion payload to `callback_url`, retrying transient failures (network errors, timeouts, 5xx, 429) with exponential backoff - tune it under `[webhook]` in your config (`max_retries`, `base_delay_ms`, `max_delay_ms`, `timeout_secs`). If you set `callback_secret`, each delivery carries an `X-Leviath-Signature: sha256=<hex>` header - the HMAC-SHA256 of the exact request body keyed on your secret - so the receiver can verify the payload is authentic.
 
 ## 🔗 Agent Client Protocol (Gas City, Zed, …)
 
-`lev agent-client` serves a Leviath agent over the [Agent **Client** Protocol](https://agentclientprotocol.com) — JSON-RPC 2.0 over stdio, the protocol agent hosts like [Gas City](https://github.com/gastownhall/gascity) and [Zed](https://zed.dev) use to drive a headless agent as a child process. A `session/prompt` runs the blueprint in the shared-world daemon and streams its output back as `session/update` notifications.
+`lev agent-client` serves a Leviath agent over the [Agent **Client** Protocol](https://agentclientprotocol.com) - JSON-RPC 2.0 over stdio, the protocol agent hosts like [Gas City](https://github.com/gastownhall/gascity) and [Zed](https://zed.dev) use to drive a headless agent as a child process. A `session/prompt` runs the blueprint in the shared-world daemon and streams its output back as `session/update` notifications.
 
 ```bash
 lev agent-client --agent coder            # speaks the protocol on stdin/stdout
 ```
 
-To drive a Leviath agent from Gas City, add a provider and point an agent at it — **no Gas City code change is needed**, just config:
+To drive a Leviath agent from Gas City, add a provider and point an agent at it - **no Gas City code change is needed**, just config:
 
 ```toml
 # Gas City provider declaration
@@ -443,14 +443,14 @@ provider = "leviath"
 session  = "acp"          # Gas City's key name for the Agent Client Protocol
 ```
 
-**Interaction & completion.** A `session/prompt` stays in flight (the agent shows as *busy*) until the run **genuinely finishes** — it is never reported "done" while the agent is still waiting on input. How interactions are handled depends on the host:
+**Interaction & completion.** A `session/prompt` stays in flight (the agent shows as *busy*) until the run **genuinely finishes** - it is never reported "done" while the agent is still waiting on input. How interactions are handled depends on the host:
 
 - **Hosts that implement `session/request_permission`** (e.g. Zed) get interactive tool approval in-turn, and drive their own conversation for other questions.
-- **Hosts that don't** (e.g. Gas City, whose ACP path reports interaction unsupported) — the question is surfaced as agent output and the run keeps going; you resolve it through **Leviath's own surfaces** (`lev dash` / `lev respond`), and the turn ends only when the run truly completes. Gas City stays responsive throughout (its prompt wait is non-blocking).
+- **Hosts that don't** (e.g. Gas City, whose ACP path reports interaction unsupported) - the question is surfaced as agent output and the run keeps going; you resolve it through **Leviath's own surfaces** (`lev dash` / `lev respond`), and the turn ends only when the run truly completes. Gas City stays responsive throughout (its prompt wait is non-blocking).
 
 For a clean "sling a task and get a result" flow with Gas City, prefer **autonomous blueprints that run to completion** (or pass `--yolo` to auto-approve tools). Conversational agents that ask follow-up questions will keep the bead *busy* until you answer them in `lev dash`.
 
-> **Two protocols, one acronym.** "ACP" is claimed by two unrelated things: the **Agent Client Protocol** (JSON-RPC/stdio, implemented here — this is the Gas City integration) and the **Agent Communication Protocol** (a REST API from the BeeAI project, not implemented in Leviath). This repo never writes the bare acronym unqualified.
+> **Two protocols, one acronym.** "ACP" is claimed by two unrelated things: the **Agent Client Protocol** (JSON-RPC/stdio, implemented here - this is the Gas City integration) and the **Agent Communication Protocol** (a REST API from the BeeAI project, not implemented in Leviath). This repo never writes the bare acronym unqualified.
 
 ## ⌨️ CLI
 
@@ -481,20 +481,20 @@ servers over **stdio** (a spawned process) or **HTTP** (streamable, with a
 legacy HTTP+SSE fallback). Configure them in `~/.leviath/config.toml`:
 
 ```toml
-# stdio — a locally spawned server
+# stdio - a locally spawned server
 [[mcp_servers]]
 name = "filesystem"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]
 
-# HTTP — a remote server (static token optional; ${VAR} keeps it out of the file)
+# HTTP - a remote server (static token optional; ${VAR} keeps it out of the file)
 [[mcp_servers]]
 name = "navigator"
 url = "https://mcp.example.com/mcp"
 headers = { Authorization = "Bearer ${MY_MCP_TOKEN}" }
 ```
 
-Servers that authenticate via the browser (OAuth) need no token in the config —
+Servers that authenticate via the browser (OAuth) need no token in the config -
 `lev mcp add navigator --url https://mcp.example.com/mcp` detects the login
 requirement and opens your browser automatically. Tokens are stored in
 `~/.leviath/mcp-auth.json` (mode `0600`) and refreshed non-interactively as the
@@ -541,8 +541,8 @@ graph TD
 ```
 
 Every platform-specific system call (Unix file permissions, `setsid` process
-detaching, `SIGTERM`, the OSC52 `/dev/tty` clipboard write) lives in one place —
-**`leviath-sys`** — behind a cross-platform API, so the rest of the workspace is
+detaching, `SIGTERM`, the OSC52 `/dev/tty` clipboard write) lives in one place -
+**`leviath-sys`** - behind a cross-platform API, so the rest of the workspace is
 free of scattered `#[cfg(unix)]`/`#[cfg(windows)]` branches and per-OS test
 coverage stays correct by construction.
 
@@ -556,7 +556,7 @@ cargo test --workspace
 cargo clippy --workspace
 ```
 
-The pre-commit hook installs itself the first time you build or test — no setup step. It enforces formatting, clippy (warnings-as-errors), the full test suite, and the coverage guardrails before every commit.
+The pre-commit hook installs itself the first time you build or test - no setup step. It enforces formatting, clippy (warnings-as-errors), the full test suite, and the coverage guardrails before every commit.
 
 <details>
 <summary>How the pre-commit hook works (and how to refresh it)</summary>
@@ -569,15 +569,15 @@ The hook enforces, before every commit:
 
 - **formatting** (`cargo fmt --check`)
 - **clippy** with warnings-as-errors
-- **doc lints** (`cargo doc` with `-D warnings` — no broken/private intra-doc links or stray HTML)
+- **doc lints** (`cargo doc` with `-D warnings` - no broken/private intra-doc links or stray HTML)
 - the **full test suite**
 - the **coverage-suppression-marker lint** (`ast-grep scan`, if `ast-grep` is installed; CI always enforces it)
 
-It does **not** run the full `cargo xtask coverage` check — that's several minutes, too slow for a local commit gate. CI runs it on every push instead, enforcing 100% for real.
+It does **not** run the full `cargo xtask coverage` check - that's several minutes, too slow for a local commit gate. CI runs it on every push instead, enforcing 100% for real.
 
 ### `ast-grep` (suppression lint)
 
-The suppression-marker scan uses [`ast-grep`](https://ast-grep.github.io), which matches Rust/YAML structurally (via tree-sitter) — rules live in `.sgrules/`. CI installs it automatically and always enforces the scan; the pre-commit hook runs it only if it's installed locally, otherwise it prints a warning and skips (CI is the backstop). Install it once with any of:
+The suppression-marker scan uses [`ast-grep`](https://ast-grep.github.io), which matches Rust/YAML structurally (via tree-sitter) - rules live in `.sgrules/`. CI installs it automatically and always enforces the scan; the pre-commit hook runs it only if it's installed locally, otherwise it prints a warning and skips (CI is the backstop). Install it once with any of:
 
 ```bash
 brew install ast-grep            # macOS / Linuxbrew
@@ -595,11 +595,11 @@ cargo clean -p cargo-husky && cargo test -p xtask
 
 ### Testing policy
 
-The workspace is gated at a hard **100%** on lines, regions, and functions — with no way to opt out. Coverage-suppression markers (`#[cfg(not(test))]`, `coverage(off)`, tarpaulin/lcov/grcov annotations) are banned by the ast-grep lint above, so code can't be hidden from measurement — it has to be refactored until it's testable. The *only* un-unit-tested code is the thin `lev` binary entrypoint (`crates/leviath-cli/src/main.rs`): the composition root that wires real terminal, stdin, network, and subprocess I/O into the library's tested cores. It's excluded from coverage measurement and guarded by a CI check that requires maintainer sign-off to change.
+The workspace is gated at a hard **100%** on lines, regions, and functions - with no way to opt out. Coverage-suppression markers (`#[cfg(not(test))]`, `coverage(off)`, tarpaulin/lcov/grcov annotations) are banned by the ast-grep lint above, so code can't be hidden from measurement - it has to be refactored until it's testable. The *only* un-unit-tested code is the thin `lev` binary entrypoint (`crates/leviath-cli/src/main.rs`): the composition root that wires real terminal, stdin, network, and subprocess I/O into the library's tested cores. It's excluded from coverage measurement and guarded by a CI check that requires maintainer sign-off to change.
 
 ### Running coverage locally
 
-`cargo xtask coverage` gates each workspace package with `cargo llvm-cov --package <pkg> --fail-under-{lines,functions,regions} 100` — llvm-cov does the counting *and* the gating; there's no custom parsing or aggregation. CI enforces a hard **100%** on all three metrics on Linux, macOS, and Windows — any file below 100% fails the build, and a browsable HTML report lands in the gitignored `coverage/` folder. Measurement is deliberately **per-package**, not `--workspace`: `-C instrument-coverage` records every function in every binary that links it (including ones that never call it), and the whole-workspace merge can let a never-run record shadow the covered one — so one package at a time is what keeps llvm-cov's counts accurate. See the doc comment atop `xtask/src/coverage.rs`.
+`cargo xtask coverage` gates each workspace package with `cargo llvm-cov --package <pkg> --fail-under-{lines,functions,regions} 100` - llvm-cov does the counting *and* the gating; there's no custom parsing or aggregation. CI enforces a hard **100%** on all three metrics on Linux, macOS, and Windows - any file below 100% fails the build, and a browsable HTML report lands in the gitignored `coverage/` folder. Measurement is deliberately **per-package**, not `--workspace`: `-C instrument-coverage` records every function in every binary that links it (including ones that never call it), and the whole-workspace merge can let a never-run record shadow the covered one - so one package at a time is what keeps llvm-cov's counts accurate. See the doc comment atop `xtask/src/coverage.rs`.
 
 ```bash
 cargo xtask coverage                                   # full workspace
@@ -619,18 +619,18 @@ Leviath ships on three rolling channels, published automatically from CI:
 | **Beta** | Weekly (Monday) | `beta` | 🟡 Tested |
 | **Stable** | Weekly (Thursday, approval-gated) | `latest` | ✅ Production |
 
-Each channel tag is a *rolling* release — deleted and recreated on every publish so it always points at that channel's newest build. That's what the shell/PowerShell installers resolve (`--channel alpha|beta|stable` → `alpha`/`beta`/`latest`).
+Each channel tag is a *rolling* release - deleted and recreated on every publish so it always points at that channel's newest build. That's what the shell/PowerShell installers resolve (`--channel alpha|beta|stable` → `alpha`/`beta`/`latest`).
 
-Separately, every **stable** deploy also cuts an **immutable versioned release** (`vX.Y.Z`, which carries GitHub's "Latest" badge). Those never change, so they're what Homebrew and Scoop pin to and what `cargo install --tag vX.Y.Z` fetches. Seeing both a `vX.Y.Z` release *and* a `latest` release for the same version is by design — one is the permanent archive, the other the moving pointer.
+Separately, every **stable** deploy also cuts an **immutable versioned release** (`vX.Y.Z`, which carries GitHub's "Latest" badge). Those never change, so they're what Homebrew and Scoop pin to and what `cargo install --tag vX.Y.Z` fetches. Seeing both a `vX.Y.Z` release *and* a `latest` release for the same version is by design - one is the permanent archive, the other the moving pointer.
 
 Install commands for each channel live in the [distribution repo](https://github.com/Sun-Forge-AI/leviath-dist).
 
 ## 🔐 Security
 
 Leviath runs LLM-driven tools on your machine, so [SECURITY.md](SECURITY.md)
-states plainly what it defends against — a malicious agent package, prompt
+states plainly what it defends against - a malicious agent package, prompt
 injection reaching an agent's tools, a hostile MCP server, another local user,
-a repository you pointed it at — and what it does not, including that the model
+a repository you pointed it at - and what it does not, including that the model
 can do anything you granted it and that `namespace` isolation is not a
 filesystem sandbox.
 

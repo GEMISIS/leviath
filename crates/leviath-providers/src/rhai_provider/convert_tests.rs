@@ -174,7 +174,7 @@ fn runtime_error_builds_runtime_variant() {
 #[test]
 fn parse_inference_and_chunk_reject_unconvertible_dynamic() {
     // A function pointer has no serde_json representation, so `from_dynamic`
-    // fails — exercising the InvalidResponse error arms.
+    // fails - exercising the InvalidResponse error arms.
     let fp = Dynamic::from(rhai::FnPtr::new("noop").unwrap());
     assert!(matches!(
         parse_inference_dynamic(fp.clone()).unwrap_err(),

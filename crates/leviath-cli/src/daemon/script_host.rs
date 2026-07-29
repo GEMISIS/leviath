@@ -11,7 +11,7 @@
 //! path-confinement logic is unit-testable with a fake, and the real
 //! network/process/filesystem/env behavior ([`RealScriptIo`]) is exercised with
 //! hermetic, local resources (a mock HTTP server, `echo`, temp files, scoped env
-//! vars) — the same approach the MCP and package-registry tests use.
+//! vars) - the same approach the MCP and package-registry tests use.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -83,7 +83,7 @@ pub fn resolve_script_permissions(
 }
 
 /// Map a `[tool_script_permissions]` string to a [`ScriptPermission`]. An
-/// unrecognized value yields `None` (the field is left at the global default) —
+/// unrecognized value yields `None` (the field is left at the global default) -
 /// parsed by hand (not via `Deserialize`) so every arm is deterministically
 /// covered, without pulling in serde's unexercised visitor machinery.
 fn parse_script_permission_str(s: &str) -> Option<ScriptPermission> {
@@ -110,7 +110,7 @@ fn script_restrictiveness(p: ScriptPermission) -> u8 {
 
 /// The effective `[tool_script_permissions]` for an agent: the user's global
 /// config with the agent's own blueprint `[tool_script_permissions]` overlaid
-/// per field — but **only where the manifest is more restrictive**.
+/// per field - but **only where the manifest is more restrictive**.
 ///
 /// Agents ship their own `.rhai` tool scripts, so it is reasonable for a
 /// manifest to say "this agent never needs `shell`". It is not reasonable for it
@@ -127,7 +127,7 @@ pub fn effective_script_permissions(
 ) -> ScriptToolPermissions {
     let mut eff = global.clone();
     // `toml::from_str`, not `manifest_toml.parse::<toml::Value>()`. In toml 1.x
-    // `FromStr for Value` parses a single *value*, not a document — so a real
+    // `FromStr for Value` parses a single *value*, not a document - so a real
     // manifest starting with `[agent]` reads as an array literal followed by
     // junk and fails. It still compiles, so the change is silent; the tests are
     // what caught it.
@@ -193,7 +193,7 @@ pub struct DaemonScriptHost {
     io: Arc<dyn ScriptIo>,
     /// The agent's sandbox manager, if any. When present, a script `shell()`
     /// call runs inside the *current* stage's sandbox (container / namespace),
-    /// exactly like the built-in `shell` tool — a script can't escape the
+    /// exactly like the built-in `shell` tool - a script can't escape the
     /// isolation the agent's stage declared. `None` runs on the host.
     sandbox: Option<Arc<SandboxManager>>,
     /// Wall-clock cap on a single `shell()` call, so a runaway command can't hang
@@ -201,7 +201,7 @@ pub struct DaemonScriptHost {
     shell_timeout: Duration,
     /// `[security] allow_local_network`: whether this agent's fetches may reach
     /// loopback / private / link-local addresses. Off unless the user turned it
-    /// on — see [`check_outbound`].
+    /// on - see [`check_outbound`].
     allow_local_network: bool,
     /// `[security] allow_env_vars`: credential-shaped environment variables this
     /// agent's scripts may read. Empty by default.
@@ -317,7 +317,7 @@ fn denied(func: &str) -> String {
 /// Check a script-supplied URL against the outbound policy before it is sent.
 ///
 /// The URL came from the model, and the model picked it out of context an
-/// attacker can influence — so this is the boundary between "the agent browsing
+/// attacker can influence - so this is the boundary between "the agent browsing
 /// the web" and "the agent probing the user's own network on someone else's
 /// behalf". See [`leviath_core::net`] for what is refused and why.
 ///
@@ -397,7 +397,7 @@ impl ScriptHost for DaemonScriptHost {
         // A script tool ships inside the agent bundle, so this call is
         // attacker-authored in exactly the case that matters. Ordinary variables
         // pass; a credential-shaped name needs the user to have listed it. Two
-        // lines — `env_var("ANTHROPIC_API_KEY")` then `http_post(...)` — was
+        // lines - `env_var("ANTHROPIC_API_KEY")` then `http_post(...)` - was
         // otherwise a working exfiltration path with no prompt in it anywhere.
         if !leviath_core::script_env_allowed(name, &self.allow_env_vars) {
             return Err(format!(
@@ -422,7 +422,7 @@ pub struct RealScriptIo;
 /// Built once, then cloned per request. A `reqwest::blocking::Client` owns a
 /// dedicated OS thread running a current-thread tokio runtime, so the previous
 /// build-one-per-request shape spawned (and tore down) a thread plus a runtime
-/// plus a TLS root-store load for *every* `http_get` — a researcher agent
+/// plus a TLS root-store load for *every* `http_get` - a researcher agent
 /// fanning out over dozens of pages could exhaust thread/FD limits, at which
 /// point `build()` fails and the `.expect` panics inside a Rhai native call
 /// (issue #109). One shared client also gives connection reuse across calls.
@@ -455,7 +455,7 @@ static HTTP_CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
 /// Flatten an error and its `source` chain into one `": "`-joined line.
 ///
 /// reqwest's own `Display` for a refused redirect is "error following redirect
-/// for url (…)" — it never mentions the reason, which for us is the whole point:
+/// for url (…)" - it never mentions the reason, which for us is the whole point:
 /// "refused to follow redirect: private address" and "too many redirects" are
 /// different problems with different fixes, and both were reaching the script
 /// author as the same opaque sentence.
@@ -476,7 +476,7 @@ fn error_chain(e: &dyn std::error::Error) -> String {
 /// field on the host. This atomic exists only because [`HTTP_CLIENT`] is
 /// process-wide and its redirect callback runs inside reqwest with no access to
 /// the host that started the request. `[security] allow_local_network` is a
-/// machine-wide switch, so one value per process is the right granularity —
+/// machine-wide switch, so one value per process is the right granularity -
 /// but keep the field authoritative and this a mirror of it, not the reverse:
 /// global mutable state read by the main check would make every test that
 /// touches it race with every test that doesn't.
@@ -518,7 +518,7 @@ impl RealScriptIo {
     /// A body the `Content-Type` marks as binary is refused rather than decoded.
     /// `Response::text` decodes *anything* lossily, so a PNG or MP3 came back as
     /// a page of U+FFFD replacement characters reported as a **successful**
-    /// fetch — no error, no signal, straight into the model's context.
+    /// fetch - no error, no signal, straight into the model's context.
     fn send(req: reqwest::blocking::RequestBuilder) -> Result<String, String> {
         Self::send_capped(req, MAX_RESPONSE_BYTES)
     }
@@ -543,7 +543,7 @@ impl RealScriptIo {
         // Refuse an oversized body before reading a byte of it. `text()` buffers
         // the whole response, so a server advertising a multi-gigabyte
         // `text/plain` is a memory-exhaustion DoS the 900 KB output cap below
-        // does nothing about — that cap runs *after* the allocation.
+        // does nothing about - that cap runs *after* the allocation.
         //
         // Residual: a chunked response sends no `Content-Length`, so a body that
         // lies about its size is still buffered. The client's 30-second timeout
@@ -567,7 +567,7 @@ impl RealScriptIo {
 /// The check is on the declared type, deliberately **not** on UTF-8 validity of
 /// the bytes: `Response::text` is charset-aware and decodes Shift-JIS,
 /// ISO-8859-1 and Windows-1252 pages *correctly*, and a strict `from_utf8` test
-/// would misclassify exactly those as binary — the non-English pages a
+/// would misclassify exactly those as binary - the non-English pages a
 /// researcher agent is most likely to fetch. Anything unrecognised (including a
 /// missing header) falls through to the existing text path.
 const BINARY_CONTENT_PREFIXES: &[&str] = &[
@@ -609,13 +609,13 @@ fn non_text_body_message(content_type: &str, len: Option<u64>) -> String {
         Some(bytes) => format!(", {} KB", bytes.div_ceil(1024)),
         None => String::new(),
     };
-    format!("non-text content ({content_type}{size}) — this tool returns text only")
+    format!("non-text content ({content_type}{size}) - this tool returns text only")
 }
 
 /// Cap a host-I/O string below the tool engine's 1 MB `max_string_size`
 /// (`build_tool_engine`) so an oversized fetch/read/shell result can't raise the
 /// NON-CATCHABLE `ErrorDataTooLarge` inside a Rhai tool script (it aborts the tool
-/// even inside try/catch). This is only a crash guard — context-size truncation is
+/// even inside try/catch). This is only a crash guard - context-size truncation is
 /// handled downstream by region budgets and any in-script truncation.
 const MAX_SCRIPT_IO_BYTES: usize = 900_000;
 
@@ -631,14 +631,14 @@ const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
 /// The refusal message for an over-large declared body, or `None` to proceed.
 ///
 /// Split out as a pure function with an injectable `max` so the threshold is
-/// testable without a 32 MB HTTP round trip — and because a mock server cannot
+/// testable without a 32 MB HTTP round trip - and because a mock server cannot
 /// help here anyway: hyper panics rather than send a `Content-Length` that
 /// disagrees with the body it is writing, so the lying-header case that motivates
 /// the check is unreachable from an honest test server.
 fn oversized_body_message(content_length: Option<u64>, max: u64) -> Option<String> {
     match content_length {
         Some(len) if len > max => Some(format!(
-            "response declares {len} bytes, over the {max}-byte limit — \
+            "response declares {len} bytes, over the {max}-byte limit - \
              fetch a more specific page"
         )),
         _ => None,
@@ -647,7 +647,7 @@ fn oversized_body_message(content_length: Option<u64>, max: u64) -> Option<Strin
 
 pub(crate) fn cap_script_io(mut s: String) -> String {
     if s.len() > MAX_SCRIPT_IO_BYTES {
-        // Cut on a char boundary — a raw byte cut-off lands mid-character on
+        // Cut on a char boundary - a raw byte cut-off lands mid-character on
         // multi-byte text and panics (the shape of issue #109).
         s.truncate(floor_char_boundary(&s, MAX_SCRIPT_IO_BYTES));
         s.push_str("\n[...truncated by leviath: response exceeded 900 KB]");
@@ -677,9 +677,9 @@ impl ScriptIo for RealScriptIo {
     fn run_shell(&self, mut cmd: TokioCommand, timeout: Duration) -> Result<String, String> {
         // The script engine drives this from a `spawn_blocking` thread (not a
         // runtime worker), so blocking on the current runtime is safe here and
-        // lets us reuse tokio's timeout — the same mechanism the built-in shell
+        // lets us reuse tokio's timeout - the same mechanism the built-in shell
         // tool uses. `try_current` rather than `current`: a blocking thread can
-        // outlive runtime shutdown, and `current` would *panic* there — which,
+        // outlive runtime shutdown, and `current` would *panic* there - which,
         // inside a Rhai native call, used to abort the daemon (issue #109).
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return Err("shell is unavailable: no tokio runtime on this thread".to_string());
@@ -687,7 +687,7 @@ impl ScriptIo for RealScriptIo {
         // Reap the whole command tree if the future is dropped (timeout, or the
         // batch dropped because the agent was cancelled) rather than detaching
         // it. `kill_on_drop` covers the shell; its own children are reparented
-        // to init unless the group is signalled — see `leviath_tools`' shell
+        // to init unless the group is signalled - see `leviath_tools`' shell
         // tool, which does the same.
         cmd.kill_on_drop(true);
         leviath_tools::own_process_group(&mut cmd);
@@ -755,7 +755,7 @@ pub(crate) fn default_shell() -> (&'static str, &'static str) {
     }
 }
 
-/// Build the host (un-sandboxed) shell command pointed at `workdir` — the
+/// Build the host (un-sandboxed) shell command pointed at `workdir` - the
 /// no-sandbox arm of [`DaemonScriptHost::shell`].
 pub(crate) fn host_shell_command(
     shell: &str,
@@ -865,7 +865,7 @@ mod tests {
     }
 
     /// The manifest may not loosen what the user locked down. This previously
-    /// went the other way — a downloaded agent setting `http_get = "allow"` over
+    /// went the other way - a downloaded agent setting `http_get = "allow"` over
     /// a global `deny` got the network back, which made the user's config
     /// advisory rather than binding.
     #[test]
@@ -1044,7 +1044,7 @@ mod tests {
 
     /// The exfiltration/SSRF case: a script tool with `http_get` permission is
     /// still not a licence to reach the user's own network. Nothing may touch
-    /// the I/O backend — the URL is refused before a request is built.
+    /// the I/O backend - the URL is refused before a request is built.
     #[test]
     fn outbound_check_blocks_local_targets_before_any_io() {
         let io = RecordingIo::arc();
@@ -1096,7 +1096,7 @@ mod tests {
         );
     }
 
-    /// Ordinary variables are unaffected — a script reading `PATH` or its own
+    /// Ordinary variables are unaffected - a script reading `PATH` or its own
     /// app's setting is normal, and the gate would be useless if it broke that.
     #[test]
     fn env_var_allows_ordinary_names() {
@@ -1107,7 +1107,7 @@ mod tests {
     }
 
     /// The user allowlisting a name is them saying "yes, this agent is meant to
-    /// have that one" — and only that one.
+    /// have that one" - and only that one.
     #[test]
     fn env_var_allowlist_permits_exactly_the_named_variable() {
         let io = RecordingIo::arc();
@@ -1232,7 +1232,7 @@ mod tests {
         let host =
             DaemonScriptHost::with_io(all_allowed(), dir.path().to_path_buf(), RecordingIo::arc());
         // A path that is *absolute on the current platform* (a leading `/` is not
-        // absolute on Windows — it needs a drive/UNC prefix), and outside the
+        // absolute on Windows - it needs a drive/UNC prefix), and outside the
         // workdir. `temp_dir()` is absolute everywhere and a sibling of the
         // workdir tempdir, so it exercises the `is_absolute()` → true branch.
         let outside = std::env::temp_dir().join("leviath-abs-outside-xyz");
@@ -1283,7 +1283,7 @@ mod tests {
                     )
                 }),
             )
-            // Declared text in a non-UTF-8 charset — must still decode, which is
+            // Declared text in a non-UTF-8 charset - must still decode, which is
             // why the guard reads the header rather than testing UTF-8 validity.
             .route(
                 "/shiftjis",
@@ -1388,7 +1388,7 @@ mod tests {
     }
 
     /// A body at or under the cap proceeds, and so does one with no declared
-    /// length — a chunked response has none, and refusing every chunked page
+    /// length - a chunked response has none, and refusing every chunked page
     /// would break most of the web.
     #[test]
     fn body_within_cap_or_of_unknown_size_proceeds() {
@@ -1398,7 +1398,7 @@ mod tests {
     }
 
     /// The cap in the real `send` path, against a small response with the limit
-    /// lowered — the 32 MiB production value would mean transferring 32 MiB to
+    /// lowered - the 32 MiB production value would mean transferring 32 MiB to
     /// assert one branch.
     #[tokio::test(flavor = "multi_thread")]
     async fn send_refuses_a_body_over_the_cap() {
@@ -1416,7 +1416,7 @@ mod tests {
 
     /// A redirect is a fresh destination the caller's original URL check never
     /// saw, so the policy re-checks every hop. Here a public-looking request is
-    /// bounced to loopback — the shape that turns any redirect-following fetch
+    /// bounced to loopback - the shape that turns any redirect-following fetch
     /// into an SSRF primitive.
     #[tokio::test(flavor = "multi_thread")]
     async fn redirects_to_a_local_address_are_refused() {
@@ -1427,7 +1427,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         // Only `/bounce` is served: if the guard ever fails open, the request
-        // 404s instead of succeeding, and the test still fails -- but no handler
+        // 404s instead of succeeding, and the test still fails - but no handler
         // sits here unreached on the passing path.
         let app = Router::new().route(
             "/bounce",
@@ -1568,7 +1568,7 @@ mod tests {
     }
 
     /// A raw TCP server that declares a larger Content-Length than it sends, then
-    /// closes — so `resp.text()` errors on the incomplete body (mirrors the
+    /// closes - so `resp.text()` errors on the incomplete body (mirrors the
     /// package-registry truncated-body test).
     async fn spawn_truncated_body_server() -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

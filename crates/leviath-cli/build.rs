@@ -8,7 +8,7 @@
 //!
 //! The build id is the short git commit hash. When the working tree is dirty it
 //! also carries a short hash of the uncommitted changes, so **every edit
-//! produces a distinct id** — that's what lets a dev-iteration reinstall (same
+//! produces a distinct id** - that's what lets a dev-iteration reinstall (same
 //! commit, changed code) be detected as stale and reload the daemon. Falls back
 //! to the package version when git is unavailable (e.g. a packaged crate).
 //!
@@ -85,7 +85,7 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
 /// A deliberately dumb line scan rather than a TOML parse: the build script has
 /// no dependencies, and `version` is a top-level key on the first few lines of
 /// every manifest. A blueprint whose version can't be read is a build failure,
-/// not a silent empty string — the wizard drives install/update decisions off
+/// not a silent empty string - the wizard drives install/update decisions off
 /// this value, so an unreadable one would quietly present as "no update".
 fn manifest_version(manifest: &str, path: &Path) -> String {
     manifest
@@ -110,7 +110,7 @@ fn manifest_version(manifest: &str, path: &Path) -> String {
 /// binary and a released `lev` can install them with no git checkout.
 ///
 /// A missing `agents/` directory yields an empty table rather than a build
-/// error — that is the shape a packaged crate (no workspace sibling dirs) sees,
+/// error - that is the shape a packaged crate (no workspace sibling dirs) sees,
 /// and `lev setup` degrades to "nothing to install" rather than failing to
 /// build.
 fn write_bundled_agents(out_dir: &Path, agents_dir: &Path) {

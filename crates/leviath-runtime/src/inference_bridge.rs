@@ -1,4 +1,4 @@
-//! The async worker side of the ECS inference stage — the sync-ECS ↔ async-I/O
+//! The async worker side of the ECS inference stage - the sync-ECS ↔ async-I/O
 //! bridge for inference.
 //!
 //! Systems can't `.await`, and a single inference can take up to an hour, so the
@@ -11,7 +11,7 @@
 //!
 //! One task exists per *in-flight request* (bounded by the per-model
 //! [`InferencePools`](crate::inference_pool::InferencePools) permits), **never**
-//! one per agent — that is what keeps CPU bounded by work, not by agent count.
+//! one per agent - that is what keeps CPU bounded by work, not by agent count.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -80,7 +80,7 @@ pub struct InferenceJob {
     /// When set, count the assembled request's tokens exactly (via the
     /// provider's `count_tokens`, which uses a remote endpoint where available)
     /// before calling `infer`, and fail early if it would exceed the model's
-    /// context window. Off by default — the runtime's cheap `len/4` estimates
+    /// context window. Off by default - the runtime's cheap `len/4` estimates
     /// drive normal budgeting; this is the opt-in accurate guard.
     pub exact_token_counting: bool,
 }
@@ -170,8 +170,8 @@ pub async fn run_inference_job(
             }
         }
     };
-    // A cancel drops the whole retry-and-backoff future — aborting the in-flight
-    // HTTP request rather than waiting out the job timeout (up to 15 minutes) —
+    // A cancel drops the whole retry-and-backoff future - aborting the in-flight
+    // HTTP request rather than waiting out the job timeout (up to 15 minutes) -
     // and reports nothing: the agent is already terminal, so there is no outcome
     // to apply. Releasing the permit here is the point; a cancelled run used to
     // hold its model's pool slot for as long as the provider took to answer.
@@ -274,7 +274,7 @@ mod tests {
     }
 
     /// Cancelling releases the pool slot immediately instead of waiting out the
-    /// job timeout (15 minutes by default), and reports no outcome — the agent is
+    /// job timeout (15 minutes by default), and reports no outcome - the agent is
     /// already terminal, so there is nothing to apply.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_cancelled_job_frees_its_pool_slot_without_reporting() {
@@ -284,7 +284,7 @@ mod tests {
         let permit = pools.try_acquire("m").expect("free pool");
         assert!(pools.try_acquire("m").is_none(), "pool should be full");
 
-        // A provider that never answers — the stalled-call case a cancel exists
+        // A provider that never answers - the stalled-call case a cancel exists
         // to escape.
         let provider = Arc::new(Scripted {
             steps: std::sync::Mutex::new(vec![Step::Hang].into()),
@@ -596,7 +596,7 @@ mod tests {
         Ok(String),
         Transient,
         Permanent,
-        /// Never returns — a stalled/hung call, for the job-timeout test.
+        /// Never returns - a stalled/hung call, for the job-timeout test.
         Hang,
     }
 

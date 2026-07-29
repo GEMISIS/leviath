@@ -1,4 +1,4 @@
-//! `lev tools` — list and validate the globally available Rhai script tools
+//! `lev tools` - list and validate the globally available Rhai script tools
 //! (issue #97). These live in `<leviath-home>/tools/` and are auto-discovered by
 //! every agent at spawn; this command surfaces what's there (and what failed to
 //! compile) without starting the daemon. Agent-specific tools are validated by
@@ -21,7 +21,7 @@ pub struct ToolsArgs {
 /// daemon's own global scan in `spawn::script_scan_dirs`. `None` when no home
 /// directory resolves.
 ///
-/// This resolved to `$HOME/tools/` until the shared resolver landed — the
+/// This resolved to `$HOME/tools/` until the shared resolver landed - the
 /// `"tools"` component was joined onto the *user home* rather than the
 /// `.leviath` data root, unlike `providers/`, `agents/` and `runs/`. Every
 /// `.rhai` file found here is compiled and offered to **every** agent as an
@@ -76,7 +76,7 @@ fn params_summary(meta: &ScriptToolMeta) -> String {
         .join(", ")
 }
 
-/// The JSON view of a report (built by hand — no derive — so the shape is
+/// The JSON view of a report (built by hand - no derive - so the shape is
 /// explicit and stable).
 fn report_json(dir_label: &str, report: &ToolsReport) -> serde_json::Value {
     let tools: Vec<serde_json::Value> = report
@@ -128,7 +128,7 @@ fn report_json(dir_label: &str, report: &ToolsReport) -> serde_json::Value {
 }
 
 /// Print a report in human-readable form. Valid tools are `✓`, skipped files are
-/// `✗` with their reason (non-fatal — invalid scripts are simply not advertised,
+/// `✗` with their reason (non-fatal - invalid scripts are simply not advertised,
 /// exactly as the daemon treats them).
 fn print_human(dir_label: &str, report: &ToolsReport) {
     println!("Global script tools ({dir_label}):");
@@ -140,7 +140,7 @@ fn print_human(dir_label: &str, report: &ToolsReport) {
         let desc = if meta.description.is_empty() {
             String::new()
         } else {
-            format!(" — {}", meta.description)
+            format!(" - {}", meta.description)
         };
         // A tool compiles but only loads if the platform satisfies its `@requires`
         // (the same gate the daemon applies at spawn); flag the ones that won't,
@@ -314,8 +314,8 @@ mod tests {
 
     #[test]
     fn run_text_and_json_and_empty() {
-        // Two valid tools — a full one (description + params + requires) and a
-        // minimal one (none of those) — so print_human covers both the present
+        // Two valid tools - a full one (description + params + requires) and a
+        // minimal one (none of those) - so print_human covers both the present
         // and absent branches of each field, and sort_by actually compares.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -346,7 +346,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         temp_env::with_var("LEVIATH_HOME", Some(home.path().to_str().unwrap()), || {
             // `<home>/.leviath/tools`, alongside `providers/` and `agents/`.
-            // This asserted `<home>/tools` before — the `"tools"` component was
+            // This asserted `<home>/tools` before - the `"tools"` component was
             // joined onto the user home rather than the data root. Every `.rhai`
             // file in this directory becomes an executable tool for *every*
             // agent, so it belongs inside Leviath's own directory rather than in

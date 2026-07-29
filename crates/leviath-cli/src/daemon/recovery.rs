@@ -1,6 +1,6 @@
 //! Restart recovery: reload persisted non-terminal agents into a fresh world when
 //! the daemon starts, so runs interrupted by a stop/crash resume where they left
-//! off — critically, any agent that was mid-inference re-issues that inference
+//! off - critically, any agent that was mid-inference re-issues that inference
 //! (the reloaded agent is `ReadyToInfer`), rather than being lost.
 //!
 //! For each `<runs_dir>/<run_id>/meta.json` whose status is non-terminal, this
@@ -18,7 +18,7 @@
 //! agent back in the *waiting* state with the same prompt re-opened, rather than
 //! re-inferring and dropping it (issue #38). Model-initiated dynamic tools
 //! (`ask_user_*`, `present_for_review`, `edit_document`) and taint-gate prompts are
-//! not persisted — they block inside the transient tool-worker turn, so on restart
+//! not persisted - they block inside the transient tool-worker turn, so on restart
 //! they take the ordinary re-inference path and the model simply re-asks.
 
 use std::path::Path;
@@ -59,7 +59,7 @@ pub fn reload_persisted_agents(
 ) -> Vec<(String, Entity)> {
     let mut reloaded: Vec<(RunMeta, Entity)> = Vec::new();
     let Ok(dir_entries) = std::fs::read_dir(runs_dir) else {
-        return Vec::new(); // no runs dir yet — nothing to recover
+        return Vec::new(); // no runs dir yet - nothing to recover
     };
     // Scan phase: collect every persisted run's metadata + whether it's parked mid
     // fan-out (has a fanout.json), so the triage can rank them.
@@ -249,11 +249,11 @@ fn totals_from(meta: &RunMeta) -> TokenTotals {
 /// The daemon is the sole owner of these runs, so anything still marked
 /// `running` at startup is by definition not running. Runs that *can* be
 /// reloaded are resumed (that is the whole point of this module); this is only
-/// for the ones that can't — which used to be logged and then left claiming
+/// for the ones that can't - which used to be logged and then left claiming
 /// `"status": "running"` on disk forever, so `lev ps` and the dashboard showed
 /// a live run that no longer existed (issue #109).
 ///
-/// Best-effort: a write failure here is logged, never fatal — the daemon is
+/// Best-effort: a write failure here is logged, never fatal - the daemon is
 /// mid-startup and the rest of the recovery pass must still run.
 fn mark_crashed(run_dir: &Path, meta: RunMeta, reason: &str, now_secs: i64) {
     let crashed = RunMeta {
@@ -339,7 +339,7 @@ fn reload_one(
     // context). The archive is appended *before* either JSON file, so in that exact
     // crash window it already holds the newer generation and folds to a consistent
     // `{meta, context}`. Fall back to the separate JSON files only for runs written
-    // before the archive existed, or an archive that couldn't be read at all — that
+    // before the archive existed, or an archive that couldn't be read at all - that
     // pair may be one tick out of sync, but it's the pre-existing behavior.
     let folded = std::fs::read(run_dir.join("run.lvr"))
         .ok()
@@ -407,7 +407,7 @@ fn reload_one(
 
     // If this run was parked at a stage-boundary interaction point (e.g.
     // plan_approval), re-present it in the *waiting* state rather than the default
-    // `Active` + `ReadyToInfer` restore — so the open prompt survives the restart
+    // `Active` + `ReadyToInfer` restore - so the open prompt survives the restart
     // instead of being dropped and re-inferred (issue #38). A missing/malformed
     // sidecar, or a blueprint that no longer matches, leaves the default restore.
     if let Some(state) = std::fs::read_to_string(run_dir.join("interactions.json"))
@@ -477,7 +477,7 @@ mod tests {
     }
 
     fn coder_manifest() -> String {
-        // Self-contained fixture — not the shipped blueprint (see test_support).
+        // Self-contained fixture - not the shipped blueprint (see test_support).
         crate::test_support::inline_coder_manifest()
     }
 
@@ -573,7 +573,7 @@ mod tests {
     }
 
     /// Write a `<runs_dir>/<run_id>/run.lvr` that folds to the given `stage_index`,
-    /// `iteration`, `prompt_tokens`, and `context` — the run's atomic journal. Used
+    /// `iteration`, `prompt_tokens`, and `context` - the run's atomic journal. Used
     /// to prove recovery prefers this consistent pair over a stale `context.json`.
     fn write_run_archive(
         runs_dir: &Path,
@@ -660,7 +660,7 @@ mod tests {
             RunStatus::Running,
             Some(&ctx),
         );
-        // A completed run — must be skipped.
+        // A completed run - must be skipped.
         write_run(
             runs.path(),
             "run-done",
@@ -721,8 +721,8 @@ mod tests {
     }
 
     /// The issue #43 fix: when the atomic journal (`run.lvr`) and the separate
-    /// `context.json` disagree — the crash-window state where a new `meta.json`
-    /// sits next to a stale `context.json` — resume restores the journal's
+    /// `context.json` disagree - the crash-window state where a new `meta.json`
+    /// sits next to a stale `context.json` - resume restores the journal's
     /// consistent `{meta, context}` pair, not the stale JSON.
     #[tokio::test]
     async fn reload_prefers_the_atomic_journal_over_a_stale_context_json() {
@@ -732,7 +732,7 @@ mod tests {
         let runs = tempfile::tempdir().unwrap();
 
         // A STALE context.json (older generation) alongside a meta.json whose
-        // iteration/totals are also older than the journal — write_run stamps
+        // iteration/totals are also older than the journal - write_run stamps
         // iteration 5 / prompt_tokens 42.
         let stale = ContextSnapshot {
             stage_name: "stale-stage".to_string(),
@@ -894,7 +894,7 @@ mod tests {
         let (run_id, entity) = &restored[0];
         assert_eq!(run_id, "run-await");
         // Re-armed in the *waiting* state (not the default Active), so no inference
-        // re-issues and the open prompt isn't dropped — the issue #38 fix.
+        // re-issues and the open prompt isn't dropped - the issue #38 fix.
         assert_eq!(world.agent_status(*entity), Some(AgentStatus::Waiting));
         assert!(
             world
@@ -1350,7 +1350,7 @@ mod tests {
         assert!(restored.is_empty()); // all skipped, none fatal
 
         // The un-reloadable run is recorded as crashed rather than left claiming
-        // it is still running (issue #109) — `lev ps` and the dashboard would
+        // it is still running (issue #109) - `lev ps` and the dashboard would
         // otherwise show a live run that no longer exists.
         let meta: RunMeta = serde_json::from_str(
             &std::fs::read_to_string(runs.path().join("run-badpath").join("meta.json")).unwrap(),
@@ -1372,7 +1372,7 @@ mod tests {
     fn marking_a_crash_is_best_effort() {
         // The run directory can vanish between the scan and the rewrite (a
         // concurrent `lev rm`, a wiped runs dir). Recovery must log and carry
-        // on — the daemon is mid-startup and the other runs still need it.
+        // on - the daemon is mid-startup and the other runs still need it.
         let runs = tempfile::tempdir().unwrap();
         write_run(
             runs.path(),

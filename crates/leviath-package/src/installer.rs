@@ -16,20 +16,20 @@ const MAX_UNPACKED_BYTES: u64 = 256 * 1024 * 1024;
 /// Refuse an unpacked bundle that contains symlinks.
 ///
 /// tar-rs blocks entries that *extract* outside the destination, but a symlink
-/// entry lands inside it perfectly legally — and then points wherever it likes.
+/// entry lands inside it perfectly legally - and then points wherever it likes.
 /// Since the installed tree is later scanned for `.rhai` tool scripts and read
 /// by the file tools, a link is a way to smuggle content in (or to have a later
 /// write follow it out). Nothing in a legitimate agent bundle needs one.
 /// What an entry is, as far as this check cares.
 ///
 /// A three-way answer rather than a `FileType`, because `FileType` cannot be
-/// constructed without a real file of that kind — and a real symlink is exactly
+/// constructed without a real file of that kind - and a real symlink is exactly
 /// what a test cannot create on Windows without a privilege CI runners lack.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Entry {
     Dir,
     File,
-    /// A symlink, or an entry that could not be stat'd at all — the same
+    /// A symlink, or an entry that could not be stat'd at all - the same
     /// refusal either way, since neither can be certified.
     Refused,
 }
@@ -57,7 +57,7 @@ fn classify(path: &Path) -> Entry {
 fn reject_symlinks_with(dir: &Path, classify: fn(&Path) -> Entry) -> anyhow::Result<()> {
     // `into_iter().flatten().flatten()` rather than a `match` on `read_dir`: this
     // directory was created and unpacked into moments ago, so an unreadable one
-    // has no reachable test — and it surfaces anyway on the manifest read that
+    // has no reachable test - and it surfaces anyway on the manifest read that
     // follows. Collapsing it to "no entries" keeps the semantics with no branch
     // nothing can exercise.
     for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -139,14 +139,14 @@ impl AgentInstaller {
     /// safe path component. `install` derives it from `file_stem()` (which
     /// already strips directories), but this is `pub` and any future caller
     /// passing a downloaded or user-supplied name would otherwise get a
-    /// traversal for free — `Path::join` does not normalize, and an absolute
+    /// traversal for free - `Path::join` does not normalize, and an absolute
     /// name replaces the base entirely.
     pub fn install_from_bytes(&self, name: &str, data: &[u8]) -> anyhow::Result<InstalledAgent> {
         self.install_from_bytes_with(name, data, classify)
     }
 
     /// Core of [`install_from_bytes`](Self::install_from_bytes) with the entry
-    /// classifier injected — see [`reject_symlinks_with`] for why the seam
+    /// classifier injected - see [`reject_symlinks_with`] for why the seam
     /// exists. A `fn` pointer, so there is one monomorphization.
     fn install_from_bytes_with(
         &self,
@@ -176,8 +176,8 @@ impl AgentInstaller {
         // Extract tar.gz archive.
         //
         // `Read::take` bounds the *decompressed* stream. Without it a ~1 MB
-        // bundle could expand to fill the disk — the classic decompression bomb
-        // — and nothing downstream would notice until the write failed.
+        // bundle could expand to fill the disk - the classic decompression bomb -
+        // and nothing downstream would notice until the write failed.
         //
         // `set_preserve_permissions(false)` and `set_unpack_xattrs(false)`:
         // otherwise an attacker-authored archive chooses the modes and extended
@@ -185,7 +185,7 @@ impl AgentInstaller {
         //
         // tar-rs already rejects `..` components and validates every entry
         // against the destination (including hard links), so classic zip-slip is
-        // covered by the dependency — which is a reason to keep `cargo audit`
+        // covered by the dependency - which is a reason to keep `cargo audit`
         // watching it, not a reason to assume it always will.
         let decoder = GzDecoder::new(data).take(MAX_UNPACKED_BYTES);
         let mut archive = tar::Archive::new(decoder);
@@ -264,7 +264,7 @@ impl AgentInstaller {
         let mut agents = Vec::new();
 
         for entry in
-            fs::read_dir(&self.install_dir).expect("install_dir exists — read_dir should not fail")
+            fs::read_dir(&self.install_dir).expect("install_dir exists - read_dir should not fail")
         {
             let entry = entry.expect("read_dir entry should not fail");
             let path = entry.path();
@@ -411,7 +411,7 @@ description = "{}"
     /// stops it mid-stream, so the unpack fails instead of filling the disk.
     #[test]
     fn install_from_bytes_refuses_a_decompression_bomb() {
-        // 512 MiB of zeros, which gzip compresses to a few hundred KiB — past
+        // 512 MiB of zeros, which gzip compresses to a few hundred KiB - past
         // the 256 MiB cap, so extraction must fail.
         let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
         {
@@ -443,7 +443,7 @@ description = "{}"
         assert!(err.to_string().contains("Failed to extract"), "{err}");
     }
 
-    /// A bundle with a `tools/` subdirectory — the realistic shape, and the one
+    /// A bundle with a `tools/` subdirectory - the realistic shape, and the one
     /// that exercises the recursive descent rather than only the flat case.
     #[test]
     fn install_from_bytes_accepts_a_nested_directory() {
@@ -474,7 +474,7 @@ description = "{}"
         assert!(installed.path.join("tools/web_fetch.rhai").exists());
     }
 
-    /// A symlink hidden one directory down is refused too — the scan descends
+    /// A symlink hidden one directory down is refused too - the scan descends
     /// rather than checking only the top level, which is where a bundle would
     /// naturally put one (`tools/`).
     #[cfg(unix)]
@@ -533,7 +533,7 @@ description = "{}"
         assert!(err.to_string().contains("symlink or unreadable"), "{err}");
     }
 
-    /// The refusal has to propagate out of a *nested* directory too — a bundle
+    /// The refusal has to propagate out of a *nested* directory too - a bundle
     /// plants its `tools/` subdirectory, not its root.
     #[test]
     fn reject_symlinks_refuses_an_entry_nested_in_a_subdirectory() {
@@ -556,7 +556,7 @@ description = "{}"
     }
 
     /// And the refusal fails the *install*, rather than being computed and
-    /// discarded — the bundle must not be left in place.
+    /// discarded - the bundle must not be left in place.
     #[test]
     fn install_refuses_a_bundle_whose_entries_cannot_be_certified() {
         fn all_refused(_: &Path) -> Entry {
@@ -733,10 +733,10 @@ description = "{}"
         let bundle = make_bundle("good-agent", "1.0.0", "Good");
         installer.install_from_bytes("good-agent", &bundle).unwrap();
 
-        // A regular file (not a dir) — covers the `if path.is_dir()` false branch
+        // A regular file (not a dir) - covers the `if path.is_dir()` false branch
         fs::write(dir.path().join("not-an-agent.txt"), "hello").unwrap();
 
-        // A dir without an agent.leviath manifest — covers the `if manifest_path.exists()` false branch
+        // A dir without an agent.leviath manifest - covers the `if manifest_path.exists()` false branch
         fs::create_dir_all(dir.path().join("no-manifest-dir")).unwrap();
 
         let agents = installer.list_installed().unwrap();
@@ -845,7 +845,7 @@ description = "{}"
     #[test]
     fn install_from_bytes_corrupt_tar_after_valid_gzip_returns_extract_error() {
         // Valid gzip framing wrapping bytes that are NOT a valid tar
-        // archive -- `GzDecoder` decompresses fine, but `Archive::unpack`
+        // archive - `GzDecoder` decompresses fine, but `Archive::unpack`
         // fails on the malformed header, exercising the "Failed to extract
         // package" error arm that every other test's well-formed bundle
         // never reaches.

@@ -379,7 +379,7 @@ impl tokio::io::AsyncWrite for FailingWriter {
     }
 }
 
-/// An `AsyncWrite` that succeeds for the first `ok` writes, then fails — to
+/// An `AsyncWrite` that succeeds for the first `ok` writes, then fails - to
 /// break the stream partway through a session.
 struct FailAfter {
     remaining: std::sync::atomic::AtomicUsize,
@@ -431,7 +431,7 @@ async fn output_failing_mid_turn_ends_the_turn() {
 
     let (_bp, args) = blueprint_args();
     let cwd = args.agent.clone().unwrap();
-    // Build the session/new line via serde so the cwd path is JSON-escaped —
+    // Build the session/new line via serde so the cwd path is JSON-escaped -
     // Windows paths contain backslashes that would otherwise be invalid JSON.
     let session_new = serde_json::json!({
         "jsonrpc": "2.0",
@@ -591,7 +591,7 @@ async fn session_new_logs_and_ignores_supplied_mcp_servers() {
         r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[{"name":"x","command":"y"}]}}"#,
     )
     .await;
-    // Still opens the session — the servers are only logged.
+    // Still opens the session - the servers are only logged.
     assert!(h.recv().await.result.is_some());
     h.close_input().await;
 }
@@ -853,12 +853,12 @@ async fn a_second_prompt_that_cannot_be_delivered_ends_the_turn() {
     h.close_input().await;
 }
 
-// ─── interactions: no client capabilities (Gas City) — keep turn in flight ───
+// ─── interactions: no client capabilities (Gas City) - keep turn in flight ───
 
 #[tokio::test]
 async fn an_interaction_without_capabilities_is_surfaced_but_does_not_end_the_turn() {
     // The interaction is raised, then the run continues and completes. The turn
-    // must surface the question AND only end on the completion — never on the
+    // must surface the question AND only end on the completion - never on the
     // interaction itself (which would tell the client "done" prematurely).
     let daemon = ScriptedDaemon::new(vec![free_text_event(), completed("complete")], spawn_ok);
     let (mut h, _bp) = opened_session(daemon, false).await;
@@ -897,8 +897,8 @@ async fn a_tool_approval_without_capabilities_keeps_the_turn_alive_until_done() 
 
 #[tokio::test]
 async fn a_run_that_settles_into_complete_interactive_ends_the_turn_via_meta() {
-    // CompleteInteractive emits no terminal `Completed` event — the agent stays
-    // live for follow-up — so the turn must detect "done" from the persisted run
+    // CompleteInteractive emits no terminal `Completed` event - the agent stays
+    // live for follow-up - so the turn must detect "done" from the persisted run
     // status on the poll tick.
     let daemon = ScriptedDaemon::new(vec![status_event()], spawn_ok);
     let (mut h, _bp) = opened_session(daemon, false).await;
@@ -1147,7 +1147,7 @@ async fn a_cancel_notification_between_turns_cancels_the_run() {
 async fn a_cancel_notification_with_no_active_run_is_a_no_op() {
     let daemon = ScriptedDaemon::new(vec![], spawn_ok);
     let mut h = Harness::start(daemon, AgentClientArgs::default());
-    // No session, no run — cancel is simply ignored.
+    // No session, no run - cancel is simply ignored.
     h.send(r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s"}}"#)
         .await;
     h.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#)
@@ -1264,7 +1264,7 @@ async fn oversized_output_is_split_across_chunks() {
 #[tokio::test]
 async fn output_is_flushed_on_the_poll_tick_between_events() {
     // A daemon that answers Spawn but delays the terminal event past one poll
-    // interval, so the 250 ms tick — not an event — is what flushes the output.
+    // interval, so the 250 ms tick - not an event - is what flushes the output.
     let dir = tempfile::tempdir().unwrap();
     let id = control_id(dir.path());
     let mut listener = bind_control_listener(&id).unwrap();

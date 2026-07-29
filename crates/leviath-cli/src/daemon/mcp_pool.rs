@@ -31,7 +31,7 @@ pub struct McpPool {
     connected: StdMutex<HashMap<String, Vec<Tool>>>,
     /// Where MCP OAuth grants are kept, so a refreshed token is written back to
     /// the backend it came from. Defaults to the file store, which is also the
-    /// config default -- a pool built without being told reads `mcp-auth.json`,
+    /// config default - a pool built without being told reads `mcp-auth.json`,
     /// exactly as before this field existed.
     credential_store: leviath_core::CredentialStoreKind,
     /// `[security] allow_env_vars`: which credential-shaped variables an MCP
@@ -92,7 +92,7 @@ impl McpPool {
     /// through `credential_store`'s backend.
     ///
     /// The pool refreshes lapsed tokens and writes them back, so it has to write
-    /// them where the user asked for them to be kept -- otherwise the first
+    /// them where the user asked for them to be kept - otherwise the first
     /// refresh after a keychain migration would put a fresh refresh token back
     /// on disk.
     pub fn for_daemon_with(
@@ -161,7 +161,7 @@ impl McpPool {
             Ok(header) => header,
             Err(e) => {
                 let err = e.to_string();
-                tracing::warn!(server = %config.name, error = %err, "MCP auth unavailable — skipping");
+                tracing::warn!(server = %config.name, error = %err, "MCP auth unavailable - skipping");
                 return Vec::new();
             }
         };
@@ -223,7 +223,7 @@ impl McpPool {
     /// `runs_dir`, so a run reloaded on daemon restart can still *execute* its
     /// blueprint MCP tools (their advertisement is restored from the snapshot;
     /// only the shared connection is lost across a restart). Blueprint paths are
-    /// collected synchronously, then connected — no fs iterator is held across an
+    /// collected synchronously, then connected - no fs iterator is held across an
     /// `.await`.
     pub async fn warm_recovered(&self, runs_dir: &std::path::Path) {
         use leviath_core::run_meta::RunStatus;
@@ -256,7 +256,7 @@ impl McpPool {
     }
 
     /// The cached defs for every config in `configs` (pool must already be warm
-    /// for them — call [`Self::ensure`] first). Unknown/unconnected configs
+    /// for them - call [`Self::ensure`] first). Unknown/unconnected configs
     /// contribute nothing. This is the sync read the spawner uses.
     pub fn cached_defs_for(&self, configs: &[MCPServerConfig]) -> Vec<Tool> {
         let cache = self
@@ -274,11 +274,11 @@ impl McpPool {
 
 /// Parse a blueprint manifest's `[[mcp_servers]]` array (issue #97). Parsed
 /// CLI-side because `leviath-core` cannot depend on `leviath-mcp` (that crate
-/// already depends on core — a cycle). Returns an empty vec when the section is
+/// already depends on core - a cycle). Returns an empty vec when the section is
 /// absent or malformed; a malformed entry is skipped with a warning.
 pub fn parse_blueprint_mcp_servers(manifest_toml: &str) -> Vec<MCPServerConfig> {
     // `toml::from_str`, not `manifest_toml.parse::<toml::Value>()`. In toml 1.x
-    // `FromStr for Value` parses a single *value*, not a document — so a real
+    // `FromStr for Value` parses a single *value*, not a document - so a real
     // manifest starting with `[agent]` reads as an array literal followed by
     // junk and fails. It still compiles, so the change is silent; the tests are
     // what caught it.
@@ -304,7 +304,7 @@ mod tests {
     use crate::test_support::with_tracing;
 
     /// A minimal stdio MCP server (python3) speaking initialize / tools/list /
-    /// tools/call — mirrors the fixtures in `tools.rs`.
+    /// tools/call - mirrors the fixtures in `tools.rs`.
     const STUB: &str = r#"
 import sys, json
 def respond(i, r):

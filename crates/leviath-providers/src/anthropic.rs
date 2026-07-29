@@ -24,7 +24,7 @@ fn maybe_dump_request(body: &serde_json::Value) {
 /// Anthropic allows at most 4 `cache_control` blocks per request, counted
 /// across BOTH system blocks and message content (issue #12). Emitting one per
 /// cacheable region overruns that the moment a blueprint has 5+ pinned/cached
-/// regions — a hard `400 "A maximum of 4 blocks with cache_control may be
+/// regions - a hard `400 "A maximum of 4 blocks with cache_control may be
 /// provided"`.
 ///
 /// Because a breakpoint caches the entire prefix up to and including its block,
@@ -36,7 +36,7 @@ fn maybe_dump_request(body: &serde_json::Value) {
 /// stable prefix's cache when a later, more-volatile tier changes.
 ///
 /// `budget` caps the number returned. If there are more tier-runs than the
-/// budget, the last `budget` are kept — the final run always ends on the last
+/// budget, the last `budget` are kept - the final run always ends on the last
 /// cacheable block, so its breakpoint spans the full cacheable prefix and
 /// nothing cacheable is left entirely uncached.
 fn system_cache_breakpoints(hints: &[leviath_core::CacheHint], budget: usize) -> Vec<usize> {
@@ -60,13 +60,13 @@ fn system_cache_breakpoints(hints: &[leviath_core::CacheHint], budget: usize) ->
     ends
 }
 
-/// Always log the serialized request size at debug, and — when `dir` is
-/// `Some` — write the full JSON body to `<dir>/anthropic-req-<unix_nanos>.json`.
+/// Always log the serialized request size at debug, and - when `dir` is
+/// `Some` - write the full JSON body to `<dir>/anthropic-req-<unix_nanos>.json`.
 ///
 /// Diagnostic for comparing request bodies: it lets us see exactly how a
 /// request that stalls (e.g. one after a batch read, with file-tracked content
 /// injected into the system prompt) differs from the small requests that
-/// succeed — size, structure, and content — without a special build. Enable by
+/// succeed - size, structure, and content - without a special build. Enable by
 /// setting `LEVIATH_DUMP_REQUEST_DIR`.
 fn dump_request(body: &serde_json::Value, dir: Option<&str>) {
     let bytes = serde_json::to_vec(body).map(|v| v.len()).unwrap_or(0);
@@ -78,14 +78,14 @@ fn dump_request(body: &serde_json::Value, dir: Option<&str>) {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let path = std::path::Path::new(dir).join(format!("anthropic-req-{nanos}.json"));
-    // The dump is the whole system prompt, transcript and tool results — file
+    // The dump is the whole system prompt, transcript and tool results - file
     // contents and `env_var` output included. It was written at the process
     // umask into a directory created the same way, so pointing this at `/tmp` on
     // a shared host handed every local account the conversation.
     let _ = std::fs::create_dir_all(dir);
     let _ = leviath_sys::secure_dir_perms(std::path::Path::new(dir));
     // `body` is an already-built `serde_json::Value`, which is infallibly
-    // serializable (no NaN/Inf numbers, keys always strings) — `to_string_pretty`
+    // serializable (no NaN/Inf numbers, keys always strings) - `to_string_pretty`
     // only fails on a custom `Serialize` impl that errors, which a `Value` never
     // has. So there is no reachable error arm; `.expect` documents that.
     let pretty = serde_json::to_string_pretty(body)
@@ -174,7 +174,7 @@ impl AnthropicProvider {
 
     /// Return built-in capabilities for a model based on its name pattern.
     fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
-        // Opus 5 — top-tier, 1M context, 128K output, no temperature
+        // Opus 5 - top-tier, 1M context, 128K output, no temperature
         if model.contains("claude-opus-5") {
             return ModelCapabilities {
                 supports_temperature: false,
@@ -185,7 +185,7 @@ impl AnthropicProvider {
                 max_output_tokens: 128_000,
             };
         }
-        // Sonnet 5 — 1M context, 128K output, no temperature
+        // Sonnet 5 - 1M context, 128K output, no temperature
         if model.contains("claude-sonnet-5") {
             return ModelCapabilities {
                 supports_temperature: false,
@@ -196,7 +196,7 @@ impl AnthropicProvider {
                 max_output_tokens: 128_000,
             };
         }
-        // Fable 5 / Mythos 5 — top-tier, 1M context, 128K output, no temperature
+        // Fable 5 / Mythos 5 - top-tier, 1M context, 128K output, no temperature
         if model.contains("claude-fable-5") || model.contains("claude-mythos-5") {
             return ModelCapabilities {
                 supports_temperature: false,
@@ -207,7 +207,7 @@ impl AnthropicProvider {
                 max_output_tokens: 128_000,
             };
         }
-        // Opus 4.8 / 4.7 — 1M context, 128K output, no temperature
+        // Opus 4.8 / 4.7 - 1M context, 128K output, no temperature
         if model.contains("claude-opus-4-8") || model.contains("claude-opus-4-7") {
             return ModelCapabilities {
                 supports_temperature: false,
@@ -218,7 +218,7 @@ impl AnthropicProvider {
                 max_output_tokens: 128_000,
             };
         }
-        // Opus 4.6 — 1M context, 128K output, temperature supported
+        // Opus 4.6 - 1M context, 128K output, temperature supported
         if model.contains("claude-opus-4-6") {
             return ModelCapabilities {
                 supports_temperature: true,
@@ -229,7 +229,7 @@ impl AnthropicProvider {
                 max_output_tokens: 128_000,
             };
         }
-        // Sonnet 4.6 — 1M context, 128K output, temperature supported
+        // Sonnet 4.6 - 1M context, 128K output, temperature supported
         if model.contains("claude-sonnet-4-6") {
             return ModelCapabilities {
                 supports_temperature: true,
@@ -240,7 +240,7 @@ impl AnthropicProvider {
                 max_output_tokens: 128_000,
             };
         }
-        // Haiku 4.5 — 200K context, 64K output, temperature supported
+        // Haiku 4.5 - 200K context, 64K output, temperature supported
         if model.contains("claude-haiku-4-5") {
             return ModelCapabilities {
                 supports_temperature: true,
@@ -294,7 +294,7 @@ impl AnthropicProvider {
     /// Wraps the text as a single user message (the endpoint counts structured
     /// message input). Returns the reported `input_tokens`, or an error the
     /// caller turns into a heuristic fallback. Does not consume the inference
-    /// rate limiter — counting is a cheap, best-effort side call.
+    /// rate limiter - counting is a cheap, best-effort side call.
     async fn count_tokens_remote(&self, text: &str, model: &str) -> Result<usize> {
         let url = format!("{}/messages/count_tokens", self.base_url);
         let body = serde_json::json!({
@@ -854,7 +854,7 @@ impl Stream for AnthropicSseStream {
                     ))));
                 }
                 std::task::Poll::Ready(None) => {
-                    // Stream ended — try to parse any remaining data
+                    // Stream ended - try to parse any remaining data
                     if let Some(chunk) =
                         parse_sse_event(&mut this.buffer, &mut this.current_tool_index)
                     {
@@ -1530,7 +1530,7 @@ mod tests {
     fn build_request_body_system_blocks_take_priority_over_message_breakpoints() {
         use leviath_core::CacheHint;
         // 3 distinct system tiers claim 3 of the 4 breakpoints; the lone message
-        // that requests one gets the last slot — and never more than 4 total.
+        // that requests one gets the last slot - and never more than 4 total.
         let provider = AnthropicProvider::new("test-key".to_string());
         let system = vec![
             crate::SystemBlock {
@@ -2320,7 +2320,7 @@ mod tests {
 
     #[test]
     fn test_parse_response_text_block_missing_text_field_is_skipped() {
-        // A text block with no "text" key — exercises the if-let None branch
+        // A text block with no "text" key - exercises the if-let None branch
         // in parse_response's content iteration.
         let provider = AnthropicProvider::new("key".to_string());
         let body = serde_json::json!({
@@ -2536,7 +2536,7 @@ mod tests {
 
     // ─── HTTP-call-level tests via a raw-TCP mock server ───────────────────
     //
-    // No mocking crate — bind to an OS-assigned localhost port, accept one
+    // No mocking crate - bind to an OS-assigned localhost port, accept one
     // connection, write back a fixed HTTP/1.1 response. Enough to exercise
     // infer()/infer_stream()/list_models()'s response-handling branches
     // without a real network call.
@@ -2824,10 +2824,10 @@ mod tests {
     #[tokio::test]
     async fn infer_stream_body_error_propagates_as_stream_item_error() {
         // Send a Content-Length larger than the actual body and close the
-        // connection early — reqwest's body stream then yields a real
+        // connection early - reqwest's body stream then yields a real
         // Err(reqwest::Error) mid-stream, exercising AnthropicSseStream's
         // Poll::Ready(Some(Err(e))) branch with a genuine error (not a
-        // hand-built one — reqwest::Error has no public constructor).
+        // hand-built one - reqwest::Error has no public constructor).
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -2859,7 +2859,7 @@ mod tests {
         // chunk: the first has no "data:" line (parse_sse_event consumes it
         // but returns None), the second is a real content_block_delta. The
         // top-of-loop parse_sse_event check consumes+discards the first
-        // event, then polls the inner stream again for more data -- which
+        // event, then polls the inner stream again for more data - which
         // immediately reports the stream as ended (this is the only chunk).
         // That exercises the "stream ended, try to parse any remaining
         // data" fallback, which finds the still-buffered second event.

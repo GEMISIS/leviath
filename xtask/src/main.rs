@@ -1,4 +1,4 @@
-//! Leviath xtask — dev-tool automation for the workspace.
+//! Leviath xtask - dev-tool automation for the workspace.
 //!
 //! Run via: `cargo xtask <subcommand>`
 //!

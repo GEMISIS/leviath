@@ -91,7 +91,7 @@ fn auth_status(server: &MCPServerConfig, store: &AuthStore, now: u64) -> String 
     }
 }
 
-/// `GET /api/mcp/servers` — list configured servers with their auth status.
+/// `GET /api/mcp/servers` - list configured servers with their auth status.
 pub(super) async fn list_servers(State(state): State<AppState>) -> impl IntoResponse {
     let admin = &state.mcp;
     let config = match Config::load_from_path_public(&admin.config_path) {
@@ -122,7 +122,7 @@ pub(super) struct AddServerRequest {
     headers: std::collections::HashMap<String, String>,
 }
 
-/// `POST /api/mcp/servers` — add a server.
+/// `POST /api/mcp/servers` - add a server.
 pub(super) async fn add_server(
     State(state): State<AppState>,
     Json(req): Json<AddServerRequest>,
@@ -162,7 +162,7 @@ pub(super) async fn add_server(
         .into_response()
 }
 
-/// `DELETE /api/mcp/servers/{name}` — remove a server and its credentials.
+/// `DELETE /api/mcp/servers/{name}` - remove a server and its credentials.
 pub(super) async fn remove_server(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
@@ -192,7 +192,7 @@ pub(super) async fn remove_server(
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// `POST /api/mcp/servers/{name}/login` — run the OAuth browser flow.
+/// `POST /api/mcp/servers/{name}/login` - run the OAuth browser flow.
 ///
 /// On the host running `lev serve` this opens the operator's browser and
 /// completes the loopback redirect, the same flow `lev mcp login` uses.
@@ -245,7 +245,7 @@ pub(super) async fn login(
     Json(serde_json::json!({ "status": "authenticated", "server": name })).into_response()
 }
 
-/// `GET /api/mcp/servers/{name}/status` — one server's transport and auth state.
+/// `GET /api/mcp/servers/{name}/status` - one server's transport and auth state.
 pub(super) async fn status(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
@@ -266,7 +266,7 @@ pub(super) async fn status(
     Json(McpServerInfo::describe(server, &store, (admin.clock)())).into_response()
 }
 
-/// `POST /api/mcp/servers/{name}/test` — connect and report the tool count.
+/// `POST /api/mcp/servers/{name}/test` - connect and report the tool count.
 pub(super) async fn test_server(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,

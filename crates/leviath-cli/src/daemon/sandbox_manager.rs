@@ -5,7 +5,7 @@
 //! keyed and deduplicated by config signature so identical configs across stages
 //! share one warm container), routes each shell call to the *current* stage's
 //! sandbox, and tears every container down at reap. `namespace` and `none` kinds
-//! need no persistent state — they are pure per-exec command wrapping.
+//! need no persistent state - they are pure per-exec command wrapping.
 //!
 //! It implements [`leviath_tools::ShellExecutor`], so the built-in shell tool
 //! runs its command inside the sandbox transparently; file tools stay on the
@@ -26,7 +26,7 @@ use tokio::process::Command as TokioCommand;
 
 /// POSIX shell used *inside* a container. Every image ships `/bin/sh`, whereas
 /// the host's detected shell (e.g. `/bin/zsh` on macOS) generally isn't present
-/// in the image — so container exec must use its own shell, not the host's.
+/// in the image - so container exec must use its own shell, not the host's.
 const CONTAINER_SHELL: &str = "sh";
 const CONTAINER_SHELL_FLAG: &str = "-c";
 
@@ -51,17 +51,17 @@ pub struct SandboxManager {
     containers: HashMap<u64, LiveContainer>,
     /// Per-stage-index resolved sandbox config; immutable after construction.
     by_index: Vec<ToolSandboxConfig>,
-    /// Whether Linux namespaces are usable on this host — captured at build so
+    /// Whether Linux namespaces are usable on this host - captured at build so
     /// `build_command` (the `ShellExecutor` hot path) doesn't re-probe and both
     /// its namespace arms are reachable regardless of the test platform.
     namespace_ok: bool,
-    /// The current stage's config — the only mutable state, swapped on stage
+    /// The current stage's config - the only mutable state, swapped on stage
     /// change (the manager lives behind an `Arc`, so interior mutability).
     current: StdMutex<ToolSandboxConfig>,
 }
 
 /// Signature identifying a distinct container: same engine + image + network +
-/// mounts → one shared warm container. (Deterministic within a process —
+/// mounts → one shared warm container. (Deterministic within a process -
 /// `DefaultHasher` uses fixed keys.)
 fn signature(cfg: &ToolSandboxConfig) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -86,7 +86,7 @@ fn sanitize(run_id: &str) -> String {
         .collect()
 }
 
-/// Build the host shell command (no sandbox) — the exact prior behavior.
+/// Build the host shell command (no sandbox) - the exact prior behavior.
 fn host_command(shell: &str, flag: &str, command: &str, workdir: &Path) -> TokioCommand {
     let mut c = TokioCommand::new(shell);
     c.arg(flag).arg(command).current_dir(workdir);
@@ -97,7 +97,7 @@ impl SandboxManager {
     /// Build the manager for an agent whose stages resolve (in order) to
     /// `by_index`, bind-mounting `workdir`. `entry_index` selects the initial
     /// stage's config. Returns `Ok(None)` when nothing is sandboxed (the common
-    /// case — the caller then attaches no executor and shell runs on the host).
+    /// case - the caller then attaches no executor and shell runs on the host).
     /// Returns `Err` when a required runtime is unavailable and that config's
     /// `on_unavailable` is `Error`.
     pub fn build(
@@ -165,7 +165,7 @@ impl SandboxManager {
                     let Some(engine) = cfg.engine.clone().or_else(|| detected.clone()) else {
                         unavailable(
                             cfg,
-                            "no container engine found — install docker or podman, \
+                            "no container engine found - install docker or podman, \
                              or set `engine` in [sandbox]",
                             &containers,
                             run,
@@ -731,7 +731,7 @@ mod tests {
     }
 
     // Live end-to-end verification against a real container engine is not a
-    // compiled test here — an `#[ignore]`d test still counts as uncovered against
+    // compiled test here - an `#[ignore]`d test still counts as uncovered against
     // the crate's hard-100% coverage gate. To verify the real create → exec →
     // destroy path manually (with a container daemon running):
     //

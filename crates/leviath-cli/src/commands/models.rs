@@ -69,7 +69,7 @@ struct BuiltinEntry {
 /// specified.  Remote results override these values for identical model IDs.
 fn builtin_table() -> Vec<BuiltinEntry> {
     macro_rules! entry {
-        // Short form — tools defaults to true
+        // Short form - tools defaults to true
         ($provider:expr_2021, $id:expr_2021, $name:expr_2021,
          temp=$t:expr_2021, ctx=$ctx:expr_2021, out=$out:expr_2021) => {
             entry!(
@@ -82,7 +82,7 @@ fn builtin_table() -> Vec<BuiltinEntry> {
                 out = $out
             )
         };
-        // Full form — explicit tools flag
+        // Full form - explicit tools flag
         ($provider:expr_2021, $id:expr_2021, $name:expr_2021,
          temp=$t:expr_2021, tools=$to:expr_2021, ctx=$ctx:expr_2021, out=$out:expr_2021) => {
             BuiltinEntry {
@@ -168,7 +168,7 @@ fn builtin_table() -> Vec<BuiltinEntry> {
             out = 65_536
         ),
         // ── OpenAI ─────────────────────────────────────────────────────────────
-        // GPT-5.5 — flagship (Apr 2026), 1M+ context
+        // GPT-5.5 - flagship (Apr 2026), 1M+ context
         entry!(
             "openai",
             "gpt-5.5",
@@ -363,7 +363,7 @@ fn builtin_table() -> Vec<BuiltinEntry> {
 /// each call site's monomorphization of this function separately, and it
 /// has been observed to report the production instantiation as 0-hit even
 /// though it's genuinely exercised by `execute_list_command_runs_without_error`
-/// et al. -- the same instantiation-merging undercount documented for
+/// et al. - the same instantiation-merging undercount documented for
 /// `run_stage_loop` (see `run/worker.rs`'s `run_worker_inner` and
 /// `run/session.rs`'s `resolve_task_with`, which use the same fix). A
 /// `&dyn Fn` trait object is one concrete type regardless of what closure is
@@ -400,14 +400,14 @@ async fn list_with_registry(
             }
 
             // `registry.get(provider_name)` is structurally guaranteed
-            // `Some` here -- `provider_name` comes from
+            // `Some` here - `provider_name` comes from
             // `registry.provider_names()` just above, and both methods read
             // the same underlying map (see `leviath-runtime/src/engine.rs`'s
             // `ProviderRegistry`). There is no way to construct a registry
             // where a name from `provider_names()` isn't `get()`-able, so
             // `.expect()` documents that invariant instead of leaving a
             // defensive-but-unreachable `if let` branch permanently
-            // uncovered -- the same choice already made by
+            // uncovered - the same choice already made by
             // `commands/serve/config.rs`'s `get_models` for this identical
             // pattern.
             let provider = registry
@@ -451,8 +451,8 @@ async fn list_with_registry(
 
     if entries.is_empty() {
         // `entries` starts from `builtin_table()`, which is a hardcoded,
-        // permanently non-empty static list (see `builtin_table_is_not_empty`)
-        // -- the only way to reach an empty `entries` here is the provider
+        // permanently non-empty static list (see `builtin_table_is_not_empty`) -
+        // the only way to reach an empty `entries` here is the provider
         // filter above removing every entry, which requires `args.provider`
         // to be `Some`. So `args.provider.is_some()` is always true at this
         // point; printing the hint unconditionally documents that invariant
@@ -500,7 +500,7 @@ async fn list_with_registry(
 
 // ─── show ─────────────────────────────────────────────────────────────────────
 
-/// Core of [`show`], with provider-registry construction injected -- see
+/// Core of [`show`], with provider-registry construction injected - see
 /// [`list_with_registry`] for why.
 async fn show_with_registry(
     args: ShowArgs,
@@ -566,7 +566,7 @@ async fn show_with_registry(
         }
     }
 
-    // 4. Not found anywhere — print a helpful message with a TOML snippet.
+    // 4. Not found anywhere - print a helpful message with a TOML snippet.
     println!("Model '{}' not found.", model_id);
     println!(
         "Add it to {} under [model_capabilities.'{}']",
@@ -1046,7 +1046,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_with_openai_filter() {
-        // See the comment on list_with_openrouter_filter -- same real
+        // See the comment on list_with_openrouter_filter - same real
         // Config::load() race.
         crate::config::with_isolated_config_path_async(
             "models-list-openai-filter",
@@ -1066,7 +1066,7 @@ mod tests {
 
     #[tokio::test]
     async fn show_builtin_anthropic_opus() {
-        // See the comment on list_with_openrouter_filter -- same real
+        // See the comment on list_with_openrouter_filter - same real
         // Config::load() race.
         crate::config::with_isolated_config_path_async(
             "models-show-anthropic-opus",
@@ -1087,7 +1087,7 @@ mod tests {
 
     #[tokio::test]
     async fn show_builtin_openai_model() {
-        // See the comment on list_with_openrouter_filter -- same real
+        // See the comment on list_with_openrouter_filter - same real
         // Config::load() race.
         crate::config::with_isolated_config_path_async(
             "models-show-openai-model",
@@ -1108,7 +1108,7 @@ mod tests {
 
     #[tokio::test]
     async fn show_builtin_deepseek_r1() {
-        // See the comment on list_with_openrouter_filter -- same real
+        // See the comment on list_with_openrouter_filter - same real
         // Config::load() race.
         crate::config::with_isolated_config_path_async(
             "models-show-deepseek-r1",
@@ -1377,7 +1377,7 @@ mod tests {
     ) -> impl Fn(&Config) -> leviath_runtime::ProviderRegistry {
         // `Fn` (not `FnOnce`) so the closure can be called through the
         // `&dyn Fn` trait object `list_with_registry`/`show_with_registry`
-        // now take -- see the doc comment on `list_with_registry` for why.
+        // now take - see the doc comment on `list_with_registry` for why.
         // Only ever actually invoked once per test, but `Fn`'s "may be
         // called more than once" contract means captured state can't be
         // moved out on each call, hence the clone.

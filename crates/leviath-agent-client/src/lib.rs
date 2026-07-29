@@ -1,6 +1,6 @@
 //! # Leviath Agent Client Protocol
 //!
-//! Wire types and Leviath mappings for the [Agent **Client** Protocol][acp] — the
+//! Wire types and Leviath mappings for the [Agent **Client** Protocol][acp] - the
 //! JSON-RPC 2.0 protocol agent hosts (Zed, Gas City, …) use to drive a headless
 //! agent over **stdio**.
 //!

@@ -73,13 +73,13 @@ pub struct AwaitingInteraction;
 ///
 /// Set when an agent is launched with `--yolo` (approve everything, run
 /// unattended). The taint gate raises a `MultipleChoice` interaction that the
-/// tool-policy `--yolo` wildcard does not cover, so without this a headless run
-/// — e.g. one driven over the Agent Client Protocol, where no human can answer —
+/// tool-policy `--yolo` wildcard does not cover, so without this a headless run -
+/// e.g. one driven over the Agent Client Protocol, where no human can answer -
 /// would block forever on a gate no one resolves. When present,
 /// [`dispatch_tools`](crate::pipeline::dispatch_tools) still evaluates the gate
 /// (so an over-cleared call is recorded in the audit trail as
 /// [`YoloAutoApprove`](leviath_core::taint::GateDecisionSource::YoloAutoApprove))
-/// but auto-approves the call instead of raising a prompt — enforcement is
+/// but auto-approves the call instead of raising a prompt - enforcement is
 /// waived, accountability is kept.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct GateAutoApprove;
@@ -89,7 +89,7 @@ pub struct GateAutoApprove;
 ///
 /// A stage-boundary checkpoint (`plan_approval` and friends) blocks on the
 /// interaction hub exactly like a tool approval does, so an unattended run
-/// would park at the first one forever — the same dead end issue #107 is about,
+/// would park at the first one forever - the same dead end issue #107 is about,
 /// reached a different way. When present,
 /// [`dispatch_interaction_point`](crate::interaction_points::dispatch_interaction_point)
 /// still publishes the document to its region (so the decision is inspectable
@@ -186,10 +186,10 @@ pub struct AssembledContext {
 fn cache_hint_sort_priority(hint: leviath_core::CacheHint) -> u8 {
     use leviath_core::CacheHint;
     match hint {
-        CacheHint::Always => 0,               // Pinned, CompactHistory — most stable
+        CacheHint::Always => 0,               // Pinned, CompactHistory - most stable
         CacheHint::SlidingPrefix { .. } => 1, // Partially stable
-        CacheHint::UntilChanged => 2,         // Compacting — changes on compaction
-        CacheHint::Never => 3,                // Temporary, Clearable — changes every iteration
+        CacheHint::UntilChanged => 2,         // Compacting - changes on compaction
+        CacheHint::Never => 3,                // Temporary, Clearable - changes every iteration
     }
 }
 
@@ -514,7 +514,7 @@ impl ContextWindow {
                                 is_error,
                                 ..
                             } => {
-                                // Accumulate — will be flushed on next non-ToolResult or end
+                                // Accumulate - will be flushed on next non-ToolResult or end
                                 pending_tool_results.push(
                                     leviath_providers::ContentBlock::ToolResult {
                                         tool_use_id: tool_call_id.clone(),
@@ -682,7 +682,7 @@ impl ContextWindow {
                             .collect();
 
                         if filtered.is_empty() {
-                            // No content left — drop this message entirely
+                            // No content left - drop this message entirely
                             None
                         } else {
                             Some(leviath_providers::Message {
@@ -714,7 +714,7 @@ impl ContextWindow {
             let bp_idx = messages.len() - 4;
             messages[bp_idx].cache_breakpoint = true;
         } else if messages.len() >= 2 {
-            // Small conversation — cache at least the first message
+            // Small conversation - cache at least the first message
             messages[0].cache_breakpoint = true;
         }
 
@@ -731,7 +731,7 @@ impl ContextWindow {
         // request that ends on an assistant turn as an (unsupported) prefill
         // ("This model does not support assistant message prefill"). After a
         // stage transition that carries the conversation, the last message is
-        // the previous stage's final assistant turn — hand the turn back to the
+        // the previous stage's final assistant turn - hand the turn back to the
         // model with a minimal nudge so it acts on the new stage's instructions.
         if messages.last().map(|m| m.role.as_str()) == Some("assistant") {
             messages.push(leviath_providers::Message {
@@ -1158,7 +1158,7 @@ mod tests {
 
         assert_eq!(window.current_tokens, 600);
 
-        // Request 500 free tokens — only 400 free, can't free clearable/temporary, so compacting should be identified
+        // Request 500 free tokens - only 400 free, can't free clearable/temporary, so compacting should be identified
         let result = window.try_evict(500).unwrap();
         assert_eq!(result.tokens_freed, 0);
         assert_eq!(result.needs_compaction, vec!["impl".to_string()]);
@@ -1188,7 +1188,7 @@ mod tests {
 
     #[test]
     fn test_try_evict_errors_when_pinned_regions_exceed_budget() {
-        // Pinned/CompactHistory regions are never evicted — if their combined
+        // Pinned/CompactHistory regions are never evicted - if their combined
         // token usage alone exceeds max_tokens, try_evict must report this as
         // a configuration error instead of silently doing nothing useful.
         let mut window = ContextWindow::new(1000);
@@ -2638,7 +2638,7 @@ mod tests {
         let assembled = with_tracing(|| window.assemble());
 
         // The orphaned tool_result message is stripped to empty and dropped,
-        // leaving no messages — so the "Begin." user fallback is synthesized.
+        // leaving no messages - so the "Begin." user fallback is synthesized.
         assert_eq!(assembled.messages.len(), 1);
         assert_eq!(assembled.messages[0].role, "user");
         assert_eq!(

@@ -2,7 +2,7 @@
 //! `wait_for_agent` / `send_to_agent` / `kill_agent` tool calls into
 //! [`SubAgentOp`]s serviced by the host (which owns the world + spawner). The
 //! tool lane runs off the world, so it blocks on the host applying each op via a
-//! oneshot — the same shape as an interaction.
+//! oneshot - the same shape as an interaction.
 
 use std::time::Duration;
 
@@ -92,7 +92,7 @@ async fn spawn(h: &SubAgentHandle, args: &serde_json::Value) -> String {
     // Never a blueprint the agent could have written itself.
     //
     // `blueprint` comes from model output and `find_manifest` accepts any path.
-    // `write_file` is confined to the workdir — but the spawner was not, so a
+    // `write_file` is confined to the workdir - but the spawner was not, so a
     // model steered by injected content could write `x/agent.leviath` inside its
     // own workdir and then spawn it. The child is built with seeds enforced, so
     // that manifest's `seed = { command = ... }` ran on the host before its
@@ -100,7 +100,7 @@ async fn spawn(h: &SubAgentHandle, args: &serde_json::Value) -> String {
     // a confined file write escalated to unconfined command execution.
     //
     // Refusing paths *inside the workdir* closes that exactly, and leaves
-    // everything legitimate working — an installed agent by name, or a path a
+    // everything legitimate working - an installed agent by name, or a path a
     // human or the parent blueprint chose. A model that can already write
     // outside the workdir has arbitrary execution by other means, so nothing
     // here is the weak link.
@@ -108,7 +108,7 @@ async fn spawn(h: &SubAgentHandle, args: &serde_json::Value) -> String {
         return format!(
             "[error] '{blueprint}' is inside this agent's own working directory. \
              Spawn an installed agent by name, or a blueprint from outside the \
-             workspace — an agent may not author the blueprint it runs."
+             workspace - an agent may not author the blueprint it runs."
         );
     }
 
@@ -182,7 +182,7 @@ async fn wait(h: &SubAgentHandle, agent_id: &str) -> String {
             }
             // The caller itself was cancelled (or failed) while waiting. Give up
             // rather than keep polling for a child that is being torn down with
-            // it — this loop has no other exit, so it would hold its tool-lane
+            // it - this loop has no other exit, so it would hold its tool-lane
             // worker for as long as the daemon lived.
             Some(_) if caller_is_terminal(h).await => {
                 return format!("[error] cancelled while waiting for '{agent_id}'");
@@ -193,7 +193,7 @@ async fn wait(h: &SubAgentHandle, agent_id: &str) -> String {
 }
 
 /// Whether the agent that called `wait_for_agent` has itself reached a terminal
-/// state. A dropped request (daemon shutting down) counts as terminal — there is
+/// state. A dropped request (daemon shutting down) counts as terminal - there is
 /// nothing left to wait for either way.
 async fn caller_is_terminal(h: &SubAgentHandle) -> bool {
     match status_of(h, &h.parent_run_id).await {
@@ -288,7 +288,7 @@ mod tests {
     use super::*;
 
     /// The escalation this closes: `write_file` is confined to the workdir, but
-    /// the spawner was not — so a model could author `x/agent.leviath` in its own
+    /// the spawner was not - so a model could author `x/agent.leviath` in its own
     /// workspace and spawn it, and the child is built with seeds enforced, so
     /// that manifest's command seeds ran on the host before its first inference.
     #[tokio::test]
@@ -321,7 +321,7 @@ mod tests {
         }
     }
 
-    /// And a blueprint from outside the workspace is untouched — an installed
+    /// And a blueprint from outside the workspace is untouched - an installed
     /// agent by name, or a path a human chose.
     #[tokio::test]
     async fn spawn_allows_a_blueprint_outside_the_workdir() {
@@ -367,7 +367,7 @@ mod tests {
             parent_run_id: "parent".to_string(),
             // This crate's own directory, deliberately *not* the system temp
             // dir: `temp_blueprint()` writes under temp, and on Linux that is
-            // `/tmp` — so a workdir of `/tmp` made every fixture blueprint look
+            // `/tmp` - so a workdir of `/tmp` made every fixture blueprint look
             // like one the agent had planted in its own workspace, and the
             // containment guard refused them all. macOS puts tempdirs under
             // `$TMPDIR` in `/var/folders`, so nothing local caught it.
@@ -377,13 +377,13 @@ mod tests {
         }
     }
 
-    /// A `SubAgentHandle` whose host answers each op from plain canned values —
+    /// A `SubAgentHandle` whose host answers each op from plain canned values -
     /// no per-call-site closures, so this single service loop is the only region
     /// (covered collectively across the suite). `spawn_result` answers `Spawn`
     /// and the received args are recorded into the returned `Vec` for assertions;
     /// `statuses` answers successive `Check`s for *children* in order (`None`
     /// once exhausted); `ok` answers `Send`/`Kill`. The caller ("parent") is
-    /// reported `Active` — see [`fake_host_with_parent`] to script it.
+    /// reported `Active` - see [`fake_host_with_parent`] to script it.
     #[allow(clippy::type_complexity)]
     fn fake_host(
         spawn_result: Result<String, String>,
@@ -422,7 +422,7 @@ mod tests {
                     }
                     // `wait` polls the *caller* as well as the child (to bail out
                     // if the caller was itself cancelled), so the scripted queue
-                    // answers only for children — the caller is reported Active
+                    // answers only for children - the caller is reported Active
                     // unless a test scripts it otherwise.
                     SubAgentOp::Check { reply, run_id } if run_id == "parent" => {
                         let _ = reply.send(parent_status.clone());
@@ -442,7 +442,7 @@ mod tests {
         (handle_with(tx), seen, task)
     }
 
-    /// A host that drops every op without replying — the handler then sees a
+    /// A host that drops every op without replying - the handler then sees a
     /// dropped oneshot.
     fn drop_host() -> (SubAgentHandle, tokio::task::JoinHandle<()>) {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -541,7 +541,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         )
         .await;
         assert!(out.contains("Spawned sub-agent 'child-123'"));
-        // Drop the handle and drain the host task — covers the loop's exit.
+        // Drop the handle and drain the host task - covers the loop's exit.
         drop(h);
         t.await.unwrap();
         // The seed context was folded into the child's task.
@@ -572,8 +572,8 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     }
 
     /// `wait_for_agent` gives up when the *calling* agent is cancelled. The loop
-    /// has no other exit, and it runs on a tool-lane worker — of which there are
-    /// a fixed number — so a cancelled caller would otherwise poll for a child
+    /// has no other exit, and it runs on a tool-lane worker - of which there are
+    /// a fixed number - so a cancelled caller would otherwise poll for a child
     /// that is being torn down with it until the daemon exits.
     #[tokio::test]
     async fn wait_gives_up_when_the_calling_agent_is_cancelled() {
@@ -597,7 +597,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     }
 
     /// A caller the host no longer knows about (daemon shutting down, or the
-    /// run already reaped) also ends the wait — there is nothing left to wait
+    /// run already reaped) also ends the wait - there is nothing left to wait
     /// for either way.
     #[tokio::test]
     async fn wait_gives_up_when_the_caller_is_unknown_to_the_host() {

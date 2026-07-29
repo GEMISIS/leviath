@@ -1,4 +1,4 @@
-//! `lev msg` / `lev cancel` — control operations on a running agent in the
+//! `lev msg` / `lev cancel` - control operations on a running agent in the
 //! shared-world daemon.
 //!
 //! Both send a control request over the daemon socket and report the boolean
@@ -34,7 +34,7 @@ pub struct CancelArgs {
     pub force: bool,
 }
 
-/// Arguments for `lev respond` — answer a pending `ask_user` interaction the
+/// Arguments for `lev respond` - answer a pending `ask_user` interaction the
 /// daemon is holding, or (with no `request_id`) list the open interactions.
 #[derive(clap::Args, Debug, Clone)]
 pub struct RespondArgs {
@@ -371,7 +371,7 @@ mod tests {
         assert!(r.unwrap_err().to_string().contains("unexpected"));
     }
 
-    /// `lev msg` has no on-disk fallback — an unreachable daemon is simply an
+    /// `lev msg` has no on-disk fallback - an unreachable daemon is simply an
     /// error, unlike `lev cancel`.
     #[tokio::test]
     async fn message_to_an_unreachable_daemon_is_an_error() {

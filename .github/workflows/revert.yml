@@ -91,7 +91,7 @@ jobs:
           if [ -f release/SHA256SUMS ]; then
             (cd release && grep -v '^SHA256SUMS$' SHA256SUMS | sha256sum -c -)
           else
-            echo "ERROR: no SHA256SUMS in $TARGET_TAG — refusing to republish unverified binaries."
+            echo "ERROR: no SHA256SUMS in $TARGET_TAG - refusing to republish unverified binaries."
             exit 1
           fi
 

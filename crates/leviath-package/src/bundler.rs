@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 /// The directory-read operation used while walking a project tree, injectable
 /// so tests can force the walk's `read_dir` error and recursion-propagation
 /// arms deterministically on every platform (a `chmod 0o000` subdirectory is
-/// Unix-only; the OS-agnostic failures — a missing top-level path, a
-/// mismatched `base`, an empty tar entry name — can't produce a *recursive*
+/// Unix-only; the OS-agnostic failures - a missing top-level path, a
+/// mismatched `base`, an empty tar entry name - can't produce a *recursive*
 /// read failure, because during recursion `base` is always an ancestor of the
 /// entry). It is a trait object rather than `impl Fn` so production and every
 /// test share exactly ONE monomorphization of the walk functions. Production
@@ -36,8 +36,8 @@ impl AgentBundler {
             // `.env.test`, `id_rsa`, `.netrc`, `.npmrc`, `credentials.json` and
             // `service-account.json` were all bundled and shipped.
             //
-            // Still a denylist — an allowlist would break every agent that ships
-            // an unanticipated data file — but a `.env*` prefix rule now covers
+            // Still a denylist - an allowlist would break every agent that ships
+            // an unanticipated data file - but a `.env*` prefix rule now covers
             // the whole family, and the exact-name entries are the credential
             // files that actually turn up in project directories.
             exclude_patterns: vec![
@@ -85,7 +85,7 @@ impl AgentBundler {
     ///
     /// Takes `project_path: &Path` (not `impl AsRef<Path>`) so every caller --
     /// production code and the various `&Path`/`&PathBuf`/`&&PathBuf` shapes
-    /// tests pass -- shares exactly ONE monomorphization; `&PathBuf` and
+    /// tests pass - shares exactly ONE monomorphization; `&PathBuf` and
     /// `&&PathBuf` coerce to `&Path` automatically via deref coercion at the
     /// call site, so no caller needs to change beyond that.
     pub fn bundle(&self, project_path: &Path) -> anyhow::Result<Vec<u8>> {
@@ -120,9 +120,9 @@ impl AgentBundler {
     /// Walk `project_path` and write a tar.gz archive to `sink`.
     ///
     /// Takes `sink` as `&mut dyn Write` (a trait object) rather than a
-    /// generic `W: Write` so that every caller -- the real `Vec<u8>`/file
+    /// generic `W: Write` so that every caller - the real `Vec<u8>`/file
     /// sink as well as tests injecting sinks that fail on write to exercise
-    /// the tar/gzip finalization error paths below -- shares exactly ONE
+    /// the tar/gzip finalization error paths below - shares exactly ONE
     /// monomorphization of this function (and, transitively, of
     /// `add_directory_to_tar`) instead of one per concrete sink type.
     fn write_bundle(
@@ -180,13 +180,13 @@ impl AgentBundler {
     ///
     /// Three shapes, which is all the patterns here need:
     ///
-    /// - `*.ext` — matches by extension (`server.key`).
-    /// - `prefix*` — matches by leading text (`.env*` covers `.env`,
+    /// - `*.ext` - matches by extension (`server.key`).
+    /// - `prefix*` - matches by leading text (`.env*` covers `.env`,
     ///   `.env.staging`, `.env.test`; `id_rsa*` covers `id_rsa` and
     ///   `id_rsa.pub`). Added because the exact-name-only matcher shipped
     ///   `.env.staging` while excluding `.env.production`, which is precisely
     ///   the kind of gap a hand-listed denylist accumulates.
-    /// - anything else — matched exactly.
+    /// - anything else: matched exactly.
     pub fn should_exclude(&self, filename: &str) -> bool {
         self.exclude_patterns.iter().any(|pattern| {
             if let Some(suffix) = pattern.strip_prefix("*.") {
@@ -218,7 +218,7 @@ impl AgentBundler {
             // `ReadDir::next()`'s `Err` arm surfaces OS-level directory-read
             // faults (not TOCTOU races): on both macOS and Linux, `readdir`
             // returns entry names without `stat`-ing them, so deleting a
-            // file mid-iteration doesn't make this fail -- the failure path
+            // file mid-iteration doesn't make this fail - the failure path
             // would need an actual OS/filesystem-driver-level error while
             // listing, which is unreachable in practice.
             let entry = entry.expect("read_dir should not fail during bundle");
@@ -271,7 +271,7 @@ mod tests {
 
     /// The variants the old exact-name list shipped. `.env.production` was
     /// excluded and `.env.staging` was not, which is the gap a hand-maintained
-    /// denylist accumulates — so the pattern covers the family now.
+    /// denylist accumulates - so the pattern covers the family now.
     #[test]
     fn excludes_every_env_variant_not_just_the_three_that_were_listed() {
         let bundler = AgentBundler::new();
@@ -525,7 +525,7 @@ mod tests {
         )
         .unwrap();
 
-        // Output path inside a directory that doesn't exist — fs::write must fail.
+        // Output path inside a directory that doesn't exist - fs::write must fail.
         let output = dir
             .path()
             .join("no-such-parent-dir")
@@ -635,7 +635,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
         fs::create_dir_all(&project).unwrap();
-        // No agent.leviath written -- `bundle()` must fail before ever
+        // No agent.leviath written - `bundle()` must fail before ever
         // reaching the write step, and `bundle_to_file` must propagate that
         // failure via its `?` rather than attempting to write anything.
         let output = dir.path().join("output.leviath-bundle");
@@ -664,7 +664,7 @@ mod tests {
 
         // A symlink whose target doesn't exist: `Path::is_dir`/`is_file`
         // both follow symlinks and return `false` when the target is
-        // missing, so this entry is neither -- exercising the "skip
+        // missing, so this entry is neither - exercising the "skip
         // anything that isn't a plain file or directory" branch.
         std::os::unix::fs::symlink(project.join("does-not-exist"), project.join("dangling"))
             .unwrap();
@@ -724,7 +724,7 @@ mod tests {
         tar.finish().unwrap();
         drop(tar);
 
-        // The dangling entry was skipped -- nothing was appended to the tar.
+        // The dangling entry was skipped - nothing was appended to the tar.
         let mut archive = tar::Archive::new(&sink[..]);
         assert_eq!(archive.entries().unwrap().count(), 0);
     }
@@ -737,7 +737,7 @@ mod tests {
     // enclosing `?`s in `write_bundle` and `bundle_with`. Injecting the reader
     // makes this deterministic on every platform. (During real
     // recursion `base` is always an ancestor of the entry, so no OS-agnostic
-    // path/tar failure can surface *inside* a recursion -- injection is the
+    // path/tar failure can surface *inside* a recursion - injection is the
     // only cross-platform way to reach these propagation arms.)
     #[test]
     fn test_bundle_recursive_read_dir_failure_propagates() {
@@ -886,7 +886,7 @@ mod tests {
     // Neither `tar::Builder::into_inner` nor `GzEncoder::finish` ever calls
     // `Write::flush` on the underlying sink directly (confirmed empirically:
     // a sink whose `flush` always errors but whose `write` always succeeds
-    // makes `write_bundle` succeed) -- so these `flush` impls are
+    // makes `write_bundle` succeed) - so these `flush` impls are
     // unreachable via `write_bundle` no matter how the sink is configured.
     // Test them directly, matching `always_on_subscriber_span_methods_are_all_no_ops`'s
     // precedent elsewhere in this file for otherwise-unreachable trait-impl methods.

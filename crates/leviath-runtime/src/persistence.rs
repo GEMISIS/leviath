@@ -1,7 +1,7 @@
 //! Agent-state persistence: turning a live ECS agent into the on-disk snapshot
 //! the dashboard/API read (`meta.json` + `context.json` under the run directory).
 //!
-//! This module holds the **pure** serialization core — components that carry an
+//! This module holds the **pure** serialization core - components that carry an
 //! agent's run identity and running token totals, plus functions that build the
 //! [`RunMeta`]/[`ContextSnapshot`] value types from an agent's live components.
 //! It does no I/O; the async write lane and the snapshot-dispatch system layer on
@@ -66,7 +66,7 @@ pub struct TokenTotals {
 
 /// Run-scoped productivity flags, mirrored into `meta.json` so an empty run can
 /// be recognized (and explained) from disk. Unlike [`StageProgress`], this is
-/// never reset on a stage transition — it describes the whole run.
+/// never reset on a stage transition - it describes the whole run.
 ///
 /// [`StageProgress`]: crate::pipeline::StageProgress
 #[derive(Component, Clone, Default, Debug, PartialEq)]
@@ -119,7 +119,7 @@ fn region_kind_str(kind: &RegionKind) -> &'static str {
 }
 
 /// Build the full context snapshot (`context.json`) from a window. Pure over the
-/// window — no engine/entity. (Ported from the CLI's `build_context_snapshot`.)
+/// window - no engine/entity. (Ported from the CLI's `build_context_snapshot`.)
 pub fn build_context_snapshot(window: &ContextWindow, stage_name: &str) -> ContextSnapshot {
     let regions = window
         .regions

@@ -1,7 +1,7 @@
 [agent]
 name = "researcher"
 version = "0.0.1"
-description = "Research assistant — gather, analyze, and summarize with a gather↔analyze refinement loop, error recovery, and multi-provider fallback"
+description = "Research assistant - gather, analyze, and summarize with a gather↔analyze refinement loop, error recovery, and multi-provider fallback"
 entry_stage = "gather"
 
 # Read/search agent: it gathers and synthesizes, writing only its final report.
@@ -26,18 +26,18 @@ system_prompt = """
 You are gathering source material on the topic in the `query` region, within any
 bounds set in `scope`.
 
-Be efficient — do not search exhaustively:
+Be efficient - do not search exhaustively:
 1. Run a FOCUSED first round of 3-5 web_search calls covering the distinct
    sub-topics of the question (not many rephrasings of the same query).
 2. web_fetch only the 2-3 most promising sources for detail; the search snippets
    in `raw_findings` are usually enough on their own.
 3. As you go, append one bibliography line per source you actually use to the
    `sources_index` region with context_append:
-   `[n] <title> — <url or path> — credibility: <high/med/low + why>`.
+   `[n] <title> - <url or path> - credibility: <high/med/low + why>`.
 
 Prefer primary sources and well-established outlets; note when something is a blog,
 forum, or vendor claim. Once you have solid coverage of the sub-topics, transition
-to analyze — don't keep searching for marginal additions. The analyze stage will
+to analyze - don't keep searching for marginal additions. The analyze stage will
 send you back if it finds a real gap.
 """
 
@@ -73,7 +73,7 @@ Analyze the `raw_findings` against the `sources_index`. Do three things:
 1. Extract factual claims into the `claims` region (context_append), each with its
    source reference: `<claim> [n]`. These are what the summary is built from.
 2. When sources DISAGREE, record the conflict in `contradictions` (context_write)
-   — who claims what, with source refs. Don't silently pick a side; surface it.
+   - who claims what, with source refs. Don't silently pick a side; surface it.
 3. Judge strength: separate well-supported claims (multiple credible sources) from
    single-source or speculative ones.
 
@@ -89,7 +89,7 @@ hint = "More information needed on specific sub-topics"
 transform = "compact"
 
 [stages.analyze.transitions.summarize]
-hint = "Analysis complete — ready to summarize"
+hint = "Analysis complete - ready to summarize"
 transform = "compact"
 
 [stages.analyze.transitions.error_recovery]
@@ -109,10 +109,10 @@ Write the research report (write_file), built from the `claims` region and citin
 
 Structure:
 - Key findings organized by theme, each with a confidence level.
-- Notable disagreements — pull these straight from the `contradictions` region;
+- Notable disagreements - pull these straight from the `contradictions` region;
   never drop a recorded conflict.
 - Open questions.
-- Sources — the numbered bibliography from `sources_index`.
+- Sources - the numbered bibliography from `sources_index`.
 
 Keep it tight and skimmable. Every non-obvious claim must carry a [n] citation.
 """
@@ -135,7 +135,7 @@ back to analyze to continue with whatever material is available.
 """
 
 [stages.error_recovery.transitions.analyze]
-hint = "Recovered — continue analysis"
+hint = "Recovered - continue analysis"
 transform = "compact"
 
 [compaction]
@@ -146,7 +146,7 @@ model = "claude-sonnet-5"
 # Budgets are a percentage of the model's context window (issue #100) with an
 # absolute `max_tokens`/`threshold_tokens` guard-rail. Percentages are ceilings.
 [context.regions]
-# The research question — required. Supplied via --task (or the API/ACP task field).
+# The research question - required. Supplied via --task (or the API/ACP task field).
 query          = { kind = "pinned", budget = "1%", max_tokens = 1000, required = true, seed = "task", required_message = "State the research question via --task." }
 # Optional caller bounds: --scope "peer-reviewed sources since 2020 only".
 scope          = { kind = "pinned", budget = "1%", max_tokens = 1000, seed = "scope" }
@@ -165,7 +165,7 @@ contradictions = { kind = "clearable",      budget = "3%", max_tokens = 3000 }
 synthesis         = { kind = "compacting",      budget = "40%", compact_at = "80%", threshold_tokens = 30000, max_tokens = 50000 }
 synthesis_history = { kind = "compact_history", source_region = "synthesis", budget = "3%", max_tokens = 10000 }
 
-# The message stream. An explicit sliding_window `conversation` region is required —
+# The message stream. An explicit sliding_window `conversation` region is required -
 # the per-stage layout is rebuilt from this table on each transition, so an
 # auto-added one would be dropped after the first stage.
 conversation      = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }

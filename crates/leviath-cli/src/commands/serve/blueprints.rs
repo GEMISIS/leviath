@@ -472,7 +472,7 @@ prompt = "p"
     }
 
     /// `DELETE /api/blueprints/{name}` reached `fs::remove_dir_all` on the same
-    /// unvalidated join — arbitrary recursive deletion for any token holder.
+    /// unvalidated join - arbitrary recursive deletion for any token holder.
     /// A percent-encoded `..%2f` decodes *after* segment matching, so the
     /// decoded form is what has to be rejected.
     #[tokio::test]
@@ -498,7 +498,7 @@ prompt = "p"
     #[tokio::test]
     async fn create_blueprint_dir_creation_failure_returns_500() {
         // Force `create_dir_all` to fail deterministically by pre-creating a
-        // regular *file* at the target path — a directory can't be created
+        // regular *file* at the target path - a directory can't be created
         // where a non-directory entry already exists. This is cross-platform:
         // both Unix (ENOTDIR/EEXIST) and Windows (ERROR_ALREADY_EXISTS) refuse
         // to create a directory at a path that's already occupied by a file.
@@ -600,7 +600,7 @@ prompt = "p"
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
 
-        // Test-only cleanup so the temp dir can be removed afterward -- not
+        // Test-only cleanup so the temp dir can be removed afterward - not
         // production/security-relevant code, so clippy's warning about
         // `set_readonly(false)` making the file world-writable on Unix
         // doesn't apply here.
@@ -792,9 +792,9 @@ prompt = "Run"
     /// removable-but-`readonly` obstacles. A real sharing violation does
     /// still block deletion, though: holding an exclusive (no-share) file
     /// handle open on a file inside the directory for the duration of the
-    /// request -- the same technique
+    /// request - the same technique
     /// `session.rs`'s `resolve_task_unreadable_file_returns_error` Windows
-    /// twin uses -- reliably makes `remove_dir_all` fail there.
+    /// twin uses - reliably makes `remove_dir_all` fail there.
     #[cfg(windows)]
     #[tokio::test]
     async fn delete_blueprint_removal_failure_returns_500_windows() {
@@ -921,7 +921,7 @@ prompt = "Run"
     async fn validate_blueprint_parses_but_fails_structural_validation_returns_ok_valid_false() {
         // Distinct from the manifest above: this one parses fine as TOML/a
         // Blueprint (Ok(bp) from parse_manifest), but bp.validate()
-        // itself rejects it -- an entry_stage that doesn't match any defined
+        // itself rejects it - an entry_stage that doesn't match any defined
         // stage. Exercises the `Ok(bp) => match bp.validate() { Err(e) => .. }`
         // arm, which `validate_blueprint_invalid_manifest_returns_ok_valid_false`
         // (a parse failure) never reaches.

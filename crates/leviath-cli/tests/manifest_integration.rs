@@ -39,7 +39,7 @@ fn all_builtin_agents_parse_successfully() {
     let manifests = discover_agent_manifests();
     assert!(
         !manifests.is_empty(),
-        "No agent manifests found — check agents/ directory"
+        "No agent manifests found - check agents/ directory"
     );
 
     for (name, path) in &manifests {
@@ -138,8 +138,8 @@ fn specific_agent_coder_has_expected_structure() {
 /// A `required` region the AGENT is expected to fill is enforced at runtime by
 /// `require_context_regions`, which re-runs the stage with a nudge until the
 /// region has content. But `unmet_required_regions` returns EMPTY for a stage
-/// with no context-writing tool — gating a stage that *can't* populate the
-/// region would loop pointlessly — so a blueprint that marks a region `required`
+/// with no context-writing tool - gating a stage that *can't* populate the
+/// region would loop pointlessly - so a blueprint that marks a region `required`
 /// while giving no stage `context_write`/`context_append` gets a gate that
 /// silently does nothing, and the region stays blank with no error.
 ///
@@ -178,7 +178,7 @@ fn agent_written_required_regions_have_a_stage_that_can_write_them() {
         assert!(
             !writers.is_empty(),
             "agent '{name}' marks {agent_written:?} required but no stage has \
-             context_write/context_append — the required-region gate is a no-op \
+             context_write/context_append - the required-region gate is a no-op \
              and the region silently stays empty"
         );
     }
@@ -206,7 +206,7 @@ fn required_regions_are_not_also_seeded_from_the_environment() {
             assert!(
                 !environmental,
                 "agent '{name}' region '{}' is required AND seeded from the \
-                 environment — a missing file or failing command would fail the \
+                 environment - a missing file or failing command would fail the \
                  spawn outright",
                 region.name
             );
@@ -234,7 +234,7 @@ fn specific_agent_researcher_has_graph_transitions() {
 ///   1. every agent declares an explicit `conversation` SlidingWindow region
 ///      (an auto-added one is dropped on the first stage transition);
 ///   2. no tool-routing target is a SlidingWindow OTHER than `conversation`
-///      (only `conversation` may hold ToolResult message blocks — a routed
+///      (only `conversation` may hold ToolResult message blocks - a routed
 ///      result elsewhere desyncs from its tool_use → Anthropic 400);
 ///   3. every Compacting region has a paired CompactHistory region.
 #[test]
@@ -329,7 +329,7 @@ fn all_builtin_stuck_edges_are_armed_and_bounded() {
                 assert!(
                     bp.find_stage(target)
                         .is_some_and(|s| s.max_revisits.is_some()),
-                    "agent '{name}' stage '{}': stuck edge → '{target}' is unbounded — \
+                    "agent '{name}' stage '{}': stuck edge → '{target}' is unbounded - \
                      '{target}' needs max_revisits or the two can ping-pong all run",
                     stage.name
                 );
@@ -342,7 +342,7 @@ fn all_builtin_stuck_edges_are_armed_and_bounded() {
 /// (`resolve_transition_sync` returns `Choose`, and `build_transition_prompt`
 /// asks the model to name a stage). Without a `transition_prompt` the model gets
 /// only the bare stage names plus whatever `hint`s exist, and has to guess the
-/// selection criteria — so a branching stage must either explain the choice in a
+/// selection criteria - so a branching stage must either explain the choice in a
 /// prompt or label every branch with a hint.
 ///
 /// `allow_complete` stages are included: they reach the same lane with a single
@@ -387,7 +387,7 @@ fn branching_stages_explain_how_to_choose() {
             assert!(
                 stage.transition_prompt.is_some() || unlabeled.is_empty(),
                 "agent '{name}' stage '{}' branches to {choosable:?} but has no \
-                 transition_prompt, and {unlabeled:?} carry no hint either — the \
+                 transition_prompt, and {unlabeled:?} carry no hint either - the \
                  model is left to guess which branch to take",
                 stage.name
             );

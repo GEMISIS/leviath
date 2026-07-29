@@ -10,7 +10,7 @@ use std::sync::Arc;
 ///
 /// The pipeline resolves each agent's stage `ModelConfig` to a concrete
 /// provider through this registry. Native providers are registered eagerly;
-/// script providers (issue #101) are resolved lazily — and hot-reloaded — via
+/// script providers (issue #101) are resolved lazily - and hot-reloaded - via
 /// an optional [`ScriptProviderLayer`].
 #[derive(Clone, Default)]
 pub struct ProviderRegistry {

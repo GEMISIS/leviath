@@ -42,8 +42,8 @@ pub struct ProviderCreds {
 
 /// Hand-written so the API key can never reach a log line.
 ///
-/// A `#[derive(Debug)]` here meant a single `tracing::debug!(?creds)` — or an
-/// error context that formats a struct holding one — would print the key.
+/// A `#[derive(Debug)]` here meant a single `tracing::debug!(?creds)` - or an
+/// error context that formats a struct holding one - would print the key.
 /// Nothing did, which is when it is cheap to make impossible.
 impl std::fmt::Debug for ProviderCreds {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -181,8 +181,8 @@ pub fn build_provider_registry(creds: &[ProviderCreds]) -> ProviderRegistry {
 mod tests {
     use super::*;
 
-    /// One `tracing::debug!(?creds)` — or an error context that formats a struct
-    /// holding one — would otherwise print the provider key.
+    /// One `tracing::debug!(?creds)` - or an error context that formats a struct
+    /// holding one - would otherwise print the provider key.
     #[test]
     fn debug_output_never_contains_the_api_key() {
         let mut creds = ProviderCreds::simple("anthropic");

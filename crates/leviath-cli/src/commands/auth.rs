@@ -1,4 +1,4 @@
-//! `lev auth` — inspect and move the secrets Leviath holds.
+//! `lev auth` - inspect and move the secrets Leviath holds.
 //!
 //! Leviath keeps two kinds of long-lived secret: provider API keys and MCP OAuth
 //! grants. `[security] credential_store` decides whether they live in Leviath's
@@ -175,7 +175,7 @@ fn providers_in_file(path: &std::path::Path) -> Vec<String> {
 /// Whether the parsed config file carries a key for `provider`.
 ///
 /// `openrouter_api_key` sits at the top level while the other three live under
-/// `[providers]` — a historical split the config struct still reflects.
+/// `[providers]` - a historical split the config struct still reflects.
 fn file_has_key(value: &toml::Table, provider: &str) -> bool {
     let field = format!("{provider}_api_key");
     if provider == "openrouter" {
@@ -327,7 +327,7 @@ fn apply_migration(config: &Config, path: &std::path::Path, to_file: bool) -> an
     )
 }
 
-/// Core of [`apply_migration`] with the keychain already resolved — see
+/// Core of [`apply_migration`] with the keychain already resolved - see
 /// [`status_with`] for why the resolution is the caller's.
 fn apply_migration_with(
     config: &Config,
@@ -764,7 +764,7 @@ mod tests {
         set_readonly(&path, false);
     }
 
-    /// `Ok(None)` -- the file backend where a keychain was expected -- is a
+    /// `Ok(None)` - the file backend where a keychain was expected - is a
     /// refusal, not a silent no-op that would strip the file.
     #[test]
     fn migrating_to_a_backend_that_is_not_a_store_is_refused() {
@@ -990,7 +990,7 @@ mod tests {
         assert!(restored.contains("rt-SECRET"), "{restored}");
     }
 
-    /// Nothing to move is not an error -- a user who has never run
+    /// Nothing to move is not an error - a user who has never run
     /// `lev mcp login` has no store, and no home is not a failure either.
     #[test]
     fn migrating_mcp_grants_is_a_no_op_when_there_is_nothing_to_move() {
@@ -1037,7 +1037,7 @@ mod tests {
     }
 
     /// A config file that cannot be parsed must fail the command rather than
-    /// being treated as an empty install -- both entry points read it.
+    /// being treated as an empty install - both entry points read it.
     #[test]
     fn a_broken_config_file_fails_both_subcommands() {
         let _guard = with_mock_store();
@@ -1061,7 +1061,7 @@ mod tests {
     fn migrate_reports_a_failing_store() {
         let _guard = test_store::lock();
         // No store installed: `store_for` probes, and on a machine with a real
-        // keychain that would reach it -- so drive the seam directly instead.
+        // keychain that would reach it - so drive the seam directly instead.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let config = config_with_keys(CredentialStoreKind::File);
@@ -1094,7 +1094,7 @@ mod tests {
         );
     }
 
-    /// Drive `execute` -- the real entry point -- for each subcommand, against a
+    /// Drive `execute` - the real entry point - for each subcommand, against a
     /// config path of our choosing.
     ///
     /// Plain `#[test]`s driving their own runtime rather than `#[tokio::test]`:

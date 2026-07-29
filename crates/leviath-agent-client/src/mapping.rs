@@ -1,7 +1,7 @@
 //! Pure translations between Leviath's own types and the Agent Client Protocol.
 //!
-//! Everything here is a total function over plain data — no I/O, no daemon, no
-//! async — so the stdio server in `leviath-cli` is left with only sequencing to
+//! Everything here is a total function over plain data - no I/O, no daemon, no
+//! async - so the stdio server in `leviath-cli` is left with only sequencing to
 //! do, and every mapping decision is unit-testable in isolation.
 
 use leviath_core::interaction::{InteractionKind, InteractionRequest};
@@ -25,7 +25,7 @@ pub const OPTION_REJECT_ONCE: &str = "reject-once";
 /// `text` blocks contribute their text. `resource` blocks (the `embeddedContext`
 /// capability) contribute their inlined text under a `--- <uri> ---` header, so
 /// the model can tell attached context from the instruction itself. Every other
-/// block kind — `image`, `audio`, `resource_link` — is dropped: we advertise no
+/// block kind - `image`, `audio`, `resource_link` - is dropped: we advertise no
 /// support for them, and silently ignoring one block is far better than failing
 /// the whole prompt.
 ///
@@ -66,10 +66,10 @@ pub fn flatten_prompt(blocks: &[ContentBlock]) -> String {
 /// block; its content runs until the next `---region:...---` marker, an
 /// `---end-regions---` line, or the end of the text. Any text before the first
 /// marker becomes the `task` region. With **no** markers at all, the whole text
-/// is returned as `{ "task": text }` — the exact pre-feature behavior, so hosts
+/// is returned as `{ "task": text }` - the exact pre-feature behavior, so hosts
 /// that don't use markers are unaffected.
 ///
-/// Region bodies are trimmed; empty blocks are dropped. Pure — no I/O.
+/// Region bodies are trimmed; empty blocks are dropped. Pure - no I/O.
 pub fn parse_region_markers(text: &str) -> std::collections::HashMap<String, String> {
     use std::collections::HashMap;
 
@@ -165,7 +165,7 @@ pub fn stop_reason_for_label(status: &str) -> StopReason {
 /// The offered options mirror what Leviath's own approval prompt supports:
 /// approve once, approve for the rest of the session
 /// ([`leviath_core::interaction::ApprovalScope::Session`]), or reject. There is
-/// deliberately no "reject always" — Leviath has no persistent per-tool denylist
+/// deliberately no "reject always" - Leviath has no persistent per-tool denylist
 /// to record it in, and offering a choice we cannot honour would be a lie.
 pub fn permission_request(
     session_id: &str,
@@ -211,7 +211,7 @@ fn permission_title(request: &InteractionRequest) -> String {
 /// Classify a Leviath tool name into the protocol's tool-kind taxonomy, so hosts
 /// can pick an icon and phrase the approval prompt.
 ///
-/// Unrecognised names — including every MCP tool, whose names are arbitrary —
+/// Unrecognised names - including every MCP tool, whose names are arbitrary -
 /// fall back to [`ToolKind::Other`].
 fn tool_kind_for(tool_name: Option<&str>) -> ToolKind {
     match tool_name {

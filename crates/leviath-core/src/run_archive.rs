@@ -1,9 +1,9 @@
 //! A portable, self-contained record of an entire agent run.
 //!
 //! A run archive is a single append-only file that captures everything about a
-//! run — who owns it (which machine, which world/daemon instance), its metadata,
+//! run - who owns it (which machine, which world/daemon instance), its metadata,
 //! every inference and tool batch, inbound messages, and the evolving context
-//! window — with enough fidelity that copying the file to another machine lets a
+//! window - with enough fidelity that copying the file to another machine lets a
 //! daemon **continue the run where it left off** (LLM non-determinism aside) or
 //! replay it for debugging.
 //!
@@ -23,7 +23,7 @@
 //! [`RunIdentity`] records which machine + world/daemon instance owns a run, and
 //! [`RunRecord::OwnershipChanged`] records a handoff. This is deliberately more
 //! than today needs: the format is meant to eventually let a run start on one
-//! machine, pause, and resume on another — including a machine declining a run
+//! machine, pause, and resume on another - including a machine declining a run
 //! whose tools it lacks and waiting for a capable host. That scheduling logic
 //! isn't built yet; the format simply reserves room for it (ownership handoffs
 //! are first-class, the version field gates changes, and new record variants can
@@ -54,7 +54,7 @@ pub const RUN_ARCHIVE_VERSION: u16 = 1;
 ///
 /// `machine_id` + `world_id` make a run unambiguously attributable even when
 /// several daemons share a filesystem and might otherwise pick the same
-/// `run_id` — a daemon can read a run's owner before deciding whether to resume
+/// `run_id` - a daemon can read a run's owner before deciding whether to resume
 /// or leave it alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunIdentity {
@@ -90,7 +90,7 @@ pub struct ToolCallRecord {
     pub result: Option<String>,
 }
 
-/// The outbound request of one inference (a provider-agnostic digest — enough to
+/// The outbound request of one inference (a provider-agnostic digest - enough to
 /// reproduce/debug the call without depending on `leviath-providers`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InferenceRequestRecord {
@@ -129,7 +129,7 @@ pub struct InferenceResponseRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RegionDelta {
     /// A new region, or a region whose kind/max changed or whose entries were
-    /// rewritten in a non-append way — carried in full.
+    /// rewritten in a non-append way - carried in full.
     Set(RegionSnapshot),
     /// Entries appended to an existing region (the common between-inference
     /// case). The region's kind/max are unchanged.
@@ -245,7 +245,7 @@ pub enum RunRecord {
     },
     /// A step forward: the updated metadata plus a *diff* of the context window
     /// since the previous point. This is the compact per-tick record the writer
-    /// emits between full checkpoints — meta is small, and the context (the bulk)
+    /// emits between full checkpoints - meta is small, and the context (the bulk)
     /// is carried as a [`ContextDelta`] rather than a full snapshot.
     Progress {
         /// The run metadata as of this step.
@@ -274,7 +274,7 @@ pub fn diff_context(prev: &ContextSnapshot, next: &ContextSnapshot) -> ContextDe
             None => regions.push(RegionDelta::Set(nr.clone())),
             Some(pr) => {
                 if pr == nr {
-                    // unchanged — emit nothing
+                    // unchanged - emit nothing
                 } else if nr.entries.is_empty() && !pr.entries.is_empty() {
                     regions.push(RegionDelta::Clear {
                         name: nr.name.clone(),
@@ -437,7 +437,7 @@ pub fn read_archive(r: &mut dyn Read) -> io::Result<(u16, Vec<RunRecord>)> {
 ///
 /// A crash while the persistence lane is appending a record can leave a partial
 /// final frame (a truncated length prefix or payload). The strict [`read_archive`]
-/// would reject the whole file for that torn tail — and once a fallback-resume
+/// would reject the whole file for that torn tail - and once a fallback-resume
 /// appends fresh records *past* the torn bytes, the archive would stay unreadable
 /// forever. This variant instead stops at the torn tail and keeps everything valid
 /// before it, so recovery can still fold the archive to its last intact point. The
@@ -456,7 +456,7 @@ pub fn read_archive_lenient(r: &mut dyn Read) -> io::Result<(u16, Vec<RunRecord>
 
 // ─── fold ───────────────────────────────────────────────────────────────────
 
-/// The state reconstructed from a run journal — enough to resume or inspect the
+/// The state reconstructed from a run journal - enough to resume or inspect the
 /// run at its latest recorded point.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FoldedRun {
@@ -675,7 +675,7 @@ mod tests {
         }
     }
 
-    /// A stable tag per region-delta shape — asserting on this avoids the
+    /// A stable tag per region-delta shape - asserting on this avoids the
     /// uncovered `false` arm a `matches!` leaves when the assertion passes.
     /// Every arm is exercised across the diff tests below.
     fn region_delta_kind(d: &RegionDelta) -> &'static str {

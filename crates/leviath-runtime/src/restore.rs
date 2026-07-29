@@ -5,7 +5,7 @@
 //! and spawns a fresh agent, then calls [`restore_agent`] to overlay the persisted
 //! context, jump to the persisted stage + iteration, and restore token totals. The
 //! agent keeps the `ReadyToInfer` marker `spawn_agent` set, so **any inference
-//! that was in flight when the daemon stopped is re-issued** on the next tick —
+//! that was in flight when the daemon stopped is re-issued** on the next tick -
 //! nothing is left stuck awaiting a job that died with the old process.
 
 use bevy_ecs::prelude::*;
@@ -33,7 +33,7 @@ pub enum RestorePriority {
 /// Classify one persisted run for restart recovery from its on-disk status and
 /// whether it is parked mid fan-out (a `<run_dir>/fanout.json` is present).
 ///
-/// Returns `None` for a **terminal** run (`Complete` / `Error` / `Cancelled`) —
+/// Returns `None` for a **terminal** run (`Complete` / `Error` / `Cancelled`) -
 /// those are never resumed. A run parked on a fan-out is [`Blocked`] regardless of
 /// its status: it can't progress until its children finish.
 ///
@@ -118,7 +118,7 @@ pub fn restore_agent(
                     .collect();
                 // Rebuild the taint alongside the content. Assigning `content`
                 // directly bypasses `add_tainted_entry`, which is the only thing
-                // that records per-entry taint — so without this the region came
+                // that records per-entry taint - so without this the region came
                 // back `Public` no matter how sensitive it had been, while the
                 // gate reported itself armed.
                 // Only where the region already tracks taint: restoring it onto
@@ -266,7 +266,7 @@ mod tests {
                         },
                     ],
                 },
-                // A region that no longer exists in the window — skipped.
+                // A region that no longer exists in the window - skipped.
                 RegionSnapshot {
                     name: "ghost".to_string(),
                     kind: "pinned".to_string(),
@@ -286,7 +286,7 @@ mod tests {
     }
 
     /// Taint was not persisted at all, so a restart, resume or page-in brought
-    /// every region back `Public` no matter how sensitive it had been — while
+    /// every region back `Public` no matter how sensitive it had been - while
     /// the gate went on reporting itself armed. It is rebuilt from the entries,
     /// and only where the region already tracks taint: restoring a level onto a
     /// region with tracking off would invent one nothing reads.

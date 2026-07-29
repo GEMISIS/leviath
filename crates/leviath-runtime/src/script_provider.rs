@@ -24,7 +24,7 @@ use std::time::SystemTime;
 use leviath_providers::{ModelCapabilities, Provider, RateLimitConfig, RhaiProvider};
 
 /// Per-provider configuration from `[model_providers.<name>]`. All fields are
-/// optional overrides — a script activates by an agent referencing its name and
+/// optional overrides - a script activates by an agent referencing its name and
 /// the file existing, not by having an entry here.
 #[derive(Clone, Debug, Default)]
 pub struct ScriptProviderSpec {
@@ -50,7 +50,7 @@ pub struct ScriptProviderLayer {
     default_caps: HashMap<String, ModelCapabilities>,
     request_timeout_secs: Option<u64>,
     /// `[security] allow_env_vars`: credential-shaped environment variables a
-    /// provider script may read. Empty by default — a provider script runs
+    /// provider script may read. Empty by default - a provider script runs
     /// during inference, not through a tool call, so nothing it does passes an
     /// approval prompt.
     env_allowlist: Arc<Vec<String>>,
@@ -82,7 +82,7 @@ impl ScriptProviderLayer {
     /// `<name>.rhai` in the providers dir.
     ///
     /// A *relative* override is confined to the providers directory. It used to
-    /// be joined verbatim, so `script = "../../tools/evil"` reached outside it —
+    /// be joined verbatim, so `script = "../../tools/evil"` reached outside it -
     /// and whatever it reached is compiled and run as a provider, which is the
     /// most privileged script surface there is. An absolute path is still
     /// honored: that is the documented way to point at a script kept elsewhere,
@@ -119,8 +119,8 @@ impl ScriptProviderLayer {
     /// Get (or lazily load / reload) the provider named `name`, or `None` when
     /// there is no such script or it fails to load.
     ///
-    /// The cache lock is taken three times — a read, then a write on whichever
-    /// arm the compile lands on — and is **never held across
+    /// The cache lock is taken three times - a read, then a write on whichever
+    /// arm the compile lands on - and is **never held across
     /// `RhaiProvider::from_script`**, which parses and initializes an arbitrary
     /// user-authored `.rhai` file. That call is the slowest and least
     /// trustworthy thing this layer does; holding a process-wide lock across it
@@ -128,14 +128,14 @@ impl ScriptProviderLayer {
     /// inside it poisoned the cache for the whole daemon (issue #109).
     ///
     /// The cost is that two callers racing on the same cold name may both
-    /// compile it. Both get a working provider and the later `insert` wins —
+    /// compile it. Both get a working provider and the later `insert` wins -
     /// wasted work, never a wrong answer, and it self-corrects on the next
     /// lookup because entries are validated by mtime.
     pub fn get_or_load(&self, name: &str) -> Option<Arc<dyn Provider>> {
         let Some(path) = self.resolve_path(name) else {
             tracing::warn!(
                 provider = %name,
-                "script provider path escapes the providers directory — refusing to load"
+                "script provider path escapes the providers directory - refusing to load"
             );
             self.evict(name);
             return None;
@@ -154,7 +154,7 @@ impl ScriptProviderLayer {
             .map(|s| s.init_config.clone())
             .unwrap_or_else(|| serde_json::json!({}));
         let rate_limit = spec.and_then(|s| s.rate_limit.clone());
-        // No lock held here — see the note above.
+        // No lock held here - see the note above.
         match RhaiProvider::from_script(
             name.to_string(),
             &path,
@@ -341,8 +341,8 @@ mod tests {
     }
 
     /// A relative `script` override may not climb out of the providers
-    /// directory. Whatever it reached would be compiled and run as a provider —
-    /// the one script surface with no permission layer in front of it — so the
+    /// directory. Whatever it reached would be compiled and run as a provider -
+    /// the one script surface with no permission layer in front of it - so the
     /// traversal is refused outright rather than normalized away.
     #[test]
     fn relative_script_override_cannot_escape_the_providers_dir() {
@@ -374,7 +374,7 @@ mod tests {
         }
     }
 
-    /// A nested path *inside* the directory is still fine — only `..` is refused.
+    /// A nested path *inside* the directory is still fine - only `..` is refused.
     #[test]
     fn nested_relative_override_inside_the_dir_still_resolves() {
         let dir = tempfile::tempdir().unwrap();

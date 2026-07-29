@@ -19,7 +19,7 @@ pub enum RunStatus {
     WaitingInput,
     Complete,
     /// All required stages done; agent still accepts optional follow-up input.
-    /// Shown as "Complete" in the dashboard — no kill option, input still enabled.
+    /// Shown as "Complete" in the dashboard - no kill option, input still enabled.
     CompleteInteractive,
     Error,
     Cancelled,
@@ -86,7 +86,7 @@ pub struct RunMeta {
     /// (`X-Leviath-Signature` header) so the receiver can verify authenticity.
     ///
     /// Persisted, because the daemon must still be able to sign a webhook for a
-    /// run it reloaded after a restart. **Never serve it** — strip it with
+    /// run it reloaded after a restart. **Never serve it** - strip it with
     /// [`RunMeta::redacted`] before any of this struct leaves the process. See
     /// that method for what went wrong.
     #[serde(default)]
@@ -107,7 +107,7 @@ pub struct RunMeta {
     /// (0 when it has none). Restores `SubAgentChildren::max_child_depth`.
     #[serde(default)]
     pub max_child_depth: usize,
-    /// Why this run may have produced nothing useful — see [`RunFlags`].
+    /// Why this run may have produced nothing useful - see [`RunFlags`].
     #[serde(default)]
     pub flags: RunFlags,
 }
@@ -165,7 +165,7 @@ impl RunMeta {
     ///
     /// `GET /api/agents`, `/api/agents/{id}` and `/api/agents/{id}/children` all
     /// serialized `RunMeta` whole, so any holder of the API token could read
-    /// every run's `callback_secret` — the key that authenticates Leviath's
+    /// every run's `callback_secret` - the key that authenticates Leviath's
     /// webhooks to their receivers. Mirrors the `RedactedConfig` pattern the
     /// `/api/config` handler already uses correctly.
     ///
@@ -249,7 +249,7 @@ pub struct RegionEntrySnapshot {
     /// been blocked a moment earlier. Any restart, crash-recovery, `resume`, or
     /// page-in did it.
     ///
-    /// Defaults to `Public` for snapshots written before this field existed —
+    /// Defaults to `Public` for snapshots written before this field existed -
     /// the same value they were being restored with anyway, so nothing is worse
     /// than it was, and new runs are correct from their first write.
     #[serde(default)]
@@ -357,7 +357,7 @@ mod tests {
     }
 
     /// The webhook signing secret must not survive into anything served over
-    /// the API — `GET /api/agents` used to hand it to any token holder.
+    /// the API - `GET /api/agents` used to hand it to any token holder.
     #[test]
     fn redacted_drops_the_callback_secret_and_keeps_everything_else() {
         let mut m = sample_meta();
@@ -372,7 +372,7 @@ mod tests {
         assert_eq!(r.run_id, m.run_id);
         assert_eq!(r.task, m.task);
 
-        // Serializing the redacted form must not mention it at all — a `None`
+        // Serializing the redacted form must not mention it at all - a `None`
         // that still emitted `"callback_secret": null` would be fine, but an
         // assertion on the wire format is what a reviewer actually checks.
         let json = serde_json::to_string(&r).unwrap();

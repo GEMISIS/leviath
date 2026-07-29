@@ -68,8 +68,8 @@ pub fn init_window_seeded(
         if let Some(region_name) = target {
             // Trim to the region's (already-resolved) budget first: `add_entry`
             // REJECTS an over-budget entry outright rather than truncating it, so
-            // without this a seed larger than its region — a big README, a long
-            // `git ls-files` — would silently leave the region completely empty.
+            // without this a seed larger than its region - a big README, a long
+            // `git ls-files` - would silently leave the region completely empty.
             let budget = window
                 .get_region(&region_name)
                 .map(|r| r.max_tokens)
@@ -124,7 +124,7 @@ fn task_region_name(blueprint: &Blueprint) -> Option<String> {
         .map(|r| r.name.clone())
 }
 
-/// Initialize a [`ContextWindow`] seeding only the task text — the thin
+/// Initialize a [`ContextWindow`] seeding only the task text - the thin
 /// back-compat wrapper over [`init_window_seeded`] used by callers that carry a
 /// single task string (the imperative engine and existing tests).
 pub fn init_window(window: &mut ContextWindow, blueprint: &Blueprint, task: &str) {
@@ -158,8 +158,8 @@ pub fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
 
     // Carry the message-stream regions across the transition even when the new
     // stage layout doesn't declare them. Dropping `conversation` (the sole
-    // SlidingWindow that holds typed turns) would strand the whole message history
-    // — the next stage would assemble with no messages, and its typed tool_use/
+    // SlidingWindow that holds typed turns) would strand the whole message history -
+    // the next stage would assemble with no messages, and its typed tool_use/
     // tool_result turns would have nowhere to land. `tool_results` likewise. A
     // blueprint that DOES declare them keeps its own budget (handled above).
     for infra in ["conversation", "tool_results"] {
@@ -251,7 +251,7 @@ mod tests {
         assert_eq!(fit_seed_to_budget(&exact, 10), exact);
     }
 
-    /// The token estimate `init_window_seeded` computes for a fitted seed — the
+    /// The token estimate `init_window_seeded` computes for a fitted seed - the
     /// number that has to land inside the region's budget.
     fn estimated_tokens(fitted: &str) -> usize {
         leviath_core::estimate_tokens(fitted)
@@ -274,7 +274,7 @@ mod tests {
         const MAX_TOKENS: usize = 60;
         let room = (MAX_TOKENS - 1) * 4 - SEED_TRUNCATION_MARKER.len();
         let mut s = "a".repeat(room - 1);
-        s.push('é'); // occupies bytes room-1 and room — the cut lands inside it
+        s.push('é'); // occupies bytes room-1 and room - the cut lands inside it
         s.push_str(&"b".repeat(500));
         assert!(!s.is_char_boundary(room), "test must straddle the cut");
 

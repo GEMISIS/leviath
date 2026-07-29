@@ -11,7 +11,7 @@ use crate::lifecycle::CompactionConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// An agent blueprint — the complete definition of an agent type.
+/// An agent blueprint - the complete definition of an agent type.
 ///
 /// Includes stages, model selection, tools, AND context layout. A blueprint
 /// defines everything needed to instantiate and run an agent with specific
@@ -74,7 +74,7 @@ pub struct Blueprint {
 
     /// Opt-in escape hatch (issue #97): when `true`, the agent may add tools to
     /// its own `tools/` directory mid-run and have them re-discovered and
-    /// re-advertised for its next turn. **Off by default** — tools are otherwise
+    /// re-advertised for its next turn. **Off by default** - tools are otherwise
     /// discovered once at spawn and an agent cannot grow its own toolchain.
     #[serde(default)]
     pub dynamic_tools: bool,
@@ -230,7 +230,7 @@ impl Blueprint {
 
         let has_any_transitions = self.stages.iter().any(|s| s.transitions.is_some());
         if !has_any_transitions {
-            // Pure linear mode — no graph validation needed
+            // Pure linear mode - no graph validation needed
             return Ok(());
         }
 
@@ -262,7 +262,7 @@ impl Blueprint {
                 }
 
                 // A `require_modifications` gate on a stage that advertises no
-                // file-modifying tool can never be satisfied — it would just
+                // file-modifying tool can never be satisfied - it would just
                 // burn the stage's re-run budget every time.
                 for (target_name, edge) in transitions {
                     let Some(gate) = &edge.gate else { continue };
@@ -300,7 +300,7 @@ impl Blueprint {
         let has_terminal = self.has_terminal_path(&entry, &mut std::collections::HashSet::new());
         if !has_terminal {
             return Err(ValidationError::Graph(
-                "no terminal path exists from entry stage — agent would never complete".to_string(),
+                "no terminal path exists from entry stage - agent would never complete".to_string(),
             ));
         }
 
@@ -587,13 +587,13 @@ pub struct InteractionPoint {
 
     /// Directives keyed by option label.
     ///
-    /// When the user picks an option present in this map (e.g. "Revise — I'll
+    /// When the user picks an option present in this map (e.g. "Revise - I'll
     /// describe changes"), the mapped directive text is injected into the
     /// agent's conversation context and the stage re-runs inference IN-STAGE
     /// (bounded by a revision cap) instead of falling through to a stage
-    /// transition. The directive tells the agent what to do next — e.g. call
+    /// transition. The directive tells the agent what to do next - e.g. call
     /// `ask_user_text` to learn what to change, or `edit_document` to let the
-    /// user edit the plan directly — so the routing decision is deterministic
+    /// user edit the plan directly - so the routing decision is deterministic
     /// (code) while the actual input capture is an agent tool call.
     #[serde(default, alias = "followups")]
     pub directives: HashMap<String, String>,
@@ -608,14 +608,14 @@ pub struct InteractionPoint {
     /// Options that, when selected, open the stage's most recent output (e.g.
     /// the plan) in an editable field so the user can modify it directly. The
     /// engine issues the edit interaction itself and injects the edited text
-    /// back into context — deterministic, with no dependence on the model
+    /// back into context - deterministic, with no dependence on the model
     /// choosing to call an edit tool. Matched with the same normalization.
     #[serde(default)]
     pub edit_options: Vec<String>,
 
     /// Optional pinned region to hold this point's authoritative document (e.g.
     /// `"plan"`). When set, each time the point is presented the current
-    /// document — the produced text, or the user's direct edit — *replaces* that
+    /// document - the produced text, or the user's direct edit - *replaces* that
     /// region's content, so later revisions and downstream stages build on the
     /// current version rather than regenerating from the task. `None` ⇒ the
     /// document lives only in the rolling conversation / output.
@@ -689,7 +689,7 @@ pub struct Stage {
     pub accepts_messages: bool,
 
     /// Whether the LLM may end the run at this stage instead of naming a
-    /// transition target — e.g. a review stage that approves the work
+    /// transition target - e.g. a review stage that approves the work
     /// needs no further stage. When true, `prompt_llm_transition`'s query
     /// offers an explicit "DONE" response that resolves to a terminal
     /// (no-transition) outcome instead of forcing the single/first
@@ -697,7 +697,7 @@ pub struct Stage {
     #[serde(default)]
     pub allow_complete: bool,
 
-    /// Whether this stage may be used as a fan-out `worker_stage` — i.e. run as
+    /// Whether this stage may be used as a fan-out `worker_stage` - i.e. run as
     /// an in-process sub-agent worker entered at this stage. Off by default so a
     /// blueprint author must explicitly opt a stage in to being fanned into
     /// (you can only fan out into a stage designed for it).
@@ -720,7 +720,7 @@ pub struct Stage {
 
     /// Per-stage sandbox override. `None` inherits the agent-level
     /// `Blueprint.sandbox` (which in turn inherits the global default = host).
-    /// Set a tighter sandbox here to isolate a single stage — e.g. run analysis
+    /// Set a tighter sandbox here to isolate a single stage - e.g. run analysis
     /// on the host but implementation in a networkless container.
     #[serde(default)]
     pub sandbox: Option<crate::sandbox::ToolSandboxConfig>,
@@ -845,7 +845,7 @@ pub struct ModelConfig {
     pub parameters: HashMap<String, serde_json::Value>,
 
     /// Optional per-stage cap on the wall-clock time (in seconds) one inference
-    /// for this stage may run — the whole call including retries. When set, it
+    /// for this stage may run - the whole call including retries. When set, it
     /// overrides the default job timeout; when `None`, the default applies.
     ///
     /// This lets a stage with slow first-token latency (e.g. a large-prompt
@@ -958,7 +958,7 @@ pub struct TransitionEdge {
     pub gate: Option<TransitionGate>,
 
     /// Thresholds arming a [`TransitionCondition::Stuck`] edge. `Some` iff the
-    /// condition is `Stuck` — both the manifest parser and [`Blueprint::validate`]
+    /// condition is `Stuck` - both the manifest parser and [`Blueprint::validate`]
     /// reject the two half-configured shapes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stuck: Option<StuckConfig>,
@@ -969,7 +969,7 @@ pub struct TransitionEdge {
 /// At least one threshold is always set: an edge with none could never fire, so
 /// both the manifest parser and [`Blueprint::validate`] reject that shape rather
 /// than build a dead edge. Every threshold is evaluated against the *current
-/// stage's* progress counters, which reset on each stage entry — so a blueprint
+/// stage's* progress counters, which reset on each stage entry - so a blueprint
 /// can arm different stages with different thresholds independently.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StuckConfig {
@@ -982,7 +982,7 @@ pub struct StuckConfig {
     pub after_minutes: Option<usize>,
 
     /// `stuck_after_same_file_edits`: `write_file`/`edit_file` calls against a
-    /// single path in this stage — the "100 iterations in the wrong file" mode.
+    /// single path in this stage - the "100 iterations in the wrong file" mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_same_file_edits: Option<usize>,
 
@@ -1022,13 +1022,13 @@ pub struct TransitionGate {
 
     /// Region whose non-emptiness also satisfies the gate. Per-stage tool-call
     /// counters reset on stage entry and are not restored when a run resumes
-    /// after a daemon restart, but context regions are — so pointing the gate at
+    /// after a daemon restart, but context regions are - so pointing the gate at
     /// the region the write tools are routed into keeps a resumed run honest.
     #[serde(default)]
     pub region: Option<String>,
 
     /// Tool names counted as modifying beyond the built-in `write_file` /
-    /// `edit_file` — for agents whose writes go through MCP or script tools.
+    /// `edit_file` - for agents whose writes go through MCP or script tools.
     #[serde(default)]
     pub tools: Vec<String>,
 
@@ -1061,7 +1061,7 @@ pub enum TransitionCondition {
     /// LLM picks from available transitions (default for multi-transition stages)
     LlmChoice,
     /// Fires *mid-stage* when the stage's runtime metrics cross this edge's
-    /// [`StuckConfig`] thresholds — the agent is burning iterations, wall clock,
+    /// [`StuckConfig`] thresholds - the agent is burning iterations, wall clock,
     /// or edits to one file without finishing. Unlike every other condition this
     /// interrupts a stage the agent never said it had completed, so when the edge
     /// is unavailable the runtime resumes the stage rather than transitioning.
@@ -1184,15 +1184,15 @@ mod tests {
     fn agent_tool_permissions_projects_only_string_tool_perm_entries() {
         let stages = vec![Stage::new("plan".to_string(), make_model())];
         let mut bp = Blueprint::new("t".into(), "d".into(), stages, make_layout());
-        // A well-formed tool_perm string entry — included.
+        // A well-formed tool_perm string entry - included.
         bp.metadata.insert(
             "tool_perm:bash".to_string(),
             serde_json::Value::String("deny".to_string()),
         );
-        // A non-`tool_perm:` key — skipped (strip_prefix returns None).
+        // A non-`tool_perm:` key - skipped (strip_prefix returns None).
         bp.metadata
             .insert("title".to_string(), serde_json::Value::String("x".into()));
-        // A tool_perm key whose value isn't a string — skipped (as_str is None).
+        // A tool_perm key whose value isn't a string - skipped (as_str is None).
         bp.metadata
             .insert("tool_perm:weird".to_string(), serde_json::Value::Bool(true));
 
@@ -1205,7 +1205,7 @@ mod tests {
 
     #[test]
     fn test_blueprint_validate_runs_transform_validation() {
-        // A transform whose mapping targets a real region — validate() must
+        // A transform whose mapping targets a real region - validate() must
         // reach ContextTransform::validate() and succeed.
         let stages = vec![Stage::new("plan".to_string(), make_model())];
         let mut bp = Blueprint::new("t".into(), "d".into(), stages, make_layout());
@@ -1247,7 +1247,7 @@ mod tests {
     #[test]
     fn test_mixed_linear_and_graph_mode_terminal_path() {
         // "plan" has explicit transitions (triggers graph-mode validation),
-        // but "impl" and "review" have none — they must fall back to
+        // but "impl" and "review" have none - they must fall back to
         // linear (next-by-index) terminal-path resolution.
         let mut plan = Stage::new("plan".to_string(), make_model());
         let impl_stage = Stage::new("impl".to_string(), make_model());
@@ -1491,7 +1491,7 @@ mod tests {
 
     #[test]
     fn test_model_config_serde_defaults_when_fields_missing() {
-        // Minimal JSON — models defaults to empty, allow_user_default defaults to true
+        // Minimal JSON - models defaults to empty, allow_user_default defaults to true
         let json = r#"{"parameters": {}}"#;
         let mc: ModelConfig = serde_json::from_str(json).unwrap();
         assert!(mc.models.is_empty());
@@ -1567,7 +1567,7 @@ mod tests {
     }
 
     /// A `require_modifications` gate on a stage that can't modify anything
-    /// could never be satisfied — it would just burn the stage's re-run budget
+    /// could never be satisfied - it would just burn the stage's re-run budget
     /// on every pass. Reject it at load time instead (issue #107).
     #[test]
     fn test_graph_validation_modification_gate_needs_a_writing_stage() {
@@ -1736,7 +1736,7 @@ mod tests {
 
     #[test]
     fn test_linear_stages_still_validate() {
-        // No transitions set at all — pure linear mode
+        // No transitions set at all - pure linear mode
         let stages = vec![
             Stage::new("plan".to_string(), make_model()),
             Stage::new("impl".to_string(), make_model()),
@@ -2151,7 +2151,7 @@ mod tests {
 
     /// Blueprint: fan_out stage (worker_stage=fix_worker) → merge → terminal.
     /// The merge stage carries an (empty) transitions table so the blueprint is
-    /// in graph mode — this makes `validate_graph` run `has_terminal_path`,
+    /// in graph mode - this makes `validate_graph` run `has_terminal_path`,
     /// which walks the fan-out stage's merge hand-off.
     fn fanout_blueprint(worker_allowed: bool, config: FanOutConfig) -> Blueprint {
         let mut fan = Stage::new("parallel".to_string(), make_model());

@@ -1,7 +1,7 @@
 //! Outbound-request policy: which URLs an agent-driven fetch may reach.
 //!
 //! Agents fetch URLs the model chose, and the model chose them from context an
-//! attacker can influence — search results, a page fetched a moment ago, a task
+//! attacker can influence - search results, a page fetched a moment ago, a task
 //! description pasted from an issue. Handing such a URL straight to an HTTP
 //! client turns the agent into a confused deputy sitting *inside* the user's
 //! network: `http://169.254.169.254/latest/meta-data/iam/security-credentials/`
@@ -16,7 +16,7 @@
 //!
 //! A hostname is resolved here and then resolved *again* by the HTTP client when
 //! it connects. A DNS entry with a very short TTL that answers publicly the first
-//! time and privately the second slips through that window — classic DNS
+//! time and privately the second slips through that window - classic DNS
 //! rebinding. Closing it needs a custom connector that dials the exact address
 //! this module approved, which the shared blocking client cannot express today.
 //! The check still stops every direct attempt (literal IPs, hostnames that
@@ -34,7 +34,7 @@ use std::time::Duration;
 /// registry. `Client::new()` is an easy default to reach for and a bad one for
 /// anything talking to a host we do not control.
 ///
-/// Values are deliberately generous — this is a floor to stop a hang, not a
+/// Values are deliberately generous - this is a floor to stop a hang, not a
 /// performance budget. A caller with a real reason for different numbers builds
 /// its own client and says why, as the provider and MCP transports do.
 #[derive(Debug, Clone, Copy)]
@@ -85,7 +85,7 @@ pub fn client(timeouts: ClientTimeouts) -> reqwest::Client {
 /// A hop is a destination the caller's original check never saw: a perfectly
 /// public endpoint answering `307 Location: http://169.254.169.254/…` lands on
 /// the cloud metadata service just the same, and 307/308 preserve the method
-/// *and the body*. Capping the hop count does not help — the first hop is
+/// *and the body*. Capping the hop count does not help - the first hop is
 /// already somewhere else.
 ///
 /// Use this wherever the URL came from outside: a model, a request body, a
@@ -142,7 +142,7 @@ impl UrlRejection {
     /// A stable short name for this refusal.
     ///
     /// Exists so a test can `assert_eq!(err.kind(), "private_address")` rather
-    /// than `assert!(matches!(err, ...))` — the `matches!` non-matching arm is a
+    /// than `assert!(matches!(err, ...))` - the `matches!` non-matching arm is a
     /// region only a *failing* assertion ever reaches, which reads as uncovered
     /// under the workspace's 100% gate. Useful in its own right for structured
     /// logging, where the kind is the field worth indexing on.
@@ -161,14 +161,14 @@ impl std::fmt::Display for UrlRejection {
         match self {
             Self::Scheme(s) => write!(
                 f,
-                "scheme '{s}' is not fetchable — only http and https are allowed"
+                "scheme '{s}' is not fetchable - only http and https are allowed"
             ),
             Self::Unresolvable(h) => write!(f, "host '{h}' did not resolve"),
             Self::PrivateAddress { host, addr } => write!(
                 f,
                 "'{host}' resolves to {addr}, which is on a loopback, private, or \
                  link-local network. Fetching it from an agent would reach the \
-                 user's own machine or LAN — including cloud metadata services \
+                 user's own machine or LAN - including cloud metadata services \
                  that hand out credentials. Set `[security] allow_local_network = \
                  true` if this agent is genuinely meant to talk to a local service."
             ),
@@ -181,7 +181,7 @@ impl std::fmt::Display for UrlRejection {
 ///
 /// Covers loopback, RFC 1918 private, link-local (which includes the
 /// `169.254.169.254` cloud metadata endpoint), CGNAT, unspecified, multicast,
-/// broadcast, and documentation ranges — plus the IPv6 equivalents. IPv4-mapped
+/// broadcast, and documentation ranges - plus the IPv6 equivalents. IPv4-mapped
 /// IPv6 addresses are unwrapped first, so `::ffff:127.0.0.1` cannot be used to
 /// smuggle a loopback address past a v6 check.
 pub fn is_restricted_addr(addr: IpAddr) -> bool {
@@ -205,12 +205,12 @@ fn is_restricted_v4(a: Ipv4Addr) -> bool {
         || a.is_multicast()
         || a.is_broadcast()
         || a.is_documentation()
-        // 100.64.0.0/10 — carrier-grade NAT. `Ipv4Addr::is_shared` is still
+        // 100.64.0.0/10 - carrier-grade NAT. `Ipv4Addr::is_shared` is still
         // unstable, so the range is spelled out.
         || (b0 == 100 && (64..128).contains(&b1))
-        // 192.0.0.0/24 — IETF protocol assignments.
+        // 192.0.0.0/24 - IETF protocol assignments.
         || (b0 == 192 && b1 == 0 && a.octets()[2] == 0)
-        // 240.0.0.0/4 — reserved.
+        // 240.0.0.0/4 - reserved.
         || b0 >= 240
 }
 
@@ -219,9 +219,9 @@ fn is_restricted_v6(a: Ipv6Addr) -> bool {
     a.is_loopback()
         || a.is_unspecified()
         || a.is_multicast()
-        // fc00::/7 — unique local. `is_unique_local` is unstable.
+        // fc00::/7 - unique local. `is_unique_local` is unstable.
         || (seg0 & 0xfe00) == 0xfc00
-        // fe80::/10 — link-local unicast. `is_unicast_link_local` is unstable.
+        // fe80::/10 - link-local unicast. `is_unicast_link_local` is unstable.
         || (seg0 & 0xffc0) == 0xfe80
 }
 
@@ -249,7 +249,7 @@ fn resolve_host(host: &str, port: u16) -> Option<Vec<IpAddr>> {
 
 /// Core of [`check_url`] with name resolution injected.
 ///
-/// A `fn` pointer, not `impl Fn`, so there is a single monomorphization —
+/// A `fn` pointer, not `impl Fn`, so there is a single monomorphization -
 /// otherwise each caller's closure type gets its own coverage report and every
 /// arm reads as partially covered. The seam exists because the interesting cases
 /// (a name resolving to nothing, a name resolving to a public address, a name
@@ -269,11 +269,11 @@ pub(crate) fn check_url_with(
     }
     // `url::Host`, not `host_str()`: the latter keeps the brackets on an IPv6
     // literal (`[::1]`), which then fails to parse as an address *and* fails to
-    // resolve — refusing the URL, but as "unresolvable" rather than "loopback",
+    // resolve - refusing the URL, but as "unresolvable" rather than "loopback",
     // and only by accident. `Host` hands back the address already parsed.
     // `.expect`, not a `NoHost` variant: the scheme check above has already
     // restricted us to http/https, and the URL Standard requires a host for
-    // those "special" schemes — `Url::parse("http://")` fails with "empty host"
+    // those "special" schemes - `Url::parse("http://")` fails with "empty host"
     // rather than producing a hostless URL. A branch for the impossible case
     // would be a permanently-uncovered one.
     let host = url
@@ -299,8 +299,8 @@ pub(crate) fn check_url_with(
 
     let host = host_str.as_str();
     let port = url.port_or_known_default().unwrap_or(80);
-    // A resolver error and an empty answer are the same thing to a caller —
-    // there is no address to check — so they collapse to one branch rather than
+    // A resolver error and an empty answer are the same thing to a caller -
+    // there is no address to check - so they collapse to one branch rather than
     // two, one of which would be near-impossible to reach.
     let resolved = resolve(host, port).filter(|addrs: &Vec<IpAddr>| !addrs.is_empty());
     let Some(resolved) = resolved else {
@@ -369,7 +369,7 @@ mod tests {
         let addr = redirecting_server("http://169.254.169.254/latest/".to_string(), 1).await;
 
         // The policy only sees *redirects*, never the URL the caller passed, so
-        // the initial connect to loopback proceeds regardless of this flag —
+        // the initial connect to loopback proceeds regardless of this flag -
         // what it governs is whether the hop onward to link-local is followed.
         let client = checked_client(ClientTimeouts::default(), false);
         let err = client
@@ -390,7 +390,7 @@ mod tests {
         assert!(refused, "{chain}");
     }
 
-    /// And a permitted hop is actually followed — so the policy is deciding per
+    /// And a permitted hop is actually followed - so the policy is deciding per
     /// address rather than refusing every redirect.
     #[tokio::test(flavor = "multi_thread")]
     async fn checked_client_follows_a_permitted_redirect() {
@@ -410,7 +410,7 @@ mod tests {
     /// A hop is a destination the caller's original check never saw. 307/308
     /// preserve the method *and* the body, so a public endpoint answering with a
     /// redirect to a private address turns a webhook into a request primitive
-    /// against the internal network — capping the hop count does not help,
+    /// against the internal network - capping the hop count does not help,
     /// because the first hop is already somewhere else.
     #[test]
     fn a_redirect_hop_is_checked_like_any_other_url() {
@@ -449,7 +449,7 @@ mod tests {
         );
     }
 
-    /// The builder has to actually produce a client — a factory returning a
+    /// The builder has to actually produce a client - a factory returning a
     /// builder nothing can `build()` would be a silent no-op.
     #[test]
     fn the_client_builder_produces_a_usable_client() {
@@ -597,7 +597,7 @@ mod tests {
     }
 
     /// The scheme check runs before resolution, so a refused scheme never
-    /// reaches the resolver — no DNS lookup for a URL we were never going to
+    /// reaches the resolver - no DNS lookup for a URL we were never going to
     /// fetch.
     #[test]
     fn the_scheme_is_checked_before_anything_is_resolved() {

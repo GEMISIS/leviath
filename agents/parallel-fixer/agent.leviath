@@ -25,13 +25,13 @@ max_iterations = 6
 max_revisits = 2
 system_prompt = """
 Work out how THIS project runs its tests. Do not fix anything, and do not run
-the full suite yet — the validate stage does that.
+the full suite yet - the validate stage does that.
 
-Start from what you already have — do not rediscover it:
+Start from what you already have - do not rediscover it:
 - `repo_files` holds the tracked file list (empty if this isn't a git repo).
 - `task` may already name the test command; if so, trust it and just confirm the
   single-test form.
-- If `CLAUDE.md`, `AGENTS.md` or `CONTRIBUTING.md` exist, read them — they
+- If `CLAUDE.md`, `AGENTS.md` or `CONTRIBUTING.md` exist, read them - they
   usually state the test command outright.
 
 Fill gaps with list_dir/read_file and read-only shell probes (e.g.
@@ -41,7 +41,7 @@ Write `discovery` (context_write): language, build system, test runner, where
 tests live, and the fixture conventions a fix would have to respect.
 
 Write `workflow` (context_write) ending with these two literal lines. The
-SINGLE-TEST line matters most — each parallel worker runs one test, not the
+SINGLE-TEST line matters most - each parallel worker runs one test, not the
 suite, and it is copied into every work item:
   SUITE: <command to run the whole test suite>
   SINGLE: <command to run ONE named test, with a placeholder for the name>
@@ -53,7 +53,7 @@ default_region = "conversation"
 shell = "scratch"
 
 [stages.discover.transitions.validate]
-hint = "Test commands known — run the suite and diagnose"
+hint = "Test commands known - run the suite and diagnose"
 transform = "direct"
 
 # ─── Stage 2: Validate ───────────────────────────────────────────────────────
@@ -66,7 +66,7 @@ available_tools = ["read_file", "read_files", "list_dir", "shell", "context_writ
 max_iterations = 20
 max_revisits = 2
 system_prompt = """
-DIAGNOSE ONLY — do NOT edit any files or fix anything here. The parallel workers
+DIAGNOSE ONLY - do NOT edit any files or fix anything here. The parallel workers
 do the fixing; your job is to run the tests read-only and describe the failures.
 
 Run the project's test suite with shell, using `workflow`'s SUITE command (the
@@ -104,7 +104,7 @@ on_worker_failure = "continue"
 split_prompt = """
 Read the `diagnosis` region and the SINGLE line of the `workflow` region.
 
-Output ONLY a JSON array — start with '[' and end with ']', no prose, no markdown
+Output ONLY a JSON array - start with '[' and end with ']', no prose, no markdown
 fences, nothing else. One work item per DISTINCT source file (group tests that
 share a file). Shape:
 
@@ -112,7 +112,7 @@ share a file). Shape:
 
 Every item MUST carry a "verify" field: the SINGLE-test command from `workflow`
 with the placeholder filled in for that item's test. Workers run their own
-blueprint and do NOT inherit this agent's context regions — the work item is all
+blueprint and do NOT inherit this agent's context regions - the work item is all
 they get, so a worker with no "verify" has no way to check its own fix.
 
 If `diagnosis` is exactly "NO FAILURES" (or lists none), output exactly: []
@@ -129,15 +129,15 @@ allow_as_worker = true
 system_prompt = """
 You are fixing ONE failing test. Your work item (test name, source file,
 diagnosis, and the `verify` command for this exact test) is in your pinned
-context — it is ALL the context you get, so work from it.
+context - it is ALL the context you get, so work from it.
 
 1. Read the test and the implicated source file.
-2. Make the MINIMAL edit that fixes the failure — don't refactor unrelated code.
+2. Make the MINIMAL edit that fixes the failure - don't refactor unrelated code.
 3. Run the work item's `verify` command to confirm this test now passes. Don't
    claim a fix you haven't run.
 4. Report exactly which file(s) you changed and what you changed.
 
-Only touch the source file for your work item — other workers are fixing other
+Only touch the source file for your work item - other workers are fixing other
 files in parallel.
 """
 
@@ -150,12 +150,12 @@ available_tools = ["read_file", "read_files", "edit_file", "shell", "context_app
 max_iterations = 30
 system_prompt = """
 The parallel workers' results are in your conversation context. Your job:
-1. Reconcile the fixes — if two touched related code, make them consistent.
+1. Reconcile the fixes - if two touched related code, make them consistent.
 2. Run the full test suite once, using `workflow`'s SUITE command.
 3. Record what changed in the `fixes` region (context_append): one line per file
    touched and the net effect.
 
-Don't chase every remaining failure here — the verify stage decides whether
+Don't chase every remaining failure here - the verify stage decides whether
 another parallel round is needed. Just make the fixes coherent and report state.
 """
 
@@ -165,7 +165,7 @@ default_region = "conversation"
 shell = "test_results"
 
 [stages.merge_fixes.transitions.verify]
-hint = "Fixes reconciled — verify the full suite"
+hint = "Fixes reconciled - verify the full suite"
 transform = "compact"
 
 # ─── Stage 5: Verify ─────────────────────────────────────────────────────────
@@ -198,7 +198,7 @@ default_region = "conversation"
 shell = "test_results"
 
 [stages.verify.transitions.validate]
-hint = "Failures remain — re-diagnose and fan out another round"
+hint = "Failures remain - re-diagnose and fan out another round"
 transform = "compact"
 
 # ─── Compaction ──────────────────────────────────────────────────────────────
@@ -209,7 +209,7 @@ model = "claude-sonnet-5"
 # ─── Context layout ──────────────────────────────────────────────────────────
 [context.regions]
 task         = { kind = "pinned", budget = "3%", max_tokens = 4000, required = true, seed = "task", required_message = "Describe what to fix via --task. The discover stage works out how to run the tests, so you no longer have to spell that out here." }
-# Deterministic repo scan, run once at spawn (issue #108) — the discover stage
+# Deterministic repo scan, run once at spawn (issue #108) - the discover stage
 # starts from facts instead of burning iterations on `ls`. `git ls-files` behaves
 # identically on POSIX and Windows shells; outside a git repo it fails and this is
 # simply left empty (non-fatal), and oversized output is trimmed to the budget.

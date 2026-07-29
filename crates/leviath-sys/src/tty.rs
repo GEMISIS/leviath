@@ -2,7 +2,7 @@
 //!
 //! OSC52 is a last-resort clipboard mechanism: it asks the *terminal emulator*
 //! to set the system clipboard, so it works over SSH and without any native
-//! clipboard tool. The bytes must reach the real terminal — the controlling
+//! clipboard tool. The bytes must reach the real terminal - the controlling
 //! `/dev/tty` or stdout.
 //!
 //! This module holds the pure, fully-tested pieces: `osc52_sequence` (the
@@ -10,7 +10,7 @@
 //! logic, parameterized over the tty opener and the fallback sink so every
 //! branch is exercised via injected fakes). The genuinely-untestable real-I/O
 //! leaves (opening `/dev/tty`, writing the real `stdout()`) are composed in the
-//! CLI binary — see `real_yank` in `crates/leviath-cli/src/main.rs`.
+//! CLI binary - see `real_yank` in `crates/leviath-cli/src/main.rs`.
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -52,13 +52,13 @@ fn osc52_sequence(text: &str) -> String {
 /// Core OSC52 write logic, parameterized over how to open the TTY and where the
 /// stdout fallback writes, so every branch is exercisable without touching a
 /// real terminal. `pub` so the CLI binary can compose it with the real
-/// `/dev/tty` opener + real `stdout()` (the un-unit-testable leaves) — see
+/// `/dev/tty` opener + real `stdout()` (the un-unit-testable leaves) - see
 /// `real_yank` in `crates/leviath-cli/src/main.rs`.
 ///
 /// The fallback is a `&mut dyn Write` (not a generic `T: Write`) deliberately:
 /// a single vtable dispatch on this cold, human-driven path costs nothing, and
 /// a non-generic function has exactly one coverage-mapping instance instead of
-/// one per caller type — no phantom-uncovered monomorphization for llvm-cov.
+/// one per caller type - no phantom-uncovered monomorphization for llvm-cov.
 pub fn osc52_write_via(
     text: &str,
     open_tty: fn() -> io::Result<File>,
@@ -94,8 +94,8 @@ mod tests {
 
     // Cross-platform stand-ins for a real TTY: a writable temp file (accepts
     // writes) and a read-only temp file (writes to it fail). Using a temp file
-    // rather than `/dev/null` keeps these tests — and thus `osc52_write_via`'s
-    // tty-success and tty-write-fails branches — covered on every OS, not just
+    // rather than `/dev/null` keeps these tests - and thus `osc52_write_via`'s
+    // tty-success and tty-write-fails branches - covered on every OS, not just
     // Unix.
     fn open_temp_writable() -> io::Result<File> {
         std::fs::OpenOptions::new()
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn write_via_returns_false_when_fallback_flush_fails() {
-        // write succeeds but flush fails — exercises the flush half of the
+        // write succeeds but flush fails - exercises the flush half of the
         // final `write_all(..).is_ok() && flush(..).is_ok()`.
         let mut sink = FlushFailWriter { buf: Vec::new() };
         assert!(!osc52_write_via("hi", open_fails, &mut sink));

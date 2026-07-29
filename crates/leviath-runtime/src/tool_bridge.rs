@@ -1,4 +1,4 @@
-//! The async worker side of the ECS tool stage — the sync-ECS ↔ async-I/O
+//! The async worker side of the ECS tool stage - the sync-ECS ↔ async-I/O
 //! bridge for tool execution.
 //!
 //! When the pipeline decides an agent's response has tool calls to run, the
@@ -9,7 +9,7 @@
 //! results channel, waking the tick loop; the tool-collect system applies the
 //! results on a later tick.
 //!
-//! **Concurrency**: the lane is a *pool* — [`spawn_tool_pool`] runs N workers off
+//! **Concurrency**: the lane is a *pool* - [`spawn_tool_pool`] runs N workers off
 //! one shared job channel (`Arc<Mutex<Receiver>>`). A worker holds the receiver
 //! lock only across `recv()`, then releases it and runs `exec().await`, so up to
 //! N agents' tool batches execute concurrently (the receive is serialized; the
@@ -28,7 +28,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
 /// The future produced by a boxed tool-execution closure: resolves to
-/// `(tool_call_id, result)` pairs — the same shape the engine's tool executors
+/// `(tool_call_id, result)` pairs - the same shape the engine's tool executors
 /// already return.
 pub type ToolExecFuture = Pin<Box<dyn Future<Output = Vec<(String, String)>> + Send>>;
 
@@ -65,7 +65,7 @@ pub type SharedJobRx = Arc<Mutex<UnboundedReceiver<ToolJob>>>;
 /// reporting each outcome and waking the tick loop. Holds the receiver lock only
 /// across `recv()` (so sibling workers can run their `exec().await` in parallel),
 /// then releases it before executing. Returns when the job channel is closed (all
-/// senders dropped — i.e. the world is shutting down).
+/// senders dropped - i.e. the world is shutting down).
 pub async fn tool_worker(
     jobs: SharedJobRx,
     results: UnboundedSender<ToolOutcome>,
@@ -89,7 +89,7 @@ pub async fn tool_worker(
         // This is what returns the worker to the pool: several of the things a
         // batch can await are unbounded (a tool-approval prompt, an `ask_user`,
         // a `wait_for_agent` poll), so without this a cancelled agent kept one
-        // of the lane's fixed number of workers forever — and once they were all
+        // of the lane's fixed number of workers forever - and once they were all
         // taken, no other agent's tools ran either.
         let out = tokio::select! {
             biased;
@@ -107,7 +107,7 @@ pub async fn tool_worker(
 
 /// Spawn a pool of `workers` [`tool_worker`] tasks off one shared job channel and
 /// return their handles. `workers` is clamped to at least 1. This is the tool-lane
-/// concurrency cap — the number of agents whose tool batches may run at once.
+/// concurrency cap - the number of agents whose tool batches may run at once.
 pub fn spawn_tool_pool(
     runtime: &Handle,
     jobs: UnboundedReceiver<ToolJob>,
@@ -165,7 +165,7 @@ mod tests {
                     // `notify_one` (not `notify_waiters`) on both signals: it
                     // stores a permit when nobody is waiting yet, so neither the
                     // test nor the batch can lose the other's wakeup by being
-                    // slow to arm — a real flake on a loaded runner.
+                    // slow to arm - a real flake on a loaded runner.
                     started.notify_one();
                     release.notified().await;
                     vec![("held".to_string(), "done".to_string())]
@@ -245,7 +245,7 @@ mod tests {
     ///
     /// This is what unwedges the daemon: several things a batch can await are
     /// unbounded (a tool-approval prompt, `ask_user`, a `wait_for_agent` poll),
-    /// and the lane has a fixed number of workers — so a cancelled agent used to
+    /// and the lane has a fixed number of workers - so a cancelled agent used to
     /// hold one forever, and once all of them were held no agent's tools ran.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_cancelled_batch_is_abandoned_and_frees_the_worker() {
@@ -254,7 +254,7 @@ mod tests {
         let wake = Arc::new(Notify::new());
         let cancel = crate::cancel::CancelToken::new();
 
-        // A batch that only finishes when released — the unbounded-prompt case.
+        // A batch that only finishes when released - the unbounded-prompt case.
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         jtx.send(held_job(

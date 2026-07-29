@@ -100,8 +100,8 @@ async fn daemon_background_loop(
 ///
 /// Generic over `S: TerminalSetup` and `E: EventSource`. The only
 /// `TerminalSetup` in the library is the test double [`TestSetup`] (the real
-/// `CrosstermSetup` lives in the binary), so every monomorphization here — and
-/// in [`run_dashboard_loop`] — runs against a `ratatui::backend::TestBackend`
+/// `CrosstermSetup` lives in the binary), so every monomorphization here - and
+/// in [`run_dashboard_loop`] - runs against a `ratatui::backend::TestBackend`
 /// with canned events, keeping the whole function covered.
 async fn execute_core<S: TerminalSetup, E: EventSource>(
     dashboard: &mut Dashboard,
@@ -123,11 +123,11 @@ async fn execute_core<S: TerminalSetup, E: EventSource>(
 /// [`EventSource`] in tests, instead of a real terminal. Exits (returning
 /// `Ok(())`) once `dashboard.should_quit` is set; propagates the first I/O
 /// error from drawing or event polling, leaving raw mode / the alternate
-/// screen untouched on error -- restoring those is `execute`'s
+/// screen untouched on error - restoring those is `execute`'s
 /// responsibility, not this loop's.
 ///
 /// Generic over `B: Backend` and `impl EventSource`; in the measured test
-/// build it is only ever instantiated once -- with the single
+/// build it is only ever instantiated once - with the single
 /// [`TestBackendHarness`] backend and the single [`TestEventSource`] (both
 /// carry an injectable-failure switch, so the draw-error and poll-error `?`
 /// arms are exercised within that one monomorphization), never a real
@@ -250,14 +250,14 @@ fn mcp_system_now() -> u64 {
 
 /// Load config, build the dashboard + engine, and run the event loop against
 /// the injected [`TerminalSetup`] and [`EventSource`]. This is the whole
-/// `lev dash` command minus the two real-terminal doubles — so it is fully
+/// `lev dash` command minus the two real-terminal doubles - so it is fully
 /// unit-testable (drive it with `TestSetup` + a canned `TestEventSource`), and
 /// the binary's `real_dashboard` supplies the real crossterm `CrosstermSetup`
 /// + [`CrosstermEventSource`].
 ///
 /// The real terminal wiring cannot live here: constructing `CrosstermSetup`
 /// enables actual raw mode / the alternate screen and blocks forever on real
-/// keyboard input (an `is_terminal()` guard does not prevent the hang -- it
+/// keyboard input (an `is_terminal()` guard does not prevent the hang - it
 /// still hangs a real editor terminal full-screen). That irreducible sliver is
 /// the binary's job; everything it composes is exercised here.
 /// `yank_fn` is the clipboard implementation the dashboard's `y` keypress uses;
@@ -600,7 +600,7 @@ mod tests {
         let mut terminal = test_terminal();
         // A no-op Resize tick, then both wheel directions, a full
         // press-drag-release selection over the log panel, and the Esc that
-        // triggers quit -- covers every arm of the event match, including the
+        // triggers quit - covers every arm of the event match, including the
         // mouse one that carries scrolling and selection.
         let mouse = |kind, column, row| {
             Event::Mouse(crossterm::event::MouseEvent {
@@ -639,7 +639,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_dashboard_loop_no_event_tick_then_quits() {
-        // Tick 1: `poll_event` returns `None` (simulated poll-timeout — no input
+        // Tick 1: `poll_event` returns `None` (simulated poll-timeout - no input
         // pending); tick 2: Esc quits.  The `None` entry exercises the
         // `if let Some(event)` fallthrough path (line 127 in mod.rs).
         let mut dashboard = make_test_dashboard();
@@ -720,7 +720,7 @@ mod tests {
     // ever used in the process, nor whatever `mio::Poll::poll` actually
     // observes against a `script`-allocated pty's fd. There is no
     // "1ms-bounded, side-effect-free" way to touch real crossterm event
-    // polling from a test at all -- so this doesn't get a test, matching
+    // polling from a test at all - so this doesn't get a test, matching
     // every other real-terminal entry point in this file (`execute`,
     // `open_controlling_tty` equivalent, etc.).
 
@@ -754,7 +754,7 @@ mod tests {
     // (`poll_event`, `try_lock`, `terminal.draw` are all synchronous), so on
     // the default current-thread `#[tokio::test]` runtime the executor's
     // single thread never regains control long enough for the timeout's own
-    // timer to fire -- a future that never yields can't be preempted by a
+    // timer to fire - a future that never yields can't be preempted by a
     // sibling future racing it. In a non-TTY sandbox
     // `CrosstermEventSource::poll_event` fails immediately (so it looks
     // bounded in headless testing); on a real terminal, with no scripted key
@@ -842,7 +842,7 @@ mod tests {
             |_d| async move {
                 let control = no_daemon_control();
                 let mut dashboard = init_dashboard(control.clone(), |_| false);
-                // `enable()` succeeds, then `create_terminal()?` fails -- deterministic
+                // `enable()` succeeds, then `create_terminal()?` fails - deterministic
                 // (no real backend / TTY involved), so this can never hang.
                 let mut setup = TestSetup {
                     enable_should_fail: false,

@@ -6,7 +6,7 @@
 //! standardizing tool interfaces across different implementations.
 //!
 //! Tool servers are reached over JSON-RPC 2.0, carried by one of the transports
-//! in [`transport`] — stdio to a spawned child process, or HTTP to a remote
+//! in [`transport`] - stdio to a spawned child process, or HTTP to a remote
 //! server. Everything above the transport layer is identical either way.
 
 pub mod auth;

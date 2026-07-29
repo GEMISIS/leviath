@@ -1,4 +1,4 @@
-//! `lev run` — run an agent in the shared-world daemon.
+//! `lev run` - run an agent in the shared-world daemon.
 //!
 //! `run` resolves the blueprint + task locally and asks the running daemon (auto-
 //! started if needed) to create the agent in the one shared ECS world. The
@@ -48,7 +48,7 @@ pub struct RunArgs {
     pub max_depth: Option<usize>,
 
     /// Refuse the blueprint's `seed = { command = "..." }` regions. Those run a
-    /// shell command at spawn — before the first inference, and so before any
+    /// shell command at spawn - before the first inference, and so before any
     /// approval prompt. See `lev validate <path>` to inspect them first.
     #[arg(long)]
     pub no_seed_commands: bool,
@@ -60,7 +60,7 @@ pub struct RunArgs {
     pub regions: HashMap<String, String>,
 }
 
-/// The `run` subcommand's own long flags — everything NOT in this set is treated
+/// The `run` subcommand's own long flags - everything NOT in this set is treated
 /// as a dynamic `--<region>` seed flag by [`extract_region_flags`].
 const KNOWN_RUN_FLAGS: &[&str] = &[
     "task",
@@ -82,7 +82,7 @@ const KNOWN_RUN_FLAGS: &[&str] = &[
 ///
 /// A no-`=` region flag consumes the following token as its value. If argv has
 /// no `run` subcommand token, nothing is extracted (the returned argv equals the
-/// input). Pure — no environment or I/O — so it is unit-testable in isolation.
+/// input). Pure - no environment or I/O - so it is unit-testable in isolation.
 pub fn extract_region_flags(argv: Vec<String>) -> (Vec<String>, HashMap<String, String>) {
     // Locate the subcommand: the first bareword (non-`-`) token after the program
     // name. Only activate when it is `run`.

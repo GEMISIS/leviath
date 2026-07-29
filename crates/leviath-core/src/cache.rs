@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// Cache hint for a region or message boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum CacheHint {
-    /// Always cache -- content never changes (pinned, system, tools, compact history).
+    /// Always cache - content never changes (pinned, system, tools, compact history).
     Always,
     /// Cache until content hash changes (compacting regions between compaction events).
     UntilChanged,

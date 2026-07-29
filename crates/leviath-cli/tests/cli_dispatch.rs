@@ -9,7 +9,7 @@
 //! `remove <name>`, `test <path> --dry-run`, and `pack <local-dir>`.
 //!
 //! This deliberately never spawns `dash`/`dashboard`, `run` (foreground),
-//! `serve`, or `__run-worker` — those touch real terminal/TTY/stdin/
+//! `serve`, or `__run-worker` - those touch real terminal/TTY/stdin/
 //! subprocess state and are intentionally left untested via real process
 //! spawns elsewhere in this codebase for safety reasons. It also never
 //! spawns `setup` without `--non-interactive` (blocks on real stdin), nor
@@ -42,7 +42,7 @@ fn workspace_root() -> PathBuf {
 ///
 /// Sets `HOME`, `USERPROFILE`, AND `LEVIATH_HOME`: `dirs::home_dir()` does
 /// not read *any* environment variable on macOS (`NSHomeDirectory()`) or
-/// Windows (`SHGetKnownFolderPath`) -- confirmed via real Windows CI
+/// Windows (`SHGetKnownFolderPath`) - confirmed via real Windows CI
 /// failures in `add`/`remove` even after overriding `HOME`+`USERPROFILE`.
 /// `LEVIATH_HOME` (`crate::config::leviath_home_dir()`, and a matching
 /// local override inside `leviath-package`'s `AgentInstaller::new()`) is
@@ -102,7 +102,7 @@ fn list_subcommand_dispatches_and_exits_zero() {
 #[test]
 fn verbose_flag_selects_debug_log_level_and_still_dispatches() {
     // Drives `main`'s `let level = if cli.verbose { "debug" } else { "info" };`
-    // `true` arm for real -- every other test here omits `--verbose`, so
+    // `true` arm for real - every other test here omits `--verbose`, so
     // that arm was otherwise never exercised. `list` is a safe, ordinary
     // subcommand to pair it with.
     let tmp = tempfile::tempdir().unwrap();
@@ -162,7 +162,7 @@ fn validate_subcommand_dispatches_and_exits_zero_for_valid_manifest() {
 // ─── create ────────────────────────────────────────────────────────────
 //
 // `lev create <name>` only does local filesystem writes (creates a
-// directory + a few files under the current directory) -- no network, no
+// directory + a few files under the current directory) - no network, no
 // interactivity. Safe to spawn for real with `current_dir` pinned to the
 // isolated tmpdir (see `lev_command`).
 
@@ -183,7 +183,7 @@ fn create_subcommand_dispatches_and_exits_zero() {
 
 // ─── setup --non-interactive ────────────────────────────────────────────
 //
-// `lev setup --non-interactive` never touches stdin -- it only applies the
+// `lev setup --non-interactive` never touches stdin - it only applies the
 // given flag values and saves to `Config::config_path()`, which is
 // redirected to the isolated `LEVIATH_CONFIG_PATH` by `lev_command`. The
 // plain interactive path (real stdin prompts) is deliberately never
@@ -213,7 +213,7 @@ fn setup_non_interactive_subcommand_dispatches_and_exits_zero() {
 // ─── add (local directory) ──────────────────────────────────────────────
 //
 // `lev add <local-dir>` copies a plain agent directory into
-// `<HOME>/.leviath/agents/<name>` -- no network call. `HOME` is redirected
+// `<HOME>/.leviath/agents/<name>` - no network call. `HOME` is redirected
 // to the isolated tmpdir by `lev_command`, so this never touches the real
 // `~/.leviath`. Only the local-path variant is exercised; a bare package
 // name would fall through to the registry-installation branch, which makes
@@ -250,7 +250,7 @@ fn add_subcommand_installs_from_local_directory_and_exits_zero() {
 // ─── remove ──────────────────────────────────────────────────────────────
 //
 // `remove_agent` has no interactive confirmation prompt (see
-// `commands/remove.rs`) -- it just verifies the agent is installed and
+// `commands/remove.rs`) - it just verifies the agent is installed and
 // deletes its directory. Installs a fixture agent first (via `add`) into
 // the isolated `HOME`, then removes it with the same isolated environment.
 
@@ -287,7 +287,7 @@ fn remove_subcommand_removes_installed_agent_and_exits_zero() {
 //
 // The `agents/coder` fixture has no `tests/` directory, so `execute()`
 // returns early (prints "No tests directory found") before ever calling
-// `Config::load()` or building a provider registry -- no network calls are
+// `Config::load()` or building a provider registry - no network calls are
 // possible on this path regardless of `--dry-run`. Pass `--dry-run` anyway
 // for defense in depth in case the fixture ever grows a `tests/` dir.
 
@@ -310,7 +310,7 @@ fn test_subcommand_dry_run_dispatches_and_exits_zero() {
 // ─── pack ────────────────────────────────────────────────────────────────
 //
 // `lev pack <local-dir>` bundles a local agent directory into a
-// `.leviath-bundle` archive on disk -- no network, no interactivity.
+// `.leviath-bundle` archive on disk - no network, no interactivity.
 
 #[test]
 fn pack_subcommand_dispatches_and_exits_zero() {

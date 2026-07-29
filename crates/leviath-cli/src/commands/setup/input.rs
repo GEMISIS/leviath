@@ -2,7 +2,7 @@
 //!
 //! One entry point, [`Wizard::handle_key`], split into a text-editing mode and
 //! a navigation mode. Editing takes priority: while a field is open, letters
-//! are letters, so `q` types a `q` rather than quitting — losing a
+//! are letters, so `q` types a `q` rather than quitting - losing a
 //! half-entered API key to a quit shortcut would be a genuinely bad way to find
 //! out about modal input.
 
@@ -104,7 +104,7 @@ impl Wizard {
 
     /// `Enter`: open an editor, or advance.
     ///
-    /// A screen with nothing to type into — a toggle, a choice, a list — falls
+    /// A screen with nothing to type into - a toggle, a choice, a list - falls
     /// through to "next screen" rather than doing nothing at all, so Enter is
     /// always the key that moves forward.
     fn activate(&mut self) -> Action {
@@ -273,7 +273,7 @@ impl Wizard {
     /// `o`: open the current provider's signup page.
     ///
     /// The opener is a field rather than a direct call so tests never launch a
-    /// real browser — `lev dash` learned that the hard way when a unit test
+    /// real browser - `lev dash` learned that the hard way when a unit test
     /// opened one.
     fn open_signup_page(&mut self) {
         let url = match self.step {

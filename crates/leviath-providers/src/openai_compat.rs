@@ -206,7 +206,7 @@ pub fn build_openai_request_body(request: &InferenceRequest) -> serde_json::Valu
 }
 
 /// Merge a request's pass-through `extra` params (the manifest's
-/// `[model.parameters]` beyond temperature/max_output_tokens — `top_p`, `stop`,
+/// `[model.parameters]` beyond temperature/max_output_tokens - `top_p`, `stop`,
 /// `seed`, `frequency_penalty`, …) into an OpenAI-shaped request `target`.
 /// A non-object `extra` (e.g. `Null` when none are set) is a no-op, and keys the
 /// builder already set are not overwritten (explicit request fields win).
@@ -1054,7 +1054,7 @@ mod tests {
     #[tokio::test]
     async fn openai_sse_stream_ends_with_incomplete_buffer_returns_none() {
         use tokio_stream::StreamExt;
-        // No trailing "\n\n" — the event never completes.
+        // No trailing "\n\n" - the event never completes.
         let data = b"data: {\"choices\":[{\"delta\":{}}]}".to_vec();
         let stream = StaticByteStream {
             data: vec![data],
@@ -1086,7 +1086,7 @@ mod tests {
         // A comment-only SSE event (no `data:` line) glued directly to a real
         // data event in the SAME chunk. `parse_openai_sse_event` consumes the
         // comment event from the buffer but returns plain `None` (its
-        // for-loop finds no `data:` line to act on) -- indistinguishable to
+        // for-loop finds no `data:` line to act on) - indistinguishable to
         // the caller from "incomplete". So `poll_next`'s top-of-loop check
         // falls through and polls the inner stream again, which then reports
         // end-of-stream; only *there* does poll_next's own end-of-stream
@@ -1403,7 +1403,7 @@ mod tests {
         // building the debug header map skips any header whose name/value
         // won't parse (the `if let (Ok, Ok)` false arm) rather than panicking.
         // The request send itself fails (unroutable address, and reqwest also
-        // rejects the bad header), which is fine — the debug-http block runs
+        // rejects the bad header), which is fine - the debug-http block runs
         // first, before the send.
         let client = reqwest::Client::new();
         let body = serde_json::json!({ "model": "x" });

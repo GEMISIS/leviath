@@ -2,7 +2,7 @@
 //!
 //! MCP defines more than one way to carry the same JSON-RPC conversation:
 //! stdio to a child process, and HTTP to a (usually remote) server. Everything
-//! above this module — [`crate::MCPClient`], discovery, execution — is written
+//! above this module - [`crate::MCPClient`], discovery, execution - is written
 //! against the crate-internal `Transport` trait and never learns which one it
 //! is talking over.
 
@@ -33,7 +33,7 @@ pub trait BearerRefresher: Send + Sync {
 /// How long to wait for a server to answer a request before giving up.
 ///
 /// Generous, because a legitimate tool call can be genuinely slow (a build, a
-/// network fetch). The point is only that "slow" can never become "forever" —
+/// network fetch). The point is only that "slow" can never become "forever" -
 /// an unbounded read is how a silent server used to wedge the caller
 /// permanently.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
@@ -68,7 +68,7 @@ pub(crate) trait Transport: Send {
 
     /// Attach a refresher used to re-authenticate on a mid-session `401`.
     ///
-    /// The default is a no-op — only the HTTP transport can re-auth; stdio has
+    /// The default is a no-op - only the HTTP transport can re-auth; stdio has
     /// no bearer to refresh.
     fn set_bearer_refresher(&mut self, _refresher: Arc<dyn BearerRefresher>) {}
 }

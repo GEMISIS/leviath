@@ -2,7 +2,7 @@
 //!
 //! The old wizard walked every user through every provider in a fixed order,
 //! asking for four API keys whether or not they had them, then asked for a
-//! `default_provider` as free text with no validation — so a typo produced a
+//! `default_provider` as free text with no validation - so a typo produced a
 //! config that only failed at the first agent run. This table replaces both:
 //! the wizard shows it as a pick-list, and the default-provider choice is a
 //! radio over what was actually configured.
@@ -19,7 +19,7 @@ pub enum Credential {
     ApiKey,
     /// A base URL, with a working default.
     BaseUrl,
-    /// Nothing — the provider is enabled by selecting it. Claude Code
+    /// Nothing - the provider is enabled by selecting it. Claude Code
     /// authenticates through its own CLI.
     None,
 }
@@ -122,7 +122,7 @@ pub const OLLAMA_MAX_CONCURRENT_INFERENCES: usize = 1;
 /// Read a provider's currently-configured credential out of a config.
 ///
 /// Note `openrouter_api_key` and `ollama_base_url` sit at the top level of
-/// `Config` while the other three live under `[providers]` — a historical split
+/// `Config` while the other three live under `[providers]` - a historical split
 /// this function hides from everything else.
 pub fn stored_credential(config: &Config, id: &str) -> Option<String> {
     match id {
@@ -163,7 +163,7 @@ pub fn is_configured(config: &Config, id: &str) -> bool {
 /// Redact a credential for display.
 ///
 /// Delegates to `leviath_core::secrets::redact`, which keeps the **last** four
-/// characters. This used to show the *first eight* — a different answer from
+/// characters. This used to show the *first eight* - a different answer from
 /// the HTTP logger's, and the wrong half to keep: API keys are structured at
 /// the front, so `sk-ant-a`, `sk-proj-` and `ghp_…` identify the issuer and, on
 /// a short token, expose a meaningful fraction of the value. A suffix is
@@ -305,7 +305,7 @@ mod tests {
     // ─── redact ─────────────────────────────────────────────────────────────
 
     /// The wizard now shows the last four characters, matching the HTTP
-    /// logger. It used to show the first *eight* — a second answer to "how much
+    /// logger. It used to show the first *eight* - a second answer to "how much
     /// of a secret is safe to print", and the wrong half: API keys are
     /// structured at the front, so `sk-ant-a` names the issuer and, on a short
     /// token, is a meaningful fraction of the value.
@@ -329,7 +329,7 @@ mod tests {
         // Issue #115: a byte-based cut lands inside a multi-byte character and
         // panics.
         assert_eq!(redact("日本語日本語日本語"), "****語日本語");
-        // 3 characters but 9 bytes — a byte-length guard would call this "long"
+        // 3 characters but 9 bytes - a byte-length guard would call this "long"
         // and print the whole key.
         assert_eq!(redact("日本語"), "****");
         assert_eq!(redact("日本語日本語日本"), "****");

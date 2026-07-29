@@ -1,7 +1,7 @@
 //! Integration tests for the `xtask` binary.
 //!
 //! These tests spawn the compiled `xtask` binary and verify its exit codes and
-//! output — end-to-end coverage of the `main()` entry point and the
+//! output - end-to-end coverage of the `main()` entry point and the
 //! `dispatch()` router, which cannot be reached by unit tests alone.
 //!
 //! `env!("CARGO_BIN_EXE_xtask")` resolves to the path of the compiled binary at
@@ -11,7 +11,7 @@
 
 use std::process::Command;
 
-/// Path to the compiled `xtask` binary — set by Cargo at build time.
+/// Path to the compiled `xtask` binary - set by Cargo at build time.
 fn xtask_bin() -> &'static str {
     env!("CARGO_BIN_EXE_xtask")
 }

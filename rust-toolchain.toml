@@ -6,7 +6,7 @@
 # committed, this is the other half of a reproducible build: same commit, same
 # lockfile, same toolchain, same binary.
 #
-# Bump deliberately — its own commit, CI green on all three OSes — rather than
+# Bump deliberately - its own commit, CI green on all three OSes - rather than
 # by drifting.
 [toolchain]
 channel = "1.97.0"

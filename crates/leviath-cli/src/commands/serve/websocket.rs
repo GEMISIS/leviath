@@ -12,7 +12,7 @@ pub(super) async fn ws_global(
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     // Subscribe before on_upgrade so the Receiver (not a Sender clone) is
-    // moved into the handler — that way when all external Senders drop the
+    // moved into the handler - that way when all external Senders drop the
     // channel becomes Closed and rx.recv() returns Err(Closed) immediately,
     // making that match arm reachable in tests.
     let rx = state.event_tx.subscribe();
@@ -93,7 +93,7 @@ mod tests {
 
     /// Minimal hand-rolled WebSocket client used to drive `handle_ws` end to
     /// end over a real TCP loopback connection. No `tokio-tungstenite` or
-    /// other WS crate is added as a dependency — this speaks just enough of
+    /// other WS crate is added as a dependency - this speaks just enough of
     /// RFC 6455 to perform the opening handshake and exchange text/close
     /// frames with axum's server-side WebSocket implementation.
     struct WsTestClient {
@@ -310,7 +310,7 @@ mod tests {
         // a JSON payload exceeding u16::MAX bytes, forcing the server's WS
         // frame to use the 8-byte extended-length encoding (0x7f) instead of
         // the 2-byte one (0x7e) that every other event in this file's tests
-        // is small enough to use -- exercising `recv_frame`'s `len == 127`
+        // is small enough to use - exercising `recv_frame`'s `len == 127`
         // branch.
         let state = test_state();
         let tx = state.event_tx.clone();
@@ -369,14 +369,14 @@ mod tests {
         let mut client = WsTestClient::connect(addr, "/ws/agents/run-match").await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        // Non-matching event first — should be filtered out and not sent.
+        // Non-matching event first - should be filtered out and not sent.
         tx.send(ServerEvent::Log {
             agent_id: "a".to_string(),
             run_id: "run-other".to_string(),
             line: "skip me".to_string(),
         })
         .unwrap();
-        // Matching event — should be relayed.
+        // Matching event - should be relayed.
         tx.send(ServerEvent::Log {
             agent_id: "a".to_string(),
             run_id: "run-match".to_string(),
@@ -592,7 +592,7 @@ mod tests {
             });
         }
 
-        // Drop the client — TCP FIN/RST is sent.
+        // Drop the client - TCP FIN/RST is sent.
         drop(client.stream);
 
         // Keep sending events so the biased select keeps trying the event
@@ -620,7 +620,7 @@ mod tests {
     /// 2. connecting a WS client so `handle_ws` is actively looping;
     /// 3. shutting the server down with graceful shutdown (drops AppState +
     ///    its Sender clone); and
-    /// 4. dropping the test-side sender — making the channel Closed so
+    /// 4. dropping the test-side sender - making the channel Closed so
     ///    rx.recv() returns Err(Closed) and handle_ws breaks.
     fn assert_closed_after_channel_closed(eof: Option<u8>) {
         assert_eq!(eof, None, "server should close after channel Closed");
@@ -652,7 +652,7 @@ mod tests {
         // Signal graceful shutdown: the server accepts no new connections and
         // drops its router (AppState), which drops the last Sender clone.
         let _ = shutdown_tx.send(());
-        // Wait for the server task to exit — at that point the channel is Closed.
+        // Wait for the server task to exit - at that point the channel is Closed.
         tokio::time::timeout(std::time::Duration::from_secs(5), handle)
             .await
             .expect("server did not shut down in time")
@@ -802,8 +802,8 @@ mod tests {
     /// exercises, instead of each test carrying its own inline copy.
     /// `llvm-cov` counts coverage per source line, not per logical match: with
     /// the match duplicated inline across tests that each construct only 1-5 of
-    /// the 7 `ServerEvent` variants, most arms of most copies read as never hit
-    /// -- even though every arm works, just not from that copy's test data. A
+    /// the 7 `ServerEvent` variants, most arms of most copies read as never hit -
+    /// even though every arm works, just not from that copy's test data. A
     /// single shared function means every arm only needs to be hit once, from
     /// any caller, to be covered.
     fn get_run_id(ev: &ServerEvent) -> &str {
@@ -977,7 +977,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            // Set SO_LINGER to 0 — causes RST on close instead of FIN.
+            // Set SO_LINGER to 0 - causes RST on close instead of FIN.
             #[allow(deprecated)]
             stream.set_linger(Some(Duration::from_secs(0))).unwrap();
             // Close immediately (drop triggers RST).

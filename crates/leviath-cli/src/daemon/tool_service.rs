@@ -1,6 +1,6 @@
 //! The real [`ToolService`] for the shared world: bridges an agent's tool calls
 //! to the built-in and MCP executors, applying the same policy / approval /
-//! interaction flow the imperative worker used — but with interactions routed
+//! interaction flow the imperative worker used - but with interactions routed
 //! through the in-memory [`leviath_runtime::interaction_hub`] instead of file
 //! polling.
 //!
@@ -10,7 +10,7 @@
 //! handled by [`dispatch_dynamic_interaction`]. File-tracking result rewriting is
 //! deliberately *not* done here: this executor is ECS-free (no context window),
 //! so the shared world's `collect_tools` applies the agent's `file_tracking`
-//! config to these results downstream — where the window is available — via the
+//! config to these results downstream - where the window is available - via the
 //! same path top-level agents use. Every daemon agent, sub-agent included, gets
 //! file-tracking whenever its blueprint declares it.
 
@@ -50,7 +50,7 @@ pub struct AgentToolState {
     pub launch_overrides: Arc<HashMap<String, ToolPolicy>>,
     /// Tools the user allowed for the whole run (grows on "allow for session").
     pub session_allows: Arc<Mutex<HashSet<String>>>,
-    /// The current stage's `tool_permissions` — re-synced by `sync_stage` on each
+    /// The current stage's `tool_permissions` - re-synced by `sync_stage` on each
     /// stage change (a `std` mutex so the sync system can update it synchronously).
     pub stage_perms: Arc<StdMutex<HashMap<String, String>>>,
     /// Every stage's `tool_permissions`, indexed by stage index; `sync_stage`
@@ -91,7 +91,7 @@ pub struct AgentToolState {
     pub dynamic: Option<Arc<DynamicToolCtx>>,
 }
 
-/// Re-resolution inputs for a `dynamic_tools` agent — held so [`CliToolService`]
+/// Re-resolution inputs for a `dynamic_tools` agent - held so [`CliToolService`]
 /// can re-scan its `tools/` directories and re-filter its stage tool defs mid-run.
 pub struct DynamicToolCtx {
     /// `tools/` directories to re-scan (agent dir, run workdir, global), in order.
@@ -118,7 +118,7 @@ async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -
     // before it. They used to take an early return in `dispatch_tools` that
     // skipped `resolve_policy` entirely: no approval prompt was ever raised for
     // them, and a user's `[tool_permissions] spawn_agent = "deny"` was silently
-    // ignored — the "a configured deny is terminal" guarantee simply did not
+    // ignored - the "a configured deny is terminal" guarantee simply did not
     // cover these five names. That mattered because `spawn_agent` runs a whole
     // second agent, with that manifest's own command seeds and MCP servers.
     if crate::daemon::subagent::is_subagent_tool(&tc.name) {
@@ -179,7 +179,7 @@ async fn execute_script_tool(state: &AgentToolState, tc: &ToolCall) -> String {
         .get(&tc.name)
         .cloned()
     else {
-        // Name was in `script_tool_names` but the tool is gone — treat as unknown.
+        // Name was in `script_tool_names` but the tool is gone - treat as unknown.
         return format!("[error] unknown script tool: {}", tc.name);
     };
     let host = state.script_host.clone();
@@ -193,7 +193,7 @@ async fn execute_script_tool(state: &AgentToolState, tc: &ToolCall) -> String {
 /// own native-function guards, or a task cancelled by runtime shutdown, becomes
 /// a tool error rather than taking the daemon (and every other run) with it.
 ///
-/// A free function applied via `unwrap_or_else` — not a `match` arm — because
+/// A free function applied via `unwrap_or_else` - not a `match` arm - because
 /// the arm can no longer be reached from a test now that panics are contained
 /// inside `leviath_scripting` (issue #109), while this body is directly
 /// unit-testable with a real `JoinError`. Mirrors
@@ -206,12 +206,12 @@ fn script_tool_join_failed(e: tokio::task::JoinError) -> String {
 /// of tool calls, returning `(tool_call_id, result)` pairs in call order.
 ///
 /// Two passes so tool calls within one batch run in parallel where it is safe:
-/// 1. **Sequential resolution** — dynamic interactions (`ask_user_*`), sub-agent
+/// 1. **Sequential resolution** - dynamic interactions (`ask_user_*`), sub-agent
 ///    tools, and `ask` approval prompts are inherently interactive and are
 ///    resolved one at a time, in order (a user answers one prompt at a time, and
 ///    a `Session`-scope approval must be visible to later calls in the batch).
 ///    Each call ends up either fully resolved or queued for execution.
-/// 2. **Parallel execution** — every queued call runs concurrently (`join_all`),
+/// 2. **Parallel execution** - every queued call runs concurrently (`join_all`),
 ///    then results are stitched back into the original call order.
 pub async fn dispatch_tools(
     state: Arc<AgentToolState>,
@@ -229,8 +229,8 @@ pub async fn dispatch_tools(
     let mut queued: Vec<(usize, bool, ToolCall)> = Vec::new();
     for tc in calls {
         let slot = slots.len();
-        // ask_user_* / present_for_review are handled by the interaction backend
-        // — the hub (a real person answers) or, for an unattended `--yolo` run,
+        // ask_user_* / present_for_review are handled by the interaction backend -
+        // the hub (a real person answers) or, for an unattended `--yolo` run,
         // the auto-answering one.
         let interaction: &dyn InteractionBackend = match state.unattended {
             true => &UnattendedInteraction,
@@ -247,13 +247,13 @@ pub async fn dispatch_tools(
         let is_builtin = state.builtin_names.contains(&tc.name);
         // What a session-scoped approval for *this specific call* would be
         // remembered under. For a shell call that is one key per command in the
-        // line, not the bare tool name — see `session_approval_keys`.
+        // line, not the bare tool name - see `session_approval_keys`.
         let approval_keys = crate::tools::session_approval_keys(&tc.name, &tc.arguments);
         let session_approved = match approval_keys.is_empty() {
             // A call with no reusable key can never match an earlier grant.
             true => false,
             // Every command in the line must already be granted. One ungranted
-            // program is enough to ask again — that is what stops a grant for
+            // program is enough to ask again - that is what stops a grant for
             // `ls` from covering `ls && curl evil`.
             false => {
                 let allows = state.session_allows.lock().await;
@@ -296,7 +296,7 @@ pub async fn dispatch_tools(
                 if response.approved.unwrap_or(false) {
                     // Record a grant for each command the user just saw run. An
                     // empty key list means this call is not reusable, so "for
-                    // this session" degrades to "this once" — the safe direction.
+                    // this session" degrades to "this once" - the safe direction.
                     if response.scope == Some(ApprovalScope::Session) && !approval_keys.is_empty() {
                         let mut allows = state.session_allows.lock().await;
                         for key in &approval_keys {
@@ -734,7 +734,7 @@ mod tests {
     fn a_poisoned_state_map_does_not_wedge_every_other_agent() {
         // `states` holds *every* agent's tool state. A panic while holding it
         // used to poison it, so from then on `.lock().unwrap()` panicked for all
-        // agents — one bad agent taking the whole daemon's tool dispatch with it
+        // agents - one bad agent taking the whole daemon's tool dispatch with it
         // (issue #109). Recovering the guard keeps the map usable.
         let svc = CliToolService::new();
         let e = Entity::from_raw_u32(1).expect("a small literal index is always a valid entity id");
@@ -864,7 +864,7 @@ mod tests {
         .await;
         assert!(dirty.load(Ordering::SeqCst));
         // A non-write builtin (list_dir, default Allow) exercises the
-        // `writes == false` short-circuit — no flag.
+        // `writes == false` short-circuit - no flag.
         dirty.store(false, Ordering::SeqCst);
         dispatch_tools(
             state,
@@ -1302,7 +1302,7 @@ mod tests {
     /// H2: a session grant is scoped to what was approved. Approving `ls` must
     /// not carry over to a command that merely *starts* with `ls` and then
     /// chains something else. A chained line is now split into one key per
-    /// command it runs, and *every* one has to be granted — so `curl` and `sh`,
+    /// command it runs, and *every* one has to be granted - so `curl` and `sh`,
     /// which the user never approved, send it back to the policy.
     #[tokio::test]
     async fn a_session_grant_does_not_carry_to_a_chained_command() {
@@ -1449,7 +1449,7 @@ mod tests {
     async fn subagent_tool_with_a_handle_is_routed_to_the_handler() {
         let hub = InteractionHub::new();
         // A handle whose host is already gone: routing succeeds but the send
-        // fails, so the handler reports "shutting down" — which proves the call
+        // fails, so the handler reports "shutting down" - which proves the call
         // reached `subagent::handle` (the Some branch), not the None fallback.
         // Drop the receiver explicitly (a `_rx` binding would outlive the send
         // and hang the handler on the never-answered oneshot reply).
@@ -1545,7 +1545,7 @@ mod tests {
     async fn unattended_run_answers_ask_user_itself_instead_of_opening_a_prompt() {
         // `--yolo` sets `unattended`, so `ask_user_confirm` resolves inline. With
         // a live hub and nobody answering, the attended path would block here
-        // forever — this test finishing at all is the assertion (#107).
+        // forever - this test finishing at all is the assertion (#107).
         let hub = InteractionHub::new();
         let mut state =
             (*state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new())).clone();
@@ -1623,7 +1623,7 @@ for line in sys.stdin:
 
     /// Returns a tool *execution* error. The error flag's wire name is
     /// `isError`; this stub previously wrote `is_error`, which only worked
-    /// because the client read the same wrong name — so the pair agreed and
+    /// because the client read the same wrong name - so the pair agreed and
     /// the bug stayed invisible here while every real server's tool errors
     /// were being reported to the model as successes.
     const MCP_STUB_ERROR: &str = r#"

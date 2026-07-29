@@ -43,7 +43,7 @@ pub fn current_uid() -> u32 {
 /// (the mode is not consulted on `connect`), so the mode alone was never the
 /// guarantee it was documented to be.
 ///
-/// `None` when the platform cannot report it — which the caller must treat as
+/// `None` when the platform cannot report it - which the caller must treat as
 /// "refuse", since an unidentifiable peer is not an authorized one.
 ///
 /// Unix-only: on Windows the control channel is not a Unix socket, so there is
@@ -71,7 +71,7 @@ mod tests {
         let client = std::os::unix::net::UnixStream::connect(&path).expect("connect");
         let (server, _) = listener.accept().expect("accept");
 
-        // Both ends agree, and both agree with the process's own uid — a peer
+        // Both ends agree, and both agree with the process's own uid - a peer
         // check that returned `None` here would refuse every legitimate
         // connection, which is the failure mode worth catching.
         assert_eq!(peer_uid(&server), Some(current_uid()));
@@ -89,7 +89,7 @@ mod tests {
     fn kill_process_group_public_wrapper_reports_a_missing_group() {
         // Exercises the public shim (distinct from the platform impl its own
         // tests cover). A group that cannot exist errors on Unix and is a no-op
-        // where the platform has no process groups — both are outcomes the
+        // where the platform has no process groups - both are outcomes the
         // caller ignores, so either result is acceptable here.
         let _ = kill_process_group(0x7FFF_FFFF);
     }

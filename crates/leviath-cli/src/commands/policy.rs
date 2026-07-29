@@ -60,7 +60,7 @@ pub(crate) fn load_policy() -> anyhow::Result<leviath_core::PolicyConfig> {
     load_policy_from(&policy_path())
 }
 
-/// Load the policy config from a specific path — split out from `load_policy`
+/// Load the policy config from a specific path - split out from `load_policy`
 /// (which injects the real default path) so the parse-error and missing-file
 /// arms are unit-testable without touching the user's real config.
 fn load_policy_from(path: &std::path::Path) -> anyhow::Result<leviath_core::PolicyConfig> {
@@ -244,7 +244,7 @@ fn execute_add_with(
 
     // Serialize and write. `PolicyConfig` is a struct of arrays-of-tables
     // (`allowlist`) followed by a table (`mcp_overrides`), whose entries hold
-    // only inline values — there is no primitive-after-table ordering hazard,
+    // only inline values - there is no primitive-after-table ordering hazard,
     // so TOML serialization cannot fail.
     let toml_str = toml::to_string_pretty(&config)
         .expect("infallible: PolicyConfig always serializes to TOML");
@@ -428,7 +428,7 @@ mod tests {
 
     #[test]
     fn load_policy_from_read_error_propagates() {
-        // The path exists but is a directory, so read_to_string fails —
+        // The path exists but is a directory, so read_to_string fails -
         // exercising load_policy_from's `read_to_string(path)?` error arm.
         let dir = tempfile::tempdir().unwrap();
         assert!(load_policy_from(dir.path()).is_err());
@@ -443,7 +443,7 @@ mod tests {
     #[test]
     fn execute_list_with_read_dir_error_propagates() {
         // `rules` exists but is a regular file (not a directory), so read_dir
-        // fails — exercising execute_list_with's `read_dir(rules)?` error arm.
+        // fails - exercising execute_list_with's `read_dir(rules)?` error arm.
         let dir = tempfile::tempdir().unwrap();
         let rules_file = dir.path().join("rules");
         std::fs::write(&rules_file, "i am a file, not a dir").unwrap();
@@ -1025,7 +1025,7 @@ mod tests {
     #[test]
     fn add_with_parent_that_is_a_file_errors() {
         // When the target path's parent is an existing regular file,
-        // create_dir_all fails and the `?` propagates — covers the error arm.
+        // create_dir_all fails and the `?` propagates - covers the error arm.
         let dir = tempfile::tempdir().unwrap();
         let file_as_parent = dir.path().join("iamafile");
         std::fs::write(&file_as_parent, "not a dir").unwrap();

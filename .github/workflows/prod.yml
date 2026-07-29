@@ -124,7 +124,7 @@ jobs:
           if [ -f release/SHA256SUMS ]; then
             (cd release && grep -v '^SHA256SUMS$' SHA256SUMS | sha256sum -c -)
           else
-            echo "ERROR: no SHA256SUMS in the beta release — refusing to promote unverified binaries."
+            echo "ERROR: no SHA256SUMS in the beta release - refusing to promote unverified binaries."
             exit 1
           fi
 
@@ -156,7 +156,7 @@ jobs:
           target_commitish: ${{ needs.check-beta.outputs.sha }}
           name: "Leviath ${{ env.VERSION }}"
           body: |
-            **Stable release** — ${{ env.VERSION }}
+            **Stable release** - ${{ env.VERSION }}
 
             Source commit: ${{ needs.check-beta.outputs.sha }}
 

@@ -1,8 +1,8 @@
-//! `lev context <run-id>` — show a run's context-window history.
+//! `lev context <run-id>` - show a run's context-window history.
 //!
 //! Replays the run's portable archive (`run.lvr`) into the sequence of context
 //! windows over time (one per recorded checkpoint/step) and prints them, so you
-//! can inspect what the agent's memory looked like at each stage and point —
+//! can inspect what the agent's memory looked like at each stage and point -
 //! for debugging or auditing. Read-only; sources everything from disk.
 
 use clap::Args;
@@ -63,7 +63,7 @@ fn render(run_id: &str, history: &[RunPoint], json: bool, full: bool) -> String 
         ));
         for region in &point.context.regions {
             out.push_str(&format!(
-                "      region {} ({}) — {} tok, {} entr{}\n",
+                "      region {} ({}) - {} tok, {} entr{}\n",
                 region.name,
                 region.kind,
                 region.current_tokens,

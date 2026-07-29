@@ -1,4 +1,4 @@
-# `lev setup` — the onboarding wizard
+# `lev setup` - the onboarding wizard
 
 ## Why it was rebuilt
 
@@ -9,7 +9,7 @@ plaintext, touched about eight of `Config`'s twenty-odd fields, took
 or agent blueprints. It ended by printing *"All API keys look valid"* on the
 strength of a `key.starts_with("sk-ant-")` check that never touched the network.
 
-A fresh install came out the other side with a config file and no agents — the
+A fresh install came out the other side with a config file and no agents - the
 ten blueprints under `agents/` shipped only in the git repo, and `lev list`
 looked for them in a directory beside the executable that no real install has.
 
@@ -32,8 +32,8 @@ lands in a `SetupPlan`; `plan::apply` is the only code that writes. The
 `--non-interactive` flag path builds the same struct, and a future mobile or web
 host would be a third builder with nothing downstream changing.
 
-That split is also what makes the interesting logic — what actually changes,
-what to warn about, which blueprint needs updating — testable without a
+That split is also what makes the interesting logic - what actually changes,
+what to warn about, which blueprint needs updating - testable without a
 terminal.
 
 ```mermaid
@@ -83,7 +83,7 @@ flowchart LR
 ## The flow
 
 Eight screens. The two discovery-driven ones are skipped when they have nothing
-to show — nobody should press Enter through *"no MCP servers found"* on a clean
+to show - nobody should press Enter through *"no MCP servers found"* on a clean
 machine.
 
 ```mermaid
@@ -132,7 +132,7 @@ stateDiagram-v2
 | **MCP servers** | Grouped by harness, with the project scope, name collisions, and inline secrets flagged. |
 | **Review** | A diff against the current file, plus warnings, then write. |
 
-**Keys** — `↑↓`/`kj` move · `←→`/`hl` change a choice · `space` toggle ·
+**Keys** - `↑↓`/`kj` move · `←→`/`hl` change a choice · `space` toggle ·
 `enter` edit or go on · `tab`/`esc` next/previous · `v` re-check · `o` signup
 page · `Ctrl-R` reveal · `Ctrl-S` write from anywhere · `?` help ·
 `q`/`Ctrl-C` quit.
@@ -167,7 +167,7 @@ Nine sources, four families of format:
 
 Rather than nine near-identical structs, one tolerant entry parser accepts the
 union of the field names and each wrapper normalises into it. Unknown fields are
-dropped rather than rejected — these files are written by tools that add keys on
+dropped rather than rejected - these files are written by tools that add keys on
 their own schedule.
 
 Three things worth knowing:
@@ -192,7 +192,7 @@ connect time and are not flagged.
 
 `build.rs` walks the workspace's `agents/` directory and generates a
 `BUNDLED_AGENTS` table whose file contents are `include_str!`s of the real files
-— 23 files, ~170 KB of text. A missing `agents/` directory emits an empty table
+- 23 files, ~170 KB of text. A missing `agents/` directory emits an empty table
 rather than failing the build (the shape a packaged crate sees); `bundled`'s own
 invariant test then catches an accidentally-empty catalog loudly.
 
@@ -213,7 +213,7 @@ backs `--no-verify`, `LiveVerifier` is instantiated only by `main.rs`, and the
 wizard never calls a provider directly. Checks run on a background task and land
 through a channel, so the UI never blocks on the network.
 
-A failure is always a warning and never a blocker — an offline laptop or a
+A failure is always a warning and never a blocker - an offline laptop or a
 provider outage must not stop someone finishing setup. Errors are mapped to what
 the user should actually do, distinguishing cases that look alike: a `429` means
 the key *works*, a `403` means it is real but lacks access, and an unrecognised
@@ -230,8 +230,8 @@ as a whole:
   starting ratatui on a pipe.
 - **Scanning a home directory** for other tools' config is desktop-shaped. A
   host with no such layout simply finds no sources and the step is skipped.
-- **The real environment** — `std::env`, `dirs::config_dir()`, a real browser,
-  the live verifier — is assembled in the binary. Nothing in the library reaches
+- **The real environment** - `std::env`, `dirs::config_dir()`, a real browser,
+  the live verifier - is assembled in the binary. Nothing in the library reaches
   it, so no test can either.
 - The one genuine per-OS branch (the XDG-vs-OS config root) is `#[cfg]`-gated in
   a single place, following `daemon_service`'s precedent.
@@ -246,7 +246,7 @@ functions per instantiation, so a loop monomorphizing over two backend types
 produces two region reports with arms covered in only one.
 
 Rendering tests assert on the drawn text, not merely that drawing did not panic
-— which is how the masking, redaction, and secret-warning behaviour is pinned.
+- which is how the masking, redaction, and secret-warning behaviour is pinned.
 
 **CI green is not evidence the wizard works.** Two defaults passed every unit
 test and were visibly wrong the first time it ran under a pty: the Ollama

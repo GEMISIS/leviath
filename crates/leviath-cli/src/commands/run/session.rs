@@ -32,7 +32,7 @@ pub fn resolve_task(
 }
 
 /// Same as [`resolve_task`], but with the stdin-is-a-TTY check injected
-/// instead of hardcoded — lets tests deterministically exercise both the
+/// instead of hardcoded - lets tests deterministically exercise both the
 /// "not a TTY" error path and the "is a TTY" editor-launch path regardless
 /// of whether the test runner's own stdin happens to be a real terminal
 /// (e.g. a human running `cargo test` interactively vs. CI).
@@ -44,7 +44,7 @@ pub fn resolve_task(
 /// anonymous types). A generic `impl Trait` parameter gives `rustc` one
 /// monomorphization per call site, and `cargo llvm-cov` sometimes reports a
 /// region as uncovered for one instantiation even though the union of all
-/// instantiations covers every source position -- a confirmed llvm-cov
+/// instantiations covers every source position - a confirmed llvm-cov
 /// limitation (see `xtask/src/coverage.rs`'s doc comment on generic-function
 /// monomorphization). Erasing the closure type with `&dyn Fn` collapses
 /// every call site back down to a single instantiation, avoiding that noise
@@ -85,20 +85,20 @@ pub fn read_region_value(raw: &str) -> anyhow::Result<String> {
 }
 
 /// Same as [`resolve_task_with`], but with the editor launch itself injected
-/// too — lets tests deterministically exercise `launch_editor`'s error
+/// too - lets tests deterministically exercise `launch_editor`'s error
 /// propagating out of `resolve_task_with` (the `result?` a few lines down)
 /// without needing a real failing subprocess/PATH setup. On Windows there is
 /// no safe way to make the real `launch_editor`'s platform-default candidate
 /// (`notepad`, resolved via `System32` unconditionally) fail without
 /// mutating the real system directory, so `resolve_task_with`'s own
 /// `#[cfg(unix)]`-only real-PATH-starvation test for this can't be mirrored
-/// there — injecting the editor launcher closes that gap on every platform.
+/// there - injecting the editor launcher closes that gap on every platform.
 ///
 /// Also takes the temp-directory provider (`tmp_dir_fn`) as an injectable
 /// closure so tests can point the task-template write at a guaranteed-
 /// unwritable directory (e.g. one whose parent doesn't exist) and
 /// deterministically exercise `write_task_template`'s `?` propagating out of
-/// this function -- the real OS temp directory used in production is
+/// this function - the real OS temp directory used in production is
 /// essentially always writable, so that error path is otherwise untestable.
 ///
 /// All closures are `&dyn Fn` for the same monomorphization-noise reason
@@ -140,8 +140,8 @@ fn resolve_task_with_editor(
             // The old name was fully predictable, and `fs::write` follows
             // symlinks: on a shared host another user pre-created that path as a
             // link to `~/.leviath/config.toml` or `~/.ssh/authorized_keys`, and
-            // the next `lev run` wrote the template — and then everything the
-            // user typed into their editor — straight through it. `tempfile`
+            // the next `lev run` wrote the template - and then everything the
+            // user typed into their editor - straight through it. `tempfile`
             // also creates it owner-only, so the task prompt is not world
             // readable while the editor holds it open.
             let tmp = write_task_template(&tmp_dir_fn(), &template)?;
@@ -192,12 +192,12 @@ fn write_task_template(
     use std::io::Write as _;
 
     // Creating and writing in one fallible step, through the handle the builder
-    // opened. Two steps would mean re-opening by path between them — a window in
-    // which the name could be swapped — and a second error arm that a freshly
+    // opened. Two steps would mean re-opening by path between them - a window in
+    // which the name could be swapped - and a second error arm that a freshly
     // created, writable handle can never actually take.
     // A combinator chain rather than `?`s: each `?` would be an error arm that
     // a freshly created, writable handle can never take, and the whole point of
-    // reporting here is the one failure that is real -- the file could not be
+    // reporting here is the one failure that is real - the file could not be
     // created at all.
     tempfile::Builder::new()
         .prefix("lev-task-")
@@ -218,7 +218,7 @@ fn write_task_template(
 /// Extracted into its own pure, injectable function (rather than inlined
 /// directly in [`launch_editor`]) so tests can assert on the Windows
 /// candidate list containing `notepad` without ever having to actually
-/// spawn it — launching a real, blocking, interactive GUI text editor with
+/// spawn it - launching a real, blocking, interactive GUI text editor with
 /// no timeout would hang CI indefinitely.
 fn platform_default_editors() -> Vec<String> {
     #[cfg(unix)]
@@ -244,10 +244,10 @@ fn platform_default_editors() -> Vec<String> {
 /// `ExitStatus`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EditorRunOutcome {
-    /// Process finished (success, or any explicit exit code) — treat as the
+    /// Process finished (success, or any explicit exit code) - treat as the
     /// user having closed the editor.
     Completed,
-    /// Process ended with no exit code (e.g. killed by a signal) — try the next
+    /// Process ended with no exit code (e.g. killed by a signal) - try the next
     /// candidate.
     Aborted,
 }
@@ -284,7 +284,7 @@ fn launch_editor(path: &std::path::Path) -> anyhow::Result<()> {
 /// *before* `$PATH`, so it can't be made to fail short of tampering with a
 /// real system directory. Injecting `run` lets a single, platform-independent
 /// test force every candidate to fail with `NotFound` without spawning any
-/// process at all -- proving the `bail!` is reachable production code on
+/// process at all - proving the `bail!` is reachable production code on
 /// every platform, not a permanent gap.
 ///
 /// `run` is `&mut dyn FnMut` rather than `impl FnMut` for the same
@@ -329,12 +329,12 @@ fn launch_editor_with(
         cmd.arg(path_str.as_ref());
 
         match run(&mut cmd) {
-            // Exited (even non-zero means the user closed it — treat as OK).
+            // Exited (even non-zero means the user closed it - treat as OK).
             Ok(EditorRunOutcome::Completed) => {
                 return Ok(());
             }
             Ok(EditorRunOutcome::Aborted) => {
-                // Ended with no exit code (e.g. killed by signal on Unix) —
+                // Ended with no exit code (e.g. killed by signal on Unix) -
                 // try the next candidate.
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -403,7 +403,7 @@ pub fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
     // Claude Code needs no API key, but it is opt-in rather than always-on: the
     // CLI puts the user's account email address into every call and that cannot
     // be turned off. Leaving it unregistered is also how it stays out of an
-    // agent's model fallback chain — `resolve_stage_model` skips any provider
+    // agent's model fallback chain - `resolve_stage_model` skips any provider
     // the registry doesn't have.
     if config.providers.claude_code_enabled {
         let mut options = std::collections::HashMap::new();
@@ -692,7 +692,7 @@ mod tests {
         let registry = build_provider_registry_from_config(&config);
         // Ollama needs no key and is always on.
         assert!(registry.has("ollama"));
-        // Claude Code needs no key either, but is opt-in — a default config
+        // Claude Code needs no key either, but is opt-in - a default config
         // must not reach the user's Claude subscription (or send their account
         // email to it) without them having said yes.
         assert!(!registry.has("claude-code"));
@@ -844,7 +844,7 @@ mod tests {
         assert!(registry.has("google"));
         assert!(registry.has("openrouter"));
         assert!(registry.has("ollama"));
-        // Every key in the world doesn't enable Claude Code — only opting in does.
+        // Every key in the world doesn't enable Claude Code - only opting in does.
         assert!(!registry.has("claude-code"));
     }
 
@@ -1112,7 +1112,7 @@ mod tests {
     fn resolve_task_none_arg_errors_when_stdin_not_tty() {
         // The TTY check is injected (not the real std::io::stdin()) so this
         // is deterministic regardless of whether the test runner's own
-        // stdin happens to be a real terminal — a human running `cargo test`
+        // stdin happens to be a real terminal - a human running `cargo test`
         // interactively has a real TTY on stdin, unlike CI, so hardcoding
         // "stdin is never a TTY under cargo test" was a false assumption.
         let result = resolve_task_with(&None, "test-agent", None, &|| false);
@@ -1149,11 +1149,11 @@ mod tests {
     // ─── launch_editor: VISUAL takes priority and succeeds ───────────────
 
     // These `launch_editor` tests point VISUAL/EDITOR at `/usr/bin/true` (or
-    // rely on PATH-starvation to prevent any editor being found) -- both
+    // rely on PATH-starvation to prevent any editor being found) - both
     // assumptions are Unix-only. On Windows, `/usr/bin/true` doesn't exist,
     // so the NotFound-branch falls through to the windows-only "notepad"
     // candidate, which Windows resolves via its System32 search path
-    // *regardless* of $PATH -- so PATH-starvation doesn't stop it either.
+    // *regardless* of $PATH - so PATH-starvation doesn't stop it either.
     // Either way that means launching a real, blocking GUI text editor with
     // no timeout, which hung a Windows CI run indefinitely. Gated to `unix`.
     #[cfg(unix)]
@@ -1210,7 +1210,7 @@ mod tests {
                 std::fs::write(&file, "content").unwrap();
 
                 // A non-zero-but-present exit code is treated as the user having
-                // closed the editor -- not an error.
+                // closed the editor - not an error.
                 let result = launch_editor(&file);
                 assert_launch_ok(&result);
 
@@ -1356,7 +1356,7 @@ mod tests {
             let result = launch_editor_with(&file, &mut |_cmd| {
                 // Ignores the actual candidate `launch_editor_with` resolved to
                 // (the platform default, since VISUAL/EDITOR are both empty) and
-                // spawns the current test binary instead -- any exit status it
+                // spawns the current test binary instead - any exit status it
                 // produces (even a nonzero "unrecognized option" error) classifies
                 // as `Completed`.
                 std::process::Command::new(std::env::current_exe().unwrap())
@@ -1375,7 +1375,7 @@ mod tests {
     // Unlike the whitespace-only case above (non-empty string, pushed as a
     // candidate that then fails to split into any usable parts), a truly
     // empty `VISUAL`/`EDITOR` value never even gets pushed onto the
-    // candidates list -- exercising the `!v.is_empty()`/`!e.is_empty()`
+    // candidates list - exercising the `!v.is_empty()`/`!e.is_empty()`
     // false arm for both. With both vars empty, resolution falls through to
     // the unix platform defaults (vim/nano/vi) unless PATH is also starved --
     // so this test combines the empty-string case with the same
@@ -1401,7 +1401,7 @@ mod tests {
 
                 // Neither empty var is pushed as a candidate, and PATH starvation
                 // means even the unix platform defaults (vim/nano/vi) fail to
-                // resolve -- so this deterministically reaches "no editor found"
+                // resolve - so this deterministically reaches "no editor found"
                 // rather than ever spawning a real editor.
                 let result = launch_editor(&file);
                 assert!(result.is_err());
@@ -1448,7 +1448,7 @@ mod tests {
         let dir = std::env::temp_dir().join("lev-test-launch-editor-perm-denied");
         let _ = std::fs::create_dir_all(&dir);
         // A regular, non-executable file: spawning it directly fails with
-        // `PermissionDenied`, not `NotFound` -- exercising the generic
+        // `PermissionDenied`, not `NotFound` - exercising the generic
         // `Err(e)` arm (as opposed to the `NotFound` "try next candidate"
         // arm already covered above).
         let not_executable = dir.join("not-executable");
@@ -1481,13 +1481,13 @@ mod tests {
 
     /// Exercises the final `bail!("No editor found...")` in
     /// [`launch_editor_with`] via the injected `run` seam rather than real
-    /// PATH/filesystem state -- see the doc comment on `launch_editor_with`
+    /// PATH/filesystem state - see the doc comment on `launch_editor_with`
     /// for why that matters on Windows specifically (real PATH-starvation
     /// can't fail `Command::new("notepad")`, which resolves via `System32`
     /// unconditionally). Forcing every candidate to fail with `NotFound`
     /// here doesn't depend on the platform at all: no real process is ever
-    /// spawned, so this runs identically -- and actually proves the `bail!`
-    /// line is reachable production code -- on Unix, Windows, and macOS
+    /// spawned, so this runs identically - and actually proves the `bail!`
+    /// line is reachable production code - on Unix, Windows, and macOS
     /// alike. Doesn't need `ENV_LOCK`/`PATH_ENV_LOCK`: whatever `$VISUAL`/
     /// `$EDITOR` happen to be set to by a concurrently-running test is
     /// irrelevant, since the injected closure fails every candidate the same
@@ -1513,7 +1513,7 @@ mod tests {
     // Windows resolves "notepad" via the System32 search path regardless of
     // $PATH, so PATH-starvation can't produce a "no editor found" outcome
     // there the way it does on Unix (breaking PATH so vim/nano/vi can't
-    // resolve) -- gated to `unix` for the same real-blocking-editor-hang
+    // resolve) - gated to `unix` for the same real-blocking-editor-hang
     // reason as the tests above. Kept alongside
     // `launch_editor_with_no_editor_found_when_every_candidate_not_found`
     // above as extra real-subprocess insurance on Unix; the injected-seam
@@ -1521,7 +1521,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn launch_editor_no_editor_found_when_path_has_no_candidates() {
-        // No VISUAL/EDITOR (both unset), and PATH points nowhere -- so even
+        // No VISUAL/EDITOR (both unset), and PATH points nowhere - so even
         // the unix platform-default candidates (vim/nano/vi) all fail to
         // resolve.
         temp_env::with_vars(
@@ -1550,7 +1550,7 @@ mod tests {
     // Windows can't reuse the Unix tests above verbatim: `/usr/bin/true` /
     // `/usr/bin/false` don't exist, shebang scripts can't execute (`os error
     // 193`), and Unix permission bits (`PermissionsExt`) don't apply. Batch
-    // (`.bat`) files stand in for the shebang scripts -- they're directly
+    // (`.bat`) files stand in for the shebang scripts - they're directly
     // executable via `Command::new(path)` on Windows, exit instantly, and
     // never touch a real interactive editor.
     //
@@ -1562,7 +1562,7 @@ mod tests {
     // status-to-outcome decision lives in the pure `classify_editor_exit`
     // (unit-tested for the code-less case on every platform), and the
     // "outcome == Aborted, try next" arm is driven directly via injection in
-    // `launch_editor_with_aborted_candidate_falls_through_to_next` -- both
+    // `launch_editor_with_aborted_candidate_falls_through_to_next` - both
     // cross-platform, no code-less `ExitStatus` required.
     //
     // Three other Unix tests rely on PATH-starvation --
@@ -1575,7 +1575,7 @@ mod tests {
     // this candidate" step itself (`launch_editor_with`'s `run` parameter) or
     // the "launch the editor" step (`resolve_task_with_editor`'s
     // `launch_editor_fn` parameter) sidesteps real process resolution
-    // entirely, closing all three gaps on every platform -- see
+    // entirely, closing all three gaps on every platform - see
     // `launch_editor_with_no_editor_found_when_every_candidate_not_found`,
     // `launch_editor_with_empty_visual_and_editor_are_skipped`, and
     // `resolve_task_with_editor_injected_editor_failure_propagates` above.
@@ -1636,7 +1636,7 @@ mod tests {
             std::fs::write(&file, "content").unwrap();
 
             // A non-zero-but-present exit code is treated as the user having
-            // closed the editor -- not an error.
+            // closed the editor - not an error.
             let result = launch_editor(&file);
             assert_launch_ok(&result);
 
@@ -1740,7 +1740,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         // A plain, non-executable text file: Windows' `CreateProcess` can't
         // recognize it as an executable image and fails with
-        // `ERROR_BAD_EXE_FORMAT` (os error 193), not `NotFound` -- exercising
+        // `ERROR_BAD_EXE_FORMAT` (os error 193), not `NotFound` - exercising
         // the generic `Err(e)` arm (as opposed to the `NotFound` "try next
         // candidate" arm already covered above).
         let not_executable = dir.join("not-executable.txt");
@@ -1774,7 +1774,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         // A tiny "editor" script that appends a non-comment line to
-        // whatever file it's invoked on ($1) -- standing in for a real
+        // whatever file it's invoked on ($1) - standing in for a real
         // interactive editor session.
         let dir = std::env::temp_dir().join("lev-test-resolve-task-editor-happy");
         let _ = std::fs::create_dir_all(&dir);
@@ -1805,7 +1805,7 @@ mod tests {
     #[test]
     fn resolve_task_with_editor_path_empty_after_stripping_comments_errors() {
         // /usr/bin/true "opens" the file and does nothing to it, so only the
-        // commented-out template remains -- stripped down to an empty task.
+        // commented-out template remains - stripped down to an empty task.
         temp_env::with_vars(
             [("VISUAL", Some("/usr/bin/true")), ("EDITOR", None)],
             || {
@@ -1823,7 +1823,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_task_with_editor_path_propagates_launch_editor_error() {
-        // No VISUAL/EDITOR (both unset), and PATH points nowhere -- so even
+        // No VISUAL/EDITOR (both unset), and PATH points nowhere - so even
         // the unix platform-default candidates (vim/nano/vi) all fail to
         // resolve, propagating the "no editor found" error.
         temp_env::with_vars(
@@ -1849,7 +1849,7 @@ mod tests {
     /// rather than an inline closure per call site so that if the latter
     /// test's control flow ever regresses and this stub *does* get called,
     /// llvm-cov's function-level coverage for it is still merged from the
-    /// former test -- an inline closure unique to the latter test would
+    /// former test - an inline closure unique to the latter test would
     /// otherwise show up as a brand new "0 calls" function purely because
     /// that particular test is designed to never reach it.
     fn stub_editor_returns_no_editor_found(_path: &std::path::Path) -> anyhow::Result<()> {
@@ -1860,7 +1860,7 @@ mod tests {
 
     /// Cross-platform twin of
     /// `resolve_task_with_editor_path_propagates_launch_editor_error` via
-    /// `resolve_task_with_editor`'s injected editor launcher -- see that
+    /// `resolve_task_with_editor`'s injected editor launcher - see that
     /// function's doc comment for why real PATH-starvation can't be mirrored
     /// on Windows here. Doesn't touch `PATH`/`VISUAL`/`EDITOR` at all (no
     /// `ENV_LOCK`/`PATH_ENV_LOCK` needed): the injected closure fails
@@ -1884,7 +1884,7 @@ mod tests {
     /// `write_task_template_error_on_bad_path` below, which calls
     /// `write_task_template` directly). The real OS temp directory used in
     /// production is essentially always writable, so this is only reachable
-    /// at all via the injected `tmp_dir_fn` -- pointed here at a directory
+    /// at all via the injected `tmp_dir_fn` - pointed here at a directory
     /// whose parent doesn't exist, so the write fails deterministically on
     /// both Unix (ENOENT) and Windows (ERROR_PATH_NOT_FOUND) before the
     /// editor launcher is ever reached (if it *were* reached, the assertion
@@ -1912,13 +1912,13 @@ mod tests {
         );
     }
 
-    // ─── resolve_task_with: editor path (stdin is a TTY) — Windows twins ──
+    // ─── resolve_task_with: editor path (stdin is a TTY) - Windows twins ──
 
     #[cfg(windows)]
     #[test]
     fn resolve_task_with_editor_path_happy_case() {
         // A tiny batch "editor" that appends a non-comment line to whatever
-        // file it's invoked on (%~1) -- standing in for a real interactive
+        // file it's invoked on (%~1) - standing in for a real interactive
         // editor session. `%~1` strips any surrounding quotes Windows adds
         // around a path containing spaces.
         let dir = std::env::temp_dir().join("lev-test-resolve-task-editor-happy-win");
@@ -1943,7 +1943,7 @@ mod tests {
     #[test]
     fn resolve_task_with_editor_path_empty_after_stripping_comments_errors() {
         // A no-op batch file "opens" the file and does nothing to it, so
-        // only the commented-out template remains -- stripped down to an
+        // only the commented-out template remains - stripped down to an
         // empty task.
         let dir = std::env::temp_dir().join("lev-test-resolve-task-editor-empty-win");
         let _ = std::fs::create_dir_all(&dir);
@@ -2040,7 +2040,7 @@ mod tests {
     // Windows has no chmod-style permission bits; instead, opening the file
     // for writing with a zero share mode (no `FILE_SHARE_READ`) makes any
     // concurrent read attempt fail with a sharing violation for as long as
-    // the handle stays open -- a deterministic Windows-native way to force
+    // the handle stays open - a deterministic Windows-native way to force
     // the same "file exists but can't be read" outcome the Unix test above
     // produces via `chmod 000`.
     #[cfg(windows)]

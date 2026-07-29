@@ -5,7 +5,7 @@ use super::*;
 /// Put `cmd` in its own process group, so the whole command tree can be
 /// signalled as one. `leviath_sys::configure_detached` does this for a
 /// `std::process::Command`; the tool lane uses tokio's, which has its own
-/// (Unix-only) setter. A no-op where the platform has no process groups —
+/// (Unix-only) setter. A no-op where the platform has no process groups -
 /// there, killing the direct child is all that exists.
 pub fn own_process_group(cmd: &mut Command) {
     #[cfg(unix)]
@@ -17,8 +17,8 @@ pub fn own_process_group(cmd: &mut Command) {
 /// SIGKILLs a shell's whole process group when dropped.
 ///
 /// `kill_on_drop` reaps the shell itself; this reaps what the shell started.
-/// Held for the duration of one shell tool call, so it fires on every exit path
-/// — normal completion (where the group is already gone and the signal is a
+/// Held for the duration of one shell tool call, so it fires on every exit path -
+/// normal completion (where the group is already gone and the signal is a
 /// harmless no-op), timeout, and the future being dropped because the agent was
 /// cancelled.
 pub struct ProcessGroupReaper(pub u32);
@@ -35,7 +35,7 @@ impl Drop for ProcessGroupReaper {
 /// Each built-in declares the capabilities it requires (see
 /// [`tool_required_capabilities`]); the current platform declares what it
 /// provides (see [`PlatformCapabilities`]). A tool whose requirements aren't
-/// met by the platform simply doesn't register — it's dropped from
+/// met by the platform simply doesn't register - it's dropped from
 /// advertisement, name-recognition, and dispatch. This lets platform-specific
 /// tools (like `shell`, which spawns OS processes) coexist without per-tool
 /// `#[cfg]` gates or one-off boolean flags.
@@ -86,7 +86,7 @@ impl PlatformCapabilities {
     ///
     /// Only desktop targets are built today, so this resolves to
     /// [`desktop`](Self::desktop). A future mobile/wasm target adds a `cfg` arm
-    /// here returning [`mobile`](Self::mobile) — every built-in then auto-filters
+    /// here returning [`mobile`](Self::mobile) - every built-in then auto-filters
     /// against it with no other change.
     pub fn current() -> Self {
         Self::desktop()
@@ -121,7 +121,7 @@ impl Default for PlatformCapabilities {
 ///
 /// Keyed by *canonical* tool name (resolve aliases via [`canonical_tool_name`]
 /// first). An empty slice means the tool is platform-agnostic and always
-/// available — this covers the runtime-handled tools (`present_for_review`,
+/// available - this covers the runtime-handled tools (`present_for_review`,
 /// `ask_user_*`, `edit_document`, `context_*`) which touch neither the OS
 /// process table nor the filesystem directly.
 pub fn tool_required_capabilities(canonical_name: &str) -> &'static [ToolCapability] {

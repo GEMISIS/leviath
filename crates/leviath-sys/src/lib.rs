@@ -2,7 +2,7 @@
 //! cross-platform API.
 //!
 //! Every `#[cfg(unix)]`/`#[cfg(windows)]` branch and platform
-//! permission/signal/TTY primitive used anywhere in the workspace lives here —
+//! permission/signal/TTY primitive used anywhere in the workspace lives here -
 //! nowhere else. The unavoidable OS-level `unsafe` is delegated to audited
 //! crates (`nix`) and safe std APIs, so this crate itself contains no `unsafe`.
 //! Callers use the plain functions re-exported at the crate root and never
@@ -19,12 +19,12 @@
 //!    compiled, so the coverage tool never sees them as gaps. The
 //!    Linux-visible code paths are all reachable from real unit tests.
 //! 3. **Testability.** Every function in this crate is exercised by real unit
-//!    tests — the syscalls here are either safe to call under test (`chmod` on a
+//!    tests - the syscalls here are either safe to call under test (`chmod` on a
 //!    tempfile) or split behind an
 //!    injected seam ([`tty::osc52_write_via`]
 //!    takes the tty opener + sink; `perms`' hardening op is a `fn` pointer). The
 //!    only genuinely-untestable real-I/O leaves (opening `/dev/tty`, writing the
-//!    real `stdout()`) are composed in the CLI binary, not here — so this crate
+//!    real `stdout()`) are composed in the CLI binary, not here - so this crate
 //!    contains no `#[cfg(not(test))]`.
 
 mod platform;

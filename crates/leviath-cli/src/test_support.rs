@@ -89,7 +89,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
 }
 
 /// A self-contained blueprint whose stage 0 (`plan`) is an `interactive_points`
-/// stage with a `plan_approval` interaction point — for recovery tests that
+/// stage with a `plan_approval` interaction point - for recovery tests that
 /// resume a run parked at an interaction point. Self-contained for the same
 /// isolation reason as [`inline_coder_manifest`].
 #[cfg(test)]

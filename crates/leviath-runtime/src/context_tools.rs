@@ -4,7 +4,7 @@
 //! These let an agent read and edit its own context-window regions. They operate
 //! directly on the [`ContextWindow`], so in the shared world they are applied by
 //! a pipeline system (which holds the ECS window) rather than by the async tool
-//! lane — [`handle_context_tool`] is the window-level core it calls. Ported from
+//! lane - [`handle_context_tool`] is the window-level core it calls. Ported from
 //! the imperative worker's `handle_context_tool`.
 
 use leviath_core::RegionKind;
@@ -34,7 +34,7 @@ fn region_not_found(name: &str, window: &ContextWindow) -> String {
 
 /// Apply one `context_*` tool call to `window`, returning the result text the
 /// model sees. Unknown tools and missing arguments yield `[error] …` strings
-/// (never a hard failure — the model reads and adjusts).
+/// (never a hard failure - the model reads and adjusts).
 pub fn handle_context_tool(
     name: &str,
     args: &serde_json::Value,
@@ -560,7 +560,7 @@ mod tests {
         );
         assert!(call(&mut w, "context_list", json!({"region": "files"})).contains("a.rs ("));
 
-        // All regions — covers every kind's label.
+        // All regions - covers every kind's label.
         let all = call(&mut w, "context_list", json!({}));
         for label in [
             "permanent",

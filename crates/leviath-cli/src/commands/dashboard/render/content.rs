@@ -154,7 +154,7 @@ impl Dashboard {
     ) {
         // Editing a document (an `EditText` interaction) takes over the content
         // pane: the editable textarea is rendered here, over the current text,
-        // instead of the read-only stage output — so the user revises the plan
+        // instead of the read-only stage output - so the user revises the plan
         // in place rather than in the bottom input bar.
         if self.editing_document() {
             self.input_textarea.set_block(
@@ -163,7 +163,7 @@ impl Dashboard {
                     .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(C_SUCCESS))
                     .title(Span::styled(
-                        " ✎ Editing this document — your changes replace it  ·  [Enter] save  \
+                        " ✎ Editing this document - your changes replace it  ·  [Enter] save  \
                          [Alt+↵] newline  [Esc] cancel ",
                         Style::default().fg(C_SUCCESS).add_modifier(Modifier::BOLD),
                     )),
@@ -478,7 +478,7 @@ impl Dashboard {
                 if let Some(edges) = graph.edges.get(sel_name) {
                     if edges.is_empty() {
                         lines.push(Line::from(Span::styled(
-                            "  Transitions: (terminal — no outgoing edges)",
+                            "  Transitions: (terminal - no outgoing edges)",
                             Style::default().fg(C_DIM),
                         )));
                     } else {
@@ -495,7 +495,7 @@ impl Dashboard {
                             let hint_part = edge
                                 .hint
                                 .as_deref()
-                                .map(|h| format!(" — {}", h))
+                                .map(|h| format!(" - {}", h))
                                 .unwrap_or_default();
                             lines.push(Line::from(vec![
                                 Span::styled(
@@ -509,7 +509,7 @@ impl Dashboard {
                     }
                 } else {
                     lines.push(Line::from(Span::styled(
-                        "  Transitions: (linear — no graph edges)",
+                        "  Transitions: (linear - no graph edges)",
                         Style::default().fg(C_DIM),
                     )));
                 }
@@ -677,7 +677,7 @@ impl Dashboard {
     #[expect(
         clippy::string_slice,
         reason = "`prefix_end` is only non-zero on a `starts_with` branch, where it is the length \
-                  of the ASCII tag that just matched — a char boundary"
+                  of the ASCII tag that just matched - a char boundary"
     )]
     fn build_output_lines(
         &self,
@@ -687,7 +687,7 @@ impl Dashboard {
     ) -> Vec<Line<'static>> {
         let content = if is_output {
             // When a document is up for review (a pending interaction's body,
-            // e.g. the plan being approved), show just that current instance —
+            // e.g. the plan being approved), show just that current instance -
             // not the full accumulated output history. `[l]` still shows logs.
             match self.reviewing_body() {
                 Some(body) => body,
@@ -1588,7 +1588,7 @@ mod tests {
                 transform: "replace".to_string(),
             }],
         );
-        // "implement" is selected stage — it has an incoming edge from "plan"
+        // "implement" is selected stage - it has an incoming edge from "plan"
         agent.graph_info = Some(crate::commands::dashboard::graph::GraphTransitionInfo {
             edges,
             entry_stage: "plan".to_string(),
@@ -1649,7 +1649,7 @@ mod tests {
 
     #[test]
     fn build_context_lines_with_no_edges_for_stage() {
-        // Stage has no entry in edges map at all → shows "linear — no graph edges"
+        // Stage has no entry in edges map at all → shows "linear - no graph edges"
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-noedge", AgentDisplayStatus::Active);
         agent.context_snapshot = Some(make_context_snapshot(4000, 8000));
@@ -1810,7 +1810,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
         dash.stage_content_mode = StageContentMode::Output;
-        // We need actual content lines to match against — build_output_lines
+        // We need actual content lines to match against - build_output_lines
         // will return empty for non-run-state, so use context mode with a snapshot
         // that has entries containing "hello"
         dash.stage_content_mode = StageContentMode::Context;

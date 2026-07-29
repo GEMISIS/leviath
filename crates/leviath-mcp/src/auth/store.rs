@@ -44,7 +44,7 @@ pub struct ServerAuth {
 /// Hand-written so the access and refresh tokens can never be printed.
 ///
 /// These are live credentials for a third-party server, and this struct is
-/// carried through error paths that format their context — one `{:?}` would put
+/// carried through error paths that format their context - one `{:?}` would put
 /// them in the logs. The endpoints and expiry are the useful part of a debug
 /// line anyway.
 impl std::fmt::Debug for ServerAuth {
@@ -201,7 +201,7 @@ impl AuthStore {
         let content =
             serde_json::to_string_pretty(&to_write).expect("AuthStore is always serializable");
         // `write_private`, not `fs::write` + `chmod`. The two-step version left
-        // this file — access *and refresh* tokens for every MCP server — at the
+        // this file - access *and refresh* tokens for every MCP server - at the
         // umask default (typically 0644) between the write and the mode change,
         // so every save had a moment where any local user could read it.
         leviath_sys::write_private(path, content.as_bytes())
@@ -212,7 +212,7 @@ impl AuthStore {
     /// The default store path, honoring `LEVIATH_HOME` like every other
     /// home-relative path this workspace uses.
     ///
-    /// `None` when no home directory can be resolved and no override is set —
+    /// `None` when no home directory can be resolved and no override is set -
     /// the same shape the CLI's own home resolver returns, so the caller
     /// decides how to report a missing home rather than this silently picking
     /// a surprising fallback.
@@ -257,7 +257,7 @@ impl AuthStore {
 /// Ensure the directory holding `path` exists.
 ///
 /// A path with no parent, or an empty-string parent (a bare filename), needs
-/// no directory created — those collapse to a no-op so the caller has a single
+/// no directory created - those collapse to a no-op so the caller has a single
 /// fallible step to reason about.
 fn create_parent_dir(path: &Path) -> anyhow::Result<()> {
     match path.parent() {
@@ -271,8 +271,8 @@ fn create_parent_dir(path: &Path) -> anyhow::Result<()> {
 ///
 /// This used to be a local copy that read `LEVIATH_HOME` as the `.leviath`
 /// directory *itself*, while the CLI reads it as the user home and appends
-/// `.leviath`. With the override set — which is how every test and every
-/// sandboxed run works — the OAuth token store therefore landed in a different
+/// `.leviath`. With the override set - which is how every test and every
+/// sandboxed run works - the OAuth token store therefore landed in a different
 /// directory from the config naming those very servers. The default
 /// (`~/.leviath/mcp-auth.json`) is unchanged.
 fn leviath_home() -> Option<PathBuf> {
@@ -323,7 +323,7 @@ mod tests {
         assert_eq!(auth.refresh_token.as_deref(), Some("rt-SECRET"));
         assert_eq!(loaded.keychain_server_names(), ["github"]);
 
-        // Without the store, the tokens are simply absent -- not fabricated.
+        // Without the store, the tokens are simply absent - not fabricated.
         let blind = AuthStore::load_with(&path, None).unwrap();
         assert!(blind.get("github").is_none());
     }
@@ -350,7 +350,7 @@ mod tests {
     }
 
     /// A server listed in the index whose credential is no longer in the store
-    /// leaves the user logged out of that one server -- not with a fabricated
+    /// leaves the user logged out of that one server - not with a fabricated
     /// empty grant, and not with the whole load failing.
     #[test]
     fn an_indexed_server_with_no_stored_credential_is_skipped() {
@@ -609,7 +609,7 @@ mod tests {
     #[test]
     fn loading_an_unreadable_path_errors() {
         // A directory exists at the path, so `exists()` is true but reading it
-        // as a file fails — the read-error arm, distinct from a missing file.
+        // as a file fails - the read-error arm, distinct from a missing file.
         let dir = tempfile::tempdir().unwrap();
         let as_dir = dir.path().join("store-is-a-dir");
         std::fs::create_dir(&as_dir).unwrap();
@@ -638,7 +638,7 @@ mod tests {
     #[test]
     fn saving_under_a_non_directory_parent_errors() {
         // The parent path is a *file*, so create_dir_all can't make it a
-        // directory — reaching the directory-creation error arm.
+        // directory - reaching the directory-creation error arm.
         let dir = tempfile::tempdir().unwrap();
         let blocker = dir.path().join("blocker");
         std::fs::write(&blocker, b"i am a file").unwrap();
@@ -663,7 +663,7 @@ mod tests {
     }
 
     /// Access *and refresh* tokens for every MCP server. Written with the mode
-    /// already applied, so there is no window — however brief — where another
+    /// already applied, so there is no window - however brief - where another
     /// local user could read them. The previous `fs::write` + `chmod` left the
     /// file at the umask default (typically 0644) in between, on every save.
     #[cfg(unix)]
@@ -688,13 +688,13 @@ mod tests {
 
     // ─── default_path / LEVIATH_HOME ──────────────────────────────────────
 
-    /// `LEVIATH_HOME` names the *home*, and `.leviath` is appended — the same
+    /// `LEVIATH_HOME` names the *home*, and `.leviath` is appended - the same
     /// reading the CLI's config, runs dir, agents dir and control socket use.
     ///
     /// This asserted `<LEVIATH_HOME>/mcp-auth.json` before, because this module
     /// carried its own copy of the resolver that treated the override as the
-    /// `.leviath` directory itself. With the override set — which is how every
-    /// test and every sandboxed run works — the OAuth token store therefore sat
+    /// `.leviath` directory itself. With the override set - which is how every
+    /// test and every sandboxed run works - the OAuth token store therefore sat
     /// in a different directory from the config naming those very servers.
     #[test]
     fn default_path_honors_leviath_home() {

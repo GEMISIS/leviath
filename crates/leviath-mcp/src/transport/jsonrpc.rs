@@ -91,8 +91,8 @@ impl JsonRpcResponse {
 /// What an inbound frame is, from the client's point of view.
 ///
 /// The transports read a single stream that carries three different things.
-/// Treating every frame as "the response to my last request" — as this client
-/// used to — means a server that pings us, or asks us for its roots, corrupts
+/// Treating every frame as "the response to my last request" - as this client
+/// used to - means a server that pings us, or asks us for its roots, corrupts
 /// the request/response pairing or blocks waiting for a reply that never comes.
 pub(crate) enum Inbound {
     /// A response to a request we sent.
@@ -133,8 +133,8 @@ pub(crate) fn classify(frame: Value) -> anyhow::Result<Inbound> {
 /// Build the reply to a server-initiated request.
 ///
 /// `ping` is answered with an empty result (it exists purely as a liveness
-/// check). Everything else — `roots/list`, `sampling/createMessage`,
-/// `elicitation/create` — gets a well-formed "method not found" rather than
+/// check). Everything else - `roots/list`, `sampling/createMessage`,
+/// `elicitation/create` - gets a well-formed "method not found" rather than
 /// silence, so a server that waits on the reply makes progress instead of
 /// stalling the connection.
 pub(crate) fn reply_to_server_request(id: &Value, method: &str) -> Value {
@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn classify_rejects_a_malformed_response() {
-        // No `method`, so it must be a response — but it isn't shaped like one.
+        // No `method`, so it must be a response - but it isn't shaped like one.
         let err = classify(serde_json::json!([1, 2, 3]))
             .err()
             .expect("array is not a response");

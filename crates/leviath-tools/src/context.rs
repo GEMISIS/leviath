@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// Context for tool execution — defines the sandbox root.
+/// Context for tool execution - defines the sandbox root.
 pub struct ToolContext {
     /// Absolute working directory. All file operations are confined here.
     pub workdir: PathBuf,
@@ -43,7 +43,7 @@ impl ToolContext {
 ///
 /// A blueprint's `available_tools` may name a built-in by any alias listed here;
 /// it resolves to the canonical tool that is advertised to the model and
-/// executed. This is the single source of truth for aliases — [`names`],
+/// executed. This is the single source of truth for aliases - [`names`],
 /// [`BuiltinTools::execute`], and the daemon's `available_tools` filtering all go
 /// through [`canonical_tool_name`], so adding a row here is all it takes to add
 /// an alias everywhere. Add rows only for genuine synonyms of an existing tool.
@@ -56,7 +56,7 @@ pub const TOOL_ALIASES: &[(&str, &str)] = &[
 
 /// Resolve `name` through [`TOOL_ALIASES`] to its canonical built-in name.
 ///
-/// Returns the input unchanged when it is not an alias — which includes every
+/// Returns the input unchanged when it is not an alias - which includes every
 /// canonical built-in and every MCP tool name, so this is safe to apply to any
 /// tool name before matching it against a definition.
 pub fn canonical_tool_name(name: &str) -> &str {
@@ -70,7 +70,7 @@ pub fn canonical_tool_name(name: &str) -> &str {
 
 /// Redirects shell command execution off the host into a sandbox.
 ///
-/// The default (no executor) runs the command directly on the host — the exact
+/// The default (no executor) runs the command directly on the host - the exact
 /// prior behavior. An implementor (the daemon's `SandboxManager`) returns a
 /// [`tokio::process::Command`] that runs `command` inside a container or Linux
 /// namespace instead. The implementor owns any per-stage sandbox state, so the

@@ -1,7 +1,7 @@
 //! MCP client: the protocol layer, over any transport.
 //!
 //! Framing and connection lifecycle live in [`crate::transport`]; this module
-//! owns the MCP conversation itself — the handshake, tool discovery, tool
+//! owns the MCP conversation itself - the handshake, tool discovery, tool
 //! calls, and the wire types they exchange.
 
 use serde::{Deserialize, Serialize};
@@ -84,7 +84,7 @@ pub struct EmbeddedResource {
 /// Content item in a tool result.
 ///
 /// Every wire field name here is the spec's camelCase spelling (`mimeType`),
-/// not a Rust-style snake_case one — mismatches made whole tool results fail to
+/// not a Rust-style snake_case one - mismatches made whole tool results fail to
 /// deserialize.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
@@ -123,7 +123,7 @@ pub enum ToolResultContent {
     /// Any content block this client does not model.
     ///
     /// Internally-tagged enums can't carry the original payload in a catch-all
-    /// arm, so the block's data is dropped — but that is the point: without
+    /// arm, so the block's data is dropped - but that is the point: without
     /// this variant a single unrecognized block (a future content type, or a
     /// vendor extension) fails the *entire* tool result. Callers skip these and
     /// warn.
@@ -133,8 +133,8 @@ pub enum ToolResultContent {
 /// MCP protocol revisions this client understands, newest first.
 ///
 /// The client offers the newest and adopts whatever the server echoes back.
-/// Pinning a single old revision — as this used to, with `2024-11-05`
-/// hardcoded — locks every connection to the oldest dialect and, on HTTP,
+/// Pinning a single old revision - as this used to, with `2024-11-05`
+/// hardcoded - locks every connection to the oldest dialect and, on HTTP,
 /// actively misdeclares the connection: the streamable transport postdates
 /// that revision entirely.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
@@ -207,7 +207,7 @@ impl MCPClient {
     /// Build a client for a configured server, over whichever transport the
     /// entry describes.
     ///
-    /// Callers above this point — discovery, execution, the tool registry —
+    /// Callers above this point - discovery, execution, the tool registry -
     /// never learn which one it turned out to be.
     pub async fn from_config(config: &MCPServerConfig) -> anyhow::Result<Self> {
         Self::from_config_with_auth(config, None, &[]).await
@@ -315,7 +315,7 @@ impl MCPClient {
                 tracing::warn!(
                     pages = MAX_TOOL_PAGES,
                     "MCP server still returned a tools/list cursor at the page \
-                     limit — stopping; some tools may be missing"
+                     limit - stopping; some tools may be missing"
                 );
             }
         }
@@ -411,14 +411,14 @@ fn negotiated_version(echoed: Option<&Value>) -> String {
             if !SUPPORTED_PROTOCOL_VERSIONS.contains(&version) {
                 tracing::warn!(
                     version = %version,
-                    "MCP server negotiated an unrecognized protocol revision — continuing"
+                    "MCP server negotiated an unrecognized protocol revision - continuing"
                 );
             }
             version.to_string()
         }
         None => {
             // Servers predating version negotiation omit the field.
-            tracing::debug!("MCP server echoed no protocolVersion — assuming the offered one");
+            tracing::debug!("MCP server echoed no protocolVersion - assuming the offered one");
             PREFERRED_PROTOCOL_VERSION.to_string()
         }
     }
@@ -469,7 +469,7 @@ mod tests {
         };
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("Hello"));
-        // Wire name is `isError`, not `is_error` — a mismatch here meant every
+        // Wire name is `isError`, not `is_error` - a mismatch here meant every
         // failing tool call deserialized as a success.
         assert!(json.contains("\"isError\":false"), "got: {json}");
         assert!(!json.contains("is_error"), "got: {json}");
@@ -1019,7 +1019,7 @@ for line in sys.stdin:
     // ─── send_request/send_notification: real write/flush I/O errors ───────
     //
     // `writer` is a `BufWriter`, so a small `write_all` just appends to its
-    // in-memory buffer without touching the OS -- the *real* write only
+    // in-memory buffer without touching the OS - the *real* write only
     // happens on `flush()`, which is where a broken pipe actually surfaces.
     // Killing and reaping the child first guarantees the pipe's read end is
     // gone, so these are deterministic, not racy. A payload large enough to
@@ -1343,8 +1343,8 @@ for line in sys.stdin:
 
     #[test]
     fn unknown_content_type_degrades_instead_of_failing_the_result() {
-        // Without the catch-all arm a single unrecognized block — a future
-        // content type or a vendor extension — makes the *whole* tool result
+        // Without the catch-all arm a single unrecognized block - a future
+        // content type or a vendor extension - makes the *whole* tool result
         // fail to parse, taking the usable blocks down with it.
         let json = r#"{"content":[
             {"type":"text","text":"keep me"},

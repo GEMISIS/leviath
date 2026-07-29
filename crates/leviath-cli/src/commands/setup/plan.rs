@@ -7,8 +7,8 @@
 //! a future mobile or web host would build it a third way with nothing
 //! downstream changing.
 //!
-//! Keeping it separate also means the interesting logic — what actually
-//! changes, and what to warn about — is testable without a terminal.
+//! Keeping it separate also means the interesting logic - what actually
+//! changes, and what to warn about - is testable without a terminal.
 
 use std::path::{Path, PathBuf};
 
@@ -62,7 +62,7 @@ pub fn apply(plan: &SetupPlan, config_path: &Path, agents_dir: &Path) -> anyhow:
 /// review screen. Empty means nothing would change.
 ///
 /// Credentials are described as "set" / "changed" / "cleared" and never
-/// printed — the review screen is exactly the moment a shoulder-surfer is
+/// printed - the review screen is exactly the moment a shoulder-surfer is
 /// looking, and a key the user cannot read back is not a real loss when the
 /// wizard just verified it works.
 pub fn changes(before: &Config, plan: &SetupPlan) -> Vec<String> {

@@ -1,7 +1,7 @@
 //! Proving a provider credential actually works, before the config is written.
 //!
 //! `lev setup` used to end by printing "All API keys look valid." after a
-//! `key.starts_with("sk-ant-")` check that never touched the network — a
+//! `key.starts_with("sk-ant-")` check that never touched the network - a
 //! sentence that was false for a revoked key, a key pasted with a trailing
 //! space, a key for the wrong account, and every key belonging to a provider
 //! the check did not cover at all (Google, OpenRouter, Ollama). The first time
@@ -9,8 +9,8 @@
 //!
 //! Every provider already implements
 //! [`list_models`](leviath_providers::Provider::list_models) against a real
-//! endpoint — `/v1/models` on Anthropic and OpenAI, `/v1beta/models` on Gemini,
-//! `/api/v1/models` on OpenRouter, `/api/tags` on Ollama — so one call both
+//! endpoint - `/v1/models` on Anthropic and OpenAI, `/v1beta/models` on Gemini,
+//! `/api/v1/models` on OpenRouter, `/api/tags` on Ollama - so one call both
 //! proves the credential and returns the model list the wizard's default-model
 //! picker needs. Two answers for the price of one round trip.
 //!
@@ -27,7 +27,7 @@ use leviath_runtime::provider_creds::ProviderCreds;
 /// What a verification attempt found out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// Not attempted — `--no-verify`, or no credential to check.
+    /// Not attempted - `--no-verify`, or no credential to check.
     Skipped,
     /// The provider answered. Carries its model ids, for the model picker.
     Reachable { models: Vec<String> },
@@ -108,15 +108,15 @@ pub async fn verify_via_registry(creds: &ProviderCreds) -> Outcome {
 /// the status code is the only part that tells the user what to *do*.
 fn describe(raw: &str) -> String {
     if raw.contains("401") || raw.contains("Unauthorized") || raw.contains("invalid_api_key") {
-        "rejected — check the key".to_string()
+        "rejected - check the key".to_string()
     } else if raw.contains("403") {
-        "forbidden — the key is valid but lacks access".to_string()
+        "forbidden - the key is valid but lacks access".to_string()
     } else if raw.contains("429") {
-        "rate limited — the key works".to_string()
+        "rate limited - the key works".to_string()
     } else if raw.contains("timed out") || raw.contains("timeout") {
-        "timed out — no answer from the provider".to_string()
+        "timed out - no answer from the provider".to_string()
     } else if raw.contains("dns") || raw.contains("connect") || raw.contains("Connection") {
-        "unreachable — check your network".to_string()
+        "unreachable - check your network".to_string()
     } else {
         raw.to_string()
     }
@@ -177,10 +177,10 @@ mod tests {
         );
         assert_eq!(
             Outcome::Failed {
-                message: "rejected — check the key".into()
+                message: "rejected - check the key".into()
             }
             .summary(),
-            "rejected — check the key"
+            "rejected - check the key"
         );
     }
 
@@ -221,31 +221,31 @@ mod tests {
     fn describe_turns_status_codes_into_advice() {
         assert_eq!(
             describe("API error 401: bad key"),
-            "rejected — check the key"
+            "rejected - check the key"
         );
-        assert_eq!(describe("Unauthorized"), "rejected — check the key");
-        assert_eq!(describe("invalid_api_key"), "rejected — check the key");
+        assert_eq!(describe("Unauthorized"), "rejected - check the key");
+        assert_eq!(describe("invalid_api_key"), "rejected - check the key");
         assert_eq!(
             describe("API error 403: no access"),
-            "forbidden — the key is valid but lacks access"
+            "forbidden - the key is valid but lacks access"
         );
         // A 429 proves the credential works, which is the useful part.
         assert_eq!(
             describe("API error 429: slow down"),
-            "rate limited — the key works"
+            "rate limited - the key works"
         );
         assert_eq!(
             describe("operation timed out"),
-            "timed out — no answer from the provider"
+            "timed out - no answer from the provider"
         );
         assert_eq!(
             describe("error trying to connect"),
-            "unreachable — check your network"
+            "unreachable - check your network"
         );
-        assert_eq!(describe("dns error"), "unreachable — check your network");
+        assert_eq!(describe("dns error"), "unreachable - check your network");
         assert_eq!(
             describe("Connection refused"),
-            "unreachable — check your network"
+            "unreachable - check your network"
         );
     }
 
@@ -325,7 +325,7 @@ mod tests {
         assert_eq!(
             outcome,
             Outcome::Failed {
-                message: "rejected — check the key".to_string()
+                message: "rejected - check the key".to_string()
             }
         );
     }

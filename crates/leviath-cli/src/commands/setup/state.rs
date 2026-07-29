@@ -1,7 +1,7 @@
 //! The wizard's state: what step we're on, what's been chosen, and how a
 //! choice turns back into a [`SetupPlan`].
 //!
-//! Deliberately free of drawing and of key handling — those are `render` and
+//! Deliberately free of drawing and of key handling - those are `render` and
 //! `input`. Everything here is ordinary data and pure transitions, so the whole
 //! flow is testable without a terminal.
 
@@ -249,7 +249,7 @@ impl Wizard {
     ///
     /// `base` must come from reading the file, not from `Config::load()`:
     /// `load` folds `$ANTHROPIC_API_KEY` and friends into the struct, and the
-    /// old wizard then re-serialized the whole thing — silently writing a key
+    /// old wizard then re-serialized the whole thing - silently writing a key
     /// the user had deliberately kept in their environment into
     /// `~/.leviath/config.toml`. Environment-supplied credentials are tracked
     /// separately in `env_only` and shown as such.
@@ -1034,7 +1034,7 @@ pub(super) mod tests {
     #[test]
     fn a_key_that_lives_only_in_the_environment_is_shown_and_never_written() {
         // The bug this closes: `Config::load` folds env keys into the struct,
-        // and the old wizard re-serialized the whole thing -- silently writing
+        // and the old wizard re-serialized the whole thing - silently writing
         // a key the user deliberately kept in their environment into
         // ~/.leviath/config.toml.
         let dir = tempfile::tempdir().unwrap();
@@ -1486,7 +1486,7 @@ pub(super) mod tests {
     async fn a_late_reply_refills_the_model_picker() {
         // Moving straight from a credential into Defaults gets there before the
         // check comes back, so the picker was built from an empty model list
-        // and stayed that way -- caught by driving the real TUI against a live
+        // and stayed that way - caught by driving the real TUI against a live
         // API key.
         let dir = tempfile::tempdir().unwrap();
         let mut wizard = test_wizard(dir.path());
@@ -1688,7 +1688,7 @@ pub(super) mod tests {
         // Regression: the default used to be re-picked only when an arrow key
         // moved the provider choice. With Ollama the sole selection it is
         // already at index 0, no arrow is ever pressed, and the limit stayed at
-        // the hosted-API default of 8 -- caught by driving the real TUI.
+        // the hosted-API default of 8 - caught by driving the real TUI.
         let dir = tempfile::tempdir().unwrap();
         let mut wizard = test_wizard(dir.path());
         let ollama = wizard

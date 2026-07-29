@@ -5,7 +5,7 @@
 //! script-tool I/O caps, ACP frame chunking, region seed truncation, dashboard
 //! column fitting, log previews. Every one of those had grown its own
 //! `while !s.is_char_boundary(end) { end -= 1 }` loop with its own comment
-//! explaining why — and two sites (`lev test`'s response preview and `lev
+//! explaining why - and two sites (`lev test`'s response preview and `lev
 //! setup`'s key redactor) never grew one at all and panicked on any emoji.
 //!
 //! That is the shape of issues #109 and #115: a byte cut-off through a flag
@@ -30,10 +30,10 @@ pub fn floor_char_boundary(s: &str, max: usize) -> usize {
 /// `&s[..max]`, backed off to the nearest char boundary at or before `max`.
 ///
 /// Returns all of `s` when `max` reaches the end. Callers append their own
-/// ellipsis or truncation marker — this only cuts.
+/// ellipsis or truncation marker - this only cuts.
 #[expect(
     clippy::string_slice,
-    reason = "floor_char_boundary returns a char boundary by construction — this is the one raw \
+    reason = "floor_char_boundary returns a char boundary by construction - this is the one raw \
               slice the rest of the workspace defers to"
 )]
 pub fn truncate_at_boundary(s: &str, max: usize) -> &str {
@@ -76,7 +76,7 @@ mod tests {
     fn floor_char_boundary_clamps_and_walks_back() {
         // Past the end clamps to the length.
         assert_eq!(floor_char_boundary("abc", 99), 3);
-        // Already a boundary — unchanged.
+        // Already a boundary - unchanged.
         assert_eq!(floor_char_boundary("abc", 2), 2);
         // Zero is always a boundary, so no walk-back happens.
         assert_eq!(floor_char_boundary("日本語", 0), 0);

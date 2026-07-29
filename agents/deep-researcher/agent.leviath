@@ -1,7 +1,7 @@
 [agent]
 name = "deep-researcher"
 version = "0.0.1"
-description = "Thorough single-topic investigation — searches, follows citation chains, cross-checks claims, and produces a structured cited report"
+description = "Thorough single-topic investigation - searches, follows citation chains, cross-checks claims, and produces a structured cited report"
 entry_stage = "gather"
 
 # Read/search agent: writes only its final report.
@@ -24,7 +24,7 @@ max_iterations = 25
 max_revisits = 3
 system_prompt = """
 You are investigating the topic in the `query` region in DEPTH, within any bounds
-in `scope`. This is a single-topic deep dive — go for primary sources and
+in `scope`. This is a single-topic deep dive - go for primary sources and
 authoritative references, not a broad skim.
 
 - Run a focused first round of web_search calls across the distinct facets of the
@@ -32,9 +32,9 @@ authoritative references, not a broad skim.
   primary sources (papers, standards, official docs) over summaries. read_file for
   local documents. Raw content lands in `sources`.
 - For every source you actually use, append one bibliography line to
-  `sources_index` (context_append): `[n] <title> — <url/path> — <date> —
+  `sources_index` (context_append): `[n] <title> - <url/path> - <date> -
   credibility: <high/med/low + why>`.
-- Note citations worth chasing — the analyze stage can send you to follow them.
+- Note citations worth chasing - the analyze stage can send you to follow them.
 
 Once you have solid primary coverage of the core facets, hand off to analyze.
 """
@@ -77,7 +77,7 @@ Analyze the `sources` against `sources_index`. Be rigorous:
 1. Extract factual claims into `claims` (context_append), each with its source
    ref: `<claim> [n]`. Separate well-supported (multiple credible sources) from
    single-source or speculative.
-2. Record source disagreements in `contradictions` (context_write) — who claims
+2. Record source disagreements in `contradictions` (context_write) - who claims
    what, with refs. Never silently pick a side.
 3. Evaluate source quality and bias; note gaps and the specific citations worth
    chasing next.
@@ -87,7 +87,7 @@ hinges on a source you haven't read directly.
 """
 
 [stages.analyze.transitions.gather]
-hint = "Broad gaps — need new sources on specific sub-topics"
+hint = "Broad gaps - need new sources on specific sub-topics"
 transform = "compact"
 
 [stages.analyze.transitions.follow_citations]
@@ -95,7 +95,7 @@ hint = "A specific cited source should be pulled and read directly"
 transform = "compact"
 
 [stages.analyze.transitions.synthesize]
-hint = "Evidence is sufficient — write the report"
+hint = "Evidence is sufficient - write the report"
 transform = "compact"
 
 [stages.analyze.transitions.error_recovery]
@@ -118,7 +118,7 @@ directly (or web_search for it by title/author first), read it, and append the
 new material to `sources` plus a bibliography line to `sources_index`. Extract
 any new or corrected claims to `claims`. Then hand back to analyze.
 
-Stay focused on the flagged citations — this is a targeted deep read, not a new
+Stay focused on the flagged citations - this is a targeted deep read, not a new
 broad search.
 """
 
@@ -130,7 +130,7 @@ web_search = "sources"
 read_file  = "sources"
 
 [stages.follow_citations.transitions.analyze]
-hint = "Cited sources read — resume analysis"
+hint = "Cited sources read - resume analysis"
 transform = "compact"
 
 [stages.follow_citations.transitions.error_recovery]
@@ -150,11 +150,11 @@ following the citation/confidence rules in `format`. Structure:
 - Executive summary (key findings in 3-5 sentences, each with a confidence level)
 - Background and context
 - Findings organized by theme, every non-obvious claim carrying a [n] citation
-- Disagreements — pull these straight from `contradictions`; never drop a
+- Disagreements - pull these straight from `contradictions`; never drop a
   recorded conflict
 - Analysis and implications
 - Open questions
-- References — the numbered bibliography from `sources_index`
+- References - the numbered bibliography from `sources_index`
 
 Write for a technical audience. Be precise. Distinguish evidence from inference.
 """
@@ -177,7 +177,7 @@ material you do have.
 """
 
 [stages.error_recovery.transitions.analyze]
-hint = "Recovered — continue analysis"
+hint = "Recovered - continue analysis"
 transform = "compact"
 
 [compaction]

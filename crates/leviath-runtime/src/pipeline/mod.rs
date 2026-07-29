@@ -78,7 +78,7 @@ pub struct StageJustEntered {
 // ─── Per-agent stage data the dispatch system reads ──────────────────────────
 
 /// Resolved inference parameters for the agent's current stage, set when it
-/// enters that stage. Pure data — the dispatch system reads it to build the
+/// enters that stage. Pure data - the dispatch system reads it to build the
 /// request.
 #[derive(Component, Debug, Clone)]
 pub struct StageInference {
@@ -112,10 +112,10 @@ pub struct InferenceStage {
     /// agent turn).
     pub transition_outcomes: UnboundedSender<InferenceOutcome>,
     /// Where completed *compaction* jobs (LLM context summarization) are
-    /// reported — again a separate lane so a summary isn't mistaken for a turn.
+    /// reported - again a separate lane so a summary isn't mistaken for a turn.
     pub compaction_outcomes: UnboundedSender<crate::compaction_bridge::CompactionOutcome>,
     /// Where completed *content-summary transform* jobs are reported (the
-    /// Summarize context-transform lane — see [`crate::context_transform`]).
+    /// Summarize context-transform lane - see [`crate::context_transform`]).
     pub content_summary_outcomes: UnboundedSender<crate::compaction_bridge::CompactionOutcome>,
     /// Signalled when an inference completes, to wake the tick loop.
     pub wake: Arc<Notify>,

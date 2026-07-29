@@ -1,8 +1,8 @@
 //! Implementations for targets that are neither Unix nor Windows.
 //!
 //! There is no permission model to apply here, so the hardening calls are
-//! no-ops that succeed. That is a real gap on such a target — secrets are
-//! written with whatever protection the platform gives by default — and it is
+//! no-ops that succeed. That is a real gap on such a target - secrets are
+//! written with whatever protection the platform gives by default - and it is
 //! stated rather than papered over. Unix uses POSIX modes and Windows uses
 //! ACLs; both are implemented in their own modules.
 

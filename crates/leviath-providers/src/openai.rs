@@ -78,7 +78,7 @@ impl OpenAIProvider {
 
     /// Return built-in capability defaults for a model.
     fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
-        // GPT-5.5 — flagship, 1M+ context, 128K output (check before generic gpt-5)
+        // GPT-5.5 - flagship, 1M+ context, 128K output (check before generic gpt-5)
         if model.starts_with("gpt-5.5") {
             ModelCapabilities {
                 supports_temperature: true,
@@ -88,7 +88,7 @@ impl OpenAIProvider {
                 max_context_tokens: 1_050_000,
                 max_output_tokens: 128_000,
             }
-        // GPT-5.x family (5.4, 5.4-mini, 5.4-nano, 5-mini) — 400K context, 128K output
+        // GPT-5.x family (5.4, 5.4-mini, 5.4-nano, 5-mini) - 400K context, 128K output
         } else if model.starts_with("gpt-5") {
             ModelCapabilities {
                 supports_temperature: true,
@@ -98,7 +98,7 @@ impl OpenAIProvider {
                 max_context_tokens: 400_000,
                 max_output_tokens: 128_000,
             }
-        // GPT-4.1 family — 1M context (must check before generic gpt-4)
+        // GPT-4.1 family - 1M context (must check before generic gpt-4)
         } else if model.starts_with("gpt-4.1") {
             ModelCapabilities {
                 supports_temperature: true,
@@ -108,7 +108,7 @@ impl OpenAIProvider {
                 max_context_tokens: 1_047_576,
                 max_output_tokens: 32_768,
             }
-        // o-series reasoning models (o3, o4) — no temperature, 200K context
+        // o-series reasoning models (o3, o4) - no temperature, 200K context
         } else if model.starts_with("o3") || model.starts_with("o4") {
             ModelCapabilities {
                 supports_temperature: false,
@@ -200,7 +200,7 @@ impl Provider for OpenAIProvider {
     }
 
     async fn count_tokens(&self, text: &str, model: &str) -> usize {
-        // tiktoken is exact for OpenAI models and runs locally — no network call.
+        // tiktoken is exact for OpenAI models and runs locally - no network call.
         crate::tokenizer::count_tokens(text, model)
     }
 

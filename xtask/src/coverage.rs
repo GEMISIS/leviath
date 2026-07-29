@@ -1,9 +1,9 @@
-//! Coverage gate — runs `cargo llvm-cov` per workspace package and enforces a
+//! Coverage gate - runs `cargo llvm-cov` per workspace package and enforces a
 //! hard 100% on regions, lines, and functions using llvm-cov's own
 //! `--fail-under-*` thresholds. No custom parsing, merging, or aggregation.
 //!
 //! **Why per-package (and not `--workspace`).** `-C instrument-coverage` emits a
-//! coverage record for *every* function in *every* binary that links it —
+//! coverage record for *every* function in *every* binary that links it -
 //! including binaries that never call it (rustc instruments unused functions).
 //! A workspace has many test binaries, and a `pub fn` from one crate is linked
 //! into every other crate's test binary. When `cargo llvm-cov --workspace`
@@ -12,14 +12,14 @@
 //! OS-dependent, so it can't be closed with a test). Measuring one package at a
 //! time keeps few binaries in each profile, where llvm-cov counts accurately.
 //! This is the standard granularity for reliable Rust coverage, not a
-//! workaround — see <https://github.com/llvm/llvm-project/issues/119558>.
+//! workaround - see <https://github.com/llvm/llvm-project/issues/119558>.
 //!
 //! Each package is gated by a single `cargo llvm-cov --package <pkg>
 //! --fail-under-{lines,functions,regions} 100` invocation, which also writes a
 //! browsable HTML report to `coverage/html/<pkg>`. `--fail-under-* 100` on the
 //! package total is equivalent to a per-file 100% gate (a total can only be
-//! 100% if every file is). `src/main.rs` — the un-unit-tested bin composition
-//! root — is excluded via `--ignore-filename-regex`.
+//! 100% if every file is). `src/main.rs` - the un-unit-tested bin composition
+//! root - is excluded via `--ignore-filename-regex`.
 //!
 //! Branch coverage is intentionally not collected: `cargo llvm-cov --branch`
 //! reliably SIGSEGVs on the same open upstream LLVM bug linked above.
@@ -28,7 +28,7 @@ use anyhow::{Context, Result};
 
 // ── Runner trait (injectable for testing) ────────────────────────────────────
 
-/// Abstraction over subprocess execution — inject a mock in tests.
+/// Abstraction over subprocess execution - inject a mock in tests.
 pub trait Runner {
     /// Run `cargo <args>` and return whether it exited successfully.
     fn cargo(&self, args: &[&str]) -> Result<bool>;
@@ -46,7 +46,7 @@ impl Runner for RealRunner {
         Ok(std::process::Command::new("cargo")
             .args(args)
             .status()
-            .expect("failed to spawn cargo — is cargo installed in PATH?")
+            .expect("failed to spawn cargo - is cargo installed in PATH?")
             .success())
     }
 
@@ -54,7 +54,7 @@ impl Runner for RealRunner {
         let out = std::process::Command::new("cargo")
             .args(["metadata", "--no-deps", "--format-version", "1"])
             .output()
-            .expect("failed to spawn cargo metadata — is cargo installed in PATH?");
+            .expect("failed to spawn cargo metadata - is cargo installed in PATH?");
         if !out.status.success() {
             anyhow::bail!("cargo metadata exited non-zero");
         }
@@ -70,7 +70,7 @@ impl Runner for RealRunner {
 pub enum CoverageMode {
     /// No arguments: gate every workspace package (local-dev full check).
     All,
-    /// `--package <pkg>`: gate exactly one package (the CI per-package fan-out —
+    /// `--package <pkg>`: gate exactly one package (the CI per-package fan-out -
     /// each package runs on its own runner, in parallel).
     Package(String),
 }
@@ -149,7 +149,7 @@ fn gate_package(runner: &dyn Runner, pkg: &str) -> Result<()> {
     if !runner.cargo(&args)? {
         // Say *what* is uncovered, not just that something is. "Open the HTML
         // report" is useless on a CI runner, whose filesystem nobody will ever
-        // see — and a gap that only appears on one OS (a `#[cfg(target_os)]`
+        // see - and a gap that only appears on one OS (a `#[cfg(target_os)]`
         // block, or a test the other platform skips) can only be diagnosed
         // from that machine's own run.
         let uncovered = uncovered_regions(runner, pkg).unwrap_or_default();
@@ -204,7 +204,7 @@ fn uncovered_regions(runner: &dyn Runner, pkg: &str) -> Option<Vec<String>> {
 ///
 /// A `segments` entry is `[line, col, count, has_count, is_region_entry,
 /// is_gap]`. A region *entry* with a count of zero is the start of code that
-/// never ran — which is exactly what the gate is complaining about. Non-entry
+/// never ran - which is exactly what the gate is complaining about. Non-entry
 /// segments and gap regions are noise here.
 pub fn parse_uncovered(json: &serde_json::Value) -> Vec<String> {
     let mut out = Vec::new();
@@ -241,7 +241,7 @@ pub fn parse_uncovered(json: &serde_json::Value) -> Vec<String> {
 /// Parse workspace package names from `cargo metadata` JSON. Two members are
 /// excluded from the gate: `xtask` (the coverage tool itself) and
 /// `leviath-testkit` (dev-dependency-only test scaffolding whose every line
-/// executes inside other packages' gated suites — self-gating it at 100%
+/// executes inside other packages' gated suites - self-gating it at 100%
 /// would force tests-of-test-helpers with no defect-finding power).
 pub fn parse_workspace_packages(meta: &serde_json::Value) -> Vec<String> {
     let members: std::collections::HashSet<String> = meta["workspace_members"]
@@ -366,7 +366,7 @@ mod tests {
     /// A filename with no `/src/` segment is reported whole rather than
     /// silently dropped.
     /// llvm-cov reports Windows paths with backslashes, and a one-platform gap
-    /// is exactly the case this output exists for -- so the shortening has to
+    /// is exactly the case this output exists for - so the shortening has to
     /// handle both separators.
     #[test]
     fn parse_uncovered_shortens_a_windows_path() {

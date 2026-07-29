@@ -92,7 +92,7 @@ fn test_eviction_cascade_temporary_then_compacting() {
 
     assert_eq!(window.current_tokens, 4500);
 
-    // Evict with small target — should clear Clearable first
+    // Evict with small target - should clear Clearable first
     let result = window.try_evict(1000).unwrap();
     assert!(result.tokens_freed >= 1500);
 
@@ -224,7 +224,7 @@ fn test_context_window_add_to_region() {
 
 #[test]
 fn test_eviction_result_needs_compaction_when_compacting_full() {
-    // Small window — compacting content nearly fills it
+    // Small window - compacting content nearly fills it
     let mut window = ContextWindow::new(1500);
 
     // Add a compacting region over its threshold

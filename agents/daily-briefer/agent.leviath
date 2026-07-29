@@ -1,7 +1,7 @@
 [agent]
 name = "daily-briefer"
 version = "0.0.1"
-description = "Morning summary agent — gathers from local + web sources, prioritizes into a running index, and delivers a concise briefing"
+description = "Morning summary agent - gathers from local + web sources, prioritizes into a running index, and delivers a concise briefing"
 entry_stage = "collect"
 
 [tool_permissions]
@@ -28,8 +28,8 @@ what to watch). Check each source:
 - Focus on what's NEW/actionable, not a full dump.
 
 Collect raw items into `raw_data`. Don't analyze yet. For each item, append a
-one-line source note to `sources_index` (context_append): `[n] <source> — <what>
-— <date/time if known>`. If sent back to fill a specific gap, focus only on it.
+one-line source note to `sources_index` (context_append): `[n] <source> - <what>
+- <date/time if known>`. If sent back to fill a specific gap, focus only on it.
 """
 
 [stages.collect.tool_routing]
@@ -42,7 +42,7 @@ list_dir   = "raw_data"
 bash       = "raw_data"
 
 [stages.collect.transitions.prioritize]
-hint = "Sources checked — rank what was found"
+hint = "Sources checked - rank what was found"
 transform = "direct"
 
 [stages.collect.transitions.error_recovery]
@@ -66,20 +66,20 @@ system_prompt = """
 Triage everything in `raw_data` and write each kept item to the `priorities`
 region (context_append) as `<TIER> | <one-sentence summary> | <source ref>`,
 using these tiers:
-1. ACTION — needs a decision or response today
-2. UPDATE — significant change or news worth knowing
-3. FYI    — interesting but not urgent
+1. ACTION - needs a decision or response today
+2. UPDATE - significant change or news worth knowing
+3. FYI    - interesting but not urgent
 
 Drop noise, duplicates, and irrelevant items entirely (don't write them). If a
 critical configured source came back empty, consider one more collect pass.
 """
 
 [stages.prioritize.transitions.brief]
-hint = "Items prioritized — compose the briefing"
+hint = "Items prioritized - compose the briefing"
 transform = "compact"
 
 [stages.prioritize.transitions.collect]
-hint = "A critical source came back empty — gather more"
+hint = "A critical source came back empty - gather more"
 transform = "compact"
 
 [stages.prioritize.transitions.error_recovery]
@@ -97,7 +97,7 @@ system_prompt = """
 Write a concise daily briefing (write_file) from the `priorities` region, citing
 `sources_index` where relevant. Format:
 
-## Daily Briefing — [Date]
+## Daily Briefing - [Date]
 
 ### 🔴 Action Required
 (ACTION-tier items needing decisions/responses today)
@@ -130,7 +130,7 @@ prioritize with whatever was successfully collected.
 """
 
 [stages.error_recovery.transitions.prioritize]
-hint = "Recovered — triage what we have"
+hint = "Recovered - triage what we have"
 transform = "compact"
 
 [compaction]

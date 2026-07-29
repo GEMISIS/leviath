@@ -22,7 +22,7 @@ pub(crate) fn configure_detached(cmd: &mut Command) {
 /// `contents`.
 ///
 /// `OpenOptions::mode` sets the mode at `open(2)` time, so the file is never
-/// visible to anyone else — unlike write-then-`chmod`, which leaves it at the
+/// visible to anyone else - unlike write-then-`chmod`, which leaves it at the
 /// umask default until the second call lands.
 ///
 /// The mode applies only when the file is *created*. An existing file keeps its
@@ -66,12 +66,12 @@ pub(crate) fn ensure_private(path: &Path, mode: u32) -> io::Result<Option<u32>> 
 /// own without the immutable flag, which needs `CAP_LINUX_IMMUTABLE`). Rather
 /// than hide that branch behind a coverage twin, we split policy from
 /// mechanism: a test injects a failing `set` and exercises the error
-/// propagation directly. A `fn` pointer (not `impl Fn`) is used deliberately —
+/// propagation directly. A `fn` pointer (not `impl Fn`) is used deliberately -
 /// it is a single concrete type, so there is no per-closure monomorphization
 /// for llvm-cov to report phantom-uncovered.
 ///
 /// A single `metadata()` call serves as both the existence check and the
-/// source of the mode bits — calling it once (instead of `exists()` then a
+/// source of the mode bits - calling it once (instead of `exists()` then a
 /// second `metadata()`) removes the TOCTOU window that would otherwise leave a
 /// permanently-unreachable error branch.
 fn ensure_private_with(
@@ -105,7 +105,7 @@ pub(crate) fn current_uid() -> u32 {
 /// `nix` wrappers, so `unsafe_code = "forbid"` still holds.
 ///
 /// `None` when the option is unavailable, which the caller must treat as "do not
-/// trust this connection" — an unidentifiable peer is not an authorized one.
+/// trust this connection" - an unidentifiable peer is not an authorized one.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) fn peer_uid(sock: &impl std::os::fd::AsFd) -> Option<u32> {
     nix::sys::socket::getsockopt(sock, nix::sys::socket::sockopt::PeerCredentials)
@@ -170,7 +170,7 @@ mod tests {
         assert_eq!(ensure_private_with(&path, 0o600, set_mode).unwrap(), None);
     }
 
-    /// Signalling a real group tears down the leader *and* its children — the
+    /// Signalling a real group tears down the leader *and* its children - the
     /// whole point, since killing a shell alone leaves what it started
     /// reparented to init and running.
     #[test]
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn kill_process_group_errors_for_a_group_that_does_not_exist() {
-        // The ordinary case when reaping — the command already finished — so it
+        // The ordinary case when reaping - the command already finished - so it
         // must surface as an error the caller can ignore, not a panic.
         let err = kill_process_group(0x7FFF_FFFF).expect_err("no such group");
         assert!(err.raw_os_error().is_some());

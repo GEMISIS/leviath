@@ -3,7 +3,7 @@
 //! A `.rhai` script in `~/.leviath/providers/` implements the API-specific
 //! *format mapping* (request → HTTP body, response JSON → Leviath types); this
 //! Rust [`RhaiProvider`] wraps it with the full [`Provider`]
-//! trait and owns the hard runtime concerns — HTTP transport, rate limiting,
+//! trait and owns the hard runtime concerns - HTTP transport, rate limiting,
 //! per-stage timeouts, retry/error-classification, and token counting.
 //!
 //! ## Async ↔ sync bridge
@@ -17,7 +17,7 @@
 //!
 //! ## Script contract
 //!
-//! Required: `initialize(config) -> Map` (runs **offline** — no network host
+//! Required: `initialize(config) -> Map` (runs **offline** - no network host
 //! functions are registered for it) and `inference(state, request) -> Map`.
 //! Optional: `stream(state, request, on_chunk)`, `count_tokens(state, text,
 //! model) -> int`, `list_models(state) -> Array`.

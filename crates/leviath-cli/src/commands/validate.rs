@@ -97,7 +97,7 @@ fn print_success(blueprint: &leviath_core::Blueprint) {
         );
     }
 
-    // Command seeds execute at spawn — surface them before anything else, so
+    // Command seeds execute at spawn - surface them before anything else, so
     // `lev validate` is a real audit step before `lev add`.
     for line in command_seed_report(blueprint) {
         println!("{line}");
@@ -110,7 +110,7 @@ fn print_success(blueprint: &leviath_core::Blueprint) {
 /// The report lines for a blueprint's `seed = { command = "..." }` regions.
 ///
 /// Split out from the printer so it is directly assertable. Empty when the
-/// blueprint declares none — the overwhelmingly common case, which should print
+/// blueprint declares none - the overwhelmingly common case, which should print
 /// nothing at all.
 fn command_seed_report(blueprint: &leviath_core::Blueprint) -> Vec<String> {
     let seeds: Vec<(&str, &str)> = blueprint
@@ -147,8 +147,8 @@ fn command_seed_report(blueprint: &leviath_core::Blueprint) -> Vec<String> {
 
 /// Outcome of the real, testable logic in [`execute`]. Kept distinct from
 /// the actual `std::process::exit(1)` calls (which would kill the test
-/// process if exercised directly) so `execute_reporting_outcome` -- and
-/// therefore every branch of `check_manifest`'s error handling -- can be
+/// process if exercised directly) so `execute_reporting_outcome` - and
+/// therefore every branch of `check_manifest`'s error handling - can be
 /// unit tested; only the thin `execute` wrapper below ever calls `exit`.
 enum ValidateOutcome {
     Success,
@@ -191,7 +191,7 @@ fn print_script_tool_report(path: &std::path::Path) {
         println!("  {} script tool(s) in tools/", set.len());
     }
     // A tool that compiles but whose `@requires` the platform can't satisfy won't
-    // load — flag it (this also catches an unknown/typo'd capability name).
+    // load - flag it (this also catches an unknown/typo'd capability name).
     for meta in set.metas() {
         if !crate::daemon::spawn::current_platform_satisfies(&meta.required_caps) {
             println!(
@@ -392,7 +392,7 @@ max_iterations = 5
 "#,
         );
         let bp = parse(&toml);
-        // No unreachable stages — should run without issues
+        // No unreachable stages - should run without issues
         print_warnings(&bp);
     }
 
@@ -566,7 +566,7 @@ a = "true"
         use leviath_core::{Blueprint, ContextLayout, Stage};
 
         // Stage "a" is valid on its own, but the blueprint's entry_stage
-        // points at a name that doesn't exist among `stages` -- impossible
+        // points at a name that doesn't exist among `stages` - impossible
         // via `Blueprint::validate`, but not impossible via this struct's
         // public fields/constructors.
         let mut stage_a = Stage::new("a".to_string(), make_model());
@@ -591,7 +591,7 @@ a = "true"
         use leviath_core::{Blueprint, ContextLayout, Stage, TransitionEdge};
 
         // Stage "a" transitions to "ghost", a name with no corresponding
-        // Stage entry -- impossible via `Blueprint::validate` (which
+        // Stage entry - impossible via `Blueprint::validate` (which
         // requires every transition target to exist), but constructible
         // directly since `transitions` is a public field.
         let mut transitions = std::collections::HashMap::new();
@@ -741,7 +741,7 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
     // ─── execute_reporting_outcome: Parse/Validation paths ──────────────
     //
     // `execute()` itself calls `std::process::exit(1)` on these two
-    // branches, which would kill the test process -- `execute_reporting_outcome`
+    // branches, which would kill the test process - `execute_reporting_outcome`
     // exists precisely so these can be exercised without that.
 
     fn assert_is_parse_error(outcome: &ValidateOutcome) {
@@ -890,7 +890,7 @@ system = { kind = "pinned", max_tokens = 1000 }
     #[test]
     fn print_script_tool_report_only_broken_scripts_warns_without_count() {
         // A `tools/` dir with only a broken script: `set` is empty (no count
-        // line — the `!set.is_empty()` false arm) but the skipped warning runs.
+        // line - the `!set.is_empty()` false arm) but the skipped warning runs.
         let dir = tempfile::tempdir().unwrap();
         let tools = dir.path().join("tools");
         std::fs::create_dir(&tools).unwrap();
@@ -941,7 +941,7 @@ max_iterations = 5
     // ─── print_warnings: BFS revisits an already-reached node (diamond) ──
     //
     // `entry` transitions to both `b` and `c`, and both `b` and `c`
-    // transition to `d` -- `d` gets queued twice, so the *second* pop hits
+    // transition to `d` - `d` gets queued twice, so the *second* pop hits
     // the `if !reachable.insert(name.clone()) { continue; }` early-exit that
     // a simple linear chain or single-path graph never reaches.
 
@@ -1011,7 +1011,7 @@ max_iterations = 5
         let dir = tempfile::tempdir().unwrap();
         write_manifest(dir.path(), "not valid toml [[[");
         let err = check_manifest(dir.path()).unwrap_err();
-        // err is ManifestCheckError::Parse — this should panic
+        // err is ManifestCheckError::Parse - this should panic
         unwrap_io_err(err);
     }
 
@@ -1027,7 +1027,7 @@ max_iterations = 5
     fn check_manifest_unreadable_file_path_is_io_error() {
         let dir = tempfile::tempdir().unwrap();
         // Pass a path to a file that doesn't exist directly (is_file() is
-        // false, and it's not a directory either) — falls through to the
+        // false, and it's not a directory either) - falls through to the
         // "join agent.leviath" branch, which also won't exist.
         let missing = dir.path().join("nonexistent-subdir");
         let err = check_manifest(&missing).unwrap_err();

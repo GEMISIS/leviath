@@ -76,7 +76,7 @@ pub enum EvictionStrategy {
 pub enum RegionKind {
     /// Never evicted or compacted. Architecture diagrams, constraints, identity.
     ///
-    /// Like SNES OAM (Object Attribute Memory) — fixed format, always present.
+    /// Like SNES OAM (Object Attribute Memory) - fixed format, always present.
     /// Use for content that defines the agent's core identity, constraints,
     /// and architectural understanding. This content persists for the entire
     /// agent lifecycle.
@@ -1210,7 +1210,7 @@ mod tests {
         assert_eq!(schema.custom_script.as_deref(), Some("validate_special()"));
     }
 
-    // ─── RegionSchema::validate — every ContentFormat branch ───────────────
+    // ─── RegionSchema::validate - every ContentFormat branch ───────────────
 
     #[test]
     fn test_validate_json_valid() {
@@ -1298,7 +1298,7 @@ mod tests {
         let schema = RegionSchema::new(ContentFormat::Custom {
             format_name: "special".to_string(),
         });
-        // Custom format validation is deferred to the scripting layer —
+        // Custom format validation is deferred to the scripting layer -
         // this schema's own validate() is a no-op for it.
         assert!(schema.validate("").is_ok());
         assert!(schema.validate("whatever").is_ok());
@@ -2042,7 +2042,7 @@ mod tests {
             region.add_entry(format!("msg{}", i), 10).unwrap();
         }
         assert!(region.needs_message_compaction);
-        // No entries were evicted — compaction flag is set for the runtime
+        // No entries were evicted - compaction flag is set for the runtime
         assert_eq!(region.entry_count(), 9);
     }
 
@@ -2809,7 +2809,7 @@ mod tests {
     #[test]
     fn test_evict_lru_entry_on_empty_region_is_noop() {
         // Directly exercise the early-return guard in `evict_lru_entry` when
-        // there is nothing to evict — a defensive branch not reachable through
+        // there is nothing to evict - a defensive branch not reachable through
         // the public upsert path (which only evicts non-empty regions).
         let mut region = Region::new(
             "kv".to_string(),

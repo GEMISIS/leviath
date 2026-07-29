@@ -20,7 +20,7 @@ pub struct AwaitingCompaction;
 #[derive(Resource)]
 pub struct CompactionResults(pub UnboundedReceiver<CompactionOutcome>);
 
-/// The eviction threshold (fraction of budget) at which compaction kicks in —
+/// The eviction threshold (fraction of budget) at which compaction kicks in -
 /// the same 0.9 the imperative `evict_and_compact` uses.
 pub(crate) const EVICTION_THRESHOLD: f32 = 0.9;
 
@@ -31,7 +31,7 @@ pub(crate) const EVICTION_THRESHOLD: f32 = 0.9;
 /// acquire a permit for the compaction model, spawn the job, and hold the agent
 /// as `AwaitingCompaction`. Anything that can't proceed (under threshold, nothing
 /// to summarize, provider missing, pool full) simply leaves the agent
-/// `ReadyToInfer` so inference proceeds — compaction is best-effort. (Ported from
+/// `ReadyToInfer` so inference proceeds - compaction is best-effort. (Ported from
 /// `AgentEngine::evict_and_compact`.)
 #[allow(clippy::type_complexity)]
 pub fn dispatch_compaction(
@@ -47,14 +47,14 @@ pub fn dispatch_compaction(
     for (entity, state, mut window, settings) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
-            continue; // paused / waiting / cancelled — don't start new work
+            continue; // paused / waiting / cancelled - don't start new work
         }
         if !window.needs_eviction(EVICTION_THRESHOLD) {
-            continue; // under threshold — nothing to do
+            continue; // under threshold - nothing to do
         }
         let target_free = window.max_tokens / 10;
         let Ok(eviction) = window.try_evict(target_free) else {
-            continue; // couldn't evict — proceed to inference as-is
+            continue; // couldn't evict - proceed to inference as-is
         };
 
         // Build a summarize request per region that both needs compaction and
@@ -87,10 +87,10 @@ pub fn dispatch_compaction(
         }
 
         let Some(provider) = providers.0.get(&config.provider) else {
-            continue; // compaction provider not registered — skip, non-fatal
+            continue; // compaction provider not registered - skip, non-fatal
         };
         let Some(permit) = stage.pools.try_acquire(&config.model) else {
-            continue; // pool full — skip compaction this round
+            continue; // pool full - skip compaction this round
         };
 
         stage.runtime.spawn(run_compaction_job(
@@ -189,7 +189,7 @@ pub(crate) fn compaction_request(
 #[derive(Component, Debug, Clone)]
 pub struct PendingEdgeCompact(pub Vec<String>);
 
-/// Whether a region kind is "stage-specific" — eligible for an edge transform to
+/// Whether a region kind is "stage-specific" - eligible for an edge transform to
 /// clear or compact. The always-preserved kinds (pinned identity, compaction
 /// history, hashmap stores) are never touched.
 pub(crate) fn is_stage_specific(kind: &leviath_core::RegionKind) -> bool {
@@ -280,7 +280,7 @@ pub fn dispatch_edge_compact(
     for (entity, state, window, pending, settings) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
-            continue; // paused / waiting / cancelled — don't start new work
+            continue; // paused / waiting / cancelled - don't start new work
         }
         let started = settings
             .and_then(|s| {

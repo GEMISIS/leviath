@@ -140,7 +140,7 @@ impl OAuthClient {
         // open, and the user needs to paste it themselves.
         println!("Opening your browser to authorize:\n  {authorize_url}");
         if !(*opener)(authorize_url.as_str()) {
-            println!("(couldn't open a browser automatically — open the link above)");
+            println!("(couldn't open a browser automatically - open the link above)");
         }
 
         let code = wait_for_callback(listener, &pkce.state, CALLBACK_TIMEOUT).await?;
@@ -218,7 +218,7 @@ impl OAuthClient {
     }
 
     /// [`authorization_header`](Self::authorization_header) reading and writing
-    /// grants through `credentials` -- the OS credential store, when
+    /// grants through `credentials` - the OS credential store, when
     /// `[security] credential_store = "keychain"` is set.
     ///
     /// `None` is the file backend. A refreshed token is written back through the
@@ -272,7 +272,7 @@ impl OAuthClient {
         // to the MCP server's own origin: a server may point at its own metadata
         // document, which is the legitimate use, and may not point at anything
         // else. Without this, connecting to a hostile MCP server was enough to
-        // make Leviath fetch an arbitrary URL — cloud metadata included.
+        // make Leviath fetch an arbitrary URL - cloud metadata included.
         let resource_meta_url = match hinted {
             Some(hint) => {
                 let parsed = Url::parse(&hint)
@@ -280,7 +280,7 @@ impl OAuthClient {
                 if !metadata::same_origin(&parsed, mcp) {
                     anyhow::bail!(
                         "MCP server at {mcp} pointed resource_metadata at a different origin \
-                         ({parsed}) — refusing to follow it"
+                         ({parsed}) - refusing to follow it"
                     );
                 }
                 parsed
@@ -327,7 +327,7 @@ impl OAuthClient {
     ///
     /// The returned document is validated against `issuer` before use. RFC 8414
     /// §3.3 requires the `issuer` in the metadata to match the one that was
-    /// requested, and this never checked — so a hostile
+    /// requested, and this never checked - so a hostile
     /// `authorization_servers[0]` in the resource document could redirect the
     /// entire flow to an attacker's authorization server and harvest the code.
     async fn fetch_auth_server_metadata(&self, issuer: &str) -> anyhow::Result<AuthServerMetadata> {
@@ -361,8 +361,8 @@ impl OAuthClient {
     ///
     /// 1. The document's own `issuer` matches the one requested (RFC 8414 §3.3).
     /// 2. The authorization and token endpoints share the issuer's origin, so a
-    ///    valid-looking document cannot send the user's browser — and the
-    ///    resulting code — somewhere else.
+    ///    valid-looking document cannot send the user's browser - and the
+    ///    resulting code - somewhere else.
     /// 3. Both endpoints are safe to use at all (https, or loopback).
     fn validate_auth_server_metadata(
         &self,
@@ -380,7 +380,7 @@ impl OAuthClient {
             if !metadata::same_origin(&claimed, issuer_url) {
                 anyhow::bail!(
                     "authorization server metadata claims issuer '{}' but was fetched for \
-                     '{issuer}' — refusing (RFC 8414 §3.3)",
+                     '{issuer}' - refusing (RFC 8414 §3.3)",
                     meta.issuer
                 );
             }
@@ -395,7 +395,7 @@ impl OAuthClient {
             self.require_safe_discovery_url(&parsed)?;
             if !metadata::same_origin(&parsed, issuer_url) {
                 anyhow::bail!(
-                    "{label} '{endpoint}' is not on the issuer's origin ('{issuer}') — refusing"
+                    "{label} '{endpoint}' is not on the issuer's origin ('{issuer}') - refusing"
                 );
             }
         }
@@ -704,14 +704,14 @@ async fn handle_callback_connection(
     }
     match (params.get("code"), params.get("state")) {
         // Constant-time: the state is 128 bits of fresh entropy over loopback, so
-        // a timing oracle here is theoretical — but it was the one secret
+        // a timing oracle here is theoretical - but it was the one secret
         // comparison in the codebase still using `==`, and "theoretical" is not
         // a reason for the comparison to differ from every other one.
         (Some(code), Some(state)) if leviath_core::constant_time_eq(state, expected_state) => {
             write_response(
                 &mut stream,
                 "200 OK",
-                "Authorization complete — you can close this tab and return to Leviath.",
+                "Authorization complete - you can close this tab and return to Leviath.",
             )
             .await;
             Ok(Some(code.clone()))
@@ -724,7 +724,7 @@ async fn handle_callback_connection(
                 "Invalid authorization state.",
             )
             .await;
-            Err(anyhow::anyhow!("OAuth state mismatch — rejecting callback"))
+            Err(anyhow::anyhow!("OAuth state mismatch - rejecting callback"))
         }
         _ => {
             write_response(
@@ -1006,7 +1006,7 @@ mod tests {
     #[tokio::test]
     async fn handle_callback_ignores_an_empty_connection() {
         // A connection that sends nothing yields no request line, so it is
-        // neither the callback nor an error — just skipped.
+        // neither the callback nor an error - just skipped.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let accept = tokio::spawn(async move {
@@ -1188,8 +1188,8 @@ mod tests {
         let authorize = match variant {
             "bad_authorize" => "not a url".to_string(),
             // A valid URL on somebody else's origin: the shape a hostile
-            // document uses to send the user's browser — and the resulting
-            // authorization code — somewhere the issuer does not control.
+            // document uses to send the user's browser - and the resulting
+            // authorization code - somewhere the issuer does not control.
             "foreign_endpoint" => "https://evil.example.com/authorize".to_string(),
             // Remote *http*: refused for the scheme before the origin check
             // even runs.
@@ -1205,7 +1205,7 @@ mod tests {
             // is the AS document's own `issuer` field.
             "as_unparseable_issuer" => "not a url".to_string(),
             // Omitted entirely. The RFC 8414 §3.3 cross-check is skipped rather
-            // than failing, since there is nothing to compare — the endpoint
+            // than failing, since there is nothing to compare - the endpoint
             // origin check below still applies.
             "no_issuer_field" => String::new(),
             _ => base.to_string(),
@@ -1882,7 +1882,7 @@ mod tests {
 
     /// A hostile MCP server pointing `resource_metadata` at somebody else's
     /// origin. The URL comes out of a `WWW-Authenticate` header the server
-    /// controls entirely, and used to be fetched with no validation at all —
+    /// controls entirely, and used to be fetched with no validation at all -
     /// so connecting to a malicious server was enough to make Leviath issue a
     /// request to any URL from inside the user's network.
     #[tokio::test]
@@ -1981,7 +1981,7 @@ mod tests {
     }
 
     /// An `authorization_endpoint` that parses fine but sits on somebody else's
-    /// origin — where the user's browser, and the code it comes back with,
+    /// origin - where the user's browser, and the code it comes back with,
     /// would go.
     #[tokio::test]
     async fn login_refuses_an_endpoint_off_the_issuers_origin() {
@@ -2003,7 +2003,7 @@ mod tests {
     }
 
     /// A document that omits `issuer` skips the §3.3 cross-check rather than
-    /// failing it — there is nothing to compare against. The endpoint-origin
+    /// failing it - there is nothing to compare against. The endpoint-origin
     /// check still applies, so this is a narrowing, not a bypass: the login
     /// proceeds normally.
     #[tokio::test]
@@ -2114,7 +2114,7 @@ mod tests {
             .await
             .expect_err("a bad authorize endpoint must fail");
         // Caught during metadata validation now, which runs before the URL is
-        // built — so the message names the field rather than the later
+        // built - so the message names the field rather than the later
         // build-the-authorize-URL step. Earlier is better: the endpoint never
         // reaches the browser opener.
         assert!(

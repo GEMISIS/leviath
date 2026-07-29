@@ -110,7 +110,7 @@ impl Dashboard {
             && !matches!(agent.status, AgentDisplayStatus::Cancelled)
             && self.selected_stage_can_respond();
         // Agent is Active (not waiting on anything) but its current stage
-        // supports mid-run messages — same 'i' key, same input pane.
+        // supports mid-run messages - same 'i' key, same input pane.
         let accepts_messages = self.selected_agent_accepts_messages();
 
         let header_h: u16 = 1; // compact breadcrumb line
@@ -126,7 +126,7 @@ impl Dashboard {
         // Review body: shown when the pending interaction carries markdown for
         // review. `EditText` also uses `body`, but that is the editable document
         // (rendered in the seeded textarea once the user starts editing), not a
-        // read-only review doc — so it is excluded here. When the output pane is
+        // read-only review doc - so it is excluded here. When the output pane is
         // already showing the document (output mode), the separate review pane is
         // suppressed to avoid rendering it twice.
         let content_shows_body =
@@ -495,8 +495,8 @@ mod tests {
 
     #[test]
     fn draw_detail_view_graph_agent_uses_taller_stage_tabs_area() {
-        // `tabs_h` is `7` when `agent.graph_info.is_some()` and `3` otherwise
-        // -- every other detail-view test above leaves `graph_info: None`, so
+        // `tabs_h` is `7` when `agent.graph_info.is_some()` and `3` otherwise -
+        // every other detail-view test above leaves `graph_info: None`, so
         // the `7` branch was never exercised. Build a minimal
         // `GraphTransitionInfo` (same shape used by `render/stages.rs`'s own
         // graph tests) purely to flip `is_graph_view` to `true`; the graph

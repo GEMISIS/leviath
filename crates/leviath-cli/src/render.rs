@@ -14,7 +14,7 @@
 //! - `mermaid` fenced blocks → styled fallback box with a hint to install mmdc
 //! - Horizontal rules (dim dashes)
 //!
-//! Plain text that contains no markdown degrades cleanly — it just renders as
+//! Plain text that contains no markdown degrades cleanly - it just renders as
 //! white text.
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
@@ -205,7 +205,7 @@ impl Renderer {
                     Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled("mermaid diagram", Style::default().fg(C_ACCENT)),
-                Span::styled(" — source", Style::default().fg(C_DIM)),
+                Span::styled(" - source", Style::default().fg(C_DIM)),
             ]));
             for code_line in &content {
                 self.push_line(Line::from(vec![
@@ -262,7 +262,7 @@ impl Renderer {
                     if !self.lines.is_empty() {
                         self.blank_line();
                     }
-                    // Visual decorators — convey depth without # text (terminal can't vary font size)
+                    // Visual decorators - convey depth without # text (terminal can't vary font size)
                     let (color, prefix, bold) = match level {
                         HeadingLevel::H1 => (C_ACCENT, "▌ ", true),
                         HeadingLevel::H2 => (C_ACCENT, "▎ ", true),
@@ -488,7 +488,7 @@ mod tests {
     fn push_line_flushes_pending_spans_first() {
         // No current caller ever invokes `push_line` while `current_spans`
         // is non-empty (each call site flushes its own pending spans via a
-        // separate check first) -- but the method itself is directly
+        // separate check first) - but the method itself is directly
         // testable by constructing that state manually, without needing a
         // real caller to reach it.
         let mut r = Renderer::new(80);
@@ -822,7 +822,7 @@ mod tests {
 
     #[test]
     fn bold_italic_nested_inherits_both_modifiers() {
-        // ***text*** parses as Strong containing Emphasis (or vice versa) —
+        // ***text*** parses as Strong containing Emphasis (or vice versa) -
         // the inner style must inherit the outer's bold/italic/strikethrough.
         let md = "***bold italic***";
         let text = markdown_to_text(md, 80);
@@ -1011,7 +1011,7 @@ mod tests {
     #[test]
     fn rule_directly_inside_blockquote_flushes_pending_quote_marker_span() {
         // `Start(BlockQuote)` pushes the "│ " marker into `current_spans`,
-        // then `Event::Rule` fires with nothing else queued -- exercises the
+        // then `Event::Rule` fires with nothing else queued - exercises the
         // `!self.current_spans.is_empty()` flush at `Event::Rule` (every
         // other rule test has an empty `current_spans` at that point).
         let md = "> ---";
@@ -1022,7 +1022,7 @@ mod tests {
     #[test]
     fn empty_blockquote_flushes_pending_quote_marker_span_at_end() {
         // `Start(BlockQuote)` pushes "│ " with no inner content at all
-        // before `End(BlockQuote)` -- exercises the flush at blockquote end
+        // before `End(BlockQuote)` - exercises the flush at blockquote end
         // (every other blockquote test has real paragraph content, which
         // flushes `current_spans` via `End(Paragraph)` first).
         let md = ">";
@@ -1038,7 +1038,7 @@ mod tests {
     #[test]
     fn nested_strong_inside_strikethrough_inherits_strikethrough_modifier() {
         // `push_inline` for the inner `Strong` tag inherits `strikethrough`
-        // from the `Strikethrough` parent already on the stack -- every
+        // from the `Strikethrough` parent already on the stack - every
         // other strikethrough test only nests plain text, never another
         // inline tag, so `parent.strikethrough` was never true at push time.
         let md = "~~strike **bold inside** more~~";

@@ -14,7 +14,7 @@ use tokio::net::windows::named_pipe::{
 };
 
 /// `ERROR_ACCESS_DENIED`: returned by a `first_pipe_instance` create when the
-/// pipe already exists — i.e. another daemon owns it.
+/// pipe already exists - i.e. another daemon owns it.
 const ERROR_ACCESS_DENIED: i32 = 5;
 
 /// Identifies a control pipe: its full `\\.\pipe\…` name.
@@ -54,12 +54,12 @@ pub struct ControlListener {
 }
 
 impl ControlListener {
-    /// Wait for the next client, then return the connected server stream —
+    /// Wait for the next client, then return the connected server stream -
     /// pre-creating the following instance so the pipe name stays resolvable for
     /// the next client while this one is served.
     ///
     /// Written as a combinator chain (rather than `?`) so the error short-circuit
-    /// lives in `Result`, not in a branch of this function — the happy path is
+    /// lives in `Result`, not in a branch of this function - the happy path is
     /// the only thing this source expresses, keeping it fully covered while still
     /// propagating any real connect/create failure.
     ///
@@ -74,7 +74,7 @@ impl ControlListener {
     /// pipe accepts is served.
     ///
     /// What stands between another local user and this channel on Windows is
-    /// therefore the pipe's security descriptor alone — and this code does not
+    /// therefore the pipe's security descriptor alone - and this code does not
     /// set one, so it is the default. That is weaker than the Unix side, where
     /// the kernel-reported uid is the gate. Documented in `SECURITY.md` rather
     /// than papered over; see the Unix module for what the check buys.
@@ -90,7 +90,7 @@ impl ControlListener {
 /// Bind the daemon's control pipe named `id`, enforcing a single instance.
 ///
 /// Creating the *first* instance of the pipe fails with `ERROR_ACCESS_DENIED`
-/// if the pipe already exists — i.e. another daemon owns it — which is mapped to
+/// if the pipe already exists - i.e. another daemon owns it - which is mapped to
 /// [`std::io::ErrorKind::AddrInUse`].
 pub fn bind_control_listener(id: &str) -> std::io::Result<ControlListener> {
     let pending = ServerOptions::new()

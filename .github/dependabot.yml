@@ -2,10 +2,10 @@ version: 2
 
 # Two ecosystems, because both are part of the attack surface:
 #
-# - `cargo` — the ~370 transitive crates that end up in the shipped binary. Now
+# - `cargo` - the ~370 transitive crates that end up in the shipped binary. Now
 #   that Cargo.lock is committed, these updates arrive as reviewable diffs
 #   instead of happening invisibly on every CI run.
-# - `github-actions` — the actions that build and publish releases. These run
+# - `github-actions` - the actions that build and publish releases. These run
 #   with `contents: write` on the release path, so a compromised action is a
 #   compromised release.
 updates:

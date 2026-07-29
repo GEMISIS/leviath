@@ -1,4 +1,4 @@
-//! `lev setup` — the guided path from "just installed Leviath" to "ready to run
+//! `lev setup` - the guided path from "just installed Leviath" to "ready to run
 //! an agent".
 //!
 //! The previous version was nine `print!`/`read_line` prompts in a fixed order:
@@ -15,18 +15,18 @@
 //!
 //! ## Shape
 //!
-//! * [`state`] — what step we're on and what's been chosen. Pure data.
-//! * [`input`] — key handling.
-//! * [`render`] — drawing.
-//! * [`plan`] — the decisions as plain data, and the only code that writes.
-//! * [`catalog`] — which providers exist and how each is configured.
-//! * [`import`] — MCP servers found in other tools.
-//! * [`verify`] — proving a credential works.
+//! * [`state`] - what step we're on and what's been chosen. Pure data.
+//! * [`input`] - key handling.
+//! * [`render`] - drawing.
+//! * [`plan`] - the decisions as plain data, and the only code that writes.
+//! * [`catalog`] - which providers exist and how each is configured.
+//! * [`import`] - MCP servers found in other tools.
+//! * [`verify`] - proving a credential works.
 //!
 //! The terminal is a *front-end*, not the feature: everything it collects lands
 //! in a [`plan::SetupPlan`], and `--non-interactive` builds the same struct
 //! from flags. A future mobile or web host would be a third builder with
-//! nothing downstream changing — which is why none of the platform-shaped parts
+//! nothing downstream changing - which is why none of the platform-shaped parts
 //! (scanning a home directory, taking over a TTY) are prescribed anywhere but
 //! here.
 
@@ -118,8 +118,8 @@ pub struct SetupEnv {
     pub opener: leviath_mcp::BrowserOpener,
 }
 
-// The real `SetupEnv` -- the user's actual home, a real `std::env` lookup, and
-// a real browser -- is built in the binary, where those leaves belong. Nothing
+// The real `SetupEnv` - the user's actual home, a real `std::env` lookup, and
+// a real browser - is built in the binary, where those leaves belong. Nothing
 // in the library reaches the real environment, so no test can either.
 
 /// The non-interactive arm: apply flags to the config on disk and save.
@@ -197,7 +197,7 @@ fn apply_flags(config: &mut Config, args: &SetupArgs) {
 ///
 /// The base config comes from reading the *file*, deliberately not from
 /// `Config::load()`: `load` folds `$ANTHROPIC_API_KEY` and friends in, and the
-/// old wizard re-serialized the whole struct — quietly writing into
+/// old wizard re-serialized the whole struct - quietly writing into
 /// `~/.leviath/config.toml` a key the user had chosen to keep in their
 /// environment. Those are tracked separately and shown as such.
 pub fn build_wizard(env: &SetupEnv) -> Wizard {
@@ -615,7 +615,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut wizard = build_wizard(&env_in(dir.path()));
         let mut terminal = test_terminal();
-        // A tick with no input, then save -- covering the poll-timeout path.
+        // A tick with no input, then save - covering the poll-timeout path.
         let mut events = TestEventSource::new_with_nones(vec![
             None,
             Some(key_with(KeyCode::Char('s'), KeyModifiers::CONTROL)),

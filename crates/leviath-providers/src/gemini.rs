@@ -120,7 +120,7 @@ impl GeminiProvider {
     fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
         // All families currently share these values; the match keeps them
         // labelled by family so any one can be adjusted independently (the arms
-        // are intentionally identical today — divergence-readiness scaffolding).
+        // are intentionally identical today - divergence-readiness scaffolding).
         #[allow(clippy::match_same_arms)]
         let (max_context_tokens, max_output_tokens) = match GeminiFamily::classify(model) {
             GeminiFamily::FlashLite => (1_048_576, 65_535),
@@ -1052,7 +1052,7 @@ mod tests {
     #[tokio::test]
     async fn list_models_native_skips_entries_without_name() {
         // First entry has no `name` (get None), second's `name` is a non-string
-        // (as_str None) — both filtered out; only the valid third survives.
+        // (as_str None) - both filtered out; only the valid third survives.
         let body =
             br#"{"models":[{"no_name":true},{"name":123},{"name":"models/gemini-3-flash"}]}"#;
         let base = spawn_mock_server(200, "OK", body).await;

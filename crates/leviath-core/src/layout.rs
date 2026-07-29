@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// Blueprint authors think in **proportions** (`budget = "35%"`) so their intent
 /// stays correct regardless of the model's context size, while power users can
-/// still pin an exact count. The percentage denominator — the model's context
-/// window — is not known at parse time, so the spec is stored unresolved here and
+/// still pin an exact count. The percentage denominator - the model's context
+/// window - is not known at parse time, so the spec is stored unresolved here and
 /// turned into a concrete token count at window-build time (see
 /// [`BudgetSpec::resolve`] and [`ContextLayout::resolved`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -52,7 +52,7 @@ impl BudgetSpec {
     ///
     /// Surrounding whitespace is trimmed and decimals are allowed (`"0.6%"`).
     /// Rejects a missing `%`, a non-numeric value, and anything outside the
-    /// `(0, 100]` range — a single region can't sensibly claim ≤0% or more than
+    /// `(0, 100]` range - a single region can't sensibly claim ≤0% or more than
     /// the whole window (region budgets may *sum* past 100%, but each is a
     /// fraction of one window). Returns the human-readable reason on failure so
     /// the caller can surface it at load time.
@@ -76,7 +76,7 @@ impl BudgetSpec {
     /// Resolve this spec to a concrete token count against a model context
     /// `window`.
     ///
-    /// [`Absolute`](BudgetSpec::Absolute) ignores the window (idempotent — a
+    /// [`Absolute`](BudgetSpec::Absolute) ignores the window (idempotent - a
     /// fully-absolute layout resolves to itself). [`Percent`](BudgetSpec::Percent)
     /// rounds `window * percent`, then applies the `max` cap, then the `min`
     /// floor. The floor is applied **last** so that when `min > max` the floor
@@ -106,7 +106,7 @@ impl BudgetSpec {
 
 /// A ContextLayout defines the complete memory map for an agent.
 ///
-/// Like SNES VRAM layout — every region has a defined purpose, size, and policy.
+/// Like SNES VRAM layout - every region has a defined purpose, size, and policy.
 /// The layout specifies:
 /// - Which regions exist and their configurations
 /// - Total token budget across all regions
@@ -178,7 +178,7 @@ impl ContextLayout {
 
         // Warn if sum of max tokens exceeds budget (not necessarily an error,
         // since not all regions will be full simultaneously)
-        // Warn if no SlidingWindow region exists — agents should have a
+        // Warn if no SlidingWindow region exists - agents should have a
         // conversation region for typed message entries, but some agents
         // (e.g., deep-researcher) use other region kinds exclusively.
         let has_sliding_window = self
@@ -187,14 +187,14 @@ impl ContextLayout {
             .any(|r| matches!(r.kind, RegionKind::SlidingWindow { .. }));
         if !has_sliding_window {
             tracing::warn!(
-                "Layout has no SlidingWindow region — typed conversation entries require one"
+                "Layout has no SlidingWindow region - typed conversation entries require one"
             );
         }
 
         // The token-sum warning and the fixed-working-budget hard error below
         // operate on concrete `max_tokens` values. When percentage budgets are
         // present those values are provisional placeholders until the layout is
-        // resolved against a model window, so the checks are meaningless here —
+        // resolved against a model window, so the checks are meaningless here -
         // skip them and rely on the post-resolution `validate()` call at spawn.
         if self.has_percent_budgets() {
             return Ok(());
@@ -256,7 +256,7 @@ impl ContextLayout {
     const MIN_WORKING_TOKENS: usize = 8000;
 
     /// The working-budget floor is only enforced when the layout's total budget
-    /// is at least this large — i.e. it's a realistically-sized agent, not a
+    /// is at least this large - i.e. it's a realistically-sized agent, not a
     /// toy/illustrative layout where an absolute floor wouldn't make sense.
     const BUDGET_CHECK_MIN_TOTAL: usize = 20_000;
 
@@ -364,7 +364,7 @@ impl ContextLayout {
 /// by the run's caller (a CLI `--<name>` flag, an ACP `---region:<name>---`
 /// marker, or the API `regions` map); the remaining variants are resolved by the
 /// daemon from the run's workdir (which is why this type only *declares* the
-/// source — `leviath-core` stays filesystem-agnostic; resolution lives in the
+/// source - `leviath-core` stays filesystem-agnostic; resolution lives in the
 /// CLI daemon's spawner).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -400,7 +400,7 @@ pub enum RegionSeed {
     /// The combined stdout/stderr of a shell command run in the workdir at spawn.
     ///
     /// Unlike every other variant this *executes* something, and it does so
-    /// before the first inference — so before any tool-approval prompt. The
+    /// before the first inference - so before any tool-approval prompt. The
     /// daemon runs it inside the entry stage's sandbox when one is configured,
     /// caps its runtime and output, and honours the `[security]
     /// allow_seed_commands` kill switch. A failure is non-fatal unless the
@@ -475,7 +475,7 @@ impl RegionDefinition {
     ///
     /// The `budget` is set to [`BudgetSpec::Absolute`] holding `max_tokens` and
     /// `compact_at` to `None`, so every existing caller (and every region without
-    /// a percentage budget) is unaffected — resolving such a layout is a no-op.
+    /// a percentage budget) is unaffected - resolving such a layout is a no-op.
     pub fn new(name: String, kind: RegionKind, max_tokens: usize) -> Self {
         Self {
             name,
@@ -660,7 +660,7 @@ mod tests {
     #[test]
     fn test_validate_warns_but_does_not_error_when_max_tokens_exceed_budget() {
         // Sum of region max_tokens (5000 + 10000 = 15000) exceeds the total
-        // budget (10000) — this should only warn, not fail validation, since
+        // budget (10000) - this should only warn, not fail validation, since
         // not all regions are full simultaneously.
         let regions = vec![
             RegionDefinition::new("a".to_string(), RegionKind::Pinned, 5000),
@@ -975,7 +975,7 @@ mod tests {
     #[test]
     fn validate_skips_token_checks_for_percent_layouts() {
         // A percentage layout whose provisional max_tokens are tiny/zero must not
-        // trip the fixed-working-budget hard error — that check is deferred to
+        // trip the fixed-working-budget hard error - that check is deferred to
         // post-resolution. Wrap in tracing so no warn-arg lines read uncovered.
         let regions = vec![
             RegionDefinition::new("big_pinned".to_string(), RegionKind::Pinned, 0).with_budget(

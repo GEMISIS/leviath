@@ -85,8 +85,8 @@ jobs:
       #
       # It has to be spelled here rather than in `.cargo/config.toml`: the
       # `RUSTFLAGS` *environment variable* set at the top of this workflow
-      # completely OVERRIDES `build.rustflags` from a config file — it does not
-      # merge — so hardening flags added there would apply to local builds and be
+      # completely OVERRIDES `build.rustflags` from a config file - it does not
+      # merge - so hardening flags added there would apply to local builds and be
       # silently dropped from exactly the release builds that need them.
       #
       # What each does, per platform:

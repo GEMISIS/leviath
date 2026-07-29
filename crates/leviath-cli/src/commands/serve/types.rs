@@ -48,7 +48,7 @@ pub struct ServeArgs {
     ///
     /// **Off by default, because they are remote code execution by
     /// construction.** Adding an MCP server writes a `command` and `args` into
-    /// `~/.leviath/config.toml`, and Leviath then spawns exactly that — so any
+    /// `~/.leviath/config.toml`, and Leviath then spawns exactly that - so any
     /// token holder could run an arbitrary process, persistently, for every
     /// future run. The rest of the API can only run agents the user already
     /// installed; this one adds new executables to the machine.
@@ -57,7 +57,7 @@ pub struct ServeArgs {
 
     /// Restrict agent working directories to this root.
     ///
-    /// Without it, `POST /api/agents` accepts any `workdir` — including `/` —
+    /// Without it, `POST /api/agents` accepts any `workdir` - including `/` -
     /// so a token holder can point a tool-executing agent at the whole
     /// filesystem. Set this to the directory the API is meant to work in.
     #[arg(long)]
@@ -171,7 +171,7 @@ impl ServeLimits {
     /// model-supplied URL goes through.
     ///
     /// The URL arrives in a `POST /api/agents` body, is persisted, and is POSTed
-    /// to when the run finishes — from inside the trust boundary, and with
+    /// to when the run finishes - from inside the trust boundary, and with
     /// retries. Unchecked, `"callback_url": "http://169.254.169.254/…"` made the
     /// daemon a repeatable request primitive against the cloud metadata service
     /// and anything else on the local network, on behalf of a caller that

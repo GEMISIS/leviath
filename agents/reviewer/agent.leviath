@@ -1,7 +1,7 @@
 [agent]
 name = "reviewer"
 version = "0.0.1"
-description = "Code review agent — discover, scan, deep review, and report with error recovery and multi-provider fallback"
+description = "Code review agent - discover, scan, deep review, and report with error recovery and multi-provider fallback"
 entry_stage = "discover"
 
 # Read-only agent: it inspects a diff/codebase and reports. No write access.
@@ -25,11 +25,11 @@ system_prompt = """
 Before reviewing anything, work out what this project is and how a claim about it
 can be CHECKED rather than asserted. Do not review the diff here.
 
-Start from what you already have — do not rediscover it:
+Start from what you already have - do not rediscover it:
 - `repo_files` holds the tracked file list (empty if this isn't a git repo).
 - `project_context` is pre-loaded with architecture/conventions docs.
 - If `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md` or
-  `.github/copilot-instructions.md` exist, read them — they usually state the
+  `.github/copilot-instructions.md` exist, read them - they usually state the
   test command and the review bar directly.
 
 Fill gaps with list_dir/read_file. Use bash ONLY read-only, to interrogate the
@@ -42,12 +42,12 @@ project actually holds itself to (which is what "correct" means in the review).
 
 Write `workflow` (context_write) ending with these two literal lines, which the
 deep review uses to confirm hypotheses instead of guessing:
-  VERIFY: <command to run one test or check, or "none — no runnable suite">
+  VERIFY: <command to run one test or check, or "none - no runnable suite">
   DONE WHEN: <what makes this review complete and trustworthy>
 """
 
 [stages.discover.transitions.scan]
-hint = "Project mapped — begin the review"
+hint = "Project mapped - begin the review"
 transform = "direct"
 
 [stages.discover.transitions.error_handler]
@@ -67,13 +67,13 @@ surrounding context). Honor any focus in `review_criteria`, and use `discovery`
 (this project's layout and conventions, mapped by the discover stage) plus
 `project_context` to judge what "correct" means here.
 
-Flag the obvious red flags — don't go deep yet:
+Flag the obvious red flags - don't go deep yet:
 - Security: injection, unsafe deserialization, secrets in code, missing authz.
 - Correctness smells: unhandled errors, nil/None derefs, off-by-one, dead code.
 - Missing input validation, TODO/FIXME markers, and anything that looks risky.
 
 Append the flagged areas (file + one line each) to the `findings` region via
-context_append — this is the worklist the deep review scrutinizes.
+context_append - this is the worklist the deep review scrutinizes.
 """
 
 # Passive reads go to `findings`; everything else stays in conversation.
@@ -84,7 +84,7 @@ read_file = "findings"
 list_dir  = "findings"
 
 [stages.scan.transitions.deep_review]
-hint = "First pass complete — scrutinize the flagged areas"
+hint = "First pass complete - scrutinize the flagged areas"
 transform = "direct"
 
 [stages.scan.transitions.error_handler]
@@ -102,15 +102,15 @@ max_revisits = 2
 system_prompt = """
 Scrutinize the flagged areas in depth. Work the review through a fixed framework so
 nothing is skipped:
-  1. Correctness — does it do what the task/diff intends? Trace the logic.
-  2. Security — injection, authz, secret handling, unsafe input.
-  3. Performance — hot-path allocations, N+1 queries, needless work.
-  4. Maintainability — clarity, naming, duplication, conventions.
-  5. Test coverage — are the risky paths actually tested?
+  1. Correctness - does it do what the task/diff intends? Trace the logic.
+  2. Security - injection, authz, secret handling, unsafe input.
+  3. Performance - hot-path allocations, N+1 queries, needless work.
+  4. Maintainability - clarity, naming, duplication, conventions.
+  5. Test coverage - are the risky paths actually tested?
 
 For each finding give: location, the concrete failure scenario (inputs/state →
 wrong result or crash), a severity (critical / warning / info), and a recommended
-fix. Recommend it — do not apply it. This agent reads and judges; no stage here
+fix. Recommend it - do not apply it. This agent reads and judges; no stage here
 has a tool that writes or edits a file, and calling one is refused. Append each finding to `findings` (context_append).
 
 Keep a running tally in the `severity_index` region: rewrite it with
@@ -118,7 +118,7 @@ context_write each time the counts change, e.g. "critical: 2, warning: 5, info: 
 This survives even if the finding detail is compacted, so the report stage always
 has the totals.
 
-Use bash only to CONFIRM a hypothesis, never to modify anything — `workflow`'s
+Use bash only to CONFIRM a hypothesis, never to modify anything - `workflow`'s
 VERIFY line holds the command this project actually uses to run one test. A
 finding you were able to check beats one you reasoned your way to; say which it
 is. Hold the review to `workflow`'s DONE WHEN line.
@@ -132,7 +132,7 @@ read_file = "findings"
 list_dir  = "findings"
 
 [stages.deep_review.transitions.report]
-hint = "Analysis complete — write the report"
+hint = "Analysis complete - write the report"
 transform = "compact"
 
 [stages.deep_review.transitions.error_handler]
@@ -151,9 +151,9 @@ Produce the review report from the `findings` region, structured by the
 `severity_index` tally so the counts and the report agree.
 
 Order findings most-severe first and group by severity level:
-  ## Critical — <must fix before merge>
-  ## Warning  — <should fix>
-  ## Info     — <nice to have>
+  ## Critical - <must fix before merge>
+  ## Warning  - <should fix>
+  ## Info     - <nice to have>
 For each: file and line, one-sentence defect summary, the failure scenario, and the
 fix. End with a short overall assessment (ship / ship-with-fixes / needs-work) that
 matches the severity_index totals.
@@ -177,7 +177,7 @@ continue with the rest.
 """
 
 [stages.error_handler.transitions.deep_review]
-hint = "Recovered — resume the deep review"
+hint = "Recovered - resume the deep review"
 transform = "compact"
 
 [compaction]
@@ -188,14 +188,14 @@ model = "claude-sonnet-5"
 # Budgets are a percentage of the model's context window (issue #100) with an
 # absolute `max_tokens` guard-rail. Percentages are ceilings, not reservations.
 [context.regions]
-# The code/diff to review — required. Supply via `--diff <text|@file>` (CLI),
+# The code/diff to review - required. Supply via `--diff <text|@file>` (CLI),
 # a ---region:diff--- block (ACP), or the API `regions` field.
 diff            = { kind = "pinned", budget = "20%", max_tokens = 20000, required = true, seed = "diff", required_message = "Provide the code or diff to review via --diff <text|@file>." }
 # Optional caller focus, e.g. --criteria "focus on security / backwards-compat".
 review_criteria = { kind = "pinned", budget = "2%",  max_tokens = 3000, seed = "criteria" }
 # Pre-loaded on startup: architecture / conventions (missing files skipped).
 project_context = { kind = "pinned", budget = "4%",  max_tokens = 5000, seed = { files = ["ARCHITECTURE.md", "DESIGN.md", "docs/ARCHITECTURE.md", "CONVENTIONS.md", "CONTRIBUTING.md", "README.md"] } }
-# Deterministic repo scan, run once at spawn (issue #108) — the discover stage
+# Deterministic repo scan, run once at spawn (issue #108) - the discover stage
 # starts from facts instead of burning iterations on `ls`. `git ls-files` behaves
 # identically on POSIX and Windows shells; outside a git repo it fails and this is
 # simply left empty (non-fatal), and oversized output is trimmed to the budget.
@@ -215,6 +215,6 @@ severity_index  = { kind = "pinned",    budget = "2%",  max_tokens = 2000 }
 report          = { kind = "clearable", budget = "7%",  max_tokens = 8000 }
 
 # The message stream. Every blueprint needs an explicit sliding_window
-# `conversation` region — the layout that replaces it on each stage transition is
+# `conversation` region - the layout that replaces it on each stage transition is
 # rebuilt from this table, so an auto-added one would be dropped after stage 1.
 conversation    = { kind = "sliding_window", max_items = 30, budget = "15%", max_tokens = 18000, strategy = "bulk", overflow = 10 }

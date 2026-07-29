@@ -1,7 +1,7 @@
 //! Windows implementations.
 //!
 //! Windows has no POSIX mode bits; access control is an ACL on each object. The
-//! hardening this crate applies on Unix — "owner only, nobody else" — has a
+//! hardening this crate applies on Unix - "owner only, nobody else" - has a
 //! direct Windows equivalent, and until now it simply was not applied: every
 //! `secure_file_perms` call was a silent no-op, so `config.toml` (every provider
 //! API key) and `mcp-auth.json` (OAuth access *and refresh* tokens) carried
@@ -13,7 +13,7 @@
 //! security descriptors through raw FFI, and this workspace is
 //! `unsafe_code = "forbid"` from top to bottom. `icacls` is the tool Windows
 //! ships for exactly this, is present on every supported version, and is
-//! reachable with an ordinary `Command` — no `unsafe`, and no new dependency
+//! reachable with an ordinary `Command` - no `unsafe`, and no new dependency
 //! whose own soundness would have to be taken on trust.
 //!
 //! It is resolved from the system directory rather than `PATH`. A `PATH` lookup
@@ -23,7 +23,7 @@
 //! # The ordering that matters
 //!
 //! A file is created with the ACL it inherits from its directory, so restricting
-//! the *directory* first is what closes the window — a secret written into an
+//! the *directory* first is what closes the window - a secret written into an
 //! already-restricted directory is never briefly readable. `write_with_mode`
 //! also restricts the file itself afterwards, as defence in depth for a
 //! directory that was somehow left permissive.
@@ -104,7 +104,7 @@ fn icacls_program() -> PathBuf {
 
 /// The arguments that restrict `path` to `user`.
 ///
-/// `/inheritance:r` drops the ACEs inherited from the parent — without it a
+/// `/inheritance:r` drops the ACEs inherited from the parent - without it a
 /// permissive parent keeps granting access no matter what is added here.
 /// `/grant:r` *replaces* any existing grant for the user rather than adding to
 /// it, so repeating the call is idempotent.
@@ -184,7 +184,7 @@ mod tests {
     /// One of them unsets it process-wide to prove the error propagates, and
     /// another reads it to restrict a real file. `cargo test` runs them in
     /// parallel threads of one process, so without this the second sees the
-    /// first's unset environment and fails with "USERNAME is not set" — a real
+    /// first's unset environment and fails with "USERNAME is not set" - a real
     /// CI failure on an unrelated PR, and a confusing one, because the code it
     /// accuses is correct.
     ///
@@ -224,7 +224,7 @@ mod tests {
     /// The property asserted is deliberately "no broad principal", not "exactly
     /// one account". `NT AUTHORITY\SYSTEM` and `BUILTIN\Administrators` survive
     /// on Windows and asserting otherwise would be asserting something the OS
-    /// does not do — SYSTEM is the operating system and an administrator can
+    /// does not do - SYSTEM is the operating system and an administrator can
     /// take ownership of any file regardless, so neither is an escalation. What
     /// must not survive is a grant to `Users`, `Everyone` or
     /// `Authenticated Users`, which is what lets the account next door read
@@ -261,7 +261,7 @@ mod tests {
     }
 
     /// With no account to grant, restricting must fail rather than quietly
-    /// leaving the file as it was — the whole point is not to believe a secret
+    /// leaving the file as it was - the whole point is not to believe a secret
     /// is protected when it is not.
     #[test]
     fn restricting_fails_when_there_is_no_account_to_grant() {

@@ -2,7 +2,7 @@
 //! [`MCPServerConfig`]s.
 //!
 //! Everything here is a pure `&str -> Result<Vec<..>>` function. No path
-//! resolution, no filesystem, no `#[cfg]` — those live in the parent module —
+//! resolution, no filesystem, no `#[cfg]` - those live in the parent module -
 //! so every harness's format is unit-testable on every platform, including the
 //! ones whose config files could never exist there.
 //!
@@ -10,16 +10,16 @@
 //!
 //! Nine harnesses, four families:
 //!
-//! * **`mcpServers` object** — Claude Code (`~/.claude.json`, plus a nested
+//! * **`mcpServers` object** - Claude Code (`~/.claude.json`, plus a nested
 //!   `mcpServers` per project), `.mcp.json`, Claude Desktop, Cursor, Windsurf,
 //!   Gemini CLI. Entries are `{command, args, env}` or `{url, headers}`, with
 //!   Gemini adding `httpUrl` and Windsurf `serverUrl`.
-//! * **`servers` object** — VS Code, same entry shape with an explicit `type`.
-//! * **`mcp` object** — OpenCode, whose entries are tagged `local`/`remote` and
+//! * **`servers` object** - VS Code, same entry shape with an explicit `type`.
+//! * **`mcp` object** - OpenCode, whose entries are tagged `local`/`remote` and
 //!   whose `command` is an *array* (argv) rather than a string.
-//! * **`context_servers` object** — Zed, whose entry nests the launch under a
+//! * **`context_servers` object** - Zed, whose entry nests the launch under a
 //!   `command` object (`{path, args, env}`).
-//! * **`[mcp_servers]` table** — Codex, the one TOML source.
+//! * **`[mcp_servers]` table** - Codex, the one TOML source.
 //!
 //! Rather than nine near-identical structs, one tolerant entry parser accepts
 //! the union of field names and every wrapper normalises into it. Unknown
@@ -56,7 +56,7 @@ const SECRET_HINTS: [&str; 7] = [
 ///
 /// `${VAR}` and `$VAR` are references Leviath expands at connect time, so they
 /// are not secrets in the file; anything else under a credential-shaped key is.
-/// Deliberately conservative in one direction only — a false positive costs the
+/// Deliberately conservative in one direction only - a false positive costs the
 /// user one glance at a flagged row, a false negative silently copies a live
 /// token into a second file on disk.
 fn looks_like_inline_secret(key: &str, value: &str) -> bool {
@@ -107,7 +107,7 @@ fn string_list(value: Option<&serde_json::Value>) -> Vec<String> {
 }
 
 /// Whether an entry is switched off in its own harness. An explicitly disabled
-/// server should not be offered — the user already said no once.
+/// server should not be offered - the user already said no once.
 fn is_disabled(entry: &serde_json::Map<String, serde_json::Value>) -> bool {
     entry.get("enabled").and_then(|v| v.as_bool()) == Some(false)
         || entry.get("disabled").and_then(|v| v.as_bool()) == Some(true)
@@ -116,7 +116,7 @@ fn is_disabled(entry: &serde_json::Map<String, serde_json::Value>) -> bool {
 /// Parse one server entry from any of the JSON-shaped harnesses.
 ///
 /// Returns `None` when the entry is disabled, malformed, or describes neither a
-/// command nor a URL — an entry Leviath cannot connect to is not a candidate.
+/// command nor a URL - an entry Leviath cannot connect to is not a candidate.
 ///
 /// Precedence is URL over command. Several harnesses carry both (a stdio
 /// fallback alongside a hosted endpoint), and [`MCPServerConfig::resolve`]
@@ -137,7 +137,7 @@ pub fn parse_json_entry(name: &str, value: &serde_json::Value) -> Option<Candida
 
     let (command, mut args) = match command_field {
         Some(serde_json::Value::String(s)) => (Some(s.clone()), Vec::new()),
-        // OpenCode: `command: ["npx", "-y", "pkg"]` — head is the program.
+        // OpenCode: `command: ["npx", "-y", "pkg"]` - head is the program.
         Some(serde_json::Value::Array(_)) => {
             let argv = string_list(entry.get("command"));
             let mut it = argv.into_iter();
@@ -182,9 +182,9 @@ pub fn parse_json_entry(name: &str, value: &serde_json::Value) -> Option<Candida
 
     // A malformed `[[mcp_servers]]` entry is a hard error in `Config::load`, so
     // importing one would brick the whole config file rather than costing one
-    // server. Both shapes above are valid by construction — each sets exactly
+    // server. Both shapes above are valid by construction - each sets exactly
     // one of `command`/`url` and states its transport outright, which is
-    // precisely what `validate` checks — so there is no runtime check here to
+    // precisely what `validate` checks - so there is no runtime check here to
     // reject something that cannot be built. `every_candidate_validates` holds
     // the invariant instead, and would fail loudly if a future edit to this
     // function broke it.
@@ -214,7 +214,7 @@ fn parse_json_map(map: Option<&serde_json::Value>) -> Vec<Candidate> {
 ///
 /// Covers `.mcp.json`, Claude Desktop, Cursor, Windsurf, and Gemini CLI
 /// (`mcpServers`), VS Code (`servers`), OpenCode (`mcp`), and Zed
-/// (`context_servers`) — the key is the only thing that differs.
+/// (`context_servers`) - the key is the only thing that differs.
 pub fn parse_json_object(contents: &str, key: &str) -> anyhow::Result<Vec<Candidate>> {
     let root: serde_json::Value = serde_json::from_str(contents)?;
     Ok(parse_json_map(root.get(key)))
@@ -246,7 +246,7 @@ pub fn parse_claude_code(contents: &str) -> anyhow::Result<Vec<Candidate>> {
 
 /// Codex's `~/.codex/config.toml`, whose servers live in an `[mcp_servers]`
 /// table. Reuses the JSON entry parser by converting the TOML table through
-/// `serde_json::Value` — the field names are identical, and one tolerant entry
+/// `serde_json::Value` - the field names are identical, and one tolerant entry
 /// parser beats two that must be kept in step.
 pub fn parse_codex(contents: &str) -> anyhow::Result<Vec<Candidate>> {
     // Deserialize the TOML straight into a `serde_json::Value` rather than

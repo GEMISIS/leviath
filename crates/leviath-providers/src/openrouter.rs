@@ -105,7 +105,7 @@ impl OpenRouterProvider {
                         }],
                     }));
                 }
-                // Everything else — including tool_use/tool_result block history —
+                // Everything else - including tool_use/tool_result block history -
                 // goes through the OpenAI-format conversion so it round-trips on
                 // non-Anthropic models instead of being sent as raw block JSON.
                 _ => messages.extend(crate::openai_compat::message_to_openai(
@@ -268,7 +268,7 @@ impl Provider for OpenRouterProvider {
                 max_output_tokens: 65_536,
             };
         }
-        // ── Meta Llama 4 Scout — 10M context ─────────────────────────────────
+        // ── Meta Llama 4 Scout - 10M context ─────────────────────────────────
         if model.contains("llama-4-scout") {
             return ModelCapabilities {
                 supports_temperature: true,
@@ -279,7 +279,7 @@ impl Provider for OpenRouterProvider {
                 max_output_tokens: 32_768,
             };
         }
-        // ── Meta Llama 4 (Maverick + others) — 1M context ────────────────────
+        // ── Meta Llama 4 (Maverick + others) - 1M context ────────────────────
         if model.starts_with("meta-llama/llama-4") {
             return ModelCapabilities {
                 supports_temperature: true,
@@ -290,7 +290,7 @@ impl Provider for OpenRouterProvider {
                 max_output_tokens: 32_768,
             };
         }
-        // ── DeepSeek R1 — reasoning-only, no tools, no temperature ───────────
+        // ── DeepSeek R1 - reasoning-only, no tools, no temperature ───────────
         if model.contains("deepseek-r1") {
             return ModelCapabilities {
                 supports_temperature: false,
@@ -301,7 +301,7 @@ impl Provider for OpenRouterProvider {
                 max_output_tokens: 32_768,
             };
         }
-        // ── DeepSeek V4 Pro — 1M context, 384K output ────────────────────────
+        // ── DeepSeek V4 Pro - 1M context, 384K output ────────────────────────
         if model.contains("deepseek-v4-pro") {
             return ModelCapabilities {
                 supports_temperature: true,
@@ -345,7 +345,7 @@ impl Provider for OpenRouterProvider {
                 max_output_tokens: 32_768,
             };
         }
-        // ── Qwen 3.6+ / Qwen3 Coder — 1M context ────────────────────────────
+        // ── Qwen 3.6+ / Qwen3 Coder - 1M context ────────────────────────────
         if model.contains("qwen3.6") || model.contains("qwen3-coder") {
             return ModelCapabilities {
                 supports_temperature: true,
@@ -367,7 +367,7 @@ impl Provider for OpenRouterProvider {
                 max_output_tokens: 32_768,
             };
         }
-        // ── Anthropic models via OpenRouter — inherit direct-provider flags ───
+        // ── Anthropic models via OpenRouter - inherit direct-provider flags ───
         let anthropic_no_temp = model.contains("claude-opus-4-8")
             || model.contains("claude-opus-4-7")
             || model.contains("claude-fable-5")
@@ -382,7 +382,7 @@ impl Provider for OpenRouterProvider {
                 max_output_tokens: 128_000,
             };
         }
-        // ── OpenAI o-series via OpenRouter — no temperature ───────────────────
+        // ── OpenAI o-series via OpenRouter - no temperature ───────────────────
         if model.starts_with("openai/o") {
             return ModelCapabilities {
                 supports_temperature: false,
@@ -650,7 +650,7 @@ mod tests {
         let provider = OpenRouterProvider::new("key".to_string());
         // Unknown model ⇒ the conservative fallback.
         assert_eq!(provider.max_context_tokens("any-model"), 128_000);
-        // A known large-context model reports its real size (not a flat 128K) —
+        // A known large-context model reports its real size (not a flat 128K) -
         // it now delegates to the per-model capabilities table.
         assert_eq!(
             provider.max_context_tokens("meta-llama/llama-4-scout"),

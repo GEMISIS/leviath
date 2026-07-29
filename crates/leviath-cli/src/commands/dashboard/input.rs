@@ -68,7 +68,7 @@ impl Dashboard {
                 return;
             }
 
-            // Detail view — not in input mode
+            // Detail view - not in input mode
             self.handle_detail_view_key(key_code);
             return;
         }
@@ -124,7 +124,7 @@ impl Dashboard {
 
     /// Whether the user is actively editing a document (an `EditText`
     /// interaction). When true the editable textarea is rendered inline in the
-    /// content pane — where the current text is shown — rather than in the bottom
+    /// content pane - where the current text is shown - rather than in the bottom
     /// input bar, so editing happens in place over the document being revised.
     pub(in crate::commands::dashboard) fn editing_document(&self) -> bool {
         use interaction::InteractionKind;
@@ -135,7 +135,7 @@ impl Dashboard {
                 .is_some_and(|r| r.kind == InteractionKind::EditText)
     }
 
-    /// The document to review for the selected agent's pending interaction — the
+    /// The document to review for the selected agent's pending interaction - the
     /// current instance's plan/output, carried as the request `body`. Shown in
     /// the output pane in place of the full accumulated history. `None` while
     /// actively editing (the textarea takes the pane) or when there is no body.
@@ -156,7 +156,7 @@ impl Dashboard {
     /// This must mirror the condition the renderer uses, not merely ask whether
     /// a review body exists. The pane is suppressed in input mode (where the
     /// document is drawn in the content pane instead) and whenever the output
-    /// pane is already showing the same body — and in both of those cases a
+    /// pane is already showing the same body - and in both of those cases a
     /// scroll aimed at `review_scroll` moves a pane nobody can see. That is
     /// exactly what happened: with a plan open for approval, every scroll key
     /// updated state that was not being rendered, so the plan sat still.
@@ -169,7 +169,7 @@ impl Dashboard {
         !self.input_mode && !content_shows_body && self.has_scrollable_document()
     }
 
-    /// Whether there is a review document on screen *somewhere* — the review
+    /// Whether there is a review document on screen *somewhere* - the review
     /// pane or the content pane.
     ///
     /// "Is there anything to scroll", as distinct from
@@ -257,7 +257,7 @@ impl Dashboard {
                 }
                 // Up/Down move the selection here, so the document gets its own
                 // keys. Without these there was no way at all to read a plan
-                // longer than the pane while its approval prompt was open —
+                // longer than the pane while its approval prompt was open -
                 // which is exactly when you need to read it.
                 KeyCode::PageUp => self.scroll_by(10),
                 KeyCode::PageDown => self.scroll_by(-10),
@@ -344,7 +344,7 @@ impl Dashboard {
             KeyCode::Char('.') => self.step_context_history(1),
             KeyCode::Char('i') => {
                 // Respond to a pending interaction, or send a mid-run message to
-                // any active agent that accepts them — same key, same input area.
+                // any active agent that accepts them - same key, same input area.
                 if self.selected_stage_can_respond() || self.selected_agent_accepts_messages() {
                     self.input_mode = true;
                     self.choice_selected = 0;
@@ -453,7 +453,7 @@ impl Dashboard {
             // The index came from `display_indices`/`agents` just above, via the
             // `self.selected_agent()` lookup that got us into this branch, and
             // the `cmd_tx.send` in between does not mutate either collection or
-            // `self.selected` -- so it's always still valid. An `if let` guard
+            // `self.selected` - so it's always still valid. An `if let` guard
             // here would add an "index went stale" branch that can never
             // actually be exercised.
             let idx = self
@@ -607,7 +607,7 @@ impl Dashboard {
             let _ = self.cmd_tx.send(DaemonCommand::Cancel {
                 run_id: agent_id.clone(),
             });
-            // See the comment in `handle_kill_from_detail` -- the index is still
+            // See the comment in `handle_kill_from_detail` - the index is still
             // valid because the `cmd_tx.send` above does not touch
             // `display_indices`/`agents`/`selected`.
             let idx = self
@@ -632,7 +632,7 @@ impl Dashboard {
             let _ = self.cmd_tx.send(DaemonCommand::Cancel {
                 run_id: agent_id.clone(),
             });
-            // See the comment in `handle_kill_from_detail` -- the index is still
+            // See the comment in `handle_kill_from_detail` - the index is still
             // valid because the `cmd_tx.send` above does not touch
             // `display_indices`/`agents`/`selected`.
             let idx = self
@@ -674,7 +674,7 @@ impl Dashboard {
                     (InteractionResponse::text(&r.id, &input), d)
                 }
                 InteractionKind::EditText => {
-                    // Preserve indentation / internal newlines — only trim the
+                    // Preserve indentation / internal newlines - only trim the
                     // display label, not the submitted content.
                     let input = self.input_textarea.lines().join("\n");
                     let d = if input.trim().is_empty() {
@@ -743,7 +743,7 @@ impl Dashboard {
         // The index is still valid because nothing since the
         // `self.selected_agent()` lookup at the top of this function (which is
         // where `req`/`agent_id` came from) touches
-        // `display_indices`/`agents`/`selected` -- an `if let` guard here would
+        // `display_indices`/`agents`/`selected` - an `if let` guard here would
         // add an "index went stale" branch that can never actually be exercised.
         let idx = self
             .selected_agent_raw_idx()
@@ -1161,7 +1161,7 @@ mod tests {
     }
 
     /// Up/Down move the choice selection, so before this there was no key at
-    /// all that scrolled the document — a plan longer than the pane could not
+    /// all that scrolled the document - a plan longer than the pane could not
     /// be read while its approval prompt was open, which is the only time it is
     /// shown.
     #[test]
@@ -1169,8 +1169,8 @@ mod tests {
         let mut dash = dashboard_awaiting_a_plan();
         assert_eq!(dash.detail_scroll, 0);
 
-        // In input mode the plan is drawn in the content pane — the separate
-        // review pane is suppressed — so that is what has to move. Verified
+        // In input mode the plan is drawn in the content pane - the separate
+        // review pane is suppressed - so that is what has to move. Verified
         // against the real dashboard through a pty: the pane's own position
         // readout went 100% → 91% → 81% on two PageUps.
         dash.handle_key(key(KeyCode::PageUp));
@@ -1179,7 +1179,7 @@ mod tests {
         dash.handle_key(key(KeyCode::PageDown));
         assert_eq!(dash.detail_scroll, 0, "and PageDown comes back");
 
-        // Down still selects rather than scrolling — the plan keys were added
+        // Down still selects rather than scrolling - the plan keys were added
         // beside the choice keys, not on top of them.
         dash.choice_selected = 0;
         dash.handle_key(key(KeyCode::Down));
@@ -1253,7 +1253,7 @@ mod tests {
         assert_eq!(dash.detail_scroll, 0);
 
         // Out of input mode and with the content pane on logs, the review pane
-        // is what is rendered — and so what the wheel moves.
+        // is what is rendered - and so what the wheel moves.
         dash.input_mode = false;
         dash.handle_key(key(KeyCode::Char('l')));
         dash.scroll_by(3);
@@ -1386,7 +1386,7 @@ mod tests {
         // Entering input mode over an EditText ⇒ editing inline.
         dash.input_mode = true;
         assert!(dash.editing_document());
-        // While editing, the textarea owns the pane — no separate review body.
+        // While editing, the textarea owns the pane - no separate review body.
         assert!(dash.reviewing_body().is_none());
     }
 
@@ -1507,7 +1507,7 @@ mod tests {
 
     #[test]
     fn input_mode_no_pending_request_typing_appends_to_textarea() {
-        // kind resolves to None when there's no pending_request at all —
+        // kind resolves to None when there's no pending_request at all -
         // exercises the `Some(FreeText) | None` arm's None side.
         let mut dash = make_test_dashboard();
         let agent = make_test_agent("run-1", AgentDisplayStatus::Active);
@@ -1569,8 +1569,8 @@ mod tests {
     }
 
     /// Every state that is not a finished one can be killed. The gate used to be
-    /// `Active | Waiting`, so a run showing IDLE or STALE — exactly the states a
-    /// user reaches for the kill key in — could not be killed at all.
+    /// `Active | Waiting`, so a run showing IDLE or STALE - exactly the states a
+    /// user reaches for the kill key in - could not be killed at all.
     #[test]
     fn every_unfinished_state_can_be_killed() {
         for status in [
@@ -1712,7 +1712,7 @@ mod tests {
     #[test]
     fn cancel_from_list_no_agent_selected_is_noop() {
         let mut dash = make_test_dashboard();
-        // No agents at all — selected_agent() is None.
+        // No agents at all - selected_agent() is None.
         dash.handle_key(key(KeyCode::Char('c')));
         assert!(dash.agents.is_empty());
     }
@@ -1747,7 +1747,7 @@ mod tests {
     fn submit_input_no_agent_selected_returns_early() {
         let mut dash = make_test_dashboard();
         dash.input_mode = true;
-        // No agents at all — selected_agent() is None.
+        // No agents at all - selected_agent() is None.
         dash.submit_input();
         assert!(dash.agents.is_empty());
     }
@@ -1953,7 +1953,7 @@ mod tests {
         // In the default Output mode the content pane is already showing the
         // body, so the separate review pane is suppressed and the content pane
         // is what a scroll must move. This test used to assert `review_scroll`
-        // here — a pane that is not on screen — which is precisely why a plan
+        // here - a pane that is not on screen - which is precisely why a plan
         // sat still while every scroll key "worked".
         dash.handle_key(key(KeyCode::Up));
         assert_eq!(dash.detail_scroll, 1);
@@ -2632,7 +2632,7 @@ mod tests {
         dash.selected_stage = 0;
         dash.detail_scroll = 10;
         dash.review_scroll = 5;
-        // search_mode must be FALSE — in search mode, Char('3') is treated as a
+        // search_mode must be FALSE - in search mode, Char('3') is treated as a
         // search character rather than a stage-jump key.
         dash.search_mode = false;
         dash.search_query = "xyz".to_string();
@@ -2680,7 +2680,7 @@ mod tests {
 
     #[test]
     fn detail_view_comma_and_period_route_to_history_step() {
-        // With no archive on disk, stepping is a no-op — this exercises the
+        // With no archive on disk, stepping is a no-op - this exercises the
         // `,`/`.` routing arms without needing a run.lvr fixture.
         let mut dash = make_test_dashboard();
         dash.agents.push(make_test_agent(
@@ -2759,7 +2759,7 @@ mod tests {
         assert!(dash.toasts.is_empty());
     }
 
-    // ─── main list: Down key — three agents to confirm can-move path ──────
+    // ─── main list: Down key - three agents to confirm can-move path ──────
 
     #[test]
     fn main_list_down_advances_through_multiple_agents() {
@@ -2781,7 +2781,7 @@ mod tests {
         dash.handle_key(key(KeyCode::Down));
         assert_eq!(dash.selected, 2);
 
-        // At bottom — cannot go further
+        // At bottom - cannot go further
         dash.handle_key(key(KeyCode::Down));
         assert_eq!(dash.selected, 2);
     }

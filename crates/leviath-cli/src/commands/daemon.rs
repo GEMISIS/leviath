@@ -1,9 +1,9 @@
-//! `lev daemon` — run and manage the shared-world daemon.
+//! `lev daemon` - run and manage the shared-world daemon.
 //!
 //! With no action, `lev daemon` runs the daemon in the foreground: it binds the
 //! control socket, drives the one shared world, and (on restart) reloads any
-//! agents persisted under the runs directory. That execution — binding a real
-//! socket, spawning a detached process, polling for readiness — is real I/O
+//! agents persisted under the runs directory. That execution - binding a real
+//! socket, spawning a detached process, polling for readiness - is real I/O
 //! routed through [`crate::dispatch::RiskyExecutors`] and implemented by the
 //! binary (`main.rs`). This module defines the arguments plus the testable
 //! request/formatting cores the binary composes.
@@ -31,7 +31,7 @@ pub enum DaemonAction {
     Stop,
     /// Report whether the daemon is running and how many agents it hosts.
     Status,
-    /// Restart the daemon (stop, then start) — reloading persisted agents.
+    /// Restart the daemon (stop, then start) - reloading persisted agents.
     Restart,
     /// Register the daemon with the OS supervisor (launchd / systemd --user) so
     /// it starts at login and is restarted automatically if it ever dies.

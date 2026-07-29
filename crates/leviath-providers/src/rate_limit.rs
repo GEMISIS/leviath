@@ -389,7 +389,7 @@ mod tests {
     #[tokio::test]
     async fn acquire_prunes_expired_token_count_entries() {
         // acquire()'s pruning loop also prunes `token_counts` (shared state
-        // with check_tpm()'s own, separate pruning loop) -- no other test
+        // with check_tpm()'s own, separate pruning loop) - no other test
         // seeds an expired token_counts entry before calling acquire()
         // itself, so that pop_front() call is otherwise unexercised from this
         // function.

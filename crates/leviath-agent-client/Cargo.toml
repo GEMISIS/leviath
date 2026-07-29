@@ -10,7 +10,7 @@ authors.workspace = true
 # crates. Saying so explicitly prevents an accidental `cargo publish` and lets
 # cargo-deny treat the intra-workspace `path` dependencies as what they are
 # rather than as unbounded version requirements. Remove this line if a crate is
-# ever meant to be published — at which point its path deps need versions too.
+# ever meant to be published - at which point its path deps need versions too.
 publish = false
 
 [dependencies]

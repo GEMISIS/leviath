@@ -82,7 +82,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                 }
 
                 // Backward compat: old single-model format (provider + model at
-                // top level) or old fallbacks list — treat both as models entries.
+                // top level) or old fallbacks list - treat both as models entries.
                 if models.is_empty() {
                     if let Some(provider) = mt.get("provider").and_then(|v| v.as_str()) {
                         let model_name = mt
@@ -203,7 +203,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                                     .unwrap_or_default();
                                 // Per-option directives, keyed by option label:
                                 // [stages.<name>.interaction_points.directives]
-                                // "Revise — I'll describe changes" = "Call ask_user_text ..."
+                                // "Revise - I'll describe changes" = "Call ask_user_text ..."
                                 // `followups` is accepted as a backward-compat alias.
                                 let pt_directives: std::collections::HashMap<String, String> = pt
                                     .get("directives")
@@ -218,7 +218,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                                     })
                                     .unwrap_or_default();
                                 // Options that immediately abort the run:
-                                // abort_options = ["Abort — cancel this run"]
+                                // abort_options = ["Abort - cancel this run"]
                                 let pt_abort_options: Vec<String> = pt
                                     .get("abort_options")
                                     .and_then(|v| v.as_array())
@@ -229,7 +229,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                                     })
                                     .unwrap_or_default();
                                 // Options that open the last output for direct editing:
-                                // edit_options = ["Add detail — expand a section"]
+                                // edit_options = ["Add detail - expand a section"]
                                 let pt_edit_options: Vec<String> = pt
                                     .get("edit_options")
                                     .and_then(|v| v.as_array())
@@ -330,7 +330,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
             if model_has_system_prompt {
                 tracing::warn!(
                     "stage '{stage_name}': `system_prompt` is nested under \
-                     [stages.{stage_name}.model] and will be IGNORED — move the \
+                     [stages.{stage_name}.model] and will be IGNORED - move the \
                      `system_prompt = \"\"\"...\"\"\"` line ABOVE the \
                      [stages.{stage_name}.model] table so it belongs to the stage"
                 );
@@ -432,7 +432,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
             }
 
             // Parse per-stage context layout: [stages.<name>.context.regions].
-            // Different stages can carry different region sets — the runtime swaps
+            // Different stages can carry different region sets - the runtime swaps
             // to a stage's layout on entry (apply_stage_context → apply_layout),
             // preserving overlapping regions' content by name. Absent ⇒ the stage
             // inherits the global [context.regions] layout. NOTE (TOML nesting):
@@ -506,7 +506,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                     if !is_stuck && stuck.is_some() {
                         return Err(Error::Other(format!(
                             "transition to '{target_name}' sets stuck_after_* thresholds \
-                             but its condition is not 'stuck' — they would never be read"
+                             but its condition is not 'stuck' - they would never be read"
                         )));
                     }
 
@@ -780,8 +780,8 @@ fn str_field(v: &toml::Value, key: &str) -> String {
 /// Parse a transition edge's `stuck_after_*` thresholds into a [`StuckConfig`],
 /// or `None` when the edge arms none of them.
 ///
-/// Non-positive values read as unset — mirroring `enforce_max_iterations`, where
-/// `max == 0` means "unlimited" — so `stuck_after_iterations = 0` leaves the edge
+/// Non-positive values read as unset - mirroring `enforce_max_iterations`, where
+/// `max == 0` means "unlimited" - so `stuck_after_iterations = 0` leaves the edge
 /// unarmed and the caller rejects it, rather than the edge firing on turn zero.
 fn parse_stuck_config(edge: &toml::Value) -> Option<StuckConfig> {
     let threshold = |key: &str| {
@@ -835,7 +835,7 @@ fn parse_region_mapping(v: &toml::Value) -> RegionMapping {
 /// (compact at that fraction of the resolved budget) and/or an absolute
 /// `threshold_tokens` cap. Percentage regions carry a provisional `max_tokens`
 /// (the cap, or 0) that is finalized when the layout is resolved against a model
-/// window at spawn — see [`ContextLayout::resolved`]. The returned total sums
+/// window at spawn - see [`ContextLayout::resolved`]. The returned total sums
 /// only the absolute maxes; percentage regions contribute at resolution time.
 ///
 /// Malformed `budget`/`compact_at` strings are a hard error so `leviath validate`
@@ -1096,7 +1096,7 @@ fn parse_transition_gate(table: &toml::value::Table) -> crate::blueprint::Transi
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect();
     }
-    // A negative budget is a typo, not "never hold the stage" — fall back to the
+    // A negative budget is a typo, not "never hold the stage" - fall back to the
     // default rather than silently disabling the gate.
     if let Some(max) = table
         .get("max_attempts")
@@ -1453,7 +1453,7 @@ stuck_after_minutes = -5"#,
         );
     }
 
-    /// Thresholds under any other condition would silently never be read — the
+    /// Thresholds under any other condition would silently never be read - the
     /// classic "I forgot `condition = \"stuck\"`" footgun.
     #[test]
     fn parse_manifest_rejects_stuck_thresholds_without_the_stuck_condition() {
@@ -2539,7 +2539,7 @@ mode = "autonomous"
     #[test]
     fn parse_manifest_security_block_without_taint_tracking_defaults_true() {
         // A present `[security]` block that omits `taint_tracking` keeps the
-        // default (true) — block presence implies intent to configure security.
+        // default (true) - block presence implies intent to configure security.
         let toml = r#"
 [agent]
 name = "sec-default"
@@ -2744,8 +2744,8 @@ mode = "autonomous"
         let transitions = bp.find_stage("a").unwrap().transitions.as_ref().unwrap();
         // An edge with no `gate` table has no gate at all.
         assert!(transitions["b"].gate.is_none());
-        // A gate whose every key is the wrong type — including a negative
-        // attempt budget — falls back to the defaults, i.e. a gate that blocks
+        // A gate whose every key is the wrong type - including a negative
+        // attempt budget - falls back to the defaults, i.e. a gate that blocks
         // nothing rather than one that silently never holds.
         let gate = transitions["c"].gate.as_ref().unwrap();
         assert_eq!(gate, &crate::blueprint::TransitionGate::default());
@@ -2956,7 +2956,7 @@ mode = "interactive"
         let inter = bp.find_stage("inter").unwrap();
         assert_eq!(inter.mode, StageMode::Interactive);
 
-        // Default mode (no mode specified) — Autonomous
+        // Default mode (no mode specified) - Autonomous
         let default = bp.find_stage("default_mode").unwrap();
         assert_eq!(default.mode, StageMode::Autonomous);
     }
@@ -3003,7 +3003,7 @@ mode = "autonomous"
     // The "plan" stage's plan_approval interaction point lets the user pick
     // Approve / Revise / Add detail / Abort. If "plan" only has a single
     // outgoing transition edge, resolve_transition() auto-follows it without
-    // ever consulting the LLM — so anything other than "Approve" is silently
+    // ever consulting the LLM - so anything other than "Approve" is silently
     // ignored and the run proceeds to "implement" anyway. Guard against that
     // regressing by requiring at least two outgoing edges (forcing the
     // LLM-consultation path in resolve_transition / prompt_llm_transition).
@@ -3043,7 +3043,7 @@ mode = "autonomous"
     /// Runtime-fired edges (`error`, `stuck`) are exempt, and deliberately so: a
     /// gate answers "did you do any work before leaving?", which only makes sense
     /// for a voluntary exit. Gating an escape hatch would send a failed or
-    /// looping agent back into the stage it is failing in — a stuck agent is not
+    /// looping agent back into the stage it is failing in - a stuck agent is not
     /// helped by being told to write more (issue #106).
     #[test]
     fn shipped_coding_agents_gate_every_non_error_implement_edge() {
@@ -3119,9 +3119,9 @@ mode = "autonomous"
 
         // Planning must NOT be able to end the run. Abort is the engine's path
         // (abort_options on the plan_approval point), so `allow_complete` was
-        // only ever a way for the model to stop early — and it did: one that had
+        // only ever a way for the model to stop early - and it did: one that had
         // created a file during `discover` read it back here, decided "already
-        // created — no further action is needed", and completed without ever
+        // created - no further action is needed", and completed without ever
         // reaching `implement`, taking the user's plan correction with it.
         assert!(!plan.allow_complete);
         // Every way out leads somewhere that does the work.
@@ -3164,7 +3164,7 @@ mode = "autonomous"
         assert!(!approval.directives.contains_key(&detail));
         // "Abort" is a deterministic abort option.
         assert!(approval.abort_options.contains(&abort));
-        // "Approve" is a plain completing option — none of the above.
+        // "Approve" is a plain completing option - none of the above.
         assert!(!approval.directives.contains_key(&approve));
         assert!(!approval.abort_options.contains(&approve));
         assert!(!approval.edit_options.contains(&approve));
@@ -3176,7 +3176,7 @@ mode = "autonomous"
         let bp = parse_manifest(manifest_content).unwrap();
         let review = bp.find_stage("review").unwrap();
 
-        // review stage must allow_complete — an approving review has no real
+        // review stage must allow_complete - an approving review has no real
         // next stage and must not be forced back into 'implement'.
         assert!(review.allow_complete);
 
@@ -3205,7 +3205,7 @@ mode = "autonomous"
     fn software_engineer_plan_and_implement_can_ask_the_user_dynamically() {
         // Beyond the static plan_approval checkpoint, plan/implement should
         // be able to decide for themselves, mid-reasoning, that they need
-        // human input — via the ask_user_* tools, not just the forced
+        // human input - via the ask_user_* tools, not just the forced
         // interaction_points.
         let manifest_content = include_str!("../../../agents/software-engineer/agent.leviath");
         let bp = parse_manifest(manifest_content).unwrap();
@@ -3232,7 +3232,7 @@ mode = "autonomous"
 
     // ─── Production-code branch coverage: optional field None-paths ──────────
 
-    /// `interactive_points` mode with NO `interaction_points` array — the stage
+    /// `interactive_points` mode with NO `interaction_points` array - the stage
     /// still gets the mode, just with an empty points list.
     #[test]
     fn parse_manifest_interactive_points_mode_with_no_points_array() {
@@ -3249,7 +3249,7 @@ mode = "interactive_points"
         assert!(points.is_empty());
     }
 
-    /// Per-stage tool_permissions with a non-string policy value — the inner
+    /// Per-stage tool_permissions with a non-string policy value - the inner
     /// `if let Some(policy_str) = policy_val.as_str()` should be skipped.
     #[test]
     fn parse_manifest_stage_tool_permissions_non_string_value_skipped() {
@@ -3269,7 +3269,7 @@ bash = 123
         assert!(stage.tool_permissions.is_empty());
     }
 
-    /// Compaction config without `provider` — covers the None-branch at line ~460.
+    /// Compaction config without `provider` - covers the None-branch at line ~460.
     #[test]
     fn parse_manifest_compaction_without_provider_uses_default() {
         let toml = r#"
@@ -3281,11 +3281,11 @@ model = "gpt-4o-mini"
 "#;
         let bp = parse_manifest(toml).unwrap();
         let cc = bp.compaction_config.as_ref().unwrap();
-        // provider absent — stays at CompactionConfig default
+        // provider absent - stays at CompactionConfig default
         assert_eq!(cc.model, "gpt-4o-mini");
     }
 
-    /// Compaction config without `model` — covers the None-branch at line ~463.
+    /// Compaction config without `model` - covers the None-branch at line ~463.
     #[test]
     fn parse_manifest_compaction_without_model_uses_default() {
         let toml = r#"
@@ -3298,7 +3298,7 @@ provider = "anthropic"
         let bp = parse_manifest(toml).unwrap();
         let cc = bp.compaction_config.as_ref().unwrap();
         assert_eq!(cc.provider, "anthropic");
-        // model absent — stays at CompactionConfig default
+        // model absent - stays at CompactionConfig default
     }
 
     // ─── Security config parsing ──────────────────────────────────────────
@@ -3341,7 +3341,7 @@ name = "no-security"
         assert!(bp.security.is_none());
     }
 
-    /// Agent-level tool_permissions with a non-string value — the inner
+    /// Agent-level tool_permissions with a non-string value - the inner
     /// `if let Some(policy_str) = policy_val.as_str()` should be skipped.
     #[test]
     fn parse_manifest_agent_tool_permissions_non_string_value_skipped() {

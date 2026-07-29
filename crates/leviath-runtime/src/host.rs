@@ -1,16 +1,16 @@
 //! The world host: the daemon-side wrapper that owns a single [`PipelineWorld`],
 //! maps stable **run ids** to ECS entities, and interleaves external **control
-//! operations** with driving the world — all on one task, so there is never any
+//! operations** with driving the world - all on one task, so there is never any
 //! locking around the world.
 //!
-//! Clients (a control socket, the TUI, the CLI) don't hold entities — those are
+//! Clients (a control socket, the TUI, the CLI) don't hold entities - those are
 //! generational indices meaningful only inside the world. They address agents by
 //! run id. The host keeps the `run_id → Entity` map and turns each
 //! [`ControlOp`] into the corresponding [`PipelineWorld`] call, replying on the
 //! op's oneshot channel.
 //!
 //! The serve loop drives the world to quiescence, then parks until either an
-//! async result wakes it, a control op arrives, or shutdown is signalled —
+//! async result wakes it, a control op arrives, or shutdown is signalled -
 //! handling a control op and then re-driving to quiescence so its effect (a
 //! resume, a delivered message) is applied immediately.
 
@@ -30,8 +30,8 @@ use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 use serde::{Deserialize, Serialize};
 
 /// The parameters for spawning an agent into the world. The runtime doesn't know
-/// how to load blueprints or resolve tools — that policy lives in the
-/// [`Spawner`] the daemon installs — so this just carries the raw request.
+/// how to load blueprints or resolve tools - that policy lives in the
+/// [`Spawner`] the daemon installs - so this just carries the raw request.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct SpawnArgs {
     /// The run id to give the new agent (its directory / control key).
@@ -95,7 +95,7 @@ pub type Spawner = Box<dyn FnMut(&mut PipelineWorld, &SpawnArgs) -> Result<Entit
 /// The daemon-installed function that pages a previously-unloaded run back into
 /// the world from its on-disk state: given a run id, it reloads the agent (its
 /// blueprint, tool state, context, stage) and returns the new entity, or `None`
-/// if there is no such resumable run on disk. Used for reload-on-demand — a
+/// if there is no such resumable run on disk. Used for reload-on-demand - a
 /// control/sub-agent op targeting a run that isn't currently in memory pages it
 /// in first via the host's internal resolve-or-reload step. Installed with
 /// [`WorldHost::set_reloader`].
@@ -106,8 +106,8 @@ pub type Reloader = Box<dyn FnMut(&mut PipelineWorld, &str) -> Option<Entity> + 
 /// and reports whether a run directory existed to act on.
 ///
 /// This is what makes a cancel unconditional. [`Reloader`] declines whenever a
-/// run can't be rebuilt — its blueprint was moved or deleted, its metadata is
-/// unreadable, it died mid-spawn before any agent existed — and before this seam
+/// run can't be rebuilt - its blueprint was moved or deleted, its metadata is
+/// unreadable, it died mid-spawn before any agent existed - and before this seam
 /// a cancel in that state replied `false` and wrote nothing, so `meta.json` kept
 /// claiming `running`/`starting` forever and the run could never be got rid of.
 /// The runtime has no notion of the on-disk layout, so the daemon supplies the
@@ -118,12 +118,12 @@ pub type ForceTerminator = Box<dyn FnMut(&str) -> bool + Send>;
 /// The daemon-installed hook run just before a terminal agent's entity is
 /// despawned (reaped). It receives the world and the entity while both are still
 /// valid, so the daemon can release per-agent resources the runtime doesn't know
-/// about — tearing down the agent's sandbox and dropping its tool state.
+/// about - tearing down the agent's sandbox and dropping its tool state.
 /// Installed with [`WorldHost::set_reaper`]; a no-op when none is set.
 pub type Reaper = Box<dyn FnMut(&mut PipelineWorld, Entity) + Send>;
 
 /// An async hook the host awaits *before* servicing a top-level `Spawn` control
-/// op, so the daemon can do async preparation the sync spawner can't — e.g.
+/// op, so the daemon can do async preparation the sync spawner can't - e.g.
 /// lazily connecting the blueprint's MCP servers into the shared pool (issue #97)
 /// so they're warm by the time [`Spawner`] reads them. The returned future is
 /// `'static` (it must clone anything it needs from the `SpawnArgs`). Installed
@@ -135,7 +135,7 @@ pub type SpawnPreprocessor = Box<
 
 /// A world-access request from an agent's tool lane. The sub-agent tools
 /// (`spawn_agent`/`check_agent`/`send_to_agent`/`kill_agent`) need the world and
-/// the [`Spawner`], which only the host holds — the tool lane runs async, off the
+/// the [`Spawner`], which only the host holds - the tool lane runs async, off the
 /// world. Each carries a oneshot reply, so the (sequential) tool lane blocks on
 /// the host applying it, mirroring the interaction hub.
 pub enum SubAgentOp {
@@ -165,7 +165,7 @@ pub enum SubAgentOp {
         /// The target run.
         run_id: String,
         /// The run doing the sending. The target must be it or one of its
-        /// descendants — see `WorldHost::is_within_tree`.
+        /// descendants - see `WorldHost::is_within_tree`.
         caller_run_id: String,
         /// The message body.
         content: String,
@@ -177,7 +177,7 @@ pub enum SubAgentOp {
         /// The run to cancel (with its descendants).
         run_id: String,
         /// The run doing the cancelling. The target must be it or one of its
-        /// descendants — see `WorldHost::is_within_tree`.
+        /// descendants - see `WorldHost::is_within_tree`.
         caller_run_id: String,
         /// Reply: whether anything was cancelled.
         reply: oneshot::Sender<bool>,
@@ -357,8 +357,8 @@ pub enum WorldEvent {
 }
 
 /// A world resource holding a clone of the host's [`WorldEvent`] broadcast
-/// sender, so ECS systems (e.g. the persistence drain) can push events — notably
-/// per-agent [`WorldEvent::Log`] lines — into the same stream the control
+/// sender, so ECS systems (e.g. the persistence drain) can push events - notably
+/// per-agent [`WorldEvent::Log`] lines - into the same stream the control
 /// transport serves. Absent in worlds that don't stream (test / `lev run`), where
 /// systems that depend on it become no-ops.
 // `Resource` moved from `bevy_ecs::system` to `bevy_ecs::resource` in 0.19.
@@ -418,12 +418,12 @@ impl WorldHost {
         Self::with_interactions(world, InteractionHub::new())
     }
 
-    /// Wrap a world with a specific interaction hub — the daemon shares one hub
+    /// Wrap a world with a specific interaction hub - the daemon shares one hub
     /// between the tool service's per-agent backends and this host.
     pub fn with_interactions(mut world: PipelineWorld, interactions: InteractionHub) -> Self {
         let (events, _) = broadcast::channel(1024);
-        // Let ECS systems (the persistence drain) push events — per-agent log
-        // lines — into the same stream the control transport serves.
+        // Let ECS systems (the persistence drain) push events - per-agent log
+        // lines - into the same stream the control transport serves.
         world
             .world_mut()
             .insert_resource(WorldEventSink(events.clone()));
@@ -599,9 +599,9 @@ impl WorldHost {
                 to_reap.push((run_id.clone(), entity));
             }
             // NOTE: non-terminal `Waiting` agents are intentionally NOT unloaded.
-            // Every `Waiting` state carries a live, unpersisted continuation — a
+            // Every `Waiting` state carries a live, unpersisted continuation - a
             // blocked `ask` future (`AwaitingInteraction`), running fan-out workers
-            // (`FanOutWaiting`), or pending children (`WaitingForChildren`) — so
+            // (`FanOutWaiting`), or pending children (`WaitingForChildren`) - so
             // flushing one to disk and paging it back cannot resume it (in-flight
             // interactions aren't persisted; the blocked future is gone). Only
             // terminal agents, whose full state is on disk, are safe to reap.
@@ -643,7 +643,7 @@ impl WorldHost {
     /// built straight into the world by the fan-out spawner, which has no handle
     /// on the host to register them. An unregistered agent is invisible to `list`
     /// (so `lev ps` never showed a worker), never reaped (its sandbox and tool
-    /// state leak), and — worst — un-cancellable, because a cancel by its run id
+    /// state leak), and - worst - un-cancellable, because a cancel by its run id
     /// misses the map, falls through to the reloader, and pages a **second** live
     /// entity in from that run's on-disk state while the original keeps running.
     /// Adopting them here is idempotent and keeps a stale mapping from winning:
@@ -861,7 +861,7 @@ impl WorldHost {
     /// had been unloaded. Returns whether the run was found in the world.
     ///
     /// Cancelling only the root would leave its sub-agents and fan-out workers
-    /// running — they are independent agents the schedule keeps driving, so they
+    /// running - they are independent agents the schedule keeps driving, so they
     /// would carry on spending tokens with no parent to report to. Each cancelled
     /// agent's open interactions are closed too, so nothing is left blocked on a
     /// prompt for a run that is going away.
@@ -869,7 +869,7 @@ impl WorldHost {
     ///
     /// `send_to_agent` and `kill_agent` took any run id at all. Nothing tied the
     /// target to the caller, so an agent could cancel an unrelated run, inject
-    /// text into its context, or — worst — hand it data: a message is added to
+    /// text into its context, or - worst - hand it data: a message is added to
     /// the target as `Public` regardless of the sender's taint, so an agent
     /// holding `Private` context whose own outbound tools were gated could pass
     /// it to a sibling whose tools were not. That is a laundering channel
@@ -919,7 +919,7 @@ impl WorldHost {
         }
         let mut cancelled = false;
         for e in subtree {
-            // Read the agent id before cancelling — the entity stays valid until
+            // Read the agent id before cancelling - the entity stays valid until
             // it is reaped, but reading first keeps this independent of that.
             let agent_id = self
                 .world
@@ -968,7 +968,7 @@ impl WorldHost {
                     // parsing a blueprint or building a sandbox would otherwise
                     // unwind the whole serve task and take the daemon with it.
                     // As with `run_isolated`, the world may be left holding a
-                    // partially-built entity — the run just never registers.
+                    // partially-built entity - the run just never registers.
                     Some(spawner) => {
                         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             spawner(&mut self.world, &args)
@@ -1019,7 +1019,7 @@ impl WorldHost {
                 // Cancel is unconditional: it either takes effect in the world
                 // (root plus every descendant) or, when the run can't be held
                 // there at all, is forced onto its on-disk state. It reports
-                // `false` only when there is genuinely no such run anywhere —
+                // `false` only when there is genuinely no such run anywhere -
                 // otherwise a run whose blueprint had moved stayed `running` on
                 // disk forever with no way to get rid of it.
                 let ok = self.cancel_tree(&run_id)
@@ -1079,7 +1079,7 @@ impl WorldHost {
 
     /// Run the host: drive the world to quiescence, then park until an async
     /// result wakes it, a control op arrives, or shutdown is signalled. Returns
-    /// when shutdown fires or the control channel closes — and before returning,
+    /// when shutdown fires or the control channel closes - and before returning,
     /// **flushes all queued persistence to disk** ([`Self::flush_and_stop`]) so a
     /// clean daemon shutdown never loses a dirty agent's final snapshot.
     pub async fn serve(&mut self, mut control_rx: UnboundedReceiver<ControlOp>) {
@@ -1455,7 +1455,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_op_contains_a_panicking_spawner() {
         // A panic while building an agent (bad manifest, sandbox blow-up) must
-        // not unwind the daemon's serve task — the run just fails to start.
+        // not unwind the daemon's serve task - the run just fails to start.
         let mut host = host_with(vec![]);
         host.set_spawner(Box::new(|_world, _args| panic!("simulated spawn panic")));
         let (tx, rx) = oneshot::channel();
@@ -1632,7 +1632,7 @@ mod tests {
     }
 
     /// `send_to_agent` and `kill_agent` took any run id at all, so an agent
-    /// could reach into an unrelated run — cancel it, inject text, or hand it
+    /// could reach into an unrelated run - cancel it, inject text, or hand it
     /// data that arrives `Public` regardless of the sender's taint. That last
     /// one is a laundering channel straight through taint tracking.
     /// The converse of the refusal: a run the caller *did* spawn is reachable,
@@ -1684,7 +1684,7 @@ mod tests {
         .await;
         assert!(!killed, "nor ours to cancel");
 
-        // A run id that resolves to nothing at all is likewise not ours — the
+        // A run id that resolves to nothing at all is likewise not ours - the
         // walk never starts, rather than defaulting to reachable.
         let phantom = ask_sub(&mut host, |reply| SubAgentOp::Send {
             run_id: "no-such-run".to_string(),
@@ -1753,7 +1753,7 @@ mod tests {
         assert!(!miss);
     }
 
-    /// A user-facing cancel must reach the sub-agent tree, not just the root —
+    /// A user-facing cancel must reach the sub-agent tree, not just the root -
     /// otherwise the children keep running with nobody to report to. Before this,
     /// only the model-facing `kill_agent` tool cascaded.
     #[tokio::test]
@@ -1819,7 +1819,7 @@ mod tests {
     }
 
     /// Cancelling a run closes its open prompts. The blocked `ask` occupies a
-    /// tool-lane worker, and the lane has a fixed worker count — leaving it
+    /// tool-lane worker, and the lane has a fixed worker count - leaving it
     /// parked forever is what starves every other agent's tool batches.
     #[tokio::test]
     async fn cancel_closes_the_runs_open_interactions() {
@@ -1833,7 +1833,7 @@ mod tests {
                 .ask(InteractionRequest::free_text("q", "ask", "stage", true))
                 .await
         });
-        // Wait for the ask to register, then let the host emit it — so the
+        // Wait for the ask to register, then let the host emit it - so the
         // emitted-interaction set is non-empty and the cancel has something to
         // prune, rather than pruning an empty set.
         while hub.pending().is_empty() {
@@ -1874,7 +1874,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_falls_back_to_the_force_terminator_when_the_world_cannot_hold_the_run() {
         let mut host = host_with(vec![]);
-        // A reloader that always declines — the deleted-blueprint case.
+        // A reloader that always declines - the deleted-blueprint case.
         host.set_reloader(Box::new(|_world, _run_id| None));
         let terminated = Arc::new(Mutex::new(Vec::new()));
         host.set_force_terminator(recording_terminator(terminated.clone()));
@@ -1929,7 +1929,7 @@ mod tests {
 
     /// Agents that enter the world outside a `Spawn` op (fan-out workers, built
     /// directly by the fan-out spawner) are adopted into the run-id map, so they
-    /// are listed, reaped and — the point here — cancellable by id. Left
+    /// are listed, reaped and - the point here - cancellable by id. Left
     /// unregistered, a cancel missed the map and paged a *second* copy of the run
     /// in from disk while the original kept going.
     #[tokio::test]
@@ -2500,7 +2500,7 @@ mod tests {
 
         let mut host = host_with(vec![]);
 
-        // Parked on a human prompt (`AwaitingInteraction`) — the reported bug:
+        // Parked on a human prompt (`AwaitingInteraction`) - the reported bug:
         // the blocked `ask` future is unpersisted, so unloading strands the run.
         let asking = register_waiting(&mut host, "asking");
         host.world
@@ -2515,7 +2515,7 @@ mod tests {
             .insert(WaitingForChildren);
         register_waiting(&mut host, "parked");
 
-        // Many serve passes — none of them may reap a Waiting agent.
+        // Many serve passes - none of them may reap a Waiting agent.
         for _ in 0..5 {
             host.emit_events();
         }

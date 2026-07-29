@@ -169,7 +169,7 @@ mod tests {
     #[tokio::test]
     async fn ask_user_tools_not_handled_by_builtin_execute() {
         // ask_user_* tools are intercepted upstream (worker.rs/foreground.rs),
-        // exactly like present_for_review — execute() must never run them.
+        // exactly like present_for_review - execute() must never run them.
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
         for name in [
@@ -406,7 +406,7 @@ mod tests {
         assert!(out.contains("[error]"), "got: {out}");
     }
 
-    /// A write through an escaping symlink is refused too — this was the path
+    /// A write through an escaping symlink is refused too - this was the path
     /// that could overwrite `~/.ssh/authorized_keys`.
     #[cfg(unix)]
     #[tokio::test]
@@ -428,7 +428,7 @@ mod tests {
         );
     }
 
-    /// A symlink that stays *inside* the workdir keeps working — the rule is
+    /// A symlink that stays *inside* the workdir keeps working - the rule is
     /// about where the path lands, not whether a symlink was involved. Agents
     /// operate on real repositories, which contain plenty of internal symlinks.
     #[cfg(unix)]
@@ -516,7 +516,7 @@ mod tests {
         // Issue #107: an external harness deletes the workspace mid-run.
         // `create_dir_all` would happily recreate it and let the agent write
         // into an empty tree that no longer resembles the checkout it reasoned
-        // about — and the runtime's health check, which just stats the workdir,
+        // about - and the runtime's health check, which just stats the workdir,
         // would never see it was gone.
         let dir = tempfile::tempdir().unwrap();
         let workdir = dir.path().join("workspace");
@@ -566,7 +566,7 @@ mod tests {
         // request then decomposes into exactly `[Normal(workdir), ParentDir,
         // ParentDir, ...]`; the first `..` pops the single workdir component and
         // the second `..` calls `normalized.pop()` on an *empty* accumulator,
-        // which returns `false` -- firing the "escapes the working directory"
+        // which returns `false` - firing the "escapes the working directory"
         // bail deterministically on every OS.
         //
         // (An empty "" workdir is not portable here: on Windows `canonicalize("")`
@@ -822,7 +822,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tools = make_tools(dir.path());
         // Build the absolute path from the tool's own (canonicalized) workdir
-        // rather than `dir.path()` directly — on macOS `/tmp`/`/var` are
+        // rather than `dir.path()` directly - on macOS `/tmp`/`/var` are
         // symlinks, so the two can differ even though they're the same place.
         let abs = tools.ctx.workdir.join("inside.txt");
         let result = tools.resolve(abs.to_str().unwrap()).unwrap();
@@ -1007,7 +1007,7 @@ mod tests {
     }
 
     /// A `ShellExecutor` that ignores the requested command and instead runs a
-    /// fixed marker command — proof that shell execution is routed through it.
+    /// fixed marker command - proof that shell execution is routed through it.
     struct RedirectExecutor;
     impl ShellExecutor for RedirectExecutor {
         fn build_command(
@@ -1101,7 +1101,7 @@ mod tests {
     /// A timed-out (or cancelled) command takes its *grandchildren* with it.
     ///
     /// `kill_on_drop` only reaps the shell. Anything the shell started is
-    /// reparented to init and keeps running — a cancelled agent's `sleep`
+    /// reparented to init and keeps running - a cancelled agent's `sleep`
     /// outliving the run that spawned it. Verified by writing a marker file
     /// after a delay: if the grandchild survived, the marker appears.
     #[cfg(unix)]
@@ -1163,7 +1163,7 @@ mod tests {
     // ── detect_shell ──────────────────────────────────────────────────────
 
     /// Windows' `detect_shell()` branch is a plain, unconditional constant
-    /// return (no env/filesystem dependence to inject) -- the
+    /// return (no env/filesystem dependence to inject) - the
     /// platform-agnostic `detect_shell_returns_valid_shell` test below
     /// already exercises it on Windows CI, but this asserts the exact
     /// documented return value directly.
@@ -1190,7 +1190,7 @@ mod tests {
     /// Forces `detect_shell()` to exercise the real `shell_exists` closure by
     /// temporarily setting $SHELL to an unrecognized path, causing the candidate
     /// loop (and the closure) to be reached. `temp_env::with_var` sets the var,
-    /// runs the closure, and restores it -- serialized against every other
+    /// runs the closure, and restores it - serialized against every other
     /// temp-env test process-wide, so no hand-rolled lock is needed.
     #[cfg(not(windows))]
     #[test]
@@ -1212,7 +1212,7 @@ mod tests {
         );
     }
 
-    // ── detect_shell_impl() — inject env and filesystem for full branch coverage ──
+    // ── detect_shell_impl() - inject env and filesystem for full branch coverage ──
 
     #[cfg(not(windows))]
     #[test]
@@ -1253,7 +1253,7 @@ mod tests {
     fn detect_shell_impl_falls_back_when_env_shell_is_missing() {
         // Regression for #79: `$SHELL` is a recognized shell name but does not
         // exist on disk (a stale or sandbox-missing `/bin/zsh`). It must NOT be
-        // returned — fall through to an available fallback instead of failing
+        // returned - fall through to an available fallback instead of failing
         // every shell call with "No such file or directory".
         let (shell, flag) =
             BuiltinTools::detect_shell_impl(Some("/bin/zsh".to_string()), &|s| s == "/bin/sh");
@@ -1274,7 +1274,7 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn detect_shell_impl_skips_missing_candidates_and_finds_zsh() {
-        // bash paths return false; /bin/zsh exists — covers shell_exists false branch
+        // bash paths return false; /bin/zsh exists - covers shell_exists false branch
         let (shell, flag) = BuiltinTools::detect_shell_impl(None, &|s| s == "/bin/zsh");
         assert_eq!(shell, "/bin/zsh");
         assert_eq!(flag, "-c");

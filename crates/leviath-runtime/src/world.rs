@@ -1,5 +1,5 @@
 //! The pipeline driver: a single [`PipelineWorld`] that hosts every agent as
-//! ECS data and ticks the [`crate::pipeline`] systems over all of them — the
+//! ECS data and ticks the [`crate::pipeline`] systems over all of them - the
 //! traditional-game-loop core of the shared world.
 //!
 //! The world owns the bevy [`World`], the tick [`Schedule`], the per-model
@@ -17,7 +17,7 @@
 //! At quiescence every remaining agent is either waiting on an in-flight async
 //! job (which will `notify` on completion) or blocked on a resource that only an
 //! async completion can free (a full pool) or on nothing at all (a missing
-//! provider / no input) — so the driver parks on the wake instead of spinning.
+//! provider / no input) - so the driver parks on the wake instead of spinning.
 //! A fresh async result or an external `send_message` fires the wake and the
 //! fixed-point loop re-runs.
 
@@ -49,20 +49,20 @@ use crate::pipeline::{
 use crate::providers::ProviderRegistry;
 use crate::tool_bridge::spawn_tool_pool;
 
-/// Counts of agents in each phase-marker — the world's per-tick "fingerprint".
+/// Counts of agents in each phase-marker - the world's per-tick "fingerprint".
 /// Two consecutive equal fingerprints mean a tick changed nothing (quiescence).
 type Fingerprint = [usize; 12];
 
 /// How many attributed system panics one [`PipelineWorld::run_to_fixed_point`]
 /// round will absorb before it stops driving. Each one fails a different agent,
-/// so this only bites if the world is thoroughly broken — it exists so a
+/// so this only bites if the world is thoroughly broken - it exists so a
 /// pathological agent can't spin the loop.
 const MAX_TICK_FAILURES_PER_ROUND: usize = 8;
 
 /// A schedule configured the way the pipeline needs it.
 ///
 /// Every pipeline system is `.chain()`ed, so the multi-threaded executor can
-/// never overlap two of them — it only adds a hop through the compute task
+/// never overlap two of them - it only adds a hop through the compute task
 /// pool. Running single-threaded keeps systems on the thread that catches their
 /// panics, which is what lets [`run_isolated`] read the offending agent out of
 /// the (thread-local) [`crate::tick_scope`] (issue #109).
@@ -118,7 +118,7 @@ impl PipelineWorld {
     ) -> Self {
         // `Query::par_iter` fans out over the compute task pool; initialize it
         // once (idempotent) so per-agent request assembly in `dispatch_inference`
-        // runs in parallel. (The schedule executor itself is single-threaded —
+        // runs in parallel. (The schedule executor itself is single-threaded -
         // see `tick_schedule`.)
         bevy_tasks::ComputeTaskPool::get_or_init(bevy_tasks::TaskPool::default);
 
@@ -293,11 +293,11 @@ impl PipelineWorld {
     }
 
     /// Enable (or disable) the opt-in exact pre-inference budget guard for this
-    /// world — see [`crate::inference_bridge::InferenceJob::exact_token_counting`].
+    /// world - see [`crate::inference_bridge::InferenceJob::exact_token_counting`].
     /// Call once at startup when the run config requests it, before serving.
     pub fn set_exact_token_counting(&mut self, enabled: bool) {
         // `InferenceStage` is inserted by every `PipelineWorld::new` path, so it
-        // is a hard invariant here — `resource_mut` (which panics if absent) is
+        // is a hard invariant here - `resource_mut` (which panics if absent) is
         // correct and keeps this branch-free.
         self.world
             .resource_mut::<crate::pipeline::InferenceStage>()
@@ -386,7 +386,7 @@ impl PipelineWorld {
     /// alive for the worker to be scheduled). Idempotent: a second call is a no-op
     /// because the persistence resource is already removed and the task taken.
     pub async fn flush_and_stop(&mut self) {
-        // Idempotent — the serve loop has usually already returned on this signal.
+        // Idempotent - the serve loop has usually already returned on this signal.
         self.shutdown.notify_one();
         // Dispatch anything that settled between the last park and now (e.g. an
         // inference result that woke the loop the same instant shutdown fired).
@@ -409,7 +409,7 @@ impl PipelineWorld {
 
     /// Set an agent's status and wake the driver. Returns `false` if the agent no
     /// longer exists. The async-starting dispatchers only act on `Active` agents,
-    /// so this is how the world pauses/resumes/cancels an agent — a non-`Active`
+    /// so this is how the world pauses/resumes/cancels an agent - a non-`Active`
     /// agent is simply data the systems skip until it is `Active` again.
     pub fn set_status(&mut self, entity: Entity, status: AgentStatus) -> bool {
         let Some(mut state) = self.world.get_mut::<AgentState>(entity) else {
@@ -440,7 +440,7 @@ impl PipelineWorld {
     /// so one bad agent can't crash the daemon and take every other hosted agent
     /// with it.
     ///
-    /// When the panic can be traced to a specific agent (the usual case — see
+    /// When the panic can be traced to a specific agent (the usual case - see
     /// [`crate::tick_scope`]), that agent is failed with the panic message so it
     /// stops being driven, its run is persisted as errored, and the host reaps
     /// it. Without that, the world would re-tick the same unchanged state on
@@ -458,7 +458,7 @@ impl PipelineWorld {
                 tracing::error!(
                     ?entity,
                     panic = %panicked.message,
-                    "a pipeline system panicked; failing that agent — the daemon and every \
+                    "a pipeline system panicked; failing that agent - the daemon and every \
                      other run keep going"
                 );
                 TickOutcome::AgentFailed
@@ -467,7 +467,7 @@ impl PipelineWorld {
                 tracing::error!(
                     panic = %panicked.message,
                     "a pipeline system panicked outside any agent's scope; the daemon survived \
-                     (an agent may be wedged — cancel it via `lev cancel <run-id>`)"
+                     (an agent may be wedged - cancel it via `lev cancel <run-id>`)"
                 );
                 TickOutcome::Unattributed
             }
@@ -479,7 +479,7 @@ impl PipelineWorld {
     /// whether there were any.
     ///
     /// These panics were caught on a task-pool thread rather than unwinding into
-    /// `tick`, so the marker component is how they reach the driver — but from
+    /// `tick`, so the marker component is how they reach the driver - but from
     /// here on they are handled exactly like an attributed unwind: the agent is
     /// failed, stops being driven, and its run persists as errored.
     fn fail_agents_panicked_in_parallel(&mut self) -> TickOutcome {
@@ -589,7 +589,7 @@ impl PipelineWorld {
     }
 
     /// Drive every agent as far as it can go **right now**, then, while async
-    /// work is in flight, wait for each completion and drive again — returning
+    /// work is in flight, wait for each completion and drive again - returning
     /// once the world is fully quiescent with nothing in flight. Bounded by
     /// `max_waits` wake-waits as a safety valve so a lost/never-arriving wake
     /// can't hang a caller (e.g. a test) forever.
@@ -660,7 +660,7 @@ fn run_isolated(schedule: &mut Schedule, world: &mut World) -> Result<(), TickPa
 /// bevy's executors mark a system "completed" *before* running it and only
 /// clear that set when `run` returns normally. A panic therefore leaves every
 /// system up to and including the offending one marked done, so the **next**
-/// tick silently skips them and only runs the tail of the chain — a partial
+/// tick silently skips them and only runs the tail of the chain - a partial
 /// tick that would, among other things, keep `dispatch_persistence` from ever
 /// seeing an agent we just failed. Swapping the executor kind and back is the
 /// public API for forcing a rebuild.
@@ -671,7 +671,7 @@ fn run_isolated(schedule: &mut Schedule, world: &mut World) -> Result<(), TickPa
 /// with an empty `completed_systems`.
 ///
 /// On 0.15 this had to set two different *kinds* and swap back, because
-/// `set_executor_kind` was a no-op when the kind was unchanged — and
+/// `set_executor_kind` was a no-op when the kind was unchanged - and
 /// `SimpleExecutor`, the other kind it used, no longer exists.
 fn reset_executor(schedule: &mut Schedule) {
     schedule.set_executor(bevy_ecs::schedule::SingleThreadedExecutor::new());
@@ -682,7 +682,7 @@ mod tests {
     use super::*;
 
     /// Serializes every test in this binary that swaps the **process-global**
-    /// panic hook — see the definition for why they can't run concurrently.
+    /// panic hook - see the definition for why they can't run concurrently.
     use crate::test_support::PANIC_HOOK_LOCK;
 
     /// Run `f` with the process panic hook silenced (the panic is expected), and
@@ -704,7 +704,7 @@ mod tests {
         fn boom_system() {
             panic!("simulated system panic");
         }
-        // A system that panics *while working on a specific agent* — the shape
+        // A system that panics *while working on a specific agent* - the shape
         // every real pipeline system has.
         fn boom_on_agent_system() {
             crate::tick_scope::enter(
@@ -963,7 +963,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_to_fixed_point_survives_a_panicking_system() {
-        // A system that panics must not hang or crash the drive loop — it's
+        // A system that panics must not hang or crash the drive loop - it's
         // caught and the loop breaks (the daemon survives).
         fn boom_system() {
             panic!("simulated system panic");
@@ -979,7 +979,7 @@ mod tests {
         // `dispatch_inference` fans its per-agent work out over the compute task
         // pool, where the thread-local scope can't reach the driver thread that
         // catches unwinds. Those bodies run under `run_agent_parallel`, which
-        // catches on the pool thread and marks the agent instead — this proves
+        // catches on the pool thread and marks the agent instead - this proves
         // the marker makes it back and fails the right run (issue #109).
         fn boom_in_parallel(
             agents: Query<(Entity, &AgentState)>,
@@ -987,7 +987,7 @@ mod tests {
         ) {
             agents.par_iter().for_each(|(entity, state)| {
                 if state.status != AgentStatus::Active {
-                    return; // already failed — nothing left to blow up
+                    return; // already failed - nothing left to blow up
                 }
                 // Clear the thread-local first: whatever attributes this panic,
                 // it is demonstrably not the `enter`/`current` mechanism.
@@ -1038,7 +1038,7 @@ mod tests {
                 .iter()
                 .find(|(_, state)| state.status == AgentStatus::Active)
             else {
-                return; // the agent has been failed — nothing left to blow up
+                return; // the agent has been failed - nothing left to blow up
             };
             crate::tick_scope::enter(entity);
             *VICTIM
@@ -1392,7 +1392,7 @@ mod tests {
         // The persistence worker is fire-and-forget on its own task; poll until the
         // final (Complete) snapshot has been flushed. A short real sleep between
         // polls (rather than a bare `yield_now`) gives the worker's write actual
-        // wall-clock time to land under load — otherwise the loop can spin through
+        // wall-clock time to land under load - otherwise the loop can spin through
         // every iteration before the write completes and spuriously time out.
         let meta_path = dir.path().join("run-42").join("meta.json");
         let mut meta = None;
@@ -1416,14 +1416,14 @@ mod tests {
     async fn a_panicked_agent_is_recorded_as_errored_on_disk() {
         // The reported symptom in issue #109: a crashed run stayed `"running"`
         // in meta.json forever. `dispatch_persistence` is the *last* system in
-        // the chain, so the tick that panics never reaches it — which is exactly
+        // the chain, so the tick that panics never reaches it - which is exactly
         // why `run_to_fixed_point` keeps driving after failing the agent.
         fn boom_on_active_agent(agents: Query<(Entity, &AgentState)>) {
             let Some((entity, _)) = agents
                 .iter()
                 .find(|(_, state)| state.status == AgentStatus::Active)
             else {
-                return; // the agent has been failed — nothing left to blow up
+                return; // the agent has been failed - nothing left to blow up
             };
             crate::tick_scope::enter(entity);
             panic!("exploded mid-stage");
@@ -1526,7 +1526,7 @@ mod tests {
     async fn persists_interaction_point_when_a_live_agent_blocks() {
         // Drive a real agent through inference → transition → the interaction-point
         // lane until it blocks awaiting approval, and assert the daemon wrote the
-        // `interactions.json` sidecar — the issue #38 persist side, end-to-end
+        // `interactions.json` sidecar - the issue #38 persist side, end-to-end
         // through the live lane (a tool call first, then a text "plan", so the stage
         // transitions into the interaction point rather than looping on nudges).
         let dir = tempfile::tempdir().unwrap();
@@ -1610,7 +1610,7 @@ mod tests {
     #[tokio::test]
     async fn flush_and_stop_drains_queued_snapshots() {
         // Unlike a plain shutdown, `flush_and_stop` awaits the persistence worker,
-        // so the final snapshot is guaranteed on disk the instant it returns — no
+        // so the final snapshot is guaranteed on disk the instant it returns - no
         // filesystem polling required (contrast the test above).
         let dir = tempfile::tempdir().unwrap();
         let mut world = PipelineWorld::new(
@@ -1657,14 +1657,14 @@ mod tests {
         world.run_until_idle(20).await;
         world.flush_and_stop().await;
 
-        // Read immediately — the drain guarantees the write landed.
+        // Read immediately - the drain guarantees the write landed.
         let meta_path = dir.path().join("run-flush").join("meta.json");
         let text = std::fs::read_to_string(&meta_path).expect("meta.json flushed on stop");
         let meta: leviath_core::run_meta::RunMeta = serde_json::from_str(&text).unwrap();
         assert_eq!(meta.run_id, "run-flush");
         assert_eq!(meta.status, leviath_core::run_meta::RunStatus::Complete);
 
-        // A second call is a no-op (resource already removed, task taken) — no panic.
+        // A second call is a no-op (resource already removed, task taken) - no panic.
         world.flush_and_stop().await;
         assert!(meta_path.exists());
     }
@@ -1673,7 +1673,7 @@ mod tests {
     async fn world_init_and_restore_needs_no_daemon_infra() {
         // `PipelineWorld::new` + `restore::restore_agent` form a self-contained
         // spin-up→restore path: no control socket, HTTP server, PID files, or build
-        // markers — only providers, a tool service, a runs dir, and a runtime. This
+        // markers - only providers, a tool service, a runs dir, and a runtime. This
         // locks that in so the daemon wiring stays optional.
         use leviath_core::region::EntryKind;
         use leviath_core::run_meta::{ContextSnapshot, RegionEntrySnapshot, RegionSnapshot};
