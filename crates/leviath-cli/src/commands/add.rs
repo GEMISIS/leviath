@@ -5,13 +5,9 @@ use std::path::Path;
 
 #[derive(Args)]
 pub struct AddArgs {
-    /// Path to agent directory, .leviath-bundle file, or registry package name
+    /// Path to an agent directory or a .leviath-bundle file
     #[arg(value_name = "PACKAGE")]
     pub package: String,
-
-    /// Install from registry (URL override)
-    #[arg(short, long)]
-    pub registry: Option<String>,
 }
 
 fn agents_dir_from_home(home: Option<std::path::PathBuf>) -> anyhow::Result<std::path::PathBuf> {
@@ -82,14 +78,11 @@ async fn execute_with(
         );
         print_capabilities(&installed.name, &installed.path);
     } else {
-        // Installing from the online registry is cut for v1 — only local agent
-        // directories and `.leviath-bundle` files are supported. Fail with a
-        // clear message rather than reaching out to a registry that isn't part
-        // of this release (`--registry` / `[registries]` are reserved for later).
+        // Only local installs exist: agent directories and .leviath-bundle
+        // files. Fail with a clear message rather than guessing at intent.
         anyhow::bail!(
-            "'{}' is not a local agent directory or a .leviath-bundle file. \
-             Installing agents from the online registry is not available in v1 — \
-             pass a path to an agent directory or a .leviath-bundle file instead.",
+            "'{}' is not a local agent directory or a .leviath-bundle file - \
+             pass a path to one of those instead.",
             args.package
         );
     }
@@ -835,7 +828,6 @@ description = "test"
                 );
                 let args = AddArgs {
                     package: src.path().to_str().unwrap().to_string(),
-                    registry: None,
                 };
 
                 execute_with(&args, &installer, agents_dir.path())
@@ -859,7 +851,6 @@ description = "test"
                 );
                 let args = AddArgs {
                     package: src.path().to_str().unwrap().to_string(),
-                    registry: None,
                 };
 
                 let err = execute_with(&args, &installer, agents_dir.path())
@@ -881,7 +872,6 @@ description = "test"
                 );
                 let args = AddArgs {
                     package: "nonexistent.leviath-bundle".to_string(),
-                    registry: None,
                 };
 
                 let err = execute_with(&args, &installer, agents_dir.path())
@@ -919,7 +909,6 @@ description = "test"
                 );
                 let args = AddArgs {
                     package: bundle_path.to_str().unwrap().to_string(),
-                    registry: None,
                 };
 
                 execute_with(&args, &installer, agents_dir.path())
@@ -946,7 +935,6 @@ description = "test"
                 );
                 let args = AddArgs {
                     package: bundle_path.to_str().unwrap().to_string(),
-                    registry: None,
                 };
 
                 let err = execute_with(&args, &installer, agents_dir.path())
@@ -958,10 +946,9 @@ description = "test"
     }
 
     #[test]
-    fn execute_with_registry_name_reports_v1_cut() {
-        // A package that is neither a local directory nor a .leviath-bundle file
-        // would previously hit the registry; in v1 it must fail with a clear
-        // "not available in v1" message instead of any network attempt.
+    fn execute_with_unrecognized_package_reports_local_only() {
+        // A package that is neither a local directory nor a .leviath-bundle
+        // file must fail with a clear message, never a network attempt.
         let rt = tokio::runtime::Runtime::new().unwrap();
         with_tracing(|| {
             rt.block_on(async {
@@ -971,13 +958,13 @@ description = "test"
                 );
                 let args = AddArgs {
                     package: "some-registry-agent".to_string(),
-                    registry: None,
                 };
                 let err = execute_with(&args, &installer, agents_dir.path())
                     .await
                     .unwrap_err();
                 assert!(
-                    err.to_string().contains("not available in v1"),
+                    err.to_string()
+                        .contains("not a local agent directory or a .leviath-bundle file"),
                     "expected the v1-cut message, got: {err}"
                 );
             })
@@ -1072,7 +1059,6 @@ name = "second"
             rt.block_on(async {
                 let args = AddArgs {
                     package: "definitely-not-a-real-bundle-xyz.leviath-bundle".to_string(),
-                    registry: None,
                 };
                 let err = execute(args).await.unwrap_err();
                 assert!(err.to_string().contains("Package file not found"));
@@ -1091,7 +1077,6 @@ name = "second"
         let result = rt.block_on(async {
             let args = AddArgs {
                 package: "whatever.leviath-bundle".to_string(),
-                registry: None,
             };
             execute(args).await
         });

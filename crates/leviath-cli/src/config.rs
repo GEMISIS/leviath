@@ -89,9 +89,6 @@ pub struct Config {
     /// Agent project paths
     pub agent_paths: Vec<PathBuf>,
 
-    /// Package registries
-    pub registries: Vec<String>,
-
     /// OpenRouter API key
     pub openrouter_api_key: Option<String>,
 
@@ -560,7 +557,6 @@ impl Default for Config {
                 claude_code_effort: None,
             },
             agent_paths: Vec::new(),
-            registries: vec!["https://leviath.dev/registry".to_string()],
             openrouter_api_key: None,
             ollama_base_url: None,
             mcp_servers: Vec::new(),
@@ -1555,7 +1551,6 @@ mod tests {
 default_provider = "anthropic"
 openrouter_api_key = "sk-or-existing"
 ollama_base_url = "http://existing-ollama:11434"
-registries = []
 agent_paths = []
 
 [providers]
@@ -2044,7 +2039,6 @@ google_api_key = "AIza-existing"
         assert!(config.default_model.is_none());
         assert!(config.model_capabilities.is_empty());
         assert!(config.tool_permissions.is_empty());
-        assert!(!config.registries.is_empty());
     }
 
     // ─── TitleConfig ───────────────────────────────────────────────────────
@@ -2110,7 +2104,6 @@ default_provider = "openai"
 openrouter_api_key = "sk-or-test"
 ollama_base_url = "http://my-ollama:11434"
 default_model = "gpt-5"
-registries = ["https://example.com/registry"]
 agent_paths = []
 
 [providers]
@@ -2156,7 +2149,6 @@ model = "claude-haiku-4-5"
     fn config_from_minimal_toml() {
         let toml_content = r#"
 default_provider = "anthropic"
-registries = []
 agent_paths = []
 
 [providers]
@@ -2170,7 +2162,6 @@ agent_paths = []
     fn config_from_toml_with_mcp_servers() {
         let toml_content = r#"
 default_provider = "anthropic"
-registries = []
 agent_paths = []
 
 [providers]
@@ -2196,7 +2187,6 @@ args = ["hello"]
             &path,
             r#"
 default_provider = "anthropic"
-registries = []
 agent_paths = []
 
 [providers]
@@ -2220,7 +2210,6 @@ name = "broken"
             &path,
             r#"
 default_provider = "anthropic"
-registries = []
 agent_paths = []
 
 [providers]
@@ -2243,7 +2232,6 @@ url = "https://mcp.example.com/mcp"
     fn config_from_toml_with_model_capabilities() {
         let toml_content = r#"
 default_provider = "anthropic"
-registries = []
 agent_paths = []
 
 [providers]
@@ -2376,14 +2364,11 @@ max_output_tokens = 2048
     fn config_from_toml_custom_registries() {
         let toml_content = r#"
 default_provider = "anthropic"
-registries = ["https://my-registry.example.com", "https://backup.example.com"]
 agent_paths = ["/my/agents"]
 
 [providers]
 "#;
         let config: Config = toml::from_str(toml_content).unwrap();
-        assert_eq!(config.registries.len(), 2);
-        assert_eq!(config.registries[0], "https://my-registry.example.com");
         assert_eq!(config.agent_paths.len(), 1);
     }
 
@@ -2411,7 +2396,6 @@ agent_paths = ["/my/agents"]
     fn title_config_from_toml_defaults() {
         let toml_content = r#"
 default_provider = "anthropic"
-registries = []
 agent_paths = []
 
 [providers]
@@ -2426,7 +2410,6 @@ agent_paths = []
     fn title_config_from_toml_disabled() {
         let toml_content = r#"
 default_provider = "anthropic"
-registries = []
 agent_paths = []
 
 [providers]
@@ -2448,7 +2431,6 @@ enabled = false
         // field and fall back to `default_true()` for the missing key.
         let toml_content = r#"
 default_provider = "anthropic"
-registries = []
 agent_paths = []
 
 [providers]
@@ -2467,7 +2449,6 @@ provider = "openai"
     fn config_tool_permissions_allow() {
         let toml_content = r#"
 default_provider = "anthropic"
-registries = []
 agent_paths = []
 
 [providers]
@@ -2495,7 +2476,6 @@ bash = "deny"
     fn config_with_agent_paths() {
         let toml_content = r#"
 default_provider = "anthropic"
-registries = []
 agent_paths = ["/home/user/agents", "/opt/agents"]
 
 [providers]
@@ -2521,7 +2501,6 @@ agent_paths = ["/home/user/agents", "/opt/agents"]
         // Test the TOML parsing path of load() by parsing directly.
         let toml_content = r#"
 default_provider = "openai"
-registries = []
 agent_paths = []
 
 [providers]
@@ -2613,7 +2592,6 @@ anthropic_api_key = "sk-ant-test-key"
                 claude_code_effort: None,
             },
             agent_paths: vec![std::path::PathBuf::from("/my/agents")],
-            registries: vec!["https://registry.example.com".to_string()],
             openrouter_api_key: None,
             ollama_base_url: Some("http://custom:11434".to_string()),
             mcp_servers: vec![],
@@ -2715,7 +2693,6 @@ anthropic_api_key = "sk-ant-test-key"
     fn config_multiple_model_capabilities() {
         let toml_content = r#"
 default_provider = "anthropic"
-registries = []
 agent_paths = []
 
 [providers]

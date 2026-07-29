@@ -15,7 +15,6 @@ pub(super) async fn get_config(State(state): State<AppState>) -> Json<RedactedCo
         has_openrouter_key: c.openrouter_api_key.is_some(),
         ollama_base_url: c.ollama_base_url.clone(),
         agent_paths: c.agent_paths.clone(),
-        registries: c.registries.clone(),
         mcp_server_count: c.mcp_servers.len(),
     })
 }
@@ -250,7 +249,6 @@ mod tests {
             has_openrouter_key: false,
             ollama_base_url: None,
             agent_paths: vec![],
-            registries: vec![],
             mcp_server_count: 2,
         };
         let json = serde_json::to_string(&config).unwrap();
@@ -270,11 +268,9 @@ mod tests {
             has_openrouter_key: false,
             ollama_base_url: Some("http://localhost:11434".to_string()),
             agent_paths: vec![],
-            registries: vec!["https://registry.example.com".to_string()],
             mcp_server_count: 0,
         };
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("\"ollama_base_url\":\"http://localhost:11434\""));
-        assert!(json.contains("registry.example.com"));
     }
 }
