@@ -1029,6 +1029,11 @@ fn parse_sse_event(buffer: &mut String, tool_index: &mut usize) -> Option<Stream
 mod tests {
     use super::*;
     use crate::test_support::always_on_tracing_guard;
+    use leviath_testkit::{
+        spawn_mock_server,
+        spawn_mock_server_truncated_body as spawn_mock_server_truncated_error_body,
+        spawn_mock_server_with_headers,
+    };
 
     #[test]
     fn test_provider_creation() {
@@ -2535,95 +2540,6 @@ mod tests {
     // connection, write back a fixed HTTP/1.1 response. Enough to exercise
     // infer()/infer_stream()/list_models()'s response-handling branches
     // without a real network call.
-
-    async fn spawn_mock_server(status: u16, reason: &str, body: &'static [u8]) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let response = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            status,
-            reason,
-            body.len()
-        )
-        .into_bytes();
-
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept");
-            let mut buf = [0u8; 8192];
-            let _ = socket.read(&mut buf).await;
-            let _ = socket.write_all(&response).await;
-            let _ = socket.write_all(body).await;
-            let _ = socket.flush().await;
-            let _ = socket.shutdown().await;
-        });
-
-        format!("http://{}", addr)
-    }
-
-    /// Declares a `Content-Length` far larger than the bytes actually sent,
-    /// then closes the connection -- forcing a genuine I/O error when the
-    /// caller reads the (non-success) response body via `.text()`, so the
-    /// `unwrap_or_else` fallback in infer()/infer_stream()/list_models() is
-    /// reachable.
-    async fn spawn_mock_server_truncated_error_body(status: u16, reason: &str) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let response = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: 10000\r\nConnection: close\r\n\r\nshort",
-            status, reason
-        )
-        .into_bytes();
-
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept");
-            let mut buf = [0u8; 8192];
-            let _ = socket.read(&mut buf).await;
-            let _ = socket.write_all(&response).await;
-            let _ = socket.flush().await;
-            let _ = socket.shutdown().await;
-        });
-
-        format!("http://{}", addr)
-    }
-
-    async fn spawn_mock_server_with_headers(
-        status: u16,
-        reason: &str,
-        extra_headers: &str,
-        body: &'static [u8],
-    ) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let response = format!(
-            "HTTP/1.1 {} {}\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n",
-            status,
-            reason,
-            extra_headers,
-            body.len()
-        )
-        .into_bytes();
-
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept");
-            let mut buf = [0u8; 8192];
-            let _ = socket.read(&mut buf).await;
-            let _ = socket.write_all(&response).await;
-            let _ = socket.write_all(body).await;
-            let _ = socket.flush().await;
-            let _ = socket.shutdown().await;
-        });
-
-        format!("http://{}", addr)
-    }
 
     fn provider_with_url(url: String) -> AnthropicProvider {
         AnthropicProvider::with_config(ProviderConfig {

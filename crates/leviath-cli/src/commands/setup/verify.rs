@@ -137,6 +137,7 @@ impl ProviderVerifier for LiveVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use leviath_testkit::spawn_mock_server;
 
     fn creds(name: &str) -> ProviderCreds {
         ProviderCreds {
@@ -281,33 +282,6 @@ mod tests {
                 message: "no provider named 'not-a-real-provider'".to_string()
             }
         );
-    }
-
-    /// A one-shot HTTP server on an ephemeral loopback port, mirroring the
-    /// pattern the provider crate's own tests use. Lets the success path run
-    /// end to end -- registry, provider, HTTP, response parsing -- without
-    /// reaching any real provider.
-    async fn spawn_mock_server(status: u16, reason: &str, body: &'static str) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let head = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            status,
-            reason,
-            body.len()
-        );
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept");
-            let mut buf = [0u8; 8192];
-            let _ = socket.read(&mut buf).await;
-            let _ = socket.write_all(head.as_bytes()).await;
-            let _ = socket.write_all(body.as_bytes()).await;
-            let _ = socket.flush().await;
-            let _ = socket.shutdown().await;
-        });
-        format!("http://{addr}")
     }
 
     #[tokio::test]

@@ -1342,37 +1342,11 @@ mod tests {
         assert_eq!(resp.tool_calls[0].arguments["a"], 1);
     }
 
-    /// Declares a `Content-Length` far larger than the bytes actually sent,
-    /// then closes the connection -- forcing a genuine `reqwest::Error` when
-    /// the byte stream itself is polled (not just `.text()`), so
-    /// `OpenAiSseStream`'s `Poll::Ready(Some(Err(e)))` arm is reachable.
-    /// `reqwest::Error` has no public constructor, so a real (truncated) HTTP
-    /// response is the only way to produce one.
-    async fn spawn_mock_server_truncated_body() -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let response = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 10000\r\nConnection: close\r\n\r\nshort".to_vec();
-
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept");
-            let mut buf = [0u8; 8192];
-            let _ = socket.read(&mut buf).await;
-            let _ = socket.write_all(&response).await;
-            let _ = socket.flush().await;
-            let _ = socket.shutdown().await;
-        });
-
-        format!("http://{}", addr)
-    }
-
     #[tokio::test]
     async fn openai_sse_stream_propagates_real_reqwest_error() {
         use tokio_stream::StreamExt;
 
-        let url = spawn_mock_server_truncated_body().await;
+        let url = leviath_testkit::spawn_mock_server_truncated_body(200, "OK").await;
         let client = reqwest::Client::new();
         let resp = client.get(&url).send().await.unwrap();
         let byte_stream = resp.bytes_stream();

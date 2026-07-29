@@ -11,6 +11,7 @@ members = [
     "crates/leviath-cli",
     "crates/leviath-tools",
     "crates/leviath-sys",
+    "crates/leviath-testkit",
     "xtask",
 ]
 
@@ -53,6 +54,7 @@ leviath-scripting = { path = "crates/leviath-scripting" }
 leviath-package = { path = "crates/leviath-package" }
 leviath-tools = { path = "crates/leviath-tools" }
 leviath-sys = { path = "crates/leviath-sys" }
+leviath-testkit = { path = "crates/leviath-testkit" }
 
 # External dependencies
 bevy_ecs = { version = "0.19", features = ["multi_threaded"] }
