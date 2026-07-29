@@ -481,9 +481,9 @@ mod tests {
     }
 
     /// Asserting on `PrivateAddress` specifically, not just `is_err()`: an IPv6
-    /// literal used to be refused as *unresolvable* (the brackets from
-    /// `host_str()` parsed as neither an address nor a name), which passed an
-    /// `is_err()` check while the address rules never ran at all.
+    /// literal refused as *unresolvable* (the brackets from `host_str()`
+    /// parsing as neither an address nor a name) would pass an `is_err()` check
+    /// while the address rules never ran at all.
     #[test]
     fn rejects_loopback_and_private_literals() {
         for s in [

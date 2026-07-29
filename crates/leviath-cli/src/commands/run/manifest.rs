@@ -107,9 +107,9 @@ mod tests {
 
     /// Name lookup goes through the `LEVIATH_HOME`-aware agents dir, so
     /// `lev run <name>` finds the same tree `lev add` installs into when the
-    /// override is set. It resolved through the raw OS home before, which made
+    /// override is set. Resolving through the raw OS home would make
     /// installed-by-name agents invisible in any redirected environment (and
-    /// forced this very test to write into the developer's real home).
+    /// force this very test to write into the developer's real home).
     #[test]
     fn find_manifest_installed_agent_by_name_honors_leviath_home() {
         let home = tempfile::tempdir().unwrap();

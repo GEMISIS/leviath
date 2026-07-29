@@ -513,8 +513,9 @@ mod tests {
     }
 
     /// A downloaded manifest cannot drop the user back onto the host. Both the
-    /// agent and stage levels come from `agent.leviath`, so `kind = "none"`
-    /// there was previously enough to defeat a global `kind = "container"`.
+    /// agent and stage levels come from `agent.leviath`, so if those levels
+    /// could win, `kind = "none"` there would defeat a global
+    /// `kind = "container"`.
     #[test]
     fn manifest_cannot_disable_the_users_sandbox() {
         let global = ToolSandboxConfig {

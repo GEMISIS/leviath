@@ -167,11 +167,11 @@ fn print_agent_listing(
 
     // 4. Bundled agents - the blueprints embedded in this binary.
     //
-    // This used to scan `<exe_dir>/agents`, a directory no real install has, so
-    // the section never printed outside a git checkout. It now reports the
-    // embedded catalog, which is what `lev setup` installs from; the on-disk
-    // scan stays as a second source so a checkout or a packaging layout that
-    // *does* ship an `agents/` dir next to the binary still shows up.
+    // Reports the embedded catalog, which is what `lev setup` installs from.
+    // Scanning only `<exe_dir>/agents` would leave this section blank outside a
+    // git checkout - a directory no real install has. The on-disk scan stays as
+    // a second source so a checkout or a packaging layout that *does* ship an
+    // `agents/` dir next to the binary still shows up.
     let mut builtin_names: Vec<String> = crate::bundled::BUNDLED_AGENTS
         .iter()
         .map(|a| format!("{} (v{})", a.name, a.version))

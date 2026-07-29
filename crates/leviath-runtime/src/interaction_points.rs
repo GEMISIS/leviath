@@ -80,7 +80,7 @@ pub struct PlanBodyOverride(pub String);
 
 /// Serializable snapshot of an agent parked at a stage-boundary interaction point,
 /// persisted to `<run_dir>/interactions.json` so a daemon restart can re-present the
-/// exact same prompt instead of dropping it and re-issuing inference (issue #38).
+/// exact same prompt instead of dropping it and re-issuing inference.
 /// Mirrors the fan-out sidecar (`fanout.json`). Everything needed to resume is small:
 /// the reviewed document lives here (and in a persisted context region), and the
 /// request id is derived from the agent id + point name + round.
@@ -297,7 +297,7 @@ async fn run_interaction_point(
 /// Re-arm an agent that was blocked at an interaction point when the daemon stopped,
 /// bringing it back in the *waiting* state with the same open request - rather than
 /// the default `Active` + `ReadyToInfer` restore, which would re-issue inference and
-/// drop the prompt (issue #38).
+/// drop the prompt.
 ///
 /// Looks up the point from the agent's (already-restored) blueprint + stage cursor,
 /// restores the point cursor/round, flips the agent to `Waiting` (clearing the

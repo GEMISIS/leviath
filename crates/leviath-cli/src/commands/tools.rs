@@ -1,5 +1,5 @@
-//! `lev tools` - list and validate the globally available Rhai script tools
-//! (issue #97). These live in `<leviath-home>/tools/` and are auto-discovered by
+//! `lev tools` - list and validate the globally available Rhai script tools.
+//! These live in `<leviath-home>/tools/` and are auto-discovered by
 //! every agent at spawn; this command surfaces what's there (and what failed to
 //! compile) without starting the daemon. Agent-specific tools are validated by
 //! `lev validate <agent>` instead.

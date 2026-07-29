@@ -124,8 +124,8 @@ pub type Reaper = Box<dyn FnMut(&mut PipelineWorld, Entity) + Send>;
 
 /// An async hook the host awaits *before* servicing a top-level `Spawn` control
 /// op, so the daemon can do async preparation the sync spawner can't - e.g.
-/// lazily connecting the blueprint's MCP servers into the shared pool (issue #97)
-/// so they're warm by the time [`Spawner`] reads them. The returned future is
+/// lazily connecting the blueprint's MCP servers into the shared pool so
+/// they're warm by the time [`Spawner`] reads them. The returned future is
 /// `'static` (it must clone anything it needs from the `SpawnArgs`). Installed
 /// with [`WorldHost::set_spawn_preprocessor`]; when none is set, spawns proceed
 /// straight to the spawner.
@@ -983,9 +983,10 @@ impl WorldHost {
                     }
                     None => Err("this daemon cannot spawn agents".to_string()),
                 };
-                // A failed spawn used to be invisible daemon-side: the error went
-                // back over the socket to a client that has already exited, and
-                // nothing was written to disk (issue #107).
+                // A failed spawn must leave a trace daemon-side: the error goes
+                // back over the socket to a client that may have already exited,
+                // and nothing is written to disk, so without this log line the
+                // failure is invisible (issue #107).
                 if let Err(error) = &result {
                     tracing::error!(
                         run_id = %args.run_id,

@@ -5,9 +5,9 @@
 //! inside other packages' gated test suites, and self-gating test scaffolding
 //! forces tests-of-test-helpers with no defect-finding power.
 //!
-//! Before this crate, `AlwaysOnSubscriber` existed as five copy-pasted
-//! `test_support.rs` files (in two silently divergent designs) and the
-//! raw-TCP mock server as nine, drifting independently.
+//! Shared here so each helper has exactly one definition: copy-pasted
+//! per-package `test_support.rs` versions drift silently (`AlwaysOnSubscriber`
+//! reached five copies in two divergent designs, the raw-TCP mock server nine).
 
 use std::sync::{Mutex, OnceLock};
 

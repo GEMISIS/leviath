@@ -1,10 +1,10 @@
 //! The providers `lev setup` can configure, and how each one is configured.
 //!
-//! The old wizard walked every user through every provider in a fixed order,
-//! asking for four API keys whether or not they had them, then asked for a
-//! `default_provider` as free text with no validation - so a typo produced a
-//! config that only failed at the first agent run. This table replaces both:
-//! the wizard shows it as a pick-list, and the default-provider choice is a
+//! This table is what keeps the wizard a pick-list rather than a fixed march
+//! through every provider (asking for four API keys whether or not the user
+//! has them) ending in a free-text `default_provider` with no validation -
+//! where a typo produces a config that only fails at the first agent run. The
+//! wizard shows the table as a pick-list, and the default-provider choice is a
 //! radio over what was actually configured.
 //!
 //! Everything a provider needs to differ by lives here as data, so adding one
@@ -163,8 +163,8 @@ pub fn is_configured(config: &Config, id: &str) -> bool {
 /// Redact a credential for display.
 ///
 /// Delegates to `leviath_core::secrets::redact`, which keeps the **last** four
-/// characters. This used to show the *first eight* - a different answer from
-/// the HTTP logger's, and the wrong half to keep: API keys are structured at
+/// characters. Showing the *first eight* would give a different answer from
+/// the HTTP logger's, and keep the wrong half: API keys are structured at
 /// the front, so `sk-ant-a`, `sk-proj-` and `ghp_…` identify the issuer and, on
 /// a short token, expose a meaningful fraction of the value. A suffix is
 /// unstructured and just as good for "is this the key I think it is".
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn the_default_provider_is_in_the_table() {
         // Otherwise a fresh config would name a provider the wizard can't
-        // configure, which is how the old free-text prompt went wrong.
+        // configure - which is exactly how a free-text prompt once went wrong.
         let config = Config::default();
         assert!(
             providers().iter().any(|p| p.id == config.default_provider),
@@ -304,11 +304,11 @@ mod tests {
 
     // ─── redact ─────────────────────────────────────────────────────────────
 
-    /// The wizard now shows the last four characters, matching the HTTP
-    /// logger. It used to show the first *eight* - a second answer to "how much
-    /// of a secret is safe to print", and the wrong half: API keys are
-    /// structured at the front, so `sk-ant-a` names the issuer and, on a short
-    /// token, is a meaningful fraction of the value.
+    /// The wizard shows the last four characters, matching the HTTP logger.
+    /// Showing the first *eight* would be a second answer to "how much of a
+    /// secret is safe to print", and the wrong half: API keys are structured
+    /// at the front, so `sk-ant-a` names the issuer and, on a short token, is
+    /// a meaningful fraction of the value.
     #[test]
     fn redact_hides_short_keys_entirely() {
         assert_eq!(redact(""), "****");

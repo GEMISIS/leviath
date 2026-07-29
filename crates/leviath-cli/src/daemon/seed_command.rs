@@ -1,4 +1,4 @@
-//! Execution of `seed = { command = "..." }` region seeds (issue #108).
+//! Execution of `seed = { command = "..." }` region seeds.
 //!
 //! A command seed runs a shell command in the run's workdir at spawn and puts
 //! its combined stdout/stderr into the region - but only when the command
@@ -34,8 +34,8 @@ use crate::daemon::script_host::{
 ///
 /// Injected rather than called directly so the failure arms (timeout, spawn
 /// failure, non-zero exit) are testable without spawning real processes. The
-/// production implementation is built by [`SeedCommandPolicy::new`]. Mirrors the
-/// `BrowserOpener` seam from issue #99.
+/// production implementation is built by [`SeedCommandPolicy::new`]. Mirrors
+/// the `BrowserOpener` seam.
 pub type SeedCommandRunner =
     Arc<dyn Fn(&str, &Path, Duration) -> Result<String, String> + Send + Sync>;
 

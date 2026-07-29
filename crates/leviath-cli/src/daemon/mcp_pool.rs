@@ -1,4 +1,4 @@
-//! The shared, lazily-connected MCP pool (issue #97).
+//! The shared, lazily-connected MCP pool.
 //!
 //! Per-agent `[[mcp_servers]]` let a blueprint carry its own MCP tool
 //! dependencies. Rather than spawn a connection per agent, all agents share one
@@ -31,8 +31,7 @@ pub struct McpPool {
     connected: StdMutex<HashMap<String, Vec<Tool>>>,
     /// Where MCP OAuth grants are kept, so a refreshed token is written back to
     /// the backend it came from. Defaults to the file store, which is also the
-    /// config default - a pool built without being told reads `mcp-auth.json`,
-    /// exactly as before this field existed.
+    /// config default - a pool built without being told reads `mcp-auth.json`.
     credential_store: leviath_core::CredentialStoreKind,
     /// `[security] allow_env_vars`: which credential-shaped variables an MCP
     /// server's `${VAR}` headers may interpolate.
@@ -272,7 +271,7 @@ impl McpPool {
     }
 }
 
-/// Parse a blueprint manifest's `[[mcp_servers]]` array (issue #97). Parsed
+/// Parse a blueprint manifest's `[[mcp_servers]]` array. Parsed
 /// CLI-side because `leviath-core` cannot depend on `leviath-mcp` (that crate
 /// already depends on core - a cycle). Returns an empty vec when the section is
 /// absent or malformed; a malformed entry is skipped with a warning.

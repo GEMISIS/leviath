@@ -1,4 +1,4 @@
-//! The daemon's real [`ScriptHost`] for Rhai script tools (issue #97, Layer 3).
+//! The daemon's real [`ScriptHost`] for Rhai script tools (permission Layer 3).
 //!
 //! A registered script tool reaches the outside world only through the host
 //! functions on [`leviath_scripting::ScriptHost`]. This module supplies the real
@@ -420,14 +420,14 @@ pub struct RealScriptIo;
 /// The one process-wide blocking HTTP client for script tools.
 ///
 /// Built once, then cloned per request. A `reqwest::blocking::Client` owns a
-/// dedicated OS thread running a current-thread tokio runtime, so the previous
-/// build-one-per-request shape spawned (and tore down) a thread plus a runtime
+/// dedicated OS thread running a current-thread tokio runtime, so a
+/// build-one-per-request shape spawns (and tears down) a thread plus a runtime
 /// plus a TLS root-store load for *every* `http_get` - a researcher agent
-/// fanning out over dozens of pages could exhaust thread/FD limits, at which
-/// point `build()` fails and the `.expect` panics inside a Rhai native call
-/// (issue #109). One shared client also gives connection reuse across calls.
+/// fanning out over dozens of pages can exhaust thread/FD limits, at which
+/// point `build()` fails and the `.expect` panics inside a Rhai native call.
+/// One shared client also gives connection reuse across calls.
 ///
-/// The builder can still only fail on TLS-backend init, and that failure is now
+/// The builder can still only fail on TLS-backend init, and that failure is
 /// contained: `leviath_scripting`'s native-function guards turn a panic here
 /// into an ordinary script error instead of aborting the daemon.
 static HTTP_CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
@@ -679,8 +679,9 @@ impl ScriptIo for RealScriptIo {
         // runtime worker), so blocking on the current runtime is safe here and
         // lets us reuse tokio's timeout - the same mechanism the built-in shell
         // tool uses. `try_current` rather than `current`: a blocking thread can
-        // outlive runtime shutdown, and `current` would *panic* there - which,
-        // inside a Rhai native call, used to abort the daemon (issue #109).
+        // outlive runtime shutdown, and `current` would *panic* there - and a
+        // panic inside a Rhai native call is the shape that can abort the
+        // daemon (issue #109).
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return Err("shell is unavailable: no tokio runtime on this thread".to_string());
         };
@@ -864,10 +865,10 @@ mod tests {
         assert_eq!(eff.http_post, ScriptPermission::Allow);
     }
 
-    /// The manifest may not loosen what the user locked down. This previously
-    /// went the other way - a downloaded agent setting `http_get = "allow"` over
-    /// a global `deny` got the network back, which made the user's config
-    /// advisory rather than binding.
+    /// The manifest may not loosen what the user locked down. The other way
+    /// round - a downloaded agent setting `http_get = "allow"` over a global
+    /// `deny` getting the network back - makes the user's config advisory
+    /// rather than binding.
     #[test]
     fn effective_perms_agent_cannot_loosen_global() {
         let global = perms(ScriptPermission::Deny);

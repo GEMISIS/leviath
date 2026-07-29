@@ -12,10 +12,10 @@ use leviath_core::manifest::parse_manifest;
 
 /// Resolve the installed agents directory.
 ///
-/// Goes through the shared home resolver so `LEVIATH_HOME` applies here too. It
-/// previously called `dirs::home_dir()` directly, which meant these handlers
-/// read and wrote a *different* directory from the one `lev add` installs into
-/// whenever that override was set.
+/// Goes through the shared home resolver so `LEVIATH_HOME` applies here too.
+/// Calling `dirs::home_dir()` directly would have these handlers read and
+/// write a *different* directory from the one `lev add` installs into
+/// whenever that override is set.
 pub(super) fn agents_dir() -> PathBuf {
     leviath_core::paths::agents_dir().unwrap_or_default()
 }

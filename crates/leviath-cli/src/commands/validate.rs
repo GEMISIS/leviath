@@ -171,7 +171,7 @@ fn execute_reporting_outcome(args: &ValidateArgs) -> anyhow::Result<ValidateOutc
     Ok(ValidateOutcome::Success)
 }
 
-/// Validate the agent's own Rhai script tools (issue #97): discover the agent
+/// Validate the agent's own Rhai script tools: discover the agent
 /// directory's `tools/` and report how many compiled, warning (non-fatal, like
 /// the daemon's own skip-and-warn) about any that failed. A missing `tools/` dir
 /// prints nothing.

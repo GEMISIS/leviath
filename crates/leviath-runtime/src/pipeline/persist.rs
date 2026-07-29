@@ -208,7 +208,7 @@ pub fn dispatch_persistence(
         // (test / `lev run`); a zero-subscriber `send` error is ignored.
         if let Some(sink) = &sink {
             for (_idx, line) in output_appends.iter().chain(log_appends.iter()) {
-                // `Res<T>` derefs to `T` in bevy_ecs 0.19; it is no longer a tuple struct.
+                // `Res<T>` derefs to `T` in bevy_ecs 0.19; it is not a tuple struct.
                 let _ = sink.0.send(crate::host::WorldEvent::Log {
                     run_id: md.run_id.clone(),
                     agent_id: state.agent_id.clone(),

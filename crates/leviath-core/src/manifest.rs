@@ -3034,8 +3034,8 @@ mode = "autonomous"
         assert!(plan.max_revisits.is_some());
     }
 
-    /// Issue #107: an implement stage that can leave without having written
-    /// anything is how a run ends up with no output at all. Every edge out of
+    /// An implement stage that can leave without having written anything is
+    /// how a run ends up with no output at all. Every edge out of
     /// `implement` that the AGENT can choose must carry a `require_modifications`
     /// gate, and the write tools must be routed into the region that gate points
     /// at (which is also what the reviewer is told to read).
@@ -3044,7 +3044,7 @@ mode = "autonomous"
     /// gate answers "did you do any work before leaving?", which only makes sense
     /// for a voluntary exit. Gating an escape hatch would send a failed or
     /// looping agent back into the stage it is failing in - a stuck agent is not
-    /// helped by being told to write more (issue #106).
+    /// helped by being told to write more.
     #[test]
     fn shipped_coding_agents_gate_every_non_error_implement_edge() {
         for manifest_content in [

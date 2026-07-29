@@ -352,9 +352,9 @@ impl Dashboard {
                 }
             }
             // All four go through `scroll_by`, which is the one place that
-            // decides which pane a gesture moves. They used to carry their own
-            // copy of that decision, which is how the keyboard and the renderer
-            // came to disagree about where the document was.
+            // decides which pane a gesture moves. Each carrying its own copy of
+            // that decision is how the keyboard and the renderer come to
+            // disagree about where the document is.
             KeyCode::Up => self.scroll_by(1),
             KeyCode::Down => self.scroll_by(-1),
             KeyCode::PageUp => self.scroll_by(10),
@@ -1160,9 +1160,9 @@ mod tests {
         dash
     }
 
-    /// Up/Down move the choice selection, so before this there was no key at
-    /// all that scrolled the document - a plan longer than the pane could not
-    /// be read while its approval prompt was open, which is the only time it is
+    /// Up/Down move the choice selection, so PageUp/PageDown/Home/End must
+    /// scroll the document - without them a plan longer than the pane cannot
+    /// be read while its approval prompt is open, which is the only time it is
     /// shown.
     #[test]
     fn a_plan_can_be_scrolled_while_its_approval_prompt_is_open() {
@@ -1568,9 +1568,9 @@ mod tests {
         assert_complete(&dash.agents[0].status);
     }
 
-    /// Every state that is not a finished one can be killed. The gate used to be
-    /// `Active | Waiting`, so a run showing IDLE or STALE - exactly the states a
-    /// user reaches for the kill key in - could not be killed at all.
+    /// Every state that is not a finished one can be killed. A gate of only
+    /// `Active | Waiting` would make a run showing IDLE or STALE - exactly the
+    /// states a user reaches for the kill key in - unkillable.
     #[test]
     fn every_unfinished_state_can_be_killed() {
         for status in [
@@ -1952,9 +1952,9 @@ mod tests {
 
         // In the default Output mode the content pane is already showing the
         // body, so the separate review pane is suppressed and the content pane
-        // is what a scroll must move. This test used to assert `review_scroll`
-        // here - a pane that is not on screen - which is precisely why a plan
-        // sat still while every scroll key "worked".
+        // is what a scroll must move. Asserting `review_scroll` here - a pane
+        // that is not on screen - is precisely how a plan sits still while
+        // every scroll key "works" and this test stays green.
         dash.handle_key(key(KeyCode::Up));
         assert_eq!(dash.detail_scroll, 1);
         assert_eq!(dash.review_scroll, 0);

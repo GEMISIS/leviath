@@ -154,8 +154,9 @@ impl OllamaProvider {
     /// Build request body for the Ollama API.
     fn build_request_body(&self, request: &InferenceRequest) -> serde_json::Value {
         // System blocks prepended + tool_use/tool_result history converted to
-        // OpenAI format (Ollama speaks the OpenAI chat shape). Previously the
-        // system prompt was dropped and blocks were serialized as raw JSON.
+        // OpenAI format (Ollama speaks the OpenAI chat shape). The shared
+        // helper matters here: a naive conversion drops the system prompt and
+        // serializes tool blocks as raw JSON.
         let messages = crate::openai_compat::openai_messages(request);
 
         let caps = self.capabilities(&request.model);

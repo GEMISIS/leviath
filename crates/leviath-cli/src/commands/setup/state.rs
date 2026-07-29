@@ -1034,8 +1034,8 @@ pub(super) mod tests {
     #[test]
     fn a_key_that_lives_only_in_the_environment_is_shown_and_never_written() {
         // The bug this closes: `Config::load` folds env keys into the struct,
-        // and the old wizard re-serialized the whole thing - silently writing
-        // a key the user deliberately kept in their environment into
+        // so a wizard that re-serializes the whole thing silently writes a key
+        // the user deliberately kept in their environment into
         // ~/.leviath/config.toml.
         let dir = tempfile::tempdir().unwrap();
 
@@ -1564,7 +1564,7 @@ pub(super) mod tests {
 
     #[test]
     fn the_provider_choice_is_a_radio_over_what_was_actually_selected() {
-        // The old free-text prompt let a typo through and only failed at the
+        // A free-text prompt lets a typo through and only fails at the
         // first agent run.
         let dir = tempfile::tempdir().unwrap();
         let mut wizard = test_wizard(dir.path());
@@ -1685,10 +1685,10 @@ pub(super) mod tests {
 
     #[test]
     fn ollama_as_the_only_provider_still_lowers_the_concurrency_limit() {
-        // Regression: the default used to be re-picked only when an arrow key
-        // moved the provider choice. With Ollama the sole selection it is
-        // already at index 0, no arrow is ever pressed, and the limit stayed at
-        // the hosted-API default of 8 - caught by driving the real TUI.
+        // Regression: re-picking the default only when an arrow key moves the
+        // provider choice misses this case. With Ollama the sole selection it
+        // is already at index 0, no arrow is ever pressed, and the limit stays
+        // at the hosted-API default of 8 - caught by driving the real TUI.
         let dir = tempfile::tempdir().unwrap();
         let mut wizard = test_wizard(dir.path());
         let ollama = wizard

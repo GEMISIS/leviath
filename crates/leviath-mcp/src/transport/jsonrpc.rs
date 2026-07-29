@@ -91,9 +91,9 @@ impl JsonRpcResponse {
 /// What an inbound frame is, from the client's point of view.
 ///
 /// The transports read a single stream that carries three different things.
-/// Treating every frame as "the response to my last request" - as this client
-/// used to - means a server that pings us, or asks us for its roots, corrupts
-/// the request/response pairing or blocks waiting for a reply that never comes.
+/// Treating every frame as "the response to my last request" means a server
+/// that pings us, or asks us for its roots, corrupts the request/response
+/// pairing or blocks waiting for a reply that never comes.
 pub(crate) enum Inbound {
     /// A response to a request we sent.
     Response(Box<JsonRpcResponse>),

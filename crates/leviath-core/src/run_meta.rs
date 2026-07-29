@@ -116,8 +116,9 @@ pub struct RunMeta {
 /// harness (or the dashboard) can tell an empty run from a successful one
 /// without inspecting the workspace or parsing logs.
 ///
-/// Issue #107: 13/300 SWE-bench runs completed their whole stage pipeline and
-/// produced no file changes at all. Nothing on disk said so, or said why.
+/// The motivating failure: 13/300 SWE-bench runs completed their whole stage
+/// pipeline and produced no file changes at all. Nothing on disk said so, or
+/// said why.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RunFlags {
     /// Paths passed to file-modifying tools that succeeded, in first-touch
@@ -357,7 +358,8 @@ mod tests {
     }
 
     /// The webhook signing secret must not survive into anything served over
-    /// the API - `GET /api/agents` used to hand it to any token holder.
+    /// the API - an unredacted meta lets `GET /api/agents` hand it to any
+    /// token holder.
     #[test]
     fn redacted_drops_the_callback_secret_and_keeps_everything_else() {
         let mut m = sample_meta();

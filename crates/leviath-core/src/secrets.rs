@@ -54,7 +54,7 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
 /// token, a meaningful fraction of the value.
 ///
 /// Counts **characters**, not bytes. `value.len() - 4` can land inside a
-/// multi-byte character and panic (the shape of issue #115), and a 5-byte
+/// multi-byte character and panic, and a 5-byte
 /// 2-character value is longer than 4 *bytes*, so a byte-based length check
 /// would print the whole thing behind four stars.
 #[must_use]
@@ -263,9 +263,9 @@ mod tests {
         }
     }
 
-    /// Issue #115: a byte-based cut lands inside a multi-byte character and
-    /// panics, and a byte-length guard calls a short multi-byte value "long"
-    /// and prints all of it.
+    /// A byte-based cut lands inside a multi-byte character and panics, and a
+    /// byte-length guard calls a short multi-byte value "long" and prints all
+    /// of it.
     #[test]
     fn redact_counts_characters_not_bytes() {
         assert_eq!(redact("日本語日本語日本語"), "****語日本語");

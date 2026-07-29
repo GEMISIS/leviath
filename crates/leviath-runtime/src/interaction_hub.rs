@@ -203,9 +203,10 @@ mod tests {
 
     #[test]
     fn a_poisoned_registry_still_serves_every_other_agent() {
-        // `pending` holds *every* agent's open prompt. A panic while holding it
-        // used to poison it, after which `pending()`/`answer()`/`cancel()`
-        // panicked for all agents and the dashboard (issue #109).
+        // `pending` holds *every* agent's open prompt, so a panic while holding
+        // it must not poison it: a poisoned registry makes
+        // `pending()`/`answer()`/`cancel()` panic for all agents and the
+        // dashboard (issue #109).
         let hub = InteractionHub::new();
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {})); // silence the deliberate panic

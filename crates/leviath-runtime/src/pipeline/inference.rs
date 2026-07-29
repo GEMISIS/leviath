@@ -7,7 +7,7 @@ use super::*;
 /// stage, and run, so it is a stable cache prefix (`CacheHint::Always`). It tells
 /// the model it may emit several `tool_use` blocks per response and should batch
 /// *independent* operations - while explicitly forbidding batching of dependent
-/// ones. See issue #17.
+/// ones.
 pub(crate) const BATCH_TOOL_HINT: &str = "You can call multiple tools in a single response. \
 When operations are independent (reading, editing, or writing different files, or \
 writing a file then running a command that doesn't need its output), batch them in \

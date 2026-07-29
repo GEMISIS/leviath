@@ -63,8 +63,8 @@ async fn daemon_background_loop(
                 "message",
             ),
         };
-        // Report what actually happened. This used to be discarded, so a cancel
-        // the daemon refused was indistinguishable from one that worked.
+        // Report what actually happened. Discarding this would make a cancel
+        // the daemon refused indistinguishable from one that worked.
         let outcome = match control.request(&request).await {
             Ok(ControlResponse::Ok { ok: true }) => types::DaemonOutcome {
                 run_id,

@@ -34,8 +34,7 @@ pub trait BearerRefresher: Send + Sync {
 ///
 /// Generous, because a legitimate tool call can be genuinely slow (a build, a
 /// network fetch). The point is only that "slow" can never become "forever" -
-/// an unbounded read is how a silent server used to wedge the caller
-/// permanently.
+/// an unbounded read lets a silent server wedge the caller permanently.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How long to wait for the initial `initialize` handshake.

@@ -1,7 +1,7 @@
 //! World-event consumer: subscribe to the daemon's pushed [`WorldEvent`] stream,
 //! map each event to a [`ServerEvent`] for WebSocket subscribers, and fire a
-//! completion webhook when a run finishes. Replaces the old filesystem poll - the
-//! daemon now pushes changes, so there is no polling interval.
+//! completion webhook when a run finishes. The daemon pushes changes, so there
+//! is no filesystem poll and no polling interval.
 
 use std::time::Duration;
 

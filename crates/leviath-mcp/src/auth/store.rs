@@ -269,12 +269,12 @@ fn create_parent_dir(path: &Path) -> anyhow::Result<()> {
 
 /// Leviath's data root, from the shared resolver.
 ///
-/// This used to be a local copy that read `LEVIATH_HOME` as the `.leviath`
-/// directory *itself*, while the CLI reads it as the user home and appends
-/// `.leviath`. With the override set - which is how every test and every
-/// sandboxed run works - the OAuth token store therefore landed in a different
-/// directory from the config naming those very servers. The default
-/// (`~/.leviath/mcp-auth.json`) is unchanged.
+/// The shared resolver reads `LEVIATH_HOME` as the user home and appends
+/// `.leviath`, exactly as the CLI does. A local copy that treats the override
+/// as the `.leviath` directory *itself* lands the OAuth token store in a
+/// different directory from the config naming those very servers - and the
+/// override being set is how every test and every sandboxed run works. The
+/// default resolves to `~/.leviath/mcp-auth.json`.
 fn leviath_home() -> Option<PathBuf> {
     leviath_core::data_dir()
 }
@@ -691,11 +691,11 @@ mod tests {
     /// `LEVIATH_HOME` names the *home*, and `.leviath` is appended - the same
     /// reading the CLI's config, runs dir, agents dir and control socket use.
     ///
-    /// This asserted `<LEVIATH_HOME>/mcp-auth.json` before, because this module
-    /// carried its own copy of the resolver that treated the override as the
-    /// `.leviath` directory itself. With the override set - which is how every
-    /// test and every sandboxed run works - the OAuth token store therefore sat
-    /// in a different directory from the config naming those very servers.
+    /// A private copy of the resolver that treats the override as the
+    /// `.leviath` directory itself resolves `<LEVIATH_HOME>/mcp-auth.json`
+    /// instead. With the override set - which is how every test and every
+    /// sandboxed run works - the OAuth token store then sits in a different
+    /// directory from the config naming those very servers.
     #[test]
     fn default_path_honors_leviath_home() {
         temp_env::with_var("LEVIATH_HOME", Some("/tmp/lev-home-test"), || {

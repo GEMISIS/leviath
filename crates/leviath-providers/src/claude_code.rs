@@ -648,8 +648,8 @@ mod tests {
 
     #[test]
     fn system_blocks_reach_the_prompt() {
-        // The regression that motivated the rewrite: `assemble()` puts every
-        // structured region in `request.system`, which used to be discarded.
+        // `assemble()` puts every structured region in `request.system`;
+        // discarding those blocks silently drops every region from the prompt.
         let mut req = make_request();
         req.system = vec![
             SystemBlock {
@@ -1124,8 +1124,8 @@ mod tests {
     /// A CLI that exits nonzero without draining stdin must still report its
     /// real exit status and stderr - the broken pipe from the undrained write is
     /// swallowed, not surfaced in its place. Uses a payload larger than the pipe
-    /// buffer so the write genuinely races the early exit (the exact shape that
-    /// used to leak a "broken pipe" error over the nonzero-exit diagnostics).
+    /// buffer so the write genuinely races the early exit (the exact shape where
+    /// a "broken pipe" error can mask the nonzero-exit diagnostics).
     #[cfg(unix)]
     #[tokio::test]
     async fn infer_reports_exit_status_even_when_stdin_is_not_drained() {

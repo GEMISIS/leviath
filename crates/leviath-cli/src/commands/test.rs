@@ -396,7 +396,7 @@ fn validate_test_case(test: &TestCase) -> bool {
 /// Shorten a model response for the assertion-failure preview.
 ///
 /// Cuts on a char boundary: this runs on raw model output, and a byte cut-off
-/// through an emoji panicked `lev test` outright (the shape of issue #115).
+/// through an emoji once panicked `lev test` outright.
 fn truncate_str(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()

@@ -1,11 +1,11 @@
 //! Proving a provider credential actually works, before the config is written.
 //!
-//! `lev setup` used to end by printing "All API keys look valid." after a
-//! `key.starts_with("sk-ant-")` check that never touched the network - a
-//! sentence that was false for a revoked key, a key pasted with a trailing
-//! space, a key for the wrong account, and every key belonging to a provider
-//! the check did not cover at all (Google, OpenRouter, Ollama). The first time
-//! the user learned otherwise was a failed agent run.
+//! A `key.starts_with("sk-ant-")` check never touches the network, so ending
+//! `lev setup` with "All API keys look valid." on that basis is a sentence
+//! that is false for a revoked key, a key pasted with a trailing space, a key
+//! for the wrong account, and every key belonging to a provider the check does
+//! not cover at all (Google, OpenRouter, Ollama). The first time the user
+//! learns otherwise is a failed agent run.
 //!
 //! Every provider already implements
 //! [`list_models`](leviath_providers::Provider::list_models) against a real
@@ -314,7 +314,7 @@ mod tests {
     #[tokio::test]
     async fn a_rejected_credential_is_reported_as_such_not_as_a_network_problem() {
         // A 401 from a real endpoint is the case this whole module exists for:
-        // the old prefix check called this key valid.
+        // a prefix-only check calls this key valid.
         let url = spawn_mock_server(401, "Unauthorized", r#"{"error":"bad key"}"#).await;
         let mut creds = creds("ollama");
         creds.api_key = None;

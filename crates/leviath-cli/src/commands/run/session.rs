@@ -137,11 +137,12 @@ fn resolve_task_with_editor(
             let template = build_task_template(agent_name, description);
 
             // A randomly named file created `O_EXCL`, not `lev-task-<pid>.txt`.
-            // The old name was fully predictable, and `fs::write` follows
-            // symlinks: on a shared host another user pre-created that path as a
-            // link to `~/.leviath/config.toml` or `~/.ssh/authorized_keys`, and
-            // the next `lev run` wrote the template - and then everything the
-            // user typed into their editor - straight through it. `tempfile`
+            // A predictable name is an attack surface because `fs::write`
+            // follows symlinks: on a shared host another user pre-creates that
+            // path as a link to `~/.leviath/config.toml` or
+            // `~/.ssh/authorized_keys`, and the next `lev run` writes the
+            // template - and then everything the user types into their editor -
+            // straight through it. `tempfile`
             // also creates it owner-only, so the task prompt is not world
             // readable while the editor holds it open.
             let tmp = write_task_template(&tmp_dir_fn(), &template)?;
@@ -434,7 +435,7 @@ pub fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
 ///
 /// Native providers are registered eagerly from [`provider_creds_from_config`];
 /// a [`ScriptProviderLayer`](leviath_runtime::script_provider::ScriptProviderLayer)
-/// is then attached so Rhai *script providers* (issue #101) resolve lazily and
+/// is then attached so Rhai *script providers* resolve lazily and
 /// hot-reload from `~/.leviath/providers/`.
 pub fn build_provider_registry_from_config(config: &Config) -> ProviderRegistry {
     let registry = build_provider_registry(&provider_creds_from_config(config));

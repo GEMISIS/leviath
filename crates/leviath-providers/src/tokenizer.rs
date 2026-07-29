@@ -32,8 +32,8 @@ pub fn count_tokens(text: &str, model: &str) -> usize {
 ///
 /// Both halves return `&'static CoreBPE` from tiktoken-rs's cached singletons,
 /// so an unknown model falls back to `cl100k_base` without building a second
-/// encoder - and without the `.expect()` the old fallible `cl100k_base()`
-/// required, since the singleton accessor cannot fail.
+/// encoder - and the singleton accessor cannot fail, so no `.expect()` is
+/// needed on the fallback path.
 fn count_tokens_tiktoken(text: &str, model: &str) -> usize {
     let bpe = bpe_for_model(model).unwrap_or_else(|_| tiktoken_rs::cl100k_base_singleton());
     bpe.encode_with_special_tokens(text).len()

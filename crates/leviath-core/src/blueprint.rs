@@ -72,7 +72,7 @@ pub struct Blueprint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<crate::sandbox::ToolSandboxConfig>,
 
-    /// Opt-in escape hatch (issue #97): when `true`, the agent may add tools to
+    /// Opt-in escape hatch: when `true`, the agent may add tools to
     /// its own `tools/` directory mid-run and have them re-discovered and
     /// re-advertised for its next turn. **Off by default** - tools are otherwise
     /// discovered once at spawn and an agent cannot grow its own toolchain.
@@ -1005,7 +1005,7 @@ impl StuckConfig {
 /// has been chosen but before its transform runs. A gate that isn't satisfied
 /// re-runs the stage with a `[System]` nudge instead of transitioning.
 ///
-/// The motivating case (issue #107): an agent that reads and reasons about the
+/// The motivating case: an agent that reads and reasons about the
 /// codebase entirely through `shell` and reaches the review stage without ever
 /// having called a file-writing tool, producing a run with no output at all.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1568,7 +1568,7 @@ mod tests {
 
     /// A `require_modifications` gate on a stage that can't modify anything
     /// could never be satisfied - it would just burn the stage's re-run budget
-    /// on every pass. Reject it at load time instead (issue #107).
+    /// on every pass. Reject it at load time instead.
     #[test]
     fn test_graph_validation_modification_gate_needs_a_writing_stage() {
         let gated = |tools: &[&str], extra: &[&str]| {

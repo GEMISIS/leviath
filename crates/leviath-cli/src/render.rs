@@ -25,9 +25,9 @@ use ratatui::{
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
 //
-// Shared with every other Leviath terminal surface. This file used to carry its
-// own hand-copied duplicate of the dashboard's palette, which is exactly the
-// kind of thing that drifts.
+// Shared with every other Leviath terminal surface. Imported from the single
+// definition in `tui::theme` rather than a hand-copied duplicate of the
+// dashboard's palette, which is exactly the kind of thing that drifts.
 
 use crate::tui::theme::{C_ACCENT, C_CODE_BG, C_DIM, C_MUTED, C_SUCCESS, C_WHITE};
 

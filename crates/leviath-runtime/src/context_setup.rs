@@ -299,8 +299,9 @@ mod tests {
 
     #[test]
     fn init_window_seeded_truncates_a_seed_larger_than_its_region() {
-        // Regression: `add_entry` rejects an over-budget entry outright, so an
-        // untrimmed oversized seed used to leave the region completely EMPTY.
+        // Regression: `add_entry` rejects an over-budget entry outright, so a
+        // seed must be trimmed first - an untrimmed oversized seed leaves the
+        // region completely EMPTY.
         let bp = blueprint_with(vec![RegionDefinition::new(
             "facts".to_string(),
             RegionKind::Pinned,

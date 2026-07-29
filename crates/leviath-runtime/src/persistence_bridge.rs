@@ -41,7 +41,7 @@ pub struct PersistJob {
     /// Serialized [`InteractionPointState`](crate::interaction_points::InteractionPointState)
     /// for an agent parked at a stage-boundary interaction point (e.g. plan_approval),
     /// written to `interactions.json` so a restart re-presents the same prompt rather
-    /// than dropping it and re-inferring (issue #38). `None` ⇒ the agent isn't parked
+    /// than dropping it and re-inferring. `None` ⇒ the agent isn't parked
     /// at an interaction point (any stale file is removed).
     pub interactions: Option<String>,
 }

@@ -1193,10 +1193,10 @@ for line in sys.stdin:
 
     // ─── Spec wire-format conformance ─────────────────────────────────────
     //
-    // Each test here pins a field name or shape that the client previously got
-    // wrong. The failures they guard against were mostly *silent* (a tool error
-    // read as success) or total (one unrecognized block failing an entire
-    // result), which is what made real servers appear not to work.
+    // Each test here pins a field name or shape that is easy to get wrong on
+    // the wire. The failures they guard against are mostly *silent* (a tool
+    // error read as success) or total (one unrecognized block failing an
+    // entire result), which is what makes real servers appear not to work.
 
     #[test]
     fn tool_result_reads_is_error_from_camel_case_wire_name() {
@@ -1212,8 +1212,8 @@ for line in sys.stdin:
     #[test]
     fn tool_result_snake_case_is_error_is_not_honored() {
         // Guards the inverse mistake: `is_error` is *not* a wire name, so a
-        // payload using it must fall back to the default rather than silently
-        // re-introducing the old behavior.
+        // payload using it must fall back to the default rather than being
+        // silently honored as the error flag.
         let json = r#"{"content":[],"is_error":true}"#;
         let result: ToolResult = serde_json::from_str(json).unwrap();
         assert!(!result.is_error);

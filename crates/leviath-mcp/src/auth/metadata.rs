@@ -95,9 +95,9 @@ pub(crate) fn is_safe_discovery_url(url: &Url) -> bool {
 ///
 /// Used to bind a server-supplied `resource_metadata` URL to the MCP server that
 /// offered it. That URL arrives in a `WWW-Authenticate` header - entirely under
-/// the remote server's control - and was previously fetched with no check at
-/// all, which made every MCP connection an SSRF primitive pointed at whatever
-/// the server named, including cloud metadata endpoints.
+/// the remote server's control - so fetching it unchecked makes every MCP
+/// connection an SSRF primitive pointed at whatever the server names,
+/// including cloud metadata endpoints.
 pub(crate) fn same_origin(a: &Url, b: &Url) -> bool {
     a.scheme() == b.scheme()
         && a.host() == b.host()
@@ -190,7 +190,7 @@ mod tests {
         );
     }
 
-    // A bad issuer no longer reaches this function: it takes an already-parsed
+    // A bad issuer cannot reach this function: it takes an already-parsed
     // `Url`, so the caller reports an unparseable issuer and this cannot be
     // handed one. `login_refuses_metadata_with_an_unparseable_issuer` in
     // `auth::tests` covers that path end to end.

@@ -65,7 +65,7 @@ const MAX_TICK_FAILURES_PER_ROUND: usize = 8;
 /// never overlap two of them - it only adds a hop through the compute task
 /// pool. Running single-threaded keeps systems on the thread that catches their
 /// panics, which is what lets [`run_isolated`] read the offending agent out of
-/// the (thread-local) [`crate::tick_scope`] (issue #109).
+/// the (thread-local) [`crate::tick_scope`].
 fn tick_schedule() -> Schedule {
     let mut schedule = Schedule::default();
     // bevy_ecs 0.19 replaced `set_executor_kind(ExecutorKind::…)` with
@@ -444,7 +444,7 @@ impl PipelineWorld {
     /// [`crate::tick_scope`]), that agent is failed with the panic message so it
     /// stops being driven, its run is persisted as errored, and the host reaps
     /// it. Without that, the world would re-tick the same unchanged state on
-    /// every wake and panic again indefinitely (issue #109).
+    /// every wake and panic again indefinitely.
     pub fn tick(&mut self) -> TickOutcome {
         let Err(panicked) = run_isolated(&mut self.schedule, &mut self.world) else {
             // A clean unwind doesn't mean a clean tick: work that ran on the
@@ -859,10 +859,10 @@ mod tests {
 
     /// A stage advertising the tools the scripted responses here actually call.
     ///
-    /// It used to advertise none, which stopped mattering the moment dispatch
-    /// began refusing tools a stage never offered: every end-to-end test that
-    /// drives a tool call short-circuited into a refusal, and the tool service
-    /// was never reached at all.
+    /// Advertising them is load-bearing: dispatch refuses tools a stage never
+    /// offered, so with an empty tool list every end-to-end test that drives a
+    /// tool call would short-circuit into a refusal and the tool service would
+    /// never be reached at all.
     fn stage(model: &str) -> StageInference {
         StageInference {
             provider_name: "script".to_string(),

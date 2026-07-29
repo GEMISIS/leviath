@@ -46,11 +46,11 @@ use leviath_core::constant_time_eq;
 /// the WebSocket routes only** - the `token` query parameter.
 ///
 /// The query form exists because a browser cannot set request headers on a
-/// WebSocket upgrade. It used to be accepted on *every* route, which meant an
-/// ordinary REST call could authenticate with the token in its URL - and a URL
-/// ends up in reverse-proxy access logs, browser history, and `Referer` headers
-/// on any outbound link. Restricting it to the routes that genuinely cannot use
-/// a header keeps the escape hatch without spreading the credential.
+/// WebSocket upgrade. Accepting it on *every* route would let an ordinary REST
+/// call authenticate with the token in its URL - and a URL ends up in
+/// reverse-proxy access logs, browser history, and `Referer` headers on any
+/// outbound link. Restricting it to the routes that genuinely cannot use a
+/// header keeps the escape hatch without spreading the credential.
 fn presented_token(req: &Request) -> Option<String> {
     if let Some(bearer) = req
         .headers()

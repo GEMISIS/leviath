@@ -171,10 +171,9 @@ mod tests {
             let home = home_dir().expect("a home directory resolves");
             let data = data_dir().expect("so does the data dir");
             assert_eq!(data, home.join(".leviath"));
-            // The global tool-scan directory in particular: this resolved to
-            // `$HOME/tools` before, outside Leviath's own directory entirely,
-            // and every `.rhai` file there becomes an executable tool for every
-            // agent.
+            // The global tool-scan directory in particular must sit inside
+            // Leviath's own directory, never a bare `$HOME/tools`: every
+            // `.rhai` file there becomes an executable tool for every agent.
             assert_eq!(tools_dir(), Some(data.join("tools")));
             assert!(tools_dir().expect("set").ends_with(".leviath/tools"));
         });
