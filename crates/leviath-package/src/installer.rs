@@ -97,24 +97,16 @@ pub struct AgentInstaller {
 impl AgentInstaller {
     /// Create a new installer using the default installation directory.
     ///
-    /// `LEVIATH_HOME` overrides the resolved home directory when set
-    /// (mirrors `leviath-cli`'s `config::leviath_home_dir()`), so tests --
-    /// including ones that spawn the real `lev` binary as a child process --
-    /// can redirect this without relying on `$HOME`/`%USERPROFILE%`, which
-    /// `dirs::home_dir()` does not read on macOS (`NSHomeDirectory()`) or
-    /// Windows (`SHGetKnownFolderPath`). `leviath-package` doesn't depend on
-    /// `leviath-cli`, so this is a small local duplicate of the same check
-    /// rather than a shared helper.
+    /// The install root comes from the shared `LEVIATH_HOME`-aware resolver
+    /// in [`leviath_core::paths`], so this crate installs into exactly the
+    /// tree every other component reads.
     pub fn new() -> Self {
-        // Panic (rather than silently falling back to ".") when neither the
-        // override nor home_dir() resolves: a system with no home directory
-        // is a misconfigured environment, and failing loudly is better than
-        // installing into an unexpected relative path.
-        let home = std::env::var_os("LEVIATH_HOME")
-            .map(std::path::PathBuf::from)
-            .or_else(dirs::home_dir)
-            .expect("could not determine home directory");
-        let install_dir = home.join(".leviath").join("agents");
+        // Panic (rather than silently falling back to ".") when no home
+        // resolves: a system with no home directory is a misconfigured
+        // environment, and failing loudly is better than installing into an
+        // unexpected relative path.
+        let install_dir =
+            leviath_core::paths::agents_dir().expect("could not determine home directory");
         Self { install_dir }
     }
 

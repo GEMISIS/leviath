@@ -387,6 +387,9 @@ impl Dashboard {
                 .join(file_name)
                 .to_string_lossy()
                 .to_string();
+            // Display-only `~` abbreviation of the OS home directory;
+            // deliberately NOT the LEVIATH_HOME-aware resolver (see the
+            // header's workdir line for the same choice).
             let home = dirs::home_dir()
                 .map(|h| h.to_string_lossy().to_string())
                 .unwrap_or_default();

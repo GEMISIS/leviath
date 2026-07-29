@@ -24,15 +24,13 @@ pub fn find_manifest(path: &str) -> anyhow::Result<PathBuf> {
         }
     }
 
-    // 3. Installed agent by name: ~/.leviath/agents/<name>/agent.leviath
-    //    dirs::home_dir() always returns Some on supported platforms.
-    let installed = dirs::home_dir()
-        .unwrap()
-        .join(".leviath")
-        .join("agents")
-        .join(path)
-        .join("agent.leviath");
-    if installed.exists() {
+    // 3. Installed agent by name: <agents_dir>/<name>/agent.leviath. Resolved
+    //    through the shared LEVIATH_HOME-aware helper, so `lev run <name>`
+    //    finds the same install tree `lev add` writes when the override is set.
+    if let Some(installed) = leviath_core::paths::agents_dir()
+        .map(|d| d.join(path).join("agent.leviath"))
+        .filter(|p| p.exists())
+    {
         return Ok(installed);
     }
 
@@ -107,23 +105,22 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Name lookup goes through the `LEVIATH_HOME`-aware agents dir, so
+    /// `lev run <name>` finds the same tree `lev add` installs into when the
+    /// override is set. It resolved through the raw OS home before, which made
+    /// installed-by-name agents invisible in any redirected environment (and
+    /// forced this very test to write into the developer's real home).
     #[test]
-    fn find_manifest_installed_agent_by_name() {
-        // `dirs::home_dir()` can't be redirected via `$HOME` on macOS (it
-        // resolves via `NSHomeDirectory()`), so this writes to the real
-        // `~/.leviath/agents/<name>/agent.leviath` -- using a name unlikely
-        // to collide with a real installed agent, cleaned up afterward.
-        let home = dirs::home_dir().expect("home directory must be available");
-        let agent_name = "test-find-manifest-installed-by-name-8f3a";
-        let agent_dir = home.join(".leviath").join("agents").join(agent_name);
+    fn find_manifest_installed_agent_by_name_honors_leviath_home() {
+        let home = tempfile::tempdir().unwrap();
+        let agent_dir = home.path().join(".leviath").join("agents").join("named");
         std::fs::create_dir_all(&agent_dir).unwrap();
         let manifest_path = agent_dir.join("agent.leviath");
         std::fs::write(&manifest_path, "[agent]\nname = \"test\"").unwrap();
 
-        let result = find_manifest(agent_name);
-        assert_eq!(result.unwrap(), manifest_path);
-
-        let _ = std::fs::remove_dir_all(&agent_dir);
+        temp_env::with_var("LEVIATH_HOME", Some(home.path()), || {
+            assert_eq!(find_manifest("named").unwrap(), manifest_path);
+        });
     }
 
     /// Covers branch 2 (directory exists) when the directory has NO `agent.leviath` inside.
