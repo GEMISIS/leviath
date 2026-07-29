@@ -832,10 +832,11 @@ impl Dashboard {
         } else {
             self.add_log(format!("Deleted run {}", id));
         }
-        // Remove saved context state if present — dirs::home_dir() is always
-        // Some on supported platforms; use map() to avoid a dead None branch.
-        let _ = dirs::home_dir()
-            .map(|home| std::fs::remove_dir_all(home.join(".leviath").join("state").join(&id)));
+        // Remove saved context state if present. Resolved through the shared
+        // LEVIATH_HOME-aware helper so the delete hits the same data root the
+        // run wrote to; map() avoids a dead None branch.
+        let _ = leviath_core::paths::data_dir()
+            .map(|d| std::fs::remove_dir_all(d.join("state").join(&id)));
         // Remove agent from self.agents using the raw index (always valid because
         // selected_agent_raw_idx() succeeded above and agents hasn't changed).
         self.agents.remove(raw_idx);

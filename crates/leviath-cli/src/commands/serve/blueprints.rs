@@ -17,10 +17,7 @@ use leviath_core::manifest::parse_manifest;
 /// read and wrote a *different* directory from the one `lev add` installs into
 /// whenever that override was set.
 pub(super) fn agents_dir() -> PathBuf {
-    crate::config::leviath_home_dir()
-        .unwrap_or_default()
-        .join(".leviath")
-        .join("agents")
+    leviath_core::paths::agents_dir().unwrap_or_default()
 }
 
 /// Resolve `<agents_dir>/<name>`, refusing a name that is not a single safe path

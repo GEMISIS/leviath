@@ -208,31 +208,30 @@ fn print_agent_listing(
 /// Core `get_agents_dir` logic, parameterized by the home directory so the
 /// "could not determine home directory" error path can be unit tested
 /// without depending on the real environment.
-fn get_agents_dir_from_home(home: Option<PathBuf>) -> anyhow::Result<PathBuf> {
-    let home = home.ok_or(anyhow::anyhow!("Could not determine home directory"))?;
-    Ok(home.join(".leviath").join("agents"))
+fn get_agents_dir_or_error(dir: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    dir.ok_or(anyhow::anyhow!("Could not determine home directory"))
 }
 
 /// Resolve `~/.leviath/agents`, the directory `lev list` scans for installed
 /// agents.
 ///
-/// A thin wrapper over [`get_agents_dir_from_home`] supplying the real home
-/// directory. The `#[cfg(test)]` guard below only lets tests force the
+/// A thin wrapper over [`get_agents_dir_or_error`] supplying the real
+/// resolved directory. The `#[cfg(test)]` guard below only lets tests force the
 /// "no home directory" error arm of `execute()` deterministically — the real
-/// `leviath_home_dir()` can't be made to return `None` in any environment a
+/// the shared resolver can't be made to return `None` in any environment a
 /// test may safely create (on macOS `dirs::home_dir()` falls back to a
 /// passwd-database lookup independent of `$HOME`). It does NOT hide the real
-/// body from coverage: with the toggle off, `get_agents_dir_from_home(
-/// leviath_home_dir())` runs (and is measured) in every ordinary test, and
+/// body from coverage: with the toggle off, `get_agents_dir_or_error(
+/// leviath_core::paths::agents_dir())` runs (and is measured) in every ordinary test, and
 /// only computes a `PathBuf` (no filesystem writes). The `None` arm of
-/// `get_agents_dir_from_home` is covered directly by
-/// `get_agents_dir_from_home_none_returns_error`.
+/// `get_agents_dir_or_error` is covered directly by
+/// `get_agents_dir_or_error_none_returns_error`.
 fn get_agents_dir() -> anyhow::Result<PathBuf> {
     #[cfg(test)]
     if FORCE_AGENTS_DIR_ERROR.with(|f| f.get()) {
         anyhow::bail!("Could not determine home directory");
     }
-    get_agents_dir_from_home(crate::config::leviath_home_dir())
+    get_agents_dir_or_error(leviath_core::paths::agents_dir())
 }
 
 #[cfg(test)]
@@ -435,15 +434,14 @@ system = {{ kind = "pinned", max_tokens = 1000 }}
     }
 
     #[test]
-    fn get_agents_dir_from_home_some_returns_path() {
-        let home = PathBuf::from("/home/testuser");
-        let dir = get_agents_dir_from_home(Some(home)).unwrap();
-        assert_eq!(dir, PathBuf::from("/home/testuser/.leviath/agents"));
+    fn get_agents_dir_or_error_some_returns_path() {
+        let dir = PathBuf::from("/home/testuser/.leviath/agents");
+        assert_eq!(get_agents_dir_or_error(Some(dir.clone())).unwrap(), dir);
     }
 
     #[test]
-    fn get_agents_dir_from_home_none_returns_error() {
-        let err = get_agents_dir_from_home(None).unwrap_err();
+    fn get_agents_dir_or_error_none_returns_error() {
+        let err = get_agents_dir_or_error(None).unwrap_err();
         assert!(
             err.to_string()
                 .contains("Could not determine home directory")

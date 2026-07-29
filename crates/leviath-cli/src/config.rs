@@ -905,32 +905,14 @@ impl Config {
     }
 }
 
-/// Resolve the user's home directory for every OTHER `~/.leviath/...`-relative
-/// path this crate uses (agent installs, run state, dashboard log, etc. --
-/// anything that isn't `Config::config_path()`, which already has its own
-/// narrower `LEVIATH_CONFIG_PATH` override just above).
-///
-/// `LEVIATH_HOME` overrides this when set, so tests (including ones that
-/// spawn the real `lev` binary as a child process, not just in-process unit
-/// tests) can redirect every home-relative path at once. This exists because
-/// `dirs::home_dir()` cannot be redirected via `$HOME`/`%USERPROFILE%` env
-/// vars on macOS (`NSHomeDirectory()`) or Windows (`SHGetKnownFolderPath`) --
-/// confirmed via real Windows CI failures in `cli_dispatch.rs`'s `add`/
-/// `remove` integration tests even after overriding `HOME`+`USERPROFILE` for
-/// the spawned child process.
-pub fn leviath_home_dir() -> Option<PathBuf> {
-    if let Ok(override_home) = std::env::var("LEVIATH_HOME") {
-        return Some(PathBuf::from(override_home));
-    }
-    dirs::home_dir()
-}
-
-/// The directory that holds drop-in Rhai *script providers* (issue #101):
-/// `~/.leviath/providers/` (honoring `LEVIATH_HOME`). `None` when no home
-/// directory can be resolved.
-pub fn providers_dir() -> Option<PathBuf> {
-    leviath_home_dir().map(|h| h.join(".leviath").join("providers"))
-}
+/// The canonical `LEVIATH_HOME`-aware resolvers live in
+/// [`leviath_core::paths`]; these re-exports keep this crate's established
+/// names pointing at that single definition instead of carrying a byte-for-
+/// byte copy of it (which is exactly how the override once diverged between
+/// components). `Config::config_path()` stays separate: it has its own
+/// narrower `LEVIATH_CONFIG_PATH` override above.
+pub use leviath_core::paths::home_dir as leviath_home_dir;
+pub use leviath_core::paths::providers_dir;
 
 /// Create the config directory with restrictive permissions.
 fn create_config_dir(dir: &std::path::Path) -> anyhow::Result<()> {

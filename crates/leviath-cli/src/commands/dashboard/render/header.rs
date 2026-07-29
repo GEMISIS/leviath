@@ -99,6 +99,9 @@ impl Dashboard {
         ]);
 
         // Stats line: workdir · per-stage tokens · total tokens [· model]
+        // Display-only `~` abbreviation of the OS home directory; deliberately
+        // NOT the LEVIATH_HOME-aware resolver, which points at Leviath's data
+        // root rather than the home the user reads paths against.
         let home = dirs::home_dir()
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_default();

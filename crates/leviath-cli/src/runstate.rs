@@ -101,9 +101,8 @@ fn runs_dir_from(env_override: Option<&str>) -> PathBuf {
     if let Some(dir) = env_override {
         return PathBuf::from(dir);
     }
-    crate::config::leviath_home_dir()
+    leviath_core::paths::data_dir()
         .unwrap_or_default()
-        .join(".leviath")
         .join("runs")
 }
 
@@ -138,9 +137,8 @@ fn dashboard_log_path_from(env_override: Option<&str>) -> PathBuf {
     if let Some(path) = env_override {
         return PathBuf::from(path);
     }
-    dirs::home_dir()
+    leviath_core::paths::data_dir()
         .unwrap_or_default()
-        .join(".leviath")
         .join("dashboard.log")
 }
 
@@ -1313,6 +1311,26 @@ mod tests {
             assert!(path.to_str().unwrap().contains(".leviath"));
             assert!(path.to_str().unwrap().ends_with("dashboard.log"));
         });
+    }
+
+    /// With no `LEVIATH_DASHBOARD_LOG_PATH`, the dashboard log must follow
+    /// `LEVIATH_HOME` like every other data path. It resolved through the raw
+    /// OS home before, so a fully isolated test session still appended to the
+    /// developer's real `~/.leviath/dashboard.log`.
+    #[test]
+    fn dashboard_log_path_honors_leviath_home() {
+        temp_env::with_vars(
+            [
+                ("LEVIATH_DASHBOARD_LOG_PATH", None),
+                ("LEVIATH_HOME", Some("/custom/home")),
+            ],
+            || {
+                assert_eq!(
+                    dashboard_log_path(),
+                    PathBuf::from("/custom/home/.leviath/dashboard.log")
+                );
+            },
+        );
     }
 
     // ─── runs_dir / run_dir ────────────────────────────────────────────────

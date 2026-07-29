@@ -10,9 +10,8 @@ pub struct AddArgs {
     pub package: String,
 }
 
-fn agents_dir_from_home(home: Option<std::path::PathBuf>) -> anyhow::Result<std::path::PathBuf> {
-    let home = home.ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-    Ok(home.join(".leviath").join("agents"))
+fn agents_dir_or_error(dir: Option<std::path::PathBuf>) -> anyhow::Result<std::path::PathBuf> {
+    dir.ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))
 }
 
 pub async fn execute(args: AddArgs) -> anyhow::Result<()> {
@@ -23,22 +22,22 @@ pub async fn execute(args: AddArgs) -> anyhow::Result<()> {
 
 /// Resolve `~/.leviath/agents`, the install root for `lev add`.
 ///
-/// A thin wrapper over [`agents_dir_from_home`] supplying the real home
+/// A thin wrapper over [`agents_dir_or_error`] supplying the real resolved
 /// directory. The `#[cfg(test)]` guard below only lets tests force the
 /// "no home directory" error arm of `execute()` deterministically — the real
-/// `leviath_home_dir()` can't be made to return `None` in any environment a
+/// the shared resolver can't be made to return `None` in any environment a
 /// test may safely create (on macOS `dirs::home_dir()` falls back to a
 /// passwd-database lookup independent of `$HOME`). It does NOT hide the real
-/// body from coverage: with the toggle off, `agents_dir_from_home(
-/// leviath_home_dir())` runs (and is measured) in every ordinary test. This
-/// only computes a `PathBuf`; the `None` arm of `agents_dir_from_home` is
-/// covered directly by `agents_dir_from_home_none_returns_error`.
+/// body from coverage: with the toggle off, `agents_dir_or_error(
+/// leviath_core::paths::agents_dir())` runs (and is measured) in every ordinary test. This
+/// only computes a `PathBuf`; the `None` arm of `agents_dir_or_error` is
+/// covered directly by `agents_dir_or_error_none_returns_error`.
 fn resolve_agents_dir() -> anyhow::Result<std::path::PathBuf> {
     #[cfg(test)]
     if FORCE_AGENTS_DIR_ERROR.with(|f| f.get()) {
         anyhow::bail!("Could not determine home directory");
     }
-    agents_dir_from_home(crate::config::leviath_home_dir())
+    agents_dir_or_error(leviath_core::paths::agents_dir())
 }
 
 #[cfg(test)]
@@ -511,18 +510,17 @@ mod tests {
     use super::*;
     use crate::test_support::{with_tracing, write_test_agent};
 
-    // ─── agents_dir_from_home ─────────────────────────────────────────────
+    // ─── agents_dir_or_error ─────────────────────────────────────────────
 
     #[test]
-    fn agents_dir_from_home_some_returns_path() {
-        let home = std::path::PathBuf::from("/home/testuser");
-        let dir = agents_dir_from_home(Some(home)).unwrap();
-        assert_eq!(dir, std::path::Path::new("/home/testuser/.leviath/agents"));
+    fn agents_dir_or_error_some_returns_path() {
+        let dir = std::path::PathBuf::from("/home/testuser/.leviath/agents");
+        assert_eq!(agents_dir_or_error(Some(dir.clone())).unwrap(), dir);
     }
 
     #[test]
-    fn agents_dir_from_home_none_returns_error() {
-        let err = agents_dir_from_home(None).unwrap_err();
+    fn agents_dir_or_error_none_returns_error() {
+        let err = agents_dir_or_error(None).unwrap_err();
         assert!(
             err.to_string()
                 .contains("Could not determine home directory")

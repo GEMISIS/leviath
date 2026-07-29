@@ -19,7 +19,7 @@ use tokio::sync::Mutex;
 use leviath_runtime::fanout::FanOutSpawnerRes;
 
 use crate::commands::run::session::build_provider_registry_from_config;
-use crate::config::{Config, leviath_home_dir};
+use crate::config::Config;
 use crate::daemon::fanout_spawner::DaemonFanOutSpawner;
 use crate::daemon::spawn::build_agent;
 use crate::daemon::tool_service::CliToolService;
@@ -37,7 +37,7 @@ pub fn control_address() -> Option<leviath_runtime::control_socket::ControlId> {
 /// Separate from [`control_address`] because on Windows a control id is a pipe
 /// name rather than a path, so the token's location cannot be derived from it.
 pub fn control_dir() -> Option<std::path::PathBuf> {
-    leviath_home_dir().map(|home| home.join(".leviath"))
+    leviath_core::paths::data_dir()
 }
 
 /// This CLI binary's build id (short git hash, `-dirty` when the tree had
@@ -49,7 +49,7 @@ pub const CURRENT_BUILD: &str = env!("LEVIATH_BUILD");
 /// Path to the file where a running daemon records its build id
 /// (`<leviath-home>/.leviath/daemon.build`).
 pub fn build_marker_path() -> Option<std::path::PathBuf> {
-    leviath_home_dir().map(|home| home.join(".leviath").join("daemon.build"))
+    leviath_core::paths::data_dir().map(|d| d.join("daemon.build"))
 }
 
 /// Record [`CURRENT_BUILD`] so the CLI can detect a stale daemon later.
@@ -196,7 +196,7 @@ pub fn build_host(
         hub: hub.clone(),
         subagent_tx: subagent_tx.clone(),
         tool_service: tool_service.clone(),
-        agents_dir: leviath_home_dir().map(|h| h.join(".leviath").join("agents")),
+        agents_dir: leviath_core::paths::agents_dir(),
         now_secs,
     };
     host.world_mut()
@@ -275,7 +275,7 @@ pub fn build_host(
     // fan-out worker this blueprint will spawn, so the *first* such worker already
     // advertises them (they'd otherwise land one turn late — issue #97).
     let pp_pool = mcp_pool.clone();
-    let pp_agents_dir = leviath_home_dir().map(|h| h.join(".leviath").join("agents"));
+    let pp_agents_dir = leviath_core::paths::agents_dir();
     host.set_spawn_preprocessor(Box::new(move |args| {
         let pool = pp_pool.clone();
         let blueprint_path = args.blueprint_path.clone();
