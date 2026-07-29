@@ -594,12 +594,33 @@ const NUDGE_TEXT: &str = "You have tools available. Please use them to complete 
 /// How many text-only responses to nudge before accepting the text as final.
 const MAX_TEXT_ONLY_NUDGES: usize = 3;
 
+/// Whether this stage's deliverable *is* its text response.
+///
+/// A stage with interaction points presents what it writes for the user to
+/// approve, revise or edit — the text is the work product, not a model stalling
+/// before it starts. Nudging one is worse than wasteful: the nudge says "use
+/// your tools to complete the task", and a stage built to produce a document
+/// usually has no tool that could. A planning stage told to complete the task
+/// went looking for a way to write the file, found none, and asked the user to
+/// grant it a write tool or create the file by hand — instead of ending the
+/// stage and presenting the plan it had already finished writing.
+fn stage_output_is_reviewed(bp: &AgentBlueprint, cursor: &StageCursor) -> bool {
+    matches!(
+        bp.0.stages.get(cursor.index).map(|s| &s.mode),
+        Some(leviath_core::blueprint::StageMode::InteractivePoints { points }) if !points.is_empty()
+    )
+}
+
 /// Empty-response system: for each `ReadyForTransition` agent decide whether the
 /// stage is done. If the agent has already made tool calls, or we've nudged the
 /// max number of times, the text response is accepted and the agent advances to
 /// `ResolveTransition`. Otherwise (text only, no work yet) the response + a
 /// "use your tools" nudge are added to context and the agent loops back to
 /// `ReadyToInfer`. Ported from `AgentEngine::loop_handle_empty_tool_calls`.
+///
+/// A stage whose output is reviewed is never nudged — see
+/// [`stage_output_is_reviewed`].
+#[allow(clippy::type_complexity)]
 pub fn handle_empty_response(
     mut agents: Query<
         (
@@ -607,15 +628,20 @@ pub fn handle_empty_response(
             &mut ContextWindow,
             &crate::components::InferenceResult,
             &mut StageProgress,
+            &AgentBlueprint,
+            &StageCursor,
         ),
         With<ReadyForTransition>,
     >,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, mut window, infer, mut progress) in agents.iter_mut() {
+    for (entity, mut window, infer, mut progress, bp, cursor) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
-        if progress.total_tool_calls > 0 || progress.text_only_nudges >= MAX_TEXT_ONLY_NUDGES {
+        if progress.total_tool_calls > 0
+            || progress.text_only_nudges >= MAX_TEXT_ONLY_NUDGES
+            || stage_output_is_reviewed(bp, cursor)
+        {
             commands
                 .entity(entity)
                 .remove::<ReadyForTransition>()
@@ -5511,6 +5537,29 @@ mod tests {
         s.run(world);
     }
 
+    /// A one-stage blueprint whose stage either presents its output for review
+    /// or runs autonomously.
+    fn nudge_bp(reviewed: bool) -> AgentBlueprint {
+        let mut stage = stage_named("a", None, false, None);
+        if reviewed {
+            let point = leviath_core::blueprint::InteractionPoint {
+                name: "plan_approval".to_string(),
+                prompt: "Review the plan above.".to_string(),
+                required: true,
+                style: leviath_core::blueprint::InteractionStyle::MultipleChoice,
+                options: vec!["Approve".to_string()],
+                directives: std::collections::HashMap::new(),
+                abort_options: Vec::new(),
+                edit_options: Vec::new(),
+                document_region: Some("plan".to_string()),
+            };
+            stage.mode = leviath_core::blueprint::StageMode::InteractivePoints {
+                points: vec![point],
+            };
+        }
+        AgentBlueprint(blueprint(vec![stage]))
+    }
+
     #[test]
     fn empty_response_finishes_when_agent_made_tool_calls() {
         let mut world = World::new();
@@ -5525,6 +5574,8 @@ mod tests {
                 ctx(&[("conversation", 10_000)]),
                 infer_result(false),
                 progress,
+                nudge_bp(false),
+                StageCursor { index: 0 },
                 ReadyForTransition,
             ))
             .id();
@@ -5547,11 +5598,64 @@ mod tests {
                 ctx(&[("conversation", 10_000)]),
                 infer_result(false),
                 progress,
+                nudge_bp(false),
+                StageCursor { index: 0 },
                 ReadyForTransition,
             ))
             .id();
         run_empty(&mut world);
         assert!(world.get::<ResolveTransition>(e).is_some());
+    }
+
+    /// A stage that presents its output for review is finished when it produces
+    /// that output. This is the whole failure, from a real run: `plan` wrote a
+    /// complete plan on its first turn — correctly, with no tool calls, because
+    /// writing the plan *is* the job — and the nudge read that as a model
+    /// stalling and told it to "use your tools to complete the task". `plan`
+    /// has no tool that writes anything, so the model went looking for one,
+    /// could not find it, and asked the user to grant it a write tool or create
+    /// the file by hand. The plan it had already finished was never presented.
+    #[test]
+    fn empty_response_never_nudges_a_stage_whose_output_is_reviewed() {
+        let mut world = World::new();
+        let e = world
+            .spawn((
+                ctx(&[("conversation", 10_000)]),
+                infer_result(false),      // text only, no tool calls
+                StageProgress::default(), // and no work done yet this stage
+                nudge_bp(true),
+                StageCursor { index: 0 },
+                ReadyForTransition,
+            ))
+            .id();
+        run_empty(&mut world);
+
+        assert!(
+            world.get::<ResolveTransition>(e).is_some(),
+            "the stage is done: its text is what gets reviewed"
+        );
+        assert!(
+            world.get::<ReadyToInfer>(e).is_none(),
+            "not sent round again"
+        );
+        assert_eq!(
+            world.get::<StageProgress>(e).unwrap().text_only_nudges,
+            0,
+            "and not counted as a nudge"
+        );
+        // Nothing was injected — the model is not told to go do work it has no
+        // tool for, which is what sent it asking the user for one.
+        assert!(
+            world
+                .get::<ContextWindow>(e)
+                .unwrap()
+                .get_region("conversation")
+                .unwrap()
+                .content
+                .is_empty(),
+            "nothing is injected: no nudge telling the model to go do work it \
+             has no tool for, which is what sent it asking the user for one"
+        );
     }
 
     #[test]
@@ -5562,6 +5666,8 @@ mod tests {
                 ctx(&[("conversation", 10_000)]),
                 infer_result(false),
                 StageProgress::default(),
+                nudge_bp(false),
+                StageCursor { index: 0 },
                 ReadyForTransition,
             ))
             .id();
