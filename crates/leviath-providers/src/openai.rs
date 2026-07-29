@@ -65,12 +65,13 @@ impl OpenAIProvider {
         api_key: String,
         overrides: HashMap<String, ModelCapabilities>,
         timeout_secs: Option<u64>,
+        rate_limit: Option<&crate::provider::RateLimitConfig>,
     ) -> Self {
         Self {
             client: crate::provider::build_http_client(timeout_secs),
             api_key,
             base_url: "https://api.openai.com/v1".to_string(),
-            rate_limiter: None,
+            rate_limiter: rate_limit.map(crate::rate_limit::RateLimiter::new),
             capability_overrides: overrides,
         }
     }
@@ -433,7 +434,8 @@ mod tests {
                 max_output_tokens: 1,
             },
         );
-        let provider = OpenAIProvider::with_overrides("test-key".to_string(), overrides, None);
+        let provider =
+            OpenAIProvider::with_overrides("test-key".to_string(), overrides, None, None);
         let caps = provider.capabilities("gpt-5.4-mini");
         assert!(!caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 1);
@@ -563,7 +565,7 @@ mod tests {
                 max_output_tokens: 1,
             },
         );
-        let provider = OpenAIProvider::with_overrides("key".to_string(), overrides, None);
+        let provider = OpenAIProvider::with_overrides("key".to_string(), overrides, None, None);
         let caps = provider.capabilities("gpt-5.5");
         assert_eq!(caps.max_context_tokens, 1);
     }
@@ -839,5 +841,21 @@ mod tests {
         let provider = provider_with_url(url);
         let err = provider.list_models().await.unwrap_err();
         assert!(err.to_string().contains("unknown error"));
+    }
+
+    #[test]
+    fn with_overrides_wires_the_rate_limiter() {
+        // The daemon path constructs providers exclusively through
+        // with_overrides, so a rate limit that stops here is a rate limit
+        // nobody gets.
+        let cfg = crate::provider::RateLimitConfig {
+            requests_per_minute: 5,
+            tokens_per_minute: 1_000,
+        };
+        let limited =
+            OpenAIProvider::with_overrides("k".to_string(), HashMap::new(), None, Some(&cfg));
+        assert!(limited.rate_limiter.is_some());
+        let unlimited = OpenAIProvider::with_overrides("k".to_string(), HashMap::new(), None, None);
+        assert!(unlimited.rate_limiter.is_none());
     }
 }

@@ -145,6 +145,7 @@ mod tests {
             base_url: None,
             model_capabilities: std::collections::HashMap::new(),
             request_timeout_secs: Some(1),
+            rate_limit: None,
             options: std::collections::HashMap::new(),
         }
     }
