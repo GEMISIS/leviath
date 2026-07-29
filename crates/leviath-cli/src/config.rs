@@ -1008,20 +1008,20 @@ pub(crate) static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// can't starve another task in the *same* test: it only serializes
 /// against other CWD-mutating tests, which is exactly the intended effect.
 ///
-/// `#[cfg(unix)]` (in addition to `#[cfg(test)]`): its only caller,
-/// `commands/list.rs`'s `execute_falls_back_to_default_cwd_when_current_dir_is_gone`,
-/// is itself Unix-only (the real filesystem race it reproduces -- deleting
-/// a directory that's the process's live CWD -- isn't reproducible on
-/// Windows, where that's a sharing violation instead). Without this,
-/// Windows CI's `-D warnings` treats this as genuinely dead code, since
-/// nothing on that platform ever constructs it.
-#[cfg(all(test, unix))]
+/// Was `#[cfg(unix)]` as well, because its only caller —
+/// `commands/list.rs`'s `execute_falls_back_to_default_cwd_when_current_dir_is_gone`
+/// — is Unix-only (the race it reproduces, deleting a directory that is the
+/// process's live CWD, is a sharing violation on Windows rather than a
+/// reproducible state), which made it dead code there under `-D warnings`.
+/// `a_dot_env_in_the_working_directory_is_read` is a second caller that must run
+/// on every platform, so the gate is gone and the dead-code concern with it.
+#[cfg(test)]
 pub(crate) struct CwdTestGuard {
     original_cwd: std::path::PathBuf,
     _lock: std::sync::MutexGuard<'static, ()>,
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 impl Drop for CwdTestGuard {
     fn drop(&mut self) {
         let _ = std::env::set_current_dir(&self.original_cwd);
@@ -1030,7 +1030,7 @@ impl Drop for CwdTestGuard {
 
 /// Acquire [`CWD_LOCK`] and snapshot the current working directory so it can
 /// be restored automatically when the returned guard drops.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) fn isolate_cwd_for_test() -> CwdTestGuard {
     let lock = CWD_LOCK
         .lock()
@@ -1135,30 +1135,36 @@ mod dotenv_tests {
     /// rather than leaking it into the rest of the run.
     #[test]
     fn a_dot_env_in_the_working_directory_is_read() {
-        let _cwd = isolate_cwd_for_test();
         let dir = make_fake_config_dir("dotenv-read");
         std::fs::write(dir.join(".env"), "LEV_DOTENV_PROBE=seen\n").unwrap();
-        std::env::set_current_dir(&dir).unwrap();
 
-        temp_env::with_vars(
-            [
-                (
-                    "LEVIATH_CONFIG_PATH",
-                    Some(dir.join("config.toml").into_os_string()),
-                ),
-                ("LEVIATH_SKIP_DOTENV", None),
-                ("LEV_DOTENV_PROBE", None),
-            ],
-            || {
-                let loaded = Config::load();
-                assert!(loaded.is_ok(), "a missing config file is not an error");
-                assert_eq!(
-                    std::env::var("LEV_DOTENV_PROBE").ok().as_deref(),
-                    Some("seen"),
-                    "the .env beside the working directory was read"
-                );
-            },
-        );
+        // Scoped so the CWD guard drops — restoring the working directory —
+        // before the cleanup below. Windows refuses to remove a directory that
+        // is some process's live CWD.
+        {
+            let _cwd = isolate_cwd_for_test();
+            std::env::set_current_dir(&dir).unwrap();
+
+            temp_env::with_vars(
+                [
+                    (
+                        "LEVIATH_CONFIG_PATH",
+                        Some(dir.join("config.toml").into_os_string()),
+                    ),
+                    ("LEVIATH_SKIP_DOTENV", None),
+                    ("LEV_DOTENV_PROBE", None),
+                ],
+                || {
+                    let loaded = Config::load();
+                    assert!(loaded.is_ok(), "a missing config file is not an error");
+                    assert_eq!(
+                        std::env::var("LEV_DOTENV_PROBE").ok().as_deref(),
+                        Some("seen"),
+                        "the .env beside the working directory was read"
+                    );
+                },
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
