@@ -33,7 +33,9 @@ pub fn draw(frame: &mut Frame, wizard: &Wizard) {
     draw_body(frame, chunks[1], wizard);
     draw_footer(frame, chunks[2], wizard);
 
-    if wizard.show_help {
+    if wizard.show_tos_confirm {
+        draw_tos_confirm(frame, frame.area());
+    } else if wizard.show_help {
         draw_help(frame, frame.area());
     }
 }
@@ -608,6 +610,65 @@ fn draw_help(frame: &mut Frame, area: Rect) {
     );
 }
 
+/// Confirmation overlay for the Claude Code transport's terms risk.
+fn draw_tos_confirm(frame: &mut Frame, area: Rect) {
+    let popup = centered(70, 50, area);
+    frame.render_widget(Clear, popup);
+    let lines = vec![
+        Line::from(Span::styled(
+            "⚠️  Terms of Service",
+            Style::default().fg(C_WARN).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Anthropic's terms prohibit third-party developers from offering",
+            Style::default().fg(C_WARN),
+        )),
+        Line::from(Span::styled(
+            "claude.ai subscription auth for their products without prior",
+            Style::default().fg(C_WARN),
+        )),
+        Line::from(Span::styled(
+            "approval. The Claude Code transport routes inference through your",
+            Style::default().fg(C_WARN),
+        )),
+        Line::from(Span::styled(
+            "subscription via the CLI's OAuth session.",
+            Style::default().fg(C_WARN),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "For unambiguous compliance, use a direct Anthropic API key.",
+            Style::default().fg(C_WHITE),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Press ", Style::default().fg(C_DIM)),
+            Span::styled(
+                "Y",
+                Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " to accept responsibility for compliance,",
+                Style::default().fg(C_DIM),
+            ),
+        ]),
+        Line::from(Span::styled(
+            "or any other key to go back.",
+            Style::default().fg(C_DIM),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(C_WARN))
+                .title(" Confirm "),
+        ),
+        popup,
+    );
+}
+
 /// A centred rectangle covering `percent_x`/`percent_y` of `area`.
 fn centered(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
@@ -877,6 +938,33 @@ mod tests {
             "{screen}"
         );
         assert!(screen.contains("responsibility for compliance"), "{screen}");
+    }
+
+    #[test]
+    fn the_tos_confirmation_overlay_draws_over_the_review_screen() {
+        let (_dir, mut w) = wizard();
+        let index = w
+            .providers
+            .iter()
+            .position(|r| r.provider.id == "claude-code")
+            .expect("the transport is offered");
+        w.providers[index].selected = true;
+        w.show_tos_confirm = true;
+        w.enter(Step::Review);
+
+        let screen = rendered(&w);
+        assert!(
+            screen.contains("Terms of Service"),
+            "overlay title missing:\n{screen}"
+        );
+        assert!(
+            screen.contains("Press"),
+            "call to action missing:\n{screen}"
+        );
+        assert!(
+            screen.contains("any other key"),
+            "dismissal hint missing:\n{screen}"
+        );
     }
 
     #[test]

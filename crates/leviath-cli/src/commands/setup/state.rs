@@ -209,6 +209,13 @@ pub struct Wizard {
     /// Show credentials in clear text.
     pub reveal: bool,
     pub show_help: bool,
+    /// The Claude Code terms-of-service confirmation is on screen, and is the
+    /// only thing keys mean until it is answered.
+    pub show_tos_confirm: bool,
+    /// The user has acknowledged the Claude Code transport's terms risk. A
+    /// hard gate on saving: the transport cannot be written to the config
+    /// without it, and deselecting the transport withdraws it.
+    pub claude_code_tos_accepted: bool,
     pub should_quit: bool,
     /// Set once the plan has been applied, so the loop knows to stop.
     pub finished: bool,
@@ -326,6 +333,8 @@ impl Wizard {
             edit: None,
             reveal: false,
             show_help: false,
+            show_tos_confirm: false,
+            claude_code_tos_accepted: false,
             should_quit: false,
             finished: false,
             message: None,
@@ -368,6 +377,21 @@ impl Wizard {
     /// The provider row the credential screen is currently showing.
     pub fn detail_row(&self) -> Option<usize> {
         self.selected_providers().get(self.detail).copied()
+    }
+
+    /// Whether the Claude Code transport is one of the picked providers.
+    pub fn claude_code_selected(&self) -> bool {
+        self.providers
+            .iter()
+            .any(|r| r.selected && r.provider.id == "claude-code")
+    }
+
+    /// Whether saving must first ask the user to acknowledge Anthropic's
+    /// terms. Enabling the transport routes inference through a subscription
+    /// session, so the risk is confirmed once, explicitly, rather than being
+    /// buried in a paragraph nobody reads.
+    pub fn needs_tos_confirmation(&self) -> bool {
+        self.claude_code_selected() && !self.claude_code_tos_accepted
     }
 
     /// The fields the current step edits, if it edits fields.
