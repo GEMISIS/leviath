@@ -163,6 +163,23 @@ impl Dashboard {
             .unwrap_or(false)
     }
 
+    /// Scroll whatever is scrollable right now by `lines` (positive scrolls
+    /// back through the document, matching the existing `review_scroll` /
+    /// `detail_scroll` convention).
+    ///
+    /// One place so the keyboard and the mouse wheel cannot disagree about
+    /// which pane a gesture moves.
+    pub(crate) fn scroll_by(&mut self, lines: i32) {
+        let target = match self.has_scrollable_review() {
+            true => &mut self.review_scroll,
+            false => &mut self.detail_scroll,
+        };
+        *target = match lines >= 0 {
+            true => target.saturating_add(lines.unsigned_abs() as usize),
+            false => target.saturating_sub(lines.unsigned_abs() as usize),
+        };
+    }
+
     fn handle_input_mode_key(&mut self, key_code: KeyCode, key: crossterm::event::KeyEvent) {
         use interaction::InteractionKind;
         let kind = self
@@ -186,6 +203,8 @@ impl Dashboard {
                         self.input_textarea = tui_textarea::TextArea::default();
                         self.choice_selected = 0;
                     }
+                    KeyCode::PageUp if self.has_scrollable_review() => self.scroll_by(10),
+                    KeyCode::PageDown if self.has_scrollable_review() => self.scroll_by(-10),
                     _ => {
                         self.input_textarea.input(tui_textarea::Input::from(key));
                     }
@@ -208,6 +227,14 @@ impl Dashboard {
                 KeyCode::Down if options_len > 0 && self.choice_selected < options_len - 1 => {
                     self.choice_selected += 1;
                 }
+                // Up/Down move the selection here, so the document gets its own
+                // keys. Without these there was no way at all to read a plan
+                // longer than the pane while its approval prompt was open —
+                // which is exactly when you need to read it.
+                KeyCode::PageUp => self.scroll_by(10),
+                KeyCode::PageDown => self.scroll_by(-10),
+                KeyCode::Home => self.scroll_by(i32::MAX),
+                KeyCode::End => self.scroll_by(i32::MIN),
                 _ => {}
             },
         }
@@ -1109,6 +1136,121 @@ mod tests {
     }
 
     // ─── handle_input_mode_key for choice navigation ──────────────────────
+
+    /// A plan approval is a multiple-choice prompt with the plan as its body.
+    fn dashboard_awaiting_a_plan() -> Dashboard {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        let mut req = leviath_core::interaction::InteractionRequest::multiple_choice(
+            "plan_approval",
+            "Review the plan above. What would you like to do?",
+            vec!["Approve".into(), "Revise".into()],
+            "plan",
+        );
+        req.body = Some(format!("## Plan\n{}", "1. a step\n".repeat(200)));
+        agent.pending_request = Some(req);
+        agent.waiting_prompt = Some("Review the plan above.".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        dash
+    }
+
+    /// Up/Down move the choice selection, so before this there was no key at
+    /// all that scrolled the document — a plan longer than the pane could not
+    /// be read while its approval prompt was open, which is the only time it is
+    /// shown.
+    #[test]
+    fn a_plan_can_be_scrolled_while_its_approval_prompt_is_open() {
+        let mut dash = dashboard_awaiting_a_plan();
+        assert_eq!(dash.review_scroll, 0);
+
+        dash.handle_key(key(KeyCode::PageUp));
+        assert_eq!(dash.review_scroll, 10, "PageUp scrolls the plan");
+        dash.handle_key(key(KeyCode::PageDown));
+        assert_eq!(dash.review_scroll, 0, "and PageDown comes back");
+
+        // Down still selects rather than scrolling — the plan keys were added
+        // beside the choice keys, not on top of them.
+        dash.choice_selected = 0;
+        dash.handle_key(key(KeyCode::Down));
+        assert_eq!(dash.choice_selected, 1);
+        assert_eq!(dash.review_scroll, 0);
+
+        // Home/End jump the length of the document without overflowing.
+        dash.handle_key(key(KeyCode::Home));
+        assert!(dash.review_scroll > 0);
+        dash.handle_key(key(KeyCode::End));
+        assert_eq!(dash.review_scroll, 0);
+    }
+
+    /// A free-text prompt can carry a document too (an agent asking a question
+    /// about something it is showing you), so it gets the same scroll keys.
+    /// `EditText` deliberately does not: there the body is what you are editing,
+    /// and PageUp/PageDown belong to the text area.
+    #[test]
+    fn free_text_scrolls_a_review_but_edit_text_keeps_its_page_keys() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        let mut req = leviath_core::interaction::InteractionRequest::free_text(
+            "q1",
+            "What next?",
+            "plan",
+            true,
+        );
+        req.body = Some("a line\n".repeat(200));
+        agent.pending_request = Some(req);
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+
+        dash.handle_key(key(KeyCode::PageUp));
+        assert_eq!(dash.review_scroll, 10, "the document scrolls");
+        assert!(
+            dash.input_textarea.lines().concat().is_empty(),
+            "and the key did not land in the answer box"
+        );
+        dash.handle_key(key(KeyCode::PageDown));
+        assert_eq!(dash.review_scroll, 0);
+
+        // EditText: the body is the thing being edited, so the guard is false
+        // and the key goes to the text area instead.
+        dash.agents[0].pending_request =
+            Some(leviath_core::interaction::InteractionRequest::edit_text(
+                "e1",
+                "Edit the plan",
+                "plan",
+                "## Plan\n1. a step",
+            ));
+        dash.review_scroll = 0;
+        dash.handle_key(key(KeyCode::PageUp));
+        assert_eq!(
+            dash.review_scroll, 0,
+            "an edit target is not scrolled out from under the cursor"
+        );
+    }
+
+    /// The wheel moves the same pane the keyboard does.
+    #[test]
+    fn the_mouse_wheel_scrolls_the_review_and_falls_back_to_the_detail_pane() {
+        let mut dash = dashboard_awaiting_a_plan();
+        dash.scroll_by(3);
+        assert_eq!(dash.review_scroll, 3);
+        assert_eq!(dash.detail_scroll, 0, "the detail pane did not move");
+        dash.scroll_by(-3);
+        assert_eq!(dash.review_scroll, 0);
+        // Past the top it stops rather than wrapping.
+        dash.scroll_by(-3);
+        assert_eq!(dash.review_scroll, 0);
+
+        // With no review document, the same gesture scrolls the detail pane.
+        dash.agents[0].pending_request = None;
+        dash.scroll_by(5);
+        assert_eq!(dash.detail_scroll, 5);
+        assert_eq!(dash.review_scroll, 0);
+    }
 
     #[test]
     fn input_mode_choice_up_down() {

@@ -246,13 +246,19 @@ pub async fn dispatch_tools(
 
         let is_builtin = state.builtin_names.contains(&tc.name);
         // What a session-scoped approval for *this specific call* would be
-        // remembered under. For a shell call that is the command's leading words,
-        // not the bare tool name — see `session_approval_key`.
-        let approval_key = crate::tools::session_approval_key(&tc.name, &tc.arguments);
-        let session_approved = match &approval_key {
-            Some(key) => state.session_allows.lock().await.contains(key),
+        // remembered under. For a shell call that is one key per command in the
+        // line, not the bare tool name — see `session_approval_keys`.
+        let approval_keys = crate::tools::session_approval_keys(&tc.name, &tc.arguments);
+        let session_approved = match approval_keys.is_empty() {
             // A call with no reusable key can never match an earlier grant.
-            None => false,
+            true => false,
+            // Every command in the line must already be granted. One ungranted
+            // program is enough to ask again — that is what stops a grant for
+            // `ls` from covering `ls && curl evil`.
+            false => {
+                let allows = state.session_allows.lock().await;
+                approval_keys.iter().all(|k| allows.contains(k))
+            }
         };
         let policy = if session_approved {
             ToolPolicy::Allow
@@ -288,15 +294,14 @@ pub async fn dispatch_tools(
                 );
                 let response = state.interaction.ask(req).await;
                 if response.approved.unwrap_or(false) {
-                    // Record the grant under the key that describes what was
-                    // actually approved. `None` means this call is not reusable
-                    // (a chained shell command), so "for this session" degrades
-                    // to "this once" — the safe direction, and the only honest
-                    // one when the command's leading words don't characterize it.
-                    if response.scope == Some(ApprovalScope::Session)
-                        && let Some(key) = &approval_key
-                    {
-                        state.session_allows.lock().await.insert(key.clone());
+                    // Record a grant for each command the user just saw run. An
+                    // empty key list means this call is not reusable, so "for
+                    // this session" degrades to "this once" — the safe direction.
+                    if response.scope == Some(ApprovalScope::Session) && !approval_keys.is_empty() {
+                        let mut allows = state.session_allows.lock().await;
+                        for key in &approval_keys {
+                            allows.insert(key.clone());
+                        }
                     }
                     slots.push((tc.id.clone(), None));
                     queued.push((slot, is_builtin, tc));
@@ -1296,8 +1301,9 @@ mod tests {
 
     /// H2: a session grant is scoped to what was approved. Approving `ls` must
     /// not carry over to a command that merely *starts* with `ls` and then
-    /// chains something else — `session_approval_key` returns `None` for a
-    /// chained command, so the grant cannot match and the policy decides again.
+    /// chains something else. A chained line is now split into one key per
+    /// command it runs, and *every* one has to be granted — so `curl` and `sh`,
+    /// which the user never approved, send it back to the policy.
     #[tokio::test]
     async fn a_session_grant_does_not_carry_to_a_chained_command() {
         let hub = InteractionHub::new();
@@ -1342,6 +1348,37 @@ mod tests {
             !plain.contains("[denied]"),
             "the approved command itself must still run, got: {plain}"
         );
+
+        // And a line that cannot be read as a list of commands has no keys at
+        // all, so it can never match a grant no matter what is in the set.
+        let out = dispatch_tools(
+            state_with_grant_for_everything(&hub).await,
+            vec![call(
+                "c3",
+                "shell",
+                serde_json::json!({"command": "echo `whoami`"}),
+            )],
+        )
+        .await;
+        let unreadable = out[0].1.clone();
+        assert!(
+            unreadable.contains("[denied]"),
+            "an ungrantable line must not ride any grant, got: {unreadable}"
+        );
+    }
+
+    /// A state whose session set already contains every key these tests use, so
+    /// a call that still gets denied can only be one with no key at all.
+    async fn state_with_grant_for_everything(hub: &InteractionHub) -> Arc<AgentToolState> {
+        let mut perms = HashMap::new();
+        perms.insert("shell".to_string(), ToolPolicy::Deny);
+        let state = state_with(hub, leviath_mcp::ToolExecutor::new(), perms);
+        let mut allows = state.session_allows.lock().await;
+        for key in ["shell:echo", "shell:whoami", "shell:ls"] {
+            allows.insert(key.to_string());
+        }
+        drop(allows);
+        state
     }
 
     /// The hole this closes: sub-agent calls took an early return that skipped

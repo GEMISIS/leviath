@@ -178,6 +178,14 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     dashboard.handle_key(key);
                 }
+                // The wheel scrolls the same pane the keyboard does. Three lines
+                // per notch is the usual terminal convention; one felt broken on
+                // a long plan, which is the document people actually scroll.
+                Event::Mouse(m) => match m.kind {
+                    crossterm::event::MouseEventKind::ScrollUp => dashboard.scroll_by(3),
+                    crossterm::event::MouseEventKind::ScrollDown => dashboard.scroll_by(-3),
+                    _ => {}
+                },
                 Event::Resize(_, _) => {
                     // Terminal will redraw automatically on next tick
                 }
@@ -594,9 +602,26 @@ mod tests {
         let mut dashboard = make_test_dashboard();
         let control = no_daemon_control();
         let mut terminal = test_terminal();
-        // A no-op Resize tick first, then the Esc that triggers quit --
-        // covers both the `Event::Resize` and `Event::Key` match arms.
-        let mut events = TestEventSource::new(vec![Event::Resize(80, 24), key(KeyCode::Esc)]);
+        // A no-op Resize tick, then both wheel directions, then the Esc that
+        // triggers quit -- covers every arm of the event match, including the
+        // mouse one that carries scrolling.
+        let wheel = |kind| {
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column: 0,
+                row: 0,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            })
+        };
+        let mut events = TestEventSource::new(vec![
+            Event::Resize(80, 24),
+            wheel(crossterm::event::MouseEventKind::ScrollUp),
+            wheel(crossterm::event::MouseEventKind::ScrollDown),
+            // A button press is not a scroll and must be ignored rather than
+            // moving the view under the user.
+            wheel(crossterm::event::MouseEventKind::Moved),
+            key(KeyCode::Esc),
+        ]);
 
         let result = run_dashboard_loop(
             &mut dashboard,

@@ -1272,6 +1272,11 @@ prompt = "Run"
                 }),
                 Some(ready_tx),
             ));
+            // `RecvError` here means the sender was dropped, which any early
+            // return from `execute_with_shutdown` does — so this reads as "the
+            // server failed to start" without saying why. Left as-is rather
+            // than adding a reporting branch that only a failing run executes,
+            // which the coverage gate would (correctly) flag as dead.
             ready_rx.await.expect("the server bound");
             let _ = stop_tx.send(());
             server.await.expect("join").expect("clean shutdown");
@@ -1291,7 +1296,12 @@ prompt = "Run"
         )
         .await
         .expect_err("a malformed origin must refuse to start");
-        assert!(err.to_string().contains("not a valid origin header"));
+        // Printed on failure: startup can fail earlier than the CORS check (the
+        // config load, for one), and "assertion failed" alone does not say so.
+        assert!(
+            err.to_string().contains("not a valid origin header"),
+            "expected the CORS parse to be what refused, got: {err}"
+        );
     }
 
     /// The MCP admin endpoints are mounted only with `--allow-admin`: adding an

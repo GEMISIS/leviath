@@ -13,6 +13,7 @@ use std::io;
 
 use clap::Parser;
 use crossterm::ExecutableCommand;
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -586,6 +587,14 @@ impl TerminalSetup for CrosstermSetup {
         io::stdout()
             .execute(EnterAlternateScreen)
             .map_err(anyhow::Error::from)?;
+        // Mouse capture is what delivers wheel events. It also takes over
+        // click-drag, so the terminal's own text selection stops working while
+        // the dashboard is up — hold Shift (or Option on macOS Terminal) to
+        // select as usual. Worth the trade: reading a long plan by wheel is the
+        // common case, copying out of the dashboard is not.
+        io::stdout()
+            .execute(EnableMouseCapture)
+            .map_err(anyhow::Error::from)?;
         Ok(())
     }
 
@@ -601,6 +610,10 @@ impl TerminalSetup for CrosstermSetup {
     }
 
     fn disable(&mut self) {
+        // Released before leaving the alternate screen, and unconditionally: a
+        // terminal left in mouse-reporting mode emits escape sequences into the
+        // user's shell on every click afterwards.
+        io::stdout().execute(DisableMouseCapture).ok();
         disable_raw_mode().ok();
         io::stdout().execute(LeaveAlternateScreen).ok();
     }
