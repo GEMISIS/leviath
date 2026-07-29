@@ -33,6 +33,11 @@ impl Wizard {
             self.handle_edit_key(key, edit);
             return Action::Continue;
         }
+        if self.show_tos_confirm {
+            // A hard gate: nothing else means anything until it is answered.
+            self.handle_tos_key(key);
+            return Action::Continue;
+        }
         if self.show_help {
             // Any key dismisses the help overlay.
             self.show_help = false;
@@ -74,7 +79,13 @@ impl Wizard {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
         match key.code {
-            KeyCode::Char('s') if ctrl => return Action::Save,
+            KeyCode::Char('s') if ctrl => {
+                if self.needs_tos_confirmation() {
+                    self.show_tos_confirm = true;
+                    return Action::Continue;
+                }
+                return Action::Save;
+            }
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('?') => self.show_help = true,
             KeyCode::Char('r') if ctrl => {
@@ -109,7 +120,13 @@ impl Wizard {
     /// always the key that moves forward.
     fn activate(&mut self) -> Action {
         let opened = match self.step {
-            Step::Review => return Action::Save,
+            Step::Review => {
+                if self.needs_tos_confirmation() {
+                    self.show_tos_confirm = true;
+                    return Action::Continue;
+                }
+                return Action::Save;
+            }
             Step::ProviderDetail => self.open_credential_editor(),
             Step::Defaults | Step::Limits => self.open_field_editor(),
             _ => false,
@@ -157,12 +174,31 @@ impl Wizard {
         true
     }
 
+    /// Handle a key while the ToS confirmation overlay is showing.
+    ///
+    /// Y accepts the terms and goes back one screen so the user can review
+    /// their choices with the acknowledgment recorded. Any other key
+    /// dismisses the overlay and goes back without recording acceptance.
+    fn handle_tos_key(&mut self, key: KeyEvent) {
+        self.show_tos_confirm = false;
+        if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+            self.claude_code_tos_accepted = true;
+        }
+        self.back();
+    }
+
     /// `Space`: toggle whatever the cursor is on.
     fn toggle(&mut self) {
         match self.step {
             Step::Providers => {
                 if let Some(row) = self.providers.get_mut(self.cursor) {
                     row.selected = !row.selected;
+                    // Deselecting the Claude Code transport withdraws the
+                    // terms acceptance so it must be re-confirmed if
+                    // re-enabled.
+                    if row.provider.id == "claude-code" && !row.selected {
+                        self.claude_code_tos_accepted = false;
+                    }
                 }
                 // The credential screen walks selected providers, so its
                 // position is only meaningful relative to the current
@@ -984,5 +1020,135 @@ mod tests {
 
         assert_eq!(w.step, before);
         assert!(!w.should_quit);
+    }
+
+    // ─── Claude Code ToS confirmation gate ──────────────────────────────────
+
+    fn wizard_with_claude_code() -> (tempfile::TempDir, Wizard) {
+        let (dir, mut w) = wizard();
+        let index = w
+            .providers
+            .iter()
+            .position(|r| r.provider.id == "claude-code")
+            .expect("the transport is offered");
+        w.providers[index].selected = true;
+        (dir, w)
+    }
+
+    #[test]
+    fn enter_on_review_with_claude_code_shows_tos_confirmation() {
+        let (_dir, mut w) = wizard_with_claude_code();
+        w.enter(Step::Review);
+
+        let action = w.handle_key(press(KeyCode::Enter));
+
+        assert_eq!(
+            action,
+            Action::Continue,
+            "must not save without ToS acceptance"
+        );
+        assert!(w.show_tos_confirm, "the overlay should be showing");
+    }
+
+    #[test]
+    fn ctrl_s_with_claude_code_shows_tos_confirmation() {
+        let (_dir, mut w) = wizard_with_claude_code();
+        w.enter(Step::Providers);
+
+        let action = w.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+        assert_eq!(action, Action::Continue);
+        assert!(w.show_tos_confirm);
+    }
+
+    #[test]
+    fn pressing_y_on_tos_confirmation_accepts_and_goes_back() {
+        let (_dir, mut w) = wizard_with_claude_code();
+        w.enter(Step::Review);
+        w.handle_key(press(KeyCode::Enter));
+        assert!(w.show_tos_confirm);
+
+        w.handle_key(press(KeyCode::Char('y')));
+
+        assert!(w.claude_code_tos_accepted);
+        assert!(!w.show_tos_confirm);
+        assert_ne!(w.step, Step::Review, "should have gone back");
+    }
+
+    #[test]
+    fn pressing_uppercase_y_also_accepts() {
+        let (_dir, mut w) = wizard_with_claude_code();
+        w.enter(Step::Review);
+        w.handle_key(press(KeyCode::Enter));
+
+        w.handle_key(press(KeyCode::Char('Y')));
+
+        assert!(w.claude_code_tos_accepted);
+        assert!(!w.show_tos_confirm);
+    }
+
+    #[test]
+    fn pressing_n_on_tos_confirmation_goes_back_without_accepting() {
+        let (_dir, mut w) = wizard_with_claude_code();
+        w.enter(Step::Review);
+        w.handle_key(press(KeyCode::Enter));
+
+        w.handle_key(press(KeyCode::Char('n')));
+
+        assert!(!w.claude_code_tos_accepted);
+        assert!(!w.show_tos_confirm);
+        assert_ne!(w.step, Step::Review);
+    }
+
+    #[test]
+    fn second_enter_on_review_after_accepting_saves() {
+        let (_dir, mut w) = wizard_with_claude_code();
+        w.enter(Step::Review);
+        w.handle_key(press(KeyCode::Enter)); // shows overlay
+        w.handle_key(press(KeyCode::Char('y'))); // accept, goes back
+
+        w.enter(Step::Review);
+        let action = w.handle_key(press(KeyCode::Enter));
+
+        assert_eq!(action, Action::Save, "should save after ToS accepted");
+    }
+
+    #[test]
+    fn deselecting_claude_code_resets_tos_acceptance() {
+        let (_dir, mut w) = wizard_with_claude_code();
+        w.claude_code_tos_accepted = true;
+
+        let index = w
+            .providers
+            .iter()
+            .position(|r| r.provider.id == "claude-code")
+            .unwrap();
+        w.enter(Step::Providers);
+        w.cursor = index;
+        w.handle_key(press(KeyCode::Char(' '))); // deselect
+
+        assert!(!w.claude_code_tos_accepted);
+    }
+
+    #[test]
+    fn tos_overlay_blocks_all_other_keys() {
+        let (_dir, mut w) = wizard_with_claude_code();
+        w.enter(Step::Review);
+        w.handle_key(press(KeyCode::Enter));
+        assert!(w.show_tos_confirm);
+
+        // q should NOT quit - the overlay eats it
+        w.handle_key(press(KeyCode::Char('q')));
+        assert!(!w.should_quit, "q must not quit while overlay is showing");
+        assert!(!w.show_tos_confirm, "overlay dismissed");
+    }
+
+    #[test]
+    fn without_claude_code_review_saves_immediately() {
+        let (_dir, mut w) = wizard();
+        w.enter(Step::Review);
+
+        let action = w.handle_key(press(KeyCode::Enter));
+        assert_eq!(action, Action::Save, "no claude-code means no gate");
     }
 }
