@@ -48,7 +48,7 @@ use leviath_runtime::control_socket::{ControlClient, ControlRequest, ControlResp
 use leviath_runtime::host::WorldEvent;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
-use self::mapping::{PermissionChoice, interpret_permission, stop_reason_for_completed};
+use self::mapping::{PermissionChoice, interpret_permission};
 use self::session::{ResolvedBlueprint, resolve_blueprint, spawn_args};
 use self::translate::{StageTail, split_chunks};
 
@@ -421,7 +421,7 @@ impl Server {
                     self.flush_output(&session_id, &mut tail, &run_id).await;
                     match event {
                         WorldEvent::Completed { status, .. } => {
-                            return stop_reason_for_completed(&status);
+                            return leviath_agent_client::stop_reason_for_label(&status);
                         }
                         WorldEvent::Context { total_tokens, max_tokens, .. } => {
                             self.emit_usage(&session_id, total_tokens, max_tokens).await;
@@ -476,7 +476,7 @@ impl Server {
     /// waiting on an interaction Leviath is handling out of band.
     fn run_finished(&self, run_id: &str) -> Option<StopReason> {
         let status = read_run_status(&self.runs_dir, run_id)?;
-        stop_reason_for_run_status(&status)
+        leviath_agent_client::stop_reason_for(&status)
     }
 
     /// Spawn the agent on the first prompt, or deliver a message on later ones.
@@ -736,15 +736,6 @@ fn read_run_status(runs_dir: &std::path::Path, run_id: &str) -> Option<RunStatus
 /// work and is only idling for optional follow-up, so control returns to the
 /// client. `WaitingInput` does **not** — the agent is blocked on an interaction,
 /// which is exactly the state that must not be reported as "done".
-fn stop_reason_for_run_status(status: &RunStatus) -> Option<StopReason> {
-    match status {
-        RunStatus::Complete | RunStatus::CompleteInteractive => Some(StopReason::EndTurn),
-        RunStatus::Error => Some(StopReason::Refusal),
-        RunStatus::Cancelled => Some(StopReason::Cancelled),
-        RunStatus::Starting | RunStatus::Running | RunStatus::WaitingInput => None,
-    }
-}
-
 /// The run id carried by any [`WorldEvent`] variant.
 fn world_event_run_id(event: &WorldEvent) -> &str {
     match event {
@@ -830,20 +821,9 @@ mod mapping {
     /// The stop reason to report for a run whose `WorldEvent::Completed` carried
     /// `status`. The host emits only the terminal statuses `complete`, `error`,
     /// and `cancelled`.
-    pub(super) fn stop_reason_for_completed(status: &str) -> leviath_agent_client::StopReason {
-        use leviath_agent_client::StopReason;
-        match status {
-            "cancelled" => StopReason::Cancelled,
-            "error" => StopReason::Refusal,
-            // "complete" and any unexpected terminal label.
-            _ => StopReason::EndTurn,
-        }
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
-        use leviath_agent_client::StopReason;
 
         #[test]
         fn interpret_maps_every_offered_option() {
@@ -877,17 +857,6 @@ mod mapping {
             let cancelled = interpret_permission(&PermissionOutcome::Cancelled);
             assert!(!cancelled.approved);
             assert_eq!(cancelled.scope, ApprovalScope::Once);
-        }
-
-        #[test]
-        fn completed_status_maps_to_stop_reason() {
-            assert_eq!(
-                stop_reason_for_completed("cancelled"),
-                StopReason::Cancelled
-            );
-            assert_eq!(stop_reason_for_completed("error"), StopReason::Refusal);
-            assert_eq!(stop_reason_for_completed("complete"), StopReason::EndTurn);
-            assert_eq!(stop_reason_for_completed("weird"), StopReason::EndTurn);
         }
     }
 }

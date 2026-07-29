@@ -131,22 +131,31 @@ pub fn parse_region_markers(text: &str) -> std::collections::HashMap<String, Str
     out
 }
 
-/// The stop reason to report for a run that has reached `status`.
+/// The stop reason to report for a run that has reached `status`, or `None`
+/// while the run has not stopped at all.
 ///
-/// `Error` maps to `refusal` rather than inventing a failure code: the protocol
-/// has no "the agent broke" reason, and `refusal` is the only one that tells the
-/// host the turn produced no usable answer. Non-terminal statuses map to
-/// `end_turn` — the agent has stopped talking and is waiting on the host, which
-/// is exactly what ends a turn.
-pub fn stop_reason_for(status: &RunStatus) -> StopReason {
+/// `Error` maps to `refusal` rather than inventing a failure code: the
+/// protocol has no "the agent broke" reason, and `refusal` is the only one
+/// that tells the host the turn produced no usable answer. Non-terminal
+/// statuses yield `None` so a poller can distinguish "still running" from
+/// "ended" without a second status check.
+pub fn stop_reason_for(status: &RunStatus) -> Option<StopReason> {
     match status {
-        RunStatus::Cancelled => StopReason::Cancelled,
-        RunStatus::Error => StopReason::Refusal,
-        RunStatus::Starting
-        | RunStatus::Running
-        | RunStatus::WaitingInput
-        | RunStatus::Complete
-        | RunStatus::CompleteInteractive => StopReason::EndTurn,
+        RunStatus::Complete | RunStatus::CompleteInteractive => Some(StopReason::EndTurn),
+        RunStatus::Error => Some(StopReason::Refusal),
+        RunStatus::Cancelled => Some(StopReason::Cancelled),
+        RunStatus::Starting | RunStatus::Running | RunStatus::WaitingInput => None,
+    }
+}
+
+/// [`stop_reason_for`] over the string labels carried by completion events,
+/// which report a terminal status by name rather than as a [`RunStatus`].
+/// An unexpected label reads as an ordinary end of turn.
+pub fn stop_reason_for_label(status: &str) -> StopReason {
+    match status {
+        "cancelled" => StopReason::Cancelled,
+        "error" => StopReason::Refusal,
+        _ => StopReason::EndTurn,
     }
 }
 
@@ -408,16 +417,24 @@ this trailing text is ignored";
     #[test]
     fn stop_reason_maps_every_run_status() {
         for (status, expected) in [
-            (RunStatus::Starting, StopReason::EndTurn),
-            (RunStatus::Running, StopReason::EndTurn),
-            (RunStatus::WaitingInput, StopReason::EndTurn),
-            (RunStatus::Complete, StopReason::EndTurn),
-            (RunStatus::CompleteInteractive, StopReason::EndTurn),
-            (RunStatus::Error, StopReason::Refusal),
-            (RunStatus::Cancelled, StopReason::Cancelled),
+            (RunStatus::Starting, None),
+            (RunStatus::Running, None),
+            (RunStatus::WaitingInput, None),
+            (RunStatus::Complete, Some(StopReason::EndTurn)),
+            (RunStatus::CompleteInteractive, Some(StopReason::EndTurn)),
+            (RunStatus::Error, Some(StopReason::Refusal)),
+            (RunStatus::Cancelled, Some(StopReason::Cancelled)),
         ] {
             assert_eq!(stop_reason_for(&status), expected, "status {status}");
         }
+    }
+
+    #[test]
+    fn stop_reason_label_matches_the_status_mapping() {
+        assert_eq!(stop_reason_for_label("cancelled"), StopReason::Cancelled);
+        assert_eq!(stop_reason_for_label("error"), StopReason::Refusal);
+        assert_eq!(stop_reason_for_label("complete"), StopReason::EndTurn);
+        assert_eq!(stop_reason_for_label("anything-else"), StopReason::EndTurn);
     }
 
     // ─── permission_request ──────────────────────────────────────────────────

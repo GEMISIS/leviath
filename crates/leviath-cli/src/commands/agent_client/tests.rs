@@ -1407,27 +1407,4 @@ mod run_status_helpers {
         std::fs::write(run.join("meta.json"), "not json").unwrap();
         assert_eq!(read_run_status(dir.path(), "bad"), None);
     }
-
-    #[test]
-    fn stop_reason_for_run_status_maps_every_status() {
-        assert_eq!(
-            stop_reason_for_run_status(&RunStatus::Complete),
-            Some(StopReason::EndTurn)
-        );
-        assert_eq!(
-            stop_reason_for_run_status(&RunStatus::CompleteInteractive),
-            Some(StopReason::EndTurn)
-        );
-        assert_eq!(
-            stop_reason_for_run_status(&RunStatus::Error),
-            Some(StopReason::Refusal)
-        );
-        assert_eq!(
-            stop_reason_for_run_status(&RunStatus::Cancelled),
-            Some(StopReason::Cancelled)
-        );
-        assert_eq!(stop_reason_for_run_status(&RunStatus::Starting), None);
-        assert_eq!(stop_reason_for_run_status(&RunStatus::Running), None);
-        assert_eq!(stop_reason_for_run_status(&RunStatus::WaitingInput), None);
-    }
 }
