@@ -911,6 +911,11 @@ fn build_agent_inner(
         &config.tool_script_permissions,
         &content,
     );
+    // Same ceiling `build_tool_state` resolves for the built-in tools: the
+    // global `[tool_permissions]` with this agent's `[agent_tool_permissions]`
+    // grants overlaid. Passing the raw global map here would silently ignore a
+    // per-agent grant when a script tool's `inherit` defers to the built-in.
+    let agent_scoped_perms = config.permissions_for_agent(&agent_name);
     let script_allow = crate::daemon::script_host::resolve_script_permissions(
         &effective_script_perms,
         &|builtin| {
@@ -920,7 +925,7 @@ fn build_agent_inner(
                 &launch_overrides,
                 &entry_stage_perms,
                 &agent_perms,
-                &config.tool_permissions,
+                &agent_scoped_perms,
             )
         },
     );
@@ -1833,6 +1838,57 @@ mod tests {
         assert!(
             out[0].1.contains("[denied]"),
             "agent-level deny should block read_file"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_agent_script_host_honors_agent_level_grants() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"scriptperm\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+
+        // `write_file` defaults to Ask, and a script-permission `Inherit`
+        // permits the host function only on a hard Allow. The grant below
+        // lives solely in the user's per-agent block, so the script host can
+        // only see it through the agent-scoped ceiling — the raw global
+        // `[tool_permissions]` map is empty here.
+        let mut config = Config::default();
+        config.agent_tool_permissions.insert(
+            "scriptperm".to_string(),
+            HashMap::from([("write_file".to_string(), crate::config::ToolPolicy::Allow)]),
+        );
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let mut args = spawn_args(&manifest.to_string_lossy());
+        args.workdir = dir.path().to_string_lossy().to_string();
+        let entity = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &config,
+            mcp,
+            &[],
+            &hub,
+            &args,
+            100,
+            sub_tx(),
+        )
+        .expect("spawn succeeds");
+
+        let state = cli.take(entity).expect("tool state registered at spawn");
+        state
+            .script_host
+            .write_file("granted.txt", "ok")
+            .expect("agent-level write_file grant must reach the script host");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("granted.txt")).unwrap(),
+            "ok"
         );
     }
 
