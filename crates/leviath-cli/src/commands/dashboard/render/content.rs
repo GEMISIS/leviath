@@ -178,15 +178,6 @@ impl Dashboard {
             return;
         }
 
-        // Read-only stage content accepts mouse selection; the rect excludes
-        // the borders (and with them the scrollbar track, which sits on the
-        // right border column). The editor branch above deliberately does not
-        // register: tui-textarea owns those cells.
-        self.selection_regions.push(content_area.inner(Margin {
-            vertical: 1,
-            horizontal: 1,
-        }));
-
         let inner_h = content_area.height.saturating_sub(2) as usize;
         let render_width = content_area.width.saturating_sub(2);
         let is_context = self.stage_content_mode == StageContentMode::Context;
@@ -250,20 +241,27 @@ impl Dashboard {
                 .collect()
         };
 
-        // Clamp search_match_idx and jump to current match
+        // Scrolling operates in *display rows*: long lines wrap at draw time,
+        // so counting logical lines undercounts what is on screen and leaves
+        // the wrapped tail clipped past the pane bottom. `line_count` measures
+        // exactly what `Paragraph` will render at this width.
+        let total_rows = wrapped_rows(&all_lines, render_width);
+
+        // Clamp search_match_idx and jump to current match (centred by the
+        // match's display row, since that is what the viewport scrolls by).
         if !match_indices.is_empty() {
             self.search_match_idx = self.search_match_idx.min(match_indices.len() - 1);
             let match_line = match_indices[self.search_match_idx];
-            let center_scroll = total.saturating_sub(match_line + inner_h / 2);
-            self.detail_scroll = center_scroll;
+            let rows_before = wrapped_rows(&all_lines[..match_line], render_width);
+            self.detail_scroll = total_rows.saturating_sub(rows_before + inner_h / 2);
         }
 
-        let max_scroll = total.saturating_sub(inner_h);
+        let max_scroll = total_rows.saturating_sub(inner_h);
         if self.detail_scroll > max_scroll {
             self.detail_scroll = max_scroll;
         }
-        let start = total.saturating_sub(inner_h + self.detail_scroll);
-        let end = (start + inner_h).min(total);
+        // Rows hidden above the viewport; 0 = top, max_scroll = bottom pinned.
+        let scroll_y = max_scroll - self.detail_scroll;
 
         let visible: Vec<Line> = if total == 0 {
             let stage_name = agent
@@ -281,11 +279,10 @@ impl Dashboard {
             ))]
         } else {
             let current_match_line = match_indices.get(self.search_match_idx).copied();
-            all_lines[start..end]
+            all_lines
                 .iter()
                 .enumerate()
-                .map(|(rel_idx, line)| {
-                    let abs_idx = start + rel_idx;
+                .map(|(abs_idx, line)| {
                     let is_current_match = current_match_line == Some(abs_idx);
                     let is_any_match = !query_lc.is_empty() && match_indices.contains(&abs_idx);
                     if is_current_match {
@@ -366,12 +363,12 @@ impl Dashboard {
                 format!(" Context Window  [o] output  [l] logs{} ", search_indicator)
             }
         };
-        let scroll_info = if total > inner_h {
+        let scroll_info = if total_rows > inner_h {
             let pct = 100
                 - (self.detail_scroll.min(max_scroll) * 100)
                     .checked_div(max_scroll)
                     .unwrap_or(0);
-            format!(" {}% ({}/{}) ", pct, end, total)
+            format!(" {}% ({}/{}) ", pct, scroll_y + inner_h, total_rows)
         } else {
             String::new()
         };
@@ -407,18 +404,21 @@ impl Dashboard {
             )
             .title_bottom(Span::styled(scroll_info, Style::default().fg(C_DIM)));
 
+        // The full text renders with a row offset (`scroll` applies after
+        // wrapping), so the viewport is exact: the bottom row of the pane is
+        // the bottom row of the document when detail_scroll is 0.
         let content_widget = Paragraph::new(visible)
             .block(content_block)
-            .wrap(Wrap { trim: false });
+            .wrap(Wrap { trim: false })
+            .scroll((scroll_y.min(u16::MAX as usize) as u16, 0));
         frame.render_widget(content_widget, content_area);
 
-        // Scrollbar
-        if total > inner_h {
+        // Scrollbar, in display rows.
+        if total_rows > inner_h {
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("↑"))
                 .end_symbol(Some("↓"));
-            let mut sb_state = ScrollbarState::new(max_scroll)
-                .position(max_scroll.saturating_sub(self.detail_scroll));
+            let mut sb_state = ScrollbarState::new(max_scroll).position(scroll_y);
             frame.render_stateful_widget(
                 scrollbar,
                 content_area.inner(Margin {
@@ -733,6 +733,15 @@ impl Dashboard {
     }
 }
 
+/// The number of display rows `lines` occupy at `width` once `Paragraph`
+/// wraps them - the same measurement the renderer itself uses, so the scroll
+/// math can never disagree with what is on screen.
+pub(in crate::commands::dashboard) fn wrapped_rows(lines: &[Line<'static>], width: u16) -> usize {
+    Paragraph::new(lines.to_vec())
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -955,48 +964,6 @@ mod tests {
                 dash.render_content_pane(f, area, &agent, 100);
             })
             .unwrap();
-    }
-
-    #[test]
-    fn render_content_pane_registers_its_selection_region() {
-        let backend = TestBackend::new(120, 40);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let mut dash = make_test_dashboard();
-        let agent = make_test_agent("run-selreg", AgentDisplayStatus::Active);
-        let area = Rect::new(0, 0, 100, 20);
-        terminal
-            .draw(|f| dash.render_content_pane(f, area, &agent, 100))
-            .unwrap();
-        // Borders excluded, so mouse selection can never grab the frame or
-        // the scrollbar track on the right border column.
-        assert_eq!(
-            dash.selection_regions,
-            vec![area.inner(ratatui::layout::Margin {
-                vertical: 1,
-                horizontal: 1,
-            })]
-        );
-    }
-
-    #[test]
-    fn render_content_pane_does_not_register_selection_while_editing() {
-        let backend = TestBackend::new(120, 40);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let mut dash = make_test_dashboard();
-        let mut agent = make_test_agent("run-selreg-edit", AgentDisplayStatus::Waiting);
-        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::edit_text(
-            "et2", "Edit", "plan", "line A",
-        ));
-        dash.agents.push(agent.clone());
-        dash.update_display_indices();
-        dash.input_mode = true;
-        assert!(dash.editing_document());
-        terminal
-            .draw(|f| dash.render_content_pane(f, Rect::new(0, 0, 100, 20), &agent, 100))
-            .unwrap();
-        // tui-textarea owns those cells; a selection there would fight the
-        // editor's own cursor and highlighting.
-        assert!(dash.selection_regions.is_empty());
     }
 
     #[test]
@@ -1844,6 +1811,60 @@ mod tests {
     }
 
     // ─── render_content_pane: scroll at bottom (detail_scroll = 0) ────────
+
+    /// The reported bug: with lines longer than the pane, `Paragraph` wraps
+    /// them into more display rows than the logical-line scroll math counted,
+    /// and the document's tail was clipped past the pane bottom - at
+    /// detail_scroll 0 (bottom / auto-follow) the last line was simply not on
+    /// screen. Scrolling now counts display rows, so the bottom is the
+    /// bottom.
+    #[test]
+    fn wrapped_content_shows_its_last_line_at_the_bottom() {
+        let backend = TestBackend::new(50, 14);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.stage_content_mode = StageContentMode::Output;
+        dash.detail_scroll = 0;
+        let agent = setup_run_state_agent_with_logs(
+            "run-wrap-bottom",
+            &[],
+            Some(&format!(
+                "{}\n\n{}\n\nTHE-FINAL-LINE",
+                "wrapping ".repeat(40),
+                "more wrapping text here ".repeat(30),
+            )),
+        );
+        terminal
+            .draw(|f| dash.render_content_pane(f, Rect::new(0, 0, 48, 14), &agent, 48))
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            screen.contains("THE-FINAL-LINE"),
+            "the document tail must be visible at detail_scroll 0:\n{screen}"
+        );
+        let _ = std::fs::remove_dir_all(runstate::run_dir("run-wrap-bottom"));
+    }
+
+    #[test]
+    fn wrapped_rows_counts_display_rows_not_logical_lines() {
+        let lines = vec![
+            Line::from("a".repeat(100)),
+            Line::from("short"),
+            Line::from(""),
+        ];
+        // At width 40 the 100-char line wraps to 3 rows: 3 + 1 + 1 = 5.
+        assert_eq!(wrapped_rows(&lines, 40), 5);
+        // Wide enough for no wrapping: one row per logical line.
+        assert_eq!(wrapped_rows(&lines, 120), 3);
+        // Degenerate width renders nothing.
+        assert_eq!(wrapped_rows(&lines, 0), 0);
+    }
 
     #[test]
     fn render_content_pane_scrollbar_visible_when_overflow() {

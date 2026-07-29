@@ -149,6 +149,55 @@ fn draw_welcome(frame: &mut Frame, area: Rect, wizard: &Wizard) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
+/// Greedy word-wrap for plain text rendered inside `List` items, which
+/// (unlike `Paragraph`) cannot wrap. Words longer than `width` break at a
+/// character boundary rather than overflowing.
+fn wrap_plain(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let mut word = word;
+        loop {
+            let need = if current.is_empty() {
+                word.chars().count()
+            } else {
+                current.chars().count() + 1 + word.chars().count()
+            };
+            if need <= width {
+                if !current.is_empty() {
+                    current.push(' ');
+                }
+                current.push_str(word);
+                break;
+            }
+            if current.is_empty() {
+                // A single word wider than the pane: hard-break it after
+                // `width` characters (a char boundary by construction).
+                // This branch is only reachable when the word has more than
+                // `width` chars (a shorter word takes the fits-branch above),
+                // so the boundary at char `width` always exists.
+                let cut = word
+                    .char_indices()
+                    .nth(width)
+                    .map(|(i, _)| i)
+                    .expect("infallible: the word is longer than width chars");
+                let (head, tail) = word.split_at(cut);
+                lines.push(head.to_string());
+                // The cut is strictly inside the word, so the tail is never
+                // empty; the loop re-tests it against the width.
+                word = tail;
+            } else {
+                lines.push(std::mem::take(&mut current));
+            }
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
 fn draw_providers(frame: &mut Frame, area: Rect, wizard: &Wizard) {
     let items: Vec<ListItem> = wizard
         .providers
@@ -175,13 +224,17 @@ fn draw_providers(frame: &mut Frame, area: Rect, wizard: &Wizard) {
             } else if !row.value.is_empty() {
                 spans.push(Span::styled("  (set)", Style::default().fg(C_MUTED)));
             }
-            ListItem::new(vec![
-                Line::from(spans),
-                Line::from(Span::styled(
-                    format!("    {}", row.provider.blurb),
+            let mut item_lines = vec![Line::from(spans)];
+            // Word-wrap the blurb to the pane: `List` does not wrap, so a
+            // long description on a narrow window would otherwise clip
+            // mid-sentence with nothing to say more text exists.
+            for chunk in wrap_plain(row.provider.blurb, area.width.saturating_sub(6) as usize) {
+                item_lines.push(Line::from(Span::styled(
+                    format!("    {chunk}"),
                     Style::default().fg(C_DIM),
-                )),
-            ])
+                )));
+            }
+            ListItem::new(item_lines)
         })
         .collect();
 
@@ -712,6 +765,40 @@ mod tests {
         let mut terminal = Terminal::new(TestBackendHarness::new(140, 44)).unwrap();
         terminal.draw(|frame| draw(frame, wizard)).unwrap();
         terminal.backend().text()
+    }
+
+    /// A provider blurb on a narrow window must wrap, not clip: the tail of
+    /// the sentence (here the transport's "cannot be disabled" caveat) has to
+    /// reach the screen.
+    #[test]
+    fn narrow_window_wraps_provider_blurbs_instead_of_clipping() {
+        let (_dir, mut w) = wizard();
+        w.enter(Step::Providers);
+        let mut terminal = Terminal::new(TestBackendHarness::new(48, 44)).unwrap();
+        terminal.draw(|frame| draw(frame, &w)).unwrap();
+        let screen = terminal.backend().text();
+        assert!(
+            screen.contains("disabled"),
+            "the blurb tail must survive a 48-column window:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn wrap_plain_wraps_at_word_boundaries_and_hard_breaks_long_words() {
+        assert_eq!(
+            wrap_plain("alpha beta gamma", 11),
+            vec!["alpha beta", "gamma"]
+        );
+        // One word wider than the pane hard-breaks by characters.
+        assert_eq!(wrap_plain("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        // Multibyte characters break on char boundaries, never mid-character.
+        assert_eq!(
+            wrap_plain("\u{65e5}\u{672c}\u{8a9e}\u{3067}\u{3059}", 2),
+            vec!["\u{65e5}\u{672c}", "\u{8a9e}\u{3067}", "\u{3059}"]
+        );
+        assert!(wrap_plain("", 10).is_empty());
+        // A degenerate zero width still terminates and yields one char per line.
+        assert_eq!(wrap_plain("ab", 0), vec!["a", "b"]);
     }
 
     fn wizard() -> (tempfile::TempDir, Wizard) {

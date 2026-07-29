@@ -1,7 +1,7 @@
 //! Agent table, log panel, and help bar rendering.
 
 use ratatui::Frame;
-use ratatui::layout::{Margin, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table};
@@ -164,13 +164,7 @@ impl Dashboard {
         frame.render_stateful_widget(table, area, &mut self.table_state);
     }
 
-    pub(in crate::commands::dashboard) fn draw_log_panel(&mut self, frame: &mut Frame, area: Rect) {
-        // The activity log accepts mouse selection (borders excluded).
-        self.selection_regions.push(area.inner(Margin {
-            vertical: 1,
-            horizontal: 1,
-        }));
-
+    pub(in crate::commands::dashboard) fn draw_log_panel(&self, frame: &mut Frame, area: Rect) {
         let log_lines: Vec<Line> = self
             .log
             .iter()
@@ -672,14 +666,6 @@ mod tests {
                 dash.draw_log_panel(f, area);
             })
             .unwrap();
-        // The activity log accepts mouse selection inside its borders.
-        assert_eq!(
-            dash.selection_regions,
-            vec![Rect::new(0, 0, 120, 40).inner(Margin {
-                vertical: 1,
-                horizontal: 1,
-            })]
-        );
     }
 
     #[test]
