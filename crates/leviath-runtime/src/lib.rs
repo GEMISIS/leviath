@@ -6,33 +6,33 @@
 //! and inference execution through a game-loop-inspired architecture where agents
 //! are entities and their behaviors are systems.
 
-pub mod cancel;
-pub mod compaction_bridge;
+pub(crate) mod cancel;
+pub(crate) mod compaction_bridge;
 pub mod components;
 pub mod context_setup;
-pub mod context_tools;
-pub mod context_transform;
+pub(crate) mod context_tools;
+pub(crate) mod context_transform;
 pub mod control_socket;
 pub mod dynamic_interaction;
 pub mod fanout;
-pub mod gate_prompt;
+pub(crate) mod gate_prompt;
 pub mod host;
-pub mod inference_bridge;
+pub(crate) mod inference_bridge;
 pub mod inference_pool;
 pub mod interaction_hub;
 pub mod interaction_points;
 pub mod persistence;
-pub mod persistence_bridge;
+pub(crate) mod persistence_bridge;
 pub mod pipeline;
 pub mod provider_creds;
-pub mod providers;
-pub mod repetition;
+pub(crate) mod providers;
+pub(crate) mod repetition;
 pub mod restore;
 pub mod script_provider;
 pub mod taint;
-pub mod tick_scope;
+pub(crate) mod tick_scope;
 pub mod title;
-pub mod title_bridge;
+pub(crate) mod title_bridge;
 pub mod tool_bridge;
 pub mod world;
 // test_support.rs gates itself with an inner `#![cfg(test)]` attribute, so no
@@ -40,14 +40,11 @@ pub mod world;
 // `duplicated_attributes` lint under `-D warnings`).
 mod test_support;
 
-pub use components::{
-    AgentMessage, AgentState, AgentStatus, ContextWindow, EvictionResult, InferenceConfig,
-    InferenceResult, MessageInbox, ParentRef, SubAgentChildren, ToolResultRoutingComponent,
-};
-pub use fanout::{FanOutSpawner, FanOutSpawnerRes, WorkItem, parse_work_items};
-pub use inference_bridge::{InferenceJob, InferenceOutcome, RetryPolicy, run_inference_job};
-pub use inference_pool::{InferencePermit, InferencePoolConfig, InferencePools};
+pub use components::{AgentState, AgentStatus, ContextWindow, ParentRef, SubAgentChildren};
+pub use fanout::{FanOutSpawner, FanOutSpawnerRes};
+pub use inference_bridge::RetryPolicy;
+pub use inference_pool::{InferencePoolConfig, InferencePools};
 pub use provider_creds::{ProviderCreds, build_provider_registry};
 pub use providers::ProviderRegistry;
 pub use taint::TaintGate;
-pub use tool_bridge::{BoxedToolExec, ToolExecFuture, ToolJob, ToolOutcome, tool_worker};
+pub use tool_bridge::BoxedToolExec;

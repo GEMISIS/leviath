@@ -3,7 +3,7 @@
 //! The dashboard displays, searches, and persists `RunMetadata.title`; this
 //! module is what fills it in. At spawn, the daemon marks an eligible run
 //! [`PendingTitle`]; [`dispatch_title`] makes one cheap LLM call over the
-//! task prompt via the [`crate::title_bridge`] worker, and [`collect_title`]
+//! task prompt via the `title_bridge` worker, and [`collect_title`]
 //! sanitizes the reply into the metadata. Everything downstream (persistence,
 //! dashboard header, run search) already reads the field.
 //!

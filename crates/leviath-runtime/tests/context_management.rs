@@ -2,9 +2,8 @@
 
 use bevy_ecs::prelude::*;
 use leviath_core::{EvictionStrategy, Region, RegionKind};
-use leviath_runtime::{
-    AgentState, AgentStatus, ContextWindow, MessageInbox, ParentRef, SubAgentChildren,
-};
+use leviath_runtime::components::MessageInbox;
+use leviath_runtime::{AgentState, AgentStatus, ContextWindow, ParentRef, SubAgentChildren};
 
 #[test]
 fn test_pinned_region_never_evicted() {

@@ -26,7 +26,7 @@ pub struct PersistWatermark {
 }
 
 /// The sending end of the persistence I/O lane (the receiving end is drained by
-/// [`crate::persistence_bridge::persistence_worker`]).
+/// `persistence_bridge::persistence_worker`).
 #[derive(Resource)]
 pub struct PersistenceStage(pub UnboundedSender<PersistJob>);
 
