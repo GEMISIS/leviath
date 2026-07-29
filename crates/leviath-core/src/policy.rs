@@ -72,15 +72,6 @@ fn pattern_matches(pattern: &str, value: &str) -> bool {
     pattern == value
 }
 
-/// A scripted rule reference (evaluated by the scripting engine).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ScriptedRule {
-    /// Name of the rule (typically the filename without .rhai extension).
-    pub name: String,
-    /// Path to the Rhai script file.
-    pub path: String,
-}
-
 /// MCP tool classification override.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct McpToolOverride {
@@ -419,17 +410,6 @@ send_email = { sensitivity = "private", direction = "egress", clearance = "publi
         };
         let json = serde_json::to_string(&rule).unwrap();
         let back: AllowlistRule = serde_json::from_str(&json).unwrap();
-        assert_eq!(rule, back);
-    }
-
-    #[test]
-    fn scripted_rule_serde_roundtrip() {
-        let rule = ScriptedRule {
-            name: "company_email".into(),
-            path: "~/.config/leviath/rules/company_email.rhai".into(),
-        };
-        let json = serde_json::to_string(&rule).unwrap();
-        let back: ScriptedRule = serde_json::from_str(&json).unwrap();
         assert_eq!(rule, back);
     }
 

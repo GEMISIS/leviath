@@ -33,15 +33,15 @@ pub mod text;
 
 pub use blueprint::{
     Blueprint, ContextTransform, EdgeTransform, FileTrackingConfig, RepetitionDetectionConfig,
-    Stage, StageResult, StuckConfig, ToolResultRouting, TransitionCondition, TransitionEdge,
+    Stage, StuckConfig, ToolResultRouting, TransitionCondition, TransitionEdge,
 };
-pub use cache::{CacheBreakpoint, CacheHint};
+pub use cache::CacheHint;
 pub use credentials::{
     CredentialStore, CredentialStoreKind, MemoryStore, mcp_account, provider_account,
 };
 pub use error::{Error, Result, ValidationError};
 pub use layout::{BudgetSpec, ContextLayout, RegionDefinition};
-pub use lifecycle::{CompactionConfig, CompactionStrategy, EvictionPolicy};
+pub use lifecycle::CompactionConfig;
 pub use net::{
     ClientTimeouts, UrlRejection, check_url, checked_client, client, client_builder,
     is_restricted_addr,
@@ -51,7 +51,7 @@ pub use paths::{
     agents_dir, data_dir, home_dir, is_safe_path_component, providers_dir, resolves_within,
     tools_dir,
 };
-pub use policy::{AllowlistRule, McpToolOverride, PolicyConfig, ScriptedRule};
+pub use policy::{AllowlistRule, McpToolOverride, PolicyConfig};
 pub use region::{
     ContentFormat, EntryKind, EvictionStrategy, Region, RegionEntry, RegionKind, RegionSchema,
     SerializedToolCall,

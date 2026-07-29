@@ -20,16 +20,6 @@ pub enum CacheHint {
     Never,
 }
 
-/// A cache breakpoint in the assembled message sequence.
-#[derive(Debug, Clone)]
-pub struct CacheBreakpoint {
-    /// Index in the message array AFTER which to insert the cache marker.
-    /// (i.e., messages[0..=index] should be cached)
-    pub after_message_index: usize,
-    /// The cache hint for this breakpoint.
-    pub hint: CacheHint,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,37 +93,5 @@ mod tests {
             let parsed: CacheHint = serde_json::from_str(&json).unwrap();
             assert_eq!(hint, parsed);
         }
-    }
-
-    #[test]
-    fn cache_breakpoint_construction() {
-        let bp = CacheBreakpoint {
-            after_message_index: 5,
-            hint: CacheHint::Always,
-        };
-        assert_eq!(bp.after_message_index, 5);
-        assert_eq!(bp.hint, CacheHint::Always);
-    }
-
-    #[test]
-    fn cache_breakpoint_clone() {
-        let bp = CacheBreakpoint {
-            after_message_index: 3,
-            hint: CacheHint::UntilChanged,
-        };
-        let cloned = bp.clone();
-        assert_eq!(cloned.after_message_index, 3);
-        assert_eq!(cloned.hint, CacheHint::UntilChanged);
-    }
-
-    #[test]
-    fn cache_breakpoint_debug() {
-        let bp = CacheBreakpoint {
-            after_message_index: 10,
-            hint: CacheHint::Never,
-        };
-        let dbg = format!("{:?}", bp);
-        assert!(dbg.contains("10"));
-        assert!(dbg.contains("Never"));
     }
 }
