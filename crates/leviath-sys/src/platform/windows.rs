@@ -191,6 +191,12 @@ mod tests {
     /// `temp_env` locks against its own calls, not against a test that reads
     /// the variable directly, so both sides have to take *this* guard. Same
     /// shape as the credential-store lesson: two guards are not a guard.
+    ///
+    /// Taken with `.expect`, not `unwrap_or_else(|e| e.into_inner())`: the
+    /// recovery closure is a function that never runs while the tests pass, and
+    /// the coverage gate reads that as an uncovered region. A poisoned guard
+    /// only happens when one of these two tests has already failed, and failing
+    /// the other with "poisoned" alongside it is no loss.
     static USERNAME_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
@@ -225,7 +231,7 @@ mod tests {
     /// your API keys.
     #[test]
     fn restricting_a_real_file_keeps_other_users_out() {
-        let _env = USERNAME_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = USERNAME_ENV.lock().expect("USERNAME guard");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret");
         std::fs::write(&path, b"the key").unwrap();
@@ -259,7 +265,7 @@ mod tests {
     /// is protected when it is not.
     #[test]
     fn restricting_fails_when_there_is_no_account_to_grant() {
-        let _env = USERNAME_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = USERNAME_ENV.lock().expect("USERNAME guard");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret");
         std::fs::write(&path, b"x").unwrap();
