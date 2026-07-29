@@ -1344,7 +1344,7 @@ mod tests {
         }
 
         async fn count_tokens(&self, text: &str, _model: &str) -> usize {
-            text.len() / 4
+            leviath_core::estimate_tokens(text)
         }
 
         fn max_context_tokens(&self, _model: &str) -> usize {

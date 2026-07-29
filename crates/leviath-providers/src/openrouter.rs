@@ -239,7 +239,7 @@ impl Provider for OpenRouterProvider {
     async fn count_tokens(&self, text: &str, _model: &str) -> usize {
         // OpenRouter fronts many models and exposes no token-count endpoint;
         // approximate locally (provider-specific tokenizers not available).
-        text.len() / 4
+        leviath_core::estimate_tokens(text)
     }
 
     fn max_context_tokens(&self, model: &str) -> usize {
@@ -635,7 +635,7 @@ mod tests {
     async fn test_count_tokens() {
         let provider = OpenRouterProvider::new("key".to_string());
         let tokens = provider.count_tokens("Hello, world!", "any-model").await;
-        assert_eq!(tokens, 3); // 13 / 4 = 3
+        assert_eq!(tokens, 4); // ceil(13 / 4): the shared estimate rounds up
     }
 
     #[tokio::test]

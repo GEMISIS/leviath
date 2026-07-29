@@ -439,7 +439,7 @@ fn build_report(summaries: &[(String, String)], failures: &[(String, String)]) -
 /// Add `text` to the parent's `conversation` region (best-effort).
 fn inject_conversation(world: &mut World, parent: Entity, text: &str) {
     if let Some(mut window) = world.get_mut::<ContextWindow>(parent) {
-        let tokens = text.len() / 4 + 1;
+        let tokens = leviath_core::estimate_tokens(text);
         let _ = window.add_typed_entry(
             "conversation",
             leviath_core::EntryKind::UserMessage,

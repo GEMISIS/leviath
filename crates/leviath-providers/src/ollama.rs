@@ -398,7 +398,7 @@ impl Provider for OllamaProvider {
 
     async fn count_tokens(&self, text: &str, _model: &str) -> usize {
         // Ollama exposes no token-count endpoint; approximate locally.
-        text.len() / 4
+        leviath_core::estimate_tokens(text)
     }
 
     fn max_context_tokens(&self, model: &str) -> usize {
@@ -720,8 +720,8 @@ mod tests {
         let provider = OllamaProvider::new();
         let tokens = provider.count_tokens("Hello, world!", "llama3").await;
         assert!(tokens > 0);
-        // len / 4 = 13 / 4 = 3
-        assert_eq!(tokens, 3);
+        // ceil(13 / 4): the shared estimate rounds up
+        assert_eq!(tokens, 4);
     }
 
     #[tokio::test]
