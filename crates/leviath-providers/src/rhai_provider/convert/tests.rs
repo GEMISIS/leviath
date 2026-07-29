@@ -1,6 +1,7 @@
-//! Tests for [`super::super::convert`]. Kept in a separate file so this test
-//! code is not measured by the coverage gate (only production code must be
-//! 100%), matching the crate's `tests.rs` convention.
+//! Tests for the parent module. The standard child-module file name
+//! (`tests.rs`) keeps this scaffolding outside the coverage report:
+//! cargo-llvm-cov's default ignore regex excludes `tests.rs` and
+//! `*_tests.rs` files, so only production code answers to the 100% gate.
 use super::{
     chunk_from_dynamic, finish_reason_from_str, host_err_to_rhai, map_rhai_err,
     parse_inference_dynamic, runtime_error,

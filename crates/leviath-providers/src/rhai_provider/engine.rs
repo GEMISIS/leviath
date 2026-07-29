@@ -312,5 +312,4 @@ fn register_emit_chunk(
 }
 
 #[cfg(test)]
-#[path = "engine_tests.rs"]
 mod tests;
