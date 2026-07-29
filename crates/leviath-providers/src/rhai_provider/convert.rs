@@ -205,5 +205,4 @@ pub fn map_rhai_err(err: Box<EvalAltResult>) -> ProviderError {
 }
 
 #[cfg(test)]
-#[path = "convert_tests.rs"]
 mod tests;

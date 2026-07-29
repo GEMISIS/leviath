@@ -281,5 +281,4 @@ fn parse_sse_block(block: &str) -> Option<SseEvent> {
 }
 
 #[cfg(test)]
-#[path = "host_tests.rs"]
 mod tests;

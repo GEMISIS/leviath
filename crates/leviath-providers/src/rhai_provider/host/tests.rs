@@ -1,5 +1,7 @@
-//! Tests for [`super::host`]. Separate file → excluded from the coverage
-//! gate (only production code must hit 100%).
+//! Tests for the parent module. The standard child-module file name
+//! (`tests.rs`) keeps this scaffolding outside the coverage report:
+//! cargo-llvm-cov's default ignore regex excludes `tests.rs` and
+//! `*_tests.rs` files, so only production code answers to the 100% gate.
 use super::*;
 
 fn ev(kind: &SseEvent) -> String {
