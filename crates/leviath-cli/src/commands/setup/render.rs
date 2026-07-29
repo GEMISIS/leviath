@@ -654,7 +654,7 @@ fn draw_tos_confirm(frame: &mut Frame, area: Rect) {
             ),
         ]),
         Line::from(Span::styled(
-            "or any other key to go back.",
+            "or any other key to cancel.",
             Style::default().fg(C_DIM),
         )),
     ];
