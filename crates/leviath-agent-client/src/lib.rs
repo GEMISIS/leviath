@@ -33,10 +33,9 @@ pub use mapping::{
     stop_reason_for, stop_reason_for_label,
 };
 pub use protocol::{
-    AgentCapabilities, AgentInfo, ClientCapabilities, ContentBlock, EmbeddedResource,
-    InitializeParams, InitializeResult, JsonRpcError, JsonRpcMessage, MAX_FRAME_BYTES,
-    PROTOCOL_VERSION, PermissionOption, PermissionOptionKind, PermissionOutcome,
-    PromptCapabilities, RequestPermissionParams, RequestPermissionResult, SessionCancelParams,
+    AgentCapabilities, AgentInfo, ContentBlock, EmbeddedResource, InitializeParams,
+    InitializeResult, JsonRpcError, JsonRpcMessage, MAX_FRAME_BYTES, PROTOCOL_VERSION,
+    PermissionOutcome, PromptCapabilities, RequestPermissionResult, SessionCancelParams,
     SessionNewParams, SessionNewResult, SessionPromptParams, SessionPromptResult, SessionUpdate,
-    SessionUpdateParams, StopReason, ToolCallRef, ToolCallStatus, ToolKind, error_codes,
+    SessionUpdateParams, StopReason, error_codes,
 };
