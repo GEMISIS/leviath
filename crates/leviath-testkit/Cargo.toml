@@ -1,0 +1,16 @@
+[package]
+name = "leviath-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Internal test-support crate: shared tracing subscriber and raw-TCP HTTP mocks"
+publish = false
+
+[dependencies]
+tracing = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

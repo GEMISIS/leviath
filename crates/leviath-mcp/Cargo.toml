@@ -34,6 +34,7 @@ form_urlencoded = "1"
 workspace = true
 
 [dev-dependencies]
+leviath-testkit = { workspace = true }
 toml = { workspace = true }
 async-stream = "0.3"
 axum = { workspace = true }

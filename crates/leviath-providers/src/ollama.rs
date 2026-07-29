@@ -641,6 +641,10 @@ impl Stream for OllamaNdjsonStream {
 mod tests {
     use super::*;
     use crate::test_support::always_on_tracing_guard;
+    use leviath_testkit::{
+        spawn_mock_server,
+        spawn_mock_server_truncated_body as spawn_mock_server_truncated_error_body,
+    };
 
     #[test]
     fn test_provider_creation() {
@@ -1918,57 +1922,6 @@ mod tests {
     }
 
     // ─── HTTP-call-level tests via a raw-TCP mock server ───────────────────
-
-    async fn spawn_mock_server(status: u16, reason: &str, body: &'static [u8]) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let response = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            status, reason, body.len()
-        )
-        .into_bytes();
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept");
-            let mut buf = [0u8; 8192];
-            let _ = socket.read(&mut buf).await;
-            let _ = socket.write_all(&response).await;
-            let _ = socket.write_all(body).await;
-            let _ = socket.flush().await;
-            let _ = socket.shutdown().await;
-        });
-        format!("http://{}", addr)
-    }
-
-    /// Sends a non-2xx status line with a `Content-Length` far larger than
-    /// the actual bytes written, then closes the connection -- this forces a
-    /// genuine mid-body I/O error when the caller tries to read the error
-    /// body (`response.text().await` returns `Err`, not merely an empty or
-    /// malformed string), exercising the `unwrap_or_else(|_| "unknown
-    /// error"...)` fallback that a well-formed (even if empty/garbled) body
-    /// can never reach. Mirrors `infer_stream_body_error_propagates_as_stream_item_error`'s
-    /// technique below, applied to the non-streaming error-body read path.
-    async fn spawn_mock_server_truncated_error_body(status: u16, reason: &str) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let response = format!(
-            "HTTP/1.1 {} {}\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n",
-            status, reason
-        );
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept");
-            let mut buf = [0u8; 8192];
-            let _ = socket.read(&mut buf).await;
-            let _ = socket.write_all(response.as_bytes()).await;
-            let _ = socket.write_all(b"short").await;
-            let _ = socket.flush().await;
-            let _ = socket.shutdown().await;
-        });
-        format!("http://{}", addr)
-    }
 
     fn mock_request() -> InferenceRequest {
         InferenceRequest {

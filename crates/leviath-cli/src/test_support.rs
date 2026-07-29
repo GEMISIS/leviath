@@ -1,56 +1,9 @@
 //! Shared test-only helpers for this crate's `#[cfg(test)]` code.
 //!
-//! Keep this as the single crate-wide copy: `set_global_default` succeeds only
-//! once per test binary, so only one `AlwaysOnSubscriber` can become the active
-//! subscriber. Duplicate copies would leave the losing ones' trait methods as
-//! uncovered dead code.
+//! The tracing subscriber comes from `leviath-testkit` (one workspace-wide
+//! copy); the helpers below are CLI-specific fixtures.
 
-/// No-op `Subscriber` that reports every callsite as enabled. A `tracing::`
-/// macro skips evaluating its fields when no subscriber is interested, so
-/// running code under [`with_tracing`] (which installs this) is what makes
-/// those macro-argument lines execute — and count as covered.
-pub(crate) struct AlwaysOnSubscriber;
-
-impl tracing::Subscriber for AlwaysOnSubscriber {
-    fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-        true
-    }
-    fn register_callsite(
-        &self,
-        _metadata: &'static tracing::Metadata<'static>,
-    ) -> tracing::subscriber::Interest {
-        tracing::subscriber::Interest::always()
-    }
-    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-    fn event(&self, event: &tracing::Event<'_>) {
-        // Callsites are cached as always-enabled, so `enabled` is never called
-        // via the macros; call it here so it's exercised.
-        assert!(self.enabled(event.metadata()));
-    }
-    fn enter(&self, _span: &tracing::span::Id) {}
-    fn exit(&self, _span: &tracing::span::Id) {}
-    fn max_level_hint(&self) -> Option<tracing::metadata::LevelFilter> {
-        Some(tracing::metadata::LevelFilter::TRACE)
-    }
-}
-
-/// Install [`AlwaysOnSubscriber`] as the process-wide default subscriber
-/// (at most once per test binary) and run `f` under it.
-pub(crate) fn with_tracing<T>(f: impl FnOnce() -> T) -> T {
-    static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    INSTALLED.get_or_init(|| {
-        // `rebuild_interest_cache` is required: callsites registered before the
-        // global default is set are cached as interest=never, so without it the
-        // macro bodies stay unreachable (and uncovered) in tests.
-        let _ = tracing::subscriber::set_global_default(AlwaysOnSubscriber);
-        tracing::callsite::rebuild_interest_cache();
-    });
-    f()
-}
+pub(crate) use leviath_testkit::with_tracing;
 
 /// A value whose `Serialize` impl always returns `Err`, so tests can drive the
 /// `?` error arm of the crate's `serde_json::to_string_pretty(...)?` helpers

@@ -400,6 +400,7 @@ impl GeminiProvider {
 mod tests {
     use super::*;
     use crate::test_support::always_on_tracing_guard;
+    use leviath_testkit::{spawn_mock_server, spawn_mock_server_truncated_body};
 
     #[test]
     fn test_provider_name() {
@@ -780,28 +781,6 @@ mod tests {
 
     // ─── HTTP-call-level tests via a raw-TCP mock server ───────────────────
 
-    async fn spawn_mock_server(status: u16, reason: &str, body: &'static [u8]) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let response = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            status, reason, body.len()
-        )
-        .into_bytes();
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept");
-            let mut buf = [0u8; 8192];
-            let _ = socket.read(&mut buf).await;
-            let _ = socket.write_all(&response).await;
-            let _ = socket.write_all(body).await;
-            let _ = socket.flush().await;
-            let _ = socket.shutdown().await;
-        });
-        format!("http://{}", addr)
-    }
-
     fn provider_with_url(url: String) -> GeminiProvider {
         GeminiProvider::with_config(ProviderConfig {
             api_key: "test-key".to_string(),
@@ -963,31 +942,6 @@ mod tests {
         let provider = provider_with_url("http://127.0.0.1:19997".to_string());
         let err = provider.list_models().await.unwrap_err();
         assert!(err.to_string().contains("Request failed:"));
-    }
-
-    /// Declares a `Content-Length` larger than the bytes actually sent, then
-    /// closes -- forcing a genuine mid-body I/O error when the caller reads
-    /// the response body, rather than a merely garbled-but-readable one.
-    async fn spawn_mock_server_truncated_body(status: u16, reason: &str) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let response = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: 9999\r\nConnection: close\r\n\r\n",
-            status, reason
-        )
-        .into_bytes();
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept");
-            let mut buf = [0u8; 8192];
-            let _ = socket.read(&mut buf).await;
-            let _ = socket.write_all(&response).await;
-            let _ = socket.write_all(b"short").await;
-            let _ = socket.flush().await;
-            let _ = socket.shutdown().await;
-        });
-        format!("http://{}", addr)
     }
 
     #[tokio::test]

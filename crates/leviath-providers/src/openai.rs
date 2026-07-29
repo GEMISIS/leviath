@@ -273,6 +273,7 @@ impl Provider for OpenAIProvider {
 mod tests {
     use super::*;
     use crate::test_support::always_on_tracing_guard;
+    use leviath_testkit::{spawn_mock_server, spawn_mock_server_truncated_body};
 
     #[test]
     fn test_provider_creation() {
@@ -623,28 +624,6 @@ mod tests {
 
     // ─── HTTP-call-level tests via a raw-TCP mock server ───────────────────
 
-    async fn spawn_mock_server(status: u16, reason: &str, body: &'static [u8]) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let response = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            status, reason, body.len()
-        )
-        .into_bytes();
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept");
-            let mut buf = [0u8; 8192];
-            let _ = socket.read(&mut buf).await;
-            let _ = socket.write_all(&response).await;
-            let _ = socket.write_all(body).await;
-            let _ = socket.flush().await;
-            let _ = socket.shutdown().await;
-        });
-        format!("http://{}", addr)
-    }
-
     fn provider_with_url(url: String) -> OpenAIProvider {
         OpenAIProvider::with_config(ProviderConfig {
             api_key: "test-key".to_string(),
@@ -809,31 +788,6 @@ mod tests {
     }
 
     // ─── "unknown error" fallback when the error body can't be read ────────
-
-    async fn spawn_mock_server_truncated_body(status: u16, reason: &str) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        // Declare a Content-Length far larger than the bytes actually sent,
-        // then close the connection -- forces a genuine mid-body read error
-        // on `.text()` rather than an empty/garbled-but-successful string.
-        let response = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: 999999\r\nConnection: close\r\n\r\n",
-            status, reason
-        )
-        .into_bytes();
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept");
-            let mut buf = [0u8; 8192];
-            let _ = socket.read(&mut buf).await;
-            let _ = socket.write_all(&response).await;
-            let _ = socket.write_all(b"short").await;
-            let _ = socket.flush().await;
-            let _ = socket.shutdown().await;
-        });
-        format!("http://{}", addr)
-    }
 
     #[tokio::test]
     async fn list_models_non_success_body_read_error_falls_back_to_unknown_error() {
