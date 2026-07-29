@@ -51,7 +51,7 @@ pub fn harden(engine: &mut rhai::Engine, max_operations: u64) {
 pub use engine::ScriptEngine;
 pub use sandbox::SandboxConfig;
 pub use tool::{
-    ParamSpec, ScriptHost, ScriptTool, ScriptToolMeta, ScriptToolSet, SkippedTool,
+    ParamSpec, ScriptHost, ScriptToolMeta, ScriptToolSet, SkippedTool,
     execute as execute_script_tool,
 };
 

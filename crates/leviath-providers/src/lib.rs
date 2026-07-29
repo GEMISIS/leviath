@@ -37,9 +37,7 @@ pub use openrouter::OpenRouterProvider;
 pub use provider::{
     ContentBlock, DEFAULT_INFERENCE_TIMEOUT_SECS, FinishReason, InferenceRequest,
     InferenceResponse, Message, MessageContent, ModelCapabilities, ModelInfo, Provider,
-    ProviderConfig, ProviderError, RateLimitConfig, Result, StreamChunk, SystemBlock, TokenUsage,
-    Tool, ToolCall, ToolCallDelta, apply_request_timeout, build_http_client, check_http_response,
-    parse_openai_finish_reason,
+    ProviderConfig, ProviderError, RateLimitConfig, Result, SystemBlock, TokenUsage, Tool,
+    ToolCall, build_http_client,
 };
-pub use rate_limit::RateLimiter;
-pub use rhai_provider::{ProviderMeta, RhaiProvider, parse_provider_annotations};
+pub use rhai_provider::RhaiProvider;
