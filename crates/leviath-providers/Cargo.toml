@@ -42,6 +42,7 @@ base64 = { workspace = true }
 tempfile = "3"
 
 [dev-dependencies]
+leviath-testkit = { workspace = true }
 # test-util enables tokio::time::pause so retry/backoff tests run instantly
 tokio = { workspace = true, features = ["test-util"] }
 # temp-env isolates process-env mutations in tests (edition 2024 set_var is unsafe)

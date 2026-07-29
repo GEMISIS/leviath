@@ -238,8 +238,11 @@ pub fn parse_uncovered(json: &serde_json::Value) -> Vec<String> {
     out
 }
 
-/// Parse workspace package names from `cargo metadata` JSON. `xtask` itself is
-/// excluded — it is the coverage tool, not measured by the gate.
+/// Parse workspace package names from `cargo metadata` JSON. Two members are
+/// excluded from the gate: `xtask` (the coverage tool itself) and
+/// `leviath-testkit` (dev-dependency-only test scaffolding whose every line
+/// executes inside other packages' gated suites — self-gating it at 100%
+/// would force tests-of-test-helpers with no defect-finding power).
 pub fn parse_workspace_packages(meta: &serde_json::Value) -> Vec<String> {
     let members: std::collections::HashSet<String> = meta["workspace_members"]
         .as_array()
@@ -255,7 +258,7 @@ pub fn parse_workspace_packages(meta: &serde_json::Value) -> Vec<String> {
         .iter()
         .filter(|p| p["id"].as_str().is_some_and(|id| members.contains(id)))
         .filter_map(|p| p["name"].as_str())
-        .filter(|n| *n != "xtask")
+        .filter(|n| *n != "xtask" && *n != "leviath-testkit")
         .map(str::to_owned)
         .collect()
 }
@@ -438,11 +441,14 @@ mod tests {
     // ── run_all ────────────────────────────────────────────────────────────────
 
     #[test]
-    fn run_all_gates_every_package_except_xtask() {
-        let m = MockRunner::new(true, meta_with(&["leviath-core", "leviath-cli", "xtask"]));
+    fn run_all_gates_every_package_except_the_ungated_members() {
+        let m = MockRunner::new(
+            true,
+            meta_with(&["leviath-core", "leviath-cli", "xtask", "leviath-testkit"]),
+        );
         run_with(&m, CoverageMode::All).unwrap();
         let calls = m.calls.borrow();
-        assert_eq!(calls.len(), 2, "one gate call per non-xtask package");
+        assert_eq!(calls.len(), 2, "one gate call per gated package");
         assert!(
             calls
                 .iter()
@@ -454,6 +460,11 @@ mod tests {
                 .any(|a| has_pair(a, "--package", "leviath-cli"))
         );
         assert!(!calls.iter().any(|a| has_pair(a, "--package", "xtask")));
+        assert!(
+            !calls
+                .iter()
+                .any(|a| has_pair(a, "--package", "leviath-testkit"))
+        );
     }
 
     #[test]

@@ -2080,6 +2080,7 @@ dependencies = [
  "leviath-runtime",
  "leviath-scripting",
  "leviath-sys",
+ "leviath-testkit",
  "leviath-tools",
  "libc",
  "pulldown-cmark",
@@ -2134,6 +2135,7 @@ dependencies = [
  "futures",
  "leviath-core",
  "leviath-sys",
+ "leviath-testkit",
  "rand 0.10.2",
  "reqwest",
  "serde",
@@ -2155,6 +2157,7 @@ dependencies = [
  "dirs",
  "flate2",
  "leviath-core",
+ "leviath-testkit",
  "reqwest",
  "serde",
  "serde_json",
@@ -2177,6 +2180,7 @@ dependencies = [
  "leviath-core",
  "leviath-scripting",
  "leviath-sys",
+ "leviath-testkit",
  "reqwest",
  "rhai",
  "serde",
@@ -2201,6 +2205,7 @@ dependencies = [
  "leviath-core",
  "leviath-providers",
  "leviath-sys",
+ "leviath-testkit",
  "leviath-tools",
  "rand 0.10.2",
  "serde",
@@ -2234,6 +2239,14 @@ dependencies = [
  "nix",
  "temp-env",
  "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "leviath-testkit"
+version = "0.1.0"
+dependencies = [
+ "tokio",
  "tracing",
 ]
 

@@ -71,6 +71,7 @@ rand = { workspace = true }
 tempfile = "3"
 
 [dev-dependencies]
+leviath-testkit = { workspace = true }
 # An in-memory credential store installed as the process default, so the
 # `KeychainStore` adapter is tested against the real `leviath_sys::keychain`
 # path rather than a stand-in. No CI runner has an unlocked login keychain, and

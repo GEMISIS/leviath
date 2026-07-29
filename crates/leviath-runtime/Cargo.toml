@@ -32,6 +32,7 @@ chrono = { workspace = true }
 async-trait = "0.1"
 
 [dev-dependencies]
+leviath-testkit = { workspace = true }
 async-trait = "0.1"
 temp-env = { workspace = true, features = ["async_closure"] }
 tempfile = "3"

@@ -29,6 +29,7 @@ reqwest = { workspace = true }
 dirs = { workspace = true }
 
 [dev-dependencies]
+leviath-testkit = { workspace = true }
 tempfile = "3"
 tokio = { workspace = true }
 
