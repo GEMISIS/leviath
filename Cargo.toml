@@ -117,7 +117,7 @@ temp-env = "0.3"
 # boundary. 0.30 additionally gives `Backend` an associated `Error` type, so the
 # wizard's generic bounds need `Send + Sync` added - small, but pointless until
 # tui-textarea moves.
-crossterm = "0.28"
+crossterm = "0.29"
 # unstable-rendered-line-info: `Paragraph::line_count`, which the dashboard
 # uses to scroll wrapped text by display rows ("unstable" = API may change
 # between ratatui versions; this workspace pins 0.29).
