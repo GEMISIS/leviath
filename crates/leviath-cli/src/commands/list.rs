@@ -479,13 +479,18 @@ system = { kind = "pinned", max_tokens = 1000 }
 
     #[tokio::test]
     async fn execute_runs_without_error() {
-        // Touches the real environment (home dir / CWD / exe location /
-        // config) but must always succeed regardless of what it finds.
-        let args = ListArgs {
-            filter: "all".to_string(),
-        };
-        let result = execute(args).await;
-        assert!(result.is_ok());
+        // Isolated: this reaches `Config::load()`, which reads process-wide
+        // environment. Unisolated it races every `temp_env` test in the binary.
+        crate::config::with_isolated_config_path_async("list-runs-ok", |_fake_dir| async move {
+            // Touches the real environment (home dir / CWD / exe location /
+            // config) but must always succeed regardless of what it finds.
+            let args = ListArgs {
+                filter: "all".to_string(),
+            };
+            let result = execute(args).await;
+            assert!(result.is_ok());
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -515,22 +520,27 @@ system = { kind = "pinned", max_tokens = 1000 }
 
     #[tokio::test]
     async fn execute_returns_err_when_agents_dir_unresolvable() {
-        // Drives `execute`'s `get_agents_dir()?` error-propagation branch
-        // for real via the test-only `FORCE_AGENTS_DIR_ERROR` toggle on
-        // `get_agents_dir`'s twin (see its doc comment for why the real
-        // implementation's failure can't be forced directly).
-        FORCE_AGENTS_DIR_ERROR.with(|f| f.set(true));
-        let args = ListArgs {
-            filter: "all".to_string(),
-        };
-        let result = execute(args).await;
-        FORCE_AGENTS_DIR_ERROR.with(|f| f.set(false));
+        // Isolated: this reaches `Config::load()`, which reads process-wide
+        // environment. Unisolated it races every `temp_env` test in the binary.
+        crate::config::with_isolated_config_path_async("list-dir-err", |_fake_dir| async move {
+            // Drives `execute`'s `get_agents_dir()?` error-propagation branch
+            // for real via the test-only `FORCE_AGENTS_DIR_ERROR` toggle on
+            // `get_agents_dir`'s twin (see its doc comment for why the real
+            // implementation's failure can't be forced directly).
+            FORCE_AGENTS_DIR_ERROR.with(|f| f.set(true));
+            let args = ListArgs {
+                filter: "all".to_string(),
+            };
+            let result = execute(args).await;
+            FORCE_AGENTS_DIR_ERROR.with(|f| f.set(false));
 
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("Could not determine home directory")
-        );
+            let err = result.unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("Could not determine home directory")
+            );
+        })
+        .await;
     }
 
     // `execute`'s `std::env::current_dir().unwrap_or_default()` can only take
@@ -545,22 +555,27 @@ system = { kind = "pinned", max_tokens = 1000 }
     #[cfg(unix)]
     #[tokio::test]
     async fn execute_falls_back_to_default_cwd_when_current_dir_is_gone() {
-        // `isolate_cwd_for_test` serializes against every other CWD-mutating
-        // test in the crate and restores CWD automatically on drop, so it's
-        // safe to hold across the `.await` below.
-        let _guard = crate::config::isolate_cwd_for_test();
-        let dir = std::env::temp_dir().join("lev-test-list-cwd-gone");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_current_dir(&dir).unwrap();
-        std::fs::remove_dir_all(&dir).unwrap();
+        // Isolated: this reaches `Config::load()`, which reads process-wide
+        // environment. Unisolated it races every `temp_env` test in the binary.
+        crate::config::with_isolated_config_path_async("list-cwd-gone", |_fake_dir| async move {
+            // `isolate_cwd_for_test` serializes against every other CWD-mutating
+            // test in the crate and restores CWD automatically on drop, so it's
+            // safe to hold across the `.await` below.
+            let _guard = crate::config::isolate_cwd_for_test();
+            let dir = std::env::temp_dir().join("lev-test-list-cwd-gone");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::env::set_current_dir(&dir).unwrap();
+            std::fs::remove_dir_all(&dir).unwrap();
 
-        let args = ListArgs {
-            filter: "all".to_string(),
-        };
-        let result = execute(args).await;
+            let args = ListArgs {
+                filter: "all".to_string(),
+            };
+            let result = execute(args).await;
 
-        assert!(result.is_ok());
+            assert!(result.is_ok());
+        })
+        .await;
     }
 
     /// Cross-platform companion to the Unix-only real-filesystem test above:
@@ -570,14 +585,19 @@ system = { kind = "pinned", max_tokens = 1000 }
     /// reproducible.
     #[tokio::test]
     async fn execute_falls_back_to_default_cwd_via_forced_error() {
-        FORCE_CWD_ERROR.with(|f| f.set(true));
-        let args = ListArgs {
-            filter: "all".to_string(),
-        };
-        let result = execute(args).await;
-        FORCE_CWD_ERROR.with(|f| f.set(false));
+        // Isolated: this reaches `Config::load()`, which reads process-wide
+        // environment. Unisolated it races every `temp_env` test in the binary.
+        crate::config::with_isolated_config_path_async("list-cwd-forced", |_fake_dir| async move {
+            FORCE_CWD_ERROR.with(|f| f.set(true));
+            let args = ListArgs {
+                filter: "all".to_string(),
+            };
+            let result = execute(args).await;
+            FORCE_CWD_ERROR.with(|f| f.set(false));
 
-        assert!(result.is_ok());
+            assert!(result.is_ok());
+        })
+        .await;
     }
 
     // ─── print_agent_listing (fully injectable) ─────────────────────────

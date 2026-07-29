@@ -1010,19 +1010,24 @@ prompt = "Run"
 
     #[tokio::test]
     async fn execute_with_unparseable_addr_returns_err() {
-        // An invalid host string makes `format!("{host}:{port}").parse()`
-        // fail, exercising execute()'s `?` on the SocketAddr parse.
-        let args = ServeArgs {
-            port: 0,
-            host: "not a valid host".to_string(),
-            cors: None,
-            token: Some("test-token".to_string()),
-            allow_admin: false,
-            workdir_root: None,
-            no_remote_yolo: false,
-        };
-        let result = execute(args, no_daemon_control()).await;
-        assert!(result.is_err());
+        // Isolated: this reaches `Config::load()`, which reads process-wide
+        // environment. Unisolated it races every `temp_env` test in the binary.
+        crate::config::with_isolated_config_path_async("serve-badaddr", |_fake_dir| async move {
+            // An invalid host string makes `format!("{host}:{port}").parse()`
+            // fail, exercising execute()'s `?` on the SocketAddr parse.
+            let args = ServeArgs {
+                port: 0,
+                host: "not a valid host".to_string(),
+                cors: None,
+                token: Some("test-token".to_string()),
+                allow_admin: false,
+                workdir_root: None,
+                no_remote_yolo: false,
+            };
+            let result = execute(args, no_daemon_control()).await;
+            assert!(result.is_err());
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1122,17 +1127,25 @@ prompt = "Run"
     /// load and left this region uncovered — a genuine flake.)
     #[tokio::test]
     async fn execute_with_unbindable_address_returns_bind_error() {
-        let args = ServeArgs {
-            port: 8080,
-            host: "192.0.2.1".to_string(),
-            cors: None,
-            token: Some("test-token".to_string()),
-            allow_admin: false,
-            workdir_root: None,
-            no_remote_yolo: false,
-        };
-        let result = execute(args, no_daemon_control()).await;
-        assert_execute_failed_on_port_in_use(&result);
+        // Isolated: this reaches `Config::load()`, which reads process-wide
+        // environment. Unisolated it races every `temp_env` test in the binary.
+        crate::config::with_isolated_config_path_async(
+            "serve-unbindable",
+            |_fake_dir| async move {
+                let args = ServeArgs {
+                    port: 8080,
+                    host: "192.0.2.1".to_string(),
+                    cors: None,
+                    token: Some("test-token".to_string()),
+                    allow_admin: false,
+                    workdir_root: None,
+                    no_remote_yolo: false,
+                };
+                let result = execute(args, no_daemon_control()).await;
+                assert_execute_failed_on_port_in_use(&result);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1247,109 +1260,121 @@ prompt = "Run"
     /// gave them nothing and widened the surface for everyone else.
     #[tokio::test]
     async fn cors_is_off_by_default_explicit_when_asked_and_fatal_when_malformed() {
-        fn args_with(cors: Option<&str>) -> ServeArgs {
-            ServeArgs {
-                port: 0,
-                host: "127.0.0.1".to_string(),
-                cors: cors.map(str::to_string),
-                token: Some("t".to_string()),
-                allow_admin: false,
-                workdir_root: None,
-                no_remote_yolo: false,
+        // Isolated because `execute_with_shutdown` calls `Config::load()`, which
+        // reads process-wide environment. Without this the test raced every
+        // `temp_env` test in the binary — `temp_env` serializes against its own
+        // calls, not against a test that reads the environment directly — and
+        // failed on CI in two different places depending on when it lost.
+        crate::config::with_isolated_config_path_async("serve-mod-cors", |_fake_dir| async move {
+            fn args_with(cors: Option<&str>) -> ServeArgs {
+                ServeArgs {
+                    port: 0,
+                    host: "127.0.0.1".to_string(),
+                    cors: cors.map(str::to_string),
+                    token: Some("t".to_string()),
+                    allow_admin: false,
+                    workdir_root: None,
+                    no_remote_yolo: false,
+                }
             }
-        }
 
-        /// Start, wait until bound, then shut down. Only reached for values that
-        /// are accepted — a rejected one never binds.
-        async fn starts(cors: Option<&str>) {
-            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-            let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-            let server = tokio::spawn(execute_with_shutdown(
-                args_with(cors),
+            /// Start, wait until bound, then shut down. Only reached for values that
+            /// are accepted — a rejected one never binds.
+            async fn starts(cors: Option<&str>) {
+                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+                let server = tokio::spawn(execute_with_shutdown(
+                    args_with(cors),
+                    no_daemon_control(),
+                    Box::pin(async move {
+                        let _ = stop_rx.await;
+                    }),
+                    Some(ready_tx),
+                ));
+                // `RecvError` here means the sender was dropped, which any early
+                // return from `execute_with_shutdown` does — so this reads as "the
+                // server failed to start" without saying why. Left as-is rather
+                // than adding a reporting branch that only a failing run executes,
+                // which the coverage gate would (correctly) flag as dead.
+                ready_rx.await.expect("the server bound");
+                let _ = stop_tx.send(());
+                server.await.expect("join").expect("clean shutdown");
+            }
+
+            starts(None).await;
+            starts(Some("*")).await;
+            starts(Some("https://ok.example")).await;
+
+            // A malformed origin fails before binding, so this can be awaited
+            // directly rather than raced against a `ready` signal.
+            let err = execute_with_shutdown(
+                args_with(Some("not a valid\nheader")),
                 no_daemon_control(),
-                Box::pin(async move {
-                    let _ = stop_rx.await;
-                }),
-                Some(ready_tx),
-            ));
-            // `RecvError` here means the sender was dropped, which any early
-            // return from `execute_with_shutdown` does — so this reads as "the
-            // server failed to start" without saying why. Left as-is rather
-            // than adding a reporting branch that only a failing run executes,
-            // which the coverage gate would (correctly) flag as dead.
-            ready_rx.await.expect("the server bound");
-            let _ = stop_tx.send(());
-            server.await.expect("join").expect("clean shutdown");
-        }
-
-        starts(None).await;
-        starts(Some("*")).await;
-        starts(Some("https://ok.example")).await;
-
-        // A malformed origin fails before binding, so this can be awaited
-        // directly rather than raced against a `ready` signal.
-        let err = execute_with_shutdown(
-            args_with(Some("not a valid\nheader")),
-            no_daemon_control(),
-            Box::pin(std::future::pending()),
-            None,
-        )
-        .await
-        .expect_err("a malformed origin must refuse to start");
-        // Printed on failure: startup can fail earlier than the CORS check (the
-        // config load, for one), and "assertion failed" alone does not say so.
-        assert!(
-            err.to_string().contains("not a valid origin header"),
-            "expected the CORS parse to be what refused, got: {err}"
-        );
+                Box::pin(std::future::pending()),
+                None,
+            )
+            .await
+            .expect_err("a malformed origin must refuse to start");
+            // Printed on failure: startup can fail earlier than the CORS check (the
+            // config load, for one), and "assertion failed" alone does not say so.
+            assert!(
+                err.to_string().contains("not a valid origin header"),
+                "expected the CORS parse to be what refused, got: {err}"
+            );
+        })
+        .await;
     }
 
     /// The MCP admin endpoints are mounted only with `--allow-admin`: adding an
     /// MCP server writes a spawn command into config, which Leviath then runs.
     #[tokio::test]
     async fn the_mcp_admin_routes_are_mounted_only_with_allow_admin() {
-        for allow_admin in [false, true] {
-            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-            let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-            let args = ServeArgs {
-                port: 0,
-                host: "127.0.0.1".to_string(),
-                cors: None,
-                token: Some("t".to_string()),
-                allow_admin,
-                workdir_root: None,
-                no_remote_yolo: false,
-            };
-            let server = tokio::spawn(execute_with_shutdown(
-                args,
-                no_daemon_control(),
-                Box::pin(async move {
-                    let _ = stop_rx.await;
-                }),
-                Some(ready_tx),
-            ));
-            let addr = ready_rx.await.expect("bound");
+        // Same isolation, same reason: this one also reaches `Config::load()`.
+        crate::config::with_isolated_config_path_async("serve-mod-admin", |_fake_dir| async move {
+            for allow_admin in [false, true] {
+                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+                let args = ServeArgs {
+                    port: 0,
+                    host: "127.0.0.1".to_string(),
+                    cors: None,
+                    token: Some("t".to_string()),
+                    allow_admin,
+                    workdir_root: None,
+                    no_remote_yolo: false,
+                };
+                let server = tokio::spawn(execute_with_shutdown(
+                    args,
+                    no_daemon_control(),
+                    Box::pin(async move {
+                        let _ = stop_rx.await;
+                    }),
+                    Some(ready_tx),
+                ));
+                let addr = ready_rx.await.expect("bound");
 
-            let status = reqwest::Client::new()
-                .post(format!("http://{addr}/api/mcp/servers"))
-                .bearer_auth("t")
-                .json(&serde_json::json!({}))
-                .send()
-                .await
-                .expect("request")
-                .status()
-                .as_u16();
-            // 405 (Method Not Allowed) is the signature of "this path exists
-            // for GET but POST is not mounted". Asserted as a presence check
-            // rather than an exact code for the mounted case, whose status
-            // depends on body validation rather than on routing.
-            match allow_admin {
-                false => assert_eq!(status, 405, "the admin route must not be mounted"),
-                true => assert_ne!(status, 405, "the admin route must be mounted"),
+                let status = reqwest::Client::new()
+                    .post(format!("http://{addr}/api/mcp/servers"))
+                    .bearer_auth("t")
+                    .json(&serde_json::json!({}))
+                    .send()
+                    .await
+                    .expect("request")
+                    .status()
+                    .as_u16();
+                // 405 (Method Not Allowed) is the signature of "this path exists
+                // for GET but POST is not mounted". Asserted as a presence check
+                // rather than an exact code for the mounted case, whose status
+                // depends on body validation rather than on routing.
+                match allow_admin {
+                    false => assert_eq!(status, 405, "the admin route must not be mounted"),
+                    true => assert_ne!(status, 405, "the admin route must be mounted"),
+                }
+
+                let _ = stop_tx.send(());
+                let _ = server.await;
             }
-
-            let _ = stop_tx.send(());
-            let _ = server.await;
-        }
+        })
+        .await;
     }
 }
