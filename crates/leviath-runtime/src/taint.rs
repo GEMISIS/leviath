@@ -101,6 +101,43 @@ impl TaintGate {
             .unwrap_or_else(|| builtin_tool_classification(tool_name))
     }
 
+    /// Apply the `[mcp_overrides]` section of policy.toml to this gate.
+    ///
+    /// Each override starts from the tool's current classification and
+    /// replaces only the fields it sets, keyed the same `server.tool` way MCP
+    /// tools are named at dispatch. An unrecognized `direction` string keeps
+    /// the existing direction and warns, rather than silently reclassifying
+    /// a security property.
+    ///
+    /// Called at gate construction. A later session-scoped "always allow"
+    /// writes the same map through [`Self::set_tool_classification`], so the
+    /// user's runtime decision still wins over the config file.
+    pub fn apply_mcp_overrides(
+        &mut self,
+        overrides: &HashMap<String, leviath_core::policy::McpToolOverride>,
+    ) {
+        for (tool_name, over) in overrides {
+            let mut classification = self.tool_classification(tool_name);
+            if let Some(sensitivity) = over.sensitivity {
+                classification.sensitivity = sensitivity;
+            }
+            if let Some(clearance) = over.clearance {
+                classification.clearance = clearance;
+            }
+            if let Some(direction) = over.direction.as_deref() {
+                match leviath_core::taint::ToolDirection::from_str_loose(direction) {
+                    Some(parsed) => classification.direction = parsed,
+                    None => tracing::warn!(
+                        tool = %tool_name,
+                        direction = %direction,
+                        "ignoring unrecognized direction in [mcp_overrides]"
+                    ),
+                }
+            }
+            self.set_tool_classification(tool_name.clone(), classification);
+        }
+    }
+
     /// Check the gate for a traditional-mode tool invocation.
     ///
     /// In traditional mode, the overall taint (max across all regions) is
@@ -432,6 +469,90 @@ mod tests {
         let window = make_window_with_taint(TaintLevel::Private);
         let decision = gate.check_traditional("agent-1", "shell", &window);
         assert!(decision.is_allowed());
+    }
+
+    #[test]
+    fn apply_mcp_overrides_replaces_only_the_set_fields() {
+        let mut gate = TaintGate::new(SecurityConfig::default());
+        let before = gate.tool_classification("srv.notify");
+        let overrides = std::collections::HashMap::from([(
+            "srv.notify".to_string(),
+            leviath_core::policy::McpToolOverride {
+                sensitivity: Some(TaintLevel::Private),
+                direction: None,
+                clearance: None,
+            },
+        )]);
+        gate.apply_mcp_overrides(&overrides);
+        let after = gate.tool_classification("srv.notify");
+        assert_eq!(after.sensitivity, TaintLevel::Private);
+        assert_eq!(after.direction, before.direction);
+        assert_eq!(after.clearance, before.clearance);
+    }
+
+    #[test]
+    fn apply_mcp_overrides_parses_direction_and_clearance() {
+        let mut gate = TaintGate::new(SecurityConfig::default());
+        let overrides = std::collections::HashMap::from([(
+            "srv.post".to_string(),
+            leviath_core::policy::McpToolOverride {
+                sensitivity: None,
+                direction: Some("outbound".to_string()),
+                clearance: Some(TaintLevel::Internal),
+            },
+        )]);
+        gate.apply_mcp_overrides(&overrides);
+        let after = gate.tool_classification("srv.post");
+        assert_eq!(after.direction, ToolDirection::Outbound);
+        assert_eq!(after.clearance, TaintLevel::Internal);
+    }
+
+    #[test]
+    fn apply_mcp_overrides_keeps_direction_on_unrecognized_string() {
+        let mut gate = TaintGate::new(SecurityConfig::default());
+        let before = gate.tool_classification("srv.odd");
+        let overrides = std::collections::HashMap::from([(
+            "srv.odd".to_string(),
+            leviath_core::policy::McpToolOverride {
+                sensitivity: None,
+                direction: Some("sideways".to_string()),
+                clearance: None,
+            },
+        )]);
+        gate.apply_mcp_overrides(&overrides);
+        // A typo must not silently reclassify a security property.
+        assert_eq!(
+            gate.tool_classification("srv.odd").direction,
+            before.direction
+        );
+    }
+
+    #[test]
+    fn session_approval_still_wins_over_an_mcp_override() {
+        let mut gate = TaintGate::new(SecurityConfig::default());
+        let overrides = std::collections::HashMap::from([(
+            "srv.send".to_string(),
+            leviath_core::policy::McpToolOverride {
+                sensitivity: None,
+                direction: Some("outbound".to_string()),
+                clearance: Some(TaintLevel::Public),
+            },
+        )]);
+        gate.apply_mcp_overrides(&overrides);
+        // The user's later "always allow" writes the same map and replaces
+        // the config-file entry.
+        gate.set_tool_classification(
+            "srv.send".to_string(),
+            ToolClassification::new(
+                TaintLevel::Public,
+                ToolDirection::Outbound,
+                TaintLevel::Private,
+            ),
+        );
+        assert_eq!(
+            gate.tool_classification("srv.send").clearance,
+            TaintLevel::Private
+        );
     }
 
     #[test]

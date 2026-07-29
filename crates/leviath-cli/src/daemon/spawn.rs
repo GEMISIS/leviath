@@ -751,9 +751,17 @@ fn build_agent_inner(
         blueprint.security.as_ref(),
         None,
     );
+    // The `[mcp_overrides]` from policy.toml (loaded into the world at daemon
+    // setup), applied to every gate this agent gets so a user's reclassified
+    // MCP tool is enforced, not just printed by `lev policy list`.
+    let mcp_overrides = world
+        .get_resource::<leviath_runtime::pipeline::PolicyGate>()
+        .map(|p| p.0.mcp_overrides.clone())
+        .unwrap_or_default();
     let tool_sensitivities: Option<HashMap<String, leviath_core::TaintLevel>> =
         security.taint_tracking.then(|| {
-            let gate = leviath_runtime::TaintGate::new(security.clone());
+            let mut gate = leviath_runtime::TaintGate::new(security.clone());
+            gate.apply_mcp_overrides(&mcp_overrides);
             all_tool_defs
                 .iter()
                 .map(|t| {
@@ -862,8 +870,10 @@ fn build_agent_inner(
         // taint tracking when the blueprint opts in (`Option`'s iterator keeps the
         // enforcement path region-free when taint is off).
         tool_sensitivities.into_iter().for_each(|sensitivities| {
+            let mut gate = leviath_runtime::TaintGate::new(security.clone());
+            gate.apply_mcp_overrides(&mcp_overrides);
             entity_mut.insert((
-                leviath_runtime::TaintGate::new(security.clone()),
+                gate,
                 leviath_runtime::pipeline::ToolSensitivities(sensitivities),
             ));
             // `--yolo` means run unattended: waive taint-gate prompts (the
@@ -1411,6 +1421,63 @@ mod tests {
                 .get::<leviath_runtime::components::GateAutoApprove>(entity)
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn build_agent_applies_policy_mcp_overrides_to_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"sec-ov\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [security]\ntaint_tracking = true\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+        let (mut world, cli) = test_world();
+        // The daemon loads policy.toml into this resource at setup; an
+        // [mcp_overrides] entry there must reach the gate attached at spawn,
+        // not just `lev policy list` output.
+        world
+            .world_mut()
+            .insert_resource(leviath_runtime::pipeline::PolicyGate(
+                leviath_core::PolicyConfig {
+                    allowlist: Vec::new(),
+                    mcp_overrides: HashMap::from([(
+                        "notes.share".to_string(),
+                        leviath_core::policy::McpToolOverride {
+                            sensitivity: None,
+                            direction: Some("outbound".to_string()),
+                            clearance: Some(leviath_core::TaintLevel::Private),
+                        },
+                    )]),
+                },
+            ));
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let entity = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+            sub_tx(),
+        )
+        .expect("spawn succeeds");
+
+        let gate = world
+            .world()
+            .get::<leviath_runtime::TaintGate>(entity)
+            .expect("gate attached");
+        let classification = gate.tool_classification("notes.share");
+        assert_eq!(
+            classification.direction,
+            leviath_core::taint::ToolDirection::Outbound
+        );
+        assert_eq!(classification.clearance, leviath_core::TaintLevel::Private);
     }
 
     #[tokio::test]
