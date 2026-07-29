@@ -35,8 +35,7 @@ impl Wizard {
         }
         if self.show_tos_confirm {
             // A hard gate: nothing else means anything until it is answered.
-            self.handle_tos_key(key);
-            return Action::Continue;
+            return self.handle_tos_key(key);
         }
         if self.show_help {
             // Any key dismisses the help overlay.
@@ -176,15 +175,17 @@ impl Wizard {
 
     /// Handle a key while the ToS confirmation overlay is showing.
     ///
-    /// Y accepts the terms and goes back one screen so the user can review
-    /// their choices with the acknowledgment recorded. Any other key
-    /// dismisses the overlay and goes back without recording acceptance.
-    fn handle_tos_key(&mut self, key: KeyEvent) {
+    /// Y accepts the terms and lets the interrupted save proceed - the user
+    /// already asked to save; confirming is the last word, not a detour. Any
+    /// other key dismisses the overlay and stays put, leaving the transport
+    /// selected but unsaveable until it is either confirmed or deselected.
+    fn handle_tos_key(&mut self, key: KeyEvent) -> Action {
         self.show_tos_confirm = false;
         if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
             self.claude_code_tos_accepted = true;
+            return Action::Save;
         }
-        self.back();
+        Action::Continue
     }
 
     /// `Space`: toggle whatever the cursor is on.
@@ -1062,42 +1063,48 @@ mod tests {
     }
 
     #[test]
-    fn pressing_y_on_tos_confirmation_accepts_and_goes_back() {
+    fn pressing_y_on_tos_confirmation_accepts_and_saves() {
         let (_dir, mut w) = wizard_with_claude_code();
         w.enter(Step::Review);
         w.handle_key(press(KeyCode::Enter));
         assert!(w.show_tos_confirm);
 
-        w.handle_key(press(KeyCode::Char('y')));
+        let action = w.handle_key(press(KeyCode::Char('y')));
 
         assert!(w.claude_code_tos_accepted);
         assert!(!w.show_tos_confirm);
-        assert_ne!(w.step, Step::Review, "should have gone back");
+        assert_eq!(
+            action,
+            Action::Save,
+            "confirming is the last word on the save the user already asked for"
+        );
     }
 
     #[test]
-    fn pressing_uppercase_y_also_accepts() {
+    fn pressing_uppercase_y_also_accepts_and_saves() {
         let (_dir, mut w) = wizard_with_claude_code();
         w.enter(Step::Review);
         w.handle_key(press(KeyCode::Enter));
 
-        w.handle_key(press(KeyCode::Char('Y')));
+        let action = w.handle_key(press(KeyCode::Char('Y')));
 
         assert!(w.claude_code_tos_accepted);
         assert!(!w.show_tos_confirm);
+        assert_eq!(action, Action::Save);
     }
 
     #[test]
-    fn pressing_n_on_tos_confirmation_goes_back_without_accepting() {
+    fn dismissing_the_tos_confirmation_stays_put_without_accepting() {
         let (_dir, mut w) = wizard_with_claude_code();
         w.enter(Step::Review);
         w.handle_key(press(KeyCode::Enter));
 
-        w.handle_key(press(KeyCode::Char('n')));
+        let action = w.handle_key(press(KeyCode::Char('n')));
 
         assert!(!w.claude_code_tos_accepted);
         assert!(!w.show_tos_confirm);
-        assert_ne!(w.step, Step::Review);
+        assert_eq!(action, Action::Continue, "the save stays blocked");
+        assert_eq!(w.step, Step::Review, "declining must not navigate away");
     }
 
     #[test]
