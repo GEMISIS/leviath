@@ -22,18 +22,6 @@ updates:
         update-types:
           - minor
           - patch
-    ignore:
-      # Both are held back by tui-textarea (latest release 0.7.0, pinned to
-      # ratatui 0.29 + crossterm 0.28): bumping either alone puts two
-      # incompatible KeyEvent types in the graph, which fails at the
-      # `Input: From<KeyEvent>` boundary. Remove these entries when
-      # tui-textarea publishes ratatui-0.30 support - that upgrade also
-      # clears the RUSTSEC-2024-0436 (`paste`) ignore in deny.toml, which
-      # arrives through ratatui 0.29.
-      - dependency-name: ratatui
-        update-types: ["version-update:semver-minor", "version-update:semver-major"]
-      - dependency-name: crossterm
-        update-types: ["version-update:semver-minor", "version-update:semver-major"]
     labels:
       - dependencies
     commit-message:

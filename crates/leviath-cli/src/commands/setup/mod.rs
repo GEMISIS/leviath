@@ -253,7 +253,11 @@ pub async fn run_wizard_loop<B: ratatui::backend::Backend>(
     loop {
         wizard.ticks += 1;
         wizard.drain_verifications();
-        terminal.draw(|frame| render::draw(frame, wizard))?;
+        terminal
+            .draw(|frame| render::draw(frame, wizard))
+            // ratatui 0.30 made the backend error an associated type with no
+            // Send/Sync guarantee, so convert by message rather than by `?`.
+            .map_err(|e| anyhow::anyhow!("terminal draw failed: {e}"))?;
 
         if let Some(Event::Key(key)) = events.poll_event(tick_rate)?
             && key.kind == KeyEventKind::Press
