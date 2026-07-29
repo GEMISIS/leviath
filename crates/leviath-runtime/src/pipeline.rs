@@ -619,7 +619,7 @@ fn stage_output_is_reviewed(bp: &AgentBlueprint, cursor: &StageCursor) -> bool {
 /// `ReadyToInfer`. Ported from `AgentEngine::loop_handle_empty_tool_calls`.
 ///
 /// A stage whose output is reviewed is never nudged — see
-/// [`stage_output_is_reviewed`].
+/// `stage_output_is_reviewed`.
 #[allow(clippy::type_complexity)]
 pub fn handle_empty_response(
     mut agents: Query<
