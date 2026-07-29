@@ -57,7 +57,7 @@ pub fn apply_context_transforms(world: &mut World, parent: Entity, child: Entity
     let mut wrote_to_child = false;
     if let Some(mut child_window) = world.get_mut::<ContextWindow>(child) {
         for (to_region, content) in writes {
-            let tokens = content.len() / 4 + 1;
+            let tokens = leviath_core::estimate_tokens(&content);
             let _ = child_window.add_to_region(&to_region, content, tokens);
         }
         wrote_to_child = true;
@@ -169,7 +169,7 @@ pub fn collect_content_summary(
         crate::tick_scope::enter(outcome.entity);
         if let Ok(summaries) = outcome.result {
             for (region, summary) in summaries {
-                let tokens = summary.len() / 4 + 1;
+                let tokens = leviath_core::estimate_tokens(&summary);
                 window.replace_region(&region, summary, tokens);
             }
         }

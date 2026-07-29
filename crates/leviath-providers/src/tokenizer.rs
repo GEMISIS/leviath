@@ -46,7 +46,7 @@ fn approximate_count_anthropic(text: &str) -> usize {
 
 /// Approximate token count for Gemini models (~4 chars per token).
 fn approximate_count_gemini(text: &str) -> usize {
-    text.len().div_ceil(4)
+    leviath_core::estimate_tokens(text)
 }
 
 /// Approximate token count based on character length.
@@ -54,7 +54,7 @@ fn approximate_count_gemini(text: &str) -> usize {
 /// Uses the common heuristic of ~4 characters per token, which is reasonably
 /// accurate for English text with GPT-style tokenizers.
 pub fn approximate_count(text: &str) -> usize {
-    text.len().div_ceil(4)
+    leviath_core::estimate_tokens(text)
 }
 
 #[cfg(test)]

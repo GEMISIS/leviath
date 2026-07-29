@@ -49,7 +49,7 @@ pub fn handle_context_tool(
                 return "[error] missing 'content' argument".to_string();
             };
             let key = args.get("key").and_then(|v| v.as_str());
-            let tokens = content.len() / 4 + 1;
+            let tokens = leviath_core::estimate_tokens(content);
 
             let is_hashmap = match window.get_region(region_name) {
                 Some(r) => matches!(r.kind, RegionKind::HashMap { .. }),
@@ -80,7 +80,7 @@ pub fn handle_context_tool(
                 return "[error] missing 'content' argument".to_string();
             };
             let key = args.get("key").and_then(|v| v.as_str());
-            let tokens = content.len() / 4 + 1;
+            let tokens = leviath_core::estimate_tokens(content);
 
             let is_hashmap = match window.get_region(region_name) {
                 Some(r) => matches!(r.kind, RegionKind::HashMap { .. }),
@@ -94,7 +94,7 @@ pub fn handle_context_tool(
                 };
                 if let Some(existing) = region.get_by_key(k) {
                     let new_content = format!("{}\n{}", existing.content, content);
-                    let new_tokens = new_content.len() / 4 + 1;
+                    let new_tokens = leviath_core::estimate_tokens(&new_content);
                     // Upserting an already-present key updates in place with no
                     // budget check, so this cannot fail.
                     region

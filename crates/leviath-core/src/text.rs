@@ -40,9 +40,37 @@ pub fn truncate_at_boundary(s: &str, max: usize) -> &str {
     &s[..floor_char_boundary(s, max)]
 }
 
+/// The workspace's one generic token estimate: bytes divided by four,
+/// rounded up.
+///
+/// Every context budget, eviction threshold, and truncation cap that has no
+/// exact tokenizer runs on this. It was open-coded across ~30 sites with
+/// three disagreeing formulas (`/4`, `/4 + 1`, `div_ceil(4)`), which meant
+/// the same text could count differently on the budgeting side and the
+/// truncation side of one decision. Rounding up (never 0 for non-empty text)
+/// is the safe direction for a budget: overestimating spends a token of
+/// headroom, underestimating overflows a window.
+///
+/// Provider-accuracy heuristics (e.g. the Anthropic-calibrated bytes/3.5 in
+/// `leviath-providers`) are deliberately separate: they estimate a specific
+/// tokenizer, this estimates "text-shaped budget units".
+pub fn estimate_tokens(s: &str) -> usize {
+    s.len().div_ceil(4)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn estimate_tokens_rounds_up_and_never_zero_for_nonempty() {
+        assert_eq!(estimate_tokens(""), 0);
+        assert_eq!(estimate_tokens("abc"), 1);
+        assert_eq!(estimate_tokens("abcd"), 1);
+        assert_eq!(estimate_tokens("abcde"), 2);
+        // Bytes, not chars: one 3-byte character still costs one budget unit.
+        assert_eq!(estimate_tokens("\u{65e5}"), 1);
+    }
 
     #[test]
     fn floor_char_boundary_clamps_and_walks_back() {

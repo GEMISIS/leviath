@@ -75,7 +75,7 @@ pub fn init_window_seeded(
                 .map(|r| r.max_tokens)
                 .unwrap_or(0);
             let fitted = fit_seed_to_budget(content, budget);
-            let tokens = fitted.len() / 4 + 1;
+            let tokens = leviath_core::estimate_tokens(&fitted);
             let _ = window.add_to_region(&region_name, fitted, tokens);
         }
     }
@@ -254,7 +254,7 @@ mod tests {
     /// The token estimate `init_window_seeded` computes for a fitted seed — the
     /// number that has to land inside the region's budget.
     fn estimated_tokens(fitted: &str) -> usize {
-        fitted.len() / 4 + 1
+        leviath_core::estimate_tokens(fitted)
     }
 
     #[test]

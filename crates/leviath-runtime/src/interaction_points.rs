@@ -487,7 +487,7 @@ pub fn dispatch_interaction_point(
             } else {
                 body.clone()
             };
-            let tokens = content.len() / 4 + 1;
+            let tokens = leviath_core::estimate_tokens(&content);
             window.replace_region(region, content, tokens);
         }
         // An unattended run (`--yolo`) approves the checkpoint instead of
@@ -690,7 +690,7 @@ fn inject(window: &mut ContextWindow, name: &str, prefix: &str, text: &str) {
         return;
     }
     let content = format!("User [{name}] {prefix}{text}");
-    let tokens = content.len() / 4 + 1;
+    let tokens = leviath_core::estimate_tokens(&content);
     let _ = window.add_to_region("conversation", content, tokens);
 }
 
