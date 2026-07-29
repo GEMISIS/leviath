@@ -160,12 +160,13 @@ impl AnthropicProvider {
         api_key: String,
         overrides: HashMap<String, ModelCapabilities>,
         timeout_secs: Option<u64>,
+        rate_limit: Option<&crate::provider::RateLimitConfig>,
     ) -> Self {
         Self {
             client: crate::provider::build_http_client(timeout_secs),
             api_key,
             base_url: "https://api.anthropic.com/v1".to_string(),
-            rate_limiter: None,
+            rate_limiter: rate_limit.map(crate::rate_limit::RateLimiter::new),
             capability_overrides: overrides,
             cache_ttl: CacheTtl::default(),
         }
@@ -1281,7 +1282,8 @@ mod tests {
                 max_output_tokens: 32_768,
             },
         );
-        let provider = AnthropicProvider::with_overrides("test-key".to_string(), overrides, None);
+        let provider =
+            AnthropicProvider::with_overrides("test-key".to_string(), overrides, None, None);
         let caps = provider.capabilities("claude-sonnet-4-6");
         // Override should take precedence over built-in
         assert!(!caps.supports_temperature);
@@ -1857,7 +1859,7 @@ mod tests {
                 max_output_tokens: 10,
             },
         );
-        let provider = AnthropicProvider::with_overrides("key".to_string(), overrides, None);
+        let provider = AnthropicProvider::with_overrides("key".to_string(), overrides, None, None);
         let caps = provider.capabilities("custom-model");
         assert_eq!(caps.max_context_tokens, 42);
         assert!(!caps.supports_streaming);
@@ -1865,7 +1867,8 @@ mod tests {
 
     #[test]
     fn test_capabilities_falls_through_to_builtin() {
-        let provider = AnthropicProvider::with_overrides("key".to_string(), HashMap::new(), None);
+        let provider =
+            AnthropicProvider::with_overrides("key".to_string(), HashMap::new(), None, None);
         let caps = provider.capabilities("claude-sonnet-4-6");
         assert_eq!(caps.max_context_tokens, 1_000_000);
     }
@@ -3014,5 +3017,22 @@ mod tests {
         std::fs::write(&file, b"x").unwrap();
         dump_request(&serde_json::json!({ "a": 1 }), Some(file.to_str().unwrap()));
         let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn with_overrides_wires_the_rate_limiter() {
+        // The daemon path constructs providers exclusively through
+        // with_overrides, so a rate limit that stops here is a rate limit
+        // nobody gets.
+        let cfg = crate::provider::RateLimitConfig {
+            requests_per_minute: 5,
+            tokens_per_minute: 1_000,
+        };
+        let limited =
+            AnthropicProvider::with_overrides("k".to_string(), HashMap::new(), None, Some(&cfg));
+        assert!(limited.rate_limiter.is_some());
+        let unlimited =
+            AnthropicProvider::with_overrides("k".to_string(), HashMap::new(), None, None);
+        assert!(unlimited.rate_limiter.is_none());
     }
 }

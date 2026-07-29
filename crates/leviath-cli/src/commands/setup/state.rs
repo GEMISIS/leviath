@@ -524,6 +524,7 @@ impl Wizard {
             base_url,
             model_capabilities: HashMap::new(),
             request_timeout_secs: Some(20),
+            rate_limit: None,
             options: HashMap::new(),
         };
         // A closed receiver means the background task is gone; the row simply

@@ -158,6 +158,20 @@ pub struct Config {
     /// Default is None (no timeout).
     pub request_timeout_secs: Option<u64>,
 
+    /// Client-side rate limits for the built-in providers, keyed by provider
+    /// name (`anthropic`, `openai`, `google`, `openrouter`).
+    ///
+    /// ```toml
+    /// [rate_limits.anthropic]
+    /// requests_per_minute = 50
+    /// tokens_per_minute = 40000
+    /// ```
+    ///
+    /// Script providers configure theirs via
+    /// `[model_providers.<name>] rate_limit` instead.
+    #[serde(default)]
+    pub rate_limits: HashMap<String, leviath_providers::RateLimitConfig>,
+
     /// Global master switch for taint tracking / data-flow enforcement.
     ///
     /// **Off by default (opt-in).** When `true`, every agent enforces taint
@@ -557,6 +571,7 @@ impl Default for Config {
             agent_tool_permissions: HashMap::new(),
             title: TitleConfig::default(),
             request_timeout_secs: None,
+            rate_limits: HashMap::new(),
             taint_tracking: false,
             limits: LimitsConfig::default(),
             batch_tool_hint: true,
@@ -2613,6 +2628,7 @@ anthropic_api_key = "sk-ant-test-key"
                 model: Some("gpt-5-mini".to_string()),
             },
             request_timeout_secs: None,
+            rate_limits: HashMap::new(),
             taint_tracking: false,
             limits: LimitsConfig {
                 max_concurrent_inferences: Some(4),

@@ -27,6 +27,10 @@ pub struct ProviderCreds {
     pub model_capabilities: std::collections::HashMap<String, leviath_providers::ModelCapabilities>,
     /// HTTP request timeout in seconds (`None` uses the provider default).
     pub request_timeout_secs: Option<u64>,
+    /// Client-side rate limit (requests/tokens per minute) enforced before
+    /// each call. `None` sends requests unthrottled. Ignored by `ollama`
+    /// (a local server) and `claude-code` (a subprocess).
+    pub rate_limit: Option<leviath_providers::RateLimitConfig>,
     /// Provider-specific settings that don't fit the api-key / base-URL shape.
     ///
     /// Currently only `claude-code` reads this, for `binary` (path to the
@@ -55,6 +59,7 @@ impl std::fmt::Debug for ProviderCreds {
             .field("base_url", &self.base_url)
             .field("model_capabilities", &self.model_capabilities)
             .field("request_timeout_secs", &self.request_timeout_secs)
+            .field("rate_limit", &self.rate_limit)
             .field("options", &self.options)
             .finish()
     }
@@ -69,6 +74,7 @@ impl ProviderCreds {
             base_url: None,
             model_capabilities: std::collections::HashMap::new(),
             request_timeout_secs: None,
+            rate_limit: None,
             options: std::collections::HashMap::new(),
         }
     }
@@ -90,6 +96,7 @@ pub fn build_provider_registry(creds: &[ProviderCreds]) -> ProviderRegistry {
                             key.clone(),
                             caps,
                             timeout,
+                            c.rate_limit.as_ref(),
                         )),
                     );
                 }
@@ -102,6 +109,7 @@ pub fn build_provider_registry(creds: &[ProviderCreds]) -> ProviderRegistry {
                             key.clone(),
                             caps,
                             timeout,
+                            c.rate_limit.as_ref(),
                         )),
                     );
                 }
@@ -114,6 +122,7 @@ pub fn build_provider_registry(creds: &[ProviderCreds]) -> ProviderRegistry {
                             key.clone(),
                             caps,
                             timeout,
+                            c.rate_limit.as_ref(),
                         )),
                     );
                 }
@@ -126,6 +135,7 @@ pub fn build_provider_registry(creds: &[ProviderCreds]) -> ProviderRegistry {
                             key.clone(),
                             caps,
                             timeout,
+                            c.rate_limit.as_ref(),
                         )),
                     );
                 }
@@ -204,6 +214,7 @@ mod tests {
                 base_url: None,
                 model_capabilities: caps.clone(),
                 request_timeout_secs: Some(30),
+                rate_limit: None,
                 options: Default::default(),
             },
             ProviderCreds {
@@ -212,6 +223,7 @@ mod tests {
                 base_url: None,
                 model_capabilities: caps.clone(),
                 request_timeout_secs: None,
+                rate_limit: None,
                 options: Default::default(),
             },
             ProviderCreds {
@@ -220,6 +232,7 @@ mod tests {
                 base_url: None,
                 model_capabilities: caps.clone(),
                 request_timeout_secs: None,
+                rate_limit: None,
                 options: Default::default(),
             },
             ProviderCreds {
@@ -228,6 +241,7 @@ mod tests {
                 base_url: None,
                 model_capabilities: caps.clone(),
                 request_timeout_secs: None,
+                rate_limit: None,
                 options: Default::default(),
             },
             ProviderCreds {
@@ -236,6 +250,7 @@ mod tests {
                 base_url: None, // exercise the default-URL fallback
                 model_capabilities: caps.clone(),
                 request_timeout_secs: None,
+                rate_limit: None,
                 options: Default::default(),
             },
             ProviderCreds {
@@ -244,6 +259,7 @@ mod tests {
                 base_url: None,
                 model_capabilities: caps.clone(),
                 request_timeout_secs: None,
+                rate_limit: None,
                 options: Default::default(),
             },
             ProviderCreds {
@@ -252,6 +268,7 @@ mod tests {
                 base_url: None,
                 model_capabilities: caps,
                 request_timeout_secs: None,
+                rate_limit: None,
                 options: Default::default(),
             },
         ];
@@ -279,6 +296,7 @@ mod tests {
                 base_url: None,
                 model_capabilities: caps.clone(),
                 request_timeout_secs: None,
+                rate_limit: None,
                 options: Default::default(),
             })
             .collect();

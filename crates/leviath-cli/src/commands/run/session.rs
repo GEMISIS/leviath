@@ -377,6 +377,7 @@ pub fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
                 base_url: None,
                 model_capabilities: caps.clone(),
                 request_timeout_secs: timeout,
+                rate_limit: config.rate_limits.get(name).cloned(),
                 options: std::collections::HashMap::new(),
             });
         }
@@ -395,6 +396,7 @@ pub fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
         ),
         model_capabilities: caps.clone(),
         request_timeout_secs: timeout,
+        rate_limit: None,
         options: std::collections::HashMap::new(),
     });
 
@@ -417,6 +419,7 @@ pub fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
             base_url: None,
             model_capabilities: caps.clone(),
             request_timeout_secs: None,
+            rate_limit: None,
             options,
         });
     }
@@ -871,6 +874,34 @@ mod tests {
         let ollama = creds.iter().find(|c| c.name == "ollama").unwrap();
         assert_eq!(ollama.base_url.as_deref(), Some("http://custom:11434"));
         assert!(ollama.api_key.is_none());
+    }
+
+    #[test]
+    fn provider_creds_from_config_carries_rate_limits() {
+        let config = Config {
+            providers: crate::config::ProviderConfig {
+                anthropic_api_key: Some("sk-ant".to_string()),
+                openai_api_key: Some("sk-oa".to_string()),
+                ..Config::default().providers
+            },
+            rate_limits: std::collections::HashMap::from([(
+                "anthropic".to_string(),
+                leviath_providers::RateLimitConfig {
+                    requests_per_minute: 50,
+                    tokens_per_minute: 40_000,
+                },
+            )]),
+            ..Config::default()
+        };
+        let creds = provider_creds_from_config(&config);
+        let anthropic = creds.iter().find(|c| c.name == "anthropic").unwrap();
+        assert_eq!(
+            anthropic.rate_limit.as_ref().map(|r| r.requests_per_minute),
+            Some(50)
+        );
+        // A provider without a [rate_limits.<name>] entry stays unthrottled.
+        let openai = creds.iter().find(|c| c.name == "openai").unwrap();
+        assert!(openai.rate_limit.is_none());
     }
 
     // ─── resolve_task: multiline file content ───────────────────────────
