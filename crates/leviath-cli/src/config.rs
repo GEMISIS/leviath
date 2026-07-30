@@ -27,6 +27,10 @@ pub enum ToolPolicy {
 // dependency. Re-exported here so `crate::config::TitleConfig` paths resolve.
 pub use leviath_core::config::TitleConfig;
 
+// Same arrangement for the `[observability]` section: the plain data lives in
+// `leviath_core::config` (the telemetry sink crate reads it), re-exported here.
+pub use leviath_core::config::{ObservabilityConfig, TelemetryExporterKind};
+
 /// Permission for one Rhai *script-tool* host function (Layer 3 of the
 /// four-layer permission model). Gates what a registered script may *do*,
 /// independent of
@@ -201,6 +205,14 @@ pub struct Config {
     /// Completion-webhook delivery tuning (retry/backoff/timeout).
     #[serde(default)]
     pub webhook: WebhookConfig,
+
+    /// Structured observability export (OpenTelemetry). Off by default; when
+    /// enabled the daemon exports run/stage/inference/tool spans, metrics, and
+    /// trace-correlated log records for every agent run. The standard
+    /// `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_SERVICE_NAME` env vars fill any
+    /// hole the file leaves, same as the provider keys.
+    #[serde(default)]
+    pub observability: ObservabilityConfig,
 
     /// Machine-wide default sandbox for tool execution. An agent's own
     /// `[sandbox]` (or a stage's) overrides this; when unset, agents run tools
@@ -575,6 +587,7 @@ impl Default for Config {
             limits: LimitsConfig::default(),
             batch_tool_hint: true,
             webhook: WebhookConfig::default(),
+            observability: ObservabilityConfig::default(),
             sandbox: None,
             tool_script_permissions: ScriptToolPermissions::default(),
             security: SecurityConfig::default(),
@@ -2626,6 +2639,12 @@ anthropic_api_key = "sk-ant-test-key"
                 max_delay_ms: 10_000,
                 timeout_secs: 7,
             },
+            observability: ObservabilityConfig {
+                enabled: true,
+                exporter: TelemetryExporterKind::Stdout,
+                endpoint: Some("http://collector:4318".to_string()),
+                service_name: Some("leviath-prod".to_string()),
+            },
             sandbox: Some(leviath_core::ToolSandboxConfig {
                 kind: leviath_core::SandboxKind::Container,
                 image: Some("ubuntu:24.04".to_string()),
@@ -2672,6 +2691,19 @@ anthropic_api_key = "sk-ant-test-key"
         assert_eq!(deserialized.webhook.base_delay_ms, 250);
         assert_eq!(deserialized.webhook.max_delay_ms, 10_000);
         assert_eq!(deserialized.webhook.timeout_secs, 7);
+        assert!(deserialized.observability.enabled);
+        assert_eq!(
+            deserialized.observability.exporter,
+            TelemetryExporterKind::Stdout
+        );
+        assert_eq!(
+            deserialized.observability.endpoint.as_deref(),
+            Some("http://collector:4318")
+        );
+        assert_eq!(
+            deserialized.observability.service_name.as_deref(),
+            Some("leviath-prod")
+        );
         assert_eq!(deserialized.limits.default_max_iterations, Some(99));
         assert_eq!(
             deserialized.providers.anthropic_api_key.as_deref(),

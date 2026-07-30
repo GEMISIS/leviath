@@ -225,6 +225,16 @@ pub fn build_host(
         .world_mut()
         .insert_resource(leviath_runtime::pipeline::GateScriptRules(script_checker));
 
+    // Structured observability (`[observability]`): replace the world's no-op
+    // telemetry sink with the configured exporter. A pipeline that fails to
+    // build logs a warning and leaves the no-op in place - observability must
+    // never stop the work it observes.
+    if let Some(sink) = leviath_telemetry::build_sink(&config.observability) {
+        host.world_mut()
+            .world_mut()
+            .insert_resource(leviath_runtime::telemetry::Telemetry(sink));
+    }
+
     // Reload-on-demand: an op targeting an unloaded run pages it back in from
     // disk. Capture the shared context (cloned before the spawner moves the
     // originals below).
@@ -989,6 +999,40 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
             ),
             Handle::current(),
             || 0,
+        );
+    }
+
+    #[tokio::test]
+    async fn build_host_installs_the_configured_telemetry_sink() {
+        // `[observability] enabled + stdout` replaces the world's no-op sink.
+        let config = Config {
+            observability: leviath_core::config::ObservabilityConfig {
+                enabled: true,
+                exporter: leviath_core::config::TelemetryExporterKind::Stdout,
+                endpoint: None,
+                service_name: None,
+            },
+            ..Config::default()
+        };
+        let runs = tempfile::tempdir().unwrap();
+        let mut host = build_host(
+            config,
+            ProviderRegistry::new(),
+            runs.path().to_path_buf(),
+            Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            Vec::new(),
+            crate::daemon::mcp_pool::McpPool::for_daemon(
+                Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+                &[],
+            ),
+            Handle::current(),
+            || 0,
+        );
+        assert!(
+            host.world_mut()
+                .world_mut()
+                .get_resource::<leviath_runtime::telemetry::Telemetry>()
+                .is_some()
         );
     }
 
