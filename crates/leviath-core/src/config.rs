@@ -47,6 +47,61 @@ impl Default for TitleConfig {
     }
 }
 
+/// Configuration for structured observability export.
+///
+/// Off by default: telemetry costs a background export pipeline and most
+/// interactive users have the dashboard instead. When enabled, spans, metrics
+/// and log records for every run flow to the configured exporter.
+///
+/// Example config:
+/// ```toml
+/// [observability]
+/// enabled = true
+/// exporter = "otlp"
+/// endpoint = "http://localhost:4318"
+/// service_name = "leviath"
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservabilityConfig {
+    /// Whether to export telemetry at all (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Which exporter to use (default: `otlp`).
+    #[serde(default)]
+    pub exporter: TelemetryExporterKind,
+
+    /// OTLP endpoint. Falls back to `OTEL_EXPORTER_OTLP_ENDPOINT`, then to
+    /// `http://localhost:4318` - the OTLP **HTTP** port. Leviath exports OTLP
+    /// over HTTP/protobuf, not gRPC, so a collector's 4317 gRPC endpoint will
+    /// not work here.
+    pub endpoint: Option<String>,
+
+    /// The `service.name` resource attribute. Falls back to
+    /// `OTEL_SERVICE_NAME`, then to `"leviath"`.
+    pub service_name: Option<String>,
+}
+
+/// Which telemetry exporter to build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelemetryExporterKind {
+    /// OTLP over HTTP/protobuf to `endpoint`.
+    #[default]
+    Otlp,
+    /// Human-readable lines through the process logger (stderr).
+    Stdout,
+    /// Build no exporter even when `enabled` is set.
+    None,
+}
+
+impl TelemetryExporterKind {
+    /// True when this kind exports nothing.
+    pub fn is_none(self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +170,64 @@ enabled = false
         assert!(!cfg.enabled);
         assert!(cfg.provider.is_none());
         assert!(cfg.model.is_none());
+    }
+
+    #[test]
+    fn observability_config_defaults_to_disabled_otlp() {
+        let cfg = ObservabilityConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.exporter, TelemetryExporterKind::Otlp);
+        assert!(cfg.endpoint.is_none());
+        assert!(cfg.service_name.is_none());
+        // An empty TOML table and the hand-written Default must agree.
+        let parsed: ObservabilityConfig = toml::from_str("").unwrap();
+        assert_eq!(parsed, cfg);
+    }
+
+    #[test]
+    fn observability_config_full_roundtrip() {
+        let toml_str = r#"
+enabled = true
+exporter = "stdout"
+endpoint = "http://collector:4318"
+service_name = "leviath-prod"
+"#;
+        let cfg: ObservabilityConfig = toml::from_str(toml_str).unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.exporter, TelemetryExporterKind::Stdout);
+        assert_eq!(cfg.endpoint.as_deref(), Some("http://collector:4318"));
+        assert_eq!(cfg.service_name.as_deref(), Some("leviath-prod"));
+        let serialized = toml::to_string(&cfg).unwrap();
+        let back: ObservabilityConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(back, cfg);
+        assert!(format!("{cfg:?}").contains("ObservabilityConfig"));
+    }
+
+    #[test]
+    fn telemetry_exporter_kind_round_trips_through_config_syntax() {
+        for (kind, text) in [
+            (TelemetryExporterKind::Otlp, "otlp"),
+            (TelemetryExporterKind::Stdout, "stdout"),
+            (TelemetryExporterKind::None, "none"),
+        ] {
+            let toml_str = format!("exporter = \"{text}\"");
+            let cfg: ObservabilityConfig = toml::from_str(&toml_str).unwrap();
+            assert_eq!(cfg.exporter, kind);
+            let serialized = toml::to_string(&cfg).unwrap();
+            assert!(serialized.contains(text), "{serialized} missing {text}");
+        }
+    }
+
+    #[test]
+    fn telemetry_exporter_kind_is_none_helper() {
+        assert!(TelemetryExporterKind::None.is_none());
+        assert!(!TelemetryExporterKind::Otlp.is_none());
+        assert!(!TelemetryExporterKind::Stdout.is_none());
+    }
+
+    #[test]
+    fn telemetry_exporter_kind_rejects_unknown_value() {
+        let err = toml::from_str::<ObservabilityConfig>("exporter = \"grpc\"");
+        assert!(err.is_err());
     }
 }
