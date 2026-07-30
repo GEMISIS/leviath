@@ -585,6 +585,7 @@ mod tests {
                             id: "call_1".to_string(),
                             name: "get_weather".to_string(),
                             input: serde_json::json!({ "city": "Paris" }),
+                            thought_signature: None,
                         },
                     ]),
                     cache_breakpoint: false,

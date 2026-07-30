@@ -36,6 +36,10 @@ pub struct SerializedToolCall {
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
+    /// Opaque provider token that must be replayed with this call
+    /// (Gemini's `thought_signature`). Persisted so it survives a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 /// Eviction strategy for `SlidingWindow` regions.
@@ -1509,6 +1513,41 @@ mod tests {
         );
     }
 
+    /// The replay token survives persistence, and archives written before the
+    /// field existed still load (`#[serde(default)]`) - a restart must not
+    /// strand a Gemini run on a missing signature or fail on an old run dir.
+    #[test]
+    fn serialized_tool_call_round_trips_thought_signature_and_reads_old_json() {
+        let with = SerializedToolCall {
+            id: "c1".into(),
+            name: "shell".into(),
+            arguments: serde_json::json!({"command": "ls"}),
+            thought_signature: Some("sig".into()),
+        };
+        let json = serde_json::to_string(&with).unwrap();
+        let back: SerializedToolCall = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.thought_signature.as_deref(), Some("sig"));
+
+        // Pre-field JSON (what every existing run dir contains).
+        let old = r#"{"id":"c2","name":"shell","arguments":{}}"#;
+        let back: SerializedToolCall = serde_json::from_str(old).unwrap();
+        assert_eq!(back.thought_signature, None);
+
+        // And a `None` signature serializes to the old shape, so new writes
+        // stay readable by anything parsing the documented format.
+        let without = SerializedToolCall {
+            id: "c3".into(),
+            name: "shell".into(),
+            arguments: serde_json::json!({}),
+            thought_signature: None,
+        };
+        assert!(
+            !serde_json::to_string(&without)
+                .unwrap()
+                .contains("thought_signature")
+        );
+    }
+
     #[test]
     fn test_add_typed_tainted_entry_checks_budget() {
         let mut region = Region::new(
@@ -1592,11 +1631,13 @@ mod tests {
                             id: "tc_1".to_string(),
                             name: "read_file".to_string(),
                             arguments: serde_json::json!({}),
+                            thought_signature: None,
                         },
                         SerializedToolCall {
                             id: "tc_2".to_string(),
                             name: "write_file".to_string(),
                             arguments: serde_json::json!({}),
+                            thought_signature: None,
                         },
                     ],
                 },
@@ -1691,11 +1732,13 @@ mod tests {
                             id: "tc_1".to_string(),
                             name: "read_file".to_string(),
                             arguments: serde_json::json!({}),
+                            thought_signature: None,
                         },
                         SerializedToolCall {
                             id: "tc_2".to_string(),
                             name: "list_dir".to_string(),
                             arguments: serde_json::json!({}),
+                            thought_signature: None,
                         },
                     ],
                 },
@@ -1759,6 +1802,7 @@ mod tests {
                         id: "tc_1".to_string(),
                         name: "tool".to_string(),
                         arguments: serde_json::json!({}),
+                        thought_signature: None,
                     }],
                 },
                 crate::taint::TaintLevel::Private,
@@ -1824,11 +1868,13 @@ mod tests {
                             id: "tc_1".to_string(),
                             name: "t1".to_string(),
                             arguments: serde_json::json!({}),
+                            thought_signature: None,
                         },
                         SerializedToolCall {
                             id: "tc_2".to_string(),
                             name: "t2".to_string(),
                             arguments: serde_json::json!({}),
+                            thought_signature: None,
                         },
                     ],
                 },
@@ -1977,6 +2023,7 @@ mod tests {
                         id: "tc1".to_string(),
                         name: "tool".to_string(),
                         arguments: serde_json::json!({}),
+                        thought_signature: None,
                     }],
                 },
             )

@@ -273,6 +273,7 @@ pub fn dispatch_tools(
                         id: c.tool_id.clone(),
                         name: c.name.clone(),
                         arguments: c.arguments.clone(),
+                        thought_signature: c.thought_signature.clone(),
                     });
                     continue;
                 }
@@ -325,6 +326,7 @@ pub fn dispatch_tools(
                 id: c.tool_id.clone(),
                 name: c.name.clone(),
                 arguments: c.arguments.clone(),
+                thought_signature: c.thought_signature.clone(),
             });
         }
 

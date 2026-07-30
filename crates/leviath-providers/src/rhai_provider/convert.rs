@@ -84,6 +84,12 @@ fn parse_tool_calls(json: &Value) -> Vec<ToolCall> {
                         .unwrap_or_default()
                         .to_string(),
                     arguments: tc.get("arguments").cloned().unwrap_or(Value::Null),
+                    // A script wrapping a provider that issues per-call replay
+                    // tokens (Gemini's `thought_signature`) can pass one through.
+                    thought_signature: tc
+                        .get("thought_signature")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
                 })
                 .collect()
         })

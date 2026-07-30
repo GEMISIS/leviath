@@ -491,6 +491,7 @@ impl AnthropicProvider {
                             id,
                             name,
                             arguments,
+                            thought_signature: None,
                         });
                     }
                     _ => {}

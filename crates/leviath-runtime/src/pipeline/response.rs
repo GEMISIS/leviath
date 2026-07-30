@@ -26,6 +26,7 @@ pub(crate) fn to_inference_result(
                 tool_id: tc.id.clone(),
                 name: tc.name.clone(),
                 arguments: tc.arguments.clone(),
+                thought_signature: tc.thought_signature.clone(),
             })
             .collect(),
         tokens_used: response.tokens_used.total_tokens,

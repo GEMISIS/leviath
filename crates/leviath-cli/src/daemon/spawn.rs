@@ -1836,6 +1836,7 @@ mod tests {
                 id: "c1".to_string(),
                 name: "list_dir".to_string(),
                 arguments: serde_json::json!({"path": "."}),
+                thought_signature: None,
             }],
         )()
         .await;
@@ -1932,6 +1933,7 @@ mod tests {
                 id: "c1".to_string(),
                 name: "read_file".to_string(),
                 arguments: serde_json::json!({"path": "/no/such/file"}),
+                thought_signature: None,
             }],
         )()
         .await;
@@ -1950,6 +1952,7 @@ mod tests {
                 id: "c2".to_string(),
                 name: "list_dir".to_string(),
                 arguments: serde_json::json!({"path": "."}),
+                thought_signature: None,
             }],
         )()
         .await;
@@ -1998,6 +2001,7 @@ mod tests {
                 id: "c1".to_string(),
                 name: "read_file".to_string(),
                 arguments: serde_json::json!({"path": "/no/such/file"}),
+                thought_signature: None,
             }],
         )()
         .await;

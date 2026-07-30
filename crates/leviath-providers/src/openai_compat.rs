@@ -117,11 +117,24 @@ pub fn message_to_openai(role: &str, content: &MessageContent) -> Vec<serde_json
             let tool_calls: Vec<serde_json::Value> = blocks
                 .iter()
                 .filter_map(|b| match b {
-                    ContentBlock::ToolUse { id, name, input } => Some(serde_json::json!({
-                        "id": id,
-                        "type": "function",
-                        "function": { "name": name, "arguments": input.to_string() }
-                    })),
+                    ContentBlock::ToolUse {
+                        id,
+                        name,
+                        input,
+                        thought_signature,
+                    } => {
+                        let mut call = serde_json::json!({
+                            "id": id,
+                            "type": "function",
+                            "function": { "name": name, "arguments": input.to_string() }
+                        });
+                        // Echoed back exactly where the provider put it.
+                        if let Some(sig) = thought_signature {
+                            call["extra_content"] =
+                                serde_json::json!({ "google": { "thought_signature": sig } });
+                        }
+                        Some(call)
+                    }
                     _ => None,
                 })
                 .collect();
@@ -169,39 +182,39 @@ pub fn openai_messages(request: &InferenceRequest) -> Vec<serde_json::Value> {
     for msg in &request.messages {
         messages.extend(message_to_openai(&msg.role, &msg.content));
     }
-    lead_with_a_user_turn(drop_unpaired_tool_turns(messages))
+    satisfy_call_turn_order(drop_unpaired_tool_turns(messages))
 }
 
-/// Ensure the conversation's first non-system turn is a user turn.
+/// Ensure every function-call turn follows a user turn or a function response
+/// turn, per Gemini's validation rule.
 ///
-/// Leviath's task lives in a pinned context region, which assembles into the
-/// system prompt, so a run's first *message* is the assistant's opening turn -
-/// usually a tool call. Anthropic accepts that; Gemini answers HTTP 400
-/// ("Please ensure that function call turn comes immediately after a user turn
-/// or after a function response turn") and kills the run on the second
-/// inference, before any work lands. The turn order is a wire-format
-/// expectation, so this layer satisfies it rather than reshaping how regions
-/// assemble: a minimal user turn is inserted ahead of a leading assistant
-/// message, naming where the real instruction is so the addition cannot read
-/// as a new request.
-fn lead_with_a_user_turn(mut messages: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
-    let first_non_system = messages
-        .iter()
-        .position(|m| m["role"] != "system")
-        .unwrap_or(messages.len());
-    if messages
-        .get(first_non_system)
-        .is_some_and(|m| m["role"] == "assistant")
-    {
-        messages.insert(
-            first_non_system,
-            serde_json::json!({
-                "role": "user",
-                "content": "Proceed with the task described in the system instructions.",
-            }),
-        );
+/// Two shapes violate it in practice. Leviath's task lives in a pinned context
+/// region, which assembles into the system prompt, so a run's first *message*
+/// is the assistant's opening tool call. And mid-run, an assistant text turn
+/// (a carried stage response, a nudge reply) can directly precede the next
+/// call turn. Anthropic accepts both; Gemini answers HTTP 400 ("Please ensure
+/// that function call turn comes immediately after a user turn or after a
+/// function response turn") and the run dies on a wire-format detail no agent
+/// author can see. The turn order is a wire-format expectation, so this layer
+/// satisfies it rather than reshaping how regions assemble: a minimal user
+/// turn is inserted ahead of each offending call turn, naming where the real
+/// instruction is so the addition cannot read as a new request.
+fn satisfy_call_turn_order(messages: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let mut out: Vec<serde_json::Value> = Vec::with_capacity(messages.len());
+    for msg in messages {
+        let is_call_turn = msg["tool_calls"].as_array().is_some_and(|c| !c.is_empty());
+        if is_call_turn {
+            let prev_role = out.last().and_then(|m| m["role"].as_str());
+            if !matches!(prev_role, Some("user") | Some("tool")) {
+                out.push(serde_json::json!({
+                    "role": "user",
+                    "content": "Proceed with the task described in the system instructions.",
+                }));
+            }
+        }
+        out.push(msg);
     }
-    messages
+    out
 }
 
 /// Remove function-call turns whose responses are missing, and responses whose
@@ -341,10 +354,20 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceRespon
                 .unwrap_or("{}");
             let arguments: serde_json::Value = serde_json::from_str(arguments_str)
                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+            // Gemini 3.x returns an opaque `thought_signature` per function
+            // call under `extra_content.google` and rejects a follow-up that
+            // omits it, so capture it here and replay it verbatim below.
+            let thought_signature = tc
+                .get("extra_content")
+                .and_then(|e| e.get("google"))
+                .and_then(|g| g.get("thought_signature"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
             tool_calls.push(ToolCall {
                 id,
                 name,
                 arguments,
+                thought_signature,
             });
         }
     }
@@ -1212,6 +1235,7 @@ mod tests {
                 id: "call_1".into(),
                 name: "search".into(),
                 input: serde_json::json!({"query": "rust"}),
+                thought_signature: None,
             },
         ]);
         let messages = message_to_openai("assistant", &content);
@@ -1237,6 +1261,7 @@ mod tests {
             id: "call_2".into(),
             name: "write_file".into(),
             input: serde_json::json!({"path": "/tmp/a.txt"}),
+            thought_signature: None,
         }]);
         let messages = message_to_openai("assistant", &content);
         // A call-only block yields one assistant turn and no `content` key.
@@ -1274,6 +1299,81 @@ mod tests {
 
     /// The shape Gemini rejects with HTTP 400: a call turn whose response has
     /// aged out of the context window (or vice versa) must not be sent.
+    /// Gemini 3.x returns an opaque per-call `thought_signature` under
+    /// `extra_content.google` and rejects a follow-up request that omits it.
+    /// Capture on parse ...
+    #[test]
+    fn parse_captures_a_gemini_thought_signature() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "c1",
+                        "type": "function",
+                        "function": { "name": "list_dir", "arguments": "{}" },
+                        "extra_content": { "google": { "thought_signature": "sig-bytes" } }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
+        });
+        let resp = parse_openai_response(&body).unwrap();
+        assert_eq!(
+            resp.tool_calls[0].thought_signature.as_deref(),
+            Some("sig-bytes")
+        );
+
+        // ... and absent stays absent (Anthropic/OpenAI shapes).
+        let plain = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "c2",
+                        "type": "function",
+                        "function": { "name": "list_dir", "arguments": "{}" }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
+        });
+        let resp = parse_openai_response(&plain).unwrap();
+        assert_eq!(resp.tool_calls[0].thought_signature, None);
+    }
+
+    /// ... and replay on build: the signature goes back exactly where the
+    /// provider put it, and a signature-less call gains no `extra_content`.
+    #[test]
+    fn request_replays_a_thought_signature_in_place() {
+        let content = MessageContent::Blocks(vec![
+            ContentBlock::ToolUse {
+                id: "c1".into(),
+                name: "list_dir".into(),
+                input: serde_json::json!({}),
+                thought_signature: Some("sig-bytes".into()),
+            },
+            ContentBlock::ToolUse {
+                id: "c2".into(),
+                name: "read_file".into(),
+                input: serde_json::json!({}),
+                thought_signature: None,
+            },
+        ]);
+        let messages = message_to_openai("assistant", &content);
+        let calls = messages[0]["tool_calls"].as_array().unwrap();
+        assert_eq!(
+            calls[0]["extra_content"]["google"]["thought_signature"],
+            "sig-bytes"
+        );
+        assert!(
+            calls[1].get("extra_content").is_none(),
+            "no signature, no extra_content: {calls:?}"
+        );
+    }
+
     #[test]
     fn unpaired_tool_turns_are_dropped_from_the_request() {
         let call_only = InferenceRequest {
@@ -1290,6 +1390,7 @@ mod tests {
                         id: "orphan".into(),
                         name: "search".into(),
                         input: serde_json::json!({}),
+                        thought_signature: None,
                     }]),
                     cache_breakpoint: false,
                 },
@@ -1341,6 +1442,7 @@ mod tests {
                         id: "c1".into(),
                         name: "search".into(),
                         input: serde_json::json!({}),
+                        thought_signature: None,
                     }]),
                     cache_breakpoint: false,
                 },
@@ -1383,6 +1485,7 @@ mod tests {
                         id: "c1".into(),
                         name: "list_dir".into(),
                         input: serde_json::json!({}),
+                        thought_signature: None,
                     },
                     ContentBlock::ToolResult {
                         tool_use_id: "c1".into(),
@@ -1428,6 +1531,109 @@ mod tests {
         assert_eq!(openai_messages(&req).len(), 1);
     }
 
+    /// A call turn directly after a function response turn is legal - two
+    /// back-to-back exchanges must not accrete filler user turns.
+    #[test]
+    fn a_call_turn_after_a_tool_turn_is_left_alone() {
+        let exchange = |n: u32| Message {
+            role: "assistant".into(),
+            content: MessageContent::Blocks(vec![
+                ContentBlock::ToolUse {
+                    id: format!("c{n}"),
+                    name: "list_dir".into(),
+                    input: serde_json::json!({}),
+                    thought_signature: None,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: format!("c{n}"),
+                    content: "ok".into(),
+                    is_error: false,
+                },
+            ]),
+            cache_breakpoint: false,
+        };
+        let req = InferenceRequest {
+            system: vec![],
+            messages: vec![
+                Message {
+                    role: "user".into(),
+                    content: MessageContent::Text("go".into()),
+                    cache_breakpoint: false,
+                },
+                exchange(1),
+                exchange(2),
+            ],
+            model: "gemini-3.5-flash".into(),
+            max_tokens: 64,
+            temperature: 0.5,
+            tools: vec![],
+            extra: serde_json::json!({}),
+            request_timeout_secs: None,
+        };
+        let roles: Vec<String> = openai_messages(&req)
+            .iter()
+            .filter_map(|m| m["role"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "tool", "assistant", "tool"],
+            "no filler between a tool turn and the next call"
+        );
+    }
+
+    /// The mid-conversation variant of the turn-order rule: an assistant text
+    /// turn directly before a call turn (a carried stage response) is just as
+    /// illegal to Gemini as a leading one, and killed real runs at their first
+    /// stage transition.
+    #[test]
+    fn a_call_turn_after_an_assistant_text_turn_gets_a_user_turn_between() {
+        let req = InferenceRequest {
+            system: vec![],
+            messages: vec![
+                Message {
+                    role: "user".into(),
+                    content: MessageContent::Text("start".into()),
+                    cache_breakpoint: false,
+                },
+                Message {
+                    role: "assistant".into(),
+                    content: MessageContent::Text("analysis so far".into()),
+                    cache_breakpoint: false,
+                },
+                Message {
+                    role: "assistant".into(),
+                    content: MessageContent::Blocks(vec![
+                        ContentBlock::ToolUse {
+                            id: "c1".into(),
+                            name: "list_dir".into(),
+                            input: serde_json::json!({}),
+                            thought_signature: None,
+                        },
+                        ContentBlock::ToolResult {
+                            tool_use_id: "c1".into(),
+                            content: "main.rs".into(),
+                            is_error: false,
+                        },
+                    ]),
+                    cache_breakpoint: false,
+                },
+            ],
+            model: "gemini-3.5-flash".into(),
+            max_tokens: 64,
+            temperature: 0.5,
+            tools: vec![],
+            extra: serde_json::json!({}),
+            request_timeout_secs: None,
+        };
+        let msgs = openai_messages(&req);
+        let roles: Vec<&str> = msgs.iter().filter_map(|m| m["role"].as_str()).collect();
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "user", "assistant", "tool"],
+            "a user turn separates text from the call: {msgs:?}"
+        );
+    }
+
     /// One block list carrying both a call and its result must emit both; the
     /// results used to be dropped, producing the unanswered-call shape.
     #[test]
@@ -1437,6 +1643,7 @@ mod tests {
                 id: "c9".into(),
                 name: "search".into(),
                 input: serde_json::json!({}),
+                thought_signature: None,
             },
             ContentBlock::ToolResult {
                 tool_use_id: "c9".into(),

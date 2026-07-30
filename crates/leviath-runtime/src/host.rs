@@ -2671,6 +2671,7 @@ mod tests {
                 id: "c".to_string(),
                 name: "n".to_string(),
                 arguments: serde_json::Value::Null,
+                thought_signature: None,
             }],
         );
         assert_eq!(exec().await, vec![("c".to_string(), String::new())]);

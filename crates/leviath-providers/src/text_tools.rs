@@ -182,7 +182,9 @@ pub fn flatten_messages(messages: &[Message]) -> String {
                             }
                             section.push_str(text);
                         }
-                        ContentBlock::ToolUse { id, name, input } => {
+                        ContentBlock::ToolUse {
+                            id, name, input, ..
+                        } => {
                             tool_uses.push(serde_json::json!({
                                 "id": id, "name": name, "arguments": input,
                             }));
@@ -427,6 +429,7 @@ mod tests {
                     id: "cc_call_1".to_string(),
                     name: "read_file".to_string(),
                     input: serde_json::json!({"path": "a.rs"}),
+                    thought_signature: None,
                 },
             ]),
             cache_breakpoint: false,
@@ -451,6 +454,7 @@ mod tests {
                 id: "cc_call_9".to_string(),
                 name: "bash".to_string(),
                 input: serde_json::json!({}),
+                thought_signature: None,
             }]),
             cache_breakpoint: false,
         };
@@ -521,6 +525,7 @@ mod tests {
                     id: "cc_call_1".to_string(),
                     name: "read_file".to_string(),
                     input: serde_json::json!({"path": "a.rs"}),
+                    thought_signature: None,
                 }]),
                 cache_breakpoint: false,
             },
