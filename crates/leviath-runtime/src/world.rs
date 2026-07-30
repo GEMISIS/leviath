@@ -186,6 +186,11 @@ impl PipelineWorld {
         world.insert_resource(ToolResults(tool_res_rx));
         world.insert_resource(PersistenceStage(persist_tx));
         world.insert_resource(MessageIntake(msg_rx));
+        // Telemetry defaults to the no-op sink; a host that wants export
+        // replaces the resource after construction (as `build_host` does).
+        world.insert_resource(crate::telemetry::Telemetry(std::sync::Arc::new(
+            leviath_core::telemetry::NoopSink,
+        )));
 
         // The tick chain is split into two `.chain()`ed groups (bevy caps a
         // system tuple at 20); the second group runs strictly after the first.
@@ -254,6 +259,11 @@ impl PipelineWorld {
                 collect_transition_choice,
                 // Drive fan-out workers and merge once they finish.
                 crate::fanout::fan_out_collect,
+                // Narrate lifecycle/activity into the telemetry sink. Must run
+                // before `sync_tool_stages` (which consumes the transient
+                // `StageJustEntered` marker) and before `dispatch_persistence`
+                // (which drains the log buffer this system only reads).
+                crate::telemetry::observe_lifecycle,
                 sync_tool_stages,
                 // Store any finished run title, then start newly-marked ones.
                 // Collect precedes persistence so a landed title is written on
@@ -398,6 +408,13 @@ impl PipelineWorld {
         if let Some(task) = self.persist_task.take() {
             let _ = task.await;
         }
+        // Push any buffered telemetry export out before the process goes away;
+        // the final fixed point above already emitted the last events. The
+        // resource always exists - `new()` installs the no-op default.
+        self.world
+            .resource::<crate::telemetry::Telemetry>()
+            .0
+            .force_flush();
     }
 
     /// The status of an agent, if it still exists.

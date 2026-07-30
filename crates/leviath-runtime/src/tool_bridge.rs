@@ -55,6 +55,10 @@ pub struct ToolOutcome {
     pub entity: Entity,
     /// `(tool_call_id, result)` pairs.
     pub results: Vec<(String, String)>,
+    /// Wall-clock time the whole batch took. Per-call timing would require
+    /// every executor to report it through `BoxedToolExec`'s return shape, so
+    /// each call in the batch shares this one figure.
+    pub elapsed: std::time::Duration,
 }
 
 /// A shared, multi-consumer job receiver: several [`tool_worker`]s pull from the
@@ -91,6 +95,7 @@ pub async fn tool_worker(
         // a `wait_for_agent` poll), so without this a cancelled agent kept one
         // of the lane's fixed number of workers forever - and once they were all
         // taken, no other agent's tools ran either.
+        let started = std::time::Instant::now();
         let out = tokio::select! {
             biased;
             _ = cancel.cancelled() => continue,
@@ -100,6 +105,7 @@ pub async fn tool_worker(
         let _ = results.send(ToolOutcome {
             entity,
             results: out,
+            elapsed: started.elapsed(),
         });
         wake.notify_one();
     }

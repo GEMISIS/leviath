@@ -118,15 +118,28 @@ pub fn dispatch_compaction(
 /// of `AgentEngine::compact_region`.)
 pub fn collect_compaction(
     mut results: ResMut<CompactionResults>,
-    mut agents: Query<&mut ContextWindow, With<AwaitingCompaction>>,
+    mut agents: Query<
+        (
+            &mut ContextWindow,
+            Option<&mut crate::telemetry::StageActivity>,
+        ),
+        With<AwaitingCompaction>,
+    >,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
     while let Ok(outcome) = results.0.try_recv() {
-        let Ok(mut window) = agents.get_mut(outcome.entity) else {
+        let Ok((mut window, activity)) = agents.get_mut(outcome.entity) else {
             continue; // stale: agent cancelled/despawned since dispatch
         };
         crate::tick_scope::enter(outcome.entity);
+        if let Some(mut activity) = activity {
+            activity
+                .0
+                .push(crate::telemetry::ActivityRecord::Compaction {
+                    success: outcome.result.is_ok(),
+                });
+        }
         if let Ok(summaries) = outcome.result {
             for (region_name, summary) in summaries {
                 let summary_tokens = leviath_core::estimate_tokens(&summary);

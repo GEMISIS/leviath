@@ -391,6 +391,7 @@ fn collect_applies_ok_and_advances_to_process_response() {
         thought_signature: None,
     });
     tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(response),
     })
@@ -413,6 +414,7 @@ fn collect_marks_error_on_failure() {
     let (mut world, tx) = world_with_results();
     let e = world.spawn((agent_state(), AwaitingInference)).id();
     tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
         entity: e,
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
     })
@@ -507,6 +509,7 @@ fn collect_inference_buffers_output_token_line_and_stage_tokens() {
     response.tokens_used.completion_tokens = 3;
     response.tokens_used.cached_tokens = 2;
     tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(response),
     })
@@ -626,6 +629,7 @@ fn collect_inference_drops_a_response_for_a_cancelled_run() {
         ))
         .id();
     tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("too late")),
     })
@@ -658,6 +662,7 @@ fn collect_inference_skips_empty_output_but_logs_tokens() {
         ))
         .id();
     tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("   ")), // whitespace-only ⇒ no output line
     })
@@ -682,6 +687,7 @@ fn collect_inference_error_buffers_error_line() {
         ))
         .id();
     tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
         entity: e,
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
     })
@@ -706,6 +712,7 @@ fn collect_inference_tolerates_cursor_beyond_ledger() {
         ))
         .id();
     tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("x")),
     })
@@ -736,6 +743,7 @@ fn collect_tools_buffers_one_tool_log_line_per_call() {
         ))
         .id();
     tx.send(ToolOutcome {
+        elapsed: std::time::Duration::ZERO,
         entity: e,
         results: vec![("c1".to_string(), "file\nbody".to_string())],
     })
@@ -1347,6 +1355,7 @@ fn collect_drops_outcome_for_non_awaiting_agent() {
     let (mut world, tx) = world_with_results();
     let e = world.spawn(agent_state()).id(); // no AwaitingInference marker
     tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("x")),
     })
@@ -1378,6 +1387,7 @@ fn collect_inference_accumulates_token_totals() {
         cache_write_tokens: 1,
     };
     tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(r),
     })
@@ -3081,6 +3091,7 @@ fn collect_tools_applies_and_loops_back_to_infer() {
         ))
         .id();
     tx.send(ToolOutcome {
+        elapsed: std::time::Duration::ZERO,
         entity: e,
         results: vec![("c1".to_string(), "res".to_string())],
     })
@@ -3106,6 +3117,7 @@ fn collect_tools_merges_stashed_context_results() {
         ))
         .id();
     tx.send(ToolOutcome {
+        elapsed: std::time::Duration::ZERO,
         entity: e,
         results: vec![("c2".to_string(), "file body".to_string())],
     })
@@ -3134,6 +3146,7 @@ fn collect_tools_drops_stale_outcome() {
     world.insert_resource(ToolResults(rx));
     let e = world.spawn(ctx(&[("conversation", 10_000)])).id(); // no AwaitingTools
     tx.send(ToolOutcome {
+        elapsed: std::time::Duration::ZERO,
         entity: e,
         results: vec![],
     })
@@ -3757,6 +3770,7 @@ fn collect_choice_errors_when_system_prompt_overflows() {
         ))
         .id();
     tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("b")),
     })
@@ -5887,6 +5901,7 @@ fn collect_tools_applies_file_tracking_from_blueprint() {
         ))
         .id();
     tx.send(ToolOutcome {
+        elapsed: std::time::Duration::ZERO,
         entity: e,
         results: vec![("c1".to_string(), "fn a() {}".to_string())],
     })
@@ -5941,6 +5956,7 @@ fn count_modifications(
         ))
         .id();
     tx.send(ToolOutcome {
+        elapsed: std::time::Duration::ZERO,
         entity: e,
         results: calls
             .iter()
@@ -6078,6 +6094,7 @@ fn collect_tools_still_applies_results_without_stage_components() {
         ))
         .id();
     tx.send(ToolOutcome {
+        elapsed: std::time::Duration::ZERO,
         entity: e,
         results: vec![
             ("c1".to_string(), "wrote it".to_string()),
@@ -6256,6 +6273,7 @@ fn collect_tools_injects_repetition_nudge_when_looping() {
         ))
         .id();
     tx.send(ToolOutcome {
+        elapsed: std::time::Duration::ZERO,
         entity: e,
         results: vec![
             ("c1".to_string(), "body".to_string()),
@@ -7097,6 +7115,7 @@ fn collect_choice_enters_chosen_stage() {
         vec![plain_edge("b")],
     );
     tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("b")),
     })
@@ -7130,6 +7149,7 @@ fn collect_choice_does_not_resurrect_or_complete_a_cancelled_run() {
         );
         world.get_mut::<AgentState>(e).unwrap().status = AgentStatus::Cancelled;
         tx.send(InferenceOutcome {
+            latency: std::time::Duration::ZERO,
             entity: e,
             result: Ok(resp(choice)),
         })
@@ -7167,6 +7187,7 @@ fn collect_choice_applies_the_chosen_edge_transform() {
         .add_to_region("conversation", "summarize me".to_string(), 10)
         .unwrap();
     tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("b")),
     })
@@ -7199,6 +7220,7 @@ fn collect_choice_holds_the_stage_when_the_chosen_edge_is_gated() {
         .entity_mut(e)
         .insert(crate::persistence::RunOutcomeFlags::default());
     tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("review")),
     })
@@ -7240,6 +7262,7 @@ fn collect_choice_records_a_forced_gate_and_enters_the_stage() {
     world.entity_mut(unflagged).insert(progress_with(0, 0, 3));
     for entity in [e, unflagged] {
         tx.send(InferenceOutcome {
+            latency: std::time::Duration::ZERO,
             entity,
             result: Ok(resp("review")),
         })
@@ -7266,6 +7289,7 @@ fn collect_choice_done_completes() {
     let bp = blueprint(vec![stage_named("a", None, true, None)]); // allow_complete
     let e = spawn_responding_agent(&mut world, bp, vec![si("m0")], vec![plain_edge("a")]);
     tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("DONE")),
     })
@@ -7289,6 +7313,7 @@ fn collect_choice_unknown_target_falls_back_to_first_stage() {
     let bp = blueprint(vec![stage_named("a", None, false, None)]);
     let e = spawn_responding_agent(&mut world, bp, vec![si("m0")], vec![plain_edge("ghost")]);
     tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
         entity: e,
         result: Ok(resp("ghost")),
     })
@@ -7307,6 +7332,7 @@ fn collect_choice_marks_error_on_failure() {
     let bp = blueprint(vec![stage_named("a", None, false, None)]);
     let e = spawn_responding_agent(&mut world, bp, vec![si("m0")], vec![plain_edge("a")]);
     tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
         entity: e,
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
     })
@@ -7328,10 +7354,176 @@ fn collect_choice_drops_stale_outcome() {
     let (mut world, tx) = world_with_transition_results();
     let ghost = world.spawn_empty().id();
     tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
         entity: ghost,
         result: Ok(resp("x")),
     })
     .unwrap();
     // No matching AwaitingTransitionResponse agent ⇒ silently dropped.
     run_collect_transition(&mut world);
+}
+
+// ─── Telemetry activity recording in the collect systems ─────────────────────
+
+#[test]
+fn collect_inference_records_activity_with_provider_and_latency() {
+    let (mut world, tx) = world_with_results();
+    let e = world
+        .spawn((
+            agent_state(),
+            AwaitingInference,
+            StageInference {
+                provider_name: "anthropic".to_string(),
+                model: "m1".to_string(),
+                tools: vec![],
+                tool_filter: None,
+            },
+            crate::telemetry::StageActivity::default(),
+        ))
+        .id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::from_millis(1500),
+        entity: e,
+        result: Ok(resp("hi")),
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    let activity = world.get::<crate::telemetry::StageActivity>(e).unwrap();
+    assert_eq!(
+        activity.0,
+        vec![crate::telemetry::ActivityRecord::Inference {
+            provider: "anthropic".to_string(),
+            model: "m1".to_string(),
+            latency_ms: 1500,
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            cached_tokens: 0,
+            success: true,
+        }]
+    );
+}
+
+#[test]
+fn collect_inference_records_a_failed_call_without_stage_inference() {
+    let (mut world, tx) = world_with_results();
+    let e = world
+        .spawn((
+            agent_state(),
+            AwaitingInference,
+            crate::telemetry::StageActivity::default(),
+        ))
+        .id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::from_millis(20),
+        entity: e,
+        result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    let activity = world.get::<crate::telemetry::StageActivity>(e).unwrap();
+    assert_eq!(
+        activity.0,
+        vec![crate::telemetry::ActivityRecord::Inference {
+            provider: String::new(),
+            model: String::new(),
+            latency_ms: 20,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cached_tokens: 0,
+            success: false,
+        }]
+    );
+}
+
+#[test]
+fn collect_tools_records_one_activity_per_call_with_error_detection() {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolResults(rx));
+    let e = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            crate::components::InferenceResult {
+                response: "r".to_string(),
+                tool_calls: vec![tc("c1", "read_file"), tc("c2", "write_file")],
+                tokens_used: 0,
+                timestamp: 0,
+            },
+            AwaitingTools,
+            crate::telemetry::StageActivity::default(),
+        ))
+        .id();
+    tx.send(ToolOutcome {
+        elapsed: std::time::Duration::from_millis(40),
+        entity: e,
+        results: vec![
+            ("c1".to_string(), "file body".to_string()),
+            ("c2".to_string(), "[error] denied".to_string()),
+        ],
+    })
+    .unwrap();
+
+    run_collect_tools(&mut world);
+
+    let activity = world.get::<crate::telemetry::StageActivity>(e).unwrap();
+    assert_eq!(
+        activity.0,
+        vec![
+            crate::telemetry::ActivityRecord::ToolCall {
+                tool_name: "read_file".to_string(),
+                batch_latency_ms: 40,
+                success: true,
+            },
+            crate::telemetry::ActivityRecord::ToolCall {
+                tool_name: "write_file".to_string(),
+                batch_latency_ms: 40,
+                success: false,
+            },
+        ]
+    );
+}
+
+#[test]
+fn collect_compaction_records_success_and_failure() {
+    let (mut world, tx) = world_with_compaction_results();
+    let e = world
+        .spawn((
+            compacting_window(),
+            AwaitingCompaction,
+            crate::telemetry::StageActivity::default(),
+        ))
+        .id();
+    tx.send(CompactionOutcome {
+        entity: e,
+        result: Ok(vec![("conv".to_string(), "summary".to_string())]),
+    })
+    .unwrap();
+    run_collect_compaction(&mut world);
+
+    let e2 = world
+        .spawn((
+            compacting_window(),
+            AwaitingCompaction,
+            crate::telemetry::StageActivity::default(),
+        ))
+        .id();
+    tx.send(CompactionOutcome {
+        entity: e2,
+        result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
+    })
+    .unwrap();
+    run_collect_compaction(&mut world);
+
+    assert_eq!(
+        world.get::<crate::telemetry::StageActivity>(e).unwrap().0,
+        vec![crate::telemetry::ActivityRecord::Compaction { success: true }]
+    );
+    assert_eq!(
+        world.get::<crate::telemetry::StageActivity>(e2).unwrap().0,
+        vec![crate::telemetry::ActivityRecord::Compaction { success: false }]
+    );
 }
