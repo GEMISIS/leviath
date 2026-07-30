@@ -11,6 +11,7 @@ members = [
     "crates/leviath-cli",
     "crates/leviath-tools",
     "crates/leviath-sys",
+    "crates/leviath-telemetry",
     "crates/leviath-testkit",
     "xtask",
 ]
@@ -54,6 +55,7 @@ leviath-scripting = { path = "crates/leviath-scripting" }
 leviath-package = { path = "crates/leviath-package" }
 leviath-tools = { path = "crates/leviath-tools" }
 leviath-sys = { path = "crates/leviath-sys" }
+leviath-telemetry = { path = "crates/leviath-telemetry" }
 leviath-testkit = { path = "crates/leviath-testkit" }
 
 # External dependencies
@@ -75,6 +77,17 @@ clap = { version = "4.5", features = ["derive"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "rustls-native-certs", "charset", "http2", "system-proxy", "blocking", "form", "query"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# OpenTelemetry export ([observability] config, issue #73). OTLP goes over
+# HTTP/protobuf on the existing rustls reqwest stack - never gRPC, which would
+# drag in tonic and a second TLS implementation. `reqwest-blocking-client` so
+# the SDK's own background export thread does the I/O without needing a tokio
+# context; `prost` comes along for message encoding only. The `testing`
+# feature (in-memory exporters) is enabled by leviath-telemetry's
+# dev-dependency, not here.
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace", "metrics", "logs"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "metrics", "logs", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }
+opentelemetry-appender-tracing = "0.32"
 thiserror = "2.0"
 toml = { version = "1.0", features = ["preserve_order"] }
 anyhow = "1.0"
