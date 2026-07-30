@@ -65,8 +65,11 @@ pub fn handle_context_tool(
                     Err(e) => format!("[error] {e}"),
                 }
             } else {
+                // Through the window method (not region.add_entry directly)
+                // so a custom region's on_write hook sees the write.
                 region.clear();
-                match region.add_entry(content.to_string(), tokens) {
+                window.current_tokens = window.calculate_tokens();
+                match window.add_to_region(region_name, content.to_string(), tokens) {
                     Ok(()) => format!("Stored in '{region_name}' section."),
                     Err(e) => format!("[error] {e}"),
                 }
@@ -110,7 +113,8 @@ pub fn handle_context_tool(
                     }
                 }
             } else {
-                match region.add_entry(content.to_string(), tokens) {
+                // Same routing rationale as context_write above.
+                match window.add_to_region(region_name, content.to_string(), tokens) {
                     Ok(()) => format!("Appended to '{region_name}' section."),
                     Err(e) => format!("[error] {e}"),
                 }

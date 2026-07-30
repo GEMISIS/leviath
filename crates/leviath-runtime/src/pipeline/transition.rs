@@ -1258,6 +1258,9 @@ pub fn spawn_agent(
     global_batch_tool_hint: bool,
 ) -> Result<Entity, String> {
     let seeds = std::collections::HashMap::from([("task".to_string(), task.to_string())]);
+    // No compiled custom-region scripts on this path: script-backed regions
+    // require the seeded spawn (the CLI resolves and compiles them). A custom
+    // region spawned through here renders its fallback shape.
     spawn_agent_seeded(
         world,
         agent_id,
@@ -1265,6 +1268,7 @@ pub fn spawn_agent(
         &seeds,
         stages,
         global_batch_tool_hint,
+        std::collections::HashMap::new(),
     )
 }
 
@@ -1279,6 +1283,10 @@ pub fn spawn_agent_seeded(
     seeds: &std::collections::HashMap<String, String>,
     stages: Vec<ResolvedStage>,
     global_batch_tool_hint: bool,
+    region_scripts: std::collections::HashMap<
+        String,
+        std::sync::Arc<leviath_scripting::region_hook::RegionScript>,
+    >,
 ) -> Result<Entity, String> {
     // Resolve any percentage region budgets against each stage's model context
     // window (the only place the model - and hence the window - is known). The
@@ -1327,6 +1335,9 @@ pub fn spawn_agent_seeded(
     // context setup (layout swap + system-prompt injection) just as entering any
     // later stage would.
     let mut window = ContextWindow::new(blueprint.context_layout.total_budget_tokens);
+    // Attach compiled custom-region scripts BEFORE seeding, so seed writes
+    // pass through each region's on_write hook like any other entry.
+    window.region_scripts = region_scripts;
     crate::context_setup::init_window_seeded(&mut window, &blueprint, seeds);
     apply_stage_context(&setups[0], &mut window)?;
 
@@ -1563,6 +1574,10 @@ pub fn dispatch_transition_choice(
             tokens,
         );
 
+        // Plain `assemble()` (default meta): this is the deterministic
+        // 256-token routing call, not stage inference - custom regions still
+        // render (they may hold the whole context), just with empty stage
+        // fields in their ctx.
         let assembled = window.assemble();
         let remaining = window.max_tokens.saturating_sub(window.current_tokens);
         let request = InferenceRequest {

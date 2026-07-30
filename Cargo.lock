@@ -2333,6 +2333,7 @@ dependencies = [
  "chrono",
  "leviath-core",
  "leviath-providers",
+ "leviath-scripting",
  "leviath-sys",
  "leviath-testkit",
  "leviath-tools",

@@ -15,15 +15,25 @@ one response to cut round trips. Do NOT batch when a call depends on a previous 
 call's result, or when you must see a command's output before deciding the next step.";
 
 /// Build the [`InferenceRequest`] for an agent from its context window + stage
-/// data. Pure; no `.await`. (Ported from `AgentEngine::build_inference_request`,
+/// data. Pure; no `.await` - a custom region's render hook is a bounded,
+/// synchronous Rhai eval. (Ported from `AgentEngine::build_inference_request`,
 /// with provider resolution lifted into the caller so this stays query-friendly.)
+///
+/// `stage_name` / `stage_iterations` feed custom-region `render(ctx)` hooks;
+/// they change nothing when the window has no custom regions.
 pub(crate) fn build_request(
     window: &ContextWindow,
     config: Option<&InferenceConfig>,
     stage: &StageInference,
     provider: &Arc<dyn Provider>,
+    stage_name: &str,
+    stage_iterations: usize,
 ) -> InferenceRequest {
-    let assembled = window.assemble();
+    let assembled = window.assemble_with_meta(&crate::custom_region::AssembleMeta {
+        stage_name: stage_name.to_string(),
+        stage_iterations,
+        model: stage.model.clone(),
+    });
     let remaining = window.max_tokens.saturating_sub(window.current_tokens);
     let caps = provider.capabilities(&stage.model);
     let output_cap = config
@@ -157,6 +167,7 @@ pub fn dispatch_inference(
             Option<&InferenceConfig>,
             &StageInference,
             Option<&InFlightWork>,
+            Option<&StageProgress>,
         ),
         With<ReadyToInfer>,
     >,
@@ -179,7 +190,7 @@ pub fn dispatch_inference(
     crate::tick_scope::clear();
     agents
         .par_iter()
-        .for_each(|(entity, state, window, config, si, in_flight)| {
+        .for_each(|(entity, state, window, config, si, in_flight, progress)| {
             crate::tick_scope::run_agent_parallel(entity, &par_commands, &mut || {
                 if state.status != AgentStatus::Active {
                     return; // paused / waiting / cancelled - don't start new work
@@ -203,7 +214,14 @@ pub fn dispatch_inference(
                     );
                     return;
                 };
-                let request = build_request(window, config, si, &provider);
+                let request = build_request(
+                    window,
+                    config,
+                    si,
+                    &provider,
+                    &state.current_stage,
+                    progress.map(|p| p.iterations).unwrap_or(0),
+                );
                 let job = InferenceJob {
                     entity,
                     provider,
