@@ -887,15 +887,21 @@ impl Config {
 
     /// Validate API key formats and return warnings for suspicious keys.
     pub fn validate_keys(&self) -> Vec<String> {
+        // A blank key means "not configured" (that is what `lev setup` writes
+        // for a provider the user skipped), so it earns no warning - warning
+        // about the shape of a key nobody set is noise that trains users to
+        // ignore the ones that matter.
         let mut warnings = Vec::new();
-        if let Some(ref key) = self.providers.anthropic_api_key
+        if let Some(key) = self.providers.anthropic_api_key.as_deref()
+            && !key.trim().is_empty()
             && !key.starts_with("sk-ant-")
         {
             warnings.push(
                 "Anthropic API key doesn't start with 'sk-ant-' - verify it's correct".to_string(),
             );
         }
-        if let Some(ref key) = self.providers.openai_api_key
+        if let Some(key) = self.providers.openai_api_key.as_deref()
+            && !key.trim().is_empty()
             && !key.starts_with("sk-")
         {
             warnings
@@ -2234,6 +2240,20 @@ max_output_tokens = 2048
     }
 
     // ─── validate_keys with both keys ──────────────────────────────────────
+
+    /// A blank key means "not configured" (what `lev setup` writes for a
+    /// skipped provider), so it must not draw a shape warning - noise about
+    /// keys nobody set trains users to ignore the warnings that matter.
+    #[test]
+    fn validate_keys_is_quiet_about_blank_keys() {
+        let mut config = Config::default();
+        config.providers.anthropic_api_key = Some(String::new());
+        config.providers.openai_api_key = Some("   ".to_string());
+        assert!(config.validate_keys().is_empty());
+        // A genuinely wrong-looking key still warns.
+        config.providers.anthropic_api_key = Some("nope".to_string());
+        assert_eq!(config.validate_keys().len(), 1);
+    }
 
     #[test]
     fn validate_keys_both_bad() {
