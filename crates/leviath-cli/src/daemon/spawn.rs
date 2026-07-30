@@ -1395,6 +1395,101 @@ mod tests {
         }
     }
 
+    // ─── resolve_region_scripts ──────────────────────────────────────────
+
+    /// Manifest with a global custom region and a per-stage one, both
+    /// pointing into `hooks/` next to the manifest.
+    fn custom_region_manifest() -> &'static str {
+        "[agent]\nname = \"cr\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+         [context.regions.brain]\nkind = \"custom\"\nscript = \"hooks/brain.rhai\"\nmax_tokens = 4000\n\n\
+         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\n\
+         [stages.main.context.regions.stage_view]\nkind = \"custom\"\nscript = \"hooks/stage.rhai\"\nmax_tokens = 2000\n"
+    }
+
+    #[test]
+    fn resolve_region_scripts_empty_without_custom_regions() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        let bp = leviath_core::manifest::parse_manifest(
+            "[agent]\nname = \"plain\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+        let scripts = resolve_region_scripts(&bp, &manifest.to_string_lossy()).unwrap();
+        assert!(scripts.is_empty());
+    }
+
+    #[test]
+    fn resolve_region_scripts_collects_global_and_per_stage_layouts() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::create_dir(dir.path().join("hooks")).unwrap();
+        std::fs::write(
+            dir.path().join("hooks/brain.rhai"),
+            "fn render(ctx) { \"b\" }",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("hooks/stage.rhai"),
+            "fn render(ctx) { \"s\" }",
+        )
+        .unwrap();
+        let bp = leviath_core::manifest::parse_manifest(custom_region_manifest()).unwrap();
+        let scripts = resolve_region_scripts(&bp, &manifest.to_string_lossy()).unwrap();
+        assert_eq!(scripts.len(), 2);
+        assert!(scripts.contains_key("hooks/brain.rhai"));
+        assert!(scripts.contains_key("hooks/stage.rhai"));
+    }
+
+    #[test]
+    fn resolve_region_scripts_reads_a_shared_path_once() {
+        // Two regions declaring the same script share one compiled Arc.
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::create_dir(dir.path().join("hooks")).unwrap();
+        std::fs::write(
+            dir.path().join("hooks/shared.rhai"),
+            "fn render(ctx) { \"x\" }",
+        )
+        .unwrap();
+        let bp = leviath_core::manifest::parse_manifest(
+            "[agent]\nname = \"cr\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [context.regions.a]\nkind = \"custom\"\nscript = \"hooks/shared.rhai\"\nmax_tokens = 2000\n\n\
+             [context.regions.b]\nkind = \"custom\"\nscript = \"hooks/shared.rhai\"\nmax_tokens = 2000\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+        let scripts = resolve_region_scripts(&bp, &manifest.to_string_lossy()).unwrap();
+        assert_eq!(scripts.len(), 1);
+    }
+
+    #[test]
+    fn resolve_region_scripts_missing_file_is_a_hard_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        let bp = leviath_core::manifest::parse_manifest(custom_region_manifest()).unwrap();
+        let err = resolve_region_scripts(&bp, &manifest.to_string_lossy()).unwrap_err();
+        assert!(err.contains("region 'brain'"), "{err}");
+        assert!(err.contains("hooks/brain.rhai"), "{err}");
+    }
+
+    #[test]
+    fn resolve_region_scripts_uncompilable_script_is_a_hard_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::create_dir(dir.path().join("hooks")).unwrap();
+        std::fs::write(dir.path().join("hooks/brain.rhai"), "fn render(ctx) {").unwrap();
+        std::fs::write(
+            dir.path().join("hooks/stage.rhai"),
+            "fn render(ctx) { \"s\" }",
+        )
+        .unwrap();
+        let bp = leviath_core::manifest::parse_manifest(custom_region_manifest()).unwrap();
+        let err = resolve_region_scripts(&bp, &manifest.to_string_lossy()).unwrap_err();
+        assert!(err.contains("failed to compile"), "{err}");
+        assert!(err.contains("region 'brain'"), "{err}");
+    }
+
     #[tokio::test]
     async fn build_agent_rejects_a_workdir_that_is_missing_or_not_a_directory() {
         // `ToolContext::new` silently keeps a path it can't canonicalize, so

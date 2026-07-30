@@ -51,6 +51,13 @@ fn check_manifest(path: &std::path::Path) -> Result<leviath_core::Blueprint, Man
         .validate()
         .map_err(|e| ManifestCheckError::Validation(e.to_string()))?;
 
+    // Custom regions' Rhai scripts must resolve to readable, compilable
+    // files with a well-formed `fn render(ctx)` - the same check a spawn
+    // performs, surfaced here where a typo'd path or syntax error is cheap
+    // to find.
+    crate::daemon::spawn::resolve_region_scripts(&blueprint, &manifest_path.to_string_lossy())
+        .map_err(ManifestCheckError::Validation)?;
+
     Ok(blueprint)
 }
 
@@ -309,6 +316,48 @@ conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
 
     fn parse(toml: &str) -> leviath_core::Blueprint {
         leviath_core::manifest::parse_manifest(toml).unwrap()
+    }
+
+    #[test]
+    fn check_manifest_verifies_custom_region_scripts() {
+        // A custom region's script must exist and compile; the same failure a
+        // spawn would hit, surfaced by `lev validate`.
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("agent.leviath");
+        let toml = r#"
+[agent]
+name = "custom-validate"
+version = "0.1.0"
+description = "d"
+
+[stages.main]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-5" }
+description = "Main stage"
+
+[context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
+brain = { kind = "custom", script = "hooks/brain.rhai", max_tokens = 1000 }
+"#;
+        std::fs::write(&manifest_path, toml).unwrap();
+
+        // Missing script file → validation error naming region + path.
+        let err = check_manifest(&manifest_path).unwrap_err();
+        let ManifestCheckError::Validation(msg) = err else {
+            panic!("expected Validation, got {err:?}");
+        };
+        assert!(msg.contains("region 'brain'"), "{msg}");
+
+        // Present + compilable → passes.
+        std::fs::create_dir(dir.path().join("hooks")).unwrap();
+        std::fs::write(
+            dir.path().join("hooks/brain.rhai"),
+            "fn render(ctx) { \"ok\" }",
+        )
+        .unwrap();
+        let bp = check_manifest(&manifest_path).unwrap();
+        assert_eq!(bp.name, "custom-validate");
     }
 
     #[test]
