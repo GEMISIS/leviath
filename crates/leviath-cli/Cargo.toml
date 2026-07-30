@@ -28,6 +28,7 @@ debug-http = ["leviath-providers/debug-http"]
 leviath-core = { workspace = true }
 leviath-agent-client = { workspace = true }
 leviath-runtime = { workspace = true }
+leviath-telemetry = { workspace = true }
 leviath-providers = { workspace = true }
 leviath-mcp = { workspace = true }
 leviath-package = { workspace = true }

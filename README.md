@@ -292,6 +292,20 @@ curl -X POST http://localhost:3000/api/agents \
 
 [Full API reference →](https://leviath.dev/docs/api)
 
+## Observability
+
+Production deployments can export structured traces, metrics, and logs over OpenTelemetry. Every run becomes a trace — `agent.run` → `agent.stage` → per-call `agent.inference` / `agent.tool_call` spans — alongside token counters, stage-duration and inference-latency histograms, and log records carrying the run's trace ID.
+
+```toml
+[observability]
+enabled = true
+exporter = "otlp"                     # "otlp" | "stdout" | "none"
+endpoint = "http://localhost:4318"    # OTLP over HTTP - 4318, not the 4317 gRPC port
+service_name = "leviath"
+```
+
+Off by default. The standard `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_SERVICE_NAME` env vars fill any hole the file leaves. `exporter = "stdout"` narrates the same events as readable log lines on stderr instead.
+
 ## Agent Client Protocol
 
 `lev agent-client` serves any Leviath agent over the [Agent Client Protocol](https://agentclientprotocol.com): JSON-RPC 2.0 over stdio, the protocol agent hosts like [Gas City](https://github.com/gastownhall/gascity) and [Zed](https://zed.dev) use to drive a headless agent as a child process. A `session/prompt` runs the blueprint in the shared-world daemon and streams output back as `session/update` notifications.

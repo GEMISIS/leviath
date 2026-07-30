@@ -2207,6 +2207,7 @@ dependencies = [
  "leviath-runtime",
  "leviath-scripting",
  "leviath-sys",
+ "leviath-telemetry",
  "leviath-testkit",
  "leviath-tools",
  "libc",
