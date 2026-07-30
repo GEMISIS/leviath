@@ -142,6 +142,29 @@ pub enum RegionKind {
         /// Optional maximum number of keys
         max_entries: Option<usize>,
     },
+
+    /// Script-backed region: a user-authored Rhai script owns how the region
+    /// renders into the assembled context (`render`), may transform or reject
+    /// each incoming entry (`on_write`), and may choose what to drop under
+    /// budget pressure (`on_overflow`).
+    ///
+    /// `script` is the blueprint-dir-relative path to the `.rhai` file; path
+    /// resolution and compilation happen in the CLI spawner (this crate stays
+    /// filesystem-free), and the compiled script travels on the runtime's
+    /// context window keyed by this path. `persistent` regions behave like
+    /// [`Pinned`](Self::Pinned) for lifecycle - never evicted, immune to edge
+    /// `Clear` transforms, counted as fixed budget - while non-persistent
+    /// regions behave like [`Temporary`](Self::Temporary).
+    ///
+    /// Note: this kind is orthogonal to [`RegionSchema`]'s (unwired)
+    /// `custom_script` field, which is a content-*validation* concept.
+    Custom {
+        /// Blueprint-dir-relative path to the Rhai script backing this region
+        script: String,
+        /// Lifecycle: `true` = Pinned-like (protected, fixed budget),
+        /// `false` = Temporary-like (stage-specific, evictable)
+        persistent: bool,
+    },
 }
 
 impl PartialEq for RegionKind {
@@ -174,6 +197,16 @@ impl PartialEq for RegionKind {
                 Self::CompactHistory { source_region: b },
             ) => a == b,
             (Self::HashMap { max_entries: a }, Self::HashMap { max_entries: b }) => a == b,
+            (
+                Self::Custom {
+                    script: a,
+                    persistent: pa,
+                },
+                Self::Custom {
+                    script: b,
+                    persistent: pb,
+                },
+            ) => a == b && pa == pb,
             _ => false,
         }
     }
@@ -193,6 +226,16 @@ impl RegionKind {
             },
             RegionKind::HashMap { .. } => crate::cache::CacheHint::UntilChanged,
             RegionKind::Temporary | RegionKind::Clearable => crate::cache::CacheHint::Never,
+            // A persistent custom region is Pinned-like: its rendered output is
+            // expected to be stable. Non-persistent custom content changes on
+            // writes, like Compacting/HashMap.
+            RegionKind::Custom { persistent, .. } => {
+                if *persistent {
+                    crate::cache::CacheHint::Always
+                } else {
+                    crate::cache::CacheHint::UntilChanged
+                }
+            }
         }
     }
 }
@@ -984,6 +1027,64 @@ mod tests {
             }
         );
         assert_ne!(RegionKind::Pinned, RegionKind::Temporary);
+    }
+
+    #[test]
+    fn custom_kind_equality_compares_script_and_persistent() {
+        let a = RegionKind::Custom {
+            script: "conv.rhai".to_string(),
+            persistent: false,
+        };
+        assert_eq!(a, a.clone());
+        assert_ne!(
+            a,
+            RegionKind::Custom {
+                script: "other.rhai".to_string(),
+                persistent: false,
+            }
+        );
+        assert_ne!(
+            a,
+            RegionKind::Custom {
+                script: "conv.rhai".to_string(),
+                persistent: true,
+            }
+        );
+        assert_ne!(a, RegionKind::Temporary);
+    }
+
+    #[test]
+    fn custom_kind_serde_round_trips() {
+        let kind = RegionKind::Custom {
+            script: "hooks/conv.rhai".to_string(),
+            persistent: true,
+        };
+        let json = serde_json::to_string(&kind).unwrap();
+        let back: RegionKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(kind, back);
+        // Pre-existing serialized kinds still deserialize (additive variant).
+        let old: RegionKind = serde_json::from_str("\"Pinned\"").unwrap();
+        assert_eq!(old, RegionKind::Pinned);
+    }
+
+    #[test]
+    fn custom_kind_cache_hint_follows_persistent() {
+        assert_eq!(
+            RegionKind::Custom {
+                script: "s.rhai".to_string(),
+                persistent: true,
+            }
+            .cache_hint(),
+            crate::cache::CacheHint::Always
+        );
+        assert_eq!(
+            RegionKind::Custom {
+                script: "s.rhai".to_string(),
+                persistent: false,
+            }
+            .cache_hint(),
+            crate::cache::CacheHint::UntilChanged
+        );
     }
 
     #[test]

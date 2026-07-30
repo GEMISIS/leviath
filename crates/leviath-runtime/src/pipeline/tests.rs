@@ -4321,6 +4321,38 @@ fn apply_edge_transform_clear_wipes_stage_specific_keeps_pinned() {
 }
 
 #[test]
+fn edge_transforms_respect_custom_region_persistence() {
+    // Non-persistent custom is stage-specific (wiped by Clear); persistent is
+    // protected alongside Pinned/HashMap/CompactHistory.
+    let mut w = transform_window();
+    let mut scratch_custom = Region::new(
+        "scratch_custom".to_string(),
+        RegionKind::Custom {
+            script: "s.rhai".to_string(),
+            persistent: false,
+        },
+        500,
+    );
+    let _ = scratch_custom.add_entry("wipe me".to_string(), 10);
+    w.add_region(scratch_custom);
+    let mut vault = Region::new(
+        "vault".to_string(),
+        RegionKind::Custom {
+            script: "v.rhai".to_string(),
+            persistent: true,
+        },
+        500,
+    );
+    let _ = vault.add_entry("keep me".to_string(), 10);
+    w.add_region(vault);
+    w.current_tokens = w.calculate_tokens();
+
+    assert!(apply_edge_transform(&mut w, &EdgeTransform::Clear).is_empty());
+    assert_eq!(w.get_region("scratch_custom").unwrap().current_tokens, 0);
+    assert!(w.get_region("vault").unwrap().current_tokens > 0);
+}
+
+#[test]
 fn apply_edge_transform_compact_returns_stage_specific_with_content() {
     let mut w = transform_window();
     // Pinned excluded; scratch (stage-specific, has content) returned; not cleared.

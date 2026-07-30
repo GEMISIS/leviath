@@ -213,6 +213,7 @@ pub fn handle_context_tool(
                         RegionKind::Clearable => "temporary",
                         RegionKind::CompactHistory { .. } => "summary archive",
                         RegionKind::HashMap { .. } => "key-value store",
+                        RegionKind::Custom { .. } => "scripted",
                     };
                     lines.push(format!(
                         "  {} ({}): {} entries, {}/{} tokens",

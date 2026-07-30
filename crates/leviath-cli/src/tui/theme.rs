@@ -18,6 +18,8 @@ pub(crate) const C_DIM: Color = Color::DarkGray;
 pub(crate) const C_MUTED: Color = Color::Gray;
 pub(crate) const C_WHITE: Color = Color::White;
 pub(crate) const C_ACTIVE: Color = Color::Cyan;
+/// Script-backed (custom) region kind in the dashboard's region list.
+pub(crate) const C_SCRIPT: Color = Color::Magenta;
 pub(crate) const C_BORDER: Color = Color::DarkGray;
 pub(crate) const C_BORDER_FOCUS: Color = Color::Cyan;
 
