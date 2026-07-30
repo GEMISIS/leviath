@@ -482,6 +482,14 @@ mod tests {
             RegionKind::HashMap { max_entries: None },
             100,
         ));
+        w.add_region(Region::new(
+            "brain".to_string(),
+            RegionKind::Custom {
+                script: "b.rhai".to_string(),
+                persistent: false,
+            },
+            100,
+        ));
         let _ = w.add_to_region("pin", "hello".to_string(), 3);
         w.current_tokens = w.calculate_tokens();
 
@@ -498,7 +506,8 @@ mod tests {
                 "sliding",
                 "compacting",
                 "history",
-                "hashmap"
+                "hashmap",
+                "custom"
             ]
         );
         // The pinned region's entry is captured.

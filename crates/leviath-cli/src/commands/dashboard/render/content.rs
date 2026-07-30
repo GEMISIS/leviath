@@ -1692,6 +1692,13 @@ mod tests {
                     entries: vec![],
                 },
                 runstate::RegionSnapshot {
+                    name: "brain".to_string(),
+                    kind: "custom".to_string(),
+                    current_tokens: 1000,
+                    max_tokens: 2000,
+                    entries: vec![],
+                },
+                runstate::RegionSnapshot {
                     name: "other".to_string(),
                     kind: "unknown_kind".to_string(),
                     current_tokens: 1000,

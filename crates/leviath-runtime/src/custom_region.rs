@@ -658,26 +658,18 @@ mod tests {
         );
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].role, "user");
-        let leviath_providers::MessageContent::Blocks(assistant) = &messages[1].content else {
-            panic!("assistant tool_calls message must be block content");
-        };
-        assert!(matches!(
-            &assistant[0],
-            leviath_providers::ContentBlock::Text { text } if text == "thinking"
-        ));
-        assert!(matches!(
-            &assistant[1],
-            leviath_providers::ContentBlock::ToolUse { id, name, .. }
-                if id == "c1" && name == "shell"
-        ));
-        let leviath_providers::MessageContent::Blocks(results) = &messages[2].content else {
-            panic!("tool_results message must be block content");
-        };
-        assert!(matches!(
-            &results[0],
-            leviath_providers::ContentBlock::ToolResult { tool_use_id, content, is_error }
-                if tool_use_id == "c1" && content == "file_a" && !is_error
-        ));
+        // Assert the wire shapes through serde - no enum destructuring, so
+        // there are no never-taken match arms for the coverage gate.
+        let assistant = serde_json::to_value(&messages[1].content).unwrap();
+        assert_eq!(assistant[0], json!({ "type": "text", "text": "thinking" }));
+        assert_eq!(assistant[1]["type"], json!("tool_use"));
+        assert_eq!(assistant[1]["id"], json!("c1"));
+        assert_eq!(assistant[1]["name"], json!("shell"));
+        let results = serde_json::to_value(&messages[2].content).unwrap();
+        assert_eq!(results[0]["type"], json!("tool_result"));
+        assert_eq!(results[0]["tool_use_id"], json!("c1"));
+        assert_eq!(results[0]["content"], json!("file_a"));
+        assert_eq!(results[0]["is_error"], json!(false));
     }
 
     #[test]
@@ -796,6 +788,71 @@ mod tests {
     }
 
     #[test]
+    fn render_invalid_shape_on_empty_region_emits_nothing() {
+        // The invalid-shape fallback has nothing to fall back TO when the
+        // region is empty - no block at all.
+        let region = region_with(&[]);
+        let (blocks, messages) = render(&region, Some(&script("fn render(ctx) { 42 }")), false);
+        assert!(blocks.is_empty());
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn render_empty_single_system_string_is_skipped() {
+        let src = r#"fn render(ctx) { #{ system: "" } }"#;
+        let region = region_with(&[("x", EntryKind::Text)]);
+        let (blocks, messages) = render(&region, Some(&script(src)), false);
+        assert!(blocks.is_empty());
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn render_tool_call_passes_thought_signature_through() {
+        let src = r#"
+            fn render(ctx) {
+                #{ messages: [#{ role: "assistant", tool_calls: [
+                    #{ id: "c", name: "n", thought_signature: "sig123" },
+                ] }] }
+            }
+        "#;
+        let region = region_with(&[("x", EntryKind::Text)]);
+        let (_, messages) = render(&region, Some(&script(src)), false);
+        let blocks = serde_json::to_value(&messages[0].content).unwrap();
+        assert_eq!(blocks[0]["thought_signature"], json!("sig123"));
+    }
+
+    #[test]
+    fn on_write_ctx_reports_every_entry_kind() {
+        // The kind string the script sees matches the entry's typed kind.
+        let src = r#"
+            fn render(ctx) { "" }
+            fn on_write(ctx) { ctx.entry.kind }
+        "#;
+        for (kind, expected) in [
+            (EntryKind::Text, "text"),
+            (EntryKind::UserMessage, "user_message"),
+            (
+                EntryKind::AssistantTurn { tool_calls: vec![] },
+                "assistant_turn",
+            ),
+            (
+                EntryKind::ToolResult {
+                    tool_call_id: "c".to_string(),
+                    tool_name: "t".to_string(),
+                    is_error: false,
+                },
+                "tool_result",
+            ),
+        ] {
+            let replaced = on_write_kind(src, "x", &kind);
+            assert_eq!(
+                replaced.map(|(content, _)| content),
+                Some(expected.to_string())
+            );
+        }
+    }
+
+    #[test]
     fn render_assistant_tool_call_defaults_arguments_and_signature() {
         let src = r#"
             fn render(ctx) {
@@ -804,29 +861,31 @@ mod tests {
         "#;
         let region = region_with(&[("x", EntryKind::Text)]);
         let (_, messages) = render(&region, Some(&script(src)), false);
-        let leviath_providers::MessageContent::Blocks(blocks) = &messages[0].content else {
-            panic!("blocks expected");
-        };
-        assert!(matches!(
-            &blocks[0],
-            leviath_providers::ContentBlock::ToolUse { input, thought_signature, .. }
-                if input == &json!({}) && thought_signature.is_none()
-        ));
+        let blocks = serde_json::to_value(&messages[0].content).unwrap();
+        assert_eq!(blocks[0]["type"], json!("tool_use"));
+        assert_eq!(blocks[0]["input"], json!({}));
+        // Indexing a missing key yields Null, so this covers absent-or-null
+        // without a short-circuit branch the coverage gate can't see taken.
+        assert_eq!(blocks[0]["thought_signature"], serde_json::Value::Null);
     }
 
     // ─── on_write ────────────────────────────────────────────────────────
 
-    fn on_write_of(src: &str, content: &str) -> OnWriteOutcome {
+    /// Run `apply_on_write` and collapse the outcome to an Option - both
+    /// enum arms are exercised across this suite (through this one shared
+    /// mapping), so it has no never-taken branch.
+    fn on_write_kind(src: &str, content: &str, kind: &EntryKind) -> Option<(String, usize)> {
         let region = region_with(&[]);
-        with_tracing(|| {
-            apply_on_write(
-                &script(src),
-                &region,
-                content.to_string(),
-                5,
-                &EntryKind::Text,
-            )
-        })
+        let outcome =
+            with_tracing(|| apply_on_write(&script(src), &region, content.to_string(), 5, kind));
+        match outcome {
+            OnWriteOutcome::Accept(content, tokens) => Some((content, tokens)),
+            OnWriteOutcome::Drop => None,
+        }
+    }
+
+    fn on_write_of(src: &str, content: &str) -> Option<(String, usize)> {
+        on_write_kind(src, content, &EntryKind::Text)
     }
 
     #[test]
@@ -835,25 +894,25 @@ mod tests {
             "fn render(ctx) { \"\" }\nfn on_write(ctx) { ctx.entry.content.to_upper() }",
             "hi",
         );
-        let OnWriteOutcome::Accept(content, tokens) = replaced else {
-            panic!("expected accept");
-        };
-        assert_eq!(content, "HI");
-        assert_eq!(tokens, leviath_core::estimate_tokens("HI"));
+        assert_eq!(
+            replaced,
+            Some(("HI".to_string(), leviath_core::estimate_tokens("HI")))
+        );
 
         for accept_body in ["true", ""] {
             let src = format!("fn render(ctx) {{ \"\" }}\nfn on_write(ctx) {{ {accept_body} }}");
-            let OnWriteOutcome::Accept(content, tokens) = on_write_of(&src, "orig") else {
-                panic!("expected accept for body {accept_body:?}");
-            };
-            assert_eq!(content, "orig");
-            assert_eq!(tokens, 5, "original token count preserved");
+            assert_eq!(
+                on_write_of(&src, "orig"),
+                Some(("orig".to_string(), 5)),
+                "body {accept_body:?} accepts unchanged with original tokens"
+            );
         }
 
-        assert!(matches!(
+        assert_eq!(
             on_write_of("fn render(ctx) { \"\" }\nfn on_write(ctx) { false }", "x"),
-            OnWriteOutcome::Drop
-        ));
+            None,
+            "false drops the entry"
+        );
     }
 
     #[test]
@@ -862,11 +921,11 @@ mod tests {
             "fn render(ctx) { \"\" }\nfn on_write(ctx) { 42 }",
             "fn render(ctx) { \"\" }\nfn on_write(ctx) { throw \"bad\" }",
         ] {
-            let OnWriteOutcome::Accept(content, tokens) = on_write_of(src, "keep") else {
-                panic!("expected accept for {src}");
-            };
-            assert_eq!(content, "keep");
-            assert_eq!(tokens, 5);
+            assert_eq!(
+                on_write_of(src, "keep"),
+                Some(("keep".to_string(), 5)),
+                "src: {src}"
+            );
         }
     }
 
