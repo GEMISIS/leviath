@@ -8,6 +8,7 @@
 
 pub mod engine;
 pub mod functions;
+pub mod region_hook;
 pub mod sandbox;
 pub mod tool;
 pub mod types;
