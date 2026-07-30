@@ -1820,35 +1820,39 @@ mod tests {
     /// bottom.
     #[test]
     fn wrapped_content_shows_its_last_line_at_the_bottom() {
-        let backend = TestBackend::new(50, 14);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let mut dash = make_test_dashboard();
-        dash.stage_content_mode = StageContentMode::Output;
-        dash.detail_scroll = 0;
-        let agent = setup_run_state_agent_with_logs(
-            "run-wrap-bottom",
-            &[],
-            Some(&format!(
-                "{}\n\n{}\n\nTHE-FINAL-LINE",
-                "wrapping ".repeat(40),
-                "more wrapping text here ".repeat(30),
-            )),
+        crate::runstate::with_isolated_runs_dir(
+            "wrapped_content_shows_its_last_line_at_the_bottom",
+            |_d| {
+                let backend = TestBackend::new(50, 14);
+                let mut terminal = Terminal::new(backend).unwrap();
+                let mut dash = make_test_dashboard();
+                dash.stage_content_mode = StageContentMode::Output;
+                dash.detail_scroll = 0;
+                let agent = setup_run_state_agent_with_logs(
+                    "run-wrap-bottom",
+                    &[],
+                    Some(&format!(
+                        "{}\n\n{}\n\nTHE-FINAL-LINE",
+                        "wrapping ".repeat(40),
+                        "more wrapping text here ".repeat(30),
+                    )),
+                );
+                terminal
+                    .draw(|f| dash.render_content_pane(f, Rect::new(0, 0, 48, 14), &agent, 48))
+                    .unwrap();
+                let screen: String = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(|c| c.symbol())
+                    .collect();
+                assert!(
+                    screen.contains("THE-FINAL-LINE"),
+                    "the document tail must be visible at detail_scroll 0:\n{screen}"
+                );
+            },
         );
-        terminal
-            .draw(|f| dash.render_content_pane(f, Rect::new(0, 0, 48, 14), &agent, 48))
-            .unwrap();
-        let screen: String = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect();
-        assert!(
-            screen.contains("THE-FINAL-LINE"),
-            "the document tail must be visible at detail_scroll 0:\n{screen}"
-        );
-        let _ = std::fs::remove_dir_all(runstate::run_dir("run-wrap-bottom"));
     }
 
     #[test]
