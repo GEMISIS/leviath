@@ -146,7 +146,11 @@ impl RiskyExecutors for RealExecutors {
 
     async fn mcp(&self, args: commands::mcp::McpArgs) -> anyhow::Result<()> {
         // The command logic is the tested `mcp::execute_with`; only the real
-        // paths, browser launcher, and clock are composed here.
+        // paths, browser launcher, and clock are composed here. The config
+        // load propagates: a config that exists but doesn't parse must fail
+        // the command, not silently drop the user's credential-store choice
+        // and env allowlist (a missing file still loads as defaults).
+        let config = leviath_cli::config::Config::load()?;
         let env = commands::mcp::McpEnv {
             config_path: leviath_cli::config::Config::config_path(),
             store_path: leviath_mcp::AuthStore::default_path().ok_or_else(|| {
@@ -160,15 +164,9 @@ impl RiskyExecutors for RealExecutors {
             tools_dir: leviath_core::tools_dir(),
             // Resolved here, once, so a keychain that cannot be reached fails
             // the command instead of silently writing a refresh token to disk.
-            credential_store: leviath_cli::credentials::store_for(
-                leviath_cli::config::Config::load()
-                    .map(|c| c.security.credential_store)
-                    .unwrap_or_default(),
-            )
-            .map_err(|e| anyhow::anyhow!("{e}"))?,
-            allow_env_vars: leviath_cli::config::Config::load()
-                .map(|c| c.security.allow_env_vars)
-                .unwrap_or_default(),
+            credential_store: leviath_cli::credentials::store_for(config.security.credential_store)
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
+            allow_env_vars: config.security.allow_env_vars,
         };
         commands::mcp::execute_with(args, &env).await
     }
@@ -404,7 +402,14 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
         bind_control_listener, control_id_from_str, handle_connection,
     };
 
-    let config = leviath_cli::config::Config::load().unwrap_or_default();
+    // Refuse to start on a config that exists but doesn't parse. The old
+    // `unwrap_or_default()` silently ran the daemon on defaults - every
+    // configured section (permissions, limits, observability, providers)
+    // ignored with nothing in the log. A missing file still loads as
+    // defaults; only a broken one is fatal, and the parse error lands in
+    // `daemon.log` for whoever finds the daemon not running.
+    let config = leviath_cli::config::Config::load()
+        .map_err(|e| anyhow::anyhow!("daemon refusing to start on a broken config: {e}"))?;
     let runs_dir = leviath_cli::runstate::runs_dir();
     let id = match args.socket {
         Some(ref s) => control_id_from_str(s),

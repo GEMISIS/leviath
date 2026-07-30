@@ -87,7 +87,10 @@ fn resolve_cwd() -> std::io::Result<PathBuf> {
 }
 
 pub async fn execute(_args: ListArgs) -> anyhow::Result<()> {
-    let config = Config::load().unwrap_or_default();
+    // Propagate, don't default: a config that exists but doesn't parse would
+    // silently list from the default `agent_paths`, hiding the user's own
+    // agent directories with no hint why (a missing file loads as defaults).
+    let config = Config::load()?;
     let agents_dir = get_agents_dir()?;
     let cwd = resolve_cwd().unwrap_or_default();
     let exe_dir = std::env::current_exe()
@@ -492,31 +495,6 @@ system = { kind = "pinned", max_tokens = 1000 }
     }
 
     #[tokio::test]
-    async fn execute_falls_back_to_default_config_when_config_file_is_malformed() {
-        // `execute`'s `Config::load().unwrap_or_default()` can only take
-        // its fallback arm when `Config::load()` errors - every other
-        // `execute()` test sees either no config file (defaults) or a
-        // well-formed one. Redirecting `LEVIATH_CONFIG_PATH` to malformed
-        // TOML (the same technique as `config.rs`'s
-        // `load_propagates_error_when_real_config_file_is_malformed`)
-        // forces that for real, and `execute` must still succeed by
-        // falling back to `Config::default()`.
-        crate::config::with_isolated_config_path_async(
-            "list-execute-malformed-config",
-            |fake_dir| async move {
-                std::fs::write(fake_dir.join("config.toml"), "not valid toml [[[").unwrap();
-
-                let args = ListArgs {
-                    filter: "all".to_string(),
-                };
-                let result = execute(args).await;
-                assert!(result.is_ok());
-            },
-        )
-        .await;
-    }
-
-    #[tokio::test]
     async fn execute_returns_err_when_agents_dir_unresolvable() {
         // Isolated: this reaches `Config::load()`, which reads process-wide
         // environment. Unisolated it races every `temp_env` test in the binary.
@@ -595,6 +573,26 @@ system = { kind = "pinned", max_tokens = 1000 }
 
             assert!(result.is_ok());
         })
+        .await;
+    }
+
+    /// A config that exists but doesn't parse must fail the command, not
+    /// silently list from the default `agent_paths` (regression: this used to
+    /// be `unwrap_or_default()`, which hid the user's agent directories with
+    /// no hint why).
+    #[tokio::test]
+    async fn execute_fails_loudly_on_a_broken_config() {
+        crate::config::with_isolated_config_path_async(
+            "list-broken-config",
+            |fake_dir| async move {
+                std::fs::write(fake_dir.join("config.toml"), "not = valid = toml").unwrap();
+                let args = ListArgs {
+                    filter: "all".to_string(),
+                };
+                let err = execute(args).await.expect_err("broken config must error");
+                assert!(err.to_string().contains("parse"), "{err}");
+            },
+        )
         .await;
     }
 
