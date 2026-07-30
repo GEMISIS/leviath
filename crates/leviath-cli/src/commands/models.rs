@@ -201,6 +201,42 @@ fn builtin_table() -> Vec<BuiltinEntry> {
             ctx = 400_000,
             out = 128_000
         ),
+        // ── Google (Gemini) ────────────────────────────────────────────────────
+        // Native Google provider entries. Without these, a user whose only key
+        // is a Gemini key saw no model they could run: every Gemini row in this
+        // table routed through OpenRouter, which needs a different key.
+        entry!(
+            "google",
+            "gemini-3.5-flash",
+            "Gemini 3.5 Flash",
+            temp = true,
+            ctx = 1_048_576,
+            out = 65_535
+        ),
+        entry!(
+            "google",
+            "gemini-3.1-pro-preview",
+            "Gemini 3.1 Pro (preview)",
+            temp = true,
+            ctx = 1_048_576,
+            out = 65_535
+        ),
+        entry!(
+            "google",
+            "gemini-3-flash",
+            "Gemini 3 Flash",
+            temp = true,
+            ctx = 1_048_576,
+            out = 65_535
+        ),
+        entry!(
+            "google",
+            "gemini-3.1-flash-lite",
+            "Gemini 3.1 Flash Lite",
+            temp = true,
+            ctx = 1_048_576,
+            out = 65_535
+        ),
         // ── OpenRouter: Google Gemini ──────────────────────────────────────────
         entry!(
             "openrouter",
@@ -820,6 +856,31 @@ mod tests {
             if entry.provider == "openai" {
                 assert!(entry.caps.supports_temperature);
             }
+        }
+    }
+
+    /// A user whose only key is a Gemini key must find models they can run.
+    /// Every Gemini row in this table used to route through OpenRouter, which
+    /// needs a different key, so `lev models list` showed that user nothing
+    /// their key could reach.
+    #[test]
+    fn builtin_table_offers_native_google_models() {
+        let table = builtin_table();
+        let native: Vec<&str> = table
+            .iter()
+            .filter(|e| e.provider == "google")
+            .map(|e| e.model_id)
+            .collect();
+        assert!(
+            !native.is_empty(),
+            "the native google provider must offer models of its own"
+        );
+        // Native ids are bare (`gemini-3.5-flash`), never OpenRouter-prefixed.
+        for id in &native {
+            assert!(
+                !id.contains('/'),
+                "native google model id must not be vendor-prefixed: {id}"
+            );
         }
     }
 

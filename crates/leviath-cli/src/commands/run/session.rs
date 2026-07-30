@@ -365,16 +365,19 @@ pub fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
     let mut creds = Vec::new();
 
     let keyed = [
-        ("anthropic", config.providers.anthropic_api_key.as_ref()),
-        ("openai", config.providers.openai_api_key.as_ref()),
-        ("google", config.providers.google_api_key.as_ref()),
-        ("openrouter", config.openrouter_api_key.as_ref()),
+        ("anthropic", config.providers.anthropic_api_key.as_deref()),
+        ("openai", config.providers.openai_api_key.as_deref()),
+        ("google", config.providers.google_api_key.as_deref()),
+        ("openrouter", config.openrouter_api_key.as_deref()),
     ];
     for (name, key) in keyed {
-        if let Some(key) = key {
+        // A blank key is not a key: `lev setup` writes empty strings for
+        // providers the user skipped, and registering one produces a provider
+        // that authenticates as nobody and fails at the first call.
+        if let Some(key) = key.map(str::trim).filter(|k| !k.is_empty()) {
             creds.push(ProviderCreds {
                 name: name.to_string(),
-                api_key: Some(key.clone()),
+                api_key: Some(key.to_string()),
                 base_url: None,
                 model_capabilities: caps.clone(),
                 request_timeout_secs: timeout,
@@ -875,6 +878,34 @@ mod tests {
         let ollama = creds.iter().find(|c| c.name == "ollama").unwrap();
         assert_eq!(ollama.base_url.as_deref(), Some("http://custom:11434"));
         assert!(ollama.api_key.is_none());
+    }
+
+    /// `lev setup` writes an empty string for a provider the user skipped, so
+    /// a blank key must not register one: doing so produced a provider that
+    /// authenticates as nobody and fails at the first call, and it crowded out
+    /// the provider the user actually configured.
+    #[test]
+    fn provider_creds_from_config_ignores_blank_keys() {
+        let config = Config {
+            providers: crate::config::ProviderConfig {
+                anthropic_api_key: Some(String::new()),
+                openai_api_key: Some("   ".to_string()),
+                google_api_key: Some("AIza-real".to_string()),
+                ..Config::default().providers
+            },
+            ..Config::default()
+        };
+        let creds = provider_creds_from_config(&config);
+        let names: Vec<&str> = creds.iter().map(|c| c.name.as_str()).collect();
+        assert!(
+            names.contains(&"google"),
+            "the configured provider must register: {names:?}"
+        );
+        assert!(!names.contains(&"anthropic"), "empty key must not register");
+        assert!(
+            !names.contains(&"openai"),
+            "whitespace-only key must not register"
+        );
     }
 
     #[test]
