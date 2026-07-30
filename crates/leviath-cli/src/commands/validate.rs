@@ -343,11 +343,9 @@ brain = { kind = "custom", script = "hooks/brain.rhai", max_tokens = 1000 }
         std::fs::write(&manifest_path, toml).unwrap();
 
         // Missing script file → validation error naming region + path.
-        let err = check_manifest(&manifest_path).unwrap_err();
-        let ManifestCheckError::Validation(msg) = err else {
-            panic!("expected Validation, got {err:?}");
-        };
-        assert!(msg.contains("region 'brain'"), "{msg}");
+        let err = format!("{:?}", check_manifest(&manifest_path).unwrap_err());
+        assert!(err.starts_with("Validation"), "{err}");
+        assert!(err.contains("region 'brain'"), "{err}");
 
         // Present + compilable → passes.
         std::fs::create_dir(dir.path().join("hooks")).unwrap();

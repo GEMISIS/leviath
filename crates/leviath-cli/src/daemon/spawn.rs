@@ -1491,6 +1491,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn build_agent_fails_fast_on_a_broken_custom_region_script() {
+        // The resolve error propagates out of build_agent before any tokens
+        // are spent - a hook that silently never ran would change every
+        // inference with no signal.
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(&manifest, custom_region_manifest()).unwrap();
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let args = spawn_args(&manifest.to_string_lossy());
+        let err = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &args,
+            100,
+            sub_tx(),
+        )
+        .unwrap_err();
+        assert!(err.contains("region 'brain'"), "got: {err}");
+        assert!(err.contains("hooks/brain.rhai"), "got: {err}");
+    }
+
+    #[tokio::test]
     async fn build_agent_rejects_a_workdir_that_is_missing_or_not_a_directory() {
         // `ToolContext::new` silently keeps a path it can't canonicalize, so
         // without this check a bogus workdir spawns a healthy-looking agent
