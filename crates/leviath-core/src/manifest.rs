@@ -983,7 +983,17 @@ fn parse_region_layout(
                     .unwrap_or(false);
                 RegionKind::Custom { script, persistent }
             }
-            _ => RegionKind::Temporary,
+            unknown => {
+                // A typo'd kind used to silently become Temporary - for a
+                // custom region that would mean the script never runs, with
+                // no signal anywhere. Fail at load instead; `lev validate`
+                // surfaces this immediately.
+                return Err(Error::Other(format!(
+                    "region '{region_name}': unknown kind \"{unknown}\" (valid kinds: \
+                     pinned, sliding_window, temporary, compacting, clearable, \
+                     compact_history, hashmap, custom)"
+                )));
+            }
         };
 
         // The effective compact_at fraction to store on the region: an explicit
@@ -3077,17 +3087,22 @@ name = "no-regions"
     }
 
     #[test]
-    fn parse_manifest_unknown_region_kind_defaults_to_temporary() {
+    fn parse_manifest_unknown_region_kind_is_a_hard_error() {
+        // A typo'd kind used to silently become Temporary - for a custom
+        // region that meant the script never ran, with no signal. The error
+        // names the region, the bad value, and the valid kinds.
         let toml = r#"
 [agent]
 name = "unknown-kind"
 
 [context.regions]
-test = { kind = "unknown_kind", max_tokens = 1000 }
+test = { kind = "cusotm", max_tokens = 1000 }
 "#;
-        let bp = parse_manifest(toml).unwrap();
-        let region = &bp.context_layout.regions[0];
-        assert_eq!(region.kind, RegionKind::Temporary);
+        let err = parse_manifest(toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("region 'test'"), "{msg}");
+        assert!(msg.contains("cusotm"), "{msg}");
+        assert!(msg.contains("valid kinds"), "{msg}");
     }
 
     #[test]
