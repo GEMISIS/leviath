@@ -29,6 +29,7 @@ pub mod run_meta;
 pub mod sandbox;
 pub mod secrets;
 pub mod taint;
+pub mod telemetry;
 pub mod text;
 
 pub use blueprint::{
