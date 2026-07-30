@@ -178,6 +178,7 @@ jobs:
         # excluded - it is the coverage tool, not measured by the gate).
         package:
           - leviath-core
+          - leviath-agent-client
           - leviath-runtime
           - leviath-providers
           - leviath-mcp
