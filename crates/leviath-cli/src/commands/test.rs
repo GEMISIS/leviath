@@ -148,6 +148,13 @@ async fn execute_with_registry(
     let manifest_content = fs::read_to_string(&manifest_path)?;
     let blueprint = parse_manifest(&manifest_content)?;
 
+    // Custom regions' Rhai scripts, resolved exactly as a real spawn would
+    // (blueprint-dir-relative, compile-checked, hard error) - `lev test` is
+    // precisely the preview loop where a hook author wants the hook to run.
+    let region_scripts =
+        crate::daemon::spawn::resolve_region_scripts(&blueprint, &manifest_path.to_string_lossy())
+            .map_err(|e| anyhow::anyhow!(e))?;
+
     let registry = if !args.dry_run {
         let config = Config::load()?;
         Some(build_registry(&config))
@@ -203,7 +210,7 @@ async fn execute_with_registry(
                     let registry = registry
                         .as_ref()
                         .expect("registry should exist in non-dry-run");
-                    match run_test_case(&blueprint, registry, test_case).await {
+                    match run_test_case(&blueprint, registry, test_case, &region_scripts).await {
                         Ok(true) => {
                             passed += 1;
                             println!("  PASS: {}", test_case.name);
@@ -295,6 +302,10 @@ async fn run_test_case(
     blueprint: &leviath_core::Blueprint,
     registry: &ProviderRegistry,
     test: &TestCase,
+    region_scripts: &std::collections::HashMap<
+        String,
+        std::sync::Arc<leviath_scripting::region_hook::RegionScript>,
+    >,
 ) -> anyhow::Result<bool> {
     // Model config comes from the first stage.
     let stage = blueprint
@@ -316,9 +327,16 @@ async fn run_test_case(
     // mirrors what the ECS pipeline's spawner does, without the shared world:
     // `lev test` only needs one inference to validate a stage's first response.
     let mut window = ContextWindow::new(blueprint.context_layout.total_budget_tokens);
+    window.region_scripts = region_scripts.clone();
     context_setup::init_window(&mut window, blueprint, &test.input);
 
-    let assembled = window.assemble();
+    // Assemble with real stage metadata so custom-region render hooks see
+    // what a live run's first inference would (iteration 0).
+    let assembled = window.assemble_with_meta(&leviath_runtime::custom_region::AssembleMeta {
+        stage_name: stage.name.clone(),
+        stage_iterations: 0,
+        model: model_name.to_string(),
+    });
     let caps = provider.capabilities(model_name);
     let remaining = window.max_tokens.saturating_sub(window.current_tokens);
     let temperature = if caps.supports_temperature { 0.7 } else { 0.0 };
@@ -1290,6 +1308,112 @@ max_tokens = 5000
         parse_manifest(manifest).unwrap()
     }
 
+    /// A provider that records the request it receives, so a test can assert
+    /// what `lev test` actually assembled (e.g. a custom region's rendered
+    /// output).
+    struct RecordingProvider {
+        seen: std::sync::Arc<std::sync::Mutex<Option<InferenceRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for RecordingProvider {
+        async fn infer(
+            &self,
+            request: InferenceRequest,
+        ) -> leviath_providers::Result<InferenceResponse> {
+            *self.seen.lock().unwrap() = Some(request);
+            Ok(InferenceResponse {
+                content: "recorded".to_string(),
+                tool_calls: vec![],
+                tokens_used: TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: FinishReason::Complete,
+            })
+        }
+
+        async fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len()
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            8192
+        }
+
+        fn name(&self) -> &str {
+            "recording"
+        }
+
+        fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+    }
+
+    /// `lev test` runs custom-region render hooks with the entry stage's real
+    /// metadata - the preview a hook author iterates against.
+    #[tokio::test]
+    async fn run_test_case_renders_custom_region_through_its_script() {
+        let manifest = r#"
+[agent]
+name = "custom-test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+
+[context.regions.task]
+kind = "pinned"
+max_tokens = 4000
+
+[context.regions.brain]
+kind = "custom"
+script = "hooks/brain.rhai"
+max_tokens = 4000
+"#;
+        let blueprint = parse_manifest(manifest).unwrap();
+        let scripts = std::collections::HashMap::from([(
+            "hooks/brain.rhai".to_string(),
+            std::sync::Arc::new(
+                leviath_scripting::region_hook::compile(
+                    "hooks/brain.rhai",
+                    "fn render(ctx) { `<brain stage=${ctx.stage_name} model=${ctx.model}>` }",
+                )
+                .unwrap(),
+            ),
+        )]);
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "anthropic".to_string(),
+            Arc::new(RecordingProvider { seen: seen.clone() }),
+        );
+        let tc = TestCase {
+            name: "custom_render".to_string(),
+            input: "hi".to_string(),
+            expect_contains: Some("recorded".to_string()),
+            expect_tool_call: None,
+            max_tokens: None,
+        };
+        let passed = run_test_case(&blueprint, &registry, &tc, &scripts)
+            .await
+            .unwrap();
+        assert!(passed);
+        let request = seen.lock().unwrap().take().expect("provider saw a request");
+        assert!(
+            request
+                .system
+                .iter()
+                .any(|b| b.text == "<brain stage=main model=claude-sonnet-4-6>"),
+            "custom region rendered with stage metadata; system blocks: {:?}",
+            request.system.iter().map(|b| &b.text).collect::<Vec<_>>()
+        );
+    }
+
     // ── new coverage tests ────────────────────────────────────────────────────
 
     /// Covers the `map_err(|e| anyhow!("Inference failed: {}", e))` closure
@@ -1306,7 +1430,7 @@ max_tokens = 5000
             expect_tool_call: None,
             max_tokens: None,
         };
-        let result = run_test_case(&blueprint, &registry, &tc).await;
+        let result = run_test_case(&blueprint, &registry, &tc, &Default::default()).await;
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Inference failed"));
     }
@@ -1329,7 +1453,7 @@ max_tokens = 5000
             expect_tool_call: None,
             max_tokens: None,
         };
-        let result = run_test_case(&blueprint, &registry, &tc).await;
+        let result = run_test_case(&blueprint, &registry, &tc, &Default::default()).await;
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Blueprint has no stages"));
     }
@@ -1354,7 +1478,7 @@ max_tokens = 5000
             expect_tool_call: None,
             max_tokens: None,
         };
-        let result = run_test_case(&blueprint, &registry, &tc).await;
+        let result = run_test_case(&blueprint, &registry, &tc, &Default::default()).await;
         assert!(result.unwrap());
     }
 
@@ -1556,7 +1680,11 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             expect_tool_call: None,
             max_tokens: None,
         };
-        assert!(run_test_case(&blueprint, &registry, &tc).await.unwrap());
+        assert!(
+            run_test_case(&blueprint, &registry, &tc, &Default::default())
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -1579,7 +1707,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             max_tokens: None,
         };
 
-        let result = run_test_case(&blueprint, &registry, &tc).await;
+        let result = run_test_case(&blueprint, &registry, &tc, &Default::default()).await;
         assert!(result.unwrap());
     }
 
@@ -1603,7 +1731,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             max_tokens: None,
         };
 
-        let result = run_test_case(&blueprint, &registry, &tc).await;
+        let result = run_test_case(&blueprint, &registry, &tc, &Default::default()).await;
         assert!(!result.unwrap());
     }
 
@@ -1632,7 +1760,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             max_tokens: None,
         };
 
-        let result = run_test_case(&blueprint, &registry, &tc).await;
+        let result = run_test_case(&blueprint, &registry, &tc, &Default::default()).await;
         assert!(result.unwrap());
     }
 
@@ -1666,7 +1794,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             max_tokens: None,
         };
 
-        let result = run_test_case(&blueprint, &registry, &tc).await;
+        let result = run_test_case(&blueprint, &registry, &tc, &Default::default()).await;
         assert!(!result.unwrap());
     }
 
@@ -1690,7 +1818,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             max_tokens: None,
         };
 
-        let result = run_test_case(&blueprint, &registry, &tc).await;
+        let result = run_test_case(&blueprint, &registry, &tc, &Default::default()).await;
         assert!(!result.unwrap());
     }
 
@@ -1714,7 +1842,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             max_tokens: None,
         };
 
-        let result = run_test_case(&blueprint, &registry, &tc).await;
+        let result = run_test_case(&blueprint, &registry, &tc, &Default::default()).await;
         assert!(result.unwrap());
     }
 
@@ -1731,7 +1859,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             max_tokens: None,
         };
 
-        let result = run_test_case(&blueprint, &registry, &tc).await;
+        let result = run_test_case(&blueprint, &registry, &tc, &Default::default()).await;
         let err = result.unwrap_err().to_string();
         assert!(err.contains("not configured"));
     }
@@ -1756,7 +1884,11 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             expect_tool_call: None,
             max_tokens: None,
         };
-        assert!(run_test_case(&blueprint, &registry, &tc).await.unwrap());
+        assert!(
+            run_test_case(&blueprint, &registry, &tc, &Default::default())
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -1780,7 +1912,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             max_tokens: None,
         };
 
-        let result = run_test_case(&blueprint, &registry, &tc).await;
+        let result = run_test_case(&blueprint, &registry, &tc, &Default::default()).await;
         assert!(result.unwrap());
     }
 
