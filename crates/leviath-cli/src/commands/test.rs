@@ -1404,14 +1404,61 @@ max_tokens = 4000
             .unwrap();
         assert!(passed);
         let request = seen.lock().unwrap().take().expect("provider saw a request");
+        // Precompute the texts so the assert message costs no extra branch.
+        let system_texts: Vec<&String> = request.system.iter().map(|b| &b.text).collect();
+        let rendered = system_texts
+            .iter()
+            .any(|t| t.as_str() == "<brain stage=main model=claude-sonnet-4-6>");
         assert!(
-            request
-                .system
-                .iter()
-                .any(|b| b.text == "<brain stage=main model=claude-sonnet-4-6>"),
-            "custom region rendered with stage metadata; system blocks: {:?}",
-            request.system.iter().map(|b| &b.text).collect::<Vec<_>>()
+            rendered,
+            "custom region rendered with stage metadata; system blocks: {system_texts:?}"
         );
+
+        // Exercise the recording provider's remaining trait surface directly.
+        let provider = registry.get("anthropic").unwrap();
+        assert_eq!(provider.count_tokens("abcd", "m").await, 4);
+        assert_eq!(provider.max_context_tokens("m"), 8192);
+        assert_eq!(provider.name(), "recording");
+    }
+
+    /// The custom-region resolve error path in `execute` (a declared script
+    /// that doesn't exist fails before any provider setup, dry-run or not).
+    #[tokio::test]
+    async fn execute_fails_fast_on_a_broken_custom_region_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        std::fs::write(
+            project.join("agent.leviath"),
+            r#"
+[agent]
+name = "broken-custom"
+version = "0.1.0"
+description = "d"
+
+[stages.main]
+model = { provider = "anthropic", model = "m" }
+
+[context.regions.brain]
+kind = "custom"
+script = "hooks/missing.rhai"
+max_tokens = 4000
+"#,
+        )
+        .unwrap();
+        std::fs::create_dir(project.join("tests")).unwrap();
+        std::fs::write(
+            project.join("tests/basic.toml"),
+            "[[test]]\nname = \"t\"\ninput = \"hi\"\n",
+        )
+        .unwrap();
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: true,
+        };
+        let err = execute(args).await.unwrap_err().to_string();
+        assert!(err.contains("region 'brain'"), "{err}");
+        assert!(err.contains("hooks/missing.rhai"), "{err}");
     }
 
     // ── new coverage tests ────────────────────────────────────────────────────

@@ -588,8 +588,17 @@ mod tests {
             },
             100,
         ));
+        w.add_region(Region::new(
+            "brain".to_string(),
+            RegionKind::Custom {
+                script: "b.rhai".to_string(),
+                persistent: false,
+            },
+            100,
+        ));
         let all = call(&mut w, "context_list", json!({}));
         assert!(all.contains("temporary") && all.contains("summarized when full"));
+        assert!(all.contains("scripted"), "custom region label: {all}");
 
         // No regions configured.
         let mut empty = ContextWindow::new(100_000);

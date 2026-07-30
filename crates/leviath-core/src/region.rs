@@ -1129,10 +1129,7 @@ mod tests {
         let mut source = Region::new("src".to_string(), RegionKind::Temporary, 100);
         source.add_entry("filler".to_string(), 10).unwrap();
         let err = dest.carry_entry(source.content[0].clone()).unwrap_err();
-        assert!(matches!(
-            err,
-            crate::error::Error::TokenBudgetExceeded { used: 10, max: 5 }
-        ));
+        assert_eq!(err.to_string(), "Content exceeds token budget: 10 > 5");
         assert!(dest.content.is_empty());
         assert_eq!(dest.current_tokens, 0);
     }

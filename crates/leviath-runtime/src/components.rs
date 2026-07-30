@@ -263,7 +263,9 @@ impl ContextWindow {
             return Some((content, tokens));
         }
         // The region exists - custom_script_for resolved through it.
-        let region = self.get_region(region_name)?;
+        let region = self
+            .get_region(region_name)
+            .expect("custom_script_for resolved through this region");
         match crate::custom_region::apply_on_write(&script, region, content, tokens, kind) {
             crate::custom_region::OnWriteOutcome::Accept(content, tokens) => {
                 Some((content, tokens))
@@ -284,9 +286,9 @@ impl ContextWindow {
         if !script.has_on_overflow() {
             return false;
         }
-        let Some(region) = self.get_region_mut(region_name) else {
-            return false;
-        };
+        let region = self
+            .get_region_mut(region_name)
+            .expect("custom_script_for resolved through this region");
         let needed = (region.current_tokens + incoming_tokens).saturating_sub(region.max_tokens);
         let freed = crate::custom_region::apply_overflow(&script, region, needed);
         self.current_tokens = self.calculate_tokens();
@@ -2481,13 +2483,10 @@ mod tests {
         window.current_tokens = 60;
 
         let err = with_tracing(|| window.try_evict(10).unwrap_err());
-        assert!(matches!(
-            err,
-            leviath_core::Error::PinnedRegionsOverBudget {
-                pinned_tokens: 60,
-                total_budget: 50,
-            }
-        ));
+        assert_eq!(
+            err.to_string(),
+            "Pinned regions (60) exceed total budget (50)"
+        );
         assert_eq!(window.get_region("vault").unwrap().content.len(), 1);
     }
 
@@ -2584,6 +2583,109 @@ mod tests {
     }
 
     #[test]
+    fn custom_region_on_write_drop_covers_typed_and_tainted_methods() {
+        // Every write method's drop arm, not just add_to_region's.
+        let src = r#"
+            fn render(ctx) { "" }
+            fn on_write(ctx) { false }
+        "#;
+        let mut window = custom_window(src, false);
+        window
+            .add_typed_entry(
+                "brain",
+                leviath_core::EntryKind::UserMessage,
+                "a".to_string(),
+                1,
+            )
+            .unwrap();
+        window
+            .add_tainted_to_region(
+                "brain",
+                "b".to_string(),
+                1,
+                leviath_core::TaintLevel::Public,
+            )
+            .unwrap();
+        window
+            .add_typed_tainted_to_region(
+                "brain",
+                leviath_core::EntryKind::UserMessage,
+                "c".to_string(),
+                1,
+                leviath_core::TaintLevel::Public,
+            )
+            .unwrap();
+        assert!(window.get_region("brain").unwrap().content.is_empty());
+    }
+
+    #[test]
+    fn try_evict_skips_custom_region_whose_script_has_no_on_overflow() {
+        // Phase 1.5 leaves the choice to phase 2 (oldest-first) when the
+        // script defines no on_overflow.
+        let mut window = ContextWindow::new(100);
+        window.add_region(Region::new(
+            "brain".to_string(),
+            RegionKind::Custom {
+                script: "s.rhai".to_string(),
+                persistent: false,
+            },
+            100,
+        ));
+        window.region_scripts.insert(
+            "s.rhai".to_string(),
+            std::sync::Arc::new(
+                leviath_scripting::region_hook::compile("s.rhai", "fn render(ctx) { \"\" }")
+                    .unwrap(),
+            ),
+        );
+        window
+            .add_to_region("brain", "old".to_string(), 40)
+            .unwrap();
+        window
+            .add_to_region("brain", "new".to_string(), 40)
+            .unwrap();
+
+        let result = with_tracing(|| window.try_evict(30).unwrap());
+        assert!(result.tokens_freed >= 40);
+        let brain = window.get_region("brain").unwrap();
+        assert_eq!(brain.content.len(), 1);
+        assert_eq!(brain.content[0].content, "new", "oldest-first fallback ran");
+    }
+
+    #[test]
+    fn try_evict_falls_to_oldest_first_when_script_frees_nothing() {
+        // on_overflow returns [] under pressure: phase 1.5 frees 0 and phase 2
+        // makes the progress.
+        let src = r#"
+            fn render(ctx) { "" }
+            fn on_overflow(ctx) { [] }
+        "#;
+        let mut window = ContextWindow::new(100);
+        window.add_region(Region::new(
+            "brain".to_string(),
+            RegionKind::Custom {
+                script: "s.rhai".to_string(),
+                persistent: false,
+            },
+            100,
+        ));
+        window.region_scripts.insert(
+            "s.rhai".to_string(),
+            std::sync::Arc::new(leviath_scripting::region_hook::compile("s.rhai", src).unwrap()),
+        );
+        window
+            .add_to_region("brain", "old".to_string(), 40)
+            .unwrap();
+        window
+            .add_to_region("brain", "new".to_string(), 40)
+            .unwrap();
+
+        let result = with_tracing(|| window.try_evict(30).unwrap());
+        assert!(result.tokens_freed >= 40);
+        assert_eq!(window.get_region("brain").unwrap().content.len(), 1);
+    }
+
+    #[test]
     fn non_custom_regions_bypass_the_on_write_seam() {
         // A script table entry exists, but the region is plain Temporary - the
         // hook must not fire for it.
@@ -2607,7 +2709,7 @@ mod tests {
         let err = window
             .add_to_region("ghost", "x".to_string(), 1)
             .unwrap_err();
-        assert!(matches!(err, leviath_core::Error::RegionNotFound(_)));
+        assert!(err.to_string().contains("ghost"), "{err}");
     }
 
     #[test]
@@ -2646,10 +2748,7 @@ mod tests {
             .unwrap();
         let err =
             with_tracing(|| window.add_to_region("brain", "too much".to_string(), 50)).unwrap_err();
-        assert!(matches!(
-            err,
-            leviath_core::Error::TokenBudgetExceeded { .. }
-        ));
+        assert_eq!(err.to_string(), "Content exceeds token budget: 140 > 100");
         assert_eq!(window.get_region("brain").unwrap().content.len(), 1);
     }
 
@@ -2662,10 +2761,7 @@ mod tests {
         let err = window
             .add_to_region("brain", "too much".to_string(), 50)
             .unwrap_err();
-        assert!(matches!(
-            err,
-            leviath_core::Error::TokenBudgetExceeded { .. }
-        ));
+        assert_eq!(err.to_string(), "Content exceeds token budget: 140 > 100");
     }
 
     #[test]
@@ -2813,11 +2909,8 @@ mod tests {
         assert!(assembled.system_blocks.is_empty());
         assert_eq!(assembled.messages.len(), 1);
         assert_eq!(assembled.messages[0].role, "user");
-        let leviath_providers::MessageContent::Text(text) = &assembled.messages[0].content else {
-            panic!("script emitted a text message");
-        };
         assert_eq!(
-            text,
+            assembled.messages[0].content.as_text(),
             "<context><event kind=\"user_message\">do the task</event>\
              <event kind=\"tool_result\">output</event></context>"
         );
@@ -2831,10 +2924,7 @@ mod tests {
         let assembled = window.assemble();
         assert!(assembled.system_blocks.is_empty());
         assert_eq!(assembled.messages.len(), 1);
-        let leviath_providers::MessageContent::Text(text) = &assembled.messages[0].content else {
-            panic!("Begin. fallback is text");
-        };
-        assert_eq!(text, "Begin.");
+        assert_eq!(assembled.messages[0].content.as_text(), "Begin.");
     }
 
     #[test]
@@ -2855,10 +2945,7 @@ mod tests {
         let window = custom_window(src, false);
         let assembled = window.assemble();
         assert_eq!(assembled.messages.len(), 1, "orphan tool_result stripped");
-        let leviath_providers::MessageContent::Text(text) = &assembled.messages[0].content else {
-            panic!("surviving message is the text one");
-        };
-        assert_eq!(text, "hello");
+        assert_eq!(assembled.messages[0].content.as_text(), "hello");
     }
 
     // ─── assemble() EntryKind::Text prefix parsing ────────────────────────

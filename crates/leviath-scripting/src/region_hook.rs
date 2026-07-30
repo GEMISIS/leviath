@@ -123,9 +123,10 @@ fn call(
     ctx: serde_json::Value,
 ) -> crate::Result<serde_json::Value> {
     let engine = build_engine();
-    let ctx_dyn = rhai::serde::to_dynamic(ctx).map_err(|e| {
-        crate::Error::ExecutionFailed(format!("{}: building {fn_name} ctx: {e}", script.path))
-    })?;
+    // Total conversion: every JSON value has a Dynamic representation, so a
+    // failure here is a programmer error, not a script error (same stance as
+    // the provider layer's request_to_dynamic).
+    let ctx_dyn = rhai::serde::to_dynamic(ctx).expect("JSON always converts to Dynamic");
     let result: Dynamic = engine
         .call_fn(&mut Scope::new(), &script.ast, fn_name, (ctx_dyn,))
         .map_err(|e| crate::Error::ExecutionFailed(format!("{}: {fn_name}: {e}", script.path)))?;
@@ -206,14 +207,20 @@ mod tests {
     #[test]
     fn compile_rejects_syntax_errors() {
         let err = compile("bad.rhai", "fn render(ctx) {").unwrap_err();
-        assert!(matches!(err, crate::Error::CompilationFailed(_)), "{err}");
+        assert!(
+            err.to_string().starts_with("Script compilation failed"),
+            "{err}"
+        );
         assert!(err.to_string().contains("bad.rhai"));
     }
 
     #[test]
     fn compile_rejects_missing_render() {
         let err = compile("no.rhai", "fn on_write(ctx) { true }").unwrap_err();
-        assert!(matches!(err, crate::Error::ValidationFailed(_)));
+        assert!(
+            err.to_string().starts_with("Script validation failed"),
+            "{err}"
+        );
         assert!(err.to_string().contains("must define fn render"));
     }
 
@@ -279,7 +286,10 @@ mod tests {
     fn render_runtime_throw_is_execution_error() {
         let s = compile("r.rhai", "fn render(ctx) { throw \"boom\" }").unwrap();
         let err = run_render(&s, ctx()).unwrap_err();
-        assert!(matches!(err, crate::Error::ExecutionFailed(_)));
+        assert!(
+            err.to_string().starts_with("Script execution failed"),
+            "{err}"
+        );
         assert!(err.to_string().contains("boom"), "{err}");
     }
 
@@ -287,7 +297,10 @@ mod tests {
     fn render_infinite_loop_hits_operation_limit() {
         let s = compile("r.rhai", "fn render(ctx) { loop { } }").unwrap();
         let err = run_render(&s, ctx()).unwrap_err();
-        assert!(matches!(err, crate::Error::ExecutionFailed(_)), "{err}");
+        assert!(
+            err.to_string().starts_with("Script execution failed"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -295,7 +308,10 @@ mod tests {
         // A function pointer cannot cross the JSON boundary.
         let s = compile("r.rhai", "fn render(ctx) { Fn(\"render\") }").unwrap();
         let err = run_render(&s, ctx()).unwrap_err();
-        assert!(matches!(err, crate::Error::ValidationFailed(_)), "{err}");
+        assert!(
+            err.to_string().starts_with("Script validation failed"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -303,7 +319,10 @@ mod tests {
         // The sandbox holds for hooks: `eval` is disabled outright, so a
         // script trying to use it never even compiles.
         let err = compile("r.rhai", "fn render(ctx) { eval(\"1+1\") }").unwrap_err();
-        assert!(matches!(err, crate::Error::CompilationFailed(_)), "{err}");
+        assert!(
+            err.to_string().starts_with("Script compilation failed"),
+            "{err}"
+        );
         assert!(err.to_string().contains("eval"), "{err}");
     }
 
@@ -374,6 +393,9 @@ mod tests {
         let s = compile("r.rhai", "fn render(ctx) { \"\" }").unwrap();
         assert!(!s.has_on_write());
         let err = run_on_write(&s, json!({})).unwrap_err();
-        assert!(matches!(err, crate::Error::ExecutionFailed(_)));
+        assert!(
+            err.to_string().starts_with("Script execution failed"),
+            "{err}"
+        );
     }
 }

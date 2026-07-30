@@ -221,7 +221,7 @@ Ten agents ship out of the box, each a multi-stage directed graph with structure
 
 ### Structured context memory
 
-Seven region kinds with deterministic eviction: architecture stays pinned, tool results evict first, and conversation auto-compacts into summaries. Route reads to specific regions so a file dump can't push out your system prompt. Budgets can be percentages of the model's context window, so a blueprint's intent survives across models of different sizes. [Learn more →](https://leviath.dev/docs/context)
+Eight region kinds with deterministic eviction: architecture stays pinned, tool results evict first, and conversation auto-compacts into summaries. Route reads to specific regions so a file dump can't push out your system prompt. Budgets can be percentages of the model's context window, so a blueprint's intent survives across models of different sizes. And when the built-ins don't fit, a [`custom` region](docs/rhai-regions.md) hands one region's rendering, writes, and eviction to a Rhai script you control - up to owning the entire context window as a single scripted region. [Learn more →](https://leviath.dev/docs/context)
 
 ### Multi-stage workflows
 
