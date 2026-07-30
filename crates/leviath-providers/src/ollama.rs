@@ -1041,16 +1041,21 @@ mod tests {
 
         let body = provider.build_request_body(&request);
         let messages = body["messages"].as_array().unwrap();
-        // Tool call round-trips as an assistant `tool_calls` message …
-        assert_eq!(messages[0]["role"], "assistant");
-        assert_eq!(
-            messages[0]["tool_calls"][0]["function"]["name"],
-            "list_files"
-        );
+        // A conversation opening on an assistant turn gets a leading user turn
+        // (strict endpoints require it), so find the turns by role rather than
+        // by fixed index.
+        let assistant = messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("the tool call round-trips as an assistant message");
+        assert_eq!(assistant["tool_calls"][0]["function"]["name"], "list_files");
         // … and the result as a `tool`-role message, not raw block JSON.
-        assert_eq!(messages[1]["role"], "tool");
-        assert_eq!(messages[1]["tool_call_id"], "call_1");
-        assert_eq!(messages[1]["content"], "a.txt\nb.txt");
+        let tool = messages
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .expect("the result round-trips as a tool message");
+        assert_eq!(tool["tool_call_id"], "call_1");
+        assert_eq!(tool["content"], "a.txt\nb.txt");
     }
 
     #[test]
