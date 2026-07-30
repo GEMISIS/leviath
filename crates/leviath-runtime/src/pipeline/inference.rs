@@ -185,10 +185,23 @@ pub fn dispatch_inference(
                     return; // paused / waiting / cancelled - don't start new work
                 }
                 let Some(provider) = providers.0.get(&si.provider_name) else {
-                    return; // provider not registered - leave ready, retry later
+                    // Leave ready and retry later - but say so. A silently
+                    // starved agent reads as a wedged run with no error.
+                    tracing::warn!(
+                        provider = %si.provider_name,
+                        "inference waiting: provider not registered"
+                    );
+                    return;
                 };
                 let Some(permit) = stage.pools.try_acquire(&si.model) else {
-                    return; // pool full - leave ready, retry next tick
+                    // Every in-flight call on this model holds a permit; if
+                    // this repeats for minutes, one of them is stuck (see the
+                    // default request timeout in leviath-providers).
+                    tracing::debug!(
+                        model = %si.model,
+                        "inference waiting: per-model pool is full"
+                    );
+                    return;
                 };
                 let request = build_request(window, config, si, &provider);
                 let job = InferenceJob {

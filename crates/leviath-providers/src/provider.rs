@@ -442,14 +442,20 @@ pub const DEFAULT_INFERENCE_TIMEOUT_SECS: u64 = 900;
 /// one fail fast. When `None`, no per-request cap is added and the call is bound
 /// only by the client-level timeout (if any) and the dispatch `job_timeout`
 /// backstop.
+/// Ceiling on a single LLM HTTP request when the config sets no
+/// `request_timeout_secs`. Without one, a call that connects and then never
+/// completes hangs its inference job forever and the run sits "running" with
+/// no error - observed live against Gemini. Ten minutes clears any legitimate
+/// long completion while still guaranteeing the run eventually errors and
+/// retries instead of wedging.
+pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 600;
+
 pub fn apply_request_timeout(
     builder: reqwest::RequestBuilder,
     request_timeout_secs: Option<u64>,
 ) -> reqwest::RequestBuilder {
-    match request_timeout_secs {
-        Some(secs) => builder.timeout(std::time::Duration::from_secs(secs)),
-        None => builder,
-    }
+    let secs = request_timeout_secs.unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS);
+    builder.timeout(std::time::Duration::from_secs(secs))
 }
 
 /// Build a `reqwest::Client` for talking to an LLM HTTP API.
@@ -478,16 +484,15 @@ pub fn apply_request_timeout(
 /// client-level hard cap on total request duration for callers that set it; a
 /// per-request timeout, when present, overrides it.
 pub fn build_http_client(timeout_secs: Option<u64>) -> reqwest::Client {
-    let mut builder = reqwest::Client::builder()
+    reqwest::Client::builder()
         .pool_max_idle_per_host(0)
         .connect_timeout(std::time::Duration::from_secs(30))
-        .tcp_keepalive(std::time::Duration::from_secs(30));
-
-    if let Some(secs) = timeout_secs {
-        builder = builder.timeout(std::time::Duration::from_secs(secs));
-    }
-
-    builder.build().expect("failed to build reqwest client")
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(
+            timeout_secs.unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS),
+        ))
+        .build()
+        .expect("failed to build reqwest client")
 }
 
 /// Trait for LLM providers.
