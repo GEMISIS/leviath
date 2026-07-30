@@ -188,18 +188,30 @@ impl OtelSink {
         let spans = opentelemetry_otlp::SpanExporter::builder()
             .with_http()
             .with_endpoint(signal_url(&endpoint, "traces"))
-            .build()
-            .map_err(|e| format!("building the OTLP span exporter: {e}"))?;
+            .build();
         let metrics = opentelemetry_otlp::MetricExporter::builder()
             .with_http()
             .with_endpoint(signal_url(&endpoint, "metrics"))
-            .build()
-            .map_err(|e| format!("building the OTLP metric exporter: {e}"))?;
+            .build();
         let logs = opentelemetry_otlp::LogExporter::builder()
             .with_http()
             .with_endpoint(signal_url(&endpoint, "logs"))
-            .build()
-            .map_err(|e| format!("building the OTLP log exporter: {e}"))?;
+            .build();
+        // The three exporters share endpoint and config, so a build failure
+        // hits all of them the same way; one error path reports whichever
+        // surfaced first (per-exporter early returns would be branches only
+        // that exporter's failure reaches).
+        let (spans, metrics, logs) = match (spans, metrics, logs) {
+            (Ok(spans), Ok(metrics), Ok(logs)) => (spans, metrics, logs),
+            (spans, metrics, logs) => {
+                let err = [spans.err(), metrics.err(), logs.err()]
+                    .into_iter()
+                    .flatten()
+                    .next()
+                    .expect("the non-Ok arm has at least one error");
+                return Err(format!("building the OTLP exporters: {err}"));
+            }
+        };
         Ok(Self::new(
             SdkTracerProvider::builder()
                 .with_resource(resource.clone())
@@ -725,6 +737,25 @@ mod tests {
     }
 
     #[test]
+    fn a_run_without_model_or_parent_omits_those_attributes() {
+        let h = harness();
+        h.sink.emit(TelemetryEvent::RunStarted {
+            run_id: "r1".to_string(),
+            agent_name: "coder".to_string(),
+            model: None,
+            parent_run_id: None,
+            recovered: false,
+            at_ms: 0,
+        });
+        h.sink.emit(run_completed("r1", 1));
+        let spans = h.spans.get_finished_spans().unwrap();
+        let run = spans.iter().find(|s| s.name == "agent.run").unwrap();
+        let keys: Vec<&str> = run.attributes.iter().map(|kv| kv.key.as_str()).collect();
+        assert!(!keys.contains(&"leviath.model"), "{keys:?}");
+        assert!(!keys.contains(&"leviath.parent_run.id"), "{keys:?}");
+    }
+
+    #[test]
     fn events_for_an_unknown_run_are_dropped() {
         let h = harness();
         h.sink.emit(stage_entered("ghost", 0, 0));
@@ -914,8 +945,8 @@ mod tests {
         let hits = Arc::new(AtomicUsize::new(0));
         let hits_seen = hits.clone();
         std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { break };
+            // `flatten` skips accept errors; the thread dies with the process.
+            for mut stream in listener.incoming().flatten() {
                 let mut buf = [0u8; 65536];
                 let _ = stream.read(&mut buf);
                 hits_seen.fetch_add(1, Ordering::SeqCst);

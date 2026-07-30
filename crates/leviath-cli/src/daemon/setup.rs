@@ -1040,6 +1040,44 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_host_with_otlp_also_installs_the_log_layer() {
+        // The OTLP exporter carries a daemon-log bridge layer; build_host must
+        // route it into the logging reload slot (a no-op when no subscriber
+        // slot exists, as in this test process - the routing is the point).
+        // Port 9 (discard) is never connected until an export flush happens,
+        // which this test doesn't trigger.
+        let config = Config {
+            observability: leviath_core::config::ObservabilityConfig {
+                enabled: true,
+                exporter: leviath_core::config::TelemetryExporterKind::Otlp,
+                endpoint: Some("http://127.0.0.1:9".to_string()),
+                service_name: Some("leviath-test".to_string()),
+            },
+            ..Config::default()
+        };
+        let runs = tempfile::tempdir().unwrap();
+        let mut host = build_host(
+            config,
+            ProviderRegistry::new(),
+            runs.path().to_path_buf(),
+            Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            Vec::new(),
+            crate::daemon::mcp_pool::McpPool::for_daemon(
+                Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+                &[],
+            ),
+            Handle::current(),
+            || 0,
+        );
+        assert!(
+            host.world_mut()
+                .world_mut()
+                .get_resource::<leviath_runtime::telemetry::Telemetry>()
+                .is_some()
+        );
+    }
+
     #[tokio::test]
     async fn serve_runs_spawn_preprocessor_for_per_agent_mcp() {
         // Drive a real spawn through `serve()` so the spawn preprocessor fires

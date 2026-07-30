@@ -108,4 +108,15 @@ mod tests {
         let built = build_sink(&config(true, TelemetryExporterKind::Otlp)).unwrap();
         assert!(built.log_layer.is_some());
     }
+
+    #[test]
+    fn an_unparseable_endpoint_disables_telemetry_with_a_warning() {
+        let cfg = ObservabilityConfig {
+            enabled: true,
+            exporter: TelemetryExporterKind::Otlp,
+            endpoint: Some("not a url at all".to_string()),
+            service_name: None,
+        };
+        assert!(build_sink(&cfg).is_none());
+    }
 }
