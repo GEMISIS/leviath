@@ -15,6 +15,9 @@ publish = false
 
 [dependencies]
 leviath-core = { workspace = true }
+# Custom-region Rhai hooks (render/on_write/on_overflow). The boundary is
+# JSON-in/JSON-out, so this crate needs no direct rhai dependency.
+leviath-scripting = { workspace = true }
 # Control-channel token generation.
 rand = { workspace = true }
 leviath-providers = { workspace = true }

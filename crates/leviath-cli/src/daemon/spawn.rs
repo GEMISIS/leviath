@@ -150,6 +150,62 @@ fn script_scan_dirs(
         .collect()
 }
 
+/// Read and compile every custom region's Rhai script declared by `blueprint`
+/// (global layout plus each stage's per-stage layout), keyed by the script
+/// path as written. Paths resolve relative to the blueprint's directory (the
+/// script-tool convention - the script travels with the agent), with absolute
+/// paths passing through `Path::join` unchanged. Each distinct path is read
+/// and compiled once; regions sharing a script share the compiled AST.
+///
+/// A missing or uncompilable script is a **hard spawn error** (fail fast,
+/// before any tokens are spent): a hook that silently never ran would change
+/// every inference with no signal. Runtime hook *eval* failures, by contrast,
+/// warn and fall back per hook.
+pub(crate) fn resolve_region_scripts(
+    blueprint: &Blueprint,
+    blueprint_path: &str,
+) -> Result<HashMap<String, Arc<leviath_scripting::region_hook::RegionScript>>, String> {
+    let base = std::path::Path::new(blueprint_path)
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+    let mut scripts = HashMap::new();
+
+    let layouts = std::iter::once(&blueprint.context_layout).chain(
+        blueprint
+            .stages
+            .iter()
+            .filter_map(|s| s.context_layout.as_ref()),
+    );
+    for layout in layouts {
+        for region in &layout.regions {
+            let leviath_core::RegionKind::Custom { script, .. } = &region.kind else {
+                continue;
+            };
+            if scripts.contains_key(script) {
+                continue;
+            }
+            let path = base.join(script);
+            let source = std::fs::read_to_string(&path).map_err(|e| {
+                format!(
+                    "region '{}': cannot read custom region script '{}': {e}",
+                    region.name,
+                    path.display()
+                )
+            })?;
+            let compiled =
+                leviath_scripting::region_hook::compile(script, &source).map_err(|e| {
+                    format!(
+                        "region '{}': custom region script failed to compile: {e}",
+                        region.name
+                    )
+                })?;
+            scripts.insert(script.clone(), Arc::new(compiled));
+        }
+    }
+    Ok(scripts)
+}
+
 /// Names already claimed by a built-in, sub-agent, or MCP tool - a discovered
 /// script tool colliding with one of these is dropped (never shadows a core tool).
 fn reserved_tool_names(builtin_names: &HashSet<String>, mcp_tool_defs: &[Tool]) -> HashSet<String> {
@@ -814,6 +870,12 @@ fn build_agent_inner(
         HashMap::new()
     };
 
+    // 5b. Read + compile-check custom regions' Rhai scripts (issue #152) -
+    // once per distinct path, blueprint-dir-relative. Runs on fresh spawns
+    // AND reloads (the hooks must work after a restart), and a broken script
+    // is a hard error either way.
+    let region_scripts = resolve_region_scripts(&blueprint, &args.blueprint_path)?;
+
     // 6. Spawn the agent.
     let entity = spawn_agent_seeded(
         world,
@@ -822,6 +884,7 @@ fn build_agent_inner(
         &seeds,
         stages,
         config.batch_tool_hint,
+        region_scripts,
     )?;
 
     // 7. Attach run metadata / token totals / persistence watermark (+ optional

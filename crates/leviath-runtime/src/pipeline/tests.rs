@@ -82,6 +82,39 @@ fn provider(supports_temperature: bool, max_output: usize) -> Arc<dyn Provider> 
 // ── build_request branch coverage ──
 
 #[test]
+fn build_request_threads_stage_meta_into_custom_region_render() {
+    // The custom region's script echoes the stage metadata build_request
+    // passes - proving the dispatch wiring (stage name, per-stage iteration,
+    // model) reaches render(ctx).
+    let mut w = ContextWindow::new(10_000);
+    w.add_region(Region::new(
+        "brain".to_string(),
+        RegionKind::Custom {
+            script: "meta.rhai".to_string(),
+            persistent: false,
+        },
+        1_000,
+    ));
+    w.region_scripts.insert(
+        "meta.rhai".to_string(),
+        Arc::new(
+            leviath_scripting::region_hook::compile(
+                "meta.rhai",
+                "fn render(ctx) { `${ctx.stage_name}#${ctx.stage_iterations}@${ctx.model}` }",
+            )
+            .unwrap(),
+        ),
+    );
+    let si = stage("model-x", vec![], None);
+    let req = build_request(&w, None, &si, &provider(true, 500), "implement", 4);
+    assert!(
+        req.system.iter().any(|b| b.text == "implement#4@model-x"),
+        "system blocks: {:?}",
+        req.system.iter().map(|b| &b.text).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn build_request_filters_tools_and_uses_config_overrides() {
     let cfg = InferenceConfig {
         temperature: Some(0.1),
@@ -95,7 +128,14 @@ fn build_request_filters_tools_and_uses_config_overrides() {
         vec![tool("keep"), tool("drop")],
         Some(vec!["keep".into()]),
     );
-    let req = build_request(&window(), Some(&cfg), &si, &provider(true, 9999));
+    let req = build_request(
+        &window(),
+        Some(&cfg),
+        &si,
+        &provider(true, 9999),
+        "test-stage",
+        0,
+    );
     assert_eq!(req.tools.len(), 1); // filtered to "keep"
     assert_eq!(req.tools[0].name, "keep");
     assert_eq!(req.max_tokens, 42); // config output cap wins
@@ -113,10 +153,17 @@ fn build_request_threads_per_stage_timeout() {
         ..Default::default()
     };
     let si = stage("m", vec![], None);
-    let req = build_request(&window(), Some(&cfg), &si, &provider(true, 500));
+    let req = build_request(
+        &window(),
+        Some(&cfg),
+        &si,
+        &provider(true, 500),
+        "test-stage",
+        0,
+    );
     assert_eq!(req.request_timeout_secs, Some(120));
 
-    let req_none = build_request(&window(), None, &si, &provider(true, 500));
+    let req_none = build_request(&window(), None, &si, &provider(true, 500), "test-stage", 0);
     assert_eq!(req_none.request_timeout_secs, None);
 }
 
@@ -132,7 +179,14 @@ fn build_request_passes_through_extra_params() {
         request_timeout_secs: None,
     };
     let si = stage("m", vec![], None);
-    let req = build_request(&window(), Some(&cfg), &si, &provider(true, 500));
+    let req = build_request(
+        &window(),
+        Some(&cfg),
+        &si,
+        &provider(true, 500),
+        "test-stage",
+        0,
+    );
     assert_eq!(req.extra, serde_json::json!({ "top_p": 0.9 }));
 }
 
@@ -156,7 +210,14 @@ fn build_request_prepends_batch_hint_when_enabled() {
         request_timeout_secs: None,
     };
     let si = stage("m", vec![], None);
-    let req = build_request(&window_with_sys(), Some(&cfg), &si, &provider(true, 500));
+    let req = build_request(
+        &window_with_sys(),
+        Some(&cfg),
+        &si,
+        &provider(true, 500),
+        "test-stage",
+        0,
+    );
     // The hint is prepended ahead of the stage's own system block(s).
     assert_eq!(
         req.system.first().map(|b| b.text.as_str()),
@@ -182,11 +243,25 @@ fn build_request_omits_batch_hint_when_disabled_or_absent() {
         batch_tool_hint: false,
         request_timeout_secs: None,
     };
-    let req = build_request(&window_with_sys(), Some(&cfg), &si, &provider(true, 500));
+    let req = build_request(
+        &window_with_sys(),
+        Some(&cfg),
+        &si,
+        &provider(true, 500),
+        "test-stage",
+        0,
+    );
     assert!(!req.system.is_empty());
     assert!(req.system.iter().all(|b| b.text != BATCH_TOOL_HINT));
     // Absent config → no hint.
-    let req_none = build_request(&window_with_sys(), None, &si, &provider(true, 500));
+    let req_none = build_request(
+        &window_with_sys(),
+        None,
+        &si,
+        &provider(true, 500),
+        "test-stage",
+        0,
+    );
     assert!(!req_none.system.is_empty());
     assert!(req_none.system.iter().all(|b| b.text != BATCH_TOOL_HINT));
 }
@@ -194,7 +269,7 @@ fn build_request_omits_batch_hint_when_disabled_or_absent() {
 #[test]
 fn build_request_all_tools_default_temperature_no_config() {
     let si = stage("m", vec![tool("a"), tool("b")], None); // None filter = all
-    let req = build_request(&window(), None, &si, &provider(true, 500));
+    let req = build_request(&window(), None, &si, &provider(true, 500), "test-stage", 0);
     assert_eq!(req.tools.len(), 2);
     assert_eq!(req.temperature, 0.7); // default when supported and no config
     assert_eq!(req.max_tokens, 500); // capability cap when no config override
@@ -203,7 +278,7 @@ fn build_request_all_tools_default_temperature_no_config() {
 #[test]
 fn build_request_empty_filter_is_all_and_no_temperature_when_unsupported() {
     let si = stage("m", vec![tool("a")], Some(vec![])); // empty filter = all
-    let req = build_request(&window(), None, &si, &provider(false, 500));
+    let req = build_request(&window(), None, &si, &provider(false, 500), "test-stage", 0);
     assert_eq!(req.tools.len(), 1);
     assert_eq!(req.temperature, 0.0); // model doesn't support temperature
 }

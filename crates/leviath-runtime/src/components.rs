@@ -204,6 +204,18 @@ pub struct ContextWindow {
 
     /// Maximum token budget
     pub max_tokens: usize,
+
+    /// Compiled custom-region scripts, keyed by the script path each
+    /// `RegionKind::Custom` carries. Populated once at spawn by the CLI
+    /// (which resolves blueprint-dir-relative paths and compile-checks the
+    /// files); a stage-layout swap rebuilds `regions` but leaves this table
+    /// untouched, so per-stage custom regions keep working. Empty when no
+    /// custom regions exist - every hook lookup then misses and the region
+    /// renders its fallback shape.
+    pub region_scripts: std::collections::HashMap<
+        String,
+        std::sync::Arc<leviath_scripting::region_hook::RegionScript>,
+    >,
 }
 
 impl ContextWindow {
@@ -213,7 +225,72 @@ impl ContextWindow {
             regions: Vec::new(),
             current_tokens: 0,
             max_tokens,
+            region_scripts: std::collections::HashMap::new(),
         }
+    }
+
+    /// The compiled script backing `region_name`, when it is a custom region
+    /// whose script path has an entry in [`Self::region_scripts`].
+    fn custom_script_for(
+        &self,
+        region_name: &str,
+    ) -> Option<std::sync::Arc<leviath_scripting::region_hook::RegionScript>> {
+        let region = self.get_region(region_name)?;
+        let leviath_core::RegionKind::Custom { script, .. } = &region.kind else {
+            return None;
+        };
+        self.region_scripts.get(script).cloned()
+    }
+
+    /// Run a custom region's `on_write` hook (when defined) for an incoming
+    /// entry. `None` means the script dropped the entry - the write reports
+    /// success without storing anything. Non-custom regions, missing scripts,
+    /// and hook failures all accept the entry unchanged.
+    ///
+    /// Deliberately NOT invoked by the layout-swap carry or restore overlay:
+    /// those re-add entries the hook already accepted once.
+    fn on_write_outcome(
+        &self,
+        region_name: &str,
+        content: String,
+        tokens: usize,
+        kind: &leviath_core::EntryKind,
+    ) -> Option<(String, usize)> {
+        let Some(script) = self.custom_script_for(region_name) else {
+            return Some((content, tokens));
+        };
+        if !script.has_on_write() {
+            return Some((content, tokens));
+        }
+        // The region exists - custom_script_for resolved through it.
+        let region = self.get_region(region_name)?;
+        match crate::custom_region::apply_on_write(&script, region, content, tokens, kind) {
+            crate::custom_region::OnWriteOutcome::Accept(content, tokens) => {
+                Some((content, tokens))
+            }
+            crate::custom_region::OnWriteOutcome::Drop => None,
+        }
+    }
+
+    /// Retry hook for a custom-region write that hit `TokenBudgetExceeded`:
+    /// let the script's `on_overflow` free room, then report whether a single
+    /// retry is worthwhile. Non-custom regions and hook failures leave the
+    /// original error standing (the callers' existing truncation ladders
+    /// apply).
+    fn try_custom_overflow(&mut self, region_name: &str, incoming_tokens: usize) -> bool {
+        let Some(script) = self.custom_script_for(region_name) else {
+            return false;
+        };
+        if !script.has_on_overflow() {
+            return false;
+        }
+        let Some(region) = self.get_region_mut(region_name) else {
+            return false;
+        };
+        let needed = (region.current_tokens + incoming_tokens).saturating_sub(region.max_tokens);
+        let freed = crate::custom_region::apply_overflow(&script, region, needed);
+        self.current_tokens = self.calculate_tokens();
+        freed >= needed && needed > 0
     }
 
     /// Get a region by name.
@@ -239,13 +316,14 @@ impl ContextWindow {
         content: String,
         tokens: usize,
     ) -> leviath_core::Result<()> {
-        if let Some(region) = self.get_region_mut(region_name) {
-            region.add_entry(content, tokens)?;
-            self.current_tokens = self.calculate_tokens();
-            Ok(())
-        } else {
-            Err(leviath_core::Error::RegionNotFound(region_name.to_string()))
-        }
+        let Some((content, tokens)) =
+            self.on_write_outcome(region_name, content, tokens, &leviath_core::EntryKind::Text)
+        else {
+            return Ok(()); // the region's script dropped the entry
+        };
+        self.write_to_region(region_name, tokens, &mut |region, tokens| {
+            region.add_entry(content.clone(), tokens)
+        })
     }
 
     /// Replace a region's entire content with a single entry (clear, then add).
@@ -253,6 +331,14 @@ impl ContextWindow {
     /// authoritative document region (e.g. the plan) holding only its current
     /// version, so revisions build on it instead of accumulating stale copies.
     pub fn replace_region(&mut self, region_name: &str, content: String, tokens: usize) -> bool {
+        // The replacement passes through on_write like any incoming entry - a
+        // custom region's script sees (and may transform or refuse) it.
+        let Some((content, tokens)) =
+            self.on_write_outcome(region_name, content, tokens, &leviath_core::EntryKind::Text)
+        else {
+            // Dropped by the script: the region keeps its current content.
+            return self.get_region(region_name).is_some();
+        };
         if let Some(region) = self.get_region_mut(region_name) {
             region.clear();
             let _ = region.add_entry(content, tokens);
@@ -275,12 +361,46 @@ impl ContextWindow {
         content: String,
         tokens: usize,
     ) -> leviath_core::Result<()> {
-        if let Some(region) = self.get_region_mut(region_name) {
-            region.add_typed_entry(content, tokens, kind)?;
-            self.current_tokens = self.calculate_tokens();
-            Ok(())
-        } else {
-            Err(leviath_core::Error::RegionNotFound(region_name.to_string()))
+        let Some((content, tokens)) = self.on_write_outcome(region_name, content, tokens, &kind)
+        else {
+            return Ok(());
+        };
+        self.write_to_region(region_name, tokens, &mut |region, tokens| {
+            region.add_typed_entry(content.clone(), tokens, kind.clone())
+        })
+    }
+
+    /// Shared tail of every region write: run the insert, give a custom
+    /// region's `on_overflow` one shot at freeing room when the budget
+    /// rejects it, and recount the window. A `&mut dyn FnMut` (not generic)
+    /// keeps one instantiation for the coverage gate.
+    fn write_to_region(
+        &mut self,
+        region_name: &str,
+        tokens: usize,
+        insert: &mut dyn FnMut(&mut Region, usize) -> leviath_core::Result<()>,
+    ) -> leviath_core::Result<()> {
+        if self.get_region(region_name).is_none() {
+            return Err(leviath_core::Error::RegionNotFound(region_name.to_string()));
+        }
+        let first = {
+            let region = self.get_region_mut(region_name).expect("checked above");
+            insert(region, tokens)
+        };
+        match first {
+            Ok(()) => {
+                self.current_tokens = self.calculate_tokens();
+                Ok(())
+            }
+            Err(leviath_core::Error::TokenBudgetExceeded { .. })
+                if self.try_custom_overflow(region_name, tokens) =>
+            {
+                let region = self.get_region_mut(region_name).expect("checked above");
+                let retried = insert(region, tokens);
+                self.current_tokens = self.calculate_tokens();
+                retried
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -346,11 +466,65 @@ impl ContextWindow {
             }
         }
 
+        // Phase 1.5: Give each non-persistent custom region's on_overflow
+        // hook first say over what IT loses, before the indiscriminate
+        // oldest-first cascade below. A script that keeps errors and drops
+        // successes only works if it runs before oldest-first does. Hook
+        // absent/failing/insufficient → phase 2 makes the guaranteed
+        // progress.
+        let mut custom_freed = 0usize;
+        for i in 0..self.regions.len() {
+            let needed = target_free_tokens
+                .saturating_sub(self.max_tokens.saturating_sub(self.current_tokens));
+            if needed == 0 {
+                break;
+            }
+            let region = &self.regions[i];
+            if !matches!(
+                region.kind,
+                RegionKind::Custom {
+                    persistent: false,
+                    ..
+                }
+            ) || region.content.is_empty()
+            {
+                continue;
+            }
+            let Some(script) = self.custom_script_for(&region.name.clone()) else {
+                continue;
+            };
+            if !script.has_on_overflow() {
+                continue;
+            }
+            let freed = crate::custom_region::apply_overflow(&script, &mut self.regions[i], needed);
+            self.current_tokens = self.current_tokens.saturating_sub(freed);
+            custom_freed += freed;
+            if freed > 0 {
+                tracing::debug!(
+                    region = %self.regions[i].name,
+                    tokens_freed = freed,
+                    "custom region's on_overflow chose its own evictions"
+                );
+            }
+        }
+        // Return early ONLY when a script's own drops satisfied the target -
+        // otherwise phase 2 would immediately evict one more entry (it checks
+        // the target *after* each eviction), overriding the script's
+        // retention choice. Windows with no custom drops (custom_freed == 0)
+        // fall through with phase 2's pre-existing behavior, byte-identical.
+        if custom_freed > 0
+            && self.max_tokens.saturating_sub(self.current_tokens) >= target_free_tokens
+        {
+            return Ok(EvictionResult {
+                tokens_freed: initial_tokens - self.current_tokens,
+                needs_compaction: Vec::new(),
+            });
+        }
+
         // Phase 2: Evict from Temporary regions (oldest first, one at a time).
         // Non-persistent Custom regions join this phase: their script's
-        // on_overflow hook (when present) has already had its say via
-        // `evict_custom_regions` before this cascade runs; oldest-first is
-        // the guaranteed-progress fallback.
+        // on_overflow hook (when present) has already had its say in phase
+        // 1.5; oldest-first is the guaranteed-progress fallback.
         loop {
             let mut evicted_any = false;
 
@@ -436,14 +610,31 @@ impl ContextWindow {
     ///
     /// System-bound regions become `system_blocks`; the messages region
     /// becomes `messages` with proper typed entries (no text-prefix parsing).
+    ///
+    /// Thin wrapper over [`assemble_with_meta`](Self::assemble_with_meta) with
+    /// no stage metadata - custom-region scripts see empty stage fields.
     pub fn assemble(&self) -> AssembledContext {
+        self.assemble_with_meta(&crate::custom_region::AssembleMeta::default())
+    }
+
+    /// [`assemble`](Self::assemble) with stage metadata for custom-region
+    /// `render(ctx)` hooks (stage name, per-stage iteration count, model).
+    /// The inference path (`build_request`) threads real values; other
+    /// callers use the default.
+    pub fn assemble_with_meta(
+        &self,
+        meta: &crate::custom_region::AssembleMeta,
+    ) -> AssembledContext {
         use leviath_core::{CacheHint, EntryKind};
 
         let mut system_blocks = Vec::new();
         let mut messages: Vec<leviath_providers::Message> = Vec::new();
 
         for region in &self.regions {
-            if region.content.is_empty() {
+            // Custom regions render even when empty - a script may emit
+            // static scaffolding. Every other kind skips an empty region.
+            let is_custom = matches!(region.kind, leviath_core::RegionKind::Custom { .. });
+            if region.content.is_empty() && !is_custom {
                 continue;
             }
 
@@ -622,21 +813,20 @@ impl ContextWindow {
                 }
 
                 // Custom (script-backed) regions render through their Rhai
-                // hook via `assemble_with_meta`; this plain-`assemble` arm is
-                // the hook-less fallback shape - a Temporary-style block - so
-                // a custom region is never silently dropped even when no
-                // compiled script is available.
-                leviath_core::RegionKind::Custom { .. } => {
-                    let text = region
-                        .content
-                        .iter()
-                        .map(|e| e.content.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
-                    system_blocks.push(leviath_providers::SystemBlock {
-                        text: format!("[{}]:\n{}", region.name, text),
-                        cache_hint: CacheHint::Never,
-                    });
+                // hook; a missing script or any hook failure falls back to
+                // the Temporary-style block inside `render_custom_region`,
+                // so a custom region is never silently dropped.
+                leviath_core::RegionKind::Custom { script, persistent } => {
+                    crate::custom_region::render_custom_region(
+                        region,
+                        self.region_scripts.get(script),
+                        *persistent,
+                        meta,
+                        self.current_tokens,
+                        self.max_tokens,
+                        &mut system_blocks,
+                        &mut messages,
+                    );
                 }
 
                 // HashMap regions → system blocks with key headers
@@ -803,13 +993,14 @@ impl ContextWindow {
         tokens: usize,
         taint_level: leviath_core::TaintLevel,
     ) -> leviath_core::Result<()> {
-        if let Some(region) = self.get_region_mut(region_name) {
-            region.add_tainted_entry(content, tokens, taint_level)?;
-            self.current_tokens = self.calculate_tokens();
-            Ok(())
-        } else {
-            Err(leviath_core::Error::RegionNotFound(region_name.to_string()))
-        }
+        let Some((content, tokens)) =
+            self.on_write_outcome(region_name, content, tokens, &leviath_core::EntryKind::Text)
+        else {
+            return Ok(());
+        };
+        self.write_to_region(region_name, tokens, &mut |region, tokens| {
+            region.add_tainted_entry(content.clone(), tokens, taint_level)
+        })
     }
 
     /// Add a typed entry to a region with a specific taint level.
@@ -826,13 +1017,13 @@ impl ContextWindow {
         tokens: usize,
         taint_level: leviath_core::TaintLevel,
     ) -> leviath_core::Result<()> {
-        if let Some(region) = self.get_region_mut(region_name) {
-            region.add_typed_tainted_entry(content, tokens, kind, taint_level)?;
-            self.current_tokens = self.calculate_tokens();
-            Ok(())
-        } else {
-            Err(leviath_core::Error::RegionNotFound(region_name.to_string()))
-        }
+        let Some((content, tokens)) = self.on_write_outcome(region_name, content, tokens, &kind)
+        else {
+            return Ok(());
+        };
+        self.write_to_region(region_name, tokens, &mut |region, tokens| {
+            region.add_typed_tainted_entry(content.clone(), tokens, kind.clone(), taint_level)
+        })
     }
 
     /// Get the overall taint level (max across all regions).
@@ -2298,6 +2489,376 @@ mod tests {
             }
         ));
         assert_eq!(window.get_region("vault").unwrap().content.len(), 1);
+    }
+
+    /// A window with one custom region (`brain`, budget 100) backed by `src`,
+    /// compiled and installed in the script table under "s.rhai".
+    fn custom_window(src: &str, persistent: bool) -> ContextWindow {
+        let mut window = ContextWindow::new(10_000);
+        window.add_region(Region::new(
+            "brain".to_string(),
+            RegionKind::Custom {
+                script: "s.rhai".to_string(),
+                persistent,
+            },
+            100,
+        ));
+        window.region_scripts.insert(
+            "s.rhai".to_string(),
+            std::sync::Arc::new(leviath_scripting::region_hook::compile("s.rhai", src).unwrap()),
+        );
+        window
+    }
+
+    #[test]
+    fn custom_region_on_write_fires_across_all_write_methods() {
+        let src = r#"
+            fn render(ctx) { "" }
+            fn on_write(ctx) { `${ctx.entry.kind}:${ctx.entry.content}` }
+        "#;
+        let mut window = custom_window(src, false);
+
+        window.add_to_region("brain", "a".to_string(), 1).unwrap();
+        window
+            .add_typed_entry(
+                "brain",
+                leviath_core::EntryKind::UserMessage,
+                "b".to_string(),
+                1,
+            )
+            .unwrap();
+        window
+            .add_tainted_to_region(
+                "brain",
+                "c".to_string(),
+                1,
+                leviath_core::TaintLevel::Public,
+            )
+            .unwrap();
+        window
+            .add_typed_tainted_to_region(
+                "brain",
+                leviath_core::EntryKind::UserMessage,
+                "d".to_string(),
+                1,
+                leviath_core::TaintLevel::Public,
+            )
+            .unwrap();
+
+        let contents: Vec<_> = window
+            .get_region("brain")
+            .unwrap()
+            .content
+            .iter()
+            .map(|e| e.content.as_str())
+            .collect();
+        assert_eq!(
+            contents,
+            vec!["text:a", "user_message:b", "text:c", "user_message:d"],
+            "every write method passes through on_write with the entry kind visible"
+        );
+        // Token counts were re-estimated for the replacements.
+        assert_eq!(window.current_tokens, window.calculate_tokens());
+
+        assert!(window.replace_region("brain", "e".to_string(), 1));
+        let region = window.get_region("brain").unwrap();
+        assert_eq!(region.content.len(), 1);
+        assert_eq!(region.content[0].content, "text:e");
+    }
+
+    #[test]
+    fn custom_region_on_write_drop_reports_success_without_storing() {
+        let src = r#"
+            fn render(ctx) { "" }
+            fn on_write(ctx) { false }
+        "#;
+        let mut window = custom_window(src, false);
+        window
+            .add_to_region("brain", "spam".to_string(), 1)
+            .unwrap();
+        assert!(window.get_region("brain").unwrap().content.is_empty());
+
+        // A dropped replacement leaves existing content in place.
+        assert!(window.replace_region("brain", "more spam".to_string(), 1));
+        assert!(window.get_region("brain").unwrap().content.is_empty());
+    }
+
+    #[test]
+    fn non_custom_regions_bypass_the_on_write_seam() {
+        // A script table entry exists, but the region is plain Temporary - the
+        // hook must not fire for it.
+        let mut window = custom_window(
+            "fn render(ctx) { \"\" }\nfn on_write(ctx) { \"MANGLED\" }",
+            false,
+        );
+        window.add_region(Region::new("plain".to_string(), RegionKind::Temporary, 100));
+        window
+            .add_to_region("plain", "untouched".to_string(), 2)
+            .unwrap();
+        assert_eq!(
+            window.get_region("plain").unwrap().content[0].content,
+            "untouched"
+        );
+    }
+
+    #[test]
+    fn write_to_missing_region_still_errors() {
+        let mut window = custom_window("fn render(ctx) { \"\" }", false);
+        let err = window
+            .add_to_region("ghost", "x".to_string(), 1)
+            .unwrap_err();
+        assert!(matches!(err, leviath_core::Error::RegionNotFound(_)));
+    }
+
+    #[test]
+    fn custom_region_add_time_overflow_retries_after_script_drops() {
+        // Region budget 100: fill with 90, then add 20 - over budget. The
+        // script drops entry 0 (90 tokens), freeing room; the retry succeeds.
+        let src = r#"
+            fn render(ctx) { "" }
+            fn on_overflow(ctx) { [0] }
+        "#;
+        let mut window = custom_window(src, false);
+        window
+            .add_to_region("brain", "big".to_string(), 90)
+            .unwrap();
+        window
+            .add_to_region("brain", "next".to_string(), 20)
+            .unwrap();
+
+        let region = window.get_region("brain").unwrap();
+        assert_eq!(region.content.len(), 1);
+        assert_eq!(region.content[0].content, "next");
+        assert_eq!(window.current_tokens, 20);
+    }
+
+    #[test]
+    fn custom_region_add_time_overflow_propagates_when_still_too_big() {
+        // The script frees nothing, so the retry path never runs and the
+        // original budget error propagates to the caller's ladders.
+        let src = r#"
+            fn render(ctx) { "" }
+            fn on_overflow(ctx) { [] }
+        "#;
+        let mut window = custom_window(src, false);
+        window
+            .add_to_region("brain", "big".to_string(), 90)
+            .unwrap();
+        let err =
+            with_tracing(|| window.add_to_region("brain", "too much".to_string(), 50)).unwrap_err();
+        assert!(matches!(
+            err,
+            leviath_core::Error::TokenBudgetExceeded { .. }
+        ));
+        assert_eq!(window.get_region("brain").unwrap().content.len(), 1);
+    }
+
+    #[test]
+    fn custom_region_without_on_overflow_gets_no_retry() {
+        let mut window = custom_window("fn render(ctx) { \"\" }", false);
+        window
+            .add_to_region("brain", "big".to_string(), 90)
+            .unwrap();
+        let err = window
+            .add_to_region("brain", "too much".to_string(), 50)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            leviath_core::Error::TokenBudgetExceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn try_evict_lets_custom_script_choose_what_to_drop() {
+        // The script keeps errors, drops successes - the retention choice the
+        // oldest-first cascade could never make. Window is small so eviction
+        // has real pressure.
+        let src = r#"
+            fn render(ctx) { "" }
+            fn on_overflow(ctx) {
+                let drops = [];
+                for (entry, i) in ctx.entries {
+                    if !entry.content.contains("ERROR") { drops.push(i); }
+                }
+                drops
+            }
+        "#;
+        let mut window = ContextWindow::new(100);
+        window.add_region(Region::new(
+            "brain".to_string(),
+            RegionKind::Custom {
+                script: "s.rhai".to_string(),
+                persistent: false,
+            },
+            100,
+        ));
+        window.region_scripts.insert(
+            "s.rhai".to_string(),
+            std::sync::Arc::new(leviath_scripting::region_hook::compile("s.rhai", src).unwrap()),
+        );
+        window
+            .add_to_region("brain", "ok one".to_string(), 30)
+            .unwrap();
+        window
+            .add_to_region("brain", "ERROR two".to_string(), 30)
+            .unwrap();
+        window
+            .add_to_region("brain", "ok three".to_string(), 30)
+            .unwrap();
+
+        let result = with_tracing(|| window.try_evict(40)).unwrap();
+        assert!(result.tokens_freed >= 40);
+        let contents: Vec<_> = window
+            .get_region("brain")
+            .unwrap()
+            .content
+            .iter()
+            .map(|e| e.content.as_str())
+            .collect();
+        assert_eq!(
+            contents,
+            vec!["ERROR two"],
+            "script retention choice honored"
+        );
+    }
+
+    // ─── assemble(): custom regions ──────────────────────────────────────
+
+    #[test]
+    fn assemble_custom_region_renders_through_script() {
+        let src = r#"fn render(ctx) { `<brain iter=${ctx.stage_iterations}>` }"#;
+        let mut window = custom_window(src, false);
+        window
+            .add_to_region("brain", "note".to_string(), 2)
+            .unwrap();
+
+        // Default meta via plain assemble().
+        let assembled = window.assemble();
+        assert_eq!(assembled.system_blocks.len(), 1);
+        assert_eq!(assembled.system_blocks[0].text, "<brain iter=0>");
+        assert_eq!(
+            assembled.system_blocks[0].cache_hint,
+            leviath_core::CacheHint::UntilChanged
+        );
+
+        // Real meta via assemble_with_meta.
+        let assembled = window.assemble_with_meta(&crate::custom_region::AssembleMeta {
+            stage_name: "plan".to_string(),
+            stage_iterations: 7,
+            model: "m".to_string(),
+        });
+        assert_eq!(assembled.system_blocks[0].text, "<brain iter=7>");
+    }
+
+    #[test]
+    fn assemble_custom_region_renders_even_when_empty() {
+        // Static scaffolding: the script emits structure with no entries.
+        let src = r#"fn render(ctx) { `<empty count=${ctx.entries.len()}>` }"#;
+        let window = custom_window(src, false);
+        let assembled = window.assemble();
+        assert_eq!(assembled.system_blocks.len(), 1);
+        assert_eq!(assembled.system_blocks[0].text, "<empty count=0>");
+    }
+
+    #[test]
+    fn assemble_custom_conversation_takeover_renders_single_user_message() {
+        // The 12-factor case: a custom region NAMED conversation holds the
+        // typed history and renders it as one XML user message. No sliding
+        // window exists; the request's only message is the script's.
+        let src = r#"
+            fn render(ctx) {
+                let xml = "<context>";
+                for entry in ctx.entries {
+                    xml += `<event kind="${entry.kind}">${entry.content}</event>`;
+                }
+                xml += "</context>";
+                #{ messages: [ #{ role: "user", content: xml } ] }
+            }
+        "#;
+        let mut window = ContextWindow::new(10_000);
+        window.add_region(Region::new(
+            "conversation".to_string(),
+            RegionKind::Custom {
+                script: "conv.rhai".to_string(),
+                persistent: false,
+            },
+            5_000,
+        ));
+        window.region_scripts.insert(
+            "conv.rhai".to_string(),
+            std::sync::Arc::new(leviath_scripting::region_hook::compile("conv.rhai", src).unwrap()),
+        );
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::UserMessage,
+                "do the task".to_string(),
+                4,
+            )
+            .unwrap();
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::ToolResult {
+                    tool_call_id: "c1".to_string(),
+                    tool_name: "shell".to_string(),
+                    is_error: false,
+                },
+                "output".to_string(),
+                2,
+            )
+            .unwrap();
+
+        let assembled = window.assemble();
+        assert!(assembled.system_blocks.is_empty());
+        assert_eq!(assembled.messages.len(), 1);
+        assert_eq!(assembled.messages[0].role, "user");
+        let leviath_providers::MessageContent::Text(text) = &assembled.messages[0].content else {
+            panic!("script emitted a text message");
+        };
+        assert_eq!(
+            text,
+            "<context><event kind=\"user_message\">do the task</event>\
+             <event kind=\"tool_result\">output</event></context>"
+        );
+    }
+
+    #[test]
+    fn assemble_custom_script_emitting_nothing_gets_begin_fallback() {
+        // A script that emits no messages leaves the request message-less;
+        // the shared finalization injects the "Begin." user message.
+        let window = custom_window("fn render(ctx) { \"\" }", false);
+        let assembled = window.assemble();
+        assert!(assembled.system_blocks.is_empty());
+        assert_eq!(assembled.messages.len(), 1);
+        let leviath_providers::MessageContent::Text(text) = &assembled.messages[0].content else {
+            panic!("Begin. fallback is text");
+        };
+        assert_eq!(text, "Begin.");
+    }
+
+    #[test]
+    fn assemble_custom_unpaired_tool_blocks_are_sanitized() {
+        // A buggy script emits a tool_result with no matching tool_use; the
+        // orphan sanitizer strips it instead of sending a provider-invalid
+        // request.
+        let src = r#"
+            fn render(ctx) {
+                #{ messages: [
+                    #{ role: "user", content: "hello" },
+                    #{ role: "user", tool_results: [
+                        #{ tool_call_id: "ghost", content: "orphan" },
+                    ] },
+                ] }
+            }
+        "#;
+        let window = custom_window(src, false);
+        let assembled = window.assemble();
+        assert_eq!(assembled.messages.len(), 1, "orphan tool_result stripped");
+        let leviath_providers::MessageContent::Text(text) = &assembled.messages[0].content else {
+            panic!("surviving message is the text one");
+        };
+        assert_eq!(text, "hello");
     }
 
     // ─── assemble() EntryKind::Text prefix parsing ────────────────────────
