@@ -108,6 +108,27 @@ pub enum TelemetryEvent {
 }
 
 impl TelemetryEvent {
+    /// A stable short name for this event's variant.
+    ///
+    /// Exists so a test can `assert_eq!(event.kind(), "run_started")` rather
+    /// than `assert!(matches!(event, ...))` - the `matches!` non-matching arm
+    /// is a region only a *failing* assertion ever reaches, which reads as
+    /// uncovered under the workspace's 100% gate. Useful in its own right for
+    /// structured logging, where the kind is the field worth indexing on.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::RunStarted { .. } => "run_started",
+            Self::StageEntered { .. } => "stage_entered",
+            Self::StageExited { .. } => "stage_exited",
+            Self::InferenceCompleted { .. } => "inference_completed",
+            Self::ToolCallCompleted { .. } => "tool_call_completed",
+            Self::CompactionCompleted { .. } => "compaction_completed",
+            Self::RunCompleted { .. } => "run_completed",
+            Self::Log { .. } => "log",
+        }
+    }
+
     /// The run this event belongs to.
     pub fn run_id(&self) -> &str {
         match self {
@@ -202,8 +223,8 @@ mod tests {
         });
         let events = sink.events();
         assert_eq!(events.len(), 2);
-        assert!(matches!(events[0], TelemetryEvent::RunStarted { .. }));
-        assert!(matches!(events[1], TelemetryEvent::StageEntered { .. }));
+        assert_eq!(events[0].kind(), "run_started");
+        assert_eq!(events[1].kind(), "stage_entered");
     }
 
     #[test]
@@ -281,6 +302,20 @@ mod tests {
                 line: "[Tokens: 10 in, 5 out]".to_string(),
             },
         ];
+        let kinds: Vec<&str> = events.iter().map(TelemetryEvent::kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                "run_started",
+                "stage_entered",
+                "stage_exited",
+                "inference_completed",
+                "tool_call_completed",
+                "compaction_completed",
+                "run_completed",
+                "log",
+            ]
+        );
         for event in &events {
             assert_eq!(event.run_id(), "r1");
         }

@@ -86,9 +86,10 @@ mod tests {
 
         // Park a handle whose subscriber this thread controls.
         let (otel_layer, handle) = reload::Layer::new(None as OtelSlot);
-        OTEL_HANDLE
-            .set(handle)
-            .unwrap_or_else(|_| panic!("this test parks the handle first"));
+        assert!(
+            OTEL_HANDLE.set(handle).is_ok(),
+            "this test parks the handle first"
+        );
         let subscriber = tracing_subscriber::registry().with(otel_layer);
         let _guard = tracing::subscriber::set_default(subscriber);
 
