@@ -5,7 +5,7 @@
 **A structured agent runtime for LLMs**
 
 **Coherent.** Structured context regions mean an agent still knows what it read 50 tool calls ago.<br>
-**Staged.** Each phase of a task gets its own model, tools, and context layout, wired as a graph.<br>
+**Right-sized.** Each phase of a task gets its own model, tools, and context layout, so you aren't paying frontier prices for file reads.<br>
 **Light.** Dozens of agents in one [bevy_ecs](https://bevyengine.org/) process, from a single binary. No Node, Python, or Docker.
 
 [![Tests](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-test-all.json)](https://github.com/Sun-Forge-AI/leviath/actions/workflows/ci.yml)
@@ -13,7 +13,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Sun-Forge-AI/leviath/blob/main/LICENSE)
 [![Docs](https://img.shields.io/badge/docs-leviath.dev-8b5cf6)](https://leviath.dev)
 
-**[Quick Start](#quick-start) · [Agents](#pre-built-agents) · [Features](#features) · [Dashboard](#dashboard) · [API](#api-server) · [Agent Client Protocol](#agent-client-protocol) · [Benchmarks](#benchmarks) · [Why not Leviath](#why-you-might-not-want-leviath) · [Contributing](#contributing)**
+**[Quick Start](#quick-start) · [Agents](#pre-built-agents) · [Features](#features) · [Dashboard](#dashboard) · [API](#api-server) · [Agent Client Protocol](#agent-client-protocol) · [Comparison](#how-it-compares) · [Why not Leviath](#why-you-might-not-want-leviath) · [Contributing](#contributing)**
 
 </div>
 
@@ -51,7 +51,7 @@ lev create my-agent              # scaffold your own agent
 
 ### 1. Install
 
-> **Private alpha:** installing needs a GitHub Personal Access Token (`repo` scope): `GITHUB_TOKEN` for the install scripts, `HOMEBREW_GITHUB_API_TOKEN` for Homebrew. One-time setup in the [distribution repo](https://github.com/Sun-Forge-AI/leviath-dist).
+> **Private alpha:** installing needs a GitHub Personal Access Token; one-time setup in the [distribution repo](https://github.com/Sun-Forge-AI/leviath-dist).
 
 **macOS (Homebrew):**
 
@@ -110,10 +110,10 @@ A few caveats, all measured:
 ### 3. Run an agent
 
 ```bash
-lev run coder --task "Build a CLI that converts CSV to JSON"
+lev run coder --task "Add pagination to the /users endpoint"
 
 # ...or try a non-coding agent
-lev run deep-researcher --task "Survey the current state of solid-state battery technology"
+lev run log-analyzer --task "Find what caused the error spike in ./logs last night"
 ```
 
 `lev run` hands the agent to a background **daemon** that hosts every agent in one shared world, so runs keep going after your terminal closes. For unattended agents, `lev daemon install` puts it under launchd/systemd so it starts at login, restarts if it dies, and reloads interrupted runs. [Daemon docs →](https://leviath.dev/docs/daemon)
@@ -221,7 +221,7 @@ Ten agents ship out of the box, each a multi-stage directed graph with structure
 
 ### Structured context memory
 
-Six region types with deterministic eviction: architecture stays pinned, tool results evict first, and conversation auto-compacts into summaries. Route reads to specific regions so a file dump can't push out your system prompt. Budgets can be percentages of the model's context window, so a blueprint's intent survives across models of different sizes. [Learn more →](https://leviath.dev/docs/context)
+Seven region kinds with deterministic eviction: architecture stays pinned, tool results evict first, and conversation auto-compacts into summaries. Route reads to specific regions so a file dump can't push out your system prompt. Budgets can be percentages of the model's context window, so a blueprint's intent survives across models of different sizes. [Learn more →](https://leviath.dev/docs/context)
 
 ### Multi-stage workflows
 
@@ -246,7 +246,7 @@ Agents spawn children with different blueprints. A **fan-out** stage splits a ta
 
 ### Human-in-the-loop
 
-Message a running agent from the terminal or dashboard. Input is injected between inference calls, so you redirect or add constraints without restarting. Force checkpoints with `interaction_points` (approve, request revisions, or edit the agent's output directly), or grant `ask_user_*` tools so the agent asks on its own judgment.
+The core primitive is **mid-run message injection**: `lev msg` (or the API) drops a message straight into a running agent's context, and the model sees it on its next inference call, so you redirect or add constraints without restarting. Stages can opt out with `accepts_messages = false`; a message then waits in the inbox until a stage that accepts it. Force checkpoints with `interaction_points` (approve, request revisions, or edit the agent's output directly), or grant `ask_user_*` tools so the agent asks on its own judgment. [Learn more →](https://leviath.dev/docs/interaction)
 
 ### Security: sandboxed execution and taint tracking
 
@@ -256,7 +256,12 @@ By default an agent's shell commands run directly on your machine, with nothing 
 - **Linux namespaces**, a lighter option that needs no container runtime. It isolates PIDs and, with `network = false`, connectivity. It shares the host filesystem, so reach for a container when you want real containment.
 - Mix them per stage: run analysis on the host and implementation in a networkless container. An installed agent can tighten its sandbox but never turn one off.
 
-**Taint tracking (experimental).** A deterministic sensitivity model (Public / Internal / Private) tags every context region, set by the runtime and never by model output. Any tool that can carry bytes off the machine is gated: if it carries data above its clearance, the call is blocked before it fires, or surfaced as an *allow once / allow for session / deny* prompt in the daemon. Add allowlists and Rhai policy rules, and dry-run any tool with `lev policy test`.
+**Taint tracking (experimental).** A deterministic sensitivity model for what leaves the machine:
+
+- Every context region carries a sensitivity label (Public / Internal / Private), set by the runtime and never by model output.
+- Any tool that can carry bytes off the machine is gated: a call carrying data above its clearance is blocked before it fires, or surfaced as an *allow once / allow for session / deny* prompt in the daemon.
+- Layer on allowlists and Rhai policy rules for finer control.
+- Dry-run any tool against the real gate with `lev policy test`.
 
 [Learn more →](https://leviath.dev/docs/security)
 
@@ -312,14 +317,48 @@ session  = "acp"          # Gas City's key name for the Agent Client Protocol
 
 > "ACP" is claimed by two unrelated protocols; Leviath implements the Agent **Client** Protocol (JSON-RPC/stdio), not BeeAI's Agent Communication Protocol.
 
-## Benchmarks
+## How we measure
 
-Leviath is a runtime that orchestrates agents, not a coding agent itself, so we don't publish head-to-head numbers against tools like Claude Code or Codex. They sit at a different layer of the stack. What we measure instead, on the same tasks with the same models:
+Leviath is a runtime that orchestrates agents, not a coding agent itself, so we don't publish head-to-head numbers against tools like Claude Code or Codex. They sit at a different layer of the stack. What we measure, on the same tasks with the same models, with every run published:
 
 - **Structured vs flat context**: the same Leviath runtime with regions enabled vs disabled, scored on held-out test pass rate, total billed tokens (including cache reads and writes), and cost.
 - **Resource footprint**: absolute memory of one daemon running many concurrent agents.
 
-A benchmark round is currently being re-run under a frozen, reproducible methodology; numbers will land here when it completes, with all runs published. Methodology and raw data: [leviath-benchmarks](https://github.com/Sun-Forge-AI/leviath-benchmarks).
+Methodology and raw data: [leviath-benchmarks](https://github.com/Sun-Forge-AI/leviath-benchmarks).
+
+## How it compares
+
+These four tools sit at different layers of the agent stack and make different architectural bets. Claude Code is a polished coding agent with an SDK to embed its harness, CrewAI and LangGraph are frameworks you build agents *in*, and Leviath is a standalone runtime agents run *on*. None is a drop-in replacement for another, so this table compares models, not merit; competitor descriptions come from each project's own documentation.
+
+| | **Leviath** | **Claude Code + Agent SDK** | **CrewAI** | **LangGraph** |
+|---|---|---|---|---|
+| **Primary layer** | Standalone agent runtime, single binary | Coding agent CLI + SDK harness | Python multi-agent framework | Low-level orchestration framework (Python/JS) |
+| **Process model for N agents** | N agents as entities in one bevy_ecs daemon | One `claude` subprocess per session; "N sessions = N subprocesses" | Runs inside your Python app; async kickoff variants | Runs in your app process; hosted server optional |
+| **Context-window management** | Typed regions, deterministic eviction, per-stage budgets | Auto-compaction summarizes history near the limit | Auto-summarizes on overflow (`respect_context_window`) | Developer-controlled graph state, durable via checkpointers |
+| **Multi-agent orchestration** | Multi-stage workflow graphs; in-process sub-agent fan-out | Subagents within a session; agent teams (experimental) | Crews (role-based teams) coordinated by Flows | Explicit graphs mixing deterministic and agentic steps |
+| **How agents are defined** | TOML blueprints + Rhai script tools | Markdown + YAML frontmatter; code via SDK | JSONC/YAML config or Python `Agent` classes | Python or TypeScript code |
+| **Runtime dependencies** | Single native binary; no Node/Python/Docker | Native CLI; SDKs need Node 18+ or Python 3.10+ | Python 3.10-3.13, uv-managed | Python or Node.js application runtime |
+| **Headless / API surface** | REST + WebSocket daemon; Agent Client Protocol stdio | `claude -p` with JSON/stream output; Python/TS SDK | `kickoff()` in-process; REST via CrewAI AMP | Library calls; REST via LangSmith Deployment |
+| **Human-in-the-loop mid-run** | Mid-run message injection; forced checkpoints; ask-user tools | Interactive steering, interrupts, permission prompts | `human_input` flag pauses a task for feedback | First-class `interrupt()`: pause indefinitely, resume with `Command` |
+| **Sandboxing / isolation** | Opt-in per agent or stage: containers or Linux namespaces | Opt-in OS sandbox for Bash (Seatbelt / bubblewrap) | Docs recommend external sandbox services (E2B, Modal) | Sandbox backends via LangChain's Deep Agents |
+| **Managed / hosted option** | None; single machine | Managed Agents (Anthropic-hosted) | CrewAI AMP | LangSmith Deployment cloud |
+
+And here is Leviath scored against [12-Factor Agents](https://github.com/humanlayer/12-factor-agents), including where it falls short today:
+
+| # | Factor | Status | Notes |
+|---|---|---|---|
+| 1 | Natural language to tool calls | ✓ | Provider tool calls map 1:1 into the runtime; a text-protocol fallback exists only for the Claude Code transport |
+| 2 | Own your prompts | ✓ | Stage, system, and transition prompts live in your blueprint TOML; a few small framework nudges are fixed text |
+| 3 | Own your context window | ✓ | Region kinds, per-stage layouts, per-tool routing, percentage budgets |
+| 4 | Tools are structured outputs | partial | Tools declare JSON Schemas; arguments are checked per-handler, not schema-validated at dispatch |
+| 5 | Unify execution and business state | ✓ | One append-only run journal, replayable with `lev context` |
+| 6 | Launch / pause / resume | partial | Launch via CLI, REST, or ACP; pause and resume exist in the runtime but have no user-facing command yet |
+| 7 | Contact humans with tool calls | ✓ | `ask_user_*` tools plus blueprint `interaction_points`, answered from CLI, REST, or ACP |
+| 8 | Own your control flow | ✓ | Graph transitions with error, max-iterations, stuck, and LLM-choice conditions |
+| 9 | Compact errors into context | partial | Tool errors land in context; inference errors currently go to logs, not context |
+| 10 | Small, focused agents | ✓ | Per-stage models, tools, and prompts; sub-agents; bounded fan-out |
+| 11 | Trigger from anywhere | partial | CLI, REST + WebSocket, ACP stdio, signed webhooks out; no built-in scheduler, so use system cron |
+| 12 | Stateless reducer | ✗ | The engine is a stateful ECS world; the run journal's fold is a true reducer, but the loop itself isn't |
 
 ## Why you might not want Leviath
 
@@ -335,24 +374,17 @@ A benchmark round is currently being re-run under a frozen, reproducible methodo
 | `lev create <name>` | Create an agent project |
 | `lev run [path] --task "..."` | Run an agent in the shared-world daemon (auto-started) |
 | `lev ps` | List running agents and their status |
-| `lev msg <agent-id> <content>` | Send a message to a running agent |
-| `lev cancel <run-id>` | Cancel a running agent |
+| `lev msg <agent-id> <content>` | Inject a message into a running agent |
 | `lev respond [req-id] [value]` | List or answer pending `ask_user` interactions |
-| `lev daemon` | Run the shared-world daemon in the foreground |
-| `lev daemon install` / `uninstall` | Supervise the daemon (launchd / systemd `--user`) |
+| `lev cancel <run-id>` | Cancel a running agent |
 | `lev dash` | TUI dashboard |
 | `lev serve` | REST + WebSocket API server |
 | `lev agent-client` | Serve an agent over the Agent Client Protocol (stdio) |
 | `lev validate [path]` | Validate an agent blueprint |
-| `lev pack` / `lev add` / `lev remove` | Package management |
-| `lev list` | List installed agents |
-| `lev test` | Run agent tests |
-| `lev tools` | List and validate the global Rhai script tools |
-| `lev policy list\|add\|test` | Manage taint-tracking policy rules (`test` runs the real gate) |
-| `lev context <run-id>` | Show a run's context-window history |
-| `lev auth status\|migrate` | Inspect and move the secrets Leviath holds |
-| `lev mcp add\|list\|remove\|login\|logout\|test` | Manage MCP tool servers |
-| `lev setup` / `lev models` | Configuration |
+| `lev mcp add\|list\|remove` | Manage MCP tool servers |
+| `lev setup` | Configuration wizard |
+
+The full list, including packaging, testing, policy, and auth commands: `lev --help`.
 
 ### MCP tool servers
 

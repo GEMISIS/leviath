@@ -19,6 +19,11 @@ These links 404 until the site is up; this file is the punch-list for building i
 | `/docs/mcp` | CLI → MCP tool servers | **Cut from README:** stdio vs HTTP (streamable + legacy HTTP+SSE fallback) transports, `[[mcp_servers]]` config incl. `url`/`headers`/`${VAR}` expansion, OAuth browser flow, `~/.leviath/mcp-auth.json` (0600) storage + non-interactive refresh. |
 | `/docs/providers` | Providers | Provider setup per vendor; **cut from README:** `[rate_limits.<provider>]` TOML (`requests_per_minute`, `tokens_per_minute`); Rhai custom providers (source: `docs/rhai-providers.md` in this repo, example `docs/examples/groq.rhai`); Claude Code transport details beyond the README's collapsed note. |
 
+| `/docs/interaction` | Features → Human-in-the-loop | Mid-run message injection semantics (immediate write to the `conversation` region by default, observed on next inference, per-stage `accepts_messages` opt-out and inbox holding), `interaction_points` (approve/revise/edit, revision bound), `ask_user_*` tools, and `lev respond` vs `lev msg`. |
+
 Not yet linked from the README but worth pages at launch: releases/channels mechanics
-(rolling vs immutable tags — currently 2 lines in README + dist repo), `lev test`
-blueprint testing, `lev context` run archives, `lev auth`.
+(rolling vs immutable tags — currently 2 lines in README + dist repo), and a full CLI
+reference covering the commands trimmed from the README table (2026-07): `lev daemon`
+(+ `install`/`uninstall`), `lev pack`/`add`/`remove`/`list`, `lev test`, `lev tools`,
+`lev policy`, `lev context`, `lev auth`, `lev models`, plus the `lev mcp`
+`login`/`logout`/`test` subcommands.
