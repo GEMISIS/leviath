@@ -166,6 +166,7 @@ pub fn dispatch_title(
                 request: title_request(&meta.task, &model),
                 permit,
             },
+            std::time::Duration::from_secs(leviath_providers::DEFAULT_INFERENCE_TIMEOUT_SECS),
             sink.0.clone(),
             stage.wake.clone(),
         ));
@@ -311,6 +312,59 @@ mod tests {
 
     fn default_pools() -> crate::inference_pool::InferencePools {
         crate::inference_pool::InferencePools::new(crate::inference_pool::InferencePoolConfig::new())
+    }
+
+    /// The permit must come back within the deadline even when the provider
+    /// never answers - a hung title call once held its pool slot forever.
+    #[tokio::test]
+    async fn title_deadline_frees_the_slot_when_the_provider_hangs() {
+        struct Hang;
+        #[async_trait::async_trait]
+        impl Provider for Hang {
+            async fn infer(
+                &self,
+                _r: InferenceRequest,
+            ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
+                std::future::pending().await
+            }
+            async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+                1
+            }
+            fn max_context_tokens(&self, _m: &str) -> usize {
+                100_000
+            }
+            fn name(&self) -> &str {
+                "hang"
+            }
+            fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
+                leviath_providers::ModelCapabilities::default()
+            }
+        }
+
+        // Trait obligations on the mock; only `infer` matters to this test.
+        assert_eq!(Hang.count_tokens("t", "m").await, 1);
+        assert_eq!(Hang.max_context_tokens("m"), 100_000);
+        assert_eq!(Hang.name(), "hang");
+        let _ = Hang.capabilities("m");
+        let pools = crate::inference_pool::InferencePools::new(
+            crate::inference_pool::InferencePoolConfig::new(),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        run_title_job(
+            TitleJob {
+                entity: bevy_ecs::entity::Entity::PLACEHOLDER,
+                provider: Arc::new(Hang),
+                request: title_request("task", "m"),
+                permit: pools.try_acquire("m").expect("free"),
+            },
+            std::time::Duration::from_millis(5),
+            tx,
+            Arc::new(Notify::new()),
+        )
+        .await;
+        let outcome = rx.recv().await.expect("an outcome is always reported");
+        let err = outcome.result.expect_err("the deadline must surface");
+        assert!(err.to_string().contains("deadline"), "{err}");
     }
 
     #[tokio::test]
