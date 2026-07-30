@@ -451,6 +451,7 @@ mod tests {
                 command: commands::models::ModelsCommand::List(commands::models::ListArgs {
                     provider: None,
                     remote: false,
+                    all: false,
                 }),
             };
             let result = dispatch(Commands::Models(args), &MockRisky).await;

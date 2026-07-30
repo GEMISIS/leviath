@@ -126,6 +126,11 @@ pub fn message_to_openai(role: &str, content: &MessageContent) -> Vec<serde_json
                 })
                 .collect();
 
+            // A block list can carry calls and results at once (a compacted
+            // turn, or a stage that folded both into one entry). Emitting only
+            // the calls silently dropped the results, leaving a function-call
+            // turn with no response after it - which Gemini rejects outright.
+            let mut out = Vec::new();
             if !tool_calls.is_empty() {
                 let content = text_parts.join("");
                 let mut msg_json = serde_json::json!({
@@ -135,21 +140,19 @@ pub fn message_to_openai(role: &str, content: &MessageContent) -> Vec<serde_json
                 if !content.is_empty() {
                     msg_json["content"] = serde_json::Value::String(content);
                 }
-                vec![msg_json]
-            } else if !tool_results.is_empty() {
-                tool_results
-                    .iter()
-                    .map(|(tool_use_id, content)| {
-                        serde_json::json!({
-                            "role": "tool",
-                            "tool_call_id": tool_use_id,
-                            "content": content,
-                        })
-                    })
-                    .collect()
-            } else {
-                vec![serde_json::json!({ "role": role, "content": text_parts.join("") })]
+                out.push(msg_json);
             }
+            out.extend(tool_results.iter().map(|(tool_use_id, content)| {
+                serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": tool_use_id,
+                    "content": content,
+                })
+            }));
+            if out.is_empty() {
+                out.push(serde_json::json!({ "role": role, "content": text_parts.join("") }));
+            }
+            out
         }
     }
 }
@@ -166,7 +169,86 @@ pub fn openai_messages(request: &InferenceRequest) -> Vec<serde_json::Value> {
     for msg in &request.messages {
         messages.extend(message_to_openai(&msg.role, &msg.content));
     }
+    lead_with_a_user_turn(drop_unpaired_tool_turns(messages))
+}
+
+/// Ensure the conversation's first non-system turn is a user turn.
+///
+/// Leviath's task lives in a pinned context region, which assembles into the
+/// system prompt, so a run's first *message* is the assistant's opening turn -
+/// usually a tool call. Anthropic accepts that; Gemini answers HTTP 400
+/// ("Please ensure that function call turn comes immediately after a user turn
+/// or after a function response turn") and kills the run on the second
+/// inference, before any work lands. The turn order is a wire-format
+/// expectation, so this layer satisfies it rather than reshaping how regions
+/// assemble: a minimal user turn is inserted ahead of a leading assistant
+/// message, naming where the real instruction is so the addition cannot read
+/// as a new request.
+fn lead_with_a_user_turn(mut messages: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let first_non_system = messages
+        .iter()
+        .position(|m| m["role"] != "system")
+        .unwrap_or(messages.len());
+    if messages
+        .get(first_non_system)
+        .is_some_and(|m| m["role"] == "assistant")
+    {
+        messages.insert(
+            first_non_system,
+            serde_json::json!({
+                "role": "user",
+                "content": "Proceed with the task described in the system instructions.",
+            }),
+        );
+    }
     messages
+}
+
+/// Remove function-call turns whose responses are missing, and responses whose
+/// call is missing.
+///
+/// A context window evicts entries independently, so a long run can assemble an
+/// assistant `tool_calls` turn whose `tool` response has aged out (or the
+/// reverse). Anthropic tolerates the gap; Gemini answers HTTP 400 - "Please
+/// ensure that function call turn comes immediately after a user turn or after
+/// a function response turn" - and the whole run dies on a wire-format detail
+/// no agent author can see. Sending a conversation that is internally
+/// consistent is this layer's job, so an unpaired turn is dropped rather than
+/// forwarded.
+fn drop_unpaired_tool_turns(messages: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let responded: std::collections::HashSet<&str> = messages
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .filter_map(|m| m["tool_call_id"].as_str())
+        .collect();
+    let called: std::collections::HashSet<&str> = messages
+        .iter()
+        .filter_map(|m| m["tool_calls"].as_array())
+        .flatten()
+        .filter_map(|c| c["id"].as_str())
+        .collect();
+
+    let keep: Vec<bool> = messages
+        .iter()
+        .map(|m| match m["tool_calls"].as_array() {
+            // An assistant call turn survives only if every call it makes was
+            // answered: a partially answered turn is the same broken shape.
+            Some(calls) => calls
+                .iter()
+                .filter_map(|c| c["id"].as_str())
+                .all(|id| responded.contains(id)),
+            None => match (m["role"].as_str(), m["tool_call_id"].as_str()) {
+                (Some("tool"), Some(id)) => called.contains(id),
+                _ => true,
+            },
+        })
+        .collect();
+
+    messages
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(m, keep)| keep.then_some(m))
+        .collect()
 }
 
 pub fn build_openai_request_body(request: &InferenceRequest) -> serde_json::Value {
@@ -505,7 +587,7 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<StreamChunk>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{InferenceRequest, Message, Tool};
+    use crate::provider::{InferenceRequest, Message, SystemBlock, Tool};
 
     fn sample_request() -> InferenceRequest {
         InferenceRequest {
@@ -1121,32 +1203,19 @@ mod tests {
     // ─── MessageContent::Blocks code paths in build_openai_request_body ────
 
     #[test]
-    fn build_request_body_blocks_tool_use_with_text() {
-        let req = InferenceRequest {
-            system: vec![],
-            messages: vec![Message {
-                role: "assistant".into(),
-                content: MessageContent::Blocks(vec![
-                    ContentBlock::Text {
-                        text: "Let me call a tool.".into(),
-                    },
-                    ContentBlock::ToolUse {
-                        id: "call_1".into(),
-                        name: "search".into(),
-                        input: serde_json::json!({"query": "rust"}),
-                    },
-                ]),
-                cache_breakpoint: false,
-            }],
-            model: "gpt-4".into(),
-            max_tokens: 1024,
-            temperature: 0.5,
-            tools: vec![],
-            extra: serde_json::json!({}),
-            request_timeout_secs: None,
-        };
-        let body = build_openai_request_body(&req);
-        let messages = body["messages"].as_array().unwrap();
+    fn message_to_openai_blocks_tool_use_with_text() {
+        let content = MessageContent::Blocks(vec![
+            ContentBlock::Text {
+                text: "Let me call a tool.".into(),
+            },
+            ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "search".into(),
+                input: serde_json::json!({"query": "rust"}),
+            },
+        ]);
+        let messages = message_to_openai("assistant", &content);
+        let messages = &messages;
         assert_eq!(messages.len(), 1);
         let msg = &messages[0];
         assert_eq!(msg["role"], "assistant");
@@ -1163,70 +1232,223 @@ mod tests {
     }
 
     #[test]
-    fn build_request_body_blocks_tool_use_without_text() {
-        let req = InferenceRequest {
-            system: vec![],
-            messages: vec![Message {
-                role: "assistant".into(),
-                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
-                    id: "call_2".into(),
-                    name: "write_file".into(),
-                    input: serde_json::json!({"path": "/tmp/a.txt"}),
-                }]),
-                cache_breakpoint: false,
-            }],
-            model: "gpt-4".into(),
-            max_tokens: 512,
-            temperature: 0.0,
-            tools: vec![],
-            extra: serde_json::json!({}),
-            request_timeout_secs: None,
-        };
-        let body = build_openai_request_body(&req);
-        let msg = &body["messages"].as_array().unwrap()[0];
-        assert_eq!(msg["role"], "assistant");
-        // No text content → content key should be absent
-        assert!(msg.get("content").is_none());
-        assert_eq!(msg["tool_calls"].as_array().unwrap().len(), 1);
+    fn message_to_openai_blocks_tool_use_without_text() {
+        let content = MessageContent::Blocks(vec![ContentBlock::ToolUse {
+            id: "call_2".into(),
+            name: "write_file".into(),
+            input: serde_json::json!({"path": "/tmp/a.txt"}),
+        }]);
+        let messages = message_to_openai("assistant", &content);
+        // A call-only block yields one assistant turn and no `content` key.
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert!(messages[0].get("content").is_none());
+        let tool_calls = messages[0]["tool_calls"].as_array().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0]["id"], "call_2");
+        assert_eq!(tool_calls[0]["function"]["name"], "write_file");
     }
 
     #[test]
-    fn build_request_body_blocks_tool_result() {
-        let req = InferenceRequest {
+    fn message_to_openai_blocks_tool_results_each_become_a_tool_turn() {
+        let content = MessageContent::Blocks(vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: "result A".into(),
+                is_error: false,
+            },
+            ContentBlock::ToolResult {
+                tool_use_id: "call_2".into(),
+                content: "result B".into(),
+                is_error: false,
+            },
+        ]);
+        let messages = message_to_openai("user", &content);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "tool");
+        assert_eq!(messages[0]["tool_call_id"], "call_1");
+        assert_eq!(messages[0]["content"], "result A");
+        assert_eq!(messages[1]["tool_call_id"], "call_2");
+        assert_eq!(messages[1]["content"], "result B");
+    }
+
+    /// The shape Gemini rejects with HTTP 400: a call turn whose response has
+    /// aged out of the context window (or vice versa) must not be sent.
+    #[test]
+    fn unpaired_tool_turns_are_dropped_from_the_request() {
+        let call_only = InferenceRequest {
             system: vec![],
-            messages: vec![Message {
-                role: "user".into(),
-                content: MessageContent::Blocks(vec![
-                    ContentBlock::ToolResult {
-                        tool_use_id: "call_1".into(),
-                        content: "result A".into(),
-                        is_error: false,
-                    },
-                    ContentBlock::ToolResult {
-                        tool_use_id: "call_2".into(),
-                        content: "result B".into(),
-                        is_error: true,
-                    },
-                ]),
-                cache_breakpoint: false,
-            }],
-            model: "gpt-4".into(),
-            max_tokens: 1024,
+            messages: vec![
+                Message {
+                    role: "user".into(),
+                    content: MessageContent::Text("do it".into()),
+                    cache_breakpoint: false,
+                },
+                Message {
+                    role: "assistant".into(),
+                    content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                        id: "orphan".into(),
+                        name: "search".into(),
+                        input: serde_json::json!({}),
+                    }]),
+                    cache_breakpoint: false,
+                },
+            ],
+            model: "gemini-3.5-flash".into(),
+            max_tokens: 64,
             temperature: 0.5,
             tools: vec![],
             extra: serde_json::json!({}),
             request_timeout_secs: None,
         };
-        let body = build_openai_request_body(&req);
-        let messages = body["messages"].as_array().unwrap();
-        // Each tool result becomes a separate "tool" role message
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0]["role"], "tool");
-        assert_eq!(messages[0]["tool_call_id"], "call_1");
-        assert_eq!(messages[0]["content"], "result A");
+        let msgs = openai_messages(&call_only);
+        assert_eq!(
+            msgs.len(),
+            1,
+            "the unanswered call turn is dropped: {msgs:?}"
+        );
+        assert_eq!(msgs[0]["role"], "user");
+
+        // A response with no call is equally invalid and equally dropped.
+        let result_only = InferenceRequest {
+            messages: vec![
+                Message {
+                    role: "user".into(),
+                    content: MessageContent::Text("do it".into()),
+                    cache_breakpoint: false,
+                },
+                Message {
+                    role: "user".into(),
+                    content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                        tool_use_id: "ghost".into(),
+                        content: "stale".into(),
+                        is_error: false,
+                    }]),
+                    cache_breakpoint: false,
+                },
+            ],
+            ..call_only.clone()
+        };
+        let msgs = openai_messages(&result_only);
+        assert_eq!(msgs.len(), 1, "the orphan response is dropped: {msgs:?}");
+
+        // A properly paired exchange survives intact.
+        let paired = InferenceRequest {
+            messages: vec![
+                Message {
+                    role: "assistant".into(),
+                    content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                        id: "c1".into(),
+                        name: "search".into(),
+                        input: serde_json::json!({}),
+                    }]),
+                    cache_breakpoint: false,
+                },
+                Message {
+                    role: "user".into(),
+                    content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                        tool_use_id: "c1".into(),
+                        content: "found".into(),
+                        is_error: false,
+                    }]),
+                    cache_breakpoint: false,
+                },
+            ],
+            ..call_only.clone()
+        };
+        let msgs = openai_messages(&paired);
+        // The pair survives; a leading user turn is prepended because the
+        // conversation opens on an assistant turn (see `lead_with_a_user_turn`).
+        assert_eq!(msgs.len(), 3, "a paired exchange survives: {msgs:?}");
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[2]["role"], "tool");
+    }
+
+    /// Gemini rejects a function-call turn that does not follow a user turn.
+    /// Leviath's task lives in a pinned region (so it assembles into the
+    /// system prompt), which left the assistant's opening tool call as the
+    /// first message and killed every Gemini run on its second inference.
+    #[test]
+    fn a_conversation_opening_on_an_assistant_turn_gets_a_user_turn_first() {
+        let req = InferenceRequest {
+            system: vec![SystemBlock {
+                text: "You are a coding agent. Task: add a doc comment.".into(),
+                cache_hint: leviath_core::CacheHint::Never,
+            }],
+            messages: vec![Message {
+                role: "assistant".into(),
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::ToolUse {
+                        id: "c1".into(),
+                        name: "list_dir".into(),
+                        input: serde_json::json!({}),
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "c1".into(),
+                        content: "main.rs".into(),
+                        is_error: false,
+                    },
+                ]),
+                cache_breakpoint: false,
+            }],
+            model: "gemini-3.5-flash".into(),
+            max_tokens: 64,
+            temperature: 0.5,
+            tools: vec![],
+            extra: serde_json::json!({}),
+            request_timeout_secs: None,
+        };
+        let msgs = openai_messages(&req);
+        let roles: Vec<&str> = msgs.iter().filter_map(|m| m["role"].as_str()).collect();
+        assert_eq!(
+            roles,
+            vec!["system", "user", "assistant", "tool"],
+            "a call turn must follow a user turn: {msgs:?}"
+        );
+    }
+
+    /// An ordinary conversation already starting with a user turn is untouched.
+    #[test]
+    fn a_conversation_already_starting_with_a_user_turn_is_unchanged() {
+        let req = InferenceRequest {
+            system: vec![],
+            messages: vec![Message {
+                role: "user".into(),
+                content: MessageContent::Text("hello".into()),
+                cache_breakpoint: false,
+            }],
+            model: "gemini-3.5-flash".into(),
+            max_tokens: 64,
+            temperature: 0.5,
+            tools: vec![],
+            extra: serde_json::json!({}),
+            request_timeout_secs: None,
+        };
+        assert_eq!(openai_messages(&req).len(), 1);
+    }
+
+    /// One block list carrying both a call and its result must emit both; the
+    /// results used to be dropped, producing the unanswered-call shape.
+    #[test]
+    fn a_block_with_both_a_call_and_its_result_emits_both() {
+        let content = MessageContent::Blocks(vec![
+            ContentBlock::ToolUse {
+                id: "c9".into(),
+                name: "search".into(),
+                input: serde_json::json!({}),
+            },
+            ContentBlock::ToolResult {
+                tool_use_id: "c9".into(),
+                content: "answer".into(),
+                is_error: false,
+            },
+        ]);
+        let messages = message_to_openai("assistant", &content);
+        assert_eq!(messages.len(), 2, "call and result: {messages:?}");
+        assert_eq!(messages[0]["role"], "assistant");
         assert_eq!(messages[1]["role"], "tool");
-        assert_eq!(messages[1]["tool_call_id"], "call_2");
-        assert_eq!(messages[1]["content"], "result B");
+        assert_eq!(messages[1]["tool_call_id"], "c9");
     }
 
     #[test]

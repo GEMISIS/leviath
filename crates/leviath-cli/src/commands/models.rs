@@ -30,6 +30,9 @@ pub struct ListArgs {
     /// Fetch live model list from provider APIs (slower but complete)
     #[arg(short = 'r', long)]
     pub remote: bool,
+    /// Include models from providers this install has no credential for
+    #[arg(short = 'a', long)]
+    pub all: bool,
 }
 
 #[derive(Args)]
@@ -424,9 +427,22 @@ async fn list_with_registry(
         })
         .collect();
 
+    // Only what this install can actually run. Listing every model the binary
+    // knows about made a user with one key scroll past dozens of models they
+    // had no credential for, and hid whether their own key had been picked up
+    // at all. `--all` restores the full catalogue for shopping around.
+    let registry = build_registry(&config);
+    let available: std::collections::HashSet<String> = registry
+        .provider_names()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    if !args.all {
+        entries.retain(|e| available.contains(&e.provider));
+    }
+
     // --remote: fetch live model lists and merge (remote wins on same ID).
     if args.remote {
-        let registry = build_registry(&config);
         for provider_name in registry.provider_names() {
             // If the caller filtered to a specific provider, skip others.
             if let Some(ref filter) = args.provider
@@ -486,16 +502,14 @@ async fn list_with_registry(
     }
 
     if entries.is_empty() {
-        // `entries` starts from `builtin_table()`, which is a hardcoded,
-        // permanently non-empty static list (see `builtin_table_is_not_empty`) -
-        // the only way to reach an empty `entries` here is the provider
-        // filter above removing every entry, which requires `args.provider`
-        // to be `Some`. So `args.provider.is_some()` is always true at this
-        // point; printing the hint unconditionally documents that invariant
-        // instead of leaving a defensive-but-unreachable `if` branch
-        // permanently uncovered.
-        println!("No models found.");
-        println!("(try removing --provider or adding --remote)");
+        // Reachable two ways now: a `--provider` filter that matches nothing,
+        // or no configured provider at all (a fresh install). Both want the
+        // same nudge, and the second is the one worth naming.
+        println!("No models available.");
+        println!(
+            "(configure a provider with `lev setup`, or pass --all to see every \
+             model Leviath knows about)"
+        );
         return Ok(());
     }
 
@@ -951,6 +965,7 @@ mod tests {
                     command: ModelsCommand::List(ListArgs {
                         provider: None,
                         remote: false,
+                        all: false,
                     }),
                 };
                 // Should succeed: prints the builtin table
@@ -970,6 +985,7 @@ mod tests {
                     command: ModelsCommand::List(ListArgs {
                         provider: Some("anthropic".to_string()),
                         remote: false,
+                        all: false,
                     }),
                 };
                 let result = execute(args).await;
@@ -988,6 +1004,7 @@ mod tests {
                     command: ModelsCommand::List(ListArgs {
                         provider: Some("nonexistent_provider".to_string()),
                         remote: false,
+                        all: false,
                     }),
                 };
                 // Should succeed but print "No models found."
@@ -1096,6 +1113,7 @@ mod tests {
                     command: ModelsCommand::List(ListArgs {
                         provider: Some("openrouter".to_string()),
                         remote: false,
+                        all: false,
                     }),
                 };
                 let result = execute(args).await;
@@ -1116,6 +1134,7 @@ mod tests {
                     command: ModelsCommand::List(ListArgs {
                         provider: Some("openai".to_string()),
                         remote: false,
+                        all: false,
                     }),
                 };
                 let result = execute(args).await;
@@ -1279,6 +1298,7 @@ mod tests {
                 let args = ListArgs {
                     remote: false,
                     provider: None,
+                    all: false,
                 };
                 let result = list_with_registry(args, &build_provider_registry_from_config).await;
                 assert!(result.is_ok());
@@ -1295,6 +1315,7 @@ mod tests {
                 let args = ListArgs {
                     remote: false,
                     provider: Some("anthropic".to_string()),
+                    all: false,
                 };
                 let result = list_with_registry(args, &build_provider_registry_from_config).await;
                 assert!(result.is_ok());
@@ -1311,6 +1332,7 @@ mod tests {
                 let args = ListArgs {
                     remote: false,
                     provider: Some("no-such-provider".to_string()),
+                    all: false,
                 };
                 // Should print "No models found." and still succeed, not error.
                 let result = list_with_registry(args, &build_provider_registry_from_config).await;
@@ -1463,6 +1485,7 @@ mod tests {
                 let args = ListArgs {
                     remote: true,
                     provider: Some("mock".to_string()),
+                    all: false,
                 };
                 let new_model = ModelInfo {
                     id: "mock-brand-new-model".to_string(),
@@ -1490,6 +1513,7 @@ mod tests {
                 let args = ListArgs {
                     remote: true,
                     provider: None,
+                    all: false,
                 };
                 let new_model = ModelInfo {
                     id: "mock-brand-new-model".to_string(),
@@ -1514,6 +1538,7 @@ mod tests {
                 let args = ListArgs {
                     remote: true,
                     provider: Some("mock".to_string()),
+                    all: false,
                 };
                 let overriding_model = ModelInfo {
                     id: known_id,
@@ -1530,6 +1555,104 @@ mod tests {
         .await;
     }
 
+    /// Only models the install can reach are listed: a registry holding just
+    /// `anthropic` must not print google/openai/openrouter rows. Before this,
+    /// a user with one key scrolled past dozens of models they could not run,
+    /// with no way to tell whether their own key had registered.
+    #[tokio::test]
+    async fn list_shows_only_providers_the_install_has_credentials_for() {
+        crate::config::with_isolated_config_path_async(
+            "models-list_only_available",
+            |_fake_dir| async move {
+                let args = ListArgs {
+                    remote: false,
+                    provider: None,
+                    all: false,
+                };
+                // A registry with exactly one provider that the builtin table
+                // also knows: its rows survive, everything else is filtered.
+                let result =
+                    list_with_registry(args, &mock_registry("anthropic", vec![], false)).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
+    }
+
+    /// A remote fetch that returns a model id the builtin table already lists
+    /// replaces that row (remote wins), which requires the row to have survived
+    /// the availability filter.
+    #[tokio::test]
+    async fn list_remote_overrides_a_builtin_entry_with_the_same_id() {
+        crate::config::with_isolated_config_path_async(
+            "models-list_remote_override",
+            |_fake_dir| async move {
+                let remote = vec![ModelInfo {
+                    id: "claude-sonnet-5".to_string(),
+                    display_name: Some("Claude Sonnet 5 (remote)".to_string()),
+                    provider: "anthropic".to_string(),
+                    capabilities: leviath_providers::ModelCapabilities::default(),
+                }];
+                let args = ListArgs {
+                    remote: true,
+                    provider: None,
+                    all: false,
+                };
+                let result =
+                    list_with_registry(args, &mock_registry("anthropic", remote, false)).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
+    }
+
+    /// `--all` restores the full catalogue for shopping around before choosing
+    /// a provider.
+    #[tokio::test]
+    async fn list_all_includes_providers_without_credentials() {
+        crate::config::with_isolated_config_path_async(
+            "models-list_all_includes_everything",
+            |_fake_dir| async move {
+                let args = ListArgs {
+                    remote: false,
+                    provider: None,
+                    all: true,
+                };
+                let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
+    }
+
+    /// A capability override marks its row with `*`, which requires the row to
+    /// survive the availability filter first.
+    #[tokio::test]
+    async fn list_marks_overridden_capabilities_for_an_available_provider() {
+        crate::config::with_isolated_config_path_async(
+            "models-list_overridden_available",
+            |_fake_dir| async move {
+                let mut config = Config::default();
+                config.model_capabilities.insert(
+                    "claude-sonnet-5".to_string(),
+                    leviath_providers::ModelCapabilities::default(),
+                );
+                config
+                    .save_to_path(&Config::config_path())
+                    .expect("the isolated config path is writable");
+                let args = ListArgs {
+                    remote: false,
+                    provider: None,
+                    all: false,
+                };
+                let result =
+                    list_with_registry(args, &mock_registry("anthropic", vec![], false)).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn list_remote_provider_error_warns_and_continues() {
         crate::config::with_isolated_config_path_async(
@@ -1538,6 +1661,7 @@ mod tests {
                 let args = ListArgs {
                     remote: true,
                     provider: Some("mock".to_string()),
+                    all: false,
                 };
                 let result = list_with_registry(args, &mock_registry("mock", vec![], true)).await;
                 assert!(result.is_ok());
@@ -1557,6 +1681,7 @@ mod tests {
                 let args = ListArgs {
                     remote: true,
                     provider: Some("mock-other".to_string()),
+                    all: false,
                 };
                 let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
                 assert!(result.is_ok());
@@ -1679,6 +1804,7 @@ mod tests {
                 let args = ListArgs {
                     remote: false,
                     provider: None,
+                    all: false,
                 };
                 let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
                 assert!(result.is_ok());
@@ -1767,6 +1893,7 @@ mod tests {
                 let args = ListArgs {
                     remote: false,
                     provider: None,
+                    all: false,
                 };
                 let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
                 assert!(result.is_err());
@@ -1832,6 +1959,7 @@ mod tests {
         expect_show(ModelsCommand::List(ListArgs {
             provider: None,
             remote: false,
+            all: false,
         }));
     }
 
