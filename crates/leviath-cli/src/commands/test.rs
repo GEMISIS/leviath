@@ -1619,6 +1619,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
                     id: "call_1".to_string(),
                     name: "bash".to_string(),
                     arguments: serde_json::json!({}),
+                    thought_signature: None,
                 }],
             }),
         );
@@ -1652,6 +1653,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
                     id: "call_1".to_string(),
                     name: "write_file".to_string(),
                     arguments: serde_json::json!({}),
+                    thought_signature: None,
                 }],
             }),
         );
@@ -1996,6 +1998,7 @@ expect_tool_call = "bash"
                     id: "call_1".to_string(),
                     name: "bash".to_string(),
                     arguments: serde_json::json!({}),
+                    thought_signature: None,
                 }];
                 let result =
                     execute_with_registry(args, Box::new(mock_registry_builder("", tool_calls)))

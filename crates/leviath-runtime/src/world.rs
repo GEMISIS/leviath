@@ -810,6 +810,7 @@ mod tests {
             id: id.to_string(),
             name: name.to_string(),
             arguments: serde_json::json!({}),
+            thought_signature: None,
         });
         r
     }

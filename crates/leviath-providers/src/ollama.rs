@@ -235,6 +235,7 @@ impl OllamaProvider {
                     id: format!("ollama_{}", i),
                     name,
                     arguments,
+                    thought_signature: None,
                 });
             }
         }
@@ -1015,6 +1016,7 @@ mod tests {
                             id: "call_1".to_string(),
                             name: "list_files".to_string(),
                             input: serde_json::json!({ "dir": "." }),
+                            thought_signature: None,
                         },
                     ]),
                     cache_breakpoint: false,

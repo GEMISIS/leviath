@@ -164,6 +164,7 @@ impl ClaudeCodeProvider {
                 ),
                 name,
                 arguments,
+                thought_signature: None,
             })
             .collect()
     }

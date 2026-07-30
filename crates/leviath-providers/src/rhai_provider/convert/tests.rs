@@ -39,6 +39,21 @@ fn finish_reasons() {
 }
 
 #[test]
+fn parse_inference_passes_a_thought_signature_through() {
+    // A script wrapping a provider that issues per-call replay tokens
+    // (Gemini's `thought_signature`) can hand one back; absent stays None.
+    let d = dyn_from_json(
+        r#"{"content":"","tool_calls":[
+            {"id":"t1","name":"f","arguments":{},"thought_signature":"sig"},
+            {"id":"t2","name":"g","arguments":{}}],
+            "finish_reason":"tool_calls"}"#,
+    );
+    let r = parse_inference_dynamic(d).unwrap();
+    assert_eq!(r.tool_calls[0].thought_signature.as_deref(), Some("sig"));
+    assert_eq!(r.tool_calls[1].thought_signature, None);
+}
+
+#[test]
 fn parse_inference_full() {
     let d = dyn_from_json(
         r#"{"content":"hi","tool_calls":[{"id":"t1","name":"f","arguments":{"a":1}}],

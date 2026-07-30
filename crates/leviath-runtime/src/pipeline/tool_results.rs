@@ -30,6 +30,7 @@ pub(crate) fn apply_tool_results(
             id: tc.tool_id.clone(),
             name: tc.name.clone(),
             arguments: tc.arguments.clone(),
+            thought_signature: tc.thought_signature.clone(),
         })
         .collect();
     let _ = window.add_typed_entry(

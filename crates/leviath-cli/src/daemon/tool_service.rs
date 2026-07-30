@@ -558,6 +558,7 @@ mod tests {
             id: id.to_string(),
             name: name.to_string(),
             arguments: args,
+            thought_signature: None,
         }
     }
 

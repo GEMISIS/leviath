@@ -500,6 +500,7 @@ impl ContextWindow {
                                             id: tc.id.clone(),
                                             name: tc.name.clone(),
                                             input: tc.arguments.clone(),
+                                            thought_signature: tc.thought_signature.clone(),
                                         });
                                     }
                                     messages.push(leviath_providers::Message {
@@ -848,6 +849,10 @@ pub struct ToolCall {
 
     /// Tool arguments
     pub arguments: serde_json::Value,
+    /// Opaque provider token echoed back with this call on the next request
+    /// (Gemini's `thought_signature`); `None` when the provider has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 /// A message that can be sent to a running agent.
@@ -1411,6 +1416,7 @@ mod tests {
             tool_id: "tool-1".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "rust"}),
+            thought_signature: None,
         };
         let json = serde_json::to_string(&tc).unwrap();
         assert!(json.contains("search"));
@@ -1440,6 +1446,7 @@ mod tests {
                 tool_id: "t1".to_string(),
                 name: "search".to_string(),
                 arguments: serde_json::json!({}),
+                thought_signature: None,
             }],
             tokens_used: 100,
             timestamp: 99999,
@@ -1710,6 +1717,7 @@ mod tests {
                         id: "tc_orphan".to_string(),
                         name: "read_file".to_string(),
                         arguments: serde_json::json!({"path": "foo.rs"}),
+                        thought_signature: None,
                     }],
                 },
                 "Let me read that file.".to_string(),
@@ -1820,6 +1828,7 @@ mod tests {
                         id: "tc_1".to_string(),
                         name: "read_file".to_string(),
                         arguments: serde_json::json!({"path": "main.rs"}),
+                        thought_signature: None,
                     }],
                 },
                 "".to_string(),
@@ -1898,6 +1907,7 @@ mod tests {
                         id: "tc_gone".to_string(),
                         name: "bash".to_string(),
                         arguments: serde_json::json!({"command": "ls"}),
+                        thought_signature: None,
                     }],
                 },
                 "".to_string(),
@@ -1952,11 +1962,13 @@ mod tests {
                             id: "tc_orphan_1".to_string(),
                             name: "read_file".to_string(),
                             arguments: serde_json::json!({"path": "a.rs"}),
+                            thought_signature: None,
                         },
                         leviath_core::SerializedToolCall {
                             id: "tc_orphan_2".to_string(),
                             name: "bash".to_string(),
                             arguments: serde_json::json!({"cmd": "ls"}),
+                            thought_signature: None,
                         },
                     ],
                 },
@@ -2020,11 +2032,13 @@ mod tests {
                             id: "tc_valid".to_string(),
                             name: "read_file".to_string(),
                             arguments: serde_json::json!({"path": "main.rs"}),
+                            thought_signature: None,
                         },
                         leviath_core::SerializedToolCall {
                             id: "tc_orphan".to_string(),
                             name: "bash".to_string(),
                             arguments: serde_json::json!({"cmd": "ls"}),
+                            thought_signature: None,
                         },
                     ],
                 },
@@ -2313,6 +2327,7 @@ mod tests {
                         id: "tc_a".to_string(),
                         name: "read_file".to_string(),
                         arguments: serde_json::json!({"path": "foo.rs"}),
+                        thought_signature: None,
                     }],
                 },
                 "Sure, let me read it.".to_string(),
@@ -2355,6 +2370,7 @@ mod tests {
                     id: "tc_a".to_string(),
                     name: "read_file".to_string(),
                     input: serde_json::json!({"path": "foo.rs"}),
+                    thought_signature: None,
                 },
             ])
         );
@@ -2392,6 +2408,7 @@ mod tests {
                         id: "tc_b".to_string(),
                         name: "bash".to_string(),
                         arguments: serde_json::json!({"cmd": "ls"}),
+                        thought_signature: None,
                     }],
                 },
                 "".to_string(),
@@ -2429,6 +2446,7 @@ mod tests {
                     id: "tc_b".to_string(),
                     name: "bash".to_string(),
                     input: serde_json::json!({"cmd": "ls"}),
+                    thought_signature: None,
                 },
             ])
         );
@@ -2469,11 +2487,13 @@ mod tests {
                             id: "tc_1".to_string(),
                             name: "read_file".to_string(),
                             arguments: serde_json::json!({"path": "a.rs"}),
+                            thought_signature: None,
                         },
                         leviath_core::SerializedToolCall {
                             id: "tc_2".to_string(),
                             name: "read_file".to_string(),
                             arguments: serde_json::json!({"path": "b.rs"}),
+                            thought_signature: None,
                         },
                     ],
                 },
@@ -2929,6 +2949,7 @@ mod tests {
                         id: "tc_1".to_string(),
                         name: "read_file".to_string(),
                         arguments: serde_json::json!({"path": "foo.rs"}),
+                        thought_signature: None,
                     }],
                 },
                 "Let me read that".to_string(),

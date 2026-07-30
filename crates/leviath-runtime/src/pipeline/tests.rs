@@ -388,6 +388,7 @@ fn collect_applies_ok_and_advances_to_process_response() {
         id: "call-1".to_string(),
         name: "read_file".to_string(),
         arguments: serde_json::json!({"path": "x"}),
+        thought_signature: None,
     });
     tx.send(InferenceOutcome {
         entity: e,
@@ -1412,6 +1413,7 @@ fn infer_result_only(with_tools: bool) -> crate::components::InferenceResult {
                 tool_id: "t".to_string(),
                 name: "n".to_string(),
                 arguments: serde_json::Value::Null,
+                thought_signature: None,
             }]
         } else {
             vec![]
@@ -1477,6 +1479,7 @@ fn process_response_counts_edits_by_path() {
             Some(p) => serde_json::json!({ "path": p }),
             None => serde_json::Value::Null,
         },
+        thought_signature: None,
     };
     let mut world = World::new();
     let e = world
@@ -2042,6 +2045,7 @@ fn ctx_call(id: &str, region: &str, content: &str) -> crate::components::ToolCal
         tool_id: id.to_string(),
         name: "context_write".to_string(),
         arguments: serde_json::json!({"region": region, "content": content}),
+        thought_signature: None,
     }
 }
 
@@ -2668,6 +2672,7 @@ fn tc(id: &str, name: &str) -> crate::components::ToolCall {
         tool_id: id.to_string(),
         name: name.to_string(),
         arguments: serde_json::Value::Null,
+        thought_signature: None,
     }
 }
 
@@ -2700,6 +2705,59 @@ fn apply_adds_assistant_turn_and_result_to_conversation() {
         None,
     );
     assert!(w.get_region("conversation").unwrap().current_tokens > 0);
+}
+
+#[test]
+fn thought_signature_survives_the_full_context_round_trip() {
+    // The whole reason the field exists: capture -> persist in the
+    // conversation region -> reappear on the assembled ToolUse block, so the
+    // next request can replay it to a provider (Gemini) that requires it.
+    // A Sliding region, because only conversation-shaped regions assemble
+    // into messages (Clearable content becomes system text).
+    let mut w = ContextWindow::new(100_000);
+    w.add_region(Region::new(
+        "conversation".to_string(),
+        RegionKind::SlidingWindow {
+            max_items: 20,
+            eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+        },
+        10_000,
+    ));
+    let call = crate::components::ToolCall {
+        tool_id: "c1".to_string(),
+        name: "read".to_string(),
+        arguments: serde_json::json!({}),
+        thought_signature: Some("sig-bytes".to_string()),
+    };
+    apply_tool_results(
+        &mut w,
+        "resp",
+        &[call],
+        &[("c1".to_string(), "result".to_string())],
+        None,
+        None,
+    );
+    let assembled = w.assemble();
+    let sigs: Vec<Option<&str>> = assembled
+        .messages
+        .iter()
+        .filter_map(|m| match &m.content {
+            leviath_providers::MessageContent::Blocks(blocks) => Some(blocks),
+            leviath_providers::MessageContent::Text(_) => None,
+        })
+        .flatten()
+        .filter_map(|b| match b {
+            leviath_providers::ContentBlock::ToolUse {
+                thought_signature, ..
+            } => Some(thought_signature.as_deref()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sigs,
+        vec![Some("sig-bytes")],
+        "the signature must reach the assembled request"
+    );
 }
 
 #[test]
@@ -4712,6 +4770,7 @@ fn edited_path_matches_only_mutating_tools_with_a_string_path() {
         tool_id: "1".to_string(),
         name: name.to_string(),
         arguments: args,
+        thought_signature: None,
     };
     let with_path = serde_json::json!({ "path": "src/main.rs" });
     assert_eq!(
@@ -5675,6 +5734,7 @@ fn fcall(id: &str, name: &str, args: serde_json::Value) -> crate::components::To
         tool_id: id.to_string(),
         name: name.to_string(),
         arguments: args,
+        thought_signature: None,
     }
 }
 

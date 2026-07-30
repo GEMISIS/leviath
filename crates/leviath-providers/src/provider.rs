@@ -189,6 +189,10 @@ pub enum ContentBlock {
         id: String,
         name: String,
         input: serde_json::Value,
+        /// See [`ToolCall::thought_signature`]: replayed verbatim so a
+        /// provider that requires it accepts the follow-up request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
     },
     /// A tool result from executing a tool.
     #[serde(rename = "tool_result")]
@@ -343,6 +347,14 @@ pub struct ToolCall {
 
     /// Tool arguments
     pub arguments: serde_json::Value,
+
+    /// Opaque provider token that must be echoed back with this call on the
+    /// next request. Gemini 3.x returns a `thought_signature` per function
+    /// call and rejects a follow-up that omits it, so the value has to survive
+    /// the round trip through the context window. `None` for providers that
+    /// have no such requirement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 /// A chunk from a streaming inference response.
@@ -806,6 +818,7 @@ mod tests {
             id: "call_123".into(),
             name: "get_weather".into(),
             arguments: serde_json::json!({"city": "NYC"}),
+            thought_signature: None,
         };
         let json = serde_json::to_string(&tc).unwrap();
         let back: ToolCall = serde_json::from_str(&json).unwrap();
@@ -899,6 +912,7 @@ mod tests {
                     id: "call_1".to_string(),
                     name: "search".to_string(),
                     arguments: serde_json::json!({"q": "rust"}),
+                    thought_signature: None,
                 }],
                 tokens_used: TokenUsage {
                     prompt_tokens: 1,
@@ -1210,6 +1224,7 @@ mod tests {
                 id: "call_1".to_string(),
                 name: "search".to_string(),
                 input: serde_json::json!({}),
+                thought_signature: None,
             },
             ContentBlock::Text {
                 text: "world".to_string(),

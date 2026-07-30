@@ -485,6 +485,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             id: "1".to_string(),
             name: name.to_string(),
             arguments: args,
+            thought_signature: None,
         }
     }
 
