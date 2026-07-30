@@ -42,8 +42,14 @@ pub struct TitleOutcome {
 
 /// Run one title job: make the call with the permit held, release the slot,
 /// report the outcome, and wake the tick loop.
+///
+/// `deadline` bounds the call the same way `RetryPolicy.job_timeout` bounds a
+/// dispatch-lane inference: the permit must be released within a fixed time
+/// even when the provider's own timer is missing (script providers) or
+/// defeated. A hung title call once held its pool slot forever.
 pub async fn run_title_job(
     job: TitleJob,
+    deadline: std::time::Duration,
     results: UnboundedSender<TitleOutcome>,
     wake: Arc<Notify>,
 ) {
@@ -54,7 +60,13 @@ pub async fn run_title_job(
         permit,
     } = job;
 
-    let result = provider.infer(request).await.map(|r| r.content);
+    let result = match tokio::time::timeout(deadline, provider.infer(request)).await {
+        Ok(outcome) => outcome.map(|r| r.content),
+        Err(_) => Err(leviath_providers::ProviderError::Other(format!(
+            "title generation exceeded the {}s deadline and was aborted to free the pool slot",
+            deadline.as_secs()
+        ))),
+    };
     drop(permit); // free the pool slot before the collect system runs
 
     let _ = results.send(TitleOutcome { entity, result });

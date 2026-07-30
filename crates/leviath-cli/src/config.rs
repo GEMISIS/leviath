@@ -151,9 +151,12 @@ pub struct Config {
     #[serde(default)]
     pub title: TitleConfig,
 
-    /// Optional request timeout in seconds for HTTP calls to provider APIs.
-    /// When set, requests that exceed this duration will be aborted.
-    /// Default is None (no timeout).
+    /// Request timeout in seconds for HTTP calls to provider APIs. Unset, the
+    /// providers fall back to the unified 15-minute ceiling
+    /// (`leviath_providers::DEFAULT_INFERENCE_TIMEOUT_SECS`) - there is
+    /// always SOME timeout, because a call that never completes wedges its
+    /// run with no error. A stage's `[stages.<name>.model]
+    /// request_timeout_secs` overrides either value for that stage's requests.
     pub request_timeout_secs: Option<u64>,
 
     /// Client-side rate limits for the built-in providers, keyed by provider

@@ -47,8 +47,13 @@ pub struct CompactionOutcome {
 /// Run one compaction job: summarize each region sequentially with the permit
 /// held, release the slot, report the outcome, and wake the tick loop. Stops at
 /// the first error (best-effort - the collect system leaves the context as-is).
+/// `deadline` bounds each summarization call the same way
+/// `RetryPolicy.job_timeout` bounds a dispatch-lane inference: the permit must
+/// be released within a fixed time even when the provider's own timer is
+/// missing (script providers) or defeated.
 pub async fn run_compaction_job(
     job: CompactionJob,
+    deadline: std::time::Duration,
     results: UnboundedSender<CompactionOutcome>,
     wake: Arc<Notify>,
 ) {
@@ -62,10 +67,18 @@ pub async fn run_compaction_job(
     let mut summaries = Vec::new();
     let mut result = Ok(());
     for (region, request) in requests {
-        match provider.infer(request).await {
-            Ok(response) => summaries.push((region, response.content)),
-            Err(e) => {
+        match tokio::time::timeout(deadline, provider.infer(request)).await {
+            Ok(Ok(response)) => summaries.push((region, response.content)),
+            Ok(Err(e)) => {
                 result = Err(e);
+                break;
+            }
+            Err(_) => {
+                result = Err(leviath_providers::ProviderError::Other(format!(
+                    "compaction exceeded the {}s deadline and was aborted to free \
+                     the pool slot",
+                    deadline.as_secs()
+                )));
                 break;
             }
         }
@@ -142,6 +155,55 @@ mod tests {
         }
     }
 
+    /// A provider whose `infer` never returns - only the job deadline can end
+    /// the call, which is exactly what these tests exercise.
+    struct Hang;
+
+    #[async_trait::async_trait]
+    impl Provider for Hang {
+        async fn infer(
+            &self,
+            _req: InferenceRequest,
+        ) -> leviath_providers::Result<InferenceResponse> {
+            std::future::pending().await
+        }
+        async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+            1
+        }
+        fn max_context_tokens(&self, _m: &str) -> usize {
+            100_000
+        }
+        fn name(&self) -> &str {
+            "hang"
+        }
+        fn capabilities(&self, _m: &str) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+    }
+
+    /// The permit must come back within the deadline even when the provider
+    /// never answers - a hung compaction call once held its pool slot forever.
+    #[tokio::test]
+    async fn deadline_frees_the_slot_when_the_provider_hangs() {
+        // Trait obligations on the mock; only `infer` matters to this test.
+        assert_eq!(Hang.count_tokens("t", "m").await, 1);
+        assert_eq!(Hang.max_context_tokens("m"), 100_000);
+        assert_eq!(Hang.name(), "hang");
+        let _ = Hang.capabilities("m");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let wake = Arc::new(tokio::sync::Notify::new());
+        run_compaction_job(
+            job(Arc::new(Hang), vec!["a"]),
+            std::time::Duration::from_millis(5),
+            tx,
+            wake,
+        )
+        .await;
+        let outcome = rx.recv().await.expect("an outcome is always reported");
+        let err = outcome.result.expect_err("the deadline must surface");
+        assert!(err.to_string().contains("deadline"), "{err}");
+    }
+
     fn job(provider: Arc<dyn Provider>, regions: Vec<&str>) -> CompactionJob {
         let pools = InferencePools::new(InferencePoolConfig::new());
         CompactionJob {
@@ -163,7 +225,13 @@ mod tests {
         let provider = Arc::new(Script {
             out: Mutex::new(vec![Ok("s1".to_string()), Ok("s2".to_string())].into()),
         });
-        run_compaction_job(job(provider, vec!["a", "b"]), tx, wake.clone()).await;
+        run_compaction_job(
+            job(provider, vec!["a", "b"]),
+            std::time::Duration::from_secs(60),
+            tx,
+            wake.clone(),
+        )
+        .await;
 
         let outcome = rx.try_recv().unwrap();
         assert_eq!(
@@ -188,7 +256,13 @@ mod tests {
         let provider = Arc::new(Script {
             out: Mutex::new(vec![Err("boom".to_string())].into()),
         });
-        run_compaction_job(job(provider, vec!["a", "b"]), tx, wake).await;
+        run_compaction_job(
+            job(provider, vec!["a", "b"]),
+            std::time::Duration::from_secs(60),
+            tx,
+            wake,
+        )
+        .await;
 
         let outcome = rx.try_recv().unwrap();
         assert!(outcome.result.is_err());
@@ -202,7 +276,13 @@ mod tests {
         let provider = Arc::new(Script {
             out: Mutex::new(vec![Ok("s".to_string())].into()),
         });
-        run_compaction_job(job(provider, vec!["a"]), tx, wake).await;
+        run_compaction_job(
+            job(provider, vec!["a"]),
+            std::time::Duration::from_secs(60),
+            tx,
+            wake,
+        )
+        .await;
     }
 
     #[tokio::test]

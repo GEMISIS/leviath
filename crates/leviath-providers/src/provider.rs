@@ -431,6 +431,15 @@ pub struct RateLimitConfig {
 /// minutes to first byte - while still guaranteeing a hung call cannot run
 /// forever. A per-stage `[stages.<name>.model] request_timeout_secs` overrides
 /// it, so a slow stage can wait longer and a fast one can fail sooner.
+///
+/// It is also [`build_http_client`]'s fallback when the config sets no global
+/// `request_timeout_secs`, so side-channel calls that bypass the dispatch
+/// backstop (title generation, compaction) are still bounded - a hung one
+/// held its pool permit forever, observed live against Gemini. Precedence,
+/// most specific wins: stage `request_timeout_secs` (per-request, overrides
+/// the client's) > config `request_timeout_secs` (client-level) > this
+/// default (client-level, only when the config is unset - it can never cap a
+/// configured value).
 pub const DEFAULT_INFERENCE_TIMEOUT_SECS: u64 = 900;
 
 /// Apply the per-call inference deadline to an outbound provider request.
@@ -442,20 +451,18 @@ pub const DEFAULT_INFERENCE_TIMEOUT_SECS: u64 = 900;
 /// one fail fast. When `None`, no per-request cap is added and the call is bound
 /// only by the client-level timeout (if any) and the dispatch `job_timeout`
 /// backstop.
-/// Ceiling on a single LLM HTTP request when the config sets no
-/// `request_timeout_secs`. Without one, a call that connects and then never
-/// completes hangs its inference job forever and the run sits "running" with
-/// no error - observed live against Gemini. Ten minutes clears any legitimate
-/// long completion while still guaranteeing the run eventually errors and
-/// retries instead of wedging.
-pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 600;
-
 pub fn apply_request_timeout(
     builder: reqwest::RequestBuilder,
     request_timeout_secs: Option<u64>,
 ) -> reqwest::RequestBuilder {
-    let secs = request_timeout_secs.unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS);
-    builder.timeout(std::time::Duration::from_secs(secs))
+    match request_timeout_secs {
+        Some(secs) => builder.timeout(std::time::Duration::from_secs(secs)),
+        // No stage override: leave the builder alone so the client-level
+        // timeout (the configured global, or the default) governs. Stamping
+        // the default here would silently cap a LARGER configured global,
+        // because reqwest's per-request timeout wins over the client's.
+        None => builder,
+    }
 }
 
 /// Build a `reqwest::Client` for talking to an LLM HTTP API.
@@ -489,7 +496,7 @@ pub fn build_http_client(timeout_secs: Option<u64>) -> reqwest::Client {
         .connect_timeout(std::time::Duration::from_secs(30))
         .tcp_keepalive(std::time::Duration::from_secs(30))
         .timeout(std::time::Duration::from_secs(
-            timeout_secs.unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS),
+            timeout_secs.unwrap_or(DEFAULT_INFERENCE_TIMEOUT_SECS),
         ))
         .build()
         .expect("failed to build reqwest client")

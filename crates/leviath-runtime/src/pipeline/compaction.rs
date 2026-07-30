@@ -100,6 +100,7 @@ pub fn dispatch_compaction(
                 requests,
                 permit,
             },
+            std::time::Duration::from_secs(leviath_providers::DEFAULT_INFERENCE_TIMEOUT_SECS),
             stage.compaction_outcomes.clone(),
             stage.wake.clone(),
         ));
@@ -295,6 +296,9 @@ pub fn dispatch_edge_compact(
                         requests,
                         permit,
                     },
+                    std::time::Duration::from_secs(
+                        leviath_providers::DEFAULT_INFERENCE_TIMEOUT_SECS,
+                    ),
                     stage.compaction_outcomes.clone(),
                     stage.wake.clone(),
                 ));
