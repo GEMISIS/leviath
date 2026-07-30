@@ -205,13 +205,17 @@ pub struct PendingEdgeCompact(pub Vec<String>);
 
 /// Whether a region kind is "stage-specific" - eligible for an edge transform to
 /// clear or compact. The always-preserved kinds (pinned identity, compaction
-/// history, hashmap stores) are never touched.
+/// history, hashmap stores, persistent custom regions) are never touched.
 pub(crate) fn is_stage_specific(kind: &leviath_core::RegionKind) -> bool {
     !matches!(
         kind,
         leviath_core::RegionKind::Pinned
             | leviath_core::RegionKind::CompactHistory { .. }
             | leviath_core::RegionKind::HashMap { .. }
+            | leviath_core::RegionKind::Custom {
+                persistent: true,
+                ..
+            }
     )
 }
 

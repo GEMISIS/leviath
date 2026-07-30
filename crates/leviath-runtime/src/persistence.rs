@@ -115,6 +115,7 @@ fn region_kind_str(kind: &RegionKind) -> &'static str {
         RegionKind::Compacting { .. } => "compacting",
         RegionKind::CompactHistory { .. } => "history",
         RegionKind::HashMap { .. } => "hashmap",
+        RegionKind::Custom { .. } => "custom",
     }
 }
 

@@ -306,10 +306,17 @@ impl ContextWindow {
         let initial_tokens = self.current_tokens;
 
         // Check if we have any evictable regions
-        let has_evictable = self
-            .regions
-            .iter()
-            .any(|r| matches!(r.kind, RegionKind::Clearable | RegionKind::Temporary));
+        let has_evictable = self.regions.iter().any(|r| {
+            matches!(
+                r.kind,
+                RegionKind::Clearable
+                    | RegionKind::Temporary
+                    | RegionKind::Custom {
+                        persistent: false,
+                        ..
+                    }
+            )
+        });
 
         if !has_evictable {
             tracing::warn!(
@@ -339,13 +346,23 @@ impl ContextWindow {
             }
         }
 
-        // Phase 2: Evict from Temporary regions (oldest first, one at a time)
+        // Phase 2: Evict from Temporary regions (oldest first, one at a time).
+        // Non-persistent Custom regions join this phase: their script's
+        // on_overflow hook (when present) has already had its say via
+        // `evict_custom_regions` before this cascade runs; oldest-first is
+        // the guaranteed-progress fallback.
         loop {
             let mut evicted_any = false;
 
             for region in &mut self.regions {
-                if matches!(region.kind, RegionKind::Temporary)
-                    && let Some(entry) = region.remove_oldest()
+                if matches!(
+                    region.kind,
+                    RegionKind::Temporary
+                        | RegionKind::Custom {
+                            persistent: false,
+                            ..
+                        }
+                ) && let Some(entry) = region.remove_oldest()
                 {
                     let freed = entry.tokens;
                     self.current_tokens -= freed;
@@ -391,7 +408,12 @@ impl ContextWindow {
             .filter(|r| {
                 matches!(
                     r.kind,
-                    RegionKind::Pinned | RegionKind::CompactHistory { .. }
+                    RegionKind::Pinned
+                        | RegionKind::CompactHistory { .. }
+                        | RegionKind::Custom {
+                            persistent: true,
+                            ..
+                        }
                 )
             })
             .map(|r| r.current_tokens)
@@ -587,6 +609,24 @@ impl ContextWindow {
                     });
                 }
                 leviath_core::RegionKind::Clearable => {
+                    let text = region
+                        .content
+                        .iter()
+                        .map(|e| e.content.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    system_blocks.push(leviath_providers::SystemBlock {
+                        text: format!("[{}]:\n{}", region.name, text),
+                        cache_hint: CacheHint::Never,
+                    });
+                }
+
+                // Custom (script-backed) regions render through their Rhai
+                // hook via `assemble_with_meta`; this plain-`assemble` arm is
+                // the hook-less fallback shape - a Temporary-style block - so
+                // a custom region is never silently dropped even when no
+                // compiled script is available.
+                leviath_core::RegionKind::Custom { .. } => {
                     let text = region
                         .content
                         .iter()
@@ -2190,6 +2230,74 @@ mod tests {
             assembled.system_blocks[0].cache_hint,
             leviath_core::CacheHint::Never
         );
+    }
+
+    fn custom_kind(script: &str, persistent: bool) -> RegionKind {
+        RegionKind::Custom {
+            script: script.to_string(),
+            persistent,
+        }
+    }
+
+    #[test]
+    fn test_assemble_custom_region_falls_back_to_temporary_style_block() {
+        // Plain `assemble()` has no compiled script available, so a custom
+        // region renders as the hook-less fallback: a Temporary-style block -
+        // never silently dropped.
+        let mut window = ContextWindow::new(100_000);
+        let mut region = Region::new("brain".to_string(), custom_kind("b.rhai", false), 10_000);
+        region.add_entry("thought one".to_string(), 10).unwrap();
+        region.add_entry("thought two".to_string(), 10).unwrap();
+        window.add_region(region);
+
+        let assembled = window.assemble();
+
+        assert_eq!(assembled.system_blocks.len(), 1);
+        assert_eq!(
+            assembled.system_blocks[0].text,
+            "[brain]:\nthought one\n\nthought two"
+        );
+        assert_eq!(
+            assembled.system_blocks[0].cache_hint,
+            leviath_core::CacheHint::Never
+        );
+    }
+
+    #[test]
+    fn try_evict_evicts_non_persistent_custom_regions_oldest_first() {
+        let mut window = ContextWindow::new(100);
+        let mut region = Region::new("brain".to_string(), custom_kind("b.rhai", false), 100);
+        region.add_entry("old".to_string(), 40).unwrap();
+        region.add_entry("new".to_string(), 40).unwrap();
+        window.add_region(region);
+        window.current_tokens = 80;
+
+        let result = with_tracing(|| window.try_evict(30).unwrap());
+        assert!(result.tokens_freed >= 40);
+        let brain = window.get_region("brain").unwrap();
+        assert_eq!(brain.content.len(), 1);
+        assert_eq!(brain.content[0].content, "new");
+    }
+
+    #[test]
+    fn try_evict_never_touches_persistent_custom_and_counts_it_as_pinned() {
+        // Persistent custom content survives eviction, and when it alone
+        // exceeds the whole window budget the pinned over-budget guard fires.
+        let mut window = ContextWindow::new(50);
+        let mut vault = Region::new("vault".to_string(), custom_kind("v.rhai", true), 100);
+        vault.add_entry("precious".to_string(), 60).unwrap();
+        window.add_region(vault);
+        window.current_tokens = 60;
+
+        let err = with_tracing(|| window.try_evict(10).unwrap_err());
+        assert!(matches!(
+            err,
+            leviath_core::Error::PinnedRegionsOverBudget {
+                pinned_tokens: 60,
+                total_budget: 50,
+            }
+        ));
+        assert_eq!(window.get_region("vault").unwrap().content.len(), 1);
     }
 
     // ─── assemble() EntryKind::Text prefix parsing ────────────────────────

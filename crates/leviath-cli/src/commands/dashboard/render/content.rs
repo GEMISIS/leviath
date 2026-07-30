@@ -611,6 +611,7 @@ impl Dashboard {
                     "sliding" => C_SUCCESS,
                     "compacting" | "history" => C_WARN,
                     "temporary" | "clearable" => C_MUTED,
+                    "custom" => C_SCRIPT,
                     _ => C_DIM,
                 };
                 lines.push(Line::from(vec![

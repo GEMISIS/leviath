@@ -964,6 +964,25 @@ fn parse_region_layout(
                     .map(|v| v as usize);
                 RegionKind::HashMap { max_entries }
             }
+            "custom" => {
+                let script = region_value
+                    .get("script")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        Error::Other(format!(
+                            "region '{region_name}': kind = \"custom\" requires \
+                             script = \"<path>.rhai\""
+                        ))
+                    })?
+                    .to_string();
+                let persistent = region_value
+                    .get("persistent")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                RegionKind::Custom { script, persistent }
+            }
             _ => RegionKind::Temporary,
         };
 
@@ -1491,6 +1510,142 @@ mode = "autonomous"
         let err = parse_manifest(toml).unwrap_err().to_string();
         assert!(err.contains("unknown transform"), "got: {err}");
         assert!(err.contains("teleport"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_manifest_custom_region_kind() {
+        let toml = r#"
+[agent]
+name = "custom-region-test"
+
+[context.regions]
+brain = { kind = "custom", script = "context_hooks/brain.rhai", persistent = true, max_tokens = 5000 }
+scratch = { kind = "custom", script = "context_hooks/scratch.rhai", max_tokens = 2000 }
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let brain = bp
+            .context_layout
+            .regions
+            .iter()
+            .find(|r| r.name == "brain")
+            .unwrap();
+        assert_eq!(
+            brain.kind,
+            RegionKind::Custom {
+                script: "context_hooks/brain.rhai".to_string(),
+                persistent: true,
+            }
+        );
+        // persistent defaults to false when omitted.
+        let scratch = bp
+            .context_layout
+            .regions
+            .iter()
+            .find(|r| r.name == "scratch")
+            .unwrap();
+        assert_eq!(
+            scratch.kind,
+            RegionKind::Custom {
+                script: "context_hooks/scratch.rhai".to_string(),
+                persistent: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_manifest_custom_region_requires_script() {
+        // Missing script is a load-time hard error, not a silent fallback.
+        let missing = r#"
+[agent]
+name = "bad"
+
+[context.regions]
+brain = { kind = "custom", max_tokens = 5000 }
+"#;
+        let err = parse_manifest(missing).unwrap_err();
+        assert!(
+            err.to_string().contains("requires"),
+            "actionable error: {err}"
+        );
+
+        // An empty/whitespace script path is equally dead - same error.
+        let empty = r#"
+[agent]
+name = "bad"
+
+[context.regions]
+brain = { kind = "custom", script = "  ", max_tokens = 5000 }
+"#;
+        let err = parse_manifest(empty).unwrap_err();
+        assert!(err.to_string().contains("requires"), "{err}");
+    }
+
+    #[test]
+    fn parse_manifest_custom_region_with_percent_budget() {
+        // Percentage budgets work on custom regions exactly as on built-ins.
+        let toml = r#"
+[agent]
+name = "pct-custom"
+
+[context.regions]
+brain = { kind = "custom", script = "b.rhai", budget = "40%", min_tokens = 10000 }
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let brain = bp
+            .context_layout
+            .regions
+            .iter()
+            .find(|r| r.name == "brain")
+            .unwrap();
+        assert!(brain.budget.is_percent());
+        let resolved = bp.context_layout.resolved(200_000);
+        assert_eq!(
+            resolved
+                .regions
+                .iter()
+                .find(|r| r.name == "brain")
+                .unwrap()
+                .max_tokens,
+            80_000
+        );
+    }
+
+    #[test]
+    fn parse_manifest_per_stage_custom_region() {
+        // A per-stage layout can declare a custom region only that stage uses.
+        let toml = r#"
+[agent]
+name = "stage-custom"
+
+[context.regions]
+task = { kind = "pinned", max_tokens = 4000 }
+
+[stages.plan]
+[stages.plan.model]
+provider = "anthropic"
+model = "claude-sonnet-4"
+
+[stages.plan.context.regions]
+plan_view = { kind = "custom", script = "hooks/plan.rhai", max_tokens = 6000 }
+
+[stages.implement]
+[stages.implement.model]
+provider = "anthropic"
+model = "claude-sonnet-4"
+
+[stages.plan.transitions.implement]
+condition = "always"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let plan = bp.stages.iter().find(|s| s.name == "plan").unwrap();
+        let layout = plan.context_layout.as_ref().unwrap();
+        assert!(layout.regions.iter().any(|r| matches!(
+            &r.kind,
+            RegionKind::Custom { script, persistent: false } if script == "hooks/plan.rhai"
+        )));
+        // Sibling stage inherits the global layout (no per-stage override).
+        let implement = bp.stages.iter().find(|s| s.name == "implement").unwrap();
+        assert!(implement.context_layout.is_none());
     }
 
     #[test]

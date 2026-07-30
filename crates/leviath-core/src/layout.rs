@@ -176,18 +176,36 @@ impl ContextLayout {
             }
         }
 
+        // Reject a Custom region whose script path is empty - it could never
+        // resolve to a file, and the runtime would silently fall back to
+        // Temporary-style rendering on every inference.
+        for region in &self.regions {
+            if let RegionKind::Custom { script, .. } = &region.kind
+                && script.trim().is_empty()
+            {
+                return Err(ValidationError::Region {
+                    region: region.name.clone(),
+                    message: "custom region requires a non-empty script path".to_string(),
+                });
+            }
+        }
+
         // Warn if sum of max tokens exceeds budget (not necessarily an error,
         // since not all regions will be full simultaneously)
         // Warn if no SlidingWindow region exists - agents should have a
         // conversation region for typed message entries, but some agents
-        // (e.g., deep-researcher) use other region kinds exclusively.
-        let has_sliding_window = self
-            .regions
-            .iter()
-            .any(|r| matches!(r.kind, RegionKind::SlidingWindow { .. }));
-        if !has_sliding_window {
+        // (e.g., deep-researcher) use other region kinds exclusively. A Custom
+        // region counts: its script can render typed entries as messages.
+        let has_message_region = self.regions.iter().any(|r| {
+            matches!(
+                r.kind,
+                RegionKind::SlidingWindow { .. } | RegionKind::Custom { .. }
+            )
+        });
+        if !has_message_region {
             tracing::warn!(
-                "Layout has no SlidingWindow region - typed conversation entries require one"
+                "Layout has no SlidingWindow (or custom scripted) region - typed \
+                 conversation entries require one"
             );
         }
 
@@ -224,6 +242,10 @@ impl ContextLayout {
                     RegionKind::Pinned
                         | RegionKind::HashMap { .. }
                         | RegionKind::CompactHistory { .. }
+                        | RegionKind::Custom {
+                            persistent: true,
+                            ..
+                        }
                 )
             })
             .map(|r| r.max_tokens)
@@ -238,7 +260,8 @@ impl ContextLayout {
         {
             return Err(ValidationError::Layout(format!(
                 "context layout leaves only {working_tokens} working tokens after fixed \
-                 regions (pinned/hashmap/compact_history) consume {fixed_tokens} of the {} \
+                 regions (pinned/hashmap/compact_history/persistent custom) consume \
+                 {fixed_tokens} of the {} \
                  total budget; at least {} are needed for the agent to operate. Reduce the \
                  fixed regions' max_tokens or increase the total budget.",
                 self.total_budget_tokens,
@@ -700,6 +723,98 @@ mod tests {
         with_tracing(|| {
             assert!(layout.validate().is_ok());
         });
+    }
+
+    fn custom_kind(script: &str, persistent: bool) -> RegionKind {
+        RegionKind::Custom {
+            script: script.to_string(),
+            persistent,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_custom_region_with_empty_script() {
+        // Whitespace-only counts as empty: it could never resolve to a file
+        // and the runtime would silently fall back on every inference.
+        let regions = vec![RegionDefinition::new(
+            "brain".to_string(),
+            custom_kind("   ", false),
+            5000,
+        )];
+        let layout = ContextLayout::new(regions, 10_000);
+        let err = with_tracing(|| layout.validate().unwrap_err());
+        assert!(
+            err.to_string().contains("non-empty script path"),
+            "actionable error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_counts_persistent_custom_as_fixed_budget() {
+        // A persistent custom region is Pinned-like: protected from eviction,
+        // so it must count toward the fixed budget that can starve the
+        // working room.
+        let regions = vec![
+            RegionDefinition::new("vault".to_string(), custom_kind("v.rhai", true), 95_000),
+            RegionDefinition::new("work".to_string(), RegionKind::Temporary, 5_000),
+        ];
+        let layout = ContextLayout::new(regions, 100_000);
+        let err = with_tracing(|| layout.validate().unwrap_err());
+        assert!(err.to_string().contains("working tokens"), "{err}");
+    }
+
+    #[test]
+    fn validate_counts_non_persistent_custom_as_working_budget() {
+        // Same shape, but the custom region is evictable - it IS the working
+        // room, so validation passes.
+        let regions = vec![
+            RegionDefinition::new("brain".to_string(), custom_kind("b.rhai", false), 95_000),
+            RegionDefinition::new("task".to_string(), RegionKind::Pinned, 4_000),
+        ];
+        let layout = ContextLayout::new(regions, 100_000);
+        with_tracing(|| {
+            assert!(layout.validate().is_ok());
+        });
+    }
+
+    #[test]
+    fn custom_region_satisfies_the_message_region_check() {
+        // A layout whose only region is custom must not trip the "no
+        // SlidingWindow region" warning path - its script can render typed
+        // entries as messages. (Mirrors the sliding-window-present test: the
+        // skip branch is exercised, validation succeeds.)
+        let regions = vec![RegionDefinition::new(
+            "everything".to_string(),
+            custom_kind("all.rhai", false),
+            9_000,
+        )];
+        let layout = ContextLayout::new(regions, 10_000);
+        with_tracing(|| {
+            assert!(layout.validate().is_ok());
+        });
+    }
+
+    #[test]
+    fn resolved_percent_budget_applies_to_custom_region() {
+        // The "recreate built-ins in Rhai" guarantee: percentage budgets work
+        // on custom regions exactly as on built-in kinds, resolved against
+        // the stage model's context window at spawn.
+        let def = RegionDefinition::new("brain".to_string(), custom_kind("b.rhai", false), 0)
+            .with_budget(BudgetSpec::Percent {
+                percent: 0.40,
+                min: Some(10_000),
+                max: None,
+            });
+        let layout = ContextLayout::new(vec![def], 0);
+        let resolved = layout.resolved(200_000);
+        assert_eq!(resolved.regions[0].max_tokens, 80_000);
+        assert!(matches!(
+            resolved.regions[0].kind,
+            RegionKind::Custom { ref script, persistent: false } if script == "b.rhai"
+        ));
+        // The min floor wins on a small window.
+        let small = layout.resolved(8_192);
+        assert_eq!(small.regions[0].max_tokens, 10_000);
     }
 
     #[test]
