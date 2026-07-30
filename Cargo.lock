@@ -2211,6 +2211,7 @@ dependencies = [
  "leviath-testkit",
  "leviath-tools",
  "libc",
+ "opentelemetry_sdk",
  "pulldown-cmark",
  "rand 0.10.2",
  "ratatui",
@@ -2377,11 +2378,13 @@ dependencies = [
  "leviath-core",
  "leviath-testkit",
  "opentelemetry",
+ "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "temp-env",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2755,6 +2758,18 @@ dependencies = [
  "pin-project-lite",
  "thiserror 2.0.19",
  "tracing",
+]
+
+[[package]]
+name = "opentelemetry-appender-tracing"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c0080f0dc1d7c786f467cd85a4e395fcab11ee852004f39a29a18ab7c25d837"
+dependencies = [
+ "opentelemetry",
+ "tracing",
+ "tracing-core",
+ "tracing-subscriber",
 ]
 
 [[package]]

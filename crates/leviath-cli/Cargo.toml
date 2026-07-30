@@ -81,6 +81,9 @@ keyring-core = "1"
 
 tempfile = "3"
 temp-env = { workspace = true, features = ["async_closure"] }
+# In-memory OTLP exporters for the logging reload-slot test - it asserts a
+# tracing event actually comes out of the installed bridge layer.
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

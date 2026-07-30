@@ -226,13 +226,17 @@ pub fn build_host(
         .insert_resource(leviath_runtime::pipeline::GateScriptRules(script_checker));
 
     // Structured observability (`[observability]`): replace the world's no-op
-    // telemetry sink with the configured exporter. A pipeline that fails to
-    // build logs a warning and leaves the no-op in place - observability must
-    // never stop the work it observes.
-    if let Some(sink) = leviath_telemetry::build_sink(&config.observability) {
+    // telemetry sink with the configured exporter, and - for OTLP - forward
+    // the daemon's own tracing events through the same pipeline. A pipeline
+    // that fails to build logs a warning and leaves the no-op in place -
+    // observability must never stop the work it observes.
+    if let Some(built) = leviath_telemetry::build_sink(&config.observability) {
         host.world_mut()
             .world_mut()
-            .insert_resource(leviath_runtime::telemetry::Telemetry(sink));
+            .insert_resource(leviath_runtime::telemetry::Telemetry(built.sink));
+        if let Some(layer) = built.log_layer {
+            crate::logging::install_otel_layer(layer);
+        }
     }
 
     // Reload-on-demand: an op targeting an unloaded run pages it back in from

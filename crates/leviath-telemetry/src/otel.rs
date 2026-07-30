@@ -65,6 +65,31 @@ pub(crate) fn ms_to_time(at_ms: i64) -> SystemTime {
     UNIX_EPOCH + Duration::from_millis(u64::try_from(at_ms).unwrap_or(0))
 }
 
+/// The log bridge behind a hand-rolled target filter.
+///
+/// `Layer::with_filter` would be the obvious spelling, but a `Filtered` layer
+/// only works when it was part of the subscriber at construction time - this
+/// one is swapped into an initially-empty reload slot later, where the
+/// missing `FilterId` registration panics. The bridge only reacts to events,
+/// so gating `on_event` is complete filtering for it.
+struct TargetFilteredBridge<L> {
+    inner: L,
+    targets: tracing_subscriber::filter::Targets,
+}
+
+impl<S, L> tracing_subscriber::Layer<S> for TargetFilteredBridge<L>
+where
+    S: tracing::Subscriber,
+    L: tracing_subscriber::Layer<S>,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
+        let meta = event.metadata();
+        if self.targets.would_enable(meta.target(), meta.level()) {
+            self.inner.on_event(event, ctx);
+        }
+    }
+}
+
 /// A stage span held open between `StageEntered` and `StageExited`.
 struct OpenStage {
     index: usize,
@@ -189,6 +214,37 @@ impl OtelSink {
                 .with_batch_exporter(logs)
                 .build(),
         ))
+    }
+
+    /// A `tracing-subscriber` layer that forwards the process's own `tracing`
+    /// events into this sink's OTLP logs pipeline (daemon-level log export).
+    ///
+    /// These records correlate by resource attributes only - the daemon's
+    /// tracing events fire outside any run's spans, so they carry no trace
+    /// ids; the per-run [`TelemetryEvent::Log`] records are the correlated
+    /// ones. Filtered to INFO, with the OTel/HTTP stack's own targets
+    /// silenced: an export failure that logged through this bridge would
+    /// otherwise generate more exports. The filtering is done inside
+    /// `TargetFilteredBridge` rather than `Layer::with_filter` because a
+    /// `Filtered` layer swapped into a reload slot after subscriber
+    /// construction has no registered `FilterId` and panics.
+    pub fn tracing_log_layer(&self) -> crate::LogLayer {
+        use tracing_subscriber::filter::LevelFilter;
+        let bridge = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(
+            &self.logger_provider,
+        );
+        let targets = tracing_subscriber::filter::Targets::new()
+            .with_default(LevelFilter::INFO)
+            .with_target("opentelemetry", LevelFilter::OFF)
+            .with_target("opentelemetry_sdk", LevelFilter::OFF)
+            .with_target("opentelemetry-otlp", LevelFilter::OFF)
+            .with_target("hyper", LevelFilter::OFF)
+            .with_target("reqwest", LevelFilter::OFF)
+            .with_target("h2", LevelFilter::OFF);
+        Box::new(TargetFilteredBridge {
+            inner: bridge,
+            targets,
+        })
     }
 
     /// Start a span at `at_ms`, optionally as a child of `parent`.
@@ -489,6 +545,21 @@ mod tests {
     use opentelemetry_sdk::logs::InMemoryLogExporter;
     use opentelemetry_sdk::metrics::InMemoryMetricExporter;
     use opentelemetry_sdk::trace::InMemorySpanExporter;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    #[test]
+    fn tracing_log_layer_forwards_app_events_and_filters_noise() {
+        let h = harness();
+        let subscriber = tracing_subscriber::registry().with(h.sink.tracing_log_layer());
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "leviath::daemon", "exported line");
+            tracing::info!(target: "hyper", "http-stack noise");
+            tracing::debug!(target: "leviath::daemon", "below the info floor");
+        });
+        let logs = h.logs.get_emitted_logs().unwrap();
+        assert_eq!(logs.len(), 1, "{logs:?}");
+        assert!(format!("{:?}", logs[0].record.body()).contains("exported line"));
+    }
 
     struct Harness {
         sink: OtelSink,

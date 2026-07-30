@@ -18,17 +18,35 @@ use leviath_core::telemetry::TelemetrySink;
 pub use log_sink::LogSink;
 pub use otel::OtelSink;
 
+/// A boxed `tracing-subscriber` layer, installable into the CLI's reloadable
+/// subscriber slot to forward the process's own log events over OTLP.
+pub type LogLayer = Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>;
+
+/// What [`build_sink`] hands the host: the event sink for the engine's
+/// telemetry resource, plus - for the OTLP exporter - a `tracing` layer that
+/// exports the daemon's own log events through the same pipeline.
+pub struct BuiltTelemetry {
+    /// The sink the runtime's observer emits into.
+    pub sink: Arc<dyn TelemetrySink>,
+    /// Daemon-level log export (`None` for the stdout exporter, whose events
+    /// already flow through `tracing`).
+    pub log_layer: Option<LogLayer>,
+}
+
 /// The sink the config asks for, or `None` when telemetry is off (disabled,
 /// `exporter = "none"`, or an OTLP pipeline that failed to build - the last
 /// is logged and dropped rather than failing the daemon: observability must
 /// never stop the work it observes).
-pub fn build_sink(cfg: &ObservabilityConfig) -> Option<Arc<dyn TelemetrySink>> {
+pub fn build_sink(cfg: &ObservabilityConfig) -> Option<BuiltTelemetry> {
     if !cfg.enabled {
         return None;
     }
     match cfg.exporter {
         TelemetryExporterKind::None => None,
-        TelemetryExporterKind::Stdout => Some(Arc::new(LogSink)),
+        TelemetryExporterKind::Stdout => Some(BuiltTelemetry {
+            sink: Arc::new(LogSink),
+            log_layer: None,
+        }),
         TelemetryExporterKind::Otlp => {
             // The OTLP exporters construct a blocking reqwest client, which
             // panics when built on a tokio runtime thread (the daemon calls
@@ -38,7 +56,13 @@ pub fn build_sink(cfg: &ObservabilityConfig) -> Option<Arc<dyn TelemetrySink>> {
                 .join()
                 .expect("exporter construction reports errors rather than panicking");
             match built {
-                Ok(sink) => Some(Arc::new(sink)),
+                Ok(sink) => {
+                    let log_layer = Some(sink.tracing_log_layer());
+                    Some(BuiltTelemetry {
+                        sink: Arc::new(sink),
+                        log_layer,
+                    })
+                }
                 Err(err) => {
                     tracing::warn!("telemetry disabled: {err}");
                     None
@@ -72,15 +96,16 @@ mod tests {
     }
 
     #[test]
-    fn stdout_exporter_builds_the_log_sink() {
-        assert!(build_sink(&config(true, TelemetryExporterKind::Stdout)).is_some());
+    fn stdout_exporter_builds_the_log_sink_without_a_log_layer() {
+        let built = build_sink(&config(true, TelemetryExporterKind::Stdout)).unwrap();
+        assert!(built.log_layer.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn otlp_exporter_builds_from_a_runtime_thread() {
+    async fn otlp_exporter_builds_from_a_runtime_thread_with_a_log_layer() {
         // The regression this guards: blocking-client construction panics on a
         // tokio thread unless it's hopped to a plain one.
-        let sink = build_sink(&config(true, TelemetryExporterKind::Otlp));
-        assert!(sink.is_some());
+        let built = build_sink(&config(true, TelemetryExporterKind::Otlp)).unwrap();
+        assert!(built.log_layer.is_some());
     }
 }

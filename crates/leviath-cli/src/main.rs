@@ -48,14 +48,12 @@ async fn main() -> anyhow::Result<()> {
     let mut cli = Cli::parse_from(argv);
     apply_region_flags(&mut cli.command, region_flags);
 
-    // Initialize tracing. Logs go to stderr, never stdout: `lev agent-client`
-    // uses stdout as its JSON-RPC protocol channel, and a stray log line there
-    // would corrupt the stream a host is parsing.
-    let level = if cli.verbose { "debug" } else { "info" };
-    tracing_subscriber::fmt()
-        .with_env_filter(level)
-        .with_writer(std::io::stderr)
-        .init();
+    // Initialize tracing (fmt → stderr, plus the reloadable OTLP log-export
+    // slot the daemon fills when `[observability]` asks for it). Logs go to
+    // stderr, never stdout: `lev agent-client` uses stdout as its JSON-RPC
+    // protocol channel, and a stray log line there would corrupt the stream a
+    // host is parsing.
+    leviath_cli::logging::init(cli.verbose);
 
     info!("Leviath CLI v{}", env!("CARGO_PKG_VERSION"));
 
