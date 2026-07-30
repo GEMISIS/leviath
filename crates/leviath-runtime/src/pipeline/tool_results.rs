@@ -331,6 +331,7 @@ pub fn collect_tools(
             Option<&mut crate::repetition::RepetitionDetector>,
             Option<&mut StageProgress>,
             Option<&mut crate::persistence::RunOutcomeFlags>,
+            Option<&mut crate::telemetry::StageActivity>,
         ),
         With<AwaitingTools>,
     >,
@@ -350,6 +351,7 @@ pub fn collect_tools(
             repetition,
             progress,
             flags,
+            activity,
         )) = agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
@@ -373,6 +375,19 @@ pub fn collect_tools(
             progress,
             flags,
         );
+        // Record each call for the telemetry observer before file tracking
+        // rewrites successful results; success is the `[error] ` result-text
+        // convention every executor follows.
+        if let Some(mut activity) = activity {
+            let batch_latency_ms = u64::try_from(outcome.elapsed.as_millis()).unwrap_or(u64::MAX);
+            for (call, (_id, result)) in infer.tool_calls.iter().zip(merged.iter()) {
+                activity.0.push(crate::telemetry::ActivityRecord::ToolCall {
+                    tool_name: call.name.clone(),
+                    batch_latency_ms,
+                    success: !result.starts_with("[error]"),
+                });
+            }
+        }
         // File tracking: sync read/write results into the configured HashMap
         // region and replace the inline result with a reference (de-dup context).
         if let Some(ft) = blueprint.and_then(|bp| bp.0.file_tracking.as_ref()) {

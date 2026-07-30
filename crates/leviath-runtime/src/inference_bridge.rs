@@ -113,6 +113,10 @@ pub struct InferenceOutcome {
     pub entity: Entity,
     /// The provider's response, or the error it failed with.
     pub result: Result<InferenceResponse, ProviderError>,
+    /// Wall-clock time the job took, retries and backoff included. Measured
+    /// here because the ECS only sees the outcome land on a later tick; this
+    /// is the only place the call's real duration exists.
+    pub latency: std::time::Duration,
 }
 
 /// Run one inference job to completion: perform the (possibly hour-long) network
@@ -135,6 +139,7 @@ pub async fn run_inference_job(
         permit,
         exact_token_counting,
     } = job;
+    let started = std::time::Instant::now();
     // Opt-in accurate pre-flight budget guard: count the assembled request
     // exactly (remote endpoint where the provider has one, heuristic otherwise)
     // and refuse a request that would overflow the model's context window,
@@ -148,6 +153,7 @@ pub async fn run_inference_job(
             let _ = results.send(InferenceOutcome {
                 entity,
                 result: Err(ProviderError::TokenLimitExceeded { used, max }),
+                latency: started.elapsed(),
             });
             wake.notify_one();
             return;
@@ -191,7 +197,11 @@ pub async fn run_inference_job(
         },
     };
     drop(permit); // free the pool slot before the collect system runs
-    let _ = results.send(InferenceOutcome { entity, result });
+    let _ = results.send(InferenceOutcome {
+        entity,
+        result,
+        latency: started.elapsed(),
+    });
     wake.notify_one();
 }
 

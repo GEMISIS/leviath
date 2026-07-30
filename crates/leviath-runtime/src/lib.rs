@@ -30,6 +30,7 @@ pub(crate) mod repetition;
 pub mod restore;
 pub mod script_provider;
 pub mod taint;
+pub mod telemetry;
 pub(crate) mod tick_scope;
 pub mod title;
 pub(crate) mod title_bridge;

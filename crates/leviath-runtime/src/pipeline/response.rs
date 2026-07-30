@@ -49,6 +49,8 @@ pub fn collect_inference(
             Option<&StageCursor>,
             Option<&mut StageLedger>,
             Option<&mut StageIoBuffer>,
+            Option<&StageInference>,
+            Option<&mut crate::telemetry::StageActivity>,
         ),
         With<AwaitingInference>,
     >,
@@ -56,7 +58,8 @@ pub fn collect_inference(
 ) {
     crate::tick_scope::clear();
     while let Ok(outcome) = results.0.try_recv() {
-        let Ok((mut state, totals, cursor, mut ledger, buffer)) = agents.get_mut(outcome.entity)
+        let Ok((mut state, totals, cursor, mut ledger, buffer, inference, activity)) =
+            agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
         };
@@ -72,6 +75,24 @@ pub fn collect_inference(
             continue;
         }
         let idx = cursor.map_or(0, |c| c.index);
+        // Record the call for the telemetry observer while the provider and
+        // timing are still at hand (the observer only sees components).
+        if let Some(mut activity) = activity {
+            let usage = outcome.result.as_ref().ok().map(|r| &r.tokens_used);
+            activity
+                .0
+                .push(crate::telemetry::ActivityRecord::Inference {
+                    provider: inference
+                        .map(|i| i.provider_name.clone())
+                        .unwrap_or_default(),
+                    model: inference.map(|i| i.model.clone()).unwrap_or_default(),
+                    latency_ms: u64::try_from(outcome.latency.as_millis()).unwrap_or(u64::MAX),
+                    prompt_tokens: usage.map_or(0, |u| u.prompt_tokens),
+                    completion_tokens: usage.map_or(0, |u| u.completion_tokens),
+                    cached_tokens: usage.map_or(0, |u| u.cached_tokens),
+                    success: outcome.result.is_ok(),
+                });
+        }
         match outcome.result {
             Ok(response) => {
                 state.iteration += 1;
