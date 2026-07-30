@@ -142,10 +142,10 @@ Ten agents ship out of the box, each a multi-stage directed graph with structure
 </picture></td>
 </tr>
 <tr>
-<td valign="middle" width="30%"><b>parallel-fixer</b><br>Fixes many failing tests at once: one sub-agent worker per failure, merged and re-verified</td>
+<td valign="middle" width="30%"><b>wide-researcher</b><br>Broad multi-topic landscape survey: compares approaches, dives on interesting threads</td>
 <td><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agents/parallel-fixer-dark.svg">
-  <img src="docs/assets/agents/parallel-fixer.svg" alt="parallel-fixer workflow graph">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agents/wide-researcher-dark.svg">
+  <img src="docs/assets/agents/wide-researcher.svg" alt="wide-researcher workflow graph">
 </picture></td>
 </tr>
 <tr>
@@ -158,7 +158,7 @@ Ten agents ship out of the box, each a multi-stage directed graph with structure
 </table>
 
 <details>
-<summary><b>The other seven</b>: coder, reviewer, wide-researcher, researcher, log-analyzer, daily-briefer, writing-assistant</summary>
+<summary><b>The other seven</b>: coder, reviewer, parallel-fixer, researcher, log-analyzer, daily-briefer, writing-assistant</summary>
 
 <br/>
 
@@ -179,10 +179,10 @@ Ten agents ship out of the box, each a multi-stage directed graph with structure
 </picture></td>
 </tr>
 <tr>
-<td valign="middle" width="30%"><b>wide-researcher</b><br>Broad multi-topic landscape survey</td>
+<td valign="middle" width="30%"><b>parallel-fixer</b><br>Fixes many failing tests at once: one sub-agent worker per failure, merged and re-verified</td>
 <td><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agents/wide-researcher-dark.svg">
-  <img src="docs/assets/agents/wide-researcher.svg" alt="wide-researcher workflow graph">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agents/parallel-fixer-dark.svg">
+  <img src="docs/assets/agents/parallel-fixer.svg" alt="parallel-fixer workflow graph">
 </picture></td>
 </tr>
 <tr>
@@ -260,10 +260,6 @@ By default an agent's shell commands run directly on your machine, with nothing 
 
 [Learn more →](https://leviath.dev/docs/security)
 
-### Codebase discovery
-
-The coding agents open with a `discover` stage that answers *what is this codebase* and *how do I verify my work here* before a line is written, then commits a concrete verification workflow to a pinned region. The implement stage captures a baseline before its first edit and diffs every later run against it, so a regression is caught immediately instead of at review time. [Learn more →](https://leviath.dev/docs/agents#discovery)
-
 ## Dashboard
 
 <p align="center">
@@ -328,7 +324,8 @@ A benchmark round is currently being re-run under a frozen, reproducible methodo
 ## Why you might not want Leviath
 
 - **It's not a replacement for Claude Code, Codex, or your favorite coding agent.** Leviath is a runtime for building and orchestrating agents. Those are polished interactive products at a different layer, and Leviath can even run on top of Claude Code as a transport.
-- **Private alpha.** Installing needs a GitHub PAT, and the blueprint format is still evolving between releases.
+- **Agents are config, not code.** A Leviath agent is a TOML blueprint plus optional Rhai script tools. If you want to write agent logic as Python or TypeScript against an SDK, that model isn't here; other languages drive Leviath through the REST API instead.
+- **It runs on one machine.** The daemon hosts every agent in a single process on a single box. There is no hosted service and no multi-machine orchestration.
 - **You need a model provider**: an API key, a local Ollama, or the Claude Code transport (with its terms-of-service caveat).
 
 ## CLI
