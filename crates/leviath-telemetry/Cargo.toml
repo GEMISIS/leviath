@@ -1,0 +1,31 @@
+[package]
+name = "leviath-telemetry"
+description = "OpenTelemetry export for Leviath's telemetry event stream"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+# Not published to crates.io: Leviath ships as the `lev` binary (via Homebrew,
+# the install script, or `cargo install --git`), and these are its internal
+# crates. Saying so explicitly prevents an accidental `cargo publish` and lets
+# cargo-deny treat the intra-workspace `path` dependencies as what they are
+# rather than as unbounded version requirements. Remove this line if a crate is
+# ever meant to be published - at which point its path deps need versions too.
+publish = false
+
+[dependencies]
+leviath-core = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# The in-memory span/metric/log exporters the unit tests assert against.
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+temp-env = { workspace = true }
+leviath-testkit = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true
