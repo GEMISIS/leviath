@@ -1,0 +1,12 @@
+flowchart LR
+    ingest(ingest)
+    analyze{{analyze}}
+    script{{script}}
+    report(report)
+    ingest --> analyze
+    analyze --> script
+    analyze --> report
+    script --> script
+    script --> analyze
+    classDef entry stroke-width:3px
+    class ingest entry

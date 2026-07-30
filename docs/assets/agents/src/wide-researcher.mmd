@@ -1,0 +1,12 @@
+flowchart LR
+    survey(survey)
+    compare{{compare}}
+    deep_dive(deep dive)
+    summarize(summarize)
+    survey --> compare
+    compare --> survey
+    compare --> deep_dive
+    compare --> summarize
+    deep_dive --> compare
+    classDef entry stroke-width:3px
+    class survey entry

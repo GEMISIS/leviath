@@ -1,0 +1,19 @@
+flowchart TD
+    discover(discover)
+    analyze{{analyze}}
+    prototype{{prototype}}
+    implement(implement)
+    review(review)
+    reassess(reassess)
+    discover --> analyze
+    analyze --> implement
+    analyze --> prototype
+    prototype --> implement
+    prototype --> analyze
+    prototype -. stuck .-> reassess
+    implement --> review
+    implement -. stuck .-> reassess
+    review --> implement
+    reassess --> implement
+    classDef entry stroke-width:3px
+    class discover entry

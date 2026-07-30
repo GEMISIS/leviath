@@ -1,0 +1,20 @@
+{
+  "theme": "base",
+  "themeVariables": {
+    "fontFamily": "Helvetica Neue, Segoe UI, Arial, sans-serif",
+    "fontSize": "15px",
+    "primaryColor": "#E8F0FE",
+    "primaryBorderColor": "#0066FF",
+    "primaryTextColor": "#0B1D3A",
+    "lineColor": "#5B6B82",
+    "secondaryColor": "#F4F7FB",
+    "tertiaryColor": "#FFFFFF",
+    "edgeLabelBackground": "#FFFFFF"
+  },
+  "flowchart": {
+    "curve": "basis",
+    "padding": 12,
+    "nodeSpacing": 40,
+    "rankSpacing": 45
+  }
+}

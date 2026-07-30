@@ -1,0 +1,24 @@
+# leviath.dev content checklist
+
+Every `leviath.dev` URL the README links to, and the content that page must cover —
+much of it was cut from the README (2026-07) on the assumption the docs site absorbs it.
+These links 404 until the site is up; this file is the punch-list for building it before release.
+
+| URL | Linked from (README section) | Must cover |
+|---|---|---|
+| `/` and `/docs` | badges, footer | Landing + docs index. |
+| `/docs/daemon` | Quick Start step 3 | Shared-world daemon: auto-start, `lev daemon` foreground mode + logs, `lev daemon install`/`uninstall` (launchd / systemd `--user`), restart-on-death, reload of interrupted runs on start. |
+| `/docs/agents` | Quick Start step 4, Features → Codebase discovery | Full `agent.leviath` blueprint reference. **Cut from README and must land here:** region budgets as percentages of the model's context window — percentages are ceilings (may sum past 100%), absolute `max_tokens`/`threshold_tokens` as guard-rails, bare `max_tokens` as fixed count, `min_tokens` floors, per-stage `[stages.<name>.context.regions]` layouts, with the worked TOML example. Also: command seeds (`seed = { command = "git ls-files" }`) and their security semantics — run at spawn before any approval prompt, confined to workdir, routed through the entry stage's sandbox, time/size-capped, printed by `lev validate`, refusable via `--no-seed-commands` or `[security] allow_seed_commands = false`. Discovery/verification workflow details (`BASELINE`/`VERIFY`/`DONE WHEN` regions, `required` regions re-running `discover`, baseline capture before first edit). |
+| `/docs/context` | Features → Structured context memory | The six region types and their eviction/compaction semantics; routing reads to regions; budget resolution details (shared with `/docs/agents`). |
+| `/docs/stages` (+ `#graph`) | Features → Multi-stage workflows | Linear vs graph workflows, conditional transitions, LLM-driven routing, error recovery stages. **Cut from README:** the full `stuck` option set (`stuck_after_iterations`, `stuck_after_minutes`, `stuck_after_same_file_edits`, `stuck_after_tool_calls`), any-subset/first-trip semantics, and that the runtime writes *why* into the target stage's context. |
+| `/docs/engine` | Features → ECS agent engine | bevy_ecs world, entity-per-agent model, scheduling, the shared lock-free inference driver. |
+| `/docs/sub-agents` | Features → Sub-agents and fan-out | Fan-out stages, `max_workers` bound, merge semantics, sub-agent `ask_user` at any depth. |
+| `/docs/security` | Features → Security | **Cut from README:** taint model detail (Public/Internal/Private lattice, tool direction + clearance declarations, `[blocked]` returns vs daemon allow-once/session/deny prompts, taint recovery on eviction, fail-closed unrecognized tools, `[security]` config, allowlists + Rhai policy rules, `lev policy test`); sandbox config reference (the `[sandbox]` / `[stages.<name>.sandbox]` TOML with `kind`/`image`/`engine`/`network`, warm container per agent + teardown at reap, bind-mounted workdir, capability drops / no-new-privileges / process+memory bounds, namespace vs container trade-offs, install-time tighten-only rule). |
+| `/docs/dashboard` | Dashboard | **Cut from README:** stage tabs, context-window visualization, markdown rendering, search/filter, auto-generated run titles (`[title]`), full mouse support details — wheel scroll, click-drag select + copy-on-release, OSC52 over SSH, `y` pane yank, Shift+drag for native selection — and the `m` MCP management screen. |
+| `/docs/api` | API Server | Full REST + WebSocket reference. **Cut from README:** webhook retry policy (transient failures, exponential backoff, `[webhook]` tuning: `max_retries`, `base_delay_ms`, `max_delay_ms`, `timeout_secs`) and `X-Leviath-Signature: sha256=<hex>` HMAC verification; `--workdir-root`, `--no-remote-yolo`, `--allow-admin` (off by default — MCP admin endpoints write spawn commands, RCE by construction), `LEVIATH_API_TOKEN` vs `--token` (`ps` visibility). |
+| `/docs/mcp` | CLI → MCP tool servers | **Cut from README:** stdio vs HTTP (streamable + legacy HTTP+SSE fallback) transports, `[[mcp_servers]]` config incl. `url`/`headers`/`${VAR}` expansion, OAuth browser flow, `~/.leviath/mcp-auth.json` (0600) storage + non-interactive refresh. |
+| `/docs/providers` | Providers | Provider setup per vendor; **cut from README:** `[rate_limits.<provider>]` TOML (`requests_per_minute`, `tokens_per_minute`); Rhai custom providers (source: `docs/rhai-providers.md` in this repo, example `docs/examples/groq.rhai`); Claude Code transport details beyond the README's collapsed note. |
+
+Not yet linked from the README but worth pages at launch: releases/channels mechanics
+(rolling vs immutable tags — currently 2 lines in README + dist repo), `lev test`
+blueprint testing, `lev context` run archives, `lev auth`.

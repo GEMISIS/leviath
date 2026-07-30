@@ -1,0 +1,16 @@
+flowchart LR
+    research(research)
+    outline{{outline}}
+    draft(draft)
+    edit{{edit}}
+    proofread(proofread)
+    research --> outline
+    outline --> draft
+    outline --> outline
+    outline --> research
+    draft --> edit
+    edit --> draft
+    edit --> proofread
+    proofread --> edit
+    classDef entry stroke-width:3px
+    class research entry

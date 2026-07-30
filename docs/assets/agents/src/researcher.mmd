@@ -1,0 +1,9 @@
+flowchart LR
+    gather(gather)
+    analyze{{analyze}}
+    summarize(summarize)
+    gather --> analyze
+    analyze --> gather
+    analyze --> summarize
+    classDef entry stroke-width:3px
+    class gather entry

@@ -57,6 +57,25 @@ jobs:
           message: ${{ job.status == 'success' && 'passing' || 'failing' }}
           color: ${{ job.status == 'success' && 'brightgreen' || 'red' }}
 
+  # One combined badge for the README (the per-OS gists above stay for
+  # anyone who wants the breakdown). `needs.test.result` is 'success' only
+  # when every matrix leg passed, so this is the honest aggregate.
+  test-badge:
+    name: Publish combined test badge
+    needs: [test]
+    if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish combined test status badge
+        uses: schneegans/dynamic-badges-action@28b0fa8bdeb46170ac397105ece0c1fe58f68910 # v1.9.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ vars.COVERAGE_GIST_ID }}
+          filename: leviath-test-all.json
+          label: tests
+          message: ${{ needs.test.result == 'success' && 'passing' || 'failing' }}
+          color: ${{ needs.test.result == 'success' && 'brightgreen' || 'red' }}
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
