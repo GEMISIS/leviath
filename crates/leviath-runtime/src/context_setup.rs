@@ -147,9 +147,17 @@ pub fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
         );
 
         if let Some(existing) = window.get_region(&region_def.name) {
+            // Carry entries verbatim - kind, metadata, key, timestamp survive
+            // the swap. Rebuilding via `add_entry` flattened every carried
+            // entry to `EntryKind::Text`, which destroyed the typed tool_use/
+            // tool_result pairing of any message-bearing region and left the
+            // assembler's orphan sanitizer to strip the whole history.
             for entry in &existing.content {
-                let _ = new_region.add_entry(entry.content.clone(), entry.tokens);
+                let _ = new_region.carry_entry(entry.clone());
             }
+            // The region-level taint state carries wholesale too; the rebuild
+            // used to silently reset it.
+            new_region.taint = existing.taint.clone();
         }
 
         kept.insert(region_def.name.as_str());
@@ -171,9 +179,12 @@ pub fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
                 existing.kind.clone(),
                 existing.max_tokens,
             );
+            // Same verbatim carry as above: these are exactly the regions whose
+            // typed turns the transition must not flatten.
             for entry in &existing.content {
-                let _ = carried.add_entry(entry.content.clone(), entry.tokens);
+                let _ = carried.carry_entry(entry.clone());
             }
+            carried.taint = existing.taint.clone();
             new_regions.push(carried);
         }
     }
@@ -488,6 +499,100 @@ mod tests {
         // Token total recomputed from the surviving content.
         assert_eq!(window.current_tokens, window.calculate_tokens());
         assert!(window.current_tokens > 0);
+    }
+
+    #[test]
+    fn apply_layout_preserves_entry_kinds_and_taint_across_swap() {
+        // Regression: the carry used to rebuild entries via `add_entry`, which
+        // stamped every carried entry `EntryKind::Text` (destroying tool_use/
+        // tool_result pairing) and silently reset region-level taint.
+        let bp = blueprint_with(vec![RegionDefinition::new(
+            "task".to_string(),
+            RegionKind::Pinned,
+            5000,
+        )]);
+        let mut window = seeded_window(&bp, "the task");
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::AssistantTurn {
+                    tool_calls: vec![leviath_core::SerializedToolCall {
+                        id: "call_9".to_string(),
+                        name: "shell".to_string(),
+                        arguments: serde_json::json!({"command": "ls"}),
+                        thought_signature: None,
+                    }],
+                },
+                "running ls".to_string(),
+                10,
+            )
+            .unwrap();
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::ToolResult {
+                    tool_call_id: "call_9".to_string(),
+                    tool_name: "shell".to_string(),
+                    is_error: false,
+                },
+                "file_a\nfile_b".to_string(),
+                10,
+            )
+            .unwrap();
+        window
+            .get_region_mut("conversation")
+            .unwrap()
+            .enable_taint_tracking();
+
+        // Swap 1: layout omits conversation (the infra-carry loop).
+        let omitting = ContextLayout::new(
+            vec![RegionDefinition::new(
+                "task".to_string(),
+                RegionKind::Pinned,
+                5000,
+            )],
+            8000,
+        );
+        apply_layout(&mut window, &omitting);
+
+        // Swap 2: layout declares conversation (the by-name carry loop).
+        let declaring = ContextLayout::new(
+            vec![
+                RegionDefinition::new("task".to_string(), RegionKind::Pinned, 5000),
+                RegionDefinition::new(
+                    "conversation".to_string(),
+                    RegionKind::SlidingWindow {
+                        max_items: 10,
+                        eviction_strategy: EvictionStrategy::PerItem,
+                    },
+                    10_000,
+                ),
+            ],
+            20_000,
+        );
+        apply_layout(&mut window, &declaring);
+
+        let conv = window.get_region("conversation").unwrap();
+        assert!(
+            conv.content.iter().any(|e| matches!(
+                &e.kind,
+                leviath_core::EntryKind::AssistantTurn { tool_calls }
+                    if tool_calls.iter().any(|c| c.id == "call_9")
+            )),
+            "assistant turn must keep its typed tool_calls through both carry paths"
+        );
+        assert!(
+            conv.content.iter().any(|e| matches!(
+                &e.kind,
+                leviath_core::EntryKind::ToolResult { tool_call_id, .. }
+                    if tool_call_id == "call_9"
+            )),
+            "tool result must keep its typed pairing through both carry paths"
+        );
+        assert!(
+            conv.taint.is_some(),
+            "region-level taint state must carry across layout swaps"
+        );
     }
 
     #[test]

@@ -491,6 +491,37 @@ impl Region {
         Ok(())
     }
 
+    /// Carry an already-accepted entry into this region verbatim, preserving
+    /// its [`EntryKind`], metadata, key, and timestamp.
+    ///
+    /// Used when a stage-layout swap rebuilds a region and moves its surviving
+    /// content across: re-adding through [`add_entry`](Self::add_entry) would
+    /// stamp every carried entry [`EntryKind::Text`], destroying the typed
+    /// `tool_use`/`tool_result` pairing the assembler needs (the orphan
+    /// sanitizer would then strip the whole history). Skips schema validation
+    /// deliberately - the entry passed it when first accepted - but keeps the
+    /// budget check and sliding-window enforcement so the destination region's
+    /// limits still hold. Taint is not touched per entry: a carry copies the
+    /// region-level [`crate::taint::RegionTaint`] wholesale instead of
+    /// re-accumulating it.
+    pub fn carry_entry(&mut self, entry: RegionEntry) -> crate::error::Result<()> {
+        // Check token budget
+        if self.current_tokens + entry.tokens > self.max_tokens {
+            return Err(crate::error::Error::TokenBudgetExceeded {
+                used: self.current_tokens + entry.tokens,
+                max: self.max_tokens,
+            });
+        }
+
+        self.current_tokens += entry.tokens;
+        self.content.push(entry);
+
+        // Enforce SlidingWindow max_items limit
+        self.enforce_sliding_window();
+
+        Ok(())
+    }
+
     /// Upsert an entry by key. If key exists, replace content and update timestamp/tokens.
     /// If key doesn't exist, add new entry. Enforces max_tokens and max_entries via LRU eviction.
     pub fn upsert_by_key(
@@ -953,6 +984,77 @@ mod tests {
             }
         );
         assert_ne!(RegionKind::Pinned, RegionKind::Temporary);
+    }
+
+    #[test]
+    fn carry_entry_preserves_kind_metadata_key_and_timestamp() {
+        let mut source = Region::new("conversation".to_string(), RegionKind::Temporary, 10_000);
+        source
+            .add_typed_entry(
+                "result body".to_string(),
+                10,
+                EntryKind::ToolResult {
+                    tool_call_id: "call_1".to_string(),
+                    tool_name: "read_file".to_string(),
+                    is_error: false,
+                },
+            )
+            .unwrap();
+        let mut entry = source.content[0].clone();
+        entry.metadata = Some(serde_json::json!({"origin": "test"}));
+        entry.key = Some("k".to_string());
+        let stamped = entry.timestamp;
+
+        let mut dest = Region::new("conversation".to_string(), RegionKind::Temporary, 10_000);
+        dest.carry_entry(entry).unwrap();
+
+        let carried = &dest.content[0];
+        assert!(matches!(
+            &carried.kind,
+            EntryKind::ToolResult { tool_call_id, .. } if tool_call_id == "call_1"
+        ));
+        assert_eq!(
+            carried.metadata,
+            Some(serde_json::json!({"origin": "test"}))
+        );
+        assert_eq!(carried.key.as_deref(), Some("k"));
+        assert_eq!(carried.timestamp, stamped);
+        assert_eq!(dest.current_tokens, 10);
+    }
+
+    #[test]
+    fn carry_entry_rejects_over_budget() {
+        let mut dest = Region::new("small".to_string(), RegionKind::Temporary, 5);
+        let mut source = Region::new("src".to_string(), RegionKind::Temporary, 100);
+        source.add_entry("filler".to_string(), 10).unwrap();
+        let err = dest.carry_entry(source.content[0].clone()).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::Error::TokenBudgetExceeded { used: 10, max: 5 }
+        ));
+        assert!(dest.content.is_empty());
+        assert_eq!(dest.current_tokens, 0);
+    }
+
+    #[test]
+    fn carry_entry_enforces_sliding_window_max_items() {
+        let mut source = Region::new("src".to_string(), RegionKind::Temporary, 10_000);
+        for i in 0..4 {
+            source.add_entry(format!("msg{i}"), 10).unwrap();
+        }
+        let mut dest = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 3,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
+            10_000,
+        );
+        for entry in &source.content {
+            dest.carry_entry(entry.clone()).unwrap();
+        }
+        assert_eq!(dest.content.len(), 3);
+        assert_eq!(dest.content[0].content, "msg1");
     }
 
     #[test]
