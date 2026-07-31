@@ -8,6 +8,9 @@ on:
     # `labeled`/`unlabeled` are included so the `guard-main-rs` job re-runs when
     # a maintainer applies/removes the `allow-main-rs-change` override label.
     types: [opened, synchronize, reopened, labeled, unlabeled]
+  # The merge queue runs required checks against a temporary `merge_group` ref.
+  # Without this trigger those checks never run, so queued PRs block forever.
+  merge_group:
 
 env:
   CARGO_TERM_COLOR: always
