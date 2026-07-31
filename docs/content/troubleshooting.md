@@ -33,10 +33,11 @@ The token is missing or wrong. REST clients send `Authorization: Bearer <token>`
 pass `?token=<token>` in the URL (browsers can't set WS headers). Confirm the value matches what you
 passed to `--token`.
 
-## An admin action returns `404`
+## An admin action returns `405`
 
-Config-write and MCP add/remove live behind `--allow-admin`. Without that flag those routes don't
-exist (they 404 rather than 403). Restart with `lev serve … --allow-admin`.
+Config-write and MCP add/remove live behind `--allow-admin`. Without that flag the mutating method
+isn't mounted, so it returns **405 Method Not Allowed** (the read routes still work). Restart with
+`lev serve … --allow-admin`.
 
 ## No provider configured
 

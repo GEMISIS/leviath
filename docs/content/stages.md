@@ -31,8 +31,9 @@ lev validate .             # verifies the graph is well-formed and reachable
 Each edge is one of two kinds:
 
 - **hint** transitions are chosen by the agent (LLM-routed) when it decides the stage's goal is met.
-- **conditional** transitions fire automatically on a runtime signal — `error`, or `stuck` — no
-  matter what the model wants.
+- **conditional** transitions fire automatically on a runtime signal rather than the agent's
+  choice: `error`, `stuck`, `max_iterations` (the stage's iteration cap is hit), or `always` (an
+  unconditional edge).
 
 ```toml
 [stages.implement.transitions.review]
@@ -42,7 +43,9 @@ hint = "Implementation complete, ready for review"
 condition = "stuck"          # a runtime condition, not the agent's choice
 ```
 
-## Stuck detection {#graph}
+<a id="graph"></a>
+
+## Stuck detection
 
 `stuck` escapes a stage that is making no progress. Crucially, stuckness is **measured, not
 self-reported** — an agent can't loop forever insisting it's almost done:

@@ -2,7 +2,7 @@
 title: Providers
 group: Reference
 group_order: 3
-order: 4
+order: 5
 ---
 
 # Providers
@@ -34,6 +34,18 @@ flowchart LR
 ```
 
 This is why a blueprint written against Anthropic still runs for someone who only has OpenAI keys.
+
+## Where credentials live
+
+Keys live in `~/.leviath/config.toml` by default, or — to keep them out of a plaintext file — in
+your OS keychain. `lev auth` manages the backend:
+
+```bash
+lev auth status                 # which backend holds your secrets
+lev auth migrate                # move keys into the OS keychain
+lev auth migrate --reverse      # move them back to config.toml
+lev auth migrate --dry-run      # preview without moving anything
+```
 
 ## Rate limits
 

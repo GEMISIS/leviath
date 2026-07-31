@@ -83,3 +83,16 @@ talk to it:
 > To drive the daemon over the network instead of the local socket, run the
 > [HTTP API server](/docs/api) — it's a thin REST + WebSocket gateway in front of this same daemon,
 > with a mandatory auth token.
+
+## Observability
+
+The daemon can export its telemetry event stream over OpenTelemetry (OTLP/HTTP) to any collector.
+Enable it in `~/.leviath/config.toml`:
+
+```toml
+[observability]
+enabled      = true
+exporter     = "otlp"
+endpoint     = "http://localhost:4318"
+service_name = "leviath"
+```

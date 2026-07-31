@@ -2,7 +2,7 @@
 title: Security & sandboxing
 group: Concepts
 group_order: 2
-order: 7
+order: 8
 ---
 
 # Security: sandboxed execution and taint tracking
@@ -58,9 +58,12 @@ Taint recovers as entries evict, and an unrecognized tool **fails closed**. Conf
 
 ```bash
 lev policy list
-lev policy add
-lev policy test --tool bash --target example.com
+lev policy add send_email --target "*.example.com" --max-sensitivity internal
+lev policy test bash --target example.com
 ```
+
+`lev policy add` and `lev policy test` take the tool name as a **positional** argument
+(`lev policy add <tool> …`, `lev policy test <tool> --target …`).
 
 ## Threat model
 
