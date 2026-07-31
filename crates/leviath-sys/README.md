@@ -5,7 +5,7 @@ process control and signals, socket peer credentials, terminal handling,
 and the OS keychain. Despite the -sys suffix, this is not an FFI binding
 crate; it is where Leviath's OS-specific code is quarantined.
 
-Part of [Leviath](https://github.com/Sun-Forge-AI/leviath), a structured
+Part of [Leviath](https://github.com/GEMISIS/leviath), a structured
 agent runtime for LLMs. Most applications should depend on the
 [`leviath`](https://crates.io/crates/leviath) facade crate rather than this
 one, and if you want the `lev` command-line tool, install

@@ -4,7 +4,7 @@ Rhai scripting for Leviath. Blueprints can ship custom validators,
 transforms, script tools, and even whole context region implementations as
 scripts, and this crate is the engine that runs them.
 
-Part of [Leviath](https://github.com/Sun-Forge-AI/leviath), a structured
+Part of [Leviath](https://github.com/GEMISIS/leviath), a structured
 agent runtime for LLMs. Most applications should depend on the
 [`leviath`](https://crates.io/crates/leviath) facade crate rather than this
 one, and if you want the `lev` command-line tool, install

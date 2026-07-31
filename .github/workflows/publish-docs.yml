@@ -34,7 +34,7 @@ jobs:
       - name: Checkout leviath.dev (docs-ssg)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          repository: Sun-Forge-AI/leviath.dev
+          repository: GEMISIS/leviath.dev
           token: ${{ secrets.DOCS_SSG_TOKEN }}
           path: site
 

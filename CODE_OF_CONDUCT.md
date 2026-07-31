@@ -61,7 +61,7 @@ representative at an online or offline event.
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the maintainers by opening an issue, or — for reports that should
 stay private — through GitHub's
-[private vulnerability reporting](https://github.com/Sun-Forge-AI/leviath/security/advisories/new)
+[private vulnerability reporting](https://github.com/GEMISIS/leviath/security/advisories/new)
 form on this repository (it reaches the maintainers privately even for
 non-vulnerability reports).
 All complaints will be reviewed and investigated promptly and fairly.

@@ -10,7 +10,7 @@ gains features.
 docs/content/*.md   (this repo, the source of truth)
         |
         v
-  docs-ssg           (the renderer, lives in the Sun-Forge-AI/leviath.dev repo:
+  docs-ssg           (the renderer, lives in the GEMISIS/leviath.dev repo:
         |             mermaid, syntax highlighting, on-page TOC, callouts, search)
         v
   s3://<site>/docs/<channel>/*.html   (published per release)

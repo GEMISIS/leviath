@@ -30,13 +30,13 @@ flowchart LR
   repository's [MIT license](LICENSE). There is no CLA.
 - **Conduct**: we follow the [Contributor Covenant](CODE_OF_CONDUCT.md).
 - **Security issues** go through
-  [private vulnerability reporting](https://github.com/Sun-Forge-AI/leviath/security/advisories/new),
+  [private vulnerability reporting](https://github.com/GEMISIS/leviath/security/advisories/new),
   never public issues — see [SECURITY.md](SECURITY.md).
 
 ## Getting the code building
 
 ```bash
-git clone https://github.com/Sun-Forge-AI/leviath.git
+git clone https://github.com/GEMISIS/leviath.git
 cd leviath
 cargo build
 cargo test --workspace

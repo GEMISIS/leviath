@@ -68,5 +68,5 @@ lev policy test bash --target example.com
 ## Threat model
 
 `lev serve` runs LLM-driven tools, so treat it as trusted-network only unless hardened. See
-[SECURITY.md](https://github.com/Sun-Forge-AI/leviath/blob/main/SECURITY.md) for the full threat
+[SECURITY.md](https://github.com/GEMISIS/leviath/blob/main/SECURITY.md) for the full threat
 model, what Leviath defends against, and how to report a vulnerability (GitHub private advisories).

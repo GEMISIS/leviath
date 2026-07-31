@@ -8,9 +8,9 @@
 **Right-sized.** Each phase of a task gets its own model, tools, and context layout, so you aren't paying frontier prices for file reads.<br>
 **Light.** Hundreds of agents in one [bevy_ecs](https://bevyengine.org/) process, from a single binary. No Node, Python, or Docker.
 
-[![Tests](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-test-all.json)](https://github.com/Sun-Forge-AI/leviath/actions/workflows/ci.yml)
-[![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-coverage-lines.json)](https://github.com/Sun-Forge-AI/leviath/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Sun-Forge-AI/leviath/blob/main/LICENSE)
+[![Tests](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-test-all.json)](https://github.com/GEMISIS/leviath/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-coverage-lines.json)](https://github.com/GEMISIS/leviath/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/GEMISIS/leviath/blob/main/LICENSE)
 [![Docs](https://img.shields.io/badge/docs-leviath.dev-8b5cf6)](https://leviath.dev)
 
 **[Quick Start](#quick-start) · [Agents](#pre-built-agents) · [Features](#features) · [Dashboard](#dashboard) · [API](#api-server) · [Agent Client Protocol](#agent-client-protocol) · [Comparison](#how-it-compares) · [Why not Leviath](#why-you-might-not-want-leviath) · [Contributing](#contributing)**
@@ -54,21 +54,21 @@ lev create my-agent              # scaffold your own agent
 **macOS (Homebrew, recommended):**
 
 ```bash
-brew tap sun-forge-ai/leviath https://github.com/Sun-Forge-AI/leviath-dist.git
-brew trust sun-forge-ai/leviath          # Homebrew 6 requires trusting third-party taps
+brew tap gemisis/leviath https://github.com/GEMISIS/leviath-dist.git
+brew trust gemisis/leviath          # Homebrew 6 requires trusting third-party taps
 brew install leviath                     # stable - or: leviath-beta, leviath-alpha
 ```
 
 **Linux:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/install.sh | bash -s -- --channel stable
+curl -fsSL https://raw.githubusercontent.com/GEMISIS/leviath-dist/main/install.sh | bash -s -- --channel stable
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-irm https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/GEMISIS/leviath-dist/main/install.ps1 | iex
 ```
 
 All three install prebuilt binaries; no Rust toolchain needed.
@@ -77,7 +77,7 @@ All three install prebuilt binaries; no Rust toolchain needed.
 
 ```bash
 cargo install leviath-cli                # released version from crates.io
-cargo install --git https://github.com/Sun-Forge-AI/leviath.git --bin lev   # latest development build
+cargo install --git https://github.com/GEMISIS/leviath.git --bin lev   # latest development build
 ```
 
 Leviath is also a library: add the [`leviath`](https://crates.io/crates/leviath) crate to embed the runtime in your own application.
@@ -437,7 +437,7 @@ Optional client-side rate limits per provider (requests and tokens per minute), 
 | **Beta** | Weekly (Monday) | `beta` | Tested |
 | **Stable** | Weekly (Thursday, approval-gated) | `latest` | Production |
 
-Channel tags roll with every publish; each stable deploy also cuts an immutable `vX.Y.Z` release, which is what Homebrew and Scoop pin to. Install commands per channel: [distribution repo](https://github.com/Sun-Forge-AI/leviath-dist).
+Channel tags roll with every publish; each stable deploy also cuts an immutable `vX.Y.Z` release, which is what Homebrew and Scoop pin to. Install commands per channel: [distribution repo](https://github.com/GEMISIS/leviath-dist).
 
 ## Security
 
@@ -446,7 +446,7 @@ Leviath runs LLM-driven tools on your machine, so [SECURITY.md](SECURITY.md) sta
 ## Contributing
 
 ```bash
-git clone https://github.com/Sun-Forge-AI/leviath.git
+git clone https://github.com/GEMISIS/leviath.git
 cd leviath
 cargo build
 cargo test --workspace
@@ -499,6 +499,6 @@ graph TD
 <p align="center">
   <a href="https://leviath.dev">Website</a> ·
   <a href="https://leviath.dev/docs">Docs</a> ·
-  <a href="https://github.com/Sun-Forge-AI/leviath">GitHub</a> ·
-  <a href="https://github.com/Sun-Forge-AI/leviath/issues">Issues</a>
+  <a href="https://github.com/GEMISIS/leviath">GitHub</a> ·
+  <a href="https://github.com/GEMISIS/leviath/issues">Issues</a>
 </p>

@@ -192,7 +192,7 @@ jobs:
       # forged by someone who merely holds a repo token.
       #
       # Users verify with:
-      #   gh attestation verify <file> --repo Sun-Forge-AI/leviath
+      #   gh attestation verify <file> --repo GEMISIS/leviath
       - name: Attest build provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
@@ -216,13 +216,13 @@ jobs:
 
             **Homebrew (macOS):**
             ```bash
-            brew tap sun-forge-ai/leviath https://github.com/Sun-Forge-AI/leviath-dist.git
+            brew tap gemisis/leviath https://github.com/GEMISIS/leviath-dist.git
             brew install leviath
             ```
 
             **Linux:**
             ```bash
-            curl -fsSL https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/install.sh | bash
+            curl -fsSL https://raw.githubusercontent.com/GEMISIS/leviath-dist/main/install.sh | bash
             ```
 
             **Manual:**

@@ -1,6 +1,6 @@
 # leviath-cli
 
-The `lev` command-line tool for [Leviath](https://github.com/Sun-Forge-AI/leviath),
+The `lev` command-line tool for [Leviath](https://github.com/GEMISIS/leviath),
 a structured agent runtime for LLMs: context memory laid out in regions with
 token budgets, multi-stage workflows described by blueprints, and an ECS-based
 execution engine.
@@ -12,7 +12,7 @@ cargo install leviath-cli
 ```
 
 Prebuilt binaries, a Homebrew tap, and install scripts are listed in the
-[main README](https://github.com/Sun-Forge-AI/leviath#readme).
+[main README](https://github.com/GEMISIS/leviath#readme).
 
 ## Quick start
 

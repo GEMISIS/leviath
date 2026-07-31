@@ -4,7 +4,7 @@ LLM provider integrations for Leviath: Anthropic, OpenAI, Gemini, Ollama,
 OpenRouter, and drop-in providers written in Rhai. Also holds the shared
 retry, rate-limit, and tokenizer plumbing the providers have in common.
 
-Part of [Leviath](https://github.com/Sun-Forge-AI/leviath), a structured
+Part of [Leviath](https://github.com/GEMISIS/leviath), a structured
 agent runtime for LLMs. Most applications should depend on the
 [`leviath`](https://crates.io/crates/leviath) facade crate rather than this
 one, and if you want the `lev` command-line tool, install
