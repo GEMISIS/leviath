@@ -20,7 +20,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-authors = ["Gerald McAlister <gemisis@gmail.com>"]
+authors = ["Gerald McAlister <gemisis@users.noreply.github.com>"]
 repository = "https://github.com/Sun-Forge-AI/leviath"
 description = "A structured agent runtime for LLMs - context memory, multi-stage workflows, and ECS-based orchestration"
 
