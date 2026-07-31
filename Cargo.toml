@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/leviath",
     "crates/leviath-core",
     "crates/leviath-agent-client",
     "crates/leviath-runtime",
@@ -22,7 +23,14 @@ edition = "2024"
 license = "MIT"
 authors = ["Gerald McAlister <gemisis@users.noreply.github.com>"]
 repository = "https://github.com/Sun-Forge-AI/leviath"
+homepage = "https://leviath.dev"
 description = "A structured agent runtime for LLMs - context memory, multi-stage workflows, and ECS-based orchestration"
+# crates.io metadata. `rust-version` is the toolchain releases are built and
+# tested with (rust-toolchain.toml pins the same minor); edition 2024 already
+# needs >= 1.85, this just states the tested floor honestly.
+rust-version = "1.97"
+keywords = ["agents", "llm", "ai", "runtime", "context"]
+categories = ["development-tools"]
 
 # Lints applied to every workspace member that opts in with `[lints] workspace = true`.
 # `unsafe_code = "forbid"` is a hard compile error that cannot be re-enabled by a
@@ -45,17 +53,24 @@ unsafe_code = "forbid"
 string_slice = "deny"
 
 [workspace.dependencies]
-# Core crates
-leviath-core = { path = "crates/leviath-core" }
-leviath-agent-client = { path = "crates/leviath-agent-client" }
-leviath-runtime = { path = "crates/leviath-runtime" }
-leviath-providers = { path = "crates/leviath-providers" }
-leviath-mcp = { path = "crates/leviath-mcp" }
-leviath-scripting = { path = "crates/leviath-scripting" }
-leviath-package = { path = "crates/leviath-package" }
-leviath-tools = { path = "crates/leviath-tools" }
-leviath-sys = { path = "crates/leviath-sys" }
-leviath-telemetry = { path = "crates/leviath-telemetry" }
+# Core crates. Path + version: the path is used inside the workspace, the
+# version is what lands in published manifests -- `cargo publish` hard-errors
+# on a path dependency without one. A release bump therefore means updating
+# `[workspace.package] version` above AND these version fields together.
+# `leviath-testkit` stays path-only ON PURPOSE: cargo strips path-only
+# dev-dependencies when publishing, which is what keeps the testkit private
+# to the repo while every crate that dev-depends on it still publishes.
+leviath = { path = "crates/leviath", version = "0.1.0" }
+leviath-core = { path = "crates/leviath-core", version = "0.1.0" }
+leviath-agent-client = { path = "crates/leviath-agent-client", version = "0.1.0" }
+leviath-runtime = { path = "crates/leviath-runtime", version = "0.1.0" }
+leviath-providers = { path = "crates/leviath-providers", version = "0.1.0" }
+leviath-mcp = { path = "crates/leviath-mcp", version = "0.1.0" }
+leviath-scripting = { path = "crates/leviath-scripting", version = "0.1.0" }
+leviath-package = { path = "crates/leviath-package", version = "0.1.0" }
+leviath-tools = { path = "crates/leviath-tools", version = "0.1.0" }
+leviath-sys = { path = "crates/leviath-sys", version = "0.1.0" }
+leviath-telemetry = { path = "crates/leviath-telemetry", version = "0.1.0" }
 leviath-testkit = { path = "crates/leviath-testkit" }
 
 # External dependencies

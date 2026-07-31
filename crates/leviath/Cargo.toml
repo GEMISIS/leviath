@@ -1,0 +1,32 @@
+[package]
+name = "leviath"
+description = "Structured agent runtime for LLMs - the batteries-included library facade over the leviath-* crates"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+# This crate is re-exports only, and CI's `guard-facade` job keeps it that
+# way: it is exempt from the 100% coverage gate (there is nothing for llvm-cov
+# to count), so any executable code added here would ship untested. The guard
+# fails the build on anything other than doc comments and `pub use` lines.
+
+[dependencies]
+leviath-core = { workspace = true }
+leviath-runtime = { workspace = true }
+leviath-providers = { workspace = true }
+leviath-tools = { workspace = true }
+leviath-mcp = { workspace = true }
+leviath-scripting = { workspace = true }
+leviath-telemetry = { workspace = true }
+leviath-package = { workspace = true }
+leviath-agent-client = { workspace = true }
+
+[lints]
+workspace = true

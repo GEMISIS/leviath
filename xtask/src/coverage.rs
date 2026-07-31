@@ -238,11 +238,14 @@ pub fn parse_uncovered(json: &serde_json::Value) -> Vec<String> {
     out
 }
 
-/// Parse workspace package names from `cargo metadata` JSON. Two members are
-/// excluded from the gate: `xtask` (the coverage tool itself) and
+/// Parse workspace package names from `cargo metadata` JSON. Three members
+/// are excluded from the gate: `xtask` (the coverage tool itself),
 /// `leviath-testkit` (dev-dependency-only test scaffolding whose every line
 /// executes inside other packages' gated suites - self-gating it at 100%
-/// would force tests-of-test-helpers with no defect-finding power).
+/// would force tests-of-test-helpers with no defect-finding power), and
+/// `leviath` (the re-export-only crates.io facade: it has zero executable
+/// regions, so llvm-cov has nothing to count; CI's `guard-facade` job is what
+/// keeps executable code from ever landing there).
 pub fn parse_workspace_packages(meta: &serde_json::Value) -> Vec<String> {
     let members: std::collections::HashSet<String> = meta["workspace_members"]
         .as_array()
@@ -258,7 +261,7 @@ pub fn parse_workspace_packages(meta: &serde_json::Value) -> Vec<String> {
         .iter()
         .filter(|p| p["id"].as_str().is_some_and(|id| members.contains(id)))
         .filter_map(|p| p["name"].as_str())
-        .filter(|n| *n != "xtask" && *n != "leviath-testkit")
+        .filter(|n| *n != "xtask" && *n != "leviath-testkit" && *n != "leviath")
         .map(str::to_owned)
         .collect()
 }
@@ -444,7 +447,13 @@ mod tests {
     fn run_all_gates_every_package_except_the_ungated_members() {
         let m = MockRunner::new(
             true,
-            meta_with(&["leviath-core", "leviath-cli", "xtask", "leviath-testkit"]),
+            meta_with(&[
+                "leviath-core",
+                "leviath-cli",
+                "xtask",
+                "leviath-testkit",
+                "leviath",
+            ]),
         );
         run_with(&m, CoverageMode::All).unwrap();
         let calls = m.calls.borrow();
@@ -465,6 +474,7 @@ mod tests {
                 .iter()
                 .any(|a| has_pair(a, "--package", "leviath-testkit"))
         );
+        assert!(!calls.iter().any(|a| has_pair(a, "--package", "leviath")));
     }
 
     #[test]
@@ -476,8 +486,14 @@ mod tests {
     // ── parse_workspace_packages ───────────────────────────────────────────────
 
     #[test]
-    fn parse_workspace_packages_excludes_xtask() {
-        let pkgs = parse_workspace_packages(&meta_with(&["leviath-core", "xtask", "leviath-cli"]));
+    fn parse_workspace_packages_excludes_the_ungated_members() {
+        let pkgs = parse_workspace_packages(&meta_with(&[
+            "leviath-core",
+            "xtask",
+            "leviath-cli",
+            "leviath-testkit",
+            "leviath",
+        ]));
         assert_eq!(
             pkgs,
             vec!["leviath-core".to_owned(), "leviath-cli".to_owned()]
