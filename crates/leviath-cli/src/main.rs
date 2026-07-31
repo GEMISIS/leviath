@@ -179,7 +179,7 @@ impl RiskyExecutors for RealExecutors {
 /// the un-unit-testable slivers kept here.
 async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
     let path = args.path.ok_or_else(|| {
-        anyhow::anyhow!("a blueprint path is required (e.g. `lev run agents/coder \"task\"`)")
+        anyhow::anyhow!("a blueprint name or path is required (e.g. `lev run coder -t \"task\"`)")
     })?;
     let task = args
         .task
@@ -371,6 +371,7 @@ fn real_daemon_install() -> anyhow::Result<()> {
     // Re-registering a live service is an error on both platforms; drop any
     // previous registration first so `install` is idempotent.
     let _ = run_supervisor(&unit.deactivate);
+    remove_legacy_services();
     run_supervisor(&unit.activate)?;
     println!("the leviath daemon is now supervised and will restart automatically");
     Ok(())
@@ -382,6 +383,7 @@ fn real_daemon_uninstall() -> anyhow::Result<()> {
     // Deregistration fails when nothing is registered; that's the desired end
     // state either way, so only the file removal is reported.
     let _ = run_supervisor(&unit.deactivate);
+    remove_legacy_services();
     if commands::daemon_service::uninstall(&unit)? {
         println!("removed {}", unit.path.display());
     } else {
@@ -389,6 +391,33 @@ fn real_daemon_uninstall() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// Deregister and delete any service registration left under a previous
+/// label (`daemon_service::LEGACY_SERVICE_LABELS`), so a rename never leaves
+/// a second supervised daemon behind. Best-effort by design: on a machine
+/// that never had the old label, every step is a no-op.
+#[cfg(target_os = "macos")]
+fn remove_legacy_services() {
+    let Some(user_home) = dirs::home_dir() else {
+        return;
+    };
+    let Ok(config_home) = commands::daemon_service::config_home(&user_home) else {
+        return;
+    };
+    for (path, bootout) in
+        commands::daemon_service::legacy_cleanup(&config_home, leviath_sys::current_uid())
+    {
+        let _ = run_supervisor(&bootout);
+        if std::fs::remove_file(&path).is_ok() {
+            println!("removed legacy service file {}", path.display());
+        }
+    }
+}
+
+/// Only macOS ever shipped under a different label; elsewhere there is
+/// nothing legacy to clean up.
+#[cfg(not(target_os = "macos"))]
+fn remove_legacy_services() {}
 
 /// Real `lev daemon`: bind the platform control socket and drive the shared world
 /// until Ctrl-C. Wiring only - the world, host, tool service, and spawner it
