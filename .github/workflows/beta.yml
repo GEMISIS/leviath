@@ -18,6 +18,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Creating the beta release creates a tag at the promoted alpha commit.
+      # When workflow files changed on main since that commit, GitHub requires
+      # `workflows: write` on top of `contents: write` to create a ref whose
+      # workflow tree differs (the 403 says so in
+      # x-accepted-github-permissions: "contents=write;
+      # contents=write,workflows=write"). Without it, promotion only works in
+      # the accidental case where no workflow edits landed in between.
+      workflows: write
     # Handed to the docs job so beta docs render the promoted alpha commit,
     # exactly like the binaries.
     outputs:
