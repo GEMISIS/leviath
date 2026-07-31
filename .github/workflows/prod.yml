@@ -230,6 +230,64 @@ jobs:
 
 
 
+  # crates.io tracks the stable channel: same commit as the binaries, so
+  # `cargo install leviath-cli` means "the current stable line". Alpha and
+  # beta are deliberately NOT published - registry versions are immutable and
+  # nightly prereleases would be permanent clutter that `cargo install`
+  # ignores by default anyway; developers who want the bleeding edge use
+  # `cargo install --git`. Publishing per crate (not --workspace) because
+  # cargo hard-errors on partially-published workspaces, and the per-crate
+  # already-on-crates.io check makes the whole job idempotent: a same-version
+  # re-promotion (the +date tag case) skips every crate cleanly.
+  publish-crates:
+    name: Publish crates.io
+    needs: [deploy, check-beta]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The promoted beta commit, so the crates match the binaries.
+          ref: ${{ needs.check-beta.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - name: Publish unpublished crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          VERSION: ${{ needs.check-beta.outputs.version }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::warning::CARGO_REGISTRY_TOKEN is not set; skipping the crates.io publish."
+            exit 0
+          fi
+          # Dependency order: cargo publish verifies each crate against the
+          # registry, so dependencies must land before their dependents.
+          for c in leviath-core leviath-sys leviath-agent-client leviath-mcp \
+                   leviath-package leviath-scripting leviath-telemetry \
+                   leviath-providers leviath-tools leviath-runtime \
+                   leviath leviath-cli; do
+            if curl -fsS -A "leviath-ci (github.com/GEMISIS/leviath)" \
+                 "https://crates.io/api/v1/crates/$c/$VERSION" >/dev/null 2>&1; then
+              echo "$c@$VERSION already on crates.io, skipping"
+              continue
+            fi
+            # Retry with a delay: crates.io rate-limits bursts of publishes,
+            # and the sparse index takes a moment to serve a just-published
+            # dependency to the next crate's verify build.
+            tries=0
+            until cargo publish -p "$c"; do
+              tries=$((tries + 1))
+              if [ "$tries" -ge 15 ]; then
+                echo "::error::giving up on $c after $tries attempts"
+                exit 1
+              fi
+              echo "publish of $c failed (attempt $tries); retrying in 2m"
+              sleep 120
+            done
+          done
+
   docs:
     name: Publish docs (stable)
     # check-beta is only here for its `sha` output; deploy is the real gate
