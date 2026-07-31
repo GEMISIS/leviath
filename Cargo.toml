@@ -156,6 +156,10 @@ tower-http = { version = "0.7", features = ["cors"] }
 # There was no `[profile.release]` at all, so shipped binaries used cargo's
 # defaults: no LTO, 16 codegen units, full symbol table, and - the one that
 # matters for correctness - arithmetic overflow wrapping silently.
+#
+# A copy of this section lives in crates/leviath-cli/Cargo.toml so that
+# `cargo install leviath-cli` (where that manifest is the root and this one
+# does not exist) builds with the same settings. Keep the two in sync.
 [profile.release]
 # Overflow panics instead of wrapping. This workspace already treats
 # index/arithmetic mistakes as a real class of bug rather than a theoretical one
