@@ -7,9 +7,9 @@ order: 1
 
 # The shared-world daemon
 
-`lev run` doesn't run the agent in your terminal — it hands it to a background **daemon** that
+`lev run` doesn't run the agent in your terminal. It hands it to a background **daemon** that
 hosts every agent in one shared [ECS world](/docs/engine). Runs keep going after your terminal
-closes, and a dozen agents share a single process instead of a process each.
+closes, and hundreds of agents share a single process instead of a process each.
 
 ```mermaid
 flowchart TB
@@ -19,7 +19,7 @@ flowchart TB
     SERVE["lev serve (HTTP/WS)"]
   end
   RUN & DASH & SERVE -->|"control socket<br/>(peer-cred checked)"| DAEMON
-  subgraph DAEMON["Daemon — one process"]
+  subgraph DAEMON["Daemon (one process)"]
     WORLD["Shared ECS world"]
     WORLD --- A1["agent"]
     WORLD --- A2["agent"]
@@ -63,11 +63,11 @@ lev daemon uninstall
 
 > [!TIP]
 > An installed daemon plus [`lev serve`](/docs/api) is all you need to drive Leviath from the
-> browser [console](/app) — no terminal required.
+> browser [console](/app), no terminal required.
 
 ## Control surface
 
-The daemon is reached over a local **control socket** — a Unix socket / Windows pipe guarded by a
+The daemon is reached over a local **control socket**: a Unix socket / Windows pipe guarded by a
 peer-credential check, *not* a TCP port, so nothing on the network can reach it. The CLI verbs that
 talk to it:
 
@@ -81,7 +81,7 @@ talk to it:
 
 > [!NOTE]
 > To drive the daemon over the network instead of the local socket, run the
-> [HTTP API server](/docs/api) — it's a thin REST + WebSocket gateway in front of this same daemon,
+> [HTTP API server](/docs/api). It's a thin REST + WebSocket gateway in front of this same daemon,
 > with a mandatory auth token.
 
 ## Observability

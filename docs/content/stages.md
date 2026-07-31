@@ -48,7 +48,7 @@ condition = "stuck"          # a runtime condition, not the agent's choice
 ## Stuck detection
 
 `stuck` escapes a stage that is making no progress. Crucially, stuckness is **measured, not
-self-reported** — an agent can't loop forever insisting it's almost done:
+self-reported**. An agent can't loop forever insisting it's almost done:
 
 ```toml
 [stages.implement.transitions.reassess]
@@ -63,5 +63,5 @@ Any subset applies; the first threshold to trip fires the edge.
 
 > [!TIP]
 > When a `stuck` (or `error`) edge fires, the runtime writes *why* into the target stage's
-> [context](/docs/context) — so the recovery stage starts out knowing what went wrong instead of
+> [context](/docs/context), so the recovery stage starts out knowing what went wrong instead of
 > rediscovering it.

@@ -7,14 +7,14 @@ order: 7
 
 # Editor integration (Agent Client Protocol)
 
-`lev agent-client` serves a Leviath agent over the **Agent Client Protocol** — JSON-RPC 2.0,
-newline-delimited, spoken over **stdio** — so an editor host can drive a headless [agent](/docs/agents)
+`lev agent-client` serves a Leviath agent over the **Agent Client Protocol** (JSON-RPC 2.0,
+newline-delimited, spoken over **stdio**) so an editor host can drive a headless [agent](/docs/agents)
 as a child process instead of you steering it from a terminal. It is a thin front end over the
 shared-world [daemon](/docs/daemon): the host talks protocol, and the command translates that into
 daemon runs and streams the output back.
 
 > [!NOTE]
-> "ACP" is deliberately never used unqualified in Leviath — the acronym is claimed by two unrelated
+> "ACP" is deliberately never used unqualified in Leviath. The acronym is claimed by two unrelated
 > protocols. This command implements the Agent **Client** Protocol (JSON-RPC over stdio). It does
 > **not** implement the Agent *Communication* Protocol (a REST + SSE API from the BeeAI project).
 
@@ -24,11 +24,11 @@ The Agent Client Protocol lets an editor host launch an agent as a subprocess an
 process's stdin/stdout. Messages are framed as **one compact JSON object per line** (newline-delimited
 JSON-RPC 2.0), with a 64 KiB ceiling per frame. The handshake and turn cycle are:
 
-- `initialize` — capability exchange; the protocol version is `1`.
-- `session/new` — open a session (carries the working directory).
-- `session/prompt` — send a prompt turn; spawns (or, on later prompts, messages) an agent in the daemon.
-- `session/update` — notifications streaming the agent's live output back to the host.
-- `session/cancel` — cancel the in-flight turn.
+- `initialize`: capability exchange; the protocol version is `1`.
+- `session/new`: open a session (carries the working directory).
+- `session/prompt`: send a prompt turn; spawns (or, on later prompts, messages) an agent in the daemon.
+- `session/update`: notifications streaming the agent's live output back to the host.
+- `session/cancel`: cancel the in-flight turn.
 
 The hosts named in the Leviath source are **Zed** and **Gas City**.
 
@@ -67,7 +67,7 @@ Flags (run `lev agent-client --help` for the authoritative list):
 | `--yolo` | Approve every tool call without prompting. Recommended when the host does not implement `session/request_permission` (e.g. Gas City). |
 | `--allow <tool>` | Allow a tool outright. Repeatable. |
 | `--max-depth <n>` | Override the blueprint's max sub-agent tree depth. |
-| `--no-seed-commands` | Refuse the blueprint's `seed = { command = "..." }` regions, which run a shell command at spawn — before the first inference, and so before any approval prompt. |
+| `--no-seed-commands` | Refuse the blueprint's `seed = { command = "..." }` regions, which run a shell command at spawn, before the first inference, and so before any approval prompt. |
 
 ## Permission handling
 
@@ -78,6 +78,6 @@ approvals are surfaced as output and the run **parks**. Use `--yolo` (or scoped 
 unattended against such a host.
 
 > [!NOTE]
-> Editor integration is a thin front end over the daemon, exactly like `lev run` and `lev serve` — it
+> Editor integration is a thin front end over the daemon, exactly like `lev run` and `lev serve`. It
 > owns no agent world of its own. See the [daemon](/docs/daemon) for what actually hosts the run, and
 > the [CLI reference](/docs/cli) for the rest of the `lev` commands.

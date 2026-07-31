@@ -7,94 +7,274 @@ order: 2
 
 # Agent catalog
 
-Leviath ships with ten pre-built agents. Each is a multi-stage [blueprint](/docs/agents) you can
-run today — give one a task and the [daemon](/docs/daemon) hosts the run:
+Leviath ships with ten pre-built agents. They live in `agents/`, one directory per agent, each
+holding an `agent.leviath` [blueprint](/docs/agents). Run any of them by name:
 
 ```bash
 lev run coder --task "Build a CLI that converts CSV to JSON"
 ```
 
-Every one is also a starting point: copy it, or `lev create my-agent` to scaffold your own and
-tune the stages, per-stage models, and context regions. The rest of this page is a tour of what
-each agent does and when to reach for it.
+This page is also a set of worked examples. Each section shows the agent's real stages and how
+they route, so you can copy the patterns into your own blueprint (`lev create my-agent` scaffolds
+one, then read [Agents](/docs/agents)). The diagrams show the main path; almost every stage also
+carries an `error` edge into a recovery stage, drawn once per agent to keep things readable.
 
 > [!TIP]
-> Not sure which to pick? Match the *shape* of the work: a codebase change (Coding), a question
-> to answer from sources (Research), or a recurring chore like logs, briefings, or drafts
-> (Utility).
+> Pick by the shape of the work: a codebase change (the coding agents), a question to answer from
+> sources (the research agents), or a recurring chore like logs, briefings, or drafts.
 
-## Coding
+## software-engineer
 
-Agents that operate on a codebase. All four orient themselves in the project before acting and
-carry [stuck detection](/docs/stages) plus error-recovery edges.
+Plan-then-implement with a human sign-off before any code is written. Reach for it when you want
+to approve the approach first.
 
-| Agent | What it does |
-| --- | --- |
-| `software-engineer` | Plan-then-implement, with a human-approved plan before any code is written. Mirrors a discover → plan → **approve** → code → review workflow. Use when you want to sign off on the approach first. |
-| `coder` | Fully autonomous coding: discover → analyze → (optionally prototype) → implement → review, with continuous verification. Use when you want it to just make the change. |
-| `reviewer` | Code review only — a fast scan pass, then a deep review of correctness, security, and architecture, ending in a ranked, actionable report. Use to vet a PR or diff. |
-| `parallel-fixer` | Fixes failing tests in parallel — one [sub-agent](/docs/sub-agents) worker per failure, then merge and re-run until the suite is green. Use for a broad "make the tests pass" sweep. |
+```mermaid
+flowchart TD
+    discover --> plan
+    plan -->|revise| plan
+    plan --> prototype
+    plan --> implement
+    prototype --> implement
+    prototype -->|stuck| reassess
+    implement --> review
+    review -->|issues| implement
+    implement -->|stuck| reassess
+    reassess --> implement
+    implement -->|error| error_recovery
+    error_recovery --> implement
+```
 
-**`software-engineer`** — stages: `discover`, `plan` (an approval checkpoint), `prototype`,
-`implement`, `review`, plus `reassess` and `error_recovery`. The `prototype` stage spikes the
-riskiest assumption before executing the approved plan.
+```bash
+lev run software-engineer --task "Add rate limiting to the public API"
+```
 
-**`coder`** — the same shape without the human plan gate: `discover`, `analyze`, elective
-`prototype`, `implement`, `review`, `reassess`, `error_recovery`. Reassess is reached only when a
-`stuck` edge fires; error_recovery only via error edges.
+The `plan` stage runs in `interactive_points` mode, so it pauses for your approval before the flow
+continues. That is the [human-in-the-loop](/docs/interaction) pattern. `discover` and `plan` run on
+Sonnet; `implement`, `review`, and `reassess` step up to Opus.
 
-**`parallel-fixer`** — a fan-out workflow: `discover` (how the project runs its tests) → `validate`
-→ `parallel_fix` (fan out `fix_worker` per failure) → `merge_fixes` → `verify`, which decides
-between done and another fix round.
+## coder
 
-## Research
+The same discover, prototype, implement, review shape without the human gate. Reach for it when
+you just want the change made.
 
-Agents that gather from sources, synthesize, and write it up. Pick by breadth vs. depth.
+```mermaid
+flowchart TD
+    discover --> analyze
+    analyze --> implement
+    analyze --> prototype
+    prototype --> implement
+    prototype -->|stuck| reassess
+    implement --> review
+    review -->|issues| implement
+    implement -->|stuck| reassess
+    reassess --> implement
+    implement -->|error| error_recovery
+    error_recovery --> implement
+```
 
-| Agent | What it does |
-| --- | --- |
-| `researcher` | General-purpose research: gather, analyze, summarize, with a gather↔analyze refinement loop. Use for a quick, focused answer. |
-| `wide-researcher` | Broad landscape survey across many sub-topics — cast a wide net, compare approaches, deep-dive the interesting threads, and produce an overview with recommendations. Use to map a whole space. |
-| `deep-researcher` | Thorough single-topic investigation — follows citation chains, cross-checks claims, and produces a structured, cited report. Use when rigor and sources matter. |
+```bash
+lev run coder --task "Fix the flaky retry logic in the uploader"
+```
 
-**`researcher`** — stages: `gather`, `analyze`, `summarize`, `error_recovery`.
+`analyze` chooses between a direct `implement` and a `prototype` spike when the approach is
+uncertain. `reassess` is reached only on a `stuck` edge. Cheap model early, Opus for the
+implement and review passes, so it is a [multi-model](/docs/stages) blueprint.
 
-**`wide-researcher`** — stages: `survey`, `compare`, `deep_dive`, `summarize`, `error_recovery`.
-The survey casts wide before narrowing.
+## reviewer
 
-**`deep-researcher`** — stages: `gather`, `analyze`, `follow_citations`, `synthesize`,
-`error_recovery`; analysis loops back to pull and read specific cited sources.
+Review only: a fast scan pass, then a deeper look at correctness, security, and architecture,
+ending in a ranked report. Reach for it to vet a diff or PR.
 
-> [!NOTE]
-> `wide-researcher` runs its sub-topics as parallel workers — the same [fan-out](/docs/sub-agents)
-> mechanism `parallel-fixer` uses for tests.
+```mermaid
+flowchart LR
+    discover --> scan
+    scan --> deep_review
+    deep_review --> report
+    deep_review -->|error| error_handler
+    error_handler --> deep_review
+```
 
-## Utility
+```bash
+lev run reviewer --task "Review the changes on the feature/auth branch"
+```
 
-Everyday agents for logs, briefings, and writing.
+The two-pass split is deliberate: `scan` runs on Sonnet to flag areas, then `deep_review`
+escalates to Opus to scrutinize only what was flagged, which keeps the expensive model focused.
 
-| Agent | What it does |
-| --- | --- |
-| `log-analyzer` | Analyzes log files for anomalies, trends, and error patterns via a scripted analyze⇄script loop, keeping a severity-ranked findings index. Use to triage a noisy log. |
-| `daily-briefer` | A morning summary agent — gathers from local and web sources, ranks items into a priorities index, and delivers a concise briefing. Use for a recurring standup-style digest. |
-| `writing-assistant` | Research-backed writing from topic to polished draft, with an interactive outline checkpoint and a draft⇄edit loop plus a final proofread. Use to produce a sourced piece. |
+## parallel-fixer
 
-**`log-analyzer`** — stages: `ingest`, `analyze`, `script` (write and run parsing/aggregation
-scripts), `report`, `error_recovery`.
+Fixes failing tests in parallel, one [sub-agent](/docs/sub-agents) worker per failure, then merges
+and re-runs until the suite is green. Reach for it for a broad "make the tests pass" sweep.
 
-**`daily-briefer`** — stages: `collect`, `prioritize`, `brief`, `error_recovery`.
+```mermaid
+flowchart TD
+    discover --> validate
+    validate --> parallel_fix
+    parallel_fix -->|fan out| fix_worker
+    fix_worker --> merge_fixes
+    merge_fixes --> verify
+    verify -->|failures remain| validate
+    verify --> complete["Suite green"]
+```
 
-**`writing-assistant`** — stages: `research`, `outline` (an approval checkpoint), `draft`, `edit`,
-`proofread`, `error_recovery`.
+```bash
+lev run parallel-fixer --task "Get the test suite passing"
+```
+
+`parallel_fix` runs in `fan_out` mode: it splits the diagnosed failures into work items (up to five
+workers), each `fix_worker` touches only its own source file, and `merge_stage` reconciles the
+results. See [Sub-agents and fan-out](/docs/sub-agents). `verify` decides between done and another
+round back through `validate`.
+
+## researcher
+
+General-purpose research: gather, analyze, summarize, with a refinement loop. Reach for it for a
+quick, focused answer.
+
+```mermaid
+flowchart LR
+    gather --> analyze
+    analyze -->|need more| gather
+    analyze --> summarize
+    analyze -->|error| error_recovery
+    error_recovery --> analyze
+```
+
+```bash
+lev run researcher --task "What changed in the HTTP/3 spec this year?"
+```
+
+The `analyze` stage loops back to `gather` when a specific sub-topic is thin, then moves to
+`summarize` once the picture holds. `analyze` runs on Opus; gather and summarize stay cheap, the
+[multi-model](/docs/stages) split again.
+
+## wide-researcher
+
+Broad landscape survey: cast a wide net, compare approaches, deep-read the interesting threads,
+then write an overview with recommendations. Reach for it to map a whole space.
+
+```mermaid
+flowchart TD
+    survey --> compare
+    compare -->|gaps| survey
+    compare --> deep_dive
+    deep_dive --> compare
+    compare --> summarize
+    compare -->|error| error_recovery
+    error_recovery --> compare
+```
+
+```bash
+lev run wide-researcher --task "Survey approaches to vector database indexing"
+```
+
+`compare` is the hub: it can widen coverage (back to `survey`), pull one thread for a focused
+`deep_dive`, or finish. The breadth here comes from the survey-then-compare loop, not fan-out.
+
+## deep-researcher
+
+Thorough single-topic investigation: follows citation chains, cross-checks claims, and produces a
+structured, cited report. Reach for it when rigor and sources matter.
+
+```mermaid
+flowchart TD
+    gather --> analyze
+    analyze -->|gaps| gather
+    analyze --> follow_citations
+    follow_citations --> analyze
+    analyze --> synthesize
+    analyze -->|error| error_recovery
+    error_recovery --> analyze
+```
+
+```bash
+lev run deep-researcher --task "Investigate the evidence for X causing Y"
+```
+
+`follow_citations` is a dedicated targeted-read stage: `analyze` flags a specific cited source, the
+stage pulls and reads it, then hands control back. Evidence accumulates in
+[context regions](/docs/context) across the loop before `synthesize` writes the report on Opus.
+
+## log-analyzer
+
+Analyzes log files for anomalies, trends, and error patterns through a scripted analyze and script
+loop, keeping a severity-ranked findings index. Reach for it to triage a noisy log.
+
+```mermaid
+flowchart LR
+    ingest --> analyze
+    analyze --> script
+    script -->|refine| script
+    script --> analyze
+    analyze --> report
+    analyze -->|error| error_recovery
+    error_recovery --> analyze
+```
+
+```bash
+lev run log-analyzer --task "Find the error patterns in /var/log/app.log"
+```
+
+`analyze` (on Opus) hands off to `script` to write and run parsing or aggregation code, which can
+refine itself before returning results. Findings persist in a [context region](/docs/context)
+across passes so the report ranks them by severity.
+
+## daily-briefer
+
+A morning digest: gathers from local and web sources, ranks items into a priorities index, and
+delivers a concise briefing. Reach for it for a recurring standup-style summary.
+
+```mermaid
+flowchart LR
+    collect --> prioritize
+    prioritize -->|source empty| collect
+    prioritize --> brief
+    prioritize -->|error| error_recovery
+    error_recovery --> prioritize
+```
+
+```bash
+lev run daily-briefer --task "Brief me on overnight activity across my repos and inbox"
+```
+
+`prioritize` (on Opus) can send the flow back to `collect` when a critical source came back empty,
+so the briefing is not built on a gap. The ranked items live in a [context region](/docs/context).
+
+## writing-assistant
+
+Research-backed writing from topic to polished draft, with an interactive outline checkpoint and a
+draft, edit, proofread loop. Reach for it to produce a sourced piece.
+
+```mermaid
+flowchart TD
+    research --> outline
+    outline -->|revise| outline
+    outline --> draft
+    outline -->|more material| research
+    draft --> edit
+    edit -->|structural| draft
+    edit --> proofread
+    proofread -->|substantive| edit
+    draft -->|error| error_recovery
+    error_recovery --> draft
+```
+
+```bash
+lev run writing-assistant --task "Write a 1500-word explainer on consistent hashing"
+```
+
+`outline` runs in `interactive_points` mode, so it stops for your approval before drafting starts,
+the [human-in-the-loop](/docs/interaction) checkpoint. From there `edit` and `proofread` can each
+kick the piece back a stage when they hit a structural or substantive problem.
 
 ## Running one
 
-Any agent runs the same way — name it and hand it a task:
+Every agent runs the same way, name it and hand it a task:
 
 ```bash
 lev run deep-researcher --task "Survey the state of solid-state batteries"
 ```
 
-To go further, read how blueprints are built in [Agents](/docs/agents), how the stage graph
-routes and recovers in [Multi-stage workflows](/docs/stages), and how the parallel agents split
-work in [Sub-agents & fan-out](/docs/sub-agents).
+To build your own, read how blueprints are structured in [Agents](/docs/agents), how the stage
+graph routes and recovers in [Multi-stage workflows](/docs/stages), and how the parallel agents
+split work in [Sub-agents and fan-out](/docs/sub-agents).

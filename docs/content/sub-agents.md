@@ -8,7 +8,7 @@ order: 6
 # Sub-agents and fan-out
 
 Agents spawn children with different blueprints, all in the same process and over one shared
-inference driver — no new OS processes, no IPC. Sub-agents are just more entities in the
+inference driver, with no new OS processes and no IPC. Sub-agents are just more entities in the
 [ECS world](/docs/engine).
 
 ## Fan-out
@@ -18,7 +18,7 @@ concurrently, bounded by `max_workers`, then merges their results back into the 
 
 ```mermaid
 flowchart TB
-  P["Parent — fan-out stage"] --> Q{"split_prompt<br/>→ work items"}
+  P["Parent fan-out stage"] --> Q{"split_prompt<br/>→ work items"}
   Q --> W1["worker 1"]
   Q --> W2["worker 2"]
   Q --> W3["worker 3"]
@@ -35,13 +35,13 @@ max_workers  = 8            # concurrency bound
 on_worker_failure = "continue"
 ```
 
-This is how the `parallel-fixer` agent fixes many failing tests at once — one worker per failure —
+This is how the `parallel-fixer` agent fixes many failing tests at once, one worker per failure,
 and how a wide research sweep runs many sub-topics in parallel.
 
 ## Human-in-the-loop, at any depth
 
-Any sub-agent, at any depth, can ask *you* a question directly — no fire-and-forget, no routing
-through the parent:
+Any sub-agent, at any depth, can ask *you* a question directly, with no fire-and-forget and no
+routing through the parent:
 
 ```mermaid
 sequenceDiagram

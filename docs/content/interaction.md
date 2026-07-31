@@ -10,14 +10,14 @@ order: 7
 A run doesn't have to be fully autonomous. An agent can raise a question and block until someone
 answers it, a stage can declare an approval gate the framework always fires, and you can inject a
 message into a running conversation at any time. This page covers how a person supervises and
-steers a live agent — from the [dashboard](/docs/dashboard), the browser [console](/app), the
+steers a live agent, from the [dashboard](/docs/dashboard), the browser [console](/app), the
 CLI, or the [HTTP API](/docs/api).
 
 ```mermaid
 sequenceDiagram
   participant A as Agent
   participant H as Human
-  A->>H: "ask_user_confirm — Delete the branch?"
+  A->>H: "ask_user_confirm: Delete the branch?"
   Note over A: run pauses, question is open
   H-->>A: "lev respond <id> --approve"
   A->>A: "answer injected, run resumes"
@@ -44,22 +44,22 @@ alongside the prompt.
 Mid-reasoning, a model may call one of these tools on its own judgment. The run pauses on the tool
 call until the answer comes back, then continues with it:
 
-- `ask_user_text` — a free-text question. Returns the user's answer (or "User provided no answer.").
-- `ask_user_choice` — a multiple-choice question (requires at least 2 `options`).
-- `ask_user_confirm` — a yes/no confirmation.
-- `edit_document` — hands the user a document (the tool's `content`) to edit; returns the edited text.
-- `present_for_review` — shows a markdown document (`title` + `markdown`) for review and collects optional feedback.
+- `ask_user_text`: a free-text question. Returns the user's answer (or "User provided no answer.").
+- `ask_user_choice`: a multiple-choice question (requires at least 2 `options`).
+- `ask_user_confirm`: a yes/no confirmation.
+- `edit_document`: hands the user a document (the tool's `content`) to edit; returns the edited text.
+- `present_for_review`: shows a markdown document (`title` + `markdown`) for review and collects optional feedback.
 
 > [!NOTE]
 > Under an unattended run (`--yolo`) nobody is watching, so these answer themselves rather than
 > parking the run forever: a confirmation is approved, an edit submits the document unchanged, a
 > review is acknowledged, and a free-text or choice question is told no one answered so the model
-> decides for itself — a choice is never picked blind.
+> decides for itself; a choice is never picked blind.
 
 ## Tool approval
 
 Instead of the model asking, you can require approval for a tool before it runs. Set a tool's
-per-stage (or agent-level) permission to `ask` — the values are `allow`, `ask`, and `deny`:
+per-stage (or agent-level) permission to `ask`. The values are `allow`, `ask`, and `deny`:
 
 ```toml
 [tool_permissions]
@@ -71,9 +71,9 @@ bash       = "ask"
 An `ask` gate raises a `tool_approval` prompt naming the tool and its telling argument (the shell
 command for `bash`/`shell`, the path for the file tools), with three options:
 
-- **Allow once** — permit just this one call.
-- **Allow for this session** — permit every call to this tool for the rest of the run (`session` scope).
-- **Deny** — reject the call.
+- **Allow once**: permit just this one call.
+- **Allow for this session**: permit every call to this tool for the rest of the run (`session` scope).
+- **Deny**: reject the call.
 
 The same prompt backs the [security](/docs/security) taint gate: an outbound tool that would carry
 sensitive data above its clearance is blocked and surfaced as a tool-approval, where **Allow for
@@ -102,22 +102,22 @@ directives = { "Revise" = "Call ask_user_text to find out what to change, then r
 document_region = "plan"
 ```
 
-The selected option is routed deterministically (in code) by which list it falls in — matched
+The selected option is routed deterministically (in code) by which list it falls in, matched
 exactly first, then with dash/whitespace normalization:
 
-- **Approve** — any plain option not listed below. Completes the point; when every point is
+- **Approve**: any plain option not listed below. Completes the point; when every point is
   satisfied the stage transitions.
-- **Directive** (a key in `directives`) — injects the mapped directive text into the conversation
+- **Directive** (a key in `directives`): injects the mapped directive text into the conversation
   and **re-runs inference in-stage**, then re-presents the point. Use it to revise.
-- **Edit** (an option in `edit_options`) — opens the stage's most recent output in an editable
+- **Edit** (an option in `edit_options`): opens the stage's most recent output in an editable
   field; the edited text is injected and adopted as the authoritative document, and the point is
   re-presented.
-- **Abort** (an option in `abort_options`) — cancels the run immediately, with no further inference
+- **Abort** (an option in `abort_options`): cancels the run immediately, with no further inference
   or transition.
 
 `document_region` names a pinned [context](/docs/context) region (e.g. `"plan"`) that holds the
-point's authoritative document. Each time the point is presented, the current text — the produced
-output, or the user's direct edit — replaces that region, so revisions and downstream stages build
+point's authoritative document. Each time the point is presented, the current text (the produced
+output, or the user's direct edit) replaces that region, so revisions and downstream stages build
 on the current version rather than regenerating from the task.
 
 > [!WARNING]
@@ -144,8 +144,8 @@ accepts_messages = false   # hold messages until a later stage that accepts them
 ```
 
 > [!TIP]
-> A message is delivered to at most one running agent by id. If nothing accepts it — no such live
-> agent — `lev msg` reports `no agent accepted the message`.
+> A message is delivered to at most one running agent by id. If nothing accepts it (no such live
+> agent), `lev msg` reports `no agent accepted the message`.
 
 ## Answering questions
 
@@ -163,7 +163,7 @@ lev respond <request-id> --deny          # reject
 
 You don't have to use the CLI. The same open questions can be answered interactively from the
 [dashboard](/docs/dashboard) (press `i`), from the browser [console](/app), or over the
-[API](/docs/api) via `GET/POST /api/agents/{id}/interaction` — read the pending question, then post
+[API](/docs/api) via `GET/POST /api/agents/{id}/interaction`: read the pending question, then post
 the answer.
 
 > [!NOTE]
