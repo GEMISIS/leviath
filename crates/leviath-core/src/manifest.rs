@@ -3179,7 +3179,8 @@ mode = "autonomous"
     // LLM-consultation path in resolve_transition / prompt_llm_transition).
     #[test]
     fn software_engineer_plan_stage_branches_on_choice() {
-        let manifest_content = include_str!("../../../agents/software-engineer/agent.leviath");
+        let manifest_content =
+            include_str!("../../leviath-cli/agents/software-engineer/agent.leviath");
         let bp = parse_manifest(manifest_content).unwrap();
         let plan = bp.find_stage("plan").unwrap();
 
@@ -3218,8 +3219,8 @@ mode = "autonomous"
     #[test]
     fn shipped_coding_agents_gate_every_non_error_implement_edge() {
         for manifest_content in [
-            include_str!("../../../agents/coder/agent.leviath"),
-            include_str!("../../../agents/software-engineer/agent.leviath"),
+            include_str!("../../leviath-cli/agents/coder/agent.leviath"),
+            include_str!("../../leviath-cli/agents/software-engineer/agent.leviath"),
         ] {
             let bp = parse_manifest(manifest_content).unwrap();
             bp.validate().unwrap();
@@ -3274,7 +3275,8 @@ mode = "autonomous"
 
     #[test]
     fn software_engineer_plan_routes_errors_and_cannot_end_the_run() {
-        let manifest_content = include_str!("../../../agents/software-engineer/agent.leviath");
+        let manifest_content =
+            include_str!("../../leviath-cli/agents/software-engineer/agent.leviath");
         let bp = parse_manifest(manifest_content).unwrap();
         let plan = bp.find_stage("plan").unwrap();
         let transitions = plan.transitions.as_ref().unwrap();
@@ -3305,7 +3307,8 @@ mode = "autonomous"
 
     #[test]
     fn software_engineer_plan_approval_option_routing() {
-        let manifest_content = include_str!("../../../agents/software-engineer/agent.leviath");
+        let manifest_content =
+            include_str!("../../leviath-cli/agents/software-engineer/agent.leviath");
         let bp = parse_manifest(manifest_content).unwrap();
         let plan = bp.find_stage("plan").unwrap();
         let points = unwrap_interactive_points(&plan.mode);
@@ -3342,7 +3345,8 @@ mode = "autonomous"
 
     #[test]
     fn software_engineer_review_stage_can_complete_and_routes_errors() {
-        let manifest_content = include_str!("../../../agents/software-engineer/agent.leviath");
+        let manifest_content =
+            include_str!("../../leviath-cli/agents/software-engineer/agent.leviath");
         let bp = parse_manifest(manifest_content).unwrap();
         let review = bp.find_stage("review").unwrap();
 
@@ -3365,7 +3369,8 @@ mode = "autonomous"
 
     #[test]
     fn software_engineer_blueprint_passes_full_validation() {
-        let manifest_content = include_str!("../../../agents/software-engineer/agent.leviath");
+        let manifest_content =
+            include_str!("../../leviath-cli/agents/software-engineer/agent.leviath");
         let bp = parse_manifest(manifest_content).unwrap();
         bp.validate()
             .expect("shipped software-engineer blueprint must pass Blueprint::validate()");
@@ -3377,7 +3382,8 @@ mode = "autonomous"
         // be able to decide for themselves, mid-reasoning, that they need
         // human input - via the ask_user_* tools, not just the forced
         // interaction_points.
-        let manifest_content = include_str!("../../../agents/software-engineer/agent.leviath");
+        let manifest_content =
+            include_str!("../../leviath-cli/agents/software-engineer/agent.leviath");
         let bp = parse_manifest(manifest_content).unwrap();
 
         let plan = bp.find_stage("plan").unwrap();

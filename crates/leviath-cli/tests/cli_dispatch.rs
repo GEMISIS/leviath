@@ -19,14 +19,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Get the workspace root (assumes tests run from the leviath-cli crate).
-fn workspace_root() -> PathBuf {
+/// Root of this crate, which holds the bundled `agents/` directory.
+fn crate_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf()
 }
 
 /// Build a `Command` for the real `lev` binary with a fully isolated
@@ -137,7 +132,7 @@ fn models_list_subcommand_dispatches_and_exits_zero() {
 #[test]
 fn validate_subcommand_dispatches_and_exits_zero_for_valid_manifest() {
     let tmp = tempfile::tempdir().unwrap();
-    let manifest = workspace_root()
+    let manifest = crate_root()
         .join("agents")
         .join("coder")
         .join("agent.leviath");
@@ -222,7 +217,7 @@ fn setup_non_interactive_subcommand_dispatches_and_exits_zero() {
 #[test]
 fn add_subcommand_installs_from_local_directory_and_exits_zero() {
     let tmp = tempfile::tempdir().unwrap();
-    let coder_agent = workspace_root().join("agents").join("coder");
+    let coder_agent = crate_root().join("agents").join("coder");
     assert!(
         coder_agent.exists(),
         "fixture agent missing: {coder_agent:?}"
@@ -257,7 +252,7 @@ fn add_subcommand_installs_from_local_directory_and_exits_zero() {
 #[test]
 fn remove_subcommand_removes_installed_agent_and_exits_zero() {
     let tmp = tempfile::tempdir().unwrap();
-    let coder_agent = workspace_root().join("agents").join("coder");
+    let coder_agent = crate_root().join("agents").join("coder");
 
     let add_output = lev_command(tmp.path())
         .args(["add", coder_agent.to_str().unwrap()])
@@ -294,7 +289,7 @@ fn remove_subcommand_removes_installed_agent_and_exits_zero() {
 #[test]
 fn test_subcommand_dry_run_dispatches_and_exits_zero() {
     let tmp = tempfile::tempdir().unwrap();
-    let coder_agent = workspace_root().join("agents").join("coder");
+    let coder_agent = crate_root().join("agents").join("coder");
 
     let output = lev_command(tmp.path())
         .args(["test", coder_agent.to_str().unwrap(), "--dry-run"])
@@ -315,7 +310,7 @@ fn test_subcommand_dry_run_dispatches_and_exits_zero() {
 #[test]
 fn pack_subcommand_dispatches_and_exits_zero() {
     let tmp = tempfile::tempdir().unwrap();
-    let coder_agent = workspace_root().join("agents").join("coder");
+    let coder_agent = crate_root().join("agents").join("coder");
     let output_bundle = tmp.path().join("out.leviath-bundle");
 
     let output = lev_command(tmp.path())
