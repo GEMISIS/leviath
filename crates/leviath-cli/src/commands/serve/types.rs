@@ -361,10 +361,40 @@ pub(super) struct RedactedConfig {
     pub(super) default_provider: String,
     pub(super) has_anthropic_key: bool,
     pub(super) has_openai_key: bool,
+    pub(super) has_google_key: bool,
     pub(super) has_openrouter_key: bool,
     pub(super) ollama_base_url: Option<String>,
     pub(super) agent_paths: Vec<PathBuf>,
     pub(super) mcp_server_count: usize,
+}
+
+/// Body of `PUT /api/config` (admin-only). Every field is optional; a present
+/// field is written, an absent one is left untouched. Mirrors what `lev setup`
+/// writes, so a newcomer can configure providers entirely from the browser.
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct WriteConfigReq {
+    pub(super) default_provider: Option<String>,
+    pub(super) default_model: Option<String>,
+    pub(super) anthropic_key: Option<String>,
+    pub(super) openai_key: Option<String>,
+    pub(super) google_key: Option<String>,
+    pub(super) openrouter_key: Option<String>,
+    pub(super) ollama_base_url: Option<String>,
+}
+
+/// Body of `POST /api/config/validate` — a format-only key check (no network,
+/// no persistence), mirroring the `lev setup` wizard's inline validation.
+#[derive(Debug, Deserialize)]
+pub(super) struct ValidateKeyReq {
+    pub(super) provider: String,
+    pub(super) key: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct ValidateKeyResp {
+    pub(super) valid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) message: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -507,6 +537,7 @@ mod tests {
             default_provider: "anthropic".to_string(),
             has_anthropic_key: true,
             has_openai_key: false,
+            has_google_key: false,
             has_openrouter_key: false,
             ollama_base_url: None,
             agent_paths: vec![],
