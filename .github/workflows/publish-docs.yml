@@ -1,0 +1,66 @@
+name: Publish docs
+
+# Renders docs/content to themed, crawlable HTML with leviath.dev's docs-ssg and
+# publishes it to the site's S3 docs/<channel>/ prefix. Called by the release
+# workflows (alpha/beta/prod) so a new build refreshes docs with no site rebuild.
+on:
+  workflow_call:
+    inputs:
+      channel:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: alpha | beta | stable
+        required: true
+        default: alpha
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Leviath (docs content)
+        uses: actions/checkout@v7
+
+      - name: Checkout leviath.dev (docs-ssg)
+        uses: actions/checkout@v7
+        with:
+          repository: Sun-Forge-AI/leviath.dev
+          path: site
+          token: ${{ secrets.SITE_REPO_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Build the docs renderer
+        working-directory: site
+        run: |
+          npm ci
+          npm run build --workspace @leviath-dev/docs-ssg
+
+      - name: Render docs
+        run: node site/packages/docs-ssg/dist/cli.mjs docs/content docs-out "${{ inputs.channel }}"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.DOCS_PUBLISH_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Publish to S3
+        run: aws s3 sync docs-out "s3://${{ vars.SITE_BUCKET }}/docs/${{ inputs.channel }}" --delete
+
+      - name: Invalidate CloudFront
+        run: >
+          aws cloudfront create-invalidation
+          --distribution-id "${{ vars.CF_DISTRIBUTION_ID }}"
+          --paths "/docs/${{ inputs.channel }}/*"
