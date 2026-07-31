@@ -44,11 +44,14 @@ curl -fsSL https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/inst
 irm https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/install.ps1 | iex
 ```
 
-**From source** (any platform, needs [Rust](https://rustup.rs/)):
+**From crates.io** (any platform, needs [Rust](https://rustup.rs/)):
 
 ```bash
-cargo install --git https://github.com/Sun-Forge-AI/leviath.git --bin lev
+cargo install leviath-cli                # released version
+cargo install --git https://github.com/Sun-Forge-AI/leviath.git --bin lev   # latest development build
 ```
+
+To embed the runtime in your own application instead, add the [`leviath`](https://crates.io/crates/leviath) crate as a dependency.
 
 ## Configure a provider
 
