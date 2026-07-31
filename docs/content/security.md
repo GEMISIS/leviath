@@ -1,7 +1,8 @@
 ---
 title: Security & sandboxing
-group: Guides
-order: 4
+group: Concepts
+group_order: 2
+order: 7
 ---
 
 # Security: sandboxed execution and taint tracking
@@ -29,17 +30,31 @@ kind = "none"             # run discovery on the host…
   `network = false`) connectivity. It shares the host filesystem, so reach for a container when you
   want real containment.
 
-An installed agent can *tighten* its sandbox but never turn one off.
+> [!IMPORTANT]
+> An *installed* agent can only ever **tighten** its sandbox — it can raise the walls, never lower
+> them. A blueprint you install can't quietly turn isolation off.
 
 ## Taint tracking (experimental)
 
-A deterministic sensitivity model — **Public / Internal / Private** — tags every context region,
-set by the runtime and never by model output. Any tool that can carry bytes off the machine is
-gated: if it carries data above its clearance, the call is blocked before it fires, or surfaced as
-an *allow once / allow for session / deny* prompt. Taint recovers as entries evict, and unrecognized
-tools fail closed.
+A deterministic sensitivity model — **Public / Internal / Private** — tags every
+[context region](/docs/context), set by the runtime and never by model output. Any tool that can
+carry bytes off the machine is gated: before it fires, the runtime checks the tool's clearance
+against the sensitivity of the data in play.
 
-Configure with a `[security]` block, layer on allowlists and Rhai policy rules, and dry-run any tool:
+```mermaid
+flowchart TD
+  C["Tool call<br/>(e.g. http_post)"] --> E{"Can it exfiltrate?"}
+  E -->|no| RUN["Run"]
+  E -->|yes| L{"Data taint ≤<br/>tool clearance?"}
+  L -->|yes| RUN
+  L -->|no| P{"Policy?"}
+  P -->|allow| RUN
+  P -->|deny| BLK["Blocked before it fires"]
+  P -->|ask| Q["Prompt: allow once /<br/>for session / deny"]
+```
+
+Taint recovers as entries evict, and an unrecognized tool **fails closed**. Configure with a
+`[security]` block, layer on allowlists and Rhai policy rules, and dry-run any tool:
 
 ```bash
 lev policy list

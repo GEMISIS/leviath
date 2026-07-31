@@ -1,13 +1,14 @@
 ---
 title: Agent blueprints
-group: Guides
-order: 2
+group: Concepts
+group_order: 2
+order: 3
 ---
 
 # Agent blueprints (`agent.leviath`)
 
 An agent is a directory with an `agent.leviath` file — a TOML **blueprint** describing a
-multi-stage workflow graph. `lev create <name>` scaffolds one.
+multi-stage [workflow graph](/docs/stages). `lev create <name>` scaffolds one.
 
 ```toml
 [agent]
@@ -35,6 +36,41 @@ system_prompt = """Understand the task and produce a short implementation plan."
 hint = "Plan ready — begin implementation"
 ```
 
+## The run loop
+
+Within a stage, an agent runs a tight loop — infer, act on tool calls, repeat — until the model
+signals it's done or a [transition](/docs/stages) fires:
+
+```mermaid
+flowchart LR
+  I["Infer<br/>(stage model)"] --> T{"Tool calls?"}
+  T -->|yes| X["Execute tools<br/>route output to regions"]
+  X --> I
+  T -->|no| D{"Transition?"}
+  D -->|hint / error / stuck| N["Next stage"]
+  D -->|none, done| E["Finish"]
+  N --> I
+```
+
+## Lifecycle
+
+A run moves through a handful of states the [dashboard](/docs/dashboard) and [API](/docs/api)
+report on:
+
+```mermaid
+stateDiagram-v2
+  [*] --> Queued
+  Queued --> Running
+  Running --> AwaitingInput: ask_user / tool approval
+  AwaitingInput --> Running: you respond
+  Running --> Done
+  Running --> Failed: unrecoverable error
+  Running --> Cancelled: lev cancel
+  Done --> [*]
+  Failed --> [*]
+  Cancelled --> [*]
+```
+
 ## Stages and models
 
 Each stage gets its own **model** (an ordered provider/model fallback list — the first configured
@@ -46,7 +82,7 @@ provider wins), tools, iteration cap, and context layout. Transitions form a
 `[context.regions]` defines the memory layout. Budgets can be **percentages of the model's context
 window** (ceilings — they may sum past 100%), with absolute `max_tokens` / `threshold_tokens`
 guard-rails. Region kinds: `pinned`, `sliding_window`, `compacting`, `compact_history`, `clearable`,
-`hashmap`. See [Context regions](/docs/context).
+`hashmap`. See [Structured context](/docs/context) for what each one does.
 
 ## Seed commands
 
@@ -59,12 +95,16 @@ seed = { command = "git ls-files" }
 ```
 
 Seeds run at spawn **before any approval prompt**, confined to the workdir and routed through the
-entry stage's sandbox, time- and size-capped. `lev validate` prints them; refuse with
-`--no-seed-commands` or `[security] allow_seed_commands = false`.
+entry stage's sandbox, time- and size-capped.
 
-Validate and test a blueprint before running it:
+> [!WARNING]
+> A seed command runs a shell command before you approve anything. `lev validate` prints every
+> seed a blueprint will run — review them for third-party blueprints. Refuse with
+> `--no-seed-commands` or `[security] allow_seed_commands = false`.
+
+## Validate before you run
 
 ```bash
-lev validate .
-lev test .
+lev validate .             # check the graph, print seeds + permissions
+lev test .                 # dry-run the blueprint
 ```

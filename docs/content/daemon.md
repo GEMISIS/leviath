@@ -1,16 +1,49 @@
 ---
 title: The daemon
-group: Start
-order: 2
+group: Concepts
+group_order: 2
+order: 1
 ---
 
 # The shared-world daemon
 
 `lev run` doesn't run the agent in your terminal — it hands it to a background **daemon** that
-hosts every agent in one shared ECS world. Runs keep going after your terminal closes, and a
-dozen agents share a single process instead of a process each.
+hosts every agent in one shared [ECS world](/docs/engine). Runs keep going after your terminal
+closes, and a dozen agents share a single process instead of a process each.
 
-The daemon starts automatically the first time you need it. You can also run it yourself:
+```mermaid
+flowchart TB
+  subgraph clients["Clients"]
+    RUN["lev run / ps / msg"]
+    DASH["lev dash"]
+    SERVE["lev serve (HTTP/WS)"]
+  end
+  RUN & DASH & SERVE -->|"control socket<br/>(peer-cred checked)"| DAEMON
+  subgraph DAEMON["Daemon — one process"]
+    WORLD["Shared ECS world"]
+    WORLD --- A1["agent"]
+    WORLD --- A2["agent"]
+    WORLD --- A3["sub-agent"]
+  end
+  DAEMON -->|inference| PROV["LLM providers"]
+```
+
+## Lifecycle
+
+The daemon starts automatically the first time a command needs it, and on start it **reloads runs
+that were interrupted** so nothing is lost across a restart.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Starting
+  Starting --> Ready: reload interrupted runs
+  Ready --> Ready: accept commands / host agents
+  Ready --> Draining: stop requested
+  Draining --> Stopped: finish in-flight work
+  Stopped --> [*]
+```
+
+You can also drive it directly:
 
 ```bash
 lev daemon                 # run in the foreground (with logs)
@@ -28,10 +61,15 @@ lev daemon install         # launchd (macOS) / systemd --user (Linux)
 lev daemon uninstall
 ```
 
+> [!TIP]
+> An installed daemon plus [`lev serve`](/docs/api) is all you need to drive Leviath from the
+> browser [console](/app) — no terminal required.
+
 ## Control surface
 
-The daemon is reached over a local control socket (a Unix socket / Windows pipe, guarded by a
-peer-credential check — not a TCP port). The CLI verbs that talk to it:
+The daemon is reached over a local **control socket** — a Unix socket / Windows pipe guarded by a
+peer-credential check, *not* a TCP port, so nothing on the network can reach it. The CLI verbs that
+talk to it:
 
 | Command | Does |
 |---|---|
@@ -41,4 +79,7 @@ peer-credential check — not a TCP port). The CLI verbs that talk to it:
 | `lev cancel <run-id>` | Cancel a run |
 | `lev context <run-id>` | Show a run's context-window history |
 
-To drive the daemon over HTTP instead, run the [API server](/docs/api).
+> [!NOTE]
+> To drive the daemon over the network instead of the local socket, run the
+> [HTTP API server](/docs/api) — it's a thin REST + WebSocket gateway in front of this same daemon,
+> with a mandatory auth token.

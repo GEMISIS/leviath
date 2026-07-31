@@ -1,6 +1,7 @@
 ---
 title: Getting Started
-group: Start
+group: Get started
+group_order: 1
 order: 1
 ---
 
@@ -10,9 +11,20 @@ Leviath is a structured agent runtime for LLMs. It gives an agent **structure** 
 that stays coherent across hundreds of tool calls, the right model for each phase of a task,
 and a dozen agents running at once in a single process.
 
+You'll go from nothing to a running agent in four steps:
+
+```mermaid
+flowchart LR
+  A["Install<br/>lev"] --> B["Configure<br/>a provider"]
+  B --> C["Run<br/>an agent"]
+  C --> D["Daemon hosts<br/>the run"]
+  D --> E["Watch in<br/>lev dash"]
+```
+
 ## Install
 
-> **Private alpha.** Installing needs a GitHub Personal Access Token (`repo` scope):
+> [!IMPORTANT]
+> Private alpha. Installing needs a GitHub Personal Access Token (`repo` scope):
 > `GITHUB_TOKEN` for the scripts and `HOMEBREW_GITHUB_API_TOKEN` for Homebrew. One-time setup
 > lives in the [distribution repo](https://github.com/Sun-Forge-AI/leviath-dist).
 
@@ -55,21 +67,45 @@ lev setup                                            # interactive wizard
 lev setup --non-interactive --anthropic-key sk-ant-… # scriptable
 ```
 
-See [Providers](/docs/providers) for the full list and the Claude Code transport.
+> [!TIP]
+> No API key handy? Point Leviath at a local [Ollama](https://ollama.com) install and run
+> entirely offline — `lev setup` will detect it. See [Providers](/docs/providers) for the full
+> list and the Claude Code transport.
 
 ## Run an agent
+
+Pick one of the ten [pre-built agents](/docs/agents) and give it a task:
 
 ```bash
 lev run coder --task "Build a CLI that converts CSV to JSON"
 lev run deep-researcher --task "Survey the state of solid-state batteries"
 ```
 
-`lev run` hands the agent to a background [daemon](/docs/daemon), so runs keep going after your
-terminal closes. Watch everything with the TUI [dashboard](/docs/dashboard):
+`lev run` doesn't run the agent in your terminal — it hands it to a background
+[daemon](/docs/daemon) that hosts every agent in one shared world:
+
+```mermaid
+flowchart LR
+  CLI["lev run"] -->|control socket| D
+  DASH["lev dash"] -->|control socket| D
+  subgraph D["Shared-world daemon — one process"]
+    A1["agent"]
+    A2["agent"]
+    A3["agent"]
+  end
+  D -->|provider API| P["LLM provider"]
+```
+
+Because the daemon owns the run, it keeps going after your terminal closes. Watch everything
+live with the TUI [dashboard](/docs/dashboard):
 
 ```bash
 lev dash
 ```
+
+> [!NOTE]
+> Prefer a browser or a REST/WebSocket client? `lev serve` exposes the same daemon over HTTP —
+> see the [API](/docs/api) and the web console.
 
 ## Create your own
 
@@ -79,4 +115,5 @@ cd my-agent
 lev run . --task "Your task here"
 ```
 
-This writes an `agent.leviath` config you can customize — see [Agents](/docs/agents).
+This writes an `agent.leviath` config you can customize — the stages, the model for each phase,
+and the context regions. See [Agents](/docs/agents) to go deeper.

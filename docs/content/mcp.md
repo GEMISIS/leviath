@@ -1,13 +1,26 @@
 ---
 title: MCP tool servers
-group: Guides
-order: 6
+group: Reference
+group_order: 3
+order: 3
 ---
 
 # MCP tool servers
 
 Leviath connects to [Model Context Protocol](https://modelcontextprotocol.io) servers over stdio or
-HTTP (streamable, with a legacy HTTP+SSE fallback), giving agents extra tools.
+HTTP (streamable, with a legacy HTTP+SSE fallback), giving agents extra tools beyond the built-ins.
+
+```mermaid
+flowchart LR
+  subgraph D["Daemon"]
+    A["agent"]
+  end
+  A -->|tool call| B["MCP broker"]
+  B -->|stdio| S1["filesystem<br/>(npx server)"]
+  B -->|HTTP| S2["remote<br/>(mcp.example.com)"]
+```
+
+## Managing servers
 
 ```bash
 lev mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem /path
@@ -31,7 +44,30 @@ url = "https://mcp.example.com"
 headers = { Authorization = "Bearer ${MY_TOKEN}" }   # ${VAR} is expanded
 ```
 
+## Discovery and invocation
+
+On connect, Leviath discovers the server's tools and exposes them to any stage whose
+`available_tools` includes them:
+
+```mermaid
+sequenceDiagram
+  participant Agent
+  participant Broker as MCP broker
+  participant Server as MCP server
+  Broker->>Server: initialize + list tools
+  Server-->>Broker: tool schemas
+  Agent->>Broker: call tool(args)
+  Broker->>Server: invoke
+  Server-->>Broker: result
+  Broker-->>Agent: routed to a context region
+```
+
+## OAuth, safely
+
 `lev mcp add` detects OAuth servers, binds tokens to the server origin (RFC 8414 issuer check,
 HTTPS-only, capped redirects), and stores them in `~/.leviath/mcp-auth.json` (`0600`), refreshing
-non-interactively. Manage servers from the [dashboard](/docs/dashboard) with `m`, or over the
-[API](/docs/api) under `/api/mcp/servers`.
+non-interactively.
+
+> [!NOTE]
+> Manage servers from the [dashboard](/docs/dashboard) with `m`, or over the [API](/docs/api) under
+> `/api/mcp/servers` (add/remove need `--allow-admin`).
