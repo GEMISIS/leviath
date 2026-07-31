@@ -51,28 +51,23 @@ lev create my-agent              # scaffold your own agent
 
 ### 1. Install
 
-> **Private alpha:** installing needs a GitHub Personal Access Token; one-time setup in the [distribution repo](https://github.com/Sun-Forge-AI/leviath-dist).
-
 **macOS (Homebrew):**
 
 ```bash
 brew tap sun-forge-ai/leviath https://github.com/Sun-Forge-AI/leviath-dist.git
-brew trust sun-forge-ai/leviath          # newer Homebrew requires trusting third-party taps
 brew install leviath                     # stable - or: leviath-beta, leviath-alpha
 ```
 
 **Linux:**
 
 ```bash
-curl -fsSL -H "Authorization: token $GITHUB_TOKEN" \
-  https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/install.sh | bash -s -- --channel stable
+curl -fsSL https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/install.sh | bash -s -- --channel stable
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-irm -Headers @{Authorization="token $env:GITHUB_TOKEN"} `
-  https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/install.ps1 | iex
 ```
 
 **Build from source** (any platform, requires [Rust](https://rustup.rs/)):
@@ -335,12 +330,12 @@ session  = "acp"          # Gas City's key name for the Agent Client Protocol
 
 ## How we measure
 
-Leviath is a runtime that orchestrates agents, not a coding agent itself, so we don't publish head-to-head numbers against tools like Claude Code or Codex. They sit at a different layer of the stack. What we measure, on the same tasks with the same models, with every run published:
+Leviath is a runtime that orchestrates agents, not a coding agent itself, so we don't publish head-to-head numbers against tools like Claude Code or Codex. They sit at a different layer of the stack. What we measure, on the same tasks with the same models:
 
 - **Structured vs flat context**: the same Leviath runtime with regions enabled vs disabled, scored on held-out test pass rate, total billed tokens (including cache reads and writes), and cost.
 - **Resource footprint**: absolute memory of one daemon running many concurrent agents.
 
-Methodology and raw data: [leviath-benchmarks](https://github.com/Sun-Forge-AI/leviath-benchmarks).
+Methodology and raw data will be published alongside the benchmark results.
 
 ## How it compares
 
@@ -491,7 +486,7 @@ graph TD
 
 ## License
 
-[MIT](LICENSE) © Sun Forge AI
+[MIT](LICENSE) © Gerald McAlister
 
 ---
 

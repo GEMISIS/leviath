@@ -202,5 +202,5 @@ The attestation is the stronger check, and the reason the checksum alone is not
 enough: anyone who can write a release can rewrite both a binary *and* its
 checksum, but the attestation is signed by GitHub's OIDC identity for the build
 workflow and cannot be forged from inside the release. The installers do not
-verify it yet - attestations are public infrastructure and this repository is
-private, so `gh attestation verify` is a manual step until that changes.
+run it automatically yet, so `gh attestation verify` is a manual step; wiring
+it into the installers is planned.
