@@ -99,10 +99,36 @@ max_tokens  = 8000
 
 ## Context regions
 
-`[context.regions]` defines the memory layout. Budgets can be **percentages of the model's context
-window** (ceilings, so they may sum past 100%), with absolute `max_tokens` / `threshold_tokens`
-guard-rails. There are eight region kinds (the default is `temporary`). See
-[Structured context](/docs/context) for what each one does.
+`[context.regions]` defines the memory layout. There are eight region kinds (the default is
+`temporary`); see [Structured context](/docs/context) for what each one does. Budgets come in
+three forms:
+
+```toml
+[context.regions.codebase]
+kind = "compacting"
+budget = "35%"             # ceiling as a share of the model's context window
+max_tokens = 60000         # absolute guard-rail the percentage never exceeds
+min_tokens = 4000          # absolute floor on small context windows
+
+[context.regions.task]
+kind = "pinned"
+max_tokens = 2000          # bare max_tokens alone = fixed absolute budget
+```
+
+Percentages are **ceilings, not allocations** - they may sum past 100% because regions rarely all
+run full at once. With a percentage, `max_tokens` caps and `min_tokens` floors the resolved value;
+without one, `max_tokens` is simply the fixed budget. Compacting regions also take
+`threshold_tokens`, the fill level that triggers compaction.
+
+A stage can override the whole layout for just itself with
+`[stages.<name>.context.regions]` - the per-stage layout applies when the stage is entered and
+uses the same syntax:
+
+```toml
+[stages.plan.context.regions.constraints]
+kind = "pinned"
+budget = "10%"
+```
 
 ## Seed commands
 
@@ -121,6 +147,27 @@ entry stage's sandbox, time- and size-capped.
 > A seed command runs a shell command before you approve anything. `lev validate` prints every
 > seed a blueprint will run; review them for third-party blueprints. Refuse with
 > `--no-seed-commands` or `[security] allow_seed_commands = false`.
+
+## How the coding agents verify their work
+
+The bundled coding agents (`software-engineer`, `coder`) treat verification as workflow, not
+vibes. Their entry stage is `discover`: before planning anything, the agent classifies the
+project's testing story and writes a `workflow` region ending in three literal lines that later
+stages execute verbatim:
+
+```text
+BASELINE: <command to run BEFORE any edit>
+VERIFY: <command to re-run after each change>
+DONE WHEN: <the completion bar, including "no regressions vs baseline">
+```
+
+The baseline is captured before the first edit, so "a test that was already failing" and "a test
+I broke" are distinguishable. Each change re-runs VERIFY and compares against the baseline, and
+the run is only done when DONE WHEN holds - not when "most tests pass". Regions that carry this
+state are marked `required = true`; if one is empty when a stage needs it, the workflow routes
+back through discovery instead of guessing. Projects with no tests at all are handled explicitly:
+the plan must include *building* verification (a smoke test to write and run), stated plainly
+rather than invented.
 
 ## Validate before you run
 

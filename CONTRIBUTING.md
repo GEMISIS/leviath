@@ -12,8 +12,11 @@ flowchart LR
   B --> C["Open PR<br/>against main"]
   C --> D["CI: tests, clippy,<br/>fmt, docs,<br/>100% coverage"]
   D --> E["Maintainer<br/>review"]
-  E --> F["Rebase<br/>merge"]
+  E --> F["Merge queue<br/>(rebase)"]
 ```
+
+Merges to `main` go through GitHub's merge queue: once a PR is approved and green, queueing it
+re-runs the required checks on the exact tree that will land, then rebase-merges automatically.
 
 - **Start with an issue** for anything non-trivial — agreeing on the approach
   first saves you from writing code that can't be merged. Small fixes (typos,
@@ -93,4 +96,4 @@ cargo llvm-cov --package <crate> --lib --html --open   # browsable per-crate rep
 
 ## Regenerating the workflow diagrams
 
-The agent workflow SVGs in `docs/assets/agents/` are rendered from the Mermaid sources in `docs/assets/agents/src/` — see `docs/assets/agents/src/README.md` for the render command and theme configs. If you change an agent's stage graph in `agents/<name>/agent.leviath`, update its `.mmd` source and re-render both the light and dark variants.
+The agent workflow SVGs in `docs/assets/agents/` are rendered from the Mermaid sources in `docs/assets/agents/src/` — see `docs/assets/agents/src/README.md` for the render command and theme configs. If you change an agent's stage graph in `crates/leviath-cli/agents/<name>/agent.leviath`, update its `.mmd` source and re-render both the light and dark variants.

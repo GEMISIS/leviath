@@ -10,6 +10,9 @@ homepage.workspace = true
 rust-version.workspace = true
 keywords.workspace = true
 categories = ["command-line-utilities"]
+# docs.rs is near-useless for a binary crate; send crates.io's Documentation
+# link to the real docs site instead.
+documentation = "https://leviath.dev"
 readme = "README.md"
 
 [lib]

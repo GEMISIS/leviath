@@ -503,14 +503,16 @@ an agent may actually call.
 
 The [taint-gate](/docs/security) blocks any exfiltration-capable tool whose data taint exceeds its
 clearance. Beyond the static allowlist in `policy.toml`, you can relax the gate with scripted rules:
-`.rhai` files in `~/.config/leviath/rules/`. They are consulted **after** the static allowlist, and
-the first script that allows a call wins. The filename stem becomes the rule name in decisions.
+`.rhai` files in the `leviath/rules/` directory under your OS config dir - `~/.config/leviath/rules/`
+on Linux, `~/Library/Application Support/leviath/rules/` on macOS. They are consulted **after** the
+static allowlist, and the first script that allows a call wins. The filename stem becomes the rule
+name in decisions.
 
 Each rule receives a `context` map with `tool`, `target`, and `taint_level` (a string: `"public"`,
 `"internal"`, or `"private"`), and evaluates to a boolean. `true` allows the call.
 
 ```rhai
-// ~/.config/leviath/rules/company.rhai
+// <config dir>/leviath/rules/company.rhai
 context.tool == "send_email"
     && context.target == "ops@corp"
     && context.taint_level == "internal"

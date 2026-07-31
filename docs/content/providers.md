@@ -59,8 +59,8 @@ tokens_per_minute   = 100000
 
 ## Custom OpenAI-compatible providers
 
-Point Leviath at any OpenAI-compatible endpoint with a small Rhai script. See
-`docs/rhai-providers.md` in the repo and the `docs/examples/groq.rhai` example.
+Point Leviath at any OpenAI-compatible endpoint with a small Rhai script.
+[Scripting Leviath](/docs/scripting) walks through a complete Groq provider.
 
 ## Claude Code transport
 

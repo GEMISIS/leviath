@@ -11,7 +11,15 @@ execution engine.
 cargo install leviath-cli
 ```
 
-Prebuilt binaries, a Homebrew tap, and install scripts are listed in the
+Prebuilt binaries skip the compile. On macOS:
+
+```bash
+brew tap gemisis/leviath https://github.com/GEMISIS/leviath-dist.git
+brew trust gemisis/leviath
+brew install leviath
+```
+
+Install scripts for Linux and Windows, plus a Scoop bucket, are in the
 [main README](https://github.com/GEMISIS/leviath#readme).
 
 ## Quick start

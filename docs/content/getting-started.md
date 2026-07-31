@@ -44,6 +44,13 @@ curl -fsSL https://raw.githubusercontent.com/GEMISIS/leviath-dist/main/install.s
 irm https://raw.githubusercontent.com/GEMISIS/leviath-dist/main/install.ps1 | iex
 ```
 
+Or with Scoop:
+
+```powershell
+scoop bucket add leviath https://github.com/GEMISIS/leviath-dist.git
+scoop install leviath           # or: leviath-beta, leviath-alpha
+```
+
 The three options above install prebuilt binaries; no Rust toolchain needed.
 
 **Cargo** (any platform, needs [Rust](https://rustup.rs/)):
