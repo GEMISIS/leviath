@@ -103,10 +103,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      # Same reason as beta.yml's promote job: tagging the promoted beta
-      # commit needs `workflows: write` whenever workflow files changed on
-      # main since that commit.
-      workflows: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -156,6 +152,9 @@ jobs:
       - name: Publish prod release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
+          # See beta.yml: tagging the promoted (older) commit needs a token
+          # that may create refs with workflow-file drift; GITHUB_TOKEN cannot.
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
           tag_name: ${{ env.VERSION }}
           target_commitish: ${{ needs.check-beta.outputs.sha }}
           name: "Leviath ${{ env.VERSION }}"
@@ -210,6 +209,8 @@ jobs:
       - name: Publish latest channel release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
+          # Same as the prod release above.
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
           tag_name: latest
           target_commitish: ${{ needs.check-beta.outputs.sha }}
           name: "Leviath ${{ env.VERSION }} (stable channel)"
