@@ -31,12 +31,12 @@ kind = "none"             # run discovery on the host…
   want real containment.
 
 > [!IMPORTANT]
-> An *installed* agent can only ever **tighten** its sandbox — it can raise the walls, never lower
+> An *installed* agent can only ever **tighten** its sandbox: it can raise the walls, never lower
 > them. A blueprint you install can't quietly turn isolation off.
 
 ## Taint tracking (experimental)
 
-A deterministic sensitivity model — **Public / Internal / Private** — tags every
+A deterministic sensitivity model (**Public / Internal / Private**) tags every
 [context region](/docs/context), set by the runtime and never by model output. Any tool that can
 carry bytes off the machine is gated: before it fires, the runtime checks the tool's clearance
 against the sensitivity of the data in play.

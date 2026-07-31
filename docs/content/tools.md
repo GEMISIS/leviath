@@ -8,8 +8,8 @@ order: 3
 # Built-in tools
 
 Every [agent](/docs/agents) advertises a set of tools to its LLM. The runtime ships a fixed catalog
-of **built-in tools** — file access, a shell, context memory, human-in-the-loop prompts, review
-surfaces, and sub-agent management — that need no configuration to exist. A [stage](/docs/stages)
+of **built-in tools** (file access, a shell, context memory, human-in-the-loop prompts, review
+surfaces, and sub-agent management) that need no configuration to exist. A [stage](/docs/stages)
 decides which of them the model may actually call via `available_tools`, and `tool_permissions`
 gates each call at `allow` / `ask` / `deny`. For tools beyond this catalog, connect an
 [MCP server](/docs/mcp).
@@ -27,7 +27,7 @@ Read and modify files relative to the agent's working directory.
 | `list_dir` | List a directory's contents. | `path` (optional; defaults to the working root) |
 
 > [!TIP]
-> `read_files` is cheaper than repeated `read_file` calls — reach for it after `list_dir` when you
+> `read_files` is cheaper than repeated `read_file` calls; reach for it after `list_dir` when you
 > already know several paths you need.
 
 ## Shell
@@ -45,7 +45,7 @@ resolve to the same tool advertised to the model.
 
 ## Context
 
-Read and write the agent's own [context window](/docs/context) — named sections the runtime folds
+Read and write the agent's own [context window](/docs/context): named sections the runtime folds
 back into the system prompt on later turns.
 
 | Tool | Purpose | Arguments |
@@ -93,9 +93,9 @@ model but executed by the engine's tool registry, since they act on the shared a
 A tool existing in the catalog does not mean an agent can call it. Two independent settings on each
 stage control access:
 
-- **`available_tools`** — the allowlist of tool names advertised to the model in that stage. A tool
+- **`available_tools`**: the allowlist of tool names advertised to the model in that stage. A tool
   not listed here is invisible to the LLM. Names may use aliases (e.g. `bash` for `shell`).
-- **`tool_permissions`** — a per-tool map whose values are `allow`, `ask`, or `deny`. `allow` runs
+- **`tool_permissions`**: a per-tool map whose values are `allow`, `ask`, or `deny`. `allow` runs
   the call outright, `ask` requires user approval first, and `deny` blocks it. Stage-level entries
   are narrower than agent-level `[tool_permissions]` and wider than launch-time flags.
 

@@ -8,7 +8,7 @@ order: 1
 # HTTP API (`lev serve`)
 
 `lev serve` exposes a REST + WebSocket API in front of the [daemon](/docs/daemon), so anything that
-speaks HTTP can drive Leviath — including the browser [console](/app).
+speaks HTTP can drive Leviath, including the browser [console](/app).
 
 ```bash
 lev serve --port 3000 --token "$(openssl rand -hex 16)" --cors https://leviath.dev
@@ -25,12 +25,12 @@ lev serve --port 3000 --token "$(openssl rand -hex 16)" --cors https://leviath.d
 - **`--allow-admin`** mounts the mutating admin routes. `GET /api/config` and
   `GET /api/mcp/servers` are always available; the writes (`PUT /api/config`,
   `POST`/`DELETE /api/mcp/servers`) are only mounted with `--allow-admin` and return **405 Method
-  Not Allowed** otherwise — the route isn't there, rather than gated by an in-handler check.
+  Not Allowed** otherwise. The route isn't there, rather than gated by an in-handler check.
 - **`--workdir-root`** confines agent workdirs; **`--no-remote-yolo`** forbids `"yolo": true` on spawn.
 
 > [!CAUTION]
 > `lev serve` runs LLM-driven tools with whatever permissions the blueprint grants. Treat it as
-> trusted-network only unless hardened — see [Security](/docs/security).
+> trusted-network only unless hardened. See [Security](/docs/security).
 
 ## Auth flow
 
@@ -99,5 +99,5 @@ Completion webhooks are signed with `callback_secret`: verify the `X-Leviath-Sig
 header. Transient failures are retried with exponential backoff.
 
 > [!TIP]
-> The [browser console](/app) is a full reference client for this API — connection, spawn, live
-> dashboard, blueprint editing, MCP and policy management — built on the same typed endpoints.
+> The [browser console](/app) is a full reference client for this API (connection, spawn, live
+> dashboard, blueprint editing, MCP and policy management), built on the same typed endpoints.

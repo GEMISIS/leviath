@@ -19,7 +19,7 @@
 
 ---
 
-Most agent tools hand an LLM a flat message array and hope for the best. Leviath gives it **structure**: context that stays coherent across hundreds of tool calls, the right model for each phase of a task, and a dozen agents running at once without melting your machine.
+Most agent tools hand an LLM a flat message array and hope for the best. Leviath gives it **structure**: context that stays coherent across hundreds of tool calls, the right model for each phase of a task, and hundreds of agents running at once without melting your machine.
 
 <p align="center">
   <img src="docs/assets/hero-final.gif" alt="Leviath's terminal dashboard running several agents concurrently" width="900">

@@ -7,7 +7,7 @@ order: 3
 
 # Agent blueprints (`agent.leviath`)
 
-An agent is a directory with an `agent.leviath` file — a TOML **blueprint** describing a
+An agent is a directory with an `agent.leviath` file, a TOML **blueprint** describing a
 multi-stage [workflow graph](/docs/stages). `lev create <name>` scaffolds one.
 
 ```toml
@@ -33,12 +33,12 @@ max_iterations = 15
 system_prompt = """Understand the task and produce a short implementation plan."""
 
 [stages.analyze.transitions.implement]
-hint = "Plan ready — begin implementation"
+hint = "Plan ready, begin implementation"
 ```
 
 ## The run loop
 
-Within a stage, an agent runs a tight loop — infer, act on tool calls, repeat — until the model
+Within a stage, an agent runs a tight loop (infer, act on tool calls, repeat) until the model
 signals it's done or a [transition](/docs/stages) fires:
 
 ```mermaid
@@ -79,7 +79,7 @@ accepting [messages](/docs/interaction).
 
 ## Stages and models
 
-Each stage gets its own **model** (an ordered provider/model fallback list — the first configured
+Each stage gets its own **model** (an ordered provider/model fallback list: the first configured
 provider wins), tools, iteration cap, and context layout. Transitions form a
 [graph](/docs/stages): linear by default, or branch on conditions like `error` and `stuck`.
 
@@ -100,8 +100,8 @@ max_tokens  = 8000
 ## Context regions
 
 `[context.regions]` defines the memory layout. Budgets can be **percentages of the model's context
-window** (ceilings — they may sum past 100%), with absolute `max_tokens` / `threshold_tokens`
-guard-rails. There are eight region kinds (the default is `temporary`) — see
+window** (ceilings, so they may sum past 100%), with absolute `max_tokens` / `threshold_tokens`
+guard-rails. There are eight region kinds (the default is `temporary`). See
 [Structured context](/docs/context) for what each one does.
 
 ## Seed commands
@@ -119,7 +119,7 @@ entry stage's sandbox, time- and size-capped.
 
 > [!WARNING]
 > A seed command runs a shell command before you approve anything. `lev validate` prints every
-> seed a blueprint will run — review them for third-party blueprints. Refuse with
+> seed a blueprint will run; review them for third-party blueprints. Refuse with
 > `--no-seed-commands` or `[security] allow_seed_commands = false`.
 
 ## Validate before you run
