@@ -50,8 +50,9 @@ scoop bucket add leviath https://github.com/GEMISIS/leviath-dist.git
 scoop install leviath            # or leviath-beta, leviath-alpha
 ```
 
-**Cargo** installs the released crates.io version, which corresponds to the
-current stable line:
+**Cargo** installs the released crates.io version, which tracks the stable
+channel: each stable deploy publishes any crate version not yet on crates.io,
+from the same commit the binaries were built at.
 
 ```bash
 cargo install leviath-cli
