@@ -95,7 +95,7 @@ about them:
   both implemented; anything else gets whatever the platform does by default,
   and `leviath-sys`'s fallback module says so rather than pretending otherwise.
 
-**Known gaps.** None outstanding. Everything the threat model claims is
+**Known gaps.** None currently tracked. Everything the threat model claims is
 implemented and tested on every supported platform. If you find something this
 document claims but the code does not do, that is a vulnerability and we want to
 hear about it - see the top of this file.

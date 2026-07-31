@@ -18,7 +18,9 @@ lev serve --port 3000 --token "$(openssl rand -hex 16)" --cors https://leviath.d
 
 - **A token is required.** The server refuses to start without `--token <t>` (or
   `LEVIATH_API_TOKEN`). Every request must send `Authorization: Bearer <t>`; WebSocket clients
-  pass it as `?token=<t>` because browsers can't set WS headers.
+  pass it as `?token=<t>` because browsers can't set WS headers. On shared machines prefer the
+  environment variable: a `--token` value is visible to other local users in the process table
+  (`ps`).
 - **CORS is closed by default.** Pass `--cors <origin>` (e.g. `https://leviath.dev`) or `--cors "*"`
   to allow a browser to call it cross-origin.
 - **Binds to `127.0.0.1`** by default. `--host 0.0.0.0` exposes it on your network.
@@ -96,7 +98,16 @@ curl -X POST http://localhost:3000/api/agents \
 ```
 
 Completion webhooks are signed with `callback_secret`: verify the `X-Leviath-Signature: sha256=<hex>`
-header. Transient failures are retried with exponential backoff.
+header. Transient failures (network errors, timeouts, 5xx, 429, 408) are retried with exponential
+backoff, tunable in config - every field has a safe default, so the block can be omitted entirely:
+
+```toml
+[webhook]
+max_retries = 3        # retries after the first attempt; 0 disables retries
+base_delay_ms = 500    # first backoff; doubles per retry
+max_delay_ms = 30000   # cap on any single backoff
+timeout_secs = 10      # per-attempt request timeout
+```
 
 > [!TIP]
 > The [browser console](/app) is a full reference client for this API (connection, spawn, live

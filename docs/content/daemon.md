@@ -48,7 +48,9 @@ You can also drive it directly:
 ```bash
 lev daemon                 # run in the foreground (with logs)
 lev daemon status          # is it running?
+lev daemon start           # start in the background
 lev daemon stop
+lev daemon restart
 ```
 
 ## Run it unattended

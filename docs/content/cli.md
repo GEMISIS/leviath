@@ -45,8 +45,8 @@ run `lev <command> --help` for the full, authoritative flag list.
 
 | Command | Purpose |
 |---|---|
-| `lev daemon [status\|stop]` | Run / inspect / stop the [shared-world daemon](/docs/daemon) |
-| `lev daemon install` | Install it as a launchd / systemd service |
+| `lev daemon [status\|start\|stop\|restart]` | Run / inspect / control the [shared-world daemon](/docs/daemon) |
+| `lev daemon [install\|uninstall]` | Manage it as a launchd / systemd service |
 | `lev serve …` | Expose the [HTTP + WebSocket API](/docs/api) |
 
 ## Configuration and tools

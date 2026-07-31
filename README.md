@@ -65,13 +65,14 @@ brew install leviath                     # stable - or: leviath-beta, leviath-al
 curl -fsSL https://raw.githubusercontent.com/GEMISIS/leviath-dist/main/install.sh | bash -s -- --channel stable
 ```
 
-**Windows (PowerShell):**
+**Windows (PowerShell or Scoop):**
 
 ```powershell
 irm https://raw.githubusercontent.com/GEMISIS/leviath-dist/main/install.ps1 | iex
+# or: scoop bucket add leviath https://github.com/GEMISIS/leviath-dist.git && scoop install leviath
 ```
 
-All three install prebuilt binaries; no Rust toolchain needed.
+All of the above install prebuilt binaries; no Rust toolchain needed.
 
 **Cargo** (any platform, requires [Rust](https://rustup.rs/)):
 
@@ -222,20 +223,11 @@ Ten agents ship out of the box, each a multi-stage directed graph with structure
 
 ### Structured context memory
 
-Eight region kinds with deterministic eviction: architecture stays pinned, tool results evict first, and conversation auto-compacts into summaries. Route reads to specific regions so a file dump can't push out your system prompt. Budgets can be percentages of the model's context window, so a blueprint's intent survives across models of different sizes. And when the built-ins don't fit, a [`custom` region](docs/rhai-regions.md) hands one region's rendering, writes, and eviction to a Rhai script you control - up to owning the entire context window as a single scripted region. [Learn more →](https://leviath.dev/docs/context)
+Eight region kinds with deterministic eviction: architecture stays pinned, tool results evict first, and conversation auto-compacts into summaries. Route reads to specific regions so a file dump can't push out your system prompt. Budgets can be percentages of the model's context window, so a blueprint's intent survives across models of different sizes. And when the built-ins don't fit, a [`custom` region](https://leviath.dev/docs/scripting) hands one region's rendering, writes, and eviction to a Rhai script you control - up to owning the entire context window as a single scripted region. [Learn more →](https://leviath.dev/docs/context)
 
 ### Multi-stage workflows
 
-Each stage gets its own model, tools, and context layout. Run them linearly or as a [directed graph](https://leviath.dev/docs/stages#graph) with conditional transitions, error recovery, and LLM-driven routing, then check the graph with `lev validate`. A `stuck` edge escapes a stage that is making no progress. Stuckness is measured, not self-reported:
-
-```toml
-[stages.implement.transitions.reassess]
-condition = "stuck"
-stuck_after_iterations      = 20   # inferences in this stage
-stuck_after_same_file_edits = 5    # write/edit calls against one path
-```
-
-[Learn more →](https://leviath.dev/docs/stages)
+Each stage gets its own model, tools, and context layout. Run them linearly or as a [directed graph](https://leviath.dev/docs/stages#graph) with conditional transitions, error recovery, and LLM-driven routing, then check the graph with `lev validate`. A `stuck` edge escapes a stage that is making no progress, and stuckness is measured by the runtime (iteration counts, repeated edits to one file), not self-reported by the model. [Learn more →](https://leviath.dev/docs/stages)
 
 ### ECS agent engine
 
@@ -253,20 +245,7 @@ The core primitive is **mid-run message injection**: `lev msg` (or the API) drop
 
 ### Security: sandboxed execution and taint tracking
 
-By default an agent's shell commands run directly on your machine, with nothing extra to install. When you want isolation, opt in per agent or per stage:
-
-- **Containers** (Docker, Podman, or anything Docker-CLI-compatible). The daemon keeps a warm container per agent and tears it down when the run ends. Containers drop every capability, forbid privilege regain, and are bounded in processes and memory, while file tools keep working over the bind-mounted workdir.
-- **Linux namespaces**, a lighter option that needs no container runtime. It isolates PIDs and, with `network = false`, connectivity. It shares the host filesystem, so reach for a container when you want real containment.
-- Mix them per stage: run analysis on the host and implementation in a networkless container. An installed agent can tighten its sandbox but never turn one off.
-
-**Taint tracking (experimental).** A deterministic sensitivity model for what leaves the machine:
-
-- Every context region carries a sensitivity label (Public / Internal / Private), set by the runtime and never by model output.
-- Any tool that can carry bytes off the machine is gated: a call carrying data above its clearance is blocked before it fires, or surfaced as an *allow once / allow for session / deny* prompt in the daemon.
-- Layer on allowlists and Rhai policy rules for finer control.
-- Dry-run any tool against the real gate with `lev policy test`.
-
-[Learn more →](https://leviath.dev/docs/security)
+By default an agent's shell commands run on your machine with nothing extra to install. When you want isolation, opt in per agent or per stage: hardened **containers** (Docker/Podman, capabilities dropped, warm per agent) or lighter **Linux namespaces**, mixable within one workflow - and an installed agent can tighten its sandbox but never turn one off. Experimental **taint tracking** labels every context region's sensitivity and gates exfiltration-capable tool calls before they fire, with allowlists and scripted policy rules on top. [Learn more →](https://leviath.dev/docs/security)
 
 ## Dashboard
 
@@ -278,13 +257,15 @@ By default an agent's shell commands run directly on your machine, with nothing 
 
 ## API Server
 
-`lev serve` exposes a REST + WebSocket API, so anything that speaks HTTP can integrate with it. No SDK required. It covers agent lifecycle, human-in-the-loop interaction, per-agent streaming, and signed webhook callbacks on completion. Because the API can spawn tool-executing agents, it refuses to start without a token and binds to `127.0.0.1` by default.
+`lev serve` exposes a REST + WebSocket API, so anything that speaks HTTP can integrate with it. No SDK required. It covers agent lifecycle, human-in-the-loop interaction, per-agent streaming, and signed webhook callbacks on completion, and it ships a browser console at `/app` for driving agents from a web page. Because the API can spawn tool-executing agents, it refuses to start without a token and binds to `127.0.0.1` by default.
 
 ```bash
+export LEVIATH_API_TOKEN="$(openssl rand -hex 16)"
 lev serve --port 3000
 
 # spawn an agent (with a completion webhook + signing secret)
 curl -X POST http://localhost:3000/api/agents \
+  -H "Authorization: Bearer $LEVIATH_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"blueprint": "coder", "task": "Add input validation",
        "callback_url": "https://example.com/hook",
@@ -295,42 +276,11 @@ curl -X POST http://localhost:3000/api/agents \
 
 ## Observability
 
-Production deployments can export structured traces, metrics, and logs over OpenTelemetry. Every run becomes a trace — `agent.run` → `agent.stage` → per-call `agent.inference` / `agent.tool_call` spans — alongside token counters, stage-duration and inference-latency histograms, and log records carrying the run's trace ID.
-
-```toml
-[observability]
-enabled = true
-exporter = "otlp"                     # "otlp" | "stdout" | "none"
-endpoint = "http://localhost:4318"    # OTLP over HTTP - 4318, not the 4317 gRPC port
-service_name = "leviath"
-```
-
-Off by default. The standard `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_SERVICE_NAME` env vars fill any hole the file leaves. `exporter = "stdout"` narrates the same events as readable log lines on stderr instead.
+Production deployments can export structured traces, metrics, and logs over OpenTelemetry. Every run becomes a trace (`agent.run` → `agent.stage` → per-call `agent.inference` / `agent.tool_call` spans) alongside token counters, latency histograms, and log records carrying the run's trace ID. Off by default; one config block turns it on. [Observability docs →](https://leviath.dev/docs/observability)
 
 ## Agent Client Protocol
 
-`lev agent-client` serves any Leviath agent over the [Agent Client Protocol](https://agentclientprotocol.com): JSON-RPC 2.0 over stdio, the protocol agent hosts like [Gas City](https://github.com/gastownhall/gascity) and [Zed](https://zed.dev) use to drive a headless agent as a child process. A `session/prompt` runs the blueprint in the shared-world daemon and streams output back as `session/update` notifications.
-
-```bash
-lev agent-client --agent coder            # speaks the protocol on stdin/stdout
-```
-
-Wiring it into a host is config, not code. Here's a Gas City provider, for example:
-
-```toml
-# Gas City provider declaration
-[providers.leviath]
-command      = "lev agent-client --agent coder"
-supports_acp = true
-
-# agents/reviewer/agent.toml
-provider = "leviath"
-session  = "acp"          # Gas City's key name for the Agent Client Protocol
-```
-
-- A `session/prompt` stays in flight until the run **genuinely finishes**. It is never reported "done" while the agent waits on input.
-- Hosts that implement `session/request_permission` (e.g. Zed) get interactive tool approval in-turn.
-- Hosts that don't (e.g. Gas City) see questions surfaced as agent output; resolve them via `lev dash` / `lev respond`, or prefer autonomous blueprints / `--yolo` for a clean sling-a-task-get-a-result flow.
+`lev agent-client --agent coder` serves any Leviath agent over the [Agent Client Protocol](https://agentclientprotocol.com) (JSON-RPC 2.0 over stdio), so hosts like [Zed](https://zed.dev) and [Gas City](https://github.com/gastownhall/gascity) can drive a headless agent as a child process. Wiring it into a host is config, not code. A `session/prompt` stays in flight until the run genuinely finishes, and hosts with `session/request_permission` get interactive tool approval in-turn. [Editor integration docs →](https://leviath.dev/docs/agent-client-protocol)
 
 > "ACP" is claimed by two unrelated protocols; Leviath implements the Agent **Client** Protocol (JSON-RPC/stdio), not BeeAI's Agent Communication Protocol.
 
@@ -386,48 +336,13 @@ And here is Leviath scored against [12-Factor Agents](https://github.com/humanla
 
 ## CLI
 
-| Command | Description |
-|---------|-------------|
-| `lev create <name>` | Create an agent project |
-| `lev run [path] --task "..."` | Run an agent in the shared-world daemon (auto-started) |
-| `lev ps` | List running agents and their status |
-| `lev msg <agent-id> <content>` | Inject a message into a running agent |
-| `lev respond [req-id] [value]` | List or answer pending `ask_user` interactions |
-| `lev cancel <run-id>` | Cancel a running agent |
-| `lev dash` | TUI dashboard |
-| `lev serve` | REST + WebSocket API server |
-| `lev agent-client` | Serve an agent over the Agent Client Protocol (stdio) |
-| `lev validate [path]` | Validate an agent blueprint |
-| `lev mcp add\|list\|remove` | Manage MCP tool servers |
-| `lev setup` | Configuration wizard |
+The [At a glance](#at-a-glance) block above covers the daily commands; the full surface (packaging, testing, policy, auth, daemon control) is in `lev --help` and the [CLI reference](https://leviath.dev/docs/cli).
 
-The full list, including packaging, testing, policy, and auth commands: `lev --help`.
-
-### MCP tool servers
-
-Leviath connects to [Model Context Protocol](https://modelcontextprotocol.io) servers over stdio or HTTP. `lev mcp add` detects OAuth servers and opens your browser to log in; tokens are stored with `0600` permissions and refreshed automatically. Configure in `~/.leviath/config.toml`:
-
-```toml
-[[mcp_servers]]
-name = "filesystem"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]
-```
-
-[MCP docs →](https://leviath.dev/docs/mcp)
+Leviath also connects to [Model Context Protocol](https://modelcontextprotocol.io) tool servers over stdio or HTTP: `lev mcp add` detects OAuth servers and opens your browser to log in, and tokens are stored with `0600` permissions and refreshed automatically. [MCP docs →](https://leviath.dev/docs/mcp)
 
 ## Providers
 
-| Provider | API Key |
-|----------|---------|
-| Anthropic | `ANTHROPIC_API_KEY` |
-| OpenAI | `OPENAI_API_KEY` |
-| Google (Gemini) | `GOOGLE_API_KEY` |
-| OpenRouter | `OPENROUTER_API_KEY` |
-| Ollama | *none (local)* |
-| Claude Code | *none (subscription)* |
-
-Optional client-side rate limits per provider (requests and tokens per minute), enforced before each call. Custom OpenAI-compatible providers can be added as Rhai scripts. [Provider docs →](https://leviath.dev/docs/providers)
+Anthropic, OpenAI, Google (Gemini), OpenRouter, local [Ollama](https://ollama.com) with no key, and the Claude Code subscription transport, with per-stage model fallback, optional client-side rate limits enforced before each call, and custom OpenAI-compatible providers as Rhai scripts. [Provider docs →](https://leviath.dev/docs/providers)
 
 ## Releases
 
@@ -437,7 +352,7 @@ Optional client-side rate limits per provider (requests and tokens per minute), 
 | **Beta** | Weekly (Monday) | `beta` | Tested |
 | **Stable** | Weekly (Thursday, approval-gated) | `latest` | Production |
 
-Channel tags roll with every publish; each stable deploy also cuts an immutable `vX.Y.Z` release, which is what Homebrew and Scoop pin to. Install commands per channel: [distribution repo](https://github.com/GEMISIS/leviath-dist).
+Channel tags roll with every publish; each stable deploy also cuts an immutable versioned release (`vX.Y.Z`, date-suffixed when the same version ships twice). One binary is built on alpha and promoted unchanged through beta and stable, checksum-verified at every hop, and each channel's docs are rendered from the exact commit its binaries came from. [Release docs →](https://leviath.dev/docs/releases) · [distribution repo](https://github.com/GEMISIS/leviath-dist)
 
 ## Security
 

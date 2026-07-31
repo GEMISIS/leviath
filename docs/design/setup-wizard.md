@@ -10,7 +10,7 @@ or agent blueprints. It ended by printing *"All API keys look valid"* on the
 strength of a `key.starts_with("sk-ant-")` check that never touched the network.
 
 A fresh install came out the other side with a config file and no agents - the
-ten blueprints under `agents/` shipped only in the git repo, and `lev list`
+ten blueprints under `agents/` (now `crates/leviath-cli/agents/`) shipped only in the git repo, and `lev list`
 looked for them in a directory beside the executable that no real install has.
 
 Three defects were worth fixing regardless of the UI:
@@ -190,7 +190,7 @@ connect time and are not flagged.
 
 ## Bundled blueprints
 
-`build.rs` walks the workspace's `agents/` directory and generates a
+`build.rs` walks the crate's `agents/` directory (now `crates/leviath-cli/agents/`) and generates a
 `BUNDLED_AGENTS` table whose file contents are `include_str!`s of the real files
 - 23 files, ~170 KB of text. A missing `agents/` directory emits an empty table
 rather than failing the build (the shape a packaged crate sees); `bundled`'s own

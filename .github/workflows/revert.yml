@@ -122,4 +122,7 @@ jobs:
           prerelease: false
           make_latest: true
           files: release/*
-          # TODO: Update homebrew stable tap to reverted version once created
+          # Homebrew and Scoop need no separate update: the stable formula and
+          # bucket download from releases/download/latest/, which this step just
+          # re-pointed at the reverted build, and integrity comes from the
+          # release's own SHA256SUMS rather than hashes pinned in the tap.

@@ -155,6 +155,9 @@ jobs:
           # See beta.yml: tagging the promoted (older) commit needs a token
           # that may create refs with workflow-file drift; GITHUB_TOKEN cannot.
           token: ${{ secrets.RELEASE_TOKEN || github.token }}
+          # Append GitHub's auto-generated notes (merged PRs since the last
+          # versioned release) below the static install instructions.
+          generate_release_notes: true
           tag_name: ${{ env.VERSION }}
           target_commitish: ${{ needs.check-beta.outputs.sha }}
           name: "Leviath ${{ env.VERSION }}"

@@ -13,8 +13,30 @@ leviath = "0.1"
 ```
 
 ```rust
-use leviath::prelude::*;
+use leviath::core::manifest::parse_manifest;
+
+fn main() -> leviath::core::Result<()> {
+    let blueprint = parse_manifest(
+        r#"
+        [agent]
+        name = "hello"
+        version = "0.1.0"
+
+        [model]
+        provider = "anthropic"
+        model = "claude-sonnet-4-6"
+
+        [[stages]]
+        name = "work"
+        prompt = "Do the task."
+        "#,
+    )?;
+    println!("{} has {} stage(s)", blueprint.name, blueprint.stages.len());
+    Ok(())
+}
 ```
+
+The most-used types are one import away with `use leviath::prelude::*;`.
 
 The modules map one-to-one onto the underlying crates: `leviath::core`,
 `leviath::runtime`, `leviath::providers`, `leviath::tools`, `leviath::mcp`,

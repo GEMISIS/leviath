@@ -29,7 +29,7 @@ from pathlib import Path
 
 SRC_DIR = Path(__file__).resolve().parent
 OUT_DIR = SRC_DIR.parent
-AGENTS_DIR = SRC_DIR.parents[3] / "agents"
+AGENTS_DIR = SRC_DIR.parents[3] / "crates" / "leviath-cli" / "agents"
 
 OMIT = {"error_recovery"}
 # Graphs with more than this many visible stages render top-down so they fit

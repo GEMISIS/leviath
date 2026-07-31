@@ -40,6 +40,19 @@ one world, cross-cutting features come for free:
 - **One context store** lets the [dashboard](/docs/dashboard) and [API](/docs/api) read every
   agent's state without touching hundreds of separate processes.
 
+## Inference pools
+
+"Shared inference" is concrete: the world holds a per-model pool that caps in-flight requests.
+An agent acquires a permit before calling the provider and holds it for the whole request; agents
+waiting for a permit just stay in their ready-to-infer state, which costs nothing - no thread is
+parked, no request is queued at the provider. The default cap comes from
+`[limits] max_concurrent_inferences` in the config, and per-model limits override it.
+
+This is a different knob from the two it is often confused with: fan-out's `max_workers` bounds
+how many *sub-agents* a stage spawns ([Sub-agents](/docs/sub-agents)), and
+`[rate_limits.<provider>]` shapes *request rate* to a provider. The pool bounds concurrency; the
+rate limiter bounds throughput; both apply.
+
 > [!NOTE]
 > The engine is an implementation detail you rarely configure directly. You describe *what* an
 > agent does in its [blueprint](/docs/agents), and the engine schedules it. This page is here so

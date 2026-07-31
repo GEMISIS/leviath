@@ -28,6 +28,7 @@ lev mcp add filesystem --command npx \
 lev mcp add remote --url https://mcp.example.com --header "Authorization: Bearer $TOK"
 lev mcp list
 lev mcp login <name>        # OAuth servers: opens your browser
+lev mcp logout <name>       # drop the stored OAuth tokens
 lev mcp test <name>
 lev mcp remove <name>
 ```
