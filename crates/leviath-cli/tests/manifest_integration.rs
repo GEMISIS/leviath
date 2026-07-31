@@ -4,20 +4,14 @@
 
 use std::path::PathBuf;
 
-/// Get the workspace root (assumes tests run from leviath-cli crate).
-fn workspace_root() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf()
+/// Root of this crate, which holds the bundled `agents/` directory.
+fn crate_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
 /// Discover all agent.leviath files in the agents/ directory.
 fn discover_agent_manifests() -> Vec<(String, PathBuf)> {
-    let agents_dir = workspace_root().join("agents");
+    let agents_dir = crate_root().join("agents");
     let mut manifests = Vec::new();
 
     if let Ok(entries) = std::fs::read_dir(&agents_dir) {
@@ -121,7 +115,7 @@ fn all_builtin_agents_transition_targets_exist() {
 
 #[test]
 fn specific_agent_coder_has_expected_structure() {
-    let path = workspace_root().join("agents/coder/agent.leviath");
+    let path = crate_root().join("agents/coder/agent.leviath");
     let content = std::fs::read_to_string(&path).unwrap();
     let bp = leviath_core::manifest::parse_manifest(&content).unwrap();
 
@@ -216,7 +210,7 @@ fn required_regions_are_not_also_seeded_from_the_environment() {
 
 #[test]
 fn specific_agent_researcher_has_graph_transitions() {
-    let path = workspace_root().join("agents/researcher/agent.leviath");
+    let path = crate_root().join("agents/researcher/agent.leviath");
     let content = std::fs::read_to_string(&path).unwrap();
     let bp = leviath_core::manifest::parse_manifest(&content).unwrap();
 
