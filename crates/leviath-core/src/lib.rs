@@ -33,9 +33,11 @@ pub mod telemetry;
 pub mod text;
 
 pub use blueprint::{
-    Blueprint, ContextTransform, EdgeTransform, FileTrackingConfig, RepetitionDetectionConfig,
-    Stage, StuckConfig, ToolResultRouting, TransitionCondition, TransitionEdge,
+    Blueprint, ContextTransform, EdgeTransform, FileTrackingConfig, ReadPathsConfig,
+    RepetitionDetectionConfig, Stage, StuckConfig, ToolResultRouting,
+    TransitionCondition, TransitionEdge,
 };
+pub use paths::ReadPathEntry;
 pub use cache::CacheHint;
 pub use credentials::{
     CredentialStore, CredentialStoreKind, MemoryStore, mcp_account, provider_account,

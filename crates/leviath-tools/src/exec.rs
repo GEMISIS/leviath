@@ -70,7 +70,47 @@ impl BuiltinTools {
     /// throughout, which is a larger change; this stops the planted-symlink case,
     /// which is the one an agent can actually arrange.
     pub(crate) fn resolve(&self, requested: &str) -> anyhow::Result<PathBuf> {
-        Self::resolve_within(requested, &self.ctx.workdir, resolves_within)
+        // 1. Try the workdir first — this is the normal, sandboxed path.
+        match Self::resolve_within(requested, &self.ctx.workdir, resolves_within) {
+            Ok(path) => return Ok(path),
+            Err(_workdir_err) => {
+                // 2. If the workdir check fails, try each read_paths allowlist entry.
+                //    Only absolute paths are checked against read_paths — relative
+                //    paths are always confined to the workdir.
+                if !Path::new(requested).is_absolute() || self.ctx.read_paths.is_empty() {
+                    // No fallback — return the original workdir error.
+                    return Self::resolve_within(requested, &self.ctx.workdir, resolves_within);
+                }
+                let raw = PathBuf::from(requested);
+                // Normalize .. and .
+                let mut normalized = PathBuf::new();
+                for component in raw.components() {
+                    match component {
+                        Component::ParentDir => {
+                            if !normalized.pop() {
+                                anyhow::bail!("path '{}' escapes the working directory", requested);
+                            }
+                        }
+                        Component::CurDir => {}
+                        other => normalized.push(other),
+                    }
+                }
+                for entry in &self.ctx.read_paths {
+                    if entry.matches(&normalized) {
+                        // Symlink check against the matched entry's root.
+                        let root = match entry {
+                            leviath_core::ReadPathEntry::Exact(root) => root.clone(),
+                            _ => normalized.clone(),
+                        };
+                        if resolves_within(&normalized, &root) {
+                            return Ok(normalized);
+                        }
+                    }
+                }
+                // No allowlist entry matched — return the original error.
+                Self::resolve_within(requested, &self.ctx.workdir, resolves_within)
+            }
+        }
     }
 
     /// Core of [`resolve`](Self::resolve) with the containment check injected.

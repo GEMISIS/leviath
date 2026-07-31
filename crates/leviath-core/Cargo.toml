@@ -25,6 +25,8 @@ dirs = { workspace = true }
 # every outbound client in the workspace starts from one timeout + redirect
 # policy instead of a bare `Client::new()` with neither.
 reqwest = { workspace = true }
+glob = "0.3"
+regex = "1"
 
 [dev-dependencies]
 # A redirecting server, so the redirect policy is verified by following one

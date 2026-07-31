@@ -2,6 +2,59 @@
 
 use std::path::{Path, PathBuf};
 
+/// A single entry in the `[read_paths]` allowlist.
+///
+/// Supports three kinds of path matching:
+/// - `Exact` — literal directory prefix match
+/// - `Glob` — glob pattern (e.g. `**/*.md`)
+/// - `Regex` — compiled regex pattern
+#[derive(Debug, Clone)]
+pub enum ReadPathEntry {
+    /// Exact path — matched via canonicalized starts_with
+    Exact(PathBuf),
+    /// Glob pattern — matched via glob::Pattern
+    Glob(glob::Pattern),
+    /// Regex pattern — matched via regex::Regex
+    Regex(regex::Regex),
+}
+
+impl ReadPathEntry {
+    /// Parse a raw string from the `[read_paths].allow` TOML array into
+    /// the appropriate variant. No prefix = Exact, `glob:` = Glob,
+    /// `regex:` = Regex.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        if let Some(rest) = raw.strip_prefix("regex:") {
+            regex::Regex::new(rest)
+                .map(ReadPathEntry::Regex)
+                .map_err(|e| format!("invalid regex '{}': {}", rest, e))
+        } else if let Some(rest) = raw.strip_prefix("glob:") {
+            glob::Pattern::new(rest)
+                .map(ReadPathEntry::Glob)
+                .map_err(|e| format!("invalid glob '{}': {}", rest, e))
+        } else {
+            Ok(ReadPathEntry::Exact(PathBuf::from(raw)))
+        }
+    }
+
+    /// Check whether `canonicalized` matches this allowlist entry.
+    ///
+    /// `canonicalized` has already been through `canonicalize_existing_prefix`
+    /// and `..`/`.` folding. On Windows, matching is case-insensitive.
+    pub fn matches(&self, canonicalized: &Path) -> bool {
+        match self {
+            ReadPathEntry::Exact(root) => {
+                let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+                canonicalized.starts_with(&root)
+            }
+            ReadPathEntry::Glob(pattern) => pattern.matches_path(canonicalized),
+            ReadPathEntry::Regex(re) => {
+                let s = canonicalized.to_string_lossy();
+                re.is_match(&s)
+            }
+        }
+    }
+}
+
 /// The user's home directory, honoring the `LEVIATH_HOME` override.
 ///
 /// `dirs::home_dir()` cannot be redirected by `$HOME` on macOS

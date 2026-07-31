@@ -736,10 +736,38 @@ fn build_agent_inner(
     .map(Arc::new);
 
     // 2b. Per-agent built-in tools (over the agent's workdir), routing shell
-    // execution through the sandbox when one is configured.
-    let mut builtins = leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(
-        std::path::PathBuf::from(&args.workdir),
-    ));
+    // execution through the sandbox when one is configured. Build with
+    // read_paths from the blueprint for C-suite agents.
+    let read_path_entries: Vec<leviath_core::ReadPathEntry> = blueprint
+        .read_paths
+        .as_ref()
+        .map(|rp| {
+            rp.allow
+                .iter()
+                .filter_map(|raw| match leviath_core::ReadPathEntry::parse(raw) {
+                    Ok(entry) => Some(entry),
+                    Err(e) => {
+                        tracing::warn!(
+                            agent_name = %blueprint.name,
+                            raw = %raw,
+                            error = %e,
+                            "skipping invalid read_paths entry"
+                        );
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let tool_ctx = if read_path_entries.is_empty() {
+        leviath_tools::ToolContext::new(std::path::PathBuf::from(&args.workdir))
+    } else {
+        leviath_tools::ToolContext::with_read_paths(
+            std::path::PathBuf::from(&args.workdir),
+            read_path_entries,
+        )
+    };
+    let mut builtins = leviath_tools::BuiltinTools::new(tool_ctx);
     if let Some(mgr) = &sandbox {
         builtins =
             builtins.with_shell_executor(mgr.clone() as Arc<dyn leviath_tools::ShellExecutor>);
