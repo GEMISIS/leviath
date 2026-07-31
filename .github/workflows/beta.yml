@@ -54,6 +54,9 @@ jobs:
             fi
             echo "sha=$sha" >> $GITHUB_OUTPUT
             echo "sha_short=${sha:0:7}" >> $GITHUB_OUTPUT
+            # Version at the promoted commit, for the release title. Same
+            # extraction prod.yml applies to the beta SHA.
+            echo "version=$(git show "$sha:Cargo.toml" | grep '^version' | head -1 | sed 's/.*"\(.*\)"/\1/')" >> $GITHUB_OUTPUT
           else
             echo "No COMMIT_SHA in alpha release. Skipping."
             echo "skip=true" >> $GITHUB_OUTPUT
@@ -99,7 +102,7 @@ jobs:
         with:
           tag_name: beta
           target_commitish: ${{ steps.alpha.outputs.sha }}
-          name: "Beta · ${{ steps.alpha.outputs.date }} · ${{ steps.alpha.outputs.sha_short }}"
+          name: "Leviath v${{ steps.alpha.outputs.version }}-Beta"
           body: |
             **Weekly beta build** promoted from alpha.
 
