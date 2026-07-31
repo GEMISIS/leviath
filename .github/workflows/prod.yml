@@ -224,11 +224,15 @@ jobs:
 
   docs:
     name: Publish docs (stable)
-    needs: deploy
+    # check-beta is only here for its `sha` output; deploy is the real gate
+    # (it inherits check-beta's skip condition).
+    needs: [deploy, check-beta]
     permissions:
       id-token: write
       contents: read
     uses: ./.github/workflows/publish-docs.yml
     with:
       channel: stable
+      # The promoted beta commit, so stable docs match the stable binaries.
+      ref: ${{ needs.check-beta.outputs.sha }}
     secrets: inherit

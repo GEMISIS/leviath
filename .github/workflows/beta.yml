@@ -18,6 +18,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    # Handed to the docs job so beta docs render the promoted alpha commit,
+    # exactly like the binaries.
+    outputs:
+      sha: ${{ steps.alpha.outputs.sha }}
+      skip: ${{ steps.alpha.outputs.skip }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -128,10 +133,15 @@ jobs:
   docs:
     name: Publish docs (beta)
     needs: promote
+    # `promote` exits 0 when there is no alpha to promote; no new binaries
+    # means no docs refresh either.
+    if: needs.promote.outputs.skip != 'true'
     permissions:
       id-token: write
       contents: read
     uses: ./.github/workflows/publish-docs.yml
     with:
       channel: beta
+      # The promoted alpha commit, so beta docs match the beta binaries.
+      ref: ${{ needs.promote.outputs.sha }}
     secrets: inherit
