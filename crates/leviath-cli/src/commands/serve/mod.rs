@@ -193,7 +193,14 @@ async fn execute_with_shutdown(
             CorsLayer::new()
                 .allow_origin(Any)
                 .allow_methods(Any)
-                .allow_headers(Any),
+                // `Access-Control-Allow-Headers: *` does NOT cover
+                // `Authorization` per the Fetch spec, so a browser sending the
+                // required bearer token would be blocked. List the headers the
+                // API actually needs explicitly.
+                .allow_headers([
+                    axum::http::header::AUTHORIZATION,
+                    axum::http::header::CONTENT_TYPE,
+                ]),
         ),
         Some(origin) => {
             // An unparseable value must not fall back to `*` - that silently
@@ -206,7 +213,14 @@ async fn execute_with_shutdown(
                 CorsLayer::new()
                     .allow_origin(value)
                     .allow_methods(Any)
-                    .allow_headers(Any),
+                    // `Access-Control-Allow-Headers: *` does NOT cover
+                    // `Authorization` per the Fetch spec, so a browser sending the
+                    // required bearer token would be blocked. List the headers the
+                    // API actually needs explicitly.
+                    .allow_headers([
+                        axum::http::header::AUTHORIZATION,
+                        axum::http::header::CONTENT_TYPE,
+                    ]),
             )
         }
     };
@@ -924,6 +938,64 @@ prompt = "Run"
                 assert!(
                     String::from_utf8_lossy(&resp2).starts_with("HTTP/1.1 401"),
                     "unauthenticated request should be 401"
+                );
+
+                handle.abort();
+            },
+        )
+        .await;
+    }
+
+    /// A browser preflight for a request carrying `Authorization` must be
+    /// allowed. `Access-Control-Allow-Headers: *` does NOT cover `Authorization`
+    /// per the Fetch spec, so the header has to be listed explicitly — without
+    /// it the console's authenticated requests are blocked by the browser. Also
+    /// covers the `Some("*")` CORS arm.
+    #[tokio::test]
+    async fn execute_cors_preflight_allows_authorization_header() {
+        crate::config::with_isolated_config_path_async(
+            "serve-mod-cors-preflight",
+            |_fake_dir| async move {
+                with_tracing(|| {});
+                let args = ServeArgs {
+                    port: 0,
+                    host: "127.0.0.1".to_string(),
+                    cors: Some("*".to_string()),
+                    token: Some("test-token".to_string()),
+                    allow_admin: false,
+                    workdir_root: None,
+                    no_remote_yolo: false,
+                };
+                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                let handle = tokio::spawn(execute_with_shutdown(
+                    args,
+                    no_daemon_control(),
+                    Box::pin(std::future::pending()),
+                    Some(ready_tx),
+                ));
+                let addr = ready_rx
+                    .await
+                    .expect("server should report its bound address");
+
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+                stream
+                    .write_all(
+                        b"OPTIONS /api/config HTTP/1.1\r\nHost: localhost\r\n\
+                          Origin: https://leviath.dev\r\n\
+                          Access-Control-Request-Method: GET\r\n\
+                          Access-Control-Request-Headers: authorization\r\n\
+                          Connection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+                let mut resp = Vec::new();
+                stream.read_to_end(&mut resp).await.unwrap();
+                let lower = String::from_utf8_lossy(&resp).to_lowercase();
+                assert!(
+                    lower.contains("access-control-allow-headers")
+                        && lower.contains("authorization"),
+                    "preflight must allow the Authorization header, got:\n{lower}"
                 );
 
                 handle.abort();
