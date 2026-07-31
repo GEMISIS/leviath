@@ -2173,6 +2173,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "leviath"
+version = "0.1.0"
+dependencies = [
+ "leviath-agent-client",
+ "leviath-core",
+ "leviath-mcp",
+ "leviath-package",
+ "leviath-providers",
+ "leviath-runtime",
+ "leviath-scripting",
+ "leviath-telemetry",
+ "leviath-tools",
+]
+
+[[package]]
 name = "leviath-agent-client"
 version = "0.1.0"
 dependencies = [

@@ -174,8 +174,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        # The workspace members `parse_workspace_packages` returns (xtask
-        # excluded - it is the coverage tool, not measured by the gate).
+        # The workspace members `parse_workspace_packages` returns. Not
+        # listed: `xtask` (the coverage tool itself), `leviath-testkit`
+        # (dev-dependency-only scaffolding exercised inside these suites), and
+        # `leviath` (the re-export-only crates.io facade - zero executable
+        # regions, kept that way by the guard-facade job below).
         package:
           - leviath-core
           - leviath-agent-client
@@ -325,3 +328,63 @@ jobs:
           else
             echo "main.rs unchanged."
           fi
+
+  # `crates/leviath` is the re-export-only crates.io facade. It is exempt from
+  # the 100% coverage gate because llvm-cov has no executable regions to count
+  # there - which means any real code added to it would ship untested. This
+  # job closes that hole: it fails unless the crate is exactly three files
+  # (Cargo.toml, README.md, src/lib.rs) and every source line is a comment, a
+  # doc comment, a `pub use`, or the `pub mod prelude` wrapper. To add
+  # behavior, put it in a gated crate and re-export it here.
+  guard-facade:
+    name: Guard re-export-only facade (crates/leviath)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Require crates/leviath to stay re-export-only
+        run: |
+          python3 - <<'EOF'
+          import pathlib, re, sys
+
+          root = pathlib.Path("crates/leviath")
+          allowed_files = {"Cargo.toml", "README.md", "src/lib.rs"}
+          actual_files = {
+              str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()
+          }
+          if actual_files != allowed_files:
+              print(
+                  "::error::crates/leviath must contain exactly "
+                  f"{sorted(allowed_files)}, found {sorted(actual_files)}. "
+                  "The facade is coverage-exempt, so no other files (build.rs, "
+                  "tests, extra modules) may live in it."
+              )
+              sys.exit(1)
+
+          item = r"\w+(::\w+)*"
+          allowed_line = re.compile(
+              r"^$"                                          # blank
+              r"|^\s*//"                                     # comment / doc comment
+              rf"|^\s*pub use {item} as \w+;$"               # renamed re-export
+              rf"|^\s*pub use {item}::\{{[\w\s,:]*\}};$"     # single-line brace re-export
+              rf"|^\s*pub use {item}::\{{$"                  # multi-line brace re-export opener
+              rf"|^\s+{item}(,\s*{item})*,?$"                # items inside a brace re-export
+              r"|^\s*\};$"                                   # close of a brace re-export
+              r"|^pub mod prelude \{$"                       # the one allowed module
+              r"|^\}$"                                       # close of the prelude
+          )
+          bad = [
+              (n, line)
+              for n, line in enumerate(
+                  (root / "src/lib.rs").read_text().splitlines(), start=1
+              )
+              if not allowed_line.match(line)
+          ]
+          for n, line in bad:
+              print(
+                  f"::error file=crates/leviath/src/lib.rs,line={n}::"
+                  f"not a re-export or comment: {line!r}. The facade is exempt "
+                  "from the coverage gate, so executable code cannot land here; "
+                  "put it in a gated crate and re-export it."
+              )
+          sys.exit(1 if bad else 0)
+          EOF
