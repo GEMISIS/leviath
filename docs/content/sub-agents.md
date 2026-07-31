@@ -18,7 +18,7 @@ concurrently, bounded by `max_workers`, then merges their results back into the 
 
 ```mermaid
 flowchart TB
-  P["Parent — fan-out stage"] --> Q{"split by query"}
+  P["Parent — fan-out stage"] --> Q{"split_prompt<br/>→ work items"}
   Q --> W1["worker 1"]
   Q --> W2["worker 2"]
   Q --> W3["worker 3"]
@@ -28,10 +28,10 @@ flowchart TB
 
 ```toml
 [stages.fix.fan_out]
-worker_agent = "."          # blueprint for each worker
-query        = "..."        # how to split the work
-max_workers  = 8
-merge_stage  = "verify"
+worker_agent = "."          # blueprint each worker runs
+split_prompt = "..."        # prompt that produces the JSON array of work items
+merge_stage  = "verify"     # stage the parent resumes at once workers finish
+max_workers  = 8            # concurrency bound
 on_worker_failure = "continue"
 ```
 

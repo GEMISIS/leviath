@@ -59,17 +59,23 @@ report on:
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Queued
-  Queued --> Running
-  Running --> AwaitingInput: ask_user / tool approval
-  AwaitingInput --> Running: you respond
-  Running --> Done
-  Running --> Failed: unrecoverable error
+  [*] --> Starting
+  Starting --> Running
+  Running --> WaitingInput: ask_user / tool approval
+  WaitingInput --> Running: you respond
+  Running --> Complete
+  Running --> CompleteInteractive: done, still accepting messages
+  Running --> Error: unrecoverable error
   Running --> Cancelled: lev cancel
-  Done --> [*]
-  Failed --> [*]
+  Complete --> [*]
+  CompleteInteractive --> [*]
+  Error --> [*]
   Cancelled --> [*]
 ```
+
+These are the exact `RunStatus` values the [dashboard](/docs/dashboard) and [API](/docs/api)
+report. `CompleteInteractive` means every required stage finished but the agent is still
+accepting [messages](/docs/interaction).
 
 ## Stages and models
 
@@ -77,12 +83,26 @@ Each stage gets its own **model** (an ordered provider/model fallback list — t
 provider wins), tools, iteration cap, and context layout. Transitions form a
 [graph](/docs/stages): linear by default, or branch on conditions like `error` and `stuck`.
 
+```toml
+[stages.analyze.model]
+allow_user_default = true          # fall back to the user's default model, else fail closed
+models = [
+  { provider = "anthropic", model = "claude-sonnet-4-6" },
+  { provider = "openai",    model = "gpt-5.4-mini" },
+]
+request_timeout_secs = 120         # per-stage inference wall-clock cap
+
+[stages.analyze.model.parameters]  # free-form, passed through to the provider
+temperature = 0.2
+max_tokens  = 8000
+```
+
 ## Context regions
 
 `[context.regions]` defines the memory layout. Budgets can be **percentages of the model's context
 window** (ceilings — they may sum past 100%), with absolute `max_tokens` / `threshold_tokens`
-guard-rails. Region kinds: `pinned`, `sliding_window`, `compacting`, `compact_history`, `clearable`,
-`hashmap`. See [Structured context](/docs/context) for what each one does.
+guard-rails. There are eight region kinds (the default is `temporary`) — see
+[Structured context](/docs/context) for what each one does.
 
 ## Seed commands
 

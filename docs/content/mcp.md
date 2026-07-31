@@ -2,7 +2,7 @@
 title: MCP tool servers
 group: Reference
 group_order: 3
-order: 3
+order: 4
 ---
 
 # MCP tool servers
@@ -23,12 +23,17 @@ flowchart LR
 ## Managing servers
 
 ```bash
-lev mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem /path
+lev mcp add filesystem --command npx \
+  --arg -y --arg @modelcontextprotocol/server-filesystem --arg /path
+lev mcp add remote --url https://mcp.example.com --header "Authorization: Bearer $TOK"
 lev mcp list
 lev mcp login <name>        # OAuth servers: opens your browser
 lev mcp test <name>
 lev mcp remove <name>
 ```
+
+`lev mcp add <name>` takes `--command` + repeatable `--arg` for a stdio server, or `--url`
+(with optional `--header`/`--env`) for an HTTP one; `--no-login` skips the OAuth handshake.
 
 Or configure in `~/.leviath/config.toml`:
 

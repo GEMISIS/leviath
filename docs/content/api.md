@@ -22,8 +22,10 @@ lev serve --port 3000 --token "$(openssl rand -hex 16)" --cors https://leviath.d
 - **CORS is closed by default.** Pass `--cors <origin>` (e.g. `https://leviath.dev`) or `--cors "*"`
   to allow a browser to call it cross-origin.
 - **Binds to `127.0.0.1`** by default. `--host 0.0.0.0` exposes it on your network.
-- **`--allow-admin`** mounts the mutating admin routes (write config, add/remove MCP servers).
-  Off by default, so those routes 404 rather than relying on an in-handler check.
+- **`--allow-admin`** mounts the mutating admin routes. `GET /api/config` and
+  `GET /api/mcp/servers` are always available; the writes (`PUT /api/config`,
+  `POST`/`DELETE /api/mcp/servers`) are only mounted with `--allow-admin` and return **405 Method
+  Not Allowed** otherwise — the route isn't there, rather than gated by an in-handler check.
 - **`--workdir-root`** confines agent workdirs; **`--no-remote-yolo`** forbids `"yolo": true` on spawn.
 
 > [!CAUTION]

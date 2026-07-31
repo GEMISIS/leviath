@@ -18,6 +18,17 @@ run `lev <command> --help` for the full, authoritative flag list.
 | `lev create <name>` | Scaffold a new [`agent.leviath` blueprint](/docs/agents) |
 | `lev validate <path>` | Check a blueprint's graph, seeds, and permissions |
 | `lev test <path>` | Dry-run a blueprint |
+| `lev models` | List the models available from your configured [providers](/docs/providers) |
+| `lev agent-client …` | Serve an agent to an [editor host over ACP](/docs/editor) |
+
+## Blueprints and packaging
+
+| Command | Purpose |
+|---|---|
+| `lev list` | List installed blueprints and agents |
+| `lev add <package>` | Install a blueprint from a directory or `.leviath-bundle` |
+| `lev remove <name>` | Remove an installed blueprint |
+| `lev pack [path]` | Bundle a project for [sharing](/docs/packaging) |
 
 ## Watching and steering
 
@@ -43,7 +54,9 @@ run `lev <command> --help` for the full, authoritative flag list.
 | Command | Purpose |
 |---|---|
 | `lev setup` | Interactive [provider](/docs/providers) setup wizard |
+| `lev auth [status\|migrate]` | Move keys between `config.toml` and the [OS keychain](/docs/providers) |
 | `lev mcp [add\|list\|login\|test\|remove]` | Manage [MCP tool servers](/docs/mcp) |
+| `lev tools` | List and validate your global [Rhai tool scripts](/docs/scripting) |
 | `lev policy [list\|add\|test]` | Manage [taint policy](/docs/security) rules |
 
 > [!TIP]

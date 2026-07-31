@@ -22,16 +22,18 @@ A stage's context window is divided into regions, each with its own budget and e
   <div style="flex:1 1 auto;background:#1f2937;padding:.6rem .3rem;color:#8b949e" title="free">headroom</div>
 </div>
 
-## The six region kinds
+## The eight region kinds
 
 | Kind | Behavior |
 |---|---|
+| `temporary` | The **default** when `kind` is omitted; recent entries, trimmed first under budget pressure. |
 | `pinned` | Never evicted (architecture, the task). |
 | `sliding_window` | Keeps the most recent entries; the conversation lives here. |
 | `compacting` | Summarizes instead of evicting — file reads and tool results. |
 | `compact_history` | Rolls compacted summaries forward across stages. |
-| `clearable` | Dropped wholesale at a stage boundary (scratch). |
-| `hashmap` | Keyed entries; a write to a key replaces it. |
+| `clearable` | Wiped in one shot when space is needed (scratch). |
+| `hashmap` | Keyed entries (alias `hash_map`); a write to a key replaces it. |
+| `custom` | Behavior defined by a Rhai script — see [Rhai scripting](/docs/scripting). |
 
 ## Eviction is deterministic
 
@@ -46,7 +48,7 @@ flowchart TD
   T -->|pinned| K2["Keep — never evicted"]
   T -->|sliding_window| D["Drop oldest entries"]
   T -->|compacting / compact_history| S["Summarize into a compact form"]
-  T -->|clearable| CL["Cleared at next stage boundary"]
+  T -->|clearable / temporary| CL["Trimmed or cleared under budget pressure"]
 ```
 
 ## Routing tool output
