@@ -19,7 +19,7 @@ run `lev <command> --help` for the full, authoritative flag list.
 | `lev validate <path>` | Check a blueprint's graph, seeds, and permissions |
 | `lev test <path>` | Dry-run a blueprint |
 | `lev models` | List the models available from your configured [providers](/docs/providers) |
-| `lev agent-client …` | Serve an agent to an [editor host over ACP](/docs/editor) |
+| `lev agent-client …` | Serve an agent over the [Agent Client Protocol](/docs/agent-client-protocol) |
 
 ## Blueprints and packaging
 
