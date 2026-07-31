@@ -55,6 +55,7 @@ lev create my-agent              # scaffold your own agent
 
 ```bash
 brew tap sun-forge-ai/leviath https://github.com/Sun-Forge-AI/leviath-dist.git
+brew trust sun-forge-ai/leviath          # Homebrew 6 requires trusting third-party taps
 brew install leviath                     # stable - or: leviath-beta, leviath-alpha
 ```
 

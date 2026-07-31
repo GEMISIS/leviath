@@ -27,6 +27,7 @@ flowchart LR
 
 ```bash
 brew tap sun-forge-ai/leviath https://github.com/Sun-Forge-AI/leviath-dist.git
+brew trust sun-forge-ai/leviath # Homebrew 6 requires trusting third-party taps
 brew install leviath            # or: leviath-beta, leviath-alpha
 ```
 
