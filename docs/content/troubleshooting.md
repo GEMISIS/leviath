@@ -58,8 +58,11 @@ on its next start.
 
 ## Install fails with an auth error
 
-During the private alpha, installing needs a GitHub token with `repo` scope (`GITHUB_TOKEN` for the
-scripts, `HOMEBREW_GITHUB_API_TOKEN` for Homebrew) — see [Getting Started](/docs/getting-started).
+No token is needed — the repos and release assets are public. A 401/403 during install usually
+means leftovers from the private alpha: remove any
+`url."https://…@github.com/Sun-Forge-AI/".insteadOf` rewrite from `~/.gitconfig`, unset stale
+`GITHUB_TOKEN` / `HOMEBREW_GITHUB_API_TOKEN` exports (an expired token *fails* requests that
+would succeed anonymously), and retry.
 
 > [!NOTE]
 > Still stuck? Open an issue or a private security advisory on

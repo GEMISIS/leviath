@@ -23,32 +23,24 @@ flowchart LR
 
 ## Install
 
-> [!IMPORTANT]
-> Private alpha. Installing needs a GitHub Personal Access Token (`repo` scope):
-> `GITHUB_TOKEN` for the scripts and `HOMEBREW_GITHUB_API_TOKEN` for Homebrew. One-time setup
-> lives in the [distribution repo](https://github.com/Sun-Forge-AI/leviath-dist).
-
 **macOS (Homebrew)**
 
 ```bash
 brew tap sun-forge-ai/leviath https://github.com/Sun-Forge-AI/leviath-dist.git
-brew trust sun-forge-ai/leviath
 brew install leviath            # or: leviath-beta, leviath-alpha
 ```
 
 **Linux**
 
 ```bash
-curl -fsSL -H "Authorization: token $GITHUB_TOKEN" \
-  https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/install.sh \
   | bash -s -- --channel stable
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-irm -Headers @{Authorization="token $env:GITHUB_TOKEN"} `
-  https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/install.ps1 | iex
 ```
 
 **From source** (any platform, needs [Rust](https://rustup.rs/)):
