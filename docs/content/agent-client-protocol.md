@@ -1,11 +1,11 @@
 ---
-title: Editor integration
+title: Agent Client Protocol
 group: Reference
 group_order: 3
 order: 7
 ---
 
-# Editor integration (Agent Client Protocol)
+# Agent Client Protocol (editor integration)
 
 `lev agent-client` serves a Leviath agent over the **Agent Client Protocol** (JSON-RPC 2.0,
 newline-delimited, spoken over **stdio**) so an editor host can drive a headless [agent](/docs/agents)
@@ -76,6 +76,23 @@ surfaces tool approvals as `session/request_permission` requests the host answer
 capabilities (Gas City sends none) cannot answer such a request, so instead of deadlocking, tool
 approvals are surfaced as output and the run **parks**. Use `--yolo` (or scoped `--allow` flags) to run
 unattended against such a host.
+
+## Connecting from Gas City
+
+Gas City launches the agent as a subprocess and talks JSON-RPC to it over stdio. Because it sends no
+client capabilities, run with `--yolo` so tool approvals don't park the run. Point Gas City's agent
+command at:
+
+```bash
+lev agent-client --agent coder --yolo
+```
+
+Then open a session in Gas City and prompt the agent; its output streams back as the run progresses.
+If you'd rather whitelist specific tools than approve everything, drop `--yolo` and list them:
+
+```bash
+lev agent-client --agent coder --allow read_file --allow list_dir --allow shell
+```
 
 > [!NOTE]
 > Editor integration is a thin front end over the daemon, exactly like `lev run` and `lev serve`. It
