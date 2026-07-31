@@ -86,3 +86,17 @@ opentelemetry_sdk = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true
+
+# A copy of the workspace root's [profile.release], and it must be kept in
+# sync with it. Inside the workspace this section is ignored (cargo prints a
+# one-line "profiles for the non root package" warning and uses the root's),
+# but a `cargo install leviath-cli` build has no workspace: this manifest IS
+# the root there, and without this section cargo's defaults apply - which
+# silently drops `overflow-checks` and lets token/budget arithmetic wrap
+# instead of panic. The GitHub release binaries and the crates.io install
+# must behave the same, so the warning is the price.
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
