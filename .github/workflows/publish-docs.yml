@@ -9,12 +9,25 @@ on:
       channel:
         required: true
         type: string
+      # The leviath commit whose docs/content gets rendered. The release
+      # workflows pass the SHA their binaries were built from, so a channel's
+      # docs always describe that channel's binary rather than whatever main
+      # happens to be when the promotion runs. Empty means the triggering SHA.
+      ref:
+        required: false
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       channel:
         description: alpha | beta | stable
         required: true
         default: alpha
+        type: string
+      ref:
+        description: leviath commit to render (empty = current main)
+        required: false
+        default: ""
         type: string
 
 permissions:
@@ -27,6 +40,8 @@ jobs:
     steps:
       - name: Checkout Leviath (docs content)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       # leviath.dev is a private repo, so the default GITHUB_TOKEN (scoped to
       # this repo) cannot read it — a fine-grained PAT with Contents: read on
