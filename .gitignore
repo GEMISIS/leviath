@@ -27,8 +27,21 @@ Thumbs.db
 .leviath/
 *.leviath-bundle
 
-# Environment specific stuff
+# Secrets — never commit environment files or key material. .env.example is the
+# one allowed exception (a template with no real values).
 .env
+.env.*
+*.env
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+id_rsa*
+
+# Per-machine Claude Code settings (may hold local permission grants)
+.claude/settings.local.json
 
 tarpaulin-report.json
 .claude/worktrees/
