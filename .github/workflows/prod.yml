@@ -221,3 +221,14 @@ jobs:
           files: release/*
 
 
+
+  docs:
+    name: Publish docs (stable)
+    needs: deploy
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/publish-docs.yml
+    with:
+      channel: stable
+    secrets: inherit
