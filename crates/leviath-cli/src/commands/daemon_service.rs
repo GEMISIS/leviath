@@ -19,7 +19,33 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 /// The reverse-DNS label both platforms key the service by.
-pub const SERVICE_LABEL: &str = "ai.sunforge.leviath";
+pub const SERVICE_LABEL: &str = "dev.leviath.daemon";
+
+/// Labels earlier releases registered the launchd agent under (the project
+/// predates its move off the Sun Forge organization). Install and uninstall
+/// also deregister these, so upgrading across the rename cannot leave a
+/// second supervised daemon running under the old name.
+#[cfg(target_os = "macos")]
+pub const LEGACY_SERVICE_LABELS: &[&str] = &["ai.sunforge.leviath"];
+
+/// The cleanup a legacy label needs: the unit file it wrote and the
+/// `launchctl bootout` that deregisters it. Pure data - running the commands
+/// is the caller's subprocess I/O, same split as [`ServiceUnit`].
+#[cfg(target_os = "macos")]
+pub fn legacy_cleanup(config_home: &Path, uid: u32) -> Vec<(PathBuf, (String, Vec<String>))> {
+    LEGACY_SERVICE_LABELS
+        .iter()
+        .map(|label| {
+            (
+                config_home.join(format!("{label}.plist")),
+                (
+                    "launchctl".to_string(),
+                    vec!["bootout".to_string(), format!("gui/{uid}/{label}")],
+                ),
+            )
+        })
+        .collect()
+}
 
 /// Where a supervised daemon's stdout/stderr are appended, under the leviath
 /// home directory. Only the platforms with a supervisor render a unit file.
@@ -424,6 +450,23 @@ mod tests {
                     .unwrap()
                     .ends_with("LaunchAgents")
             );
+        }
+
+        #[test]
+        fn legacy_cleanup_covers_every_old_label_with_a_bootout_and_a_plist() {
+            let actions = legacy_cleanup(Path::new("/tmp/lev-units"), 501);
+            assert_eq!(actions.len(), LEGACY_SERVICE_LABELS.len());
+            let (path, (cmd, args)) = &actions[0];
+            assert_eq!(
+                path.file_name().unwrap().to_string_lossy(),
+                "ai.sunforge.leviath.plist"
+            );
+            assert_eq!(cmd, "launchctl");
+            assert_eq!(args[0], "bootout");
+            assert_eq!(args[1], "gui/501/ai.sunforge.leviath");
+            // The rename is only safe because the old label is cleaned up;
+            // the current label must never appear in the legacy list.
+            assert!(!LEGACY_SERVICE_LABELS.contains(&SERVICE_LABEL));
         }
     }
 
