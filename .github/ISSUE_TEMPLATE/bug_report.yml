@@ -1,0 +1,52 @@
+name: Bug report
+description: Something in Leviath doesn't work the way it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report! For suspected **security vulnerabilities**, please use
+        [private vulnerability reporting](https://github.com/Sun-Forge-AI/leviath/security/advisories/new)
+        instead of a public issue — see [SECURITY.md](../blob/main/SECURITY.md).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+      placeholder: |
+        1. Ran `lev run coder --task "..."`
+        2. Expected the agent to ...
+        3. Instead it ...
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest command sequence, blueprint, or config that triggers it.
+      render: shell
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Leviath version
+      description: Output of `lev --version`, including the channel (stable / beta / alpha).
+      placeholder: lev 0.1.0 (alpha 20260728)
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: macOS 15.5 (arm64) / Ubuntu 24.04 / Windows 11
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Daemon or CLI output. Redact API keys and anything sensitive before pasting.
+      render: text
+    validations:
+      required: false
