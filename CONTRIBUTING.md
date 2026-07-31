@@ -1,5 +1,40 @@
 # Contributing to Leviath
 
+Contributions are welcome — bug reports, docs fixes, and code. This page covers
+both the *process* (how a change lands) and the *tooling* (hooks, lints, and the
+coverage gate).
+
+## How a change lands
+
+```mermaid
+flowchart LR
+  A["Fork &<br/>branch"] --> B["Commit<br/>(Conventional<br/>Commits)"]
+  B --> C["Open PR<br/>against main"]
+  C --> D["CI: tests, clippy,<br/>fmt, docs,<br/>100% coverage"]
+  D --> E["Maintainer<br/>review"]
+  E --> F["Rebase<br/>merge"]
+```
+
+- **Start with an issue** for anything non-trivial — agreeing on the approach
+  first saves you from writing code that can't be merged. Small fixes (typos,
+  doc corrections, obvious bugs) can go straight to a PR.
+- **Direct pushes to `main` are disabled** for everyone, maintainers included.
+  Every change arrives as a pull request, must pass all required CI checks, and
+  needs maintainer approval before it can merge.
+- **History is rebase-only** — no merge commits. Keep your branch rebased on
+  `main`; force-pushing your own PR branch is fine and expected.
+- **Commit messages follow [Conventional Commits](https://www.conventionalcommits.org)**:
+  `feat:`, `fix:`, `docs:`, `ci:`, `refactor:`, `test:`, `chore:` — look at
+  `git log --oneline` for the house style.
+- **Licensing**: by submitting a contribution you agree it is licensed under the
+  repository's [MIT license](LICENSE). There is no CLA.
+- **Conduct**: we follow the [Contributor Covenant](CODE_OF_CONDUCT.md).
+- **Security issues** go through
+  [private vulnerability reporting](https://github.com/Sun-Forge-AI/leviath/security/advisories/new),
+  never public issues — see [SECURITY.md](SECURITY.md).
+
+## Getting the code building
+
 ```bash
 git clone https://github.com/Sun-Forge-AI/leviath.git
 cd leviath
