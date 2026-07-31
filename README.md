@@ -135,7 +135,7 @@ Ten agents ship out of the box, each a multi-stage directed graph with structure
 <table>
 <tr><th align="left">Agent</th><th align="left">Workflow</th></tr>
 <tr>
-<td valign="middle" width="30%"><b>software-engineer</b> <em>(default)</em><br>Full coding workflow: codebase discovery, human-approved planning, an optional prototype spike, stuck detection</td>
+<td valign="middle" width="30%"><b>software-engineer</b><br>Full coding workflow: codebase discovery, human-approved planning, an optional prototype spike, stuck detection</td>
 <td><picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agents/software-engineer-dark.svg">
   <img src="docs/assets/agents/software-engineer.svg" alt="software-engineer workflow graph">
