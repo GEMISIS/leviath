@@ -66,9 +66,17 @@ jobs:
             ext: zip
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          targets: ${{ matrix.target }}
+      # `rust-toolchain.toml` pins the compiler, and rustup resolves that pin
+      # per directory - so a cross target handed to a "stable" toolchain action
+      # lands on a *different* toolchain installation than the one `cargo build`
+      # actually uses, and the cross builds fail with "can't find crate for
+      # `core`". Install the pinned toolchain itself (no-arg install reads the
+      # pin) and add the target to it.
+      - name: Install the pinned toolchain with the build target
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: release-${{ matrix.target }}
