@@ -23,7 +23,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -105,6 +105,7 @@ fn api_router() -> Router<AppState> {
         .route("/api/mcp/servers/{name}/test", post(mcp::test_server))
         // Config
         .route("/api/config", get(config::get_config))
+        .route("/api/config/validate", post(config::validate_config_key))
         .route("/api/models", get(config::get_models))
         // WebSocket
         .route("/ws", get(websocket::ws_global))
@@ -222,7 +223,10 @@ async fn execute_with_shutdown(
     let app = match args.allow_admin {
         true => app
             .route("/api/mcp/servers", post(mcp::add_server))
-            .route("/api/mcp/servers/{name}", delete(mcp::remove_server)),
+            .route("/api/mcp/servers/{name}", delete(mcp::remove_server))
+            // Config-write persists provider secrets to disk, so it is gated the
+            // same way as MCP admin: unmounted (404) unless --allow-admin.
+            .route("/api/config", put(config::put_config)),
         false => app,
     };
 
