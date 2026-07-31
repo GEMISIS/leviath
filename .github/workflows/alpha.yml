@@ -157,6 +157,8 @@ jobs:
           echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
           echo "date=$(date -u +%Y%m%d)" >> $GITHUB_OUTPUT
           echo "sha_full=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+          # For the release title. Same line-anchored extraction prod.yml uses.
+          echo "version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')" >> $GITHUB_OUTPUT
 
       - name: Download all artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -203,7 +205,7 @@ jobs:
         with:
           tag_name: alpha
           target_commitish: ${{ steps.info.outputs.sha_full }}
-          name: "Alpha · ${{ steps.info.outputs.date }} · ${{ steps.info.outputs.sha_short }}"
+          name: "Leviath v${{ steps.info.outputs.version }}-Alpha"
           body: |
             **Nightly alpha build** from `main` at ${{ steps.info.outputs.sha_full }}
 
