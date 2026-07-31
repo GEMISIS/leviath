@@ -6,6 +6,10 @@ use super::*;
 pub struct ToolContext {
     /// Absolute working directory. All file operations are confined here.
     pub workdir: PathBuf,
+    /// Additional directories/patterns this agent may read from beyond its
+    /// workdir. C-suite agents use this to read design docs and run archives.
+    /// Read-only; write operations are always sandboxed to `workdir`.
+    pub read_paths: Vec<leviath_core::ReadPathEntry>,
     /// Per-path advisory locks serializing concurrent mutating file operations
     /// (`write_file`/`edit_file`) on the *same* file. Fan-out sub-agent workers
     /// share one process and one workdir, so an in-process lock map keyed by
@@ -21,6 +25,17 @@ impl ToolContext {
         let workdir = std::fs::canonicalize(&workdir).unwrap_or(workdir);
         Self {
             workdir,
+            read_paths: Vec::new(),
+            file_locks: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Create a new context with additional read paths for the allowlist.
+    pub fn with_read_paths(workdir: PathBuf, read_paths: Vec<leviath_core::ReadPathEntry>) -> Self {
+        let workdir = std::fs::canonicalize(&workdir).unwrap_or(workdir);
+        Self {
+            workdir,
+            read_paths,
             file_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }

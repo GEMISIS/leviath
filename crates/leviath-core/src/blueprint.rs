@@ -78,6 +78,27 @@ pub struct Blueprint {
     /// discovered once at spawn and an agent cannot grow its own toolchain.
     #[serde(default)]
     pub dynamic_tools: bool,
+
+    /// Additional directories (or glob/regex patterns) this agent may read from
+    /// beyond its workdir. C-suite agents (CTO, TL) need this to read design
+    /// docs, run archives, and other agent blueprints. Read-only; `write_file`
+    /// and `edit_file` remain sandboxed to the workdir.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_paths: Option<ReadPathsConfig>,
+}
+
+/// Additional read paths an agent can access beyond its workdir.
+///
+/// Entries may be exact paths, glob patterns (`glob:` prefix), or regex
+/// patterns (`regex:` prefix). No prefix = exact match.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadPathsConfig {
+    /// Directories / patterns to allow. Each entry may be:
+    /// - An exact path: `"C:\\Users\\...\\.leviath\\runs"`
+    /// - A glob: `"glob:C:\\Users\\...\\.leviath\\runs\\**"`
+    /// - A regex: `"regex:^C:\\\\Users\\\\...\\\\.leviath\\\\runs\\\\.*"`
+    #[serde(default)]
+    pub allow: Vec<String>,
 }
 
 impl Blueprint {
