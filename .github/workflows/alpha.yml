@@ -225,3 +225,14 @@ jobs:
             ```
           prerelease: true
           files: release/*
+
+  docs:
+    name: Publish docs (alpha)
+    needs: release
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/publish-docs.yml
+    with:
+      channel: alpha
+    secrets: inherit
