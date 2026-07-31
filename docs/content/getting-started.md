@@ -26,22 +26,22 @@ flowchart LR
 **macOS (Homebrew, recommended)**
 
 ```bash
-brew tap sun-forge-ai/leviath https://github.com/Sun-Forge-AI/leviath-dist.git
-brew trust sun-forge-ai/leviath # Homebrew 6 requires trusting third-party taps
+brew tap gemisis/leviath https://github.com/GEMISIS/leviath-dist.git
+brew trust gemisis/leviath # Homebrew 6 requires trusting third-party taps
 brew install leviath            # or: leviath-beta, leviath-alpha
 ```
 
 **Linux**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/GEMISIS/leviath-dist/main/install.sh \
   | bash -s -- --channel stable
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-irm https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/GEMISIS/leviath-dist/main/install.ps1 | iex
 ```
 
 The three options above install prebuilt binaries; no Rust toolchain needed.
@@ -50,7 +50,7 @@ The three options above install prebuilt binaries; no Rust toolchain needed.
 
 ```bash
 cargo install leviath-cli                # released version from crates.io
-cargo install --git https://github.com/Sun-Forge-AI/leviath.git --bin lev   # latest development build
+cargo install --git https://github.com/GEMISIS/leviath.git --bin lev   # latest development build
 ```
 
 To embed the runtime in your own application instead, add the [`leviath`](https://crates.io/crates/leviath) crate as a dependency.

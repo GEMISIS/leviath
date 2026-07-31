@@ -22,7 +22,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 authors = ["Gerald McAlister <gemisis@users.noreply.github.com>"]
-repository = "https://github.com/Sun-Forge-AI/leviath"
+repository = "https://github.com/GEMISIS/leviath"
 homepage = "https://leviath.dev"
 description = "A structured agent runtime for LLMs - context memory, multi-stage workflows, and ECS-based orchestration"
 # crates.io metadata. `rust-version` is the toolchain releases are built and

@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Report privately, not as a public issue: use [GitHub's private vulnerability
-reporting](https://github.com/Sun-Forge-AI/leviath/security/advisories/new).
+reporting](https://github.com/GEMISIS/leviath/security/advisories/new).
 Everything about a report happens there - filing, discussion, the fix, and
 the advisory.
 
@@ -194,7 +194,7 @@ the attestation as well:
 
 ```bash
 # Asset names are `leviath-<platform>-<arch>.<ext>`, e.g.:
-gh attestation verify leviath-linux-x64.tar.gz --repo Sun-Forge-AI/leviath
+gh attestation verify leviath-linux-x64.tar.gz --repo GEMISIS/leviath
 sha256sum -c SHA256SUMS
 ```
 

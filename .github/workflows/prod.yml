@@ -164,18 +164,18 @@ jobs:
 
             **Homebrew (macOS):**
             ```bash
-            brew tap sun-forge-ai/leviath https://github.com/Sun-Forge-AI/leviath-dist.git
+            brew tap gemisis/leviath https://github.com/GEMISIS/leviath-dist.git
             brew install leviath
             ```
 
             **Linux:**
             ```bash
-            curl -fsSL https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/install.sh | bash
+            curl -fsSL https://raw.githubusercontent.com/GEMISIS/leviath-dist/main/install.sh | bash
             ```
 
             **Windows (Scoop):**
             ```powershell
-            scoop bucket add leviath https://github.com/Sun-Forge-AI/leviath-dist.git
+            scoop bucket add leviath https://github.com/GEMISIS/leviath-dist.git
             scoop install leviath
             ```
 
@@ -188,7 +188,7 @@ jobs:
 
             **From source:**
             ```bash
-            cargo install --git https://github.com/Sun-Forge-AI/leviath.git --tag ${{ env.VERSION }} --bin lev
+            cargo install --git https://github.com/GEMISIS/leviath.git --tag ${{ env.VERSION }} --bin lev
             ```
           prerelease: false
           make_latest: true

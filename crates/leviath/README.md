@@ -26,7 +26,7 @@ If you want the `lev` command-line tool rather than a library, install
 [`leviath-cli`](https://crates.io/crates/leviath-cli).
 
 Source, documentation, and issue tracker live at
-[github.com/Sun-Forge-AI/leviath](https://github.com/Sun-Forge-AI/leviath).
+[github.com/GEMISIS/leviath](https://github.com/GEMISIS/leviath).
 See also [leviath.dev](https://leviath.dev).
 
 Licensed under the MIT license.

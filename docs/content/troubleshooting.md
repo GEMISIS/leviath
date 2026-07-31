@@ -60,10 +60,10 @@ on its next start.
 
 No token is needed — the repos and release assets are public. A 401/403 during install usually
 means leftovers from the private alpha: remove any
-`url."https://…@github.com/Sun-Forge-AI/".insteadOf` rewrite from `~/.gitconfig`, unset stale
+`url."https://…@github.com/GEMISIS/".insteadOf` rewrite from `~/.gitconfig`, unset stale
 `GITHUB_TOKEN` / `HOMEBREW_GITHUB_API_TOKEN` exports (an expired token *fails* requests that
 would succeed anonymously), and retry.
 
 > [!NOTE]
 > Still stuck? Open an issue or a private security advisory on
-> [GitHub](https://github.com/Sun-Forge-AI/leviath).
+> [GitHub](https://github.com/GEMISIS/leviath).
