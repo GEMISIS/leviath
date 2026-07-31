@@ -28,12 +28,13 @@ jobs:
       - name: Checkout Leviath (docs content)
         uses: actions/checkout@v7
 
+      # leviath.dev is public, so the default token checks it out — no
+      # cross-repo PAT/deploy-key needed.
       - name: Checkout leviath.dev (docs-ssg)
         uses: actions/checkout@v7
         with:
           repository: Sun-Forge-AI/leviath.dev
           path: site
-          token: ${{ secrets.SITE_REPO_TOKEN }}
 
       - uses: actions/setup-node@v4
         with:
