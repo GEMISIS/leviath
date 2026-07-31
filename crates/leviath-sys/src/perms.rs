@@ -62,6 +62,16 @@ mod tests {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
+    /// On Windows these calls shell out to `icacls`, resolved from `SystemRoot`
+    /// with a grant for `USERNAME` - and the platform tests mutate both
+    /// process-wide. Every test here that spawns it takes the same lock they
+    /// do, or a mutator's mid-flight environment turns a passing test into a
+    /// spawn failure.
+    #[cfg(windows)]
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::platform::ENV_LOCK.lock().expect("env lock")
+    }
+
     /// The point of `write_private` over `fs::write` + `chmod`: there is no
     /// moment where the file exists at the umask default. The absence of that
     /// window cannot be observed after the fact, so what is asserted is the mode
@@ -69,6 +79,8 @@ mod tests {
     /// only eventually.
     #[test]
     fn write_private_creates_an_owner_only_file_with_the_content() {
+        #[cfg(windows)]
+        let _env = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret");
 
@@ -83,6 +95,8 @@ mod tests {
     /// permissive must tighten it again.
     #[test]
     fn write_private_retightens_an_existing_permissive_file() {
+        #[cfg(windows)]
+        let _env = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret");
         std::fs::write(&path, b"old").unwrap();
@@ -105,6 +119,8 @@ mod tests {
 
     #[test]
     fn secure_file_perms_restricts_on_unix_and_succeeds_everywhere() {
+        #[cfg(windows)]
+        let _env = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret");
         std::fs::write(&path, b"x").unwrap();
@@ -119,6 +135,8 @@ mod tests {
 
     #[test]
     fn secure_dir_perms_restricts_on_unix_and_succeeds_everywhere() {
+        #[cfg(windows)]
+        let _env = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let sub = dir.path().join("d");
         std::fs::create_dir(&sub).unwrap();
@@ -133,6 +151,8 @@ mod tests {
 
     #[test]
     fn secure_file_perms_missing_path_behavior() {
+        #[cfg(windows)]
+        let _env = env_lock();
         // Unix `chmod` and Windows `icacls` both fail on a path that is not
         // there; only a platform with no permission model at all succeeds,
         // because it genuinely did nothing. Reporting the failure is the point:
@@ -149,6 +169,8 @@ mod tests {
 
     #[test]
     fn ensure_file_private_tightens_permissive_file_on_unix() {
+        #[cfg(windows)]
+        let _env = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cfg");
         std::fs::write(&path, b"x").unwrap();
@@ -169,6 +191,8 @@ mod tests {
 
     #[test]
     fn ensure_file_private_leaves_private_file_untouched() {
+        #[cfg(windows)]
+        let _env = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cfg");
         std::fs::write(&path, b"x").unwrap();

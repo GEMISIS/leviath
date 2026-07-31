@@ -146,6 +146,33 @@ fn interpret_icacls(success: bool, stderr: &[u8], path: &Path) -> io::Result<()>
     )))
 }
 
+/// Serializes every test that touches the process environment this module
+/// reads: `USERNAME` (the account to grant) and `SystemRoot` (where
+/// `icacls.exe` is resolved from).
+///
+/// Some tests mutate those variables process-wide to prove errors propagate;
+/// others spawn the real `icacls`, which reads both. `cargo test` runs them in
+/// parallel threads of one process, so an unguarded spawner can catch a
+/// mutator's environment mid-flight. On CI that surfaced as `ensure_private`
+/// failing with "The system cannot find the path specified": `SystemRoot`
+/// momentarily pointed at `C:\definitely-not-windows` while another test was
+/// proving that a missing `icacls` is reported.
+///
+/// `temp_env` locks against its own calls, not against a test that reads the
+/// variable directly, so both sides have to take *this* guard. Same shape as
+/// the credential-store lesson: two guards are not a guard.
+///
+/// `pub(crate)` because the `perms` tests reach the same spawn through the
+/// public API and race identically.
+///
+/// Taken with `.expect`, not `unwrap_or_else(|e| e.into_inner())`: the
+/// recovery closure is a function that never runs while the tests pass, and
+/// the coverage gate reads that as an uncovered region. A poisoned guard only
+/// happens when a test holding it has already failed, and failing the others
+/// with "poisoned" alongside it is no loss.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +195,7 @@ mod tests {
     /// place of the real one, during the step meant to be securing a secret.
     #[test]
     fn icacls_comes_from_the_system_directory() {
+        let _env = ENV_LOCK.lock().expect("env lock");
         temp_env::with_var("SystemRoot", Some(r"C:\Windows"), || {
             assert_eq!(
                 icacls_program(),
@@ -178,26 +206,6 @@ mod tests {
             assert_eq!(icacls_program(), PathBuf::from("icacls.exe"));
         });
     }
-
-    /// Serializes the tests that depend on `USERNAME`.
-    ///
-    /// One of them unsets it process-wide to prove the error propagates, and
-    /// another reads it to restrict a real file. `cargo test` runs them in
-    /// parallel threads of one process, so without this the second sees the
-    /// first's unset environment and fails with "USERNAME is not set" - a real
-    /// CI failure on an unrelated PR, and a confusing one, because the code it
-    /// accuses is correct.
-    ///
-    /// `temp_env` locks against its own calls, not against a test that reads
-    /// the variable directly, so both sides have to take *this* guard. Same
-    /// shape as the credential-store lesson: two guards are not a guard.
-    ///
-    /// Taken with `.expect`, not `unwrap_or_else(|e| e.into_inner())`: the
-    /// recovery closure is a function that never runs while the tests pass, and
-    /// the coverage gate reads that as an uncovered region. A poisoned guard
-    /// only happens when one of these two tests has already failed, and failing
-    /// the other with "poisoned" alongside it is no loss.
-    static USERNAME_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn a_missing_username_is_an_explained_error() {
@@ -231,7 +239,7 @@ mod tests {
     /// your API keys.
     #[test]
     fn restricting_a_real_file_keeps_other_users_out() {
-        let _env = USERNAME_ENV.lock().expect("USERNAME guard");
+        let _env = ENV_LOCK.lock().expect("env lock");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret");
         std::fs::write(&path, b"the key").unwrap();
@@ -265,7 +273,7 @@ mod tests {
     /// is protected when it is not.
     #[test]
     fn restricting_fails_when_there_is_no_account_to_grant() {
-        let _env = USERNAME_ENV.lock().expect("USERNAME guard");
+        let _env = ENV_LOCK.lock().expect("env lock");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret");
         std::fs::write(&path, b"x").unwrap();
@@ -284,6 +292,7 @@ mod tests {
     /// silently skipping the hardening.
     #[test]
     fn a_missing_icacls_is_reported() {
+        let _env = ENV_LOCK.lock().expect("env lock");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret");
         std::fs::write(&path, b"x").unwrap();
@@ -298,6 +307,7 @@ mod tests {
 
     #[test]
     fn write_with_mode_writes_and_restricts() {
+        let _env = ENV_LOCK.lock().expect("env lock");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret");
         write_with_mode(&path, b"the key", 0o600).unwrap();
@@ -310,6 +320,7 @@ mod tests {
 
     #[test]
     fn ensure_private_restricts_an_existing_file_and_skips_a_missing_one() {
+        let _env = ENV_LOCK.lock().expect("env lock");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cfg");
         std::fs::write(&path, b"x").unwrap();
@@ -322,6 +333,7 @@ mod tests {
 
     #[test]
     fn set_mode_restricts_a_directory() {
+        let _env = ENV_LOCK.lock().expect("env lock");
         let dir = tempfile::tempdir().unwrap();
         let sub = dir.path().join("d");
         std::fs::create_dir(&sub).unwrap();
@@ -332,6 +344,7 @@ mod tests {
 
     #[test]
     fn set_mode_reports_a_missing_path() {
+        let _env = ENV_LOCK.lock().expect("env lock");
         let dir = tempfile::tempdir().unwrap();
         assert!(set_mode(&dir.path().join("nope"), 0o600).is_err());
     }
