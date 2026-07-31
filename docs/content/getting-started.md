@@ -23,7 +23,7 @@ flowchart LR
 
 ## Install
 
-**macOS (Homebrew)**
+**macOS (Homebrew, recommended)**
 
 ```bash
 brew tap sun-forge-ai/leviath https://github.com/Sun-Forge-AI/leviath-dist.git
@@ -44,10 +44,12 @@ curl -fsSL https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/inst
 irm https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/install.ps1 | iex
 ```
 
-**From crates.io** (any platform, needs [Rust](https://rustup.rs/)):
+The three options above install prebuilt binaries; no Rust toolchain needed.
+
+**Cargo** (any platform, needs [Rust](https://rustup.rs/)):
 
 ```bash
-cargo install leviath-cli                # released version
+cargo install leviath-cli                # released version from crates.io
 cargo install --git https://github.com/Sun-Forge-AI/leviath.git --bin lev   # latest development build
 ```
 
