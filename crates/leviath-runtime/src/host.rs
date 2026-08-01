@@ -2150,7 +2150,7 @@ mod tests {
         // batch that can finish on its own makes the lane's occupancy a moving
         // target, and the counts these tests assert on stop being deterministic.
         // `release_the_lane` lets them all go at the end.
-        let mut blocker = || {
+        let blocker = || {
             let held = release.clone();
             submit(Box::new(move || {
                 Box::pin(async move {
