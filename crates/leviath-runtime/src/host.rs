@@ -2036,6 +2036,116 @@ mod tests {
         );
     }
 
+    /// A two-stage linear blueprint (`one` -> `two`), for the stage-boundary
+    /// tests. No transitions declared: `resolve_transition_sync` falls through to
+    /// the next stage in order, which is the ordinary case.
+    fn two_stage_blueprint() -> leviath_core::Blueprint {
+        let layout = leviath_core::layout::ContextLayout::new(
+            vec![leviath_core::layout::RegionDefinition::new(
+                "conversation".to_string(),
+                RegionKind::Clearable,
+                10_000,
+            )],
+            12_000,
+        );
+        let model =
+            leviath_core::blueprint::ModelConfig::new("script".to_string(), "m".to_string());
+        // Both stages end by running out of iterations, which is how a stage that
+        // keeps calling tools finishes. That boundary is the one the driver used
+        // to miss: `enforce_max_iterations` and `resolve_transition` both run in
+        // the same tick, so the agent leaves `ReadyToInfer` and comes back to it
+        // with every marker count exactly as it was.
+        let mut one = leviath_core::Stage::new("one".to_string(), model.clone());
+        one.max_iterations = Some(1);
+        let mut two = leviath_core::Stage::new("two".to_string(), model);
+        two.max_iterations = Some(1);
+        let stages = vec![one, two];
+        leviath_core::Blueprint::new("t".to_string(), "d".to_string(), stages, layout)
+    }
+
+    /// Spawn an agent that starts at stage `one` of [`two_stage_blueprint`].
+    fn spawn_two_stage(host: &mut WorldHost, run_id: &str, agent_id: &str) -> Entity {
+        let mut state = agent_state(agent_id);
+        state.current_stage = "one".to_string();
+        let e = host.world_mut().spawn_agent((
+            AgentBlueprint(two_stage_blueprint()),
+            StageCursor { index: 0 },
+            state,
+            crate::components::MessageInbox::default(),
+            StageProgress::default(),
+            StageInferences(vec![si(), si()]),
+            StageSetups(vec![setup(), setup()]),
+            VisitCounts::default(),
+            window(),
+            si(),
+            setup().inference_config,
+            ReadyToInfer,
+        ));
+        host.register(run_id, e);
+        e
+    }
+
+    /// A response that asks for one tool call - what a working stage returns
+    /// right up to the iteration that ends it.
+    fn tool_call(id: &str) -> InferenceResponse {
+        InferenceResponse {
+            tool_calls: vec![leviath_providers::ToolCall {
+                id: id.to_string(),
+                name: "noop".to_string(),
+                arguments: serde_json::Value::Null,
+                thought_signature: None,
+            }],
+            ..text("working")
+        }
+    }
+
+    /// Regression for #197 ("entering the next stage waits for the re-drive
+    /// tick").
+    ///
+    /// `serve` is event-driven; its 30s re-drive is a correctness backstop for a
+    /// wake that never came, not the mechanism ordinary work runs on. A stage
+    /// boundary that only makes progress on the timer puts up to 30s of dead time
+    /// on every transition - a five-stage run loses minutes to nothing.
+    ///
+    /// The re-drive is set out of reach here, so the run can only finish through
+    /// the wake path.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stage_boundary_is_crossed_without_waiting_for_the_redrive() {
+        let mut host = host_with(vec![tool_call("c1"), tool_call("c2")]);
+        host.set_redrive_interval(std::time::Duration::from_secs(3600));
+        spawn_two_stage(&mut host, "run-a", "agent-a");
+
+        let mut events = host.subscribe();
+        let shutdown = host.world_mut().shutdown_handle();
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(async move { host.serve(op_rx).await });
+
+        // Watch the event stream rather than the world: `serve` owns the host for
+        // as long as it runs. Everything before `Completed` (spawn, status,
+        // tokens) streams past on the way.
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let event = events
+                    .recv()
+                    .await
+                    .expect("the event stream must outlive the run");
+                if let WorldEvent::Completed { status, .. } = event {
+                    break status;
+                }
+            }
+        })
+        .await;
+
+        shutdown.notify_one();
+        drop(op_tx);
+        handle.await.unwrap();
+
+        assert_eq!(
+            completed.expect("the run must reach stage two and finish on wakes alone"),
+            "complete"
+        );
+    }
+
     /// The heartbeat's two levels. Under pressure it is worth an `info` line;
     /// idle it must not be, or a healthy daemon spams the log forever.
     #[tokio::test]
