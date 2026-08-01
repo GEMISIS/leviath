@@ -2,7 +2,7 @@
 title: Providers
 group: Reference
 group_order: 3
-order: 5
+order: 6
 ---
 
 # Providers

@@ -2,7 +2,7 @@
 title: CLI reference
 group: Reference
 group_order: 3
-order: 2
+order: 3
 ---
 
 # CLI reference (`lev`)

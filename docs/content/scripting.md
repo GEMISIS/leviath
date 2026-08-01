@@ -2,7 +2,7 @@
 title: Rhai scripting
 group: Reference
 group_order: 3
-order: 6
+order: 7
 ---
 
 # Rhai scripting
