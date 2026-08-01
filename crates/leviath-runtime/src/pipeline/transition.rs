@@ -216,6 +216,12 @@ pub fn enforce_max_iterations(
 /// stage that has to act on it.
 pub(crate) const STUCK_REPORT_REGION: &str = "stuck_report";
 
+/// The context region an abnormal-ending note (inference error, iteration cap)
+/// is written to when the blueprint declares one. Pinned by convention, like
+/// [`STUCK_REPORT_REGION`], so the note survives the edge transform into the
+/// stage that has to act on it.
+pub(crate) const ERROR_REPORT_REGION: &str = "error_report";
+
 /// The per-stage numbers a [`StuckConfig`](leviath_core::blueprint::StuckConfig)
 /// is evaluated against.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -303,6 +309,46 @@ pub(crate) fn note_stuck(window: &mut ContextWindow, stage: &str, reason: &str) 
     );
     let tokens = leviath_core::estimate_tokens(&content);
     let _ = window.add_to_region(region, content, tokens);
+}
+
+/// Write an abnormal-ending note where the next stage will read it: the
+/// blueprint's `error_report` region when it declares one, else `conversation`.
+/// Best-effort, like [`note_stuck`] - an overflowing region silently drops it.
+fn note_abnormal_ending(window: &mut ContextWindow, content: String) {
+    let region = if window.get_region(ERROR_REPORT_REGION).is_some() {
+        ERROR_REPORT_REGION
+    } else {
+        "conversation"
+    };
+    let tokens = leviath_core::estimate_tokens(&content);
+    let _ = window.add_to_region(region, content, tokens);
+}
+
+/// Write the inference error that ended a stage into context, so the recovery
+/// stage an `error` edge routes to starts out knowing what failed instead of
+/// being told to diagnose an error it cannot see.
+pub(crate) fn note_error(window: &mut ContextWindow, stage: &str, message: &str) {
+    note_abnormal_ending(
+        window,
+        format!(
+            "[Inference error in stage '{stage}'] {message}. Diagnose this failure from \
+             the error text above before retrying or working around it."
+        ),
+    );
+}
+
+/// Write an iteration-cap note into context when a stage runs out of
+/// iterations, so whatever stage runs next - a `max_iterations` edge target or
+/// the normal successor - knows the work was cut off rather than finished.
+pub(crate) fn note_max_iterations(window: &mut ContextWindow, stage: &str, cap: usize) {
+    note_abnormal_ending(
+        window,
+        format!(
+            "[Stage '{stage}' hit its iteration cap ({cap})] The stage was cut off before \
+             it declared completion - treat its output as possibly incomplete and verify \
+             it before building on it."
+        ),
+    );
 }
 
 /// Stuck-detection guard: for each `ReadyToInfer` agent whose current stage
@@ -830,12 +876,23 @@ pub fn resolve_transition(
             // An error/max-iterations edge is never gated: the stage already
             // failed, and holding it back to demand file changes would strand a
             // run that can't make any.
-            Some(StageOutcome::Errored(_)) => {
-                find_conditioned_edge(&bp.0, stage, &visits.0, TransitionCondition::Error)
-                    .map(|(i, t)| StageResolution::Next(i, t, None))
-                    .unwrap_or(StageResolution::TerminalError)
+            Some(StageOutcome::Errored(message)) => {
+                match find_conditioned_edge(&bp.0, stage, &visits.0, TransitionCondition::Error) {
+                    Some((i, t)) => {
+                        // Put the error where the recovery stage will read it;
+                        // without an error edge the run terminates and the
+                        // status already carries the message.
+                        note_error(&mut window, &stage.name, message);
+                        StageResolution::Next(i, t, None)
+                    }
+                    None => StageResolution::TerminalError,
+                }
             }
             Some(StageOutcome::MaxIterations) => {
+                // Whatever runs next - a max_iterations edge target, the normal
+                // successor, or the transition-choice model - should know the
+                // stage was cut off, not finished.
+                note_max_iterations(&mut window, &stage.name, stage.max_iterations.unwrap_or(0));
                 find_conditioned_edge(&bp.0, stage, &visits.0, TransitionCondition::MaxIterations)
                     .map(|(i, t)| StageResolution::Next(i, t, None))
                     .unwrap_or_else(|| {

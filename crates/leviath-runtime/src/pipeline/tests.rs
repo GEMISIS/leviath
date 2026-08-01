@@ -4941,6 +4941,65 @@ fn note_stuck_prefers_the_stuck_report_region_then_conversation() {
     assert!(text.contains("you are looping"), "{text}");
 }
 
+#[test]
+fn note_error_prefers_the_error_report_region_then_conversation() {
+    let mut with_report = ctx(&[("conversation", 10_000), ("error_report", 10_000)]);
+    note_error(&mut with_report, "gather", "provider timed out");
+    assert!(
+        with_report
+            .get_region("error_report")
+            .unwrap()
+            .current_tokens
+            > 0
+    );
+    assert_eq!(
+        with_report
+            .get_region("conversation")
+            .unwrap()
+            .current_tokens,
+        0
+    );
+
+    // Blueprints that declare no error_report still get the error text -
+    // every blueprint is required to declare `conversation`.
+    let mut fallback = ctx(&[("conversation", 10_000)]);
+    note_error(&mut fallback, "gather", "provider timed out");
+    let conv = fallback.get_region("conversation").unwrap();
+    let text: String = conv.content.iter().map(|e| e.content.as_str()).collect();
+    assert!(text.contains("Inference error in stage 'gather'"), "{text}");
+    assert!(text.contains("provider timed out"), "{text}");
+}
+
+#[test]
+fn note_max_iterations_prefers_the_error_report_region_then_conversation() {
+    let mut with_report = ctx(&[("conversation", 10_000), ("error_report", 10_000)]);
+    note_max_iterations(&mut with_report, "implement", 12);
+    assert!(
+        with_report
+            .get_region("error_report")
+            .unwrap()
+            .current_tokens
+            > 0
+    );
+    assert_eq!(
+        with_report
+            .get_region("conversation")
+            .unwrap()
+            .current_tokens,
+        0
+    );
+
+    let mut fallback = ctx(&[("conversation", 10_000)]);
+    note_max_iterations(&mut fallback, "implement", 12);
+    let conv = fallback.get_region("conversation").unwrap();
+    let text: String = conv.content.iter().map(|e| e.content.as_str()).collect();
+    assert!(
+        text.contains("Stage 'implement' hit its iteration cap (12)"),
+        "{text}"
+    );
+    assert!(text.contains("possibly incomplete"), "{text}");
+}
+
 /// Build a world holding one `ReadyToInfer` agent whose stage `a` carries a
 /// `stuck` edge to `b` armed on `cfg`.
 fn spawn_stuck_agent(
@@ -5221,6 +5280,12 @@ fn resolve_transition_routes_error_to_error_edge() {
         AgentStatus::Active
     );
     assert!(world.get::<StageOutcome>(e).is_none());
+    // The error text was written into context for the recovery stage to read.
+    let text = conversation_text(&world, e);
+    assert!(
+        text.contains("[Inference error in stage 'a'] boom"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -5253,13 +5318,17 @@ fn resolve_transition_errors_terminally_without_an_error_edge() {
     );
     assert!(world.get::<StageOutcome>(e).is_none());
     assert!(world.get::<ResolveTransition>(e).is_none());
+    // A terminal error writes no note - the run is over and the status
+    // already carries the message.
+    assert_eq!(conversation_text(&world, e), "");
 }
 
 #[test]
 fn resolve_transition_routes_max_iterations_edge_else_falls_through() {
     // With a max_iterations edge → follow it.
     let mi = conditioned_edge("recovery", TransitionCondition::MaxIterations);
-    let a = stage_named("a", Some(vec![("m".to_string(), mi)]), false, None);
+    let mut a = stage_named("a", Some(vec![("m".to_string(), mi)]), false, None);
+    a.max_iterations = Some(7);
     let recovery = stage_named("recovery", None, false, None);
     let bp = blueprint(vec![a, recovery]);
     let mut world = World::new();
@@ -5271,9 +5340,17 @@ fn resolve_transition_routes_max_iterations_edge_else_falls_through() {
     );
     run_transition(&mut world);
     assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+    // The cap note reached context so the recovery stage knows why it runs.
+    let text = conversation_text(&world, e);
+    assert!(
+        text.contains("Stage 'a' hit its iteration cap (7)"),
+        "{text}"
+    );
 
-    // Without one → fall through to a normal (linear) transition.
-    let a2 = stage_named("a", None, false, None);
+    // Without one → fall through to a normal (linear) transition, still
+    // telling the next stage the work was cut off.
+    let mut a2 = stage_named("a", None, false, None);
+    a2.max_iterations = Some(3);
     let b2 = stage_named("b", None, false, None);
     let bp2 = blueprint(vec![a2, b2]);
     let mut world2 = World::new();
@@ -5286,6 +5363,11 @@ fn resolve_transition_routes_max_iterations_edge_else_falls_through() {
     run_transition(&mut world2);
     assert_eq!(world2.get::<StageCursor>(e2).unwrap().index, 1); // linear fall-through
     assert!(world2.get::<StageOutcome>(e2).is_none());
+    let text2 = conversation_text(&world2, e2);
+    assert!(
+        text2.contains("Stage 'a' hit its iteration cap (3)"),
+        "{text2}"
+    );
 }
 
 #[test]
