@@ -66,8 +66,6 @@ pub(crate) fn lost_lane_message(lane: &str, err: JoinError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::mpsc;
 
     use crate::test_support::SilentPanics;
