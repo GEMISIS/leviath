@@ -48,7 +48,7 @@ use crate::pipeline::{
     resolve_transition, sync_tool_stages,
 };
 use crate::providers::ProviderRegistry;
-use crate::tool_bridge::spawn_tool_pool;
+use crate::tool_bridge::ToolLane;
 
 /// Counts of agents in each phase-marker - the world's per-tick "fingerprint".
 /// Two consecutive equal fingerprints mean a tick changed nothing (quiescence).
@@ -120,13 +120,15 @@ pub struct LaneSnapshot {
     pub agents: AgentCounts,
     /// Inference-pool occupancy, one entry per model actually used.
     pub inference: Vec<crate::inference_pool::PoolOccupancy>,
-    /// Tool-lane workers currently running a batch.
+    /// Tool batches holding lane capacity and running.
     pub tools_busy: usize,
-    /// Tool batches waiting for a free worker.
+    /// Tool batches waiting for lane capacity.
     pub tools_queued: usize,
-    /// The tool lane's worker count.
+    /// Tool batches parked on an unbounded wait, holding no capacity.
+    pub tools_parked: usize,
+    /// The tool lane's concurrency cap.
     pub tools_workers: usize,
-    /// Every worker busy with batches still queued behind them.
+    /// The lane full with batches still queued behind it.
     pub tools_saturated: bool,
 }
 
@@ -160,10 +162,12 @@ pub struct PipelineWorld {
     wake: Arc<Notify>,
     shutdown: Arc<Notify>,
     msg_tx: UnboundedSender<AgentMessage>,
-    /// The tool worker pool tasks; kept so they live as long as the world. Each
-    /// exits on its own when the world (and thus the [`ToolStage`] sender) is
-    /// dropped. The pool size is the tool-lane concurrency cap.
-    _tool_tasks: Vec<JoinHandle<()>>,
+    /// The tool lane, kept so the world can widen it under relief.
+    tool_lane: Arc<ToolLane>,
+    /// The task serving the tool lane; kept so it lives as long as the world. It
+    /// exits on its own once the world (and thus the [`ToolStage`] sender) is
+    /// dropped and the batches it started have finished.
+    _tool_task: JoinHandle<()>,
     /// The persistence worker task. Retained (rather than detached) so
     /// [`Self::flush_and_stop`] can close its channel and `await` it, guaranteeing
     /// every queued snapshot reaches disk before shutdown. `None` once flushed.
@@ -209,14 +213,14 @@ impl PipelineWorld {
         let (title_tx, title_rx) = unbounded_channel();
 
         let tool_stats = Arc::new(crate::tool_bridge::ToolLaneStats::new(tool_concurrency));
-        let tool_tasks = spawn_tool_pool(
-            &runtime,
-            tool_job_rx,
+        let tool_lane = ToolLane::new(
+            runtime.clone(),
             tool_res_tx,
             wake.clone(),
             tool_concurrency,
             tool_stats.clone(),
         );
+        let tool_task = tool_lane.serve(tool_job_rx);
         // Retained so `flush_and_stop` can drain it on shutdown. Left to its own
         // devices otherwise: it exits when the world (and thus its PersistenceStage
         // sender) is dropped.
@@ -368,7 +372,8 @@ impl PipelineWorld {
             wake,
             shutdown,
             msg_tx,
-            _tool_tasks: tool_tasks,
+            tool_lane,
+            _tool_task: tool_task,
             persist_task: Some(persist_task),
         }
     }
@@ -535,9 +540,19 @@ impl PipelineWorld {
             inference: self.world.resource::<InferenceStage>().pools.occupancy(),
             tools_busy: tools.busy(),
             tools_queued: tools.queued(),
+            tools_parked: tools.parked(),
             tools_workers: tools.workers(),
             tools_saturated: tools.is_saturated(),
         }
+    }
+
+    /// Widen the tool lane by `extra` batches, permanently.
+    ///
+    /// The relief valve: when the lane has stopped draining, handing out more
+    /// capacity lets the queued batches through without cancelling anything.
+    /// Returns how many were added.
+    pub fn relieve_tool_lane(&self, extra: usize) -> usize {
+        self.tool_lane.relieve(extra)
     }
 
     /// The status of an agent, if it still exists.
