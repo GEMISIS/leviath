@@ -606,8 +606,10 @@ mod tests {
         assert_eq!(out, "outside contents");
     }
 
-    /// Folding `..` past the filesystem root is unresolvable no matter what
-    /// any allowlist says.
+    /// Folding `..` past the top is unresolvable no matter what any allowlist
+    /// says. A leading `..` against an empty base leaves nothing to pop on
+    /// every platform - `/..` would not, since it is not absolute on Windows
+    /// and gets reshaped by the workdir join there.
     #[test]
     fn folding_past_the_root_is_unresolvable() {
         let policy = leviath_core::ReadPathPolicy {
@@ -616,12 +618,12 @@ mod tests {
             ..Default::default()
         };
         let err = BuiltinTools::resolve_outside(
-            "/..",
-            Path::new("/w"),
+            "../x",
+            Path::new(""),
             &policy,
             leviath_core::canonicalize_for_match,
         )
-        .expect_err("popping past the root must be refused");
+        .expect_err("popping past the top must be refused");
         assert!(err.to_string().contains("cannot be resolved"), "{err}");
     }
 
