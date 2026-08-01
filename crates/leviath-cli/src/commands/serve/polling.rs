@@ -195,6 +195,10 @@ fn fire_completion_webhook(
         "result": meta.error,
         "metadata": meta.metadata,
         "tokens": { "prompt": meta.prompt_tokens, "completion": meta.completion_tokens },
+        // A `complete` status only says the pipeline ran to the end, not that
+        // it achieved anything. A harness batching hundreds of runs has no
+        // other way to tell the difference without re-reading the workspace.
+        "empty_output": meta.flags.empty_output,
     });
     // Serialize once so the signature covers the exact bytes we send. `Value`'s
     // `Display` is infallible and byte-identical to `to_vec`.
@@ -740,6 +744,7 @@ mod tests {
                 );
                 meta.callback_url = Some(url);
                 meta.callback_secret = Some("topsecret".into());
+                meta.flags.empty_output = true;
                 create_run(&meta).unwrap();
 
                 fire_completion_webhook(&reqwest::Client::new(), &fast_cfg(), "signed", "complete");
@@ -760,6 +765,12 @@ mod tests {
                         .to_lowercase()
                         .contains("x-leviath-delivery: agent_completed:signed"),
                     "delivery id in the header"
+                );
+                // A `complete` status alone would tell the receiver this run
+                // succeeded, when it finished with nothing to show (#192).
+                assert!(
+                    requests[0].contains(r#""empty_output":true"#),
+                    "the empty-run verdict travels with the completion"
                 );
             },
         )
