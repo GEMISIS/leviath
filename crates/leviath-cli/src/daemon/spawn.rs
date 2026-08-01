@@ -2114,6 +2114,7 @@ mod tests {
                 arguments: serde_json::json!({"path": "."}),
                 thought_signature: None,
             }],
+            leviath_runtime::pipeline::noop_progress(),
         )()
         .await;
         assert_eq!(out[0].0, "c1");
@@ -2211,6 +2212,7 @@ mod tests {
                 arguments: serde_json::json!({"path": "/no/such/file"}),
                 thought_signature: None,
             }],
+            leviath_runtime::pipeline::noop_progress(),
         )()
         .await;
         let result = out[0].1.clone();
@@ -2230,6 +2232,7 @@ mod tests {
                 arguments: serde_json::json!({"path": "."}),
                 thought_signature: None,
             }],
+            leviath_runtime::pipeline::noop_progress(),
         )()
         .await;
         let result = out[0].1.clone();
@@ -2279,6 +2282,7 @@ mod tests {
                 arguments: serde_json::json!({"path": "/no/such/file"}),
                 thought_signature: None,
             }],
+            leviath_runtime::pipeline::noop_progress(),
         )()
         .await;
         assert!(

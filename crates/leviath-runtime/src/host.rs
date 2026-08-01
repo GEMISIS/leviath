@@ -1186,7 +1186,12 @@ mod tests {
 
     struct NoTools;
     impl ToolService for NoTools {
-        fn exec_for(&self, _e: Entity, calls: Vec<leviath_providers::ToolCall>) -> BoxedToolExec {
+        fn exec_for(
+            &self,
+            _e: Entity,
+            calls: Vec<leviath_providers::ToolCall>,
+            _progress: crate::pipeline::ToolProgress,
+        ) -> BoxedToolExec {
             Box::new(move || {
                 Box::pin(async move { calls.into_iter().map(|c| (c.id, String::new())).collect() })
             })
@@ -2688,6 +2693,7 @@ mod tests {
                 arguments: serde_json::Value::Null,
                 thought_signature: None,
             }],
+            crate::pipeline::noop_progress(),
         );
         assert_eq!(exec().await, vec![("c".to_string(), String::new())]);
     }

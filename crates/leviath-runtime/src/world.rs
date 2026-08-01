@@ -850,7 +850,12 @@ mod tests {
     /// A tool service that returns a fixed result string for every call.
     struct EchoTools;
     impl ToolService for EchoTools {
-        fn exec_for(&self, _entity: Entity, calls: Vec<ToolCall>) -> BoxedToolExec {
+        fn exec_for(
+            &self,
+            _entity: Entity,
+            calls: Vec<ToolCall>,
+            _progress: crate::pipeline::ToolProgress,
+        ) -> BoxedToolExec {
             Box::new(move || {
                 Box::pin(async move {
                     calls
