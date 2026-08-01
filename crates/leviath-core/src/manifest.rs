@@ -685,6 +685,25 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
         blueprint.sandbox = Some(parse_sandbox_config(sandbox_table)?);
     }
 
+    // Parse agent-level read-path declarations: [read_paths]. Entries are
+    // syntax-checked here so a broken one fails `lev validate`/`lev add`/spawn
+    // loudly, instead of degrading the agent at its first out-of-workdir read.
+    if let Some(rp_table) = parsed.get("read_paths").and_then(|v| v.as_table()) {
+        let mut allow = Vec::new();
+        if let Some(entries) = rp_table.get("allow").and_then(|v| v.as_array()) {
+            for entry in entries {
+                let Some(raw) = entry.as_str() else {
+                    return Err(Error::Other(format!(
+                        "[read_paths] allow entries must be strings, got: {entry}"
+                    )));
+                };
+                crate::read_paths::validate_entry_syntax(raw).map_err(Error::Other)?;
+                allow.push(raw.to_string());
+            }
+        }
+        blueprint.read_paths = Some(crate::blueprint::ReadPathsConfig { allow });
+    }
+
     // Parse agent-level tool permissions: [tool_permissions]
     if let Some(tp_table) = parsed.get("tool_permissions").and_then(|v| v.as_table()) {
         for (tool_name, policy_val) in tp_table {
@@ -2650,6 +2669,87 @@ mode = "autonomous"
         // A stage with no [security] inherits (None).
         let build = bp.find_stage("build").unwrap();
         assert!(build.security.is_none());
+    }
+
+    #[test]
+    fn parse_manifest_read_paths_declarations() {
+        let toml = r#"
+[agent]
+name = "rp-test"
+
+[read_paths]
+allow = ["~/.leviath/runs", "glob:~/design-docs/**", "regex:/data/archives/.*"]
+
+[stages.plan]
+mode = "autonomous"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let rp = bp.read_paths.as_ref().unwrap();
+        assert_eq!(
+            rp.allow,
+            vec![
+                "~/.leviath/runs".to_string(),
+                "glob:~/design-docs/**".to_string(),
+                "regex:/data/archives/.*".to_string(),
+            ]
+        );
+    }
+
+    /// A `[read_paths]` section without an `allow` key parses as an empty
+    /// declaration list - present but granting nothing to ask for.
+    #[test]
+    fn parse_manifest_read_paths_without_allow_is_empty() {
+        let toml = r#"
+[agent]
+name = "rp-empty"
+
+[read_paths]
+
+[stages.plan]
+mode = "autonomous"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        assert!(bp.read_paths.as_ref().unwrap().allow.is_empty());
+    }
+
+    /// No `[read_paths]` section means no declarations at all - the field
+    /// stays `None` and the workdir sandbox is unchanged.
+    #[test]
+    fn parse_manifest_without_read_paths_leaves_none() {
+        let toml = r#"
+[agent]
+name = "rp-none"
+
+[stages.plan]
+mode = "autonomous"
+"#;
+        assert!(parse_manifest(toml).unwrap().read_paths.is_none());
+    }
+
+    /// A malformed entry fails the whole parse - a skipped entry would
+    /// degrade the agent silently at its first out-of-workdir read.
+    #[test]
+    fn parse_manifest_refuses_invalid_read_path_entries() {
+        for (entry, expect) in [
+            (r#""glob:[""#, "invalid glob"),
+            (r#""regex:relative/.*""#, "must start with"),
+            (r#"42"#, "must be strings"),
+        ] {
+            let toml = format!(
+                r#"
+[agent]
+name = "rp-bad"
+
+[read_paths]
+allow = [{entry}]
+
+[stages.plan]
+mode = "autonomous"
+"#
+            );
+            let err = parse_manifest(&toml).unwrap_err().to_string();
+            assert!(err.contains(expect), "{entry}: {err}");
+        }
     }
 
     #[test]

@@ -182,6 +182,27 @@ pub(crate) fn describe_capabilities(manifest_toml: &str, script_tools: &[String]
         findings.push("asks to run tools directly on the host (sandbox = none)".to_string());
     }
 
+    // Read paths beyond the workdir. Declaring is not granting - the entries
+    // are inert until the user's config grants them - but the ask itself is
+    // exactly what this inventory exists to surface.
+    if let Some(entries) = value
+        .get("read_paths")
+        .and_then(|v| v.get("allow"))
+        .and_then(|v| v.as_array())
+        && !entries.is_empty()
+    {
+        let listed: Vec<String> = entries
+            .iter()
+            .filter_map(|e| e.as_str().map(str::to_string))
+            .collect();
+        findings.push(format!(
+            "asks to read outside its workdir (read-only): {}; inert unless you grant it \
+             via [security] read_paths / allow_blueprint_read_paths or \
+             [agent_read_paths.<name>] in your config",
+            listed.join(", ")
+        ));
+    }
+
     // Command seeds run at spawn, before the first inference and therefore
     // before any approval prompt - the one place a manifest executes something
     // without being asked.
@@ -446,6 +467,37 @@ mod capability_tests {
     #[test]
     fn opting_into_a_sandbox_is_not_reported() {
         let manifest = "[agent]\nname = \"x\"\n\n[sandbox]\nkind = \"container\"\n";
+        assert!(describe_capabilities(manifest, &[]).is_empty());
+    }
+
+    /// `[read_paths]` is an ask to see beyond the workdir - listed verbatim,
+    /// with the reminder that it stays inert until the user's config grants it.
+    #[test]
+    fn read_path_declarations_are_reported() {
+        let manifest = "[agent]\nname = \"x\"\n\n\
+                        [read_paths]\n\
+                        allow = [\"~/.leviath/runs\", \"glob:~/design-docs/**\"]\n";
+        let findings = describe_capabilities(manifest, &[]);
+        assert_eq!(findings.len(), 1);
+        assert!(
+            findings[0].contains("read outside its workdir"),
+            "{findings:?}"
+        );
+        assert!(findings[0].contains("~/.leviath/runs"), "{findings:?}");
+        assert!(
+            findings[0].contains("glob:~/design-docs/**"),
+            "{findings:?}"
+        );
+        assert!(
+            findings[0].contains("inert unless you grant it"),
+            "{findings:?}"
+        );
+    }
+
+    /// An empty `allow` array asks for nothing - stay quiet.
+    #[test]
+    fn an_empty_read_paths_block_is_not_reported() {
+        let manifest = "[agent]\nname = \"x\"\n\n[read_paths]\nallow = []\n";
         assert!(describe_capabilities(manifest, &[]).is_empty());
     }
 

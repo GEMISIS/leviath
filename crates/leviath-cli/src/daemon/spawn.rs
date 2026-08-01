@@ -581,6 +581,81 @@ fn read_and_concat(
     Ok((!parts.is_empty()).then(|| parts.join("\n\n")))
 }
 
+/// Resolve an agent's `[read_paths]` declarations against the user's config
+/// into the policy its file tools enforce, plus a warning to surface when the
+/// declarations exist but nothing grants them.
+///
+/// A declared-but-ungranted agent still spawns - its out-of-workdir reads are
+/// refused per path with the same guidance - but the warning fires once here
+/// so the user learns about it at spawn rather than from a mid-run tool error.
+/// A malformed entry (in the blueprint or in the user's own grant list) is a
+/// hard spawn error: silently dropping it would either under-grant or run the
+/// agent with less vision than its author designed for.
+fn build_read_path_policy(
+    blueprint: &leviath_core::Blueprint,
+    config: &crate::config::Config,
+    workdir: &std::path::Path,
+) -> Result<(leviath_core::ReadPathPolicy, Option<String>), String> {
+    let Some(rp) = blueprint
+        .read_paths
+        .as_ref()
+        .filter(|rp| !rp.allow.is_empty())
+    else {
+        return Ok((leviath_core::ReadPathPolicy::inactive(), None));
+    };
+    let home = leviath_core::home_dir();
+    let declared =
+        leviath_core::ReadPathSet::compile(&rp.allow, workdir, home.as_deref(), cfg!(windows))
+            .map_err(|e| format!("agent '{}' [read_paths]: {e}", blueprint.name))?;
+    let grant_entries = config.read_path_grants_for_agent(&blueprint.name);
+    let grants =
+        leviath_core::ReadPathSet::compile(&grant_entries, workdir, home.as_deref(), cfg!(windows))
+            .map_err(|e| format!("read_paths grant in your config.toml: {e}"))?;
+    let allow_blueprint = config.security.allow_blueprint_read_paths;
+    let warning = (!allow_blueprint && grants.is_empty()).then(|| {
+        let entries = rp
+            .allow
+            .iter()
+            .map(|e| format!("\"{e}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "agent '{name}' declares [read_paths] but nothing grants them; reads outside \
+             the workdir will be refused. To grant them, add to your config.toml either:\n\
+             [security]\nallow_blueprint_read_paths = true\n\
+             or the specific paths:\n[agent_read_paths.{name}]\nallow = [{entries}]",
+            name = blueprint.name,
+        )
+    });
+    Ok((
+        leviath_core::ReadPathPolicy {
+            agent: blueprint.name.clone(),
+            blueprint: declared,
+            grants,
+            allow_blueprint,
+        },
+        warning,
+    ))
+}
+
+/// Raise the read tools to `Private` for an agent whose `[read_paths]` are
+/// actually granted: they can pull in content from outside the workdir -
+/// design docs, run archives, whatever else was granted - which the default
+/// `Internal` classification (written for workdir files) understates.
+fn bump_read_sensitivities(
+    map: &mut HashMap<String, leviath_core::TaintLevel>,
+    read_paths_granted: bool,
+) {
+    if !read_paths_granted {
+        return;
+    }
+    for tool in ["read_file", "read_files", "list_dir"] {
+        if let Some(level) = map.get_mut(tool) {
+            *level = (*level).max(leviath_core::TaintLevel::Private);
+        }
+    }
+}
+
 /// Load the blueprint at `args.blueprint_path`, spawn the agent into `world`,
 /// register its tool state, and return the new entity. Operates on the raw ECS
 /// [`World`] so it is callable both from the host's spawner (via
@@ -736,37 +811,20 @@ fn build_agent_inner(
     .map(Arc::new);
 
     // 2b. Per-agent built-in tools (over the agent's workdir), routing shell
-    // execution through the sandbox when one is configured. Build with
-    // read_paths from the blueprint for C-suite agents.
-    let read_path_entries: Vec<leviath_core::ReadPathEntry> = blueprint
-        .read_paths
-        .as_ref()
-        .map(|rp| {
-            rp.allow
-                .iter()
-                .filter_map(|raw| match leviath_core::ReadPathEntry::parse(raw) {
-                    Ok(entry) => Some(entry),
-                    Err(e) => {
-                        tracing::warn!(
-                            agent_name = %blueprint.name,
-                            raw = %raw,
-                            error = %e,
-                            "skipping invalid read_paths entry"
-                        );
-                        None
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let tool_ctx = if read_path_entries.is_empty() {
-        leviath_tools::ToolContext::new(std::path::PathBuf::from(&args.workdir))
-    } else {
-        leviath_tools::ToolContext::with_read_paths(
-            std::path::PathBuf::from(&args.workdir),
-            read_path_entries,
-        )
-    };
+    // execution through the sandbox when one is configured. The blueprint's
+    // `[read_paths]` declarations are resolved against the user's config here -
+    // declared AND granted, or the read tools never leave the workdir.
+    let (read_path_policy, read_path_warning) =
+        build_read_path_policy(&blueprint, config, std::path::Path::new(&args.workdir))?;
+    if let Some(warning) = &read_path_warning {
+        tracing::warn!(agent_name = %blueprint.name, "{warning}");
+    }
+    // Whether the agent can actually read outside its workdir - feeds the
+    // taint bump below, captured before the policy moves into the context.
+    let read_paths_granted = read_path_policy.is_active()
+        && (read_path_policy.allow_blueprint || !read_path_policy.grants.is_empty());
+    let tool_ctx = leviath_tools::ToolContext::new(std::path::PathBuf::from(&args.workdir))
+        .with_read_paths(read_path_policy);
     let mut builtins = leviath_tools::BuiltinTools::new(tool_ctx);
     if let Some(mgr) = &sandbox {
         builtins =
@@ -846,7 +904,7 @@ fn build_agent_inner(
         security.taint_tracking.then(|| {
             let mut gate = leviath_runtime::TaintGate::new(security.clone());
             gate.apply_mcp_overrides(&mcp_overrides);
-            all_tool_defs
+            let mut map: HashMap<String, leviath_core::TaintLevel> = all_tool_defs
                 .iter()
                 .map(|t| {
                     (
@@ -854,7 +912,9 @@ fn build_agent_inner(
                         gate.tool_classification(&t.name).sensitivity,
                     )
                 })
-                .collect()
+                .collect();
+            bump_read_sensitivities(&mut map, read_paths_granted);
+            map
         });
     // Per-stage tool permissions (in stage order) + the entry stage's index, for
     // the tool state's stage-scoped policy layer.
@@ -2397,6 +2457,123 @@ mod tests {
         );
     }
 
+    // ── [read_paths] policy resolution ────────────────────────────────────
+
+    use std::path::Path;
+
+    fn blueprint_declaring(read_paths: &[&str]) -> Blueprint {
+        let stage = leviath_core::Stage::new("s".to_string(), model_cfg(vec![("anthropic", "m")]));
+        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let mut bp = Blueprint::new("cto".to_string(), "d".to_string(), vec![stage], layout);
+        if !read_paths.is_empty() {
+            bp.read_paths = Some(leviath_core::ReadPathsConfig {
+                allow: read_paths.iter().map(|s| s.to_string()).collect(),
+            });
+        }
+        bp
+    }
+
+    #[test]
+    fn read_path_policy_is_inactive_without_declarations() {
+        let bp = blueprint_declaring(&[]);
+        let (policy, warning) =
+            build_read_path_policy(&bp, &Config::default(), Path::new("/w")).unwrap();
+        assert!(!policy.is_active());
+        assert!(warning.is_none());
+
+        // An explicitly empty `[read_paths]` block is the same as none.
+        let mut bp = blueprint_declaring(&[]);
+        bp.read_paths = Some(leviath_core::ReadPathsConfig { allow: vec![] });
+        let (policy, warning) =
+            build_read_path_policy(&bp, &Config::default(), Path::new("/w")).unwrap();
+        assert!(!policy.is_active());
+        assert!(warning.is_none());
+    }
+
+    /// Declared but ungranted: the agent still spawns, and the warning names
+    /// the agent and shows both config stanzas that would grant the paths.
+    #[test]
+    fn read_path_policy_warns_when_nothing_grants() {
+        let bp = blueprint_declaring(&["/data/runs", "glob:/data/docs/**"]);
+        let (policy, warning) =
+            build_read_path_policy(&bp, &Config::default(), Path::new("/w")).unwrap();
+        assert!(policy.is_active());
+        assert!(!policy.allow_blueprint);
+        assert!(policy.grants.is_empty());
+        let warning = warning.expect("ungranted declarations must warn");
+        assert!(warning.contains("allow_blueprint_read_paths"), "{warning}");
+        assert!(warning.contains("[agent_read_paths.cto]"), "{warning}");
+        assert!(warning.contains("\"/data/runs\""), "{warning}");
+        assert!(warning.contains("\"glob:/data/docs/**\""), "{warning}");
+    }
+
+    #[test]
+    fn read_path_policy_is_quiet_when_granted() {
+        let bp = blueprint_declaring(&["/data/runs"]);
+        let mut config = Config::default();
+        config.agent_read_paths.insert(
+            "cto".to_string(),
+            crate::config::ReadPathGrants {
+                allow: vec!["/data/runs".to_string()],
+            },
+        );
+        let (policy, warning) = build_read_path_policy(&bp, &config, Path::new("/w")).unwrap();
+        assert!(policy.is_active());
+        assert!(!policy.grants.is_empty());
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn read_path_policy_is_quiet_under_the_override() {
+        let bp = blueprint_declaring(&["/data/runs"]);
+        let mut config = Config::default();
+        config.security.allow_blueprint_read_paths = true;
+        let (policy, warning) = build_read_path_policy(&bp, &config, Path::new("/w")).unwrap();
+        assert!(policy.allow_blueprint);
+        assert!(warning.is_none());
+    }
+
+    /// A malformed entry is a hard spawn error naming its source - the
+    /// blueprint's section or the user's own grant list.
+    #[test]
+    fn read_path_policy_rejects_bad_entries_loudly() {
+        let bp = blueprint_declaring(&["glob:["]);
+        let err = build_read_path_policy(&bp, &Config::default(), Path::new("/w")).unwrap_err();
+        assert!(err.contains("agent 'cto' [read_paths]"), "{err}");
+
+        let bp = blueprint_declaring(&["/data/runs"]);
+        let mut config = Config::default();
+        config.security.read_paths = vec!["regex:(".to_string()];
+        let err = build_read_path_policy(&bp, &config, Path::new("/w")).unwrap_err();
+        assert!(err.contains("config.toml"), "{err}");
+    }
+
+    /// Granted read paths raise the read tools to `Private`; nothing else
+    /// moves, and an ungranted or missing tool entry is left alone.
+    #[test]
+    fn read_sensitivities_bump_only_the_read_tools_when_granted() {
+        use leviath_core::TaintLevel;
+        let base = || {
+            HashMap::from([
+                ("read_file".to_string(), TaintLevel::Internal),
+                ("list_dir".to_string(), TaintLevel::Public),
+                ("write_file".to_string(), TaintLevel::Internal),
+            ])
+        };
+
+        let mut map = base();
+        bump_read_sensitivities(&mut map, true);
+        assert_eq!(map.get("read_file"), Some(&TaintLevel::Private));
+        assert_eq!(map.get("list_dir"), Some(&TaintLevel::Private));
+        assert_eq!(map.get("write_file"), Some(&TaintLevel::Internal));
+        // `read_files` was absent from the map: no entry invented for it.
+        assert!(!map.contains_key("read_files"));
+
+        let mut map = base();
+        bump_read_sensitivities(&mut map, false);
+        assert_eq!(map, base(), "no grant, no change");
+    }
+
     #[test]
     fn resolve_stages_empty_available_tools_gets_none() {
         let mut stage =
@@ -2609,6 +2786,115 @@ system_prompt = "be brief"
         assert_eq!(world.agent_status(entity), Some(AgentStatus::Active));
         // Compaction settings were attached.
         assert!(world.world().get::<CompactionSettings>(entity).is_some());
+    }
+
+    /// A manifest that returns `[agent] name` and `write` a `read_paths.leviath`
+    /// declaring an out-of-workdir read. Used by the wiring tests below.
+    fn write_read_paths_manifest(dir: &std::path::Path, allow: &str) -> std::path::PathBuf {
+        let manifest = dir.join("reader.leviath");
+        std::fs::write(
+            &manifest,
+            format!(
+                r#"
+[agent]
+name = "reader"
+version = "0.1.0"
+description = "d"
+
+[read_paths]
+allow = [{allow}]
+
+[context.regions]
+task = {{ kind = "pinned", max_tokens = 4000 }}
+
+[stages.main]
+mode = "autonomous"
+model = {{ models = [{{ provider = "anthropic", model = "m" }}] }}
+description = "d"
+available_tools = []
+system_prompt = "be brief"
+"#
+            ),
+        )
+        .unwrap();
+        manifest
+    }
+
+    /// A granted `[read_paths]` spawns cleanly, with taint on so the read-tool
+    /// sensitivity bump path runs end to end.
+    #[tokio::test]
+    async fn build_agent_wires_granted_read_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write_read_paths_manifest(dir.path(), "\"/tmp\"");
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let mut config = Config::default();
+        config.security.allow_blueprint_read_paths = true;
+        config.taint_tracking = true;
+        let entity = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &config,
+            mcp,
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+            sub_tx(),
+        )
+        .expect("spawn succeeds");
+        assert_eq!(world.agent_status(entity), Some(AgentStatus::Active));
+    }
+
+    /// A declared-but-ungranted `[read_paths]` still spawns; the warning-logging
+    /// branch fires.
+    #[tokio::test]
+    async fn build_agent_wires_ungranted_read_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write_read_paths_manifest(dir.path(), "\"/tmp\"");
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let entity = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+            sub_tx(),
+        )
+        .expect("spawn succeeds even when nothing grants the declaration");
+        assert_eq!(world.agent_status(entity), Some(AgentStatus::Active));
+    }
+
+    /// A malformed grant entry in the user's own config fails the spawn - the
+    /// error propagates out of `build_read_path_policy`.
+    #[tokio::test]
+    async fn build_agent_rejects_a_malformed_config_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write_read_paths_manifest(dir.path(), "\"/tmp\"");
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let mut config = Config::default();
+        config.security.read_paths = vec!["glob:[".to_string()];
+        let err = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &config,
+            mcp,
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+            sub_tx(),
+        )
+        .expect_err("a broken config grant must fail the spawn");
+        assert!(err.contains("config.toml"), "{err}");
     }
 
     #[tokio::test]

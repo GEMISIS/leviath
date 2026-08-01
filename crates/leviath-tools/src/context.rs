@@ -6,10 +6,12 @@ use super::*;
 pub struct ToolContext {
     /// Absolute working directory. All file operations are confined here.
     pub workdir: PathBuf,
-    /// Additional directories/patterns this agent may read from beyond its
-    /// workdir. C-suite agents use this to read design docs and run archives.
-    /// Read-only; write operations are always sandboxed to `workdir`.
-    pub read_paths: Vec<leviath_core::ReadPathEntry>,
+    /// The `[read_paths]` policy: which paths outside the workdir the
+    /// *read-only* file tools may fall back to, and only when both the
+    /// blueprint declares them and the user's config grants them. Inactive by
+    /// default, and never consulted by `write_file`/`edit_file` - writes are
+    /// confined to `workdir` unconditionally.
+    pub(crate) read_paths: leviath_core::ReadPathPolicy,
     /// Per-path advisory locks serializing concurrent mutating file operations
     /// (`write_file`/`edit_file`) on the *same* file. Fan-out sub-agent workers
     /// share one process and one workdir, so an in-process lock map keyed by
@@ -25,19 +27,16 @@ impl ToolContext {
         let workdir = std::fs::canonicalize(&workdir).unwrap_or(workdir);
         Self {
             workdir,
-            read_paths: Vec::new(),
+            read_paths: leviath_core::ReadPathPolicy::inactive(),
             file_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Create a new context with additional read paths for the allowlist.
-    pub fn with_read_paths(workdir: PathBuf, read_paths: Vec<leviath_core::ReadPathEntry>) -> Self {
-        let workdir = std::fs::canonicalize(&workdir).unwrap_or(workdir);
-        Self {
-            workdir,
-            read_paths,
-            file_locks: Arc::new(Mutex::new(HashMap::new())),
-        }
+    /// Attach a `[read_paths]` policy resolved at spawn. Builder-style, like
+    /// [`BuiltinTools::with_shell_executor`].
+    pub fn with_read_paths(mut self, policy: leviath_core::ReadPathPolicy) -> Self {
+        self.read_paths = policy;
+        self
     }
 
     /// Get (or create) the advisory lock for `path`. The map mutex is held only

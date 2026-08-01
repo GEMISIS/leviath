@@ -109,6 +109,10 @@ anyhow = "1.0"
 chrono = "0.4"
 rhai = { version = "1.20", features = ["sync", "serde"] }
 glob = "0.3"
+# Compiled once per [read_paths] entry at spawn; already in the lock file
+# transitively, named here so the allowlist matcher in `leviath-core` uses the
+# same version everywhere.
+regex = "1"
 # Already in the tree via reqwest; named explicitly so `leviath-core` can hold
 # the outbound-URL policy (`leviath_core::net`) without depending on reqwest.
 # `reqwest::Url` IS this crate's `Url`, so the two interoperate directly.

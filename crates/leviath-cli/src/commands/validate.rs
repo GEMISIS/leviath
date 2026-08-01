@@ -217,6 +217,51 @@ fn print_script_tool_report(path: &std::path::Path) {
     }
 }
 
+/// Report `[read_paths]` declarations: what the agent asks to read beyond its
+/// workdir, plus a sharper warning for entries so broad they amount to "my
+/// whole home directory" or "any absolute path". Pure over the blueprint so
+/// the wording is testable without capturing stdout.
+fn read_path_warning_lines(blueprint: &leviath_core::Blueprint) -> Vec<String> {
+    let Some(rp) = blueprint
+        .read_paths
+        .as_ref()
+        .filter(|rp| !rp.allow.is_empty())
+    else {
+        return Vec::new();
+    };
+    let mut lines = vec![format!(
+        "  ⚠ Note: declares [read_paths] (reads outside the run workdir): {} - refused \
+         unless your config grants them",
+        rp.allow.join(", ")
+    )];
+    for entry in &rp.allow {
+        if read_path_entry_is_broad(entry) {
+            lines.push(format!(
+                "  ⚠ Warning: read_paths entry '{entry}' is very broad - it can match your \
+                 entire home directory or any path on this machine"
+            ));
+        }
+    }
+    lines
+}
+
+/// Whether a `[read_paths]` entry grants effectively unlimited read access:
+/// the home directory itself, a filesystem root, or a pattern whose first
+/// component already matches anything.
+fn read_path_entry_is_broad(entry: &str) -> bool {
+    let pattern = entry
+        .strip_prefix("glob:")
+        .or_else(|| entry.strip_prefix("regex:"))
+        .unwrap_or(entry);
+    let pattern = pattern.replace('\\', "/");
+    let trimmed = pattern.trim_end_matches('/');
+    matches!(trimmed, "~" | "")
+        || trimmed == "/**"
+        || pattern.starts_with("**")
+        || pattern.starts_with("/.*")
+        || trimmed == "/.+"
+}
+
 pub async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
     match execute_reporting_outcome(&args)? {
         ValidateOutcome::Success => Ok(()),
@@ -226,6 +271,12 @@ pub async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
 }
 
 fn print_warnings(blueprint: &leviath_core::Blueprint) {
+    // Before the graph-only checks below: `[read_paths]` applies to any
+    // blueprint shape, so it is reported ahead of the `is_graph` early return.
+    for line in read_path_warning_lines(blueprint) {
+        println!("{line}");
+    }
+
     let stage_names: std::collections::HashSet<&str> =
         blueprint.stages.iter().map(|s| s.name.as_str()).collect();
 
@@ -318,6 +369,67 @@ conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
         leviath_core::manifest::parse_manifest(toml).unwrap()
     }
 
+    /// The `[read_paths]` note fires for any blueprint shape - including the
+    /// linear ones the graph warnings skip - and lists the entries verbatim.
+    #[test]
+    fn read_path_declarations_are_noted_for_linear_blueprints() {
+        let toml = format!(
+            "{}\n[read_paths]\nallow = [\"~/.leviath/runs\"]\n",
+            make_blueprint_toml("[stages.plan]\nmode = \"autonomous\"")
+        );
+        let lines = read_path_warning_lines(&parse(&toml));
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("~/.leviath/runs"), "{lines:?}");
+        assert!(
+            lines[0].contains("refused unless your config grants"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn no_read_paths_means_no_note() {
+        let toml = make_blueprint_toml("[stages.plan]\nmode = \"autonomous\"");
+        assert!(read_path_warning_lines(&parse(&toml)).is_empty());
+    }
+
+    /// Entries that amount to "everything" get the sharper warning; scoped
+    /// ones do not.
+    #[test]
+    fn broad_read_path_entries_get_their_own_warning() {
+        let toml = format!(
+            "{}\n[read_paths]\nallow = [\"~\", \"~/.leviath/runs\"]\n",
+            make_blueprint_toml("[stages.plan]\nmode = \"autonomous\"")
+        );
+        let lines = read_path_warning_lines(&parse(&toml));
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[1].contains("very broad"), "{lines:?}");
+        assert!(lines[1].contains("'~'"), "{lines:?}");
+    }
+
+    #[test]
+    fn broad_entry_heuristic_covers_each_shape() {
+        for entry in [
+            "~",
+            "~/",
+            "/",
+            "glob:**",
+            "glob:/**",
+            "regex:/.*",
+            "regex:/.+",
+        ] {
+            assert!(read_path_entry_is_broad(entry), "{entry}");
+        }
+        for entry in [
+            "~/.leviath/runs",
+            "glob:~/docs/**",
+            "regex:/data/.*",
+            "../shared",
+            r"C:\data",
+        ] {
+            assert!(!read_path_entry_is_broad(entry), "{entry}");
+        }
+    }
+
     #[test]
     fn check_manifest_verifies_custom_region_scripts() {
         // A custom region's script must exist and compile; the same failure a
@@ -404,17 +516,22 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
 
     #[test]
     fn print_warnings_linear_mode_no_panic() {
-        let toml = make_blueprint_toml(
-            r#"
+        let toml = format!(
+            "{}\n[read_paths]\nallow = [\"~/.leviath/runs\", \"~\"]\n",
+            make_blueprint_toml(
+                r#"
 [stages.main]
 mode = "autonomous"
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 description = "Main stage"
 max_iterations = 10
 "#,
+            )
         );
         let bp = parse(&toml);
-        // Should not panic even though there's no graph
+        // Should not panic even though there's no graph, and the read_paths
+        // note (plus the broad-entry warning for "~") is printed before the
+        // graph-only checks bail.
         print_warnings(&bp);
     }
 

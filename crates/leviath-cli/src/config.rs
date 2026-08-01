@@ -231,6 +231,30 @@ pub struct Config {
     /// [`Self::taint_tracking`] key for back-compat.)
     #[serde(default)]
     pub security: SecurityConfig,
+
+    /// Per-agent read grants, keyed by agent name - the itemized counterpart
+    /// of [`SecurityConfig::allow_blueprint_read_paths`], analogous to
+    /// [`Self::agent_tool_permissions`]:
+    ///
+    /// ```toml
+    /// [agent_read_paths.cto]
+    /// allow = ["~/.leviath/runs", "glob:~/design-docs/**"]
+    /// ```
+    ///
+    /// Naming the agent here is the user saying "I trust this one to read
+    /// these" - a decision that lives in the user's config, not the
+    /// downloaded manifest. As with `[security] read_paths`, a grant only
+    /// takes effect for a path the blueprint also declares.
+    #[serde(default)]
+    pub agent_read_paths: HashMap<String, ReadPathGrants>,
+}
+
+/// One agent's entry in `[agent_read_paths.<name>]`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReadPathGrants {
+    /// Granted entries, same forms as a blueprint's `[read_paths] allow`.
+    #[serde(default)]
+    pub allow: Vec<String>,
 }
 
 /// `[security]` in `~/.leviath/config.toml`.
@@ -292,6 +316,40 @@ pub struct SecurityConfig {
     #[serde(default)]
     pub allow_env_vars: Vec<String>,
 
+    /// Whether a blueprint's `[read_paths]` declarations are honored as-is.
+    ///
+    /// **Off by default.** A `[read_paths]` block travels inside the
+    /// `agent.leviath` you installed, and a manifest may only *tighten* what
+    /// your config allows, never widen it - otherwise any agent package could
+    /// read `~/.ssh`, this very config file (your API keys), or a password
+    /// store by shipping one TOML line. With this off, an agent's declared
+    /// read paths are inert until you grant them via [`Self::read_paths`] or
+    /// `[agent_read_paths.<name>]`. Turning it on says "any blueprint I run
+    /// may read every path it declares" - reads only, each access still
+    /// resolves symlinks and must land inside a declared entry, but prefer
+    /// the per-agent grant for anything you did not author yourself.
+    #[serde(default)]
+    pub allow_blueprint_read_paths: bool,
+
+    /// Machine-wide read grants for agents that declare `[read_paths]`.
+    ///
+    /// Entries use the same three forms as a blueprint's `[read_paths] allow`:
+    /// an exact path (grants its subtree), `glob:` and `regex:` patterns
+    /// (matched against the symlink-resolved real path, written with `/` on
+    /// every OS, regex auto-anchored). `~/` expands to your home; a relative
+    /// entry resolves against the run's workdir.
+    ///
+    /// ```toml
+    /// [security]
+    /// read_paths = ["~/.leviath/runs", "glob:~/design-docs/**"]
+    /// ```
+    ///
+    /// A grant only takes effect for a path the running blueprint *also*
+    /// declares - by itself it grants nothing, so listing a directory here
+    /// does not open it to agents that never asked.
+    #[serde(default)]
+    pub read_paths: Vec<String>,
+
     /// Where provider API keys and MCP OAuth tokens are kept.
     ///
     /// **`file` by default** - `~/.leviath/config.toml` and
@@ -325,6 +383,8 @@ impl Default for SecurityConfig {
             allow_seed_commands: true,
             allow_local_network: false,
             allow_env_vars: Vec::new(),
+            allow_blueprint_read_paths: false,
+            read_paths: Vec::new(),
             credential_store: leviath_core::CredentialStoreKind::File,
         }
     }
@@ -591,6 +651,7 @@ impl Default for Config {
             sandbox: None,
             tool_script_permissions: ScriptToolPermissions::default(),
             security: SecurityConfig::default(),
+            agent_read_paths: HashMap::new(),
         }
     }
 }
@@ -609,6 +670,18 @@ impl Config {
             merged.extend(per_agent.iter().map(|(k, v)| (k.clone(), *v)));
         }
         merged
+    }
+
+    /// Every read-path grant that applies to `agent_name`: the machine-wide
+    /// `[security] read_paths` list plus that agent's
+    /// `[agent_read_paths.<name>]` entries. Resolved once at spawn, mirroring
+    /// [`Self::permissions_for_agent`].
+    pub fn read_path_grants_for_agent(&self, agent_name: &str) -> Vec<String> {
+        let mut grants = self.security.read_paths.clone();
+        if let Some(per_agent) = self.agent_read_paths.get(agent_name) {
+            grants.extend(per_agent.allow.iter().cloned());
+        }
+        grants
     }
 
     /// Load configuration from the default location (~/.leviath/config.toml).
@@ -1889,6 +1962,39 @@ google_api_key = "AIza-existing"
         assert_eq!(other.get("shell"), Some(&ToolPolicy::Ask));
     }
 
+    /// Read-path grants mirror the tool-permission shape: a machine-wide list
+    /// plus per-agent additions, resolved once per agent.
+    #[test]
+    fn read_path_grants_merge_global_and_per_agent() {
+        let mut config = Config::default();
+        assert!(
+            !config.security.allow_blueprint_read_paths,
+            "blueprint read paths must be opt-in"
+        );
+        assert!(config.read_path_grants_for_agent("cto").is_empty());
+
+        config.security.read_paths = vec!["~/.leviath/runs".to_string()];
+        config.agent_read_paths.insert(
+            "cto".to_string(),
+            ReadPathGrants {
+                allow: vec!["glob:~/design-docs/**".to_string()],
+            },
+        );
+
+        assert_eq!(
+            config.read_path_grants_for_agent("cto"),
+            vec![
+                "~/.leviath/runs".to_string(),
+                "glob:~/design-docs/**".to_string(),
+            ]
+        );
+        // Any other agent gets the machine-wide grants only.
+        assert_eq!(
+            config.read_path_grants_for_agent("researcher"),
+            vec!["~/.leviath/runs".to_string()]
+        );
+    }
+
     /// One `tracing::debug!(?config)` would otherwise put every provider key in
     /// the logs.
     #[test]
@@ -2663,8 +2769,16 @@ anthropic_api_key = "sk-ant-test-key"
                 allow_seed_commands: false,
                 allow_local_network: true,
                 allow_env_vars: vec!["MY_PROVIDER_KEY".to_string()],
+                allow_blueprint_read_paths: true,
+                read_paths: vec!["~/.leviath/runs".to_string()],
                 credential_store: leviath_core::CredentialStoreKind::Keychain,
             },
+            agent_read_paths: HashMap::from([(
+                "cto".to_string(),
+                ReadPathGrants {
+                    allow: vec!["glob:~/design-docs/**".to_string()],
+                },
+            )]),
         };
 
         let serialized = toml::to_string_pretty(&config).unwrap();
@@ -2687,6 +2801,14 @@ anthropic_api_key = "sk-ant-test-key"
             ScriptPermission::Deny
         );
         assert!(!deserialized.security.allow_seed_commands);
+        assert!(deserialized.security.allow_blueprint_read_paths);
+        assert_eq!(deserialized.security.read_paths, vec!["~/.leviath/runs"]);
+        assert_eq!(
+            deserialized.agent_read_paths.get("cto"),
+            Some(&ReadPathGrants {
+                allow: vec!["glob:~/design-docs/**".to_string()],
+            })
+        );
         assert_eq!(deserialized.webhook.max_retries, 5);
         assert_eq!(deserialized.webhook.base_delay_ms, 250);
         assert_eq!(deserialized.webhook.max_delay_ms, 10_000);

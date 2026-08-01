@@ -2,59 +2,6 @@
 
 use std::path::{Path, PathBuf};
 
-/// A single entry in the `[read_paths]` allowlist.
-///
-/// Supports three kinds of path matching:
-/// - `Exact` — literal directory prefix match
-/// - `Glob` — glob pattern (e.g. `**/*.md`)
-/// - `Regex` — compiled regex pattern
-#[derive(Debug, Clone)]
-pub enum ReadPathEntry {
-    /// Exact path — matched via canonicalized starts_with
-    Exact(PathBuf),
-    /// Glob pattern — matched via glob::Pattern
-    Glob(glob::Pattern),
-    /// Regex pattern — matched via regex::Regex
-    Regex(regex::Regex),
-}
-
-impl ReadPathEntry {
-    /// Parse a raw string from the `[read_paths].allow` TOML array into
-    /// the appropriate variant. No prefix = Exact, `glob:` = Glob,
-    /// `regex:` = Regex.
-    pub fn parse(raw: &str) -> Result<Self, String> {
-        if let Some(rest) = raw.strip_prefix("regex:") {
-            regex::Regex::new(rest)
-                .map(ReadPathEntry::Regex)
-                .map_err(|e| format!("invalid regex '{}': {}", rest, e))
-        } else if let Some(rest) = raw.strip_prefix("glob:") {
-            glob::Pattern::new(rest)
-                .map(ReadPathEntry::Glob)
-                .map_err(|e| format!("invalid glob '{}': {}", rest, e))
-        } else {
-            Ok(ReadPathEntry::Exact(PathBuf::from(raw)))
-        }
-    }
-
-    /// Check whether `canonicalized` matches this allowlist entry.
-    ///
-    /// `canonicalized` has already been through `canonicalize_existing_prefix`
-    /// and `..`/`.` folding. On Windows, matching is case-insensitive.
-    pub fn matches(&self, canonicalized: &Path) -> bool {
-        match self {
-            ReadPathEntry::Exact(root) => {
-                let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-                canonicalized.starts_with(&root)
-            }
-            ReadPathEntry::Glob(pattern) => pattern.matches_path(canonicalized),
-            ReadPathEntry::Regex(re) => {
-                let s = canonicalized.to_string_lossy();
-                re.is_match(&s)
-            }
-        }
-    }
-}
-
 /// The user's home directory, honoring the `LEVIATH_HOME` override.
 ///
 /// `dirs::home_dir()` cannot be redirected by `$HOME` on macOS
@@ -163,6 +110,17 @@ pub fn resolves_within(path: &Path, root: &Path) -> bool {
         // is not a safe one.
         None => false,
     }
+}
+
+/// Canonicalize a path for allowlist matching, failing closed.
+///
+/// The same machinery [`resolves_within`] uses, exposed for the `[read_paths]`
+/// resolver in `leviath-tools`: the deepest existing ancestor is
+/// canonicalized (which is where any symlink lives) and the unresolved tail
+/// re-appended. `None` means nothing along the path could be verified, and an
+/// unverifiable path must be refused, never matched.
+pub fn canonicalize_for_match(path: &Path) -> Option<PathBuf> {
+    canonicalize_existing_prefix(path)
 }
 
 /// Canonicalize the deepest existing ancestor of `path` and re-append whatever
@@ -338,6 +296,23 @@ mod tests {
         // `dir.path()` is already whatever the OS handed us; canonicalizing the
         // path alone would diverge from it on macOS.
         assert!(resolves_within(&root.join("f.txt"), root));
+    }
+
+    /// The `[read_paths]` resolver's canonicalizer is the same machinery as
+    /// `resolves_within`, exposed fail-closed: a real path resolves (symlinks
+    /// and all), an unverifiable one is `None`.
+    #[test]
+    fn canonicalize_for_match_resolves_real_paths_and_refuses_unverifiable_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), b"x").unwrap();
+        assert_eq!(
+            canonicalize_for_match(&dir.path().join("f.txt")),
+            Some(std::fs::canonicalize(dir.path().join("f.txt")).unwrap())
+        );
+        assert_eq!(
+            canonicalize_for_match(Path::new("no-such-relative-name")),
+            None
+        );
     }
 
     #[test]
