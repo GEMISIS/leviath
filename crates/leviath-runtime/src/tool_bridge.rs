@@ -237,11 +237,6 @@ impl ToolLane {
         self.stats.widen(extra);
         extra
     }
-
-    /// The lane's occupancy counters.
-    pub fn stats(&self) -> &Arc<ToolLaneStats> {
-        &self.stats
-    }
 }
 
 /// Read jobs off the channel, spawning one task per batch, then wait for the

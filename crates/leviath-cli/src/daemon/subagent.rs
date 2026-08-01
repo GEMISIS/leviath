@@ -646,12 +646,12 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     async fn wait_does_not_hold_the_tool_lane() {
         use leviath_runtime::tool_bridge::{ToolJob, ToolLane, ToolLaneStats};
 
-        // A child that never finishes, so the wait is still running throughout.
-        let (h, _seen, _t) = fake_host(
-            Ok("child-1".to_string()),
-            vec![Some(AgentStatus::Active); 64],
-            false,
-        );
+        // The child stays busy for several polls - long enough that the parent is
+        // demonstrably parked - and then finishes, so the wait is exercised to its
+        // end rather than abandoned mid-await.
+        let mut statuses = vec![Some(AgentStatus::Active); 6];
+        statuses.push(Some(AgentStatus::Complete));
+        let (h, _seen, _t) = fake_host(Ok("child-1".to_string()), statuses, false);
 
         let (job_tx, job_rx) = tokio::sync::mpsc::unbounded_channel();
         let (result_tx, mut results) = tokio::sync::mpsc::unbounded_channel();
@@ -707,6 +707,20 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         assert_eq!(
             outcome.results,
             vec![("child".to_string(), "ran".to_string())]
+        );
+
+        // And the waiter takes a permit again and reports, once its child is done.
+        let waited = tokio::time::timeout(std::time::Duration::from_secs(30), results.recv())
+            .await
+            .expect("the wait finished")
+            .expect("an outcome arrived");
+        assert_eq!(waited.results.len(), 1);
+        // Bound first: an expression that only a *failing* assertion evaluates
+        // is a region no passing run ever reaches.
+        let reported = waited.results[0].1.clone();
+        assert!(
+            reported.contains("finished with status: complete"),
+            "got: {reported}"
         );
     }
 
