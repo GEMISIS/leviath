@@ -340,7 +340,7 @@ pub fn build_host(
         // grant, a permission change) takes effect on the next `lev run`
         // without a daemon restart.
         let config = spawn_reloader.current();
-        build_agent(
+        let built = build_agent(
             world.world_mut(),
             tool_service.as_ref(),
             &config,
@@ -350,7 +350,19 @@ pub fn build_host(
             args,
             now_secs(),
             subagent_tx.clone(),
-        )
+        );
+        // The placeholder above is `Starting`, which is *not* terminal - so a
+        // failed spawn used to leave a run that claimed to be alive for ever,
+        // listed by `lev ps` and the dashboard with nothing behind it. Record
+        // the failure where the placeholder is (issue #190).
+        if let Err(message) = &built {
+            crate::runstate::force_error_in(
+                &spawn_runs_dir.join(&args.run_id),
+                message,
+                now_secs(),
+            );
+        }
+        built
     }));
     host
 }
@@ -473,6 +485,14 @@ mod tests {
     use leviath_runtime::host::{ControlOp, SpawnArgs};
     use tokio::sync::oneshot;
 
+    /// A config whose registry actually has `anthropic` in it, so a spawn of a
+    /// manifest naming that provider is not refused for having none.
+    fn config_with_anthropic_key() -> Config {
+        let mut config = Config::default();
+        config.providers.anthropic_api_key = Some("test-key".to_string());
+        config
+    }
+
     #[tokio::test]
     async fn make_reaper_delegates_to_tool_service_reap() {
         // Exercises the reaper closure body build_host installs. The daemon only
@@ -538,9 +558,11 @@ mod tests {
     async fn setup_daemon_host_builds_a_working_host() {
         // Config::default has no MCP servers → the shared MCP connect is a no-op.
         // An empty runs dir → restart recovery finds nothing to reload.
+        // A key for the manifest's provider, because a spawn whose stages have
+        // no usable provider is now refused outright (issue #190).
         let runs = tempfile::tempdir().unwrap();
         let mut host = setup_daemon_host(
-            Config::default(),
+            config_with_anthropic_key(),
             runs.path().to_path_buf(),
             Handle::current(),
         )
@@ -577,9 +599,10 @@ mod tests {
     /// A spawn can die before any state exists (3 of 13 empty runs in one live
     /// batch), leaving nothing on disk to diagnose. The spawner stakes out the
     /// run directory first, so a spawn that fails at *any* later step still
-    /// leaves a `meta.json`.
+    /// leaves a `meta.json` - and, since `Starting` is not terminal and would
+    /// otherwise claim the run was alive for ever, records the failure in it.
     #[tokio::test]
-    async fn spawner_pre_creates_the_run_dir_even_when_the_spawn_fails() {
+    async fn spawner_records_the_failure_in_the_run_dir_it_staked_out() {
         let runs = tempfile::tempdir().unwrap();
         let mut host = setup_daemon_host(
             Config::default(),
@@ -604,7 +627,13 @@ mod tests {
 
         let meta = crate::runstate::read_meta_from(&runs.path().join("my-agent-1234-ab12"))
             .expect("a failed spawn still leaves meta.json behind");
-        assert_eq!(meta.status, leviath_core::run_meta::RunStatus::Starting);
+        // Terminal, not `Starting`: nothing is going to advance this run.
+        assert_eq!(meta.status, leviath_core::run_meta::RunStatus::Error);
+        assert!(
+            meta.error
+                .is_some_and(|e| e.contains("/no/such/agent.leviath")),
+            "and it says what went wrong"
+        );
         assert_eq!(meta.task, "t");
         // The agent name is recovered from the run id's prefix, dashes and all.
         assert_eq!(meta.agent_name, "my-agent");

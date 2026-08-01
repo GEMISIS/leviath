@@ -112,29 +112,81 @@ pub fn filter_tools_by_available(all: &[Tool], available: &[String]) -> Vec<Tool
         .collect()
 }
 
-/// Resolve every stage's provider/model + effective tool set from the blueprint.
+/// Every provider a stage could have used, in the order they were tried, for
+/// the error message when none of them is configured.
+///
+/// A `--model provider/model` override is the whole list on its own: it names
+/// exactly one provider and skips the blueprint's fallbacks entirely.
+fn providers_tried(
+    model_cfg: &ModelConfig,
+    model_override: Option<&str>,
+    defaults: &ModelDefaults,
+) -> String {
+    let mut names: Vec<String> = match model_override {
+        Some(ov) if ov.contains('/') => vec![
+            ov.split_once('/')
+                .map(|(p, _)| p.to_string())
+                .expect("the `contains('/')` guard guarantees a split"),
+        ],
+        _ => {
+            let mut listed: Vec<String> = model_cfg
+                .models
+                .iter()
+                .map(|e| e.provider.clone())
+                .collect();
+            if model_cfg.allow_user_default && !defaults.provider.is_empty() {
+                listed.push(defaults.provider.clone());
+            }
+            listed
+        }
+    };
+    names.dedup();
+    names.join(", ")
+}
+
+/// Resolve every stage's provider/model + effective tool set from the
+/// blueprint, or report the first stage that has no usable provider.
+///
+/// The last fallback in [`resolve_stage_model`] is unchecked - it hands back
+/// the blueprint's own first entry whether or not anything answers to that
+/// name, and a full `provider/model` override skips the registry outright. So
+/// a stage could resolve to a provider that does not exist, and the agent
+/// spawned anyway: `Active`, iteration 0, and unable to take a single turn for
+/// as long as the host lived (issue #190). Catching it here turns a silently
+/// wedged run into an error the caller sees.
 pub fn resolve_stages(
     blueprint: &Blueprint,
     model_override: Option<&str>,
     defaults: &ModelDefaults,
     registry: &ProviderRegistry,
     all_tool_defs: &[Tool],
-) -> Vec<ResolvedStage> {
+) -> Result<Vec<ResolvedStage>, String> {
     blueprint
         .stages
         .iter()
         .map(|stage| {
             let (provider_name, model) =
                 resolve_stage_model(&stage.model, model_override, defaults, registry);
+            // `registry.has` also consults the script layer, so a `.rhai`
+            // provider sitting on disk counts as usable and is never
+            // false-rejected here.
+            if !registry.has(&provider_name) {
+                return Err(format!(
+                    "stage '{}' has no usable provider (tried: {}). Configure one \
+                     with `lev setup`, or add it to config.toml and restart the daemon.",
+                    stage.name,
+                    providers_tried(&stage.model, model_override, defaults)
+                ));
+            }
             // Empty `available_tools` exposes no tools; otherwise filter the full
             // set by name (alias-resolved). A name matching nothing (a typo, or an
             // MCP tool whose server isn't installed) is simply omitted.
             let tools = filter_tools_by_available(all_tool_defs, &stage.available_tools);
-            ResolvedStage {
+            Ok(ResolvedStage {
                 provider_name,
                 model,
                 tools,
-            }
+            })
         })
         .collect()
 }
@@ -341,8 +393,84 @@ mod tests {
             &ModelDefaults::default(),
             &registry_with(&["anthropic"]),
             &tools,
-        );
+        )
+        .expect("anthropic is registered");
         assert!(resolved[0].tools.is_empty());
+    }
+
+    #[test]
+    fn resolve_stages_refuses_a_stage_with_no_usable_provider() {
+        // Issue #190: the last fallback in `resolve_stage_model` is unchecked,
+        // so this used to resolve to "ghost" and produce an agent that could
+        // never take a turn. It has to be an error the caller sees.
+        let stage = leviath_core::Stage::new("plan".to_string(), model_cfg(vec![("ghost", "m")]));
+        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
+
+        let err = resolve_stages(
+            &bp,
+            None,
+            &ModelDefaults::default(),
+            &registry_with(&[]),
+            &[],
+        )
+        .expect_err("no provider is configured");
+
+        assert!(err.contains("plan"), "names the stage: {err}");
+        assert!(err.contains("ghost"), "names what it tried: {err}");
+        assert!(err.contains("lev setup"), "says what to do: {err}");
+    }
+
+    #[test]
+    fn resolve_stages_refuses_an_override_naming_an_unregistered_provider() {
+        // `--model ghost/x` short-circuits every fallback, so the override is
+        // the only provider that was tried.
+        let stage =
+            leviath_core::Stage::new("plan".to_string(), model_cfg(vec![("anthropic", "m")]));
+        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
+
+        let err = resolve_stages(
+            &bp,
+            Some("ghost/x"),
+            &ModelDefaults::default(),
+            &registry_with(&["anthropic"]),
+            &[],
+        )
+        .expect_err("the override names a provider that isn't registered");
+
+        assert!(err.contains("tried: ghost"), "got: {err}");
+        assert!(
+            !err.contains("anthropic"),
+            "the override skipped the blueprint's list entirely: {err}"
+        );
+    }
+
+    #[test]
+    fn providers_tried_lists_the_blueprint_entries_and_the_user_default() {
+        let defaults = ModelDefaults {
+            provider: "fallback".to_string(),
+            model: None,
+        };
+        let cfg = model_cfg(vec![("one", "m"), ("two", "m")]);
+        assert_eq!(providers_tried(&cfg, None, &defaults), "one, two, fallback");
+
+        // A stage that opts out of the user default doesn't claim to have tried it.
+        let mut no_default = cfg.clone();
+        no_default.allow_user_default = false;
+        assert_eq!(providers_tried(&no_default, None, &defaults), "one, two");
+
+        // Neither does an embedder that configured no default at all.
+        assert_eq!(
+            providers_tried(&cfg, None, &ModelDefaults::default()),
+            "one, two"
+        );
+
+        // A bare `--model m` override still uses the blueprint's providers.
+        assert_eq!(
+            providers_tried(&cfg, Some("m"), &defaults),
+            "one, two, fallback"
+        );
     }
 
     #[test]
@@ -373,7 +501,8 @@ mod tests {
             &ModelDefaults::default(),
             &registry_with(&["anthropic"]),
             &tools,
-        );
+        )
+        .expect("anthropic is registered");
         let selected: Vec<&str> = resolved[0].tools.iter().map(|t| t.name.as_str()).collect();
         // `bash` resolved to `shell`; the unknown MCP name and unlisted
         // `read_file` were both excluded.
