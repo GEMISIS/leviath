@@ -151,9 +151,22 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
     }
 }
 
+/// The dedupe key for one delivery: `<event>:<run_id>`.
+///
+/// Deterministic on purpose - no randomness, no timestamp. A retried attempt, or
+/// the same completion re-fired after a daemon restart, carries the identical id,
+/// so a receiver deduping on it processes each completion once no matter how many
+/// times it is delivered. It rides inside the signed body (so it is covered by
+/// the HMAC) and in the `X-Leviath-Delivery` header for cheap access.
+fn delivery_id(event: &str, run_id: &str) -> String {
+    format!("{event}:{run_id}")
+}
+
 /// POST a completion webhook for `run_id` if its persisted metadata carries a
 /// `callback_url`. When the metadata also carries a `callback_secret`, the body
 /// is signed with HMAC-SHA256 and the signature travels in `X-Leviath-Signature`.
+/// Every delivery carries a deterministic [`delivery_id`] for receiver-side
+/// dedupe (in the signed body and the `X-Leviath-Delivery` header).
 fn fire_completion_webhook(
     client: &reqwest::Client,
     cfg: &WebhookConfig,
@@ -166,8 +179,10 @@ fn fire_completion_webhook(
     let Some(url) = meta.callback_url.clone() else {
         return; // no webhook configured
     };
+    let delivery = delivery_id("agent_completed", &meta.run_id);
     let payload = serde_json::json!({
         "event": "agent_completed",
+        "delivery_id": delivery,
         "run_id": meta.run_id,
         "agent_id": meta.agent_name,
         "status": status,
@@ -184,6 +199,7 @@ fn fire_completion_webhook(
         url,
         body,
         signature,
+        delivery,
         cfg.clone(),
     ));
 }
@@ -226,6 +242,7 @@ async fn fire_webhook(
     url: String,
     body: Vec<u8>,
     signature: Option<String>,
+    delivery: String,
     cfg: WebhookConfig,
 ) {
     let max_attempts = cfg.max_retries.saturating_add(1);
@@ -235,6 +252,7 @@ async fn fire_webhook(
         let mut req = client
             .post(&url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header("X-Leviath-Delivery", &delivery)
             .timeout(Duration::from_secs(cfg.timeout_secs))
             .body(body.clone());
         if let Some(sig) = &signature {
@@ -545,6 +563,7 @@ mod tests {
             url,
             b"{}".to_vec(),
             None,
+            "agent_completed:run-x".to_string(),
             fast_cfg(),
         )
         .await;
@@ -560,6 +579,7 @@ mod tests {
             url,
             b"{}".to_vec(),
             None,
+            "agent_completed:run-x".to_string(),
             fast_cfg(),
         )
         .await;
@@ -575,6 +595,7 @@ mod tests {
             url,
             b"{}".to_vec(),
             None,
+            "agent_completed:run-x".to_string(),
             fast_cfg(),
         )
         .await;
@@ -590,6 +611,7 @@ mod tests {
             url,
             b"{}".to_vec(),
             None,
+            "agent_completed:run-x".to_string(),
             fast_cfg(),
         )
         .await;
@@ -606,6 +628,7 @@ mod tests {
             url,
             body,
             Some(expected.clone()),
+            "agent_completed:run-x".to_string(),
             fast_cfg(),
         )
         .await;
@@ -622,6 +645,7 @@ mod tests {
             url,
             b"{}".to_vec(),
             None,
+            "agent_completed:run-x".to_string(),
             fast_cfg(),
         )
         .await;
@@ -639,6 +663,7 @@ mod tests {
             "http://127.0.0.1:1/never".to_string(),
             b"{}".to_vec(),
             None,
+            "agent_completed:run-x".to_string(),
             fast_cfg(),
         )
         .await;
@@ -671,9 +696,56 @@ mod tests {
                         .contains("x-leviath-signature: sha256=")
                 );
                 assert!(requests[0].contains("agent_completed"));
+                // The delivery id travels in the signed body and the header.
+                assert!(
+                    requests[0].contains(r#""delivery_id":"agent_completed:signed""#),
+                    "delivery id in the body"
+                );
+                assert!(
+                    requests[0]
+                        .to_lowercase()
+                        .contains("x-leviath-delivery: agent_completed:signed"),
+                    "delivery id in the header"
+                );
             },
         )
         .await;
+    }
+
+    #[test]
+    fn delivery_id_is_deterministic_per_completion() {
+        // No randomness, no timestamp: a retry and a post-restart re-fire carry
+        // the same id, which is what makes receiver-side dedupe a key check.
+        assert_eq!(
+            delivery_id("agent_completed", "run-7"),
+            "agent_completed:run-7"
+        );
+        assert_eq!(
+            delivery_id("agent_completed", "run-7"),
+            delivery_id("agent_completed", "run-7")
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_webhook_repeats_the_same_delivery_id_across_retries() {
+        let (url, server) = fake_receiver(vec![503, 200]).await;
+        fire_webhook(
+            reqwest::Client::new(),
+            url,
+            b"{}".to_vec(),
+            None,
+            "agent_completed:run-r".to_string(),
+            fast_cfg(),
+        )
+        .await;
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        for req in &requests {
+            assert!(
+                req.to_lowercase()
+                    .contains("x-leviath-delivery: agent_completed:run-r")
+            );
+        }
     }
 
     /// A fake daemon that answers a `Subscribe` request by streaming `events`
