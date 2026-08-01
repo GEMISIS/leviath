@@ -112,3 +112,19 @@ edit_file = "allow"    # apply edits without prompting
 > `available_tools` and `tool_permissions` are separate gates: a tool must be listed in
 > `available_tools` to be offered at all, and its `tool_permissions` value then decides whether a
 > call is allowed, prompted, or refused.
+
+## Argument validation
+
+Before a call is dispatched, its arguments are checked against the exact JSON Schema the tool
+advertised to the model. This applies uniformly: built-in tools, Rhai script tools, MCP tools, and
+the sub-agent tools all declare schemas, and a call that does not satisfy its schema (a missing
+required argument, a number where a string belongs, a value outside a declared enum) is refused
+back to the model as an `[error]` result naming the violations. The call never executes and never
+reaches a permission prompt, and the refusal does not count as work the agent did; the model reads
+the message and corrects itself on the next turn.
+
+A schema that cannot be compiled (a typo'd type in a Rhai `@param` line, an MCP schema fragment the
+engine cannot interpret) turns validation off for that tool rather than refusing its calls. The
+daemon logs a warning when that happens so the broken schema gets noticed. Schemas with external
+`$ref` references fall in the same bucket by design: the validator never fetches anything over the
+network or filesystem, so such a schema fails to compile and is skipped.
