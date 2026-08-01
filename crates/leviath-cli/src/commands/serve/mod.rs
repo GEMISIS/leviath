@@ -90,6 +90,8 @@ fn api_router() -> Router<AppState> {
         .route("/api/agents/{id}/logs", get(agents::agent_logs))
         .route("/api/agents/{id}/result", get(agents::agent_result))
         .route("/api/agents/{id}/tree-status", get(tree::agent_tree_status))
+        .route("/api/agents/{id}/pause", post(agents::pause_agent))
+        .route("/api/agents/{id}/resume", post(agents::resume_agent))
         // Messages
         .route("/api/agents/{id}/message", post(interactions::send_message))
         // Interactions
@@ -429,6 +431,23 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_pause_and_resume_routes_are_mounted() {
+        // With no daemon behind the test state the handlers answer 503 - the
+        // point here is only that the routes exist in the shared table (an
+        // unmounted route would 404 at the router).
+        for action in ["pause", "resume"] {
+            let app = test_app();
+            let req = Request::builder()
+                .method("POST")
+                .uri(format!("/api/agents/some-run/{action}"))
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
     }
 
     #[tokio::test]
