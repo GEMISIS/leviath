@@ -82,6 +82,14 @@ impl RiskyExecutors for RealExecutors {
         commands::ctl::cancel_run(&control_client()?, &args).await
     }
 
+    async fn pause(&self, args: commands::ctl::PauseArgs) -> anyhow::Result<()> {
+        commands::ctl::pause_run(&control_client()?, &args).await
+    }
+
+    async fn resume(&self, args: commands::ctl::ResumeArgs) -> anyhow::Result<()> {
+        commands::ctl::resume_run(&control_client()?, &args).await
+    }
+
     async fn respond(&self, args: commands::ctl::RespondArgs) -> anyhow::Result<()> {
         commands::ctl::respond(&control_client()?, &args).await
     }
