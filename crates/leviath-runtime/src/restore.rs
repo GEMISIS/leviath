@@ -43,7 +43,9 @@ pub fn classify_restore(status: &RunStatus, parked_on_fanout: bool) -> Option<Re
         RunStatus::Complete | RunStatus::Error | RunStatus::Cancelled => None,
         _ if parked_on_fanout => Some(RestorePriority::Blocked),
         RunStatus::Starting | RunStatus::Running => Some(RestorePriority::Active),
-        RunStatus::WaitingInput | RunStatus::CompleteInteractive => Some(RestorePriority::Blocked),
+        RunStatus::WaitingInput | RunStatus::CompleteInteractive | RunStatus::Paused => {
+            Some(RestorePriority::Blocked)
+        }
     }
 }
 
@@ -401,6 +403,10 @@ mod tests {
         // No immediate progress → Blocked.
         assert_eq!(
             classify_restore(&RunStatus::WaitingInput, false),
+            Some(RestorePriority::Blocked)
+        );
+        assert_eq!(
+            classify_restore(&RunStatus::Paused, false),
             Some(RestorePriority::Blocked)
         );
         assert_eq!(

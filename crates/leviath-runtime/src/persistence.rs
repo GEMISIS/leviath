@@ -86,6 +86,7 @@ impl TokenTotals {
 pub fn run_status_from(status: &AgentStatus) -> RunStatus {
     match status {
         AgentStatus::Idle | AgentStatus::Active => RunStatus::Running,
+        AgentStatus::Paused => RunStatus::Paused,
         AgentStatus::Waiting => RunStatus::WaitingInput,
         AgentStatus::Complete => RunStatus::Complete,
         AgentStatus::Error { .. } => RunStatus::Error,
@@ -98,7 +99,8 @@ pub fn run_status_from(status: &AgentStatus) -> RunStatus {
 /// surfaces as `Error` (the stage stopped without completing).
 pub fn stage_status_from(status: &AgentStatus) -> StageRunStatus {
     match status {
-        AgentStatus::Idle | AgentStatus::Active => StageRunStatus::Active,
+        // A paused agent's current stage is still mid-flight, not a new stage state.
+        AgentStatus::Idle | AgentStatus::Active | AgentStatus::Paused => StageRunStatus::Active,
         AgentStatus::Waiting => StageRunStatus::WaitingInput,
         AgentStatus::Complete => StageRunStatus::Complete,
         AgentStatus::Error { .. } | AgentStatus::Cancelled => StageRunStatus::Error,
@@ -259,6 +261,7 @@ mod tests {
     fn status_mapping_covers_all_variants() {
         assert_eq!(run_status_from(&AgentStatus::Idle), RunStatus::Running);
         assert_eq!(run_status_from(&AgentStatus::Active), RunStatus::Running);
+        assert_eq!(run_status_from(&AgentStatus::Paused), RunStatus::Paused);
         assert_eq!(
             run_status_from(&AgentStatus::Waiting),
             RunStatus::WaitingInput
@@ -285,6 +288,10 @@ mod tests {
         );
         assert_eq!(
             stage_status_from(&AgentStatus::Active),
+            StageRunStatus::Active
+        );
+        assert_eq!(
+            stage_status_from(&AgentStatus::Paused),
             StageRunStatus::Active
         );
         assert_eq!(

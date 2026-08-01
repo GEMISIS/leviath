@@ -109,6 +109,11 @@ pub enum AgentStatus {
     /// Agent is waiting for input or external event
     Waiting,
 
+    /// Agent was paused by the user. The async-starting systems skip it exactly
+    /// like `Idle`; the variant is distinct so the pause persists visibly
+    /// (`meta.json`, `lev ps`, dashboard) and so resume can be gated on it.
+    Paused,
+
     /// Agent has completed its task
     Complete,
 

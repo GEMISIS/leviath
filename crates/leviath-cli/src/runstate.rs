@@ -665,6 +665,7 @@ mod tests {
             RunStatus::WaitingInput,
             RunStatus::Complete,
             RunStatus::CompleteInteractive,
+            RunStatus::Paused,
             RunStatus::Error,
             RunStatus::Cancelled,
         ] {
@@ -684,6 +685,7 @@ mod tests {
             RunStatus::CompleteInteractive.to_string(),
             "CompleteInteractive"
         );
+        assert_eq!(RunStatus::Paused.to_string(), "Paused");
         assert_eq!(RunStatus::Error.to_string(), "Error");
         assert_eq!(RunStatus::Cancelled.to_string(), "Cancelled");
     }

@@ -32,6 +32,10 @@ pub enum AgentDisplayStatus {
     CompleteInteractive,
     Error(String),
     Idle,
+    /// Paused by the user; resumable with `r` (or `lev resume`). Distinct from
+    /// `Idle` because a paused run is deliberate unfinished business, not a run
+    /// that merely has not ticked yet.
+    Paused,
     Cancelled,
     /// On disk the run claims to be live, but the daemon has no such run and its
     /// metadata has not been touched in a long time - so nothing is driving it.
@@ -51,6 +55,7 @@ impl std::fmt::Display for AgentDisplayStatus {
             Self::CompleteInteractive => write!(f, "{}COMPLETE", GLYPH_COMPLETE),
             Self::Error(msg) => write!(f, "{}ERROR: {}", GLYPH_ERROR, msg),
             Self::Idle => write!(f, "{}IDLE", GLYPH_PENDING),
+            Self::Paused => write!(f, "{}PAUSED", GLYPH_PENDING),
             Self::Cancelled => write!(f, "⊘CANCEL"),
             Self::Stale => write!(f, "{}STALE", GLYPH_ERROR),
         }
@@ -80,6 +85,7 @@ impl AgentDisplayStatus {
             Self::Complete | Self::CompleteInteractive => C_SUCCESS,
             Self::Error(_) => C_ERROR,
             Self::Idle => C_DIM,
+            Self::Paused => C_WARN,
             Self::Cancelled => C_DIM,
             Self::Stale => C_WARN,
         }

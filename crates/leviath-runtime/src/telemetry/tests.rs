@@ -358,6 +358,7 @@ fn terminal_label_maps_every_status() {
     assert_eq!(terminal_label(&AgentStatus::Idle), None);
     assert_eq!(terminal_label(&AgentStatus::Active), None);
     assert_eq!(terminal_label(&AgentStatus::Waiting), None);
+    assert_eq!(terminal_label(&AgentStatus::Paused), None);
 }
 
 #[test]

@@ -74,7 +74,9 @@ fn terminal_label(status: &AgentStatus) -> Option<&'static str> {
         AgentStatus::Complete => Some("complete"),
         AgentStatus::Error { .. } => Some("error"),
         AgentStatus::Cancelled => Some("cancelled"),
-        AgentStatus::Idle | AgentStatus::Active | AgentStatus::Waiting => None,
+        AgentStatus::Idle | AgentStatus::Active | AgentStatus::Waiting | AgentStatus::Paused => {
+            None
+        }
     }
 }
 

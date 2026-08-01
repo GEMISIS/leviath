@@ -21,6 +21,9 @@ pub enum RunStatus {
     /// All required stages done; agent still accepts optional follow-up input.
     /// Shown as "Complete" in the dashboard - no kill option, input still enabled.
     CompleteInteractive,
+    /// Paused by the user; resumes on request and is restored paused after a
+    /// daemon restart.
+    Paused,
     Error,
     Cancelled,
 }
@@ -33,6 +36,7 @@ impl std::fmt::Display for RunStatus {
             RunStatus::WaitingInput => write!(f, "WaitingInput"),
             RunStatus::Complete => write!(f, "Complete"),
             RunStatus::CompleteInteractive => write!(f, "CompleteInteractive"),
+            RunStatus::Paused => write!(f, "Paused"),
             RunStatus::Error => write!(f, "Error"),
             RunStatus::Cancelled => write!(f, "Cancelled"),
         }
@@ -462,6 +466,7 @@ mod tests {
             RunStatus::CompleteInteractive.to_string(),
             "CompleteInteractive"
         );
+        assert_eq!(RunStatus::Paused.to_string(), "Paused");
         assert_eq!(RunStatus::Error.to_string(), "Error");
         assert_eq!(RunStatus::Cancelled.to_string(), "Cancelled");
     }
@@ -474,6 +479,7 @@ mod tests {
             RunStatus::WaitingInput,
             RunStatus::Complete,
             RunStatus::CompleteInteractive,
+            RunStatus::Paused,
             RunStatus::Error,
             RunStatus::Cancelled,
         ] {
@@ -484,6 +490,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&RunStatus::WaitingInput).unwrap(),
             "\"waiting_input\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RunStatus::Paused).unwrap(),
+            "\"paused\""
         );
     }
 

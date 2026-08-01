@@ -438,14 +438,29 @@ impl PipelineWorld {
     }
 
     /// Pause an agent (it finishes any in-flight step, then stops before starting
-    /// new work). Returns `false` if the agent no longer exists.
+    /// new work). Only `Active` and `Idle` agents can be paused: a `Waiting`
+    /// agent's status is the marker the fan-out merge poll and interaction
+    /// resolution depend on, so overwriting it would wedge the run, and pausing
+    /// a terminal agent is meaningless. Returns `false` if the agent no longer
+    /// exists or is not in a pausable state.
     pub fn pause(&mut self, entity: Entity) -> bool {
-        self.set_status(entity, AgentStatus::Idle)
+        match self.agent_status(entity) {
+            Some(AgentStatus::Active | AgentStatus::Idle) => {
+                self.set_status(entity, AgentStatus::Paused)
+            }
+            _ => false,
+        }
     }
 
-    /// Resume a paused agent.
+    /// Resume a paused agent. `Idle` is also accepted (resume-as-nudge for an
+    /// agent that has not ticked yet); anything else returns `false`.
     pub fn resume(&mut self, entity: Entity) -> bool {
-        self.set_status(entity, AgentStatus::Active)
+        match self.agent_status(entity) {
+            Some(AgentStatus::Paused | AgentStatus::Idle) => {
+                self.set_status(entity, AgentStatus::Active)
+            }
+            _ => false,
+        }
     }
 
     /// Cancel an agent (it stops starting new work; in-flight results still land).
@@ -1303,12 +1318,55 @@ mod tests {
         assert!(world.pause(e));
 
         world.run_until_idle(30).await;
-        // Paused ⇒ parked as Idle, never inferred.
-        assert_eq!(world.agent_status(e), Some(AgentStatus::Idle));
+        // Paused ⇒ parked, never inferred.
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Paused));
 
         assert!(world.resume(e));
         world.run_until_idle(30).await;
         assert_eq!(world.agent_status(e), Some(AgentStatus::Complete));
+    }
+
+    #[tokio::test]
+    async fn pause_refuses_waiting_and_terminal_agents() {
+        let mut world = build_world(registry_with(vec![text("t1")]));
+        let e = spawn(&mut world);
+
+        // A Waiting agent's status is the marker fan-out merges and interaction
+        // resolution key off - pause must not clobber it.
+        world.set_status(e, AgentStatus::Waiting);
+        assert!(!world.pause(e));
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Waiting));
+
+        world.set_status(e, AgentStatus::Cancelled);
+        assert!(!world.pause(e));
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn resume_refuses_agents_that_are_not_paused_or_idle() {
+        let mut world = build_world(registry_with(vec![text("t1")]));
+        let e = spawn(&mut world);
+
+        // Already running: nothing to resume.
+        world.set_status(e, AgentStatus::Active);
+        assert!(!world.resume(e));
+
+        world.set_status(e, AgentStatus::Waiting);
+        assert!(!world.resume(e));
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Waiting));
+
+        world.set_status(e, AgentStatus::Complete);
+        assert!(!world.resume(e));
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Complete));
+    }
+
+    #[tokio::test]
+    async fn resume_nudges_an_idle_agent_active() {
+        let mut world = build_world(registry_with(vec![text("t1")]));
+        let e = spawn(&mut world);
+        world.set_status(e, AgentStatus::Idle);
+        assert!(world.resume(e));
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Active));
     }
 
     #[tokio::test]

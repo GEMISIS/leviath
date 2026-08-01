@@ -276,6 +276,7 @@ fn label(status: &AgentStatus) -> String {
     match status {
         AgentStatus::Idle => "idle".to_string(),
         AgentStatus::Active => "active".to_string(),
+        AgentStatus::Paused => "paused".to_string(),
         AgentStatus::Waiting => "waiting".to_string(),
         AgentStatus::Complete => "complete".to_string(),
         AgentStatus::Cancelled => "cancelled".to_string(),
@@ -501,6 +502,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     fn label_and_terminal_cover_all_statuses() {
         assert_eq!(label(&AgentStatus::Idle), "idle");
         assert_eq!(label(&AgentStatus::Active), "active");
+        assert_eq!(label(&AgentStatus::Paused), "paused");
         assert_eq!(label(&AgentStatus::Waiting), "waiting");
         assert_eq!(label(&AgentStatus::Complete), "complete");
         assert_eq!(label(&AgentStatus::Cancelled), "cancelled");

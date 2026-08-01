@@ -327,6 +327,9 @@ impl Dashboard {
                 // Above the finished states: a stale run is unfinished business
                 // the user probably wants to clear.
                 AgentDisplayStatus::Stale => 2,
+                // Same altitude as Stale: deliberately parked, but still the
+                // user's unfinished business.
+                AgentDisplayStatus::Paused => 2,
             }
         };
         let mut indices: Vec<usize> = (0..self.agents.len())
@@ -561,6 +564,7 @@ impl Dashboard {
                     }
                 }
                 RunStatus::WaitingInput => AgentDisplayStatus::Waiting,
+                RunStatus::Paused => AgentDisplayStatus::Paused,
                 RunStatus::Complete => AgentDisplayStatus::Complete,
                 RunStatus::CompleteInteractive => AgentDisplayStatus::CompleteInteractive,
                 RunStatus::Error => {
