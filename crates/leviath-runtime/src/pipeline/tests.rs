@@ -8661,7 +8661,7 @@ async fn dispatch_tools_announces_lane_calls() {
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     let (sink_tx, mut sink_rx) = tokio::sync::broadcast::channel(16);
     world.insert_resource(WorldEventSink(sink_tx));
     let e = world

@@ -1689,7 +1689,7 @@ mod tests {
             Arc::new(NoTools),
             pools,
             1,
-            std::env::temp_dir(),
+            None,
             Handle::current(),
         ))
     }
