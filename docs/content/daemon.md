@@ -67,6 +67,21 @@ lev daemon uninstall
 > An installed daemon plus [`lev serve`](/docs/api) is all you need to drive Leviath from the
 > browser [console](/app), no terminal required.
 
+## Config changes take effect on the next run
+
+The daemon watches `~/.leviath/config.toml` and picks up your edits automatically. When you change
+per-run policy - a tool permission, a `[read_paths]` grant, a sandbox default, a limit, taint - the
+**next `lev run` uses the new value with no restart**. If a save leaves the file briefly unparseable
+(a half-typed edit), the daemon keeps serving your last good config and reloads on the next clean
+save, so an in-progress edit never breaks a spawn.
+
+Two kinds of change still need `lev daemon restart`, because they set up connections and
+process-wide state once at startup rather than per run:
+
+- provider keys and `[model_providers]` (the provider registry)
+- `[[mcp_servers]]` (live MCP connections), `[observability]` (the telemetry pipeline), and
+  `[security] allow_local_network` (the outbound-network policy)
+
 ## Control surface
 
 The daemon is reached over a local **control socket**: a Unix socket / Windows pipe guarded by a
