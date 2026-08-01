@@ -1,0 +1,286 @@
+---
+title: Rhai providers
+group: Reference
+group_order: 3
+order: 8
+---
+
+# Custom model providers
+
+A `.rhai` script in `~/.leviath/providers/` teaches Leviath any OpenAI-compatible (or otherwise HTTP)
+LLM API. The script does only **format mapping** (Leviath's request to the API's HTTP body, and the
+response back). The Rust wrapper keeps HTTP transport, rate limiting, per-stage timeouts, retry with
+backoff, error classification, and token counting.
+
+The provider name is the filename stem, so `groq.rhai` is referenced as `provider = "groq"`. A script
+becomes a live provider the first time an agent references its name, and it is recompiled
+automatically whenever the file changes (the mtime is checked on each use). A broken script is skipped
+with a warning and starts working again once you fix the file. The daemon never scans-and-runs every
+dropped file at startup, only the ones an agent actually names.
+
+## Where it goes and how it's referenced
+
+Put the file at `~/.leviath/providers/groq.rhai`, then point a stage (or the top-level `[model]`) at
+it from the blueprint:
+
+```toml
+# agent.leviath
+[model]
+provider = "groq"                       # the filename stem
+model    = "llama-3.3-70b-versatile"    # passed through as request.model
+
+# Per-stage override, if you want one stage on a different provider:
+[stages.plan.model]
+provider = "groq"
+model    = "llama-3.3-70b-versatile"
+```
+
+A config table is optional. It only supplies overrides that reach the script's `initialize`:
+
+```toml
+# ~/.leviath/config.toml
+[model_providers.groq]
+script   = "groq"                            # optional; defaults to <name>.rhai
+api_key  = "..."                             # optional; the script may read its own env var
+base_url = "https://api.groq.com/openai/v1"  # optional
+
+[model_providers.groq.rate_limit]            # optional; enforced by the Rust wrapper
+requests_per_minute = 30
+tokens_per_minute   = 100000
+
+# Any other keys are forwarded verbatim to initialize(config).
+```
+
+## The script contract
+
+A provider defines `initialize` and `inference` (required) and may add `stream`, `count_tokens`, and
+`list_models`. Metadata comes from leading `// @key value` comments.
+
+`initialize(config)` runs once when the provider loads. It runs **offline**, so no HTTP host
+functions are available here. Return a state map that is persisted and passed to every later call.
+
+`inference(state, request)` does one non-streaming call. `request` carries:
+
+```jsonc
+{
+  "system":   [ { "text": "...", "cache_hint": "..." } ],
+  "messages": [ { "role": "user", "content": "...", "cache_breakpoint": false } ],
+  "tools":    [ { "name": "...", "description": "...", "parameters": { /* JSON schema */ } } ],
+  "model": "...", "max_tokens": 1024, "temperature": 0.7,
+  "request_timeout_secs": 120, "extra": { /* forwarded config keys */ }
+}
+```
+
+and must return:
+
+```jsonc
+{
+  "content": "...",
+  "tool_calls":  [ { "id": "...", "name": "...", "arguments": { /* parsed */ } } ],
+  "tokens_used": { "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+                   "cached_tokens": 0, "cache_write_tokens": 0 },
+  "finish_reason": "Complete"   // "Complete" | "ToolCall" | "TokenLimit" | "Stop"
+}
+```
+
+## Host functions
+
+These are the only calls that reach outside the sandbox:
+
+- HTTP: `http_get(url [, headers])`, `http_post(url, body [, headers])`, and
+  `stream_request(url, body, headers, callback)` for SSE streaming. The callback is a Rhai closure
+  invoked with each SSE `data:` payload.
+- Data: `parse_json(str)`, `to_json(value)`, `parse_sse(chunk)`.
+- Env and encoding: `env_var(name)` (returns a string or `()`), `encode_uri(str)`,
+  `encode_base64(str)`.
+- Tokens: `count_tokens_heuristic(text, hint)` where `hint` is `"openai"`, `"anthropic"`,
+  `"gemini"`, or `"general"`.
+
+Rate limiting, request timeouts, retry, and 429/5xx classification are applied by the Rust wrapper
+around these calls, so you do not implement them.
+
+## Error handling
+
+Signal an error by throwing a structured map. `transient: true` is retried with backoff; a 429
+returned by `http_post`/`stream_request` is mapped to a rate-limit error automatically.
+
+```rhai
+throw #{ message: "API key not set", transient: false };  // permanent, no retry
+throw #{ message: "server 503",      transient: true  };  // retried with backoff
+```
+
+## A complete provider
+
+This is a full OpenAI-compatible provider. Save it as `~/.leviath/providers/groq.rhai`, set
+`GROQ_API_KEY`, and point a stage at `provider = "groq"`. It handles non-streaming and streaming
+inference, tool calls, token usage, and model listing.
+
+```rhai
+// @provider groq
+// @description Groq inference (OpenAI-compatible, fast)
+// @supports_streaming true
+// @default_model llama-3.3-70b-versatile
+// @max_context_tokens 131072
+// @max_output_tokens 32768
+
+fn initialize(config) {
+    let api_key = config.api_key ?? env_var("GROQ_API_KEY");
+    if api_key == () { throw #{ message: "GROQ_API_KEY not set", transient: false }; }
+    #{
+        base_url: config.base_url ?? "https://api.groq.com/openai/v1",
+        api_key: api_key,
+        model: config.model ?? "llama-3.3-70b-versatile",
+    }
+}
+
+fn auth_headers(state) {
+    #{
+        "Authorization": `Bearer ${state.api_key}`,
+        "Content-Type": "application/json",
+    }
+}
+
+fn build_messages(request) {
+    let msgs = [];
+    if request.system.len() > 0 {
+        let sys_text = request.system.map(|b| b.text).reduce(|a, b| a + "\n\n" + b, "");
+        msgs.push(#{ role: "system", content: sys_text });
+    }
+    for msg in request.messages {
+        msgs.push(#{ role: msg.role, content: msg.content });
+    }
+    msgs
+}
+
+fn build_tools(request) {
+    request.tools.map(|t| #{
+        type: "function",
+        function: #{ name: t.name, description: t.description, parameters: t.parameters },
+    })
+}
+
+fn build_body(state, request, streaming) {
+    let body = #{
+        model: request.model ?? state.model,
+        messages: build_messages(request),
+        max_tokens: request.max_tokens,
+        temperature: request.temperature,
+    };
+    let tools = build_tools(request);
+    if tools.len() > 0 { body.tools = tools; }
+    if streaming { body.stream = true; }
+    to_json(body)
+}
+
+fn map_finish(reason) {
+    switch reason {
+        "stop" => "Complete",
+        "tool_calls" => "ToolCall",
+        "length" => "TokenLimit",
+        _ => "Complete",
+    }
+}
+
+fn usage_of(u) {
+    if u == () { return #{ total_tokens: 0 }; }
+    #{
+        prompt_tokens: u.prompt_tokens ?? 0,
+        completion_tokens: u.completion_tokens ?? 0,
+        total_tokens: u.total_tokens ?? 0,
+        cached_tokens: 0,
+        cache_write_tokens: 0,
+    }
+}
+
+fn inference(state, request) {
+    let resp = parse_json(http_post(
+        `${state.base_url}/chat/completions`,
+        build_body(state, request, false),
+        auth_headers(state),
+    ));
+    let choice = resp.choices[0];
+    let msg = choice.message;
+    let tool_calls = if msg.tool_calls != () {
+        msg.tool_calls.map(|tc| #{
+            id: tc.id,
+            name: tc.function.name,
+            arguments: parse_json(tc.function.arguments),
+        })
+    } else { [] };
+    #{
+        content: msg.content ?? "",
+        tool_calls: tool_calls,
+        tokens_used: usage_of(resp.usage),
+        finish_reason: map_finish(choice.finish_reason),
+    }
+}
+
+fn stream(state, request, on_chunk) {
+    stream_request(
+        `${state.base_url}/chat/completions`,
+        build_body(state, request, true),
+        auth_headers(state),
+        |chunk| {
+            let data = parse_sse(chunk);
+            if data == () { return; }
+            let choice = data.choices[0];
+            let delta = choice.delta;
+            let result = #{ delta: delta.content ?? "" };
+            if choice.finish_reason != () {
+                result.finish_reason = map_finish(choice.finish_reason);
+            }
+            if data.usage != () { result.tokens = usage_of(data.usage); }
+            on_chunk.call(result);
+        },
+    );
+}
+
+fn count_tokens(state, text, model) {
+    count_tokens_heuristic(text, "openai")
+}
+
+fn list_models(state) {
+    let resp = parse_json(http_get(`${state.base_url}/models`, auth_headers(state)));
+    resp.data.map(|m| #{
+        id: m.id,
+        display_name: m.id,
+        max_context_tokens: m.context_window ?? 8192,
+        max_output_tokens: 4096,
+    })
+}
+```
+
+The three optional functions each carry their own shape. `stream(state, request, on_chunk)` calls
+`on_chunk.call(#{...})` per delta, where each chunk map is
+`{ delta, tool_calls: [{index, id, name, arguments_delta}], tokens: {...}, finish_reason }`.
+`count_tokens(state, text, model)` returns an int (Leviath falls back to a local heuristic without
+it). `list_models(state)` returns an array of
+`{ id, display_name, max_context_tokens, max_output_tokens }`.
+
+## Testing it
+
+To adapt this to another OpenAI-compatible API, change the metadata block, the default `base_url` and
+env var in `initialize`, and the default `model`. The request/response mapping is usually the same.
+For an API that is not OpenAI-shaped, rewrite `build_body` and the response parsing in `inference` to
+match its wire format.
+
+```bash
+lev models list --provider groq   # calls list_models, exercising auth and parse_json end to end
+lev run <agent> --task "..."      # a live run through a stage that references the provider
+```
+
+> [!TIP]
+> A broken provider script is skipped and model selection falls through to the next configured model,
+> so a syntax error looks like "my agent quietly used the wrong model". Run
+> `lev models list --provider <name>` first; a compile or auth error surfaces there instead of
+> hiding behind a fallback.
+
+## Not in scope
+
+Three things this deliberately does not do: switching providers mid-run (one `inference()` call
+always sees one consistent snapshot of the script), a community registry, and composing one
+provider out of others.
+
+See [Providers](/docs/providers) for how a stage selects a model and orders fallbacks, and the
+[configuration reference](/docs/configuration#model_providersname) for the `[model_providers]`
+keys.
