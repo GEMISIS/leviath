@@ -92,7 +92,7 @@ impl EmbedSpawner {
                 &self.defaults,
                 registry,
                 &all_tool_defs,
-            )
+            )?
         };
 
         let agent_name = blueprint.name.clone();

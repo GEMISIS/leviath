@@ -1226,6 +1226,7 @@ pub fn force_transition(world: &mut World, entity: Entity, target_idx: usize) {
 /// set - the per-stage input to [`spawn_agent`]. The caller (CLI / daemon) owns
 /// the model-selection policy (overrides, availability, user defaults) and tool
 /// filtering; the runtime just turns the result into agent data.
+#[derive(Debug)]
 pub struct ResolvedStage {
     /// The provider to call for this stage.
     pub provider_name: String,

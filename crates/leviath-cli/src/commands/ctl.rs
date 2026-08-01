@@ -183,7 +183,7 @@ fn report_forced(
         None => String::new(),
     };
     match outcome {
-        O::Cancelled => {
+        O::Terminated => {
             println!(
                 "cancelled '{run_id}' on disk{why}; if a daemon is still running, \
                  restart it so it picks up the change"

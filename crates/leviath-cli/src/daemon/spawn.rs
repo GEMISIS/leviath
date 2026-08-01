@@ -768,7 +768,7 @@ fn build_agent_inner(
             &model_defaults(config),
             registry,
             &all_tool_defs,
-        )
+        )?
     };
 
     // 4. Snapshot the blueprint bits we need after it's moved into the world.
@@ -2478,6 +2478,52 @@ system_prompt = "SYSTEM_PROMPT_PLACEHOLDER"
             sub_tx(),
         );
         assert!(result.is_err(), "expected spawn error, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn build_agent_refuses_a_manifest_with_no_usable_provider() {
+        // The end-to-end shape of issue #190: this used to build an agent
+        // pointed at a provider nothing answers to, which then sat at
+        // iteration 0 for the life of the daemon.
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ghostly.leviath");
+        std::fs::write(
+            &manifest,
+            r#"
+[agent]
+name = "ghostly"
+version = "0.1.0"
+description = "d"
+entry_stage = "main"
+
+[context.regions]
+task = { kind = "pinned", max_tokens = 4000 }
+
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "ghost", model = "m" }], allow_user_default = false }
+description = "d"
+available_tools = []
+"#,
+        )
+        .unwrap();
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let err = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+            sub_tx(),
+        )
+        .unwrap_err();
+        assert!(err.contains("main"), "names the stage: {err}");
+        assert!(err.contains("ghost"), "names what it tried: {err}");
     }
 
     #[tokio::test]
