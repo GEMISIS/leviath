@@ -133,6 +133,7 @@ impl EmbedSpawner {
                 callback_url: None,
                 callback_secret: None,
                 title: None,
+                unattended: args.yolo,
             },
             TokenTotals::default(),
             PersistWatermark::default(),
