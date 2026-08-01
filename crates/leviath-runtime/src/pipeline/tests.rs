@@ -2850,6 +2850,244 @@ async fn dispatch_tools_partitions_context_and_lane() {
     assert_eq!(job.entity, e);
 }
 
+// ── argument validation (dispatch_tools) ──
+
+/// A stage advertising `tools`, each with a real parameter schema. The plain
+/// `offering()` fixture advertises `{}` (accepts anything); these tests are
+/// about what happens when a schema actually constrains.
+fn offering_with_schemas(tools: &[(&str, serde_json::Value)]) -> StageInference {
+    StageInference {
+        provider_name: "p".to_string(),
+        model: "m".to_string(),
+        tools: tools
+            .iter()
+            .map(|(n, schema)| leviath_providers::Tool {
+                name: (*n).to_string(),
+                description: String::new(),
+                parameters: schema.clone(),
+            })
+            .collect(),
+        tool_filter: None,
+    }
+}
+
+fn path_required_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": { "path": { "type": "string" } },
+        "required": ["path"]
+    })
+}
+
+/// Layer 2: a call whose arguments do not satisfy the advertised schema is
+/// refused back to the model with the validator's message, and never reaches
+/// the lane - while a valid call in the same batch still runs.
+#[tokio::test]
+async fn dispatch_tools_refuses_arguments_that_fail_the_advertised_schema() {
+    let (jtx, mut jrx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+    world.insert_resource(ToolStage(jtx));
+    let result = crate::components::InferenceResult {
+        response: "r".to_string(),
+        tool_calls: vec![
+            fcall("c1", "read_file", serde_json::json!({"path": 42})),
+            fcall("c2", "read_file", serde_json::json!({"path": "a.txt"})),
+        ],
+        tokens_used: 0,
+        timestamp: 0,
+    };
+    let e = world
+        .spawn((
+            agent_state(),
+            offering_with_schemas(&[("read_file", path_required_schema())]),
+            result,
+            conv_window(),
+            ReadyForTools,
+        ))
+        .id();
+
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    let stashed = &world.get::<ContextToolResults>(e).unwrap().0;
+    assert_eq!(stashed.len(), 1, "only the invalid call was answered here");
+    assert_eq!(stashed[0].0, "c1");
+    let refusal = stashed[0].1.clone();
+    assert!(
+        refusal.starts_with("[error] invalid arguments for 'read_file'"),
+        "{refusal}"
+    );
+    // The message names the violation, so the next turn can self-correct.
+    assert!(refusal.contains("path"), "{refusal}");
+
+    let job = jrx.try_recv().expect("the valid call still runs");
+    assert_eq!(job.entity, e);
+}
+
+/// A schema that does not compile (a typo'd Rhai `@param` type produces
+/// `{"type": "strng"}`) must not turn its tool unusable: validation is
+/// skipped and the call dispatches as before.
+#[tokio::test]
+async fn dispatch_tools_skips_validation_when_the_schema_does_not_compile() {
+    let (jtx, mut jrx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+    world.insert_resource(ToolStage(jtx));
+    let result = crate::components::InferenceResult {
+        response: "r".to_string(),
+        tool_calls: vec![fcall("c1", "typod", serde_json::json!({"whatever": true}))],
+        tokens_used: 0,
+        timestamp: 0,
+    };
+    let e = world
+        .spawn((
+            agent_state(),
+            offering_with_schemas(&[("typod", serde_json::json!({"type": "strng"}))]),
+            result,
+            conv_window(),
+            ReadyForTools,
+        ))
+        .id();
+
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    assert!(
+        world.get::<ContextToolResults>(e).unwrap().0.is_empty(),
+        "nothing was refused"
+    );
+    assert!(jrx.try_recv().is_ok(), "the call dispatched anyway");
+}
+
+/// The schema lookup resolves aliases on both sides, like the Layer-1 check
+/// above it: a stage advertising `bash` constrains a call to `shell`.
+#[tokio::test]
+async fn dispatch_tools_validates_through_a_tool_alias() {
+    let (jtx, _jrx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+    world.insert_resource(ToolStage(jtx));
+    let canonical = leviath_tools::canonical_tool_name("bash");
+    assert_ne!(
+        canonical, "bash",
+        "this test needs a real alias to be a test"
+    );
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": { "command": { "type": "string" } },
+        "required": ["command"]
+    });
+    let result = crate::components::InferenceResult {
+        response: "r".to_string(),
+        tool_calls: vec![fcall("c1", canonical, serde_json::json!({}))],
+        tokens_used: 0,
+        timestamp: 0,
+    };
+    let e = world
+        .spawn((
+            agent_state(),
+            offering_with_schemas(&[("bash", schema)]),
+            result,
+            conv_window(),
+            ReadyForTools,
+        ))
+        .id();
+
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    let text = conversation_text(&world, e);
+    assert!(text.contains("invalid arguments"), "{text}");
+    assert!(text.contains("command"), "{text}");
+}
+
+/// An MCP-style schema (server-supplied: enums, typed array items) constrains
+/// the same way - both directions, accept and refuse.
+#[tokio::test]
+async fn dispatch_tools_validates_an_mcp_style_schema() {
+    let (jtx, mut jrx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+    world.insert_resource(ToolStage(jtx));
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "mode": { "enum": ["fast", "thorough"] },
+            "targets": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["mode"]
+    });
+    let result = crate::components::InferenceResult {
+        response: "r".to_string(),
+        tool_calls: vec![
+            fcall(
+                "c1",
+                "mcp_search",
+                serde_json::json!({"mode": "sideways", "targets": ["a", 7]}),
+            ),
+            fcall(
+                "c2",
+                "mcp_search",
+                serde_json::json!({"mode": "fast", "targets": ["a"]}),
+            ),
+        ],
+        tokens_used: 0,
+        timestamp: 0,
+    };
+    let e = world
+        .spawn((
+            agent_state(),
+            offering_with_schemas(&[("mcp_search", schema)]),
+            result,
+            conv_window(),
+            ReadyForTools,
+        ))
+        .id();
+
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    let stashed = &world.get::<ContextToolResults>(e).unwrap().0;
+    assert_eq!(stashed.len(), 1);
+    assert_eq!(stashed[0].0, "c1");
+    assert!(stashed[0].1.contains("/mode"), "{}", stashed[0].1);
+    assert!(jrx.try_recv().is_ok(), "the conforming call ran");
+}
+
+/// The helper's own edges, directly: no def for the name means nothing to
+/// validate (after the unoffered check that cannot happen in dispatch), and
+/// the provider's `Null`-for-no-arguments convention satisfies an
+/// unconstraining schema.
+#[test]
+fn invalid_args_refusal_without_a_def_or_constraint_is_none() {
+    let stage = offering(&["read_file"]);
+    assert_eq!(
+        invalid_args_refusal(&stage, "never_advertised", &serde_json::json!({})),
+        None
+    );
+    assert_eq!(
+        invalid_args_refusal(&stage, "read_file", &serde_json::Value::Null),
+        None
+    );
+}
+
+/// Every refusal prefix dispatch can produce reads as "this never happened".
+/// `[blocked]` was missing until issue #155's pass, so a taint-blocked write
+/// counted as a modification.
+#[test]
+fn call_had_no_effect_covers_every_refusal_prefix() {
+    assert!(call_had_no_effect("[error] boom"));
+    assert!(call_had_no_effect("[denied] user said no"));
+    assert!(call_had_no_effect("[unavailable] not in this stage"));
+    assert!(call_had_no_effect("[blocked] taint gate"));
+    assert!(!call_had_no_effect("Successfully wrote 12 bytes"));
+}
+
 // ── taint gate (dispatch_tools) ──
 
 /// A taint-tracking window carrying `Internal`-level data.
@@ -6734,6 +6972,28 @@ fn collect_tools_ignores_a_write_the_stage_never_offered() {
     );
     assert_eq!(progress.modifying_tool_calls, 0);
     // Not "blocked" either - nobody declined it; the stage never had it.
+    assert_eq!(progress.blocked_modification_calls, 0);
+    assert_eq!(flags.modified_file_count, 0);
+    assert!(flags.modified_files.is_empty());
+}
+
+/// A taint-blocked write never ran either. `[blocked]` was missing from the
+/// no-effect prefixes, so it counted as a successful modification - a stage
+/// whose every write the gate stopped could still satisfy a
+/// `require_modifications` transition.
+#[test]
+fn collect_tools_ignores_a_write_the_taint_gate_blocked() {
+    let (progress, flags) = count_modifications(
+        &[(
+            "write_file",
+            serde_json::json!({"path": "exfil.txt"}),
+            "[blocked] 'write_file' would carry Internal-tainted data.",
+        )],
+        &[],
+    );
+    assert_eq!(progress.modifying_tool_calls, 0);
+    // Not "blocked_modification_calls" - that counter is the user declining;
+    // the gate refusing is not the agent having tried and been overruled.
     assert_eq!(progress.blocked_modification_calls, 0);
     assert_eq!(flags.modified_file_count, 0);
     assert!(flags.modified_files.is_empty());

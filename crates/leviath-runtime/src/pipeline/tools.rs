@@ -121,17 +121,20 @@ pub(crate) fn merge_in_call_order(
 
 /// Whether a tool result describes a call whose side effect never happened.
 ///
-/// `[error]` (it ran and failed), `[denied]` (policy refused it) and
-/// `[unavailable]` (the stage never offered it) all mean the same thing to
-/// anything reasoning about what the agent *did*: file tracking must not record
-/// a write that was not written, and the modification counters behind a
-/// transition gate must not count it as work. Three separate prefix lists is
-/// exactly how a fourth prefix gets missed - `[unavailable]` was, when dispatch
-/// began refusing unoffered tools and both call sites still listed only two.
+/// `[error]` (it ran and failed), `[denied]` (policy refused it),
+/// `[unavailable]` (the stage never offered it) and `[blocked]` (the taint
+/// gate stopped it) all mean the same thing to anything reasoning about what
+/// the agent *did*: file tracking must not record a write that was not
+/// written, and the modification counters behind a transition gate must not
+/// count it as work. Separate prefix lists are exactly how a new prefix gets
+/// missed - `[unavailable]` was, when dispatch began refusing unoffered tools
+/// and both call sites still listed only two, and `[blocked]` was again, so a
+/// taint-blocked write counted as a modification until issue #155's pass.
 pub(crate) fn call_had_no_effect(result: &str) -> bool {
     result.starts_with("[error]")
         || result.starts_with("[denied]")
         || result.starts_with("[unavailable]")
+        || result.starts_with("[blocked]")
 }
 
 /// The effective tool names this stage advertised, canonicalised.
@@ -196,6 +199,47 @@ pub(crate) fn barrier_then(
             exec().await
         })
     })
+}
+
+/// `Some(refusal)` when `name`'s arguments do not satisfy the schema the
+/// stage advertised for it.
+///
+/// The def is found by canonicalising both the called name and each advertised
+/// name, the same resolution `offered_tool_names` applies, so a tool offered
+/// as `bash` validates a call to `shell` and vice versa. A name with no def
+/// here validates as fine - after the unoffered-tool check that cannot happen,
+/// and the schema's absence is not the model's mistake to be refused over.
+///
+/// A schema that does not compile (a typo'd Rhai `@param` type, an MCP
+/// fragment this crate cannot interpret) is logged and skipped rather than
+/// refused: validation must never turn a working tool into an unusable one.
+///
+/// Schemas are compiled per call, deliberately. They are small, calls arrive
+/// at model latency, and a compiled-validator cache would need invalidating on
+/// every dynamic-tools re-advertisement and scoping per agent - real
+/// complexity for unmeasurable savings.
+pub(crate) fn invalid_args_refusal(
+    stage: &StageInference,
+    name: &str,
+    args: &serde_json::Value,
+) -> Option<String> {
+    let canonical = leviath_tools::canonical_tool_name(name);
+    let tool = stage
+        .tools
+        .iter()
+        .find(|t| leviath_tools::canonical_tool_name(&t.name) == canonical)?;
+    match leviath_tools::validate_tool_args(name, &tool.parameters, args) {
+        leviath_tools::ArgValidation::Valid => None,
+        leviath_tools::ArgValidation::SchemaUnusable(e) => {
+            tracing::warn!(
+                tool = %name,
+                error = %e,
+                "tool schema did not compile; skipping argument validation"
+            );
+            None
+        }
+        leviath_tools::ArgValidation::Invalid(msg) => Some(msg),
+    }
 }
 
 /// Tool-dispatch system: for each `ReadyForTools` agent, apply its `context_*`
@@ -306,6 +350,16 @@ pub fn dispatch_tools(
             // and rewritten by the dynamic-tools refresh - so enforcement cannot
             // drift from advertising the way a second copy of the rule would.
             if let Some(refusal) = unoffered_tool_refusal(stage_inf, &c.name) {
+                context_results.push((c.tool_id.clone(), refusal));
+                continue;
+            }
+            // Layer 2: the call must satisfy the schema the model was shown.
+            // A mismatched call is refused back to the model with the
+            // validator's message, so the next turn can self-correct, rather
+            // than executed on garbage or surfaced to the user as a permission
+            // prompt for arguments that were never valid. Deterministic, so a
+            // gate-prompt re-run of the same batch refuses identically.
+            if let Some(refusal) = invalid_args_refusal(stage_inf, &c.name, &c.arguments) {
                 context_results.push((c.tool_id.clone(), refusal));
                 continue;
             }
