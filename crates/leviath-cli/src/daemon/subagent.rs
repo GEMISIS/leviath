@@ -169,6 +169,16 @@ async fn wait(h: &SubAgentHandle, agent_id: &str) -> String {
     if agent_id.is_empty() {
         return "[error] wait_for_agent requires 'agent_id'".to_string();
     }
+    // The whole wait happens off the tool lane. The child's own tool batches
+    // queue on that lane, so a parent that kept lane capacity while waiting was
+    // holding the very thing the child needed to finish - a parent and child
+    // deadlocked on each other, which is what froze whole factories for hours
+    // (issue #191).
+    leviath_runtime::tool_bridge::off_lane(poll_until_finished(h, agent_id)).await
+}
+
+/// Poll `agent_id` until it reaches a terminal state, or until the caller does.
+async fn poll_until_finished(h: &SubAgentHandle, agent_id: &str) -> String {
     loop {
         match status_of(h, agent_id).await {
             None => return format!("[error] no such sub-agent '{agent_id}'"),
@@ -180,8 +190,8 @@ async fn wait(h: &SubAgentHandle, agent_id: &str) -> String {
             }
             // The caller itself was cancelled (or failed) while waiting. Give up
             // rather than keep polling for a child that is being torn down with
-            // it - this loop has no other exit, so it would hold its tool-lane
-            // worker for as long as the daemon lived.
+            // it - this loop has no other exit, so it would otherwise run for as
+            // long as the daemon lived.
             Some(_) if caller_is_terminal(h).await => {
                 return format!("[error] cancelled while waiting for '{agent_id}'");
             }
@@ -603,8 +613,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     }
 
     /// `wait_for_agent` gives up when the *calling* agent is cancelled. The loop
-    /// has no other exit, and it runs on a tool-lane worker - of which there are
-    /// a fixed number - so a cancelled caller would otherwise poll for a child
+    /// has no other exit, so a cancelled caller would otherwise poll for a child
     /// that is being torn down with it until the daemon exits.
     #[tokio::test]
     async fn wait_gives_up_when_the_calling_agent_is_cancelled() {
@@ -624,6 +633,80 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         assert!(
             out.contains("cancelled while waiting"),
             "reports why it stopped, got: {out}"
+        );
+    }
+
+    /// `wait_for_agent` waits off the tool lane.
+    ///
+    /// The child's own tool batches queue on that lane. A parent that kept lane
+    /// capacity for the length of the wait was holding exactly what the child
+    /// needed in order to finish, so a factory of parents waiting on children
+    /// wedged itself and stayed wedged (issue #191).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wait_does_not_hold_the_tool_lane() {
+        use leviath_runtime::tool_bridge::{ToolJob, ToolLane, ToolLaneStats};
+
+        // A child that never finishes, so the wait is still running throughout.
+        let (h, _seen, _t) = fake_host(
+            Ok("child-1".to_string()),
+            vec![Some(AgentStatus::Active); 64],
+            false,
+        );
+
+        let (job_tx, job_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (result_tx, mut results) = tokio::sync::mpsc::unbounded_channel();
+        let stats = std::sync::Arc::new(ToolLaneStats::new(1));
+        let lane = ToolLane::new(
+            tokio::runtime::Handle::current(),
+            result_tx,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            1,
+            stats.clone(),
+        );
+        let _serving = lane.serve(job_rx);
+        let submit = |entity: u32, exec: leviath_runtime::tool_bridge::BoxedToolExec| {
+            stats.enqueued();
+            job_tx
+                .send(ToolJob {
+                    entity: bevy_ecs::entity::Entity::from_raw_u32(entity)
+                        .expect("a small index is a valid id"),
+                    exec,
+                    cancel: leviath_runtime::cancel::CancelToken::new(),
+                })
+                .expect("the lane is serving");
+        };
+
+        submit(
+            1,
+            Box::new(move || {
+                Box::pin(async move {
+                    let out =
+                        handle(&h, &tc("wait_for_agent", json!({"agent_id": "child-1"}))).await;
+                    vec![("wait".to_string(), out)]
+                })
+            }),
+        );
+        // The waiter gives the lane back rather than sitting on it.
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while stats.parked() == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the wait stepped off the lane");
+
+        // Which is what lets anything else run - a child's tool batch, here.
+        submit(
+            2,
+            Box::new(|| Box::pin(async { vec![("child".to_string(), "ran".to_string())] })),
+        );
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), results.recv())
+            .await
+            .expect("the batch behind the waiter ran")
+            .expect("an outcome arrived");
+        assert_eq!(
+            outcome.results,
+            vec![("child".to_string(), "ran".to_string())]
         );
     }
 

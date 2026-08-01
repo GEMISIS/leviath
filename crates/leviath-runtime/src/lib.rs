@@ -60,7 +60,9 @@
 //!   escape hatch: it tracks this crate's `bevy_ecs` version (re-exported as
 //!   [`ecs`]) and carries no compatibility promise.
 
-pub(crate) mod cancel;
+// Public because [`tool_bridge::ToolJob`] carries a `CancelToken`, so anything
+// handing work to the tool lane needs to name the type.
+pub mod cancel;
 pub(crate) mod compaction_bridge;
 pub mod components;
 pub mod context_setup;

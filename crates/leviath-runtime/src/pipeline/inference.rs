@@ -113,7 +113,7 @@ pub(crate) fn retry_policy_for(
 ///
 /// Without it, cancelling only stopped *new* work from being dispatched: a
 /// request already handed to the async lanes ran to completion, holding its
-/// inference-pool permit or tool-lane worker the whole time.
+/// inference-pool permit or tool-lane capacity the whole time.
 #[derive(Component, Default, Debug)]
 pub struct InFlightWork(pub Vec<crate::cancel::CancelToken>);
 

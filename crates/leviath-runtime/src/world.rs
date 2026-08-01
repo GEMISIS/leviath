@@ -279,7 +279,7 @@ impl PipelineWorld {
             (
                 // First: stop whatever a now-terminal agent still has running in
                 // the async lanes. Ahead of everything else so a cancel frees its
-                // inference permit and tool-lane worker on the very next tick,
+                // inference permit and tool-lane capacity on the very next tick,
                 // rather than whenever the provider or tool happens to answer.
                 abort_terminal_work,
                 deliver_messages,
