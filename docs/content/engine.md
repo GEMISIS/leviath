@@ -223,6 +223,32 @@ how many *sub-agents* a stage spawns ([Sub-agents](/docs/sub-agents)), and
 `[rate_limits.<provider>]` shapes *request rate* to a provider. The pool bounds concurrency; the
 rate limiter bounds throughput; both apply.
 
+<a id="the-tool-lane"></a>
+
+## The tool lane
+
+Tools have a pool of their own. `[limits] max_concurrent_tools` (8 by default) caps how many
+agents' tool batches execute at once across the whole daemon, and a batch holds one unit of that
+capacity for as long as it is running.
+
+The interesting part is what happens when a batch is not running but waiting. Several things a
+batch can wait for have no time bound at all: a tool-approval prompt, an `ask_user`, a
+`wait_for_agent` that only ends when some other run finishes. A batch parked on one of those gives
+its capacity back and takes a fresh unit when it has something to do again, so waiting costs the
+lane nothing.
+
+That is not a nicety. A parent waiting for a child it spawned would otherwise be holding the very
+capacity the child needed in order to finish, and enough parents doing that froze whole factories
+for hours with every run reading as healthy. `lev ps` shows parked batches separately from running
+ones for the same reason: parked is fine, queued with nothing draining is not.
+
+As a backstop for jams nobody has diagnosed yet, the daemon counts the 30-second cycles it spends
+with a full tool lane and no run moving anywhere. Past `[limits] dead_cycles_before_relief` (10 by
+default, so five minutes) it widens the lane so the queued batches get through. It only ever adds
+capacity, never cancels anything, and it stops after granting one extra lane's worth: if that much
+did not help, the problem is not capacity. Set the key to `0` to turn relief off; the count is
+reported either way, in `lev ps` and as `leviath.scheduler.dead_cycles.total`.
+
 ## Stages are not entities
 
 A stage is not a separate entity or object. It is `StageCursor.index`, an index into the blueprint

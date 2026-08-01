@@ -58,6 +58,31 @@ Waiting for a busy model is *not* this. An agent queued behind other in-flight r
 model is working as intended and is never failed, however long the queue takes — raise
 `[limits] max_concurrent_inferences` if you want more of them running at once.
 
+## Every run looks busy but nothing finishes
+
+Run `lev ps` and read the line under the table. If there isn't one, the daemon thinks it is
+getting somewhere and the problem is in a particular run rather than the daemon as a whole.
+
+A `lanes:` line means the tool lane is full with batches queued behind it. On its own that is just
+a busy factory. What matters is the second half:
+
+```
+lanes: tools 8/8 busy, 3 parked, 12 queued  ·  no progress for 14 cycles (7m)
+```
+
+A cycle is 30 seconds, so that reads as seven minutes in which work was waiting for the tool lane
+and not one run moved. `parked` is not part of the problem: a batch waiting on a person or on
+another run holds no capacity. `busy` with a `queued` figure that never falls is.
+
+The usual cause is too little tool capacity for the shape of the workload. Raise
+`[limits] max_concurrent_tools` and restart the daemon. Left alone, the daemon widens the lane
+itself after `[limits] dead_cycles_before_relief` cycles (10 by default) and says so in the log at
+`error` level; it never cancels anything, and it stops after one extra lane's worth.
+
+The same numbers are exported as `leviath.tool_lane.*` and
+`leviath.scheduler.dead_cycles.total` if you have [observability](/docs/observability) on. A
+healthy daemon sits at zero dead cycles.
+
 ## An agent seems stuck in a loop
 
 That's what [stuck detection](/docs/stages#graph) is for. Add a `condition = "stuck"` transition

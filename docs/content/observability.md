@@ -39,9 +39,19 @@ them anywhere, which is the quickest way to see what would be exported.
 transitions, retries, and terminal status all land as span attributes, so a
 stuck or looping run is visible as a shape, not just a log line.
 
-**Metrics.** Token counters (prompt and completion), stage-duration
-histograms, and inference-latency histograms, labeled by agent, stage, and
+**Metrics.** Per run: `leviath.agents.active`, `leviath.tokens.total` and
+`leviath.tool_calls.total` counters, and `leviath.stage_duration` and
+`leviath.inference_latency` histograms, labeled by agent, stage, provider, and
 model.
+
+Per daemon, sampled every 30 seconds: `leviath.tool_lane.busy`,
+`leviath.tool_lane.queued`, and `leviath.tool_lane.parked` for what the tool
+lane is holding, plus `leviath.scheduler.dead_cycles.total` and
+`leviath.tool_lane.relief.total`. A dead cycle is a whole 30-second interval in
+which a lane was at capacity, work was queued behind it, and no run moved. It is
+the one number that separates a busy daemon from a wedged one, and it is worth
+alerting on: a healthy factory sits at zero, and anything sustained above it
+means work is arriving that nothing is getting to.
 
 **Logs.** Log records carry the run's trace ID, so a collector that joins the
 three signals can jump from a log line to the exact span that produced it.
