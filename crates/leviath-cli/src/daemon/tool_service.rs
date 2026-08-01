@@ -504,7 +504,7 @@ impl ToolService for CliToolService {
         let available = ctx.stage_available.get(stage_index)?;
         let mut all = ctx.static_defs.clone();
         all.extend(script_defs);
-        Some(crate::daemon::spawn::filter_tools_by_available(
+        Some(leviath_runtime::pipeline::filter_tools_by_available(
             &all, available,
         ))
     }
