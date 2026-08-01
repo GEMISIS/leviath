@@ -25,7 +25,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{broadcast, oneshot};
 
 use crate::components::AgentStatus;
-use crate::host::{ControlOp, SpawnArgs, WorldEvent};
+use crate::host::{ControlOp, RunListEntry, SpawnArgs, WorldEvent};
 use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 
 #[cfg(unix)]
@@ -247,10 +247,10 @@ pub enum ControlResponse {
         /// Whether the operation applied.
         ok: bool,
     },
-    /// A listing of runs and their statuses.
+    /// A listing of runs, their statuses, and the context needed to read them.
     List {
-        /// `(run_id, status)` pairs.
-        runs: Vec<(String, AgentStatus)>,
+        /// One entry per live run.
+        runs: Vec<RunListEntry>,
     },
     /// A listing of open interactions.
     Interactions {
@@ -870,6 +870,23 @@ mod tests {
         broadcast::channel(16).0
     }
 
+    /// The one listing row the fake host serves, so the op reply and the
+    /// expected response can't drift apart.
+    fn listing_entry() -> RunListEntry {
+        RunListEntry {
+            run_id: "run-a".to_string(),
+            status: AgentStatus::Active,
+            wait_reason: None,
+            stage: "plan".to_string(),
+            stage_index: Some(0),
+            num_stages: Some(2),
+            iteration: 3,
+            tool_calls: 7,
+            last_progress_at: Some(1_000),
+            unattended: false,
+        }
+    }
+
     /// A fake host: drains ControlOps and replies with scripted values.
     fn spawn_fake_host(mut rx: mpsc::UnboundedReceiver<ControlOp>) {
         tokio::spawn(async move {
@@ -899,7 +916,7 @@ mod tests {
                         let _ = reply.send(true);
                     }
                     ControlOp::List { reply } => {
-                        let _ = reply.send(vec![("run-a".to_string(), AgentStatus::Active)]);
+                        let _ = reply.send(vec![listing_entry()]);
                     }
                     ControlOp::ListInteractions { reply } => {
                         let _ = reply.send(vec![]);
@@ -1049,7 +1066,7 @@ mod tests {
         assert_eq!(
             resp,
             ControlResponse::List {
-                runs: vec![("run-a".to_string(), AgentStatus::Active)]
+                runs: vec![listing_entry()]
             }
         );
     }

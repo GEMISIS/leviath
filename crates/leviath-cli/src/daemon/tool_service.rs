@@ -1524,6 +1524,7 @@ mod tests {
             workdir: "/tmp".to_string(),
             max_depth: 3,
             no_seed_commands: false,
+            unattended: false,
         };
         let builtins = Arc::new(leviath_tools::BuiltinTools::new(
             leviath_tools::ToolContext::new(std::env::temp_dir()),

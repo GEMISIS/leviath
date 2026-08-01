@@ -992,6 +992,7 @@ fn build_agent_inner(
         callback_url: args.callback_url.clone(),
         callback_secret: args.callback_secret.clone(),
         title: None,
+        unattended: args.yolo,
     };
     {
         let mut entity_mut = world.entity_mut(entity);
@@ -1070,6 +1071,7 @@ fn build_agent_inner(
         workdir: args.workdir.clone(),
         max_depth: max_child_depth,
         no_seed_commands: args.no_seed_commands,
+        unattended: args.yolo,
     };
     // Rhai script-tool host (Layer 3): resolve `[tool_script_permissions]` once,
     // with `read_file`/`shell` `inherit` deferring to the agent's own resolved

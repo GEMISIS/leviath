@@ -84,9 +84,19 @@ impl FanOutSpawner for DaemonFanOutSpawner {
     ) -> Result<Entity, String> {
         // The parent supplies the worker's workdir, run id (parentage), and (for
         // `worker_stage`) its blueprint path.
-        let (parent_path, workdir, parent_run_id) = world
+        // `unattended` rides along: a worker of an unattended parent is a worker
+        // nobody is watching either, and one that stops on an approval prompt
+        // parks the parent behind it for good.
+        let (parent_path, workdir, parent_run_id, unattended) = world
             .get::<RunMetadata>(parent)
-            .map(|md| (md.agent_path.clone(), md.workdir.clone(), md.run_id.clone()))
+            .map(|md| {
+                (
+                    md.agent_path.clone(),
+                    md.workdir.clone(),
+                    md.run_id.clone(),
+                    md.unattended,
+                )
+            })
             .ok_or_else(|| "fan-out parent has no run metadata".to_string())?;
 
         let (resolve_path, entry_stage) =
@@ -98,7 +108,7 @@ impl FanOutSpawner for DaemonFanOutSpawner {
             &task,
             None,
             &workdir,
-            false,
+            unattended,
             Vec::new(),
             None,
             // Fan-out workers get their split of the parent task via `task`.

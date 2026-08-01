@@ -21,7 +21,8 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{broadcast, oneshot};
 
 use crate::components::{
-    AgentMessage, AgentState, AgentStatus, ContextWindow, ParentRef, SubAgentChildren,
+    AgentMessage, AgentState, AgentStatus, AwaitingInteraction, ContextWindow, ParentRef,
+    SubAgentChildren, WaitReason,
 };
 use crate::interaction_hub::InteractionHub;
 use crate::persistence::{RunMetadata, TokenTotals};
@@ -84,6 +85,48 @@ pub struct SpawnArgs {
     /// tree) can nest children under their parent. `None` for a top-level run.
     #[serde(default)]
     pub parent_run_id: Option<String>,
+}
+
+/// One row of [`WorldHost::list`]: a live run, its status, and enough context to
+/// judge whether that status is a problem.
+///
+/// `lev ps` used to be a run id and a status word, which is why issue #184
+/// happened: `waiting` on its own says nothing about whether a person is needed,
+/// and there was no way to tell a run that had moved a second ago from one that
+/// had been stopped for an hour. Everything here is read straight off the live
+/// world, so it is the daemon's own view, not a re-read of `meta.json`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RunListEntry {
+    /// The run id (`lev ps`'s first column, and what `lev kill` takes).
+    pub run_id: String,
+    /// The agent's live status.
+    pub status: AgentStatus,
+    /// Why the status is [`AgentStatus::Waiting`]; `None` for every other
+    /// status, and for a `Waiting` the host cannot attribute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_reason: Option<WaitReason>,
+    /// The stage the agent is in.
+    pub stage: String,
+    /// Zero-based index of that stage, when the agent tracks one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_index: Option<usize>,
+    /// How many stages the blueprint has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_stages: Option<usize>,
+    /// Iterations completed in the current stage.
+    pub iteration: usize,
+    /// Cumulative tool calls across the run.
+    pub tool_calls: usize,
+    /// Unix seconds when this run last actually moved (see
+    /// [`PersistWatermark`](crate::pipeline::PersistWatermark)). Distinct from
+    /// `meta.json`'s `updated_at`, which also advances on a heartbeat and so
+    /// cannot be used to tell a working run from a wedged one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_progress_at: Option<i64>,
+    /// Whether this run is unattended (`--yolo`). An unattended run should never
+    /// be sitting on a prompt; if it is, something dropped the flag.
+    #[serde(default)]
+    pub unattended: bool,
 }
 
 /// The daemon-installed function that turns [`SpawnArgs`] into a live agent:
@@ -230,7 +273,7 @@ pub enum ControlOp {
     /// List every known live run and its status.
     List {
         /// Reply channel.
-        reply: oneshot::Sender<Vec<(String, AgentStatus)>>,
+        reply: oneshot::Sender<Vec<RunListEntry>>,
     },
     /// Deliver a message to a running agent (by agent id). Reply is `false` if the
     /// world's message channel is closed.
@@ -369,17 +412,11 @@ pub enum WorldEvent {
 #[derive(bevy_ecs::resource::Resource, Clone)]
 pub struct WorldEventSink(pub broadcast::Sender<WorldEvent>);
 
-/// A short, stable status label for [`WorldEvent`].
+/// A short, stable status label for [`WorldEvent`]. Part of the daemon's wire
+/// contract (the REST WebSocket forwards it verbatim), so it comes from the one
+/// table on [`AgentStatus`] rather than a copy that could drift from it.
 fn status_str(status: &AgentStatus) -> &'static str {
-    match status {
-        AgentStatus::Idle => "idle",
-        AgentStatus::Active => "active",
-        AgentStatus::Paused => "paused",
-        AgentStatus::Waiting => "waiting",
-        AgentStatus::Complete => "complete",
-        AgentStatus::Error { .. } => "error",
-        AgentStatus::Cancelled => "cancelled",
-    }
+    status.label()
 }
 
 /// The last-emitted snapshot of an agent, for change detection.
@@ -949,15 +986,99 @@ impl WorldHost {
         cancelled
     }
 
-    /// List every known live run and its status.
-    fn list(&self) -> Vec<(String, AgentStatus)> {
+    /// Why `entity` is [`AgentStatus::Waiting`], read off the markers the engine
+    /// already maintains. `None` when the agent is not waiting, or when it is
+    /// waiting for a reason nothing has claimed.
+    ///
+    /// Order matters. A taint-gate block and a stage checkpoint each open a hub
+    /// request of their own, so both also carry [`AwaitingInteraction`]; asking
+    /// the specific markers first is what keeps them from all reporting as a
+    /// generic prompt.
+    pub fn wait_reason(&self, entity: Entity) -> Option<WaitReason> {
+        let world = self.world.world();
+        let state = world.get::<AgentState>(entity)?;
+        if state.status != AgentStatus::Waiting {
+            return None;
+        }
+        if world.get::<crate::gate_prompt::AwaitingGatePrompt>(entity).is_some() {
+            return Some(WaitReason::TaintGate);
+        }
+        if world
+            .get::<crate::interaction_points::AwaitingInteractionPoint>(entity)
+            .is_some()
+        {
+            return Some(WaitReason::InteractionPoint);
+        }
+        if let Some(fanout) = world.get::<crate::fanout::FanOutWaiting>(entity) {
+            return Some(WaitReason::FanOutWorkers {
+                outstanding: fanout.outstanding(),
+            });
+        }
+        if world
+            .get::<crate::pipeline::WaitingForChildren>(entity)
+            .is_some()
+        {
+            let outstanding = world
+                .get::<SubAgentChildren>(entity)
+                .map(|c| {
+                    c.children
+                        .iter()
+                        .filter(|&&child| {
+                            world.get::<AgentState>(child).is_some_and(|s| {
+                                !crate::pipeline::is_terminal_status(&s.status)
+                            })
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
+            return Some(WaitReason::Children { outstanding });
+        }
+        if world.get::<AwaitingInteraction>(entity).is_some() {
+            // The hub is keyed by agent id, and one agent can only be parked on
+            // one prompt at a time, so the first match is the one blocking it.
+            let kind = self
+                .interactions
+                .pending()
+                .into_iter()
+                .find(|(agent_id, _)| *agent_id == state.agent_id)
+                .map(|(_, req)| req.kind);
+            return Some(match kind {
+                Some(leviath_core::interaction::InteractionKind::ToolApproval) => {
+                    WaitReason::ToolApproval
+                }
+                _ => WaitReason::UserPrompt,
+            });
+        }
+        None
+    }
+
+    /// List every known live run with the context an operator needs to read its
+    /// status: why it is waiting, where it is, and when it last moved.
+    fn list(&self) -> Vec<RunListEntry> {
+        let world = self.world.world();
         self.by_run_id
             .iter()
             .filter_map(|(run_id, &entity)| {
-                self.world
-                    .world()
-                    .get::<AgentState>(entity)
-                    .map(|s| (run_id.clone(), s.status.clone()))
+                let state = world.get::<AgentState>(entity)?;
+                let metadata = world.get::<RunMetadata>(entity);
+                Some(RunListEntry {
+                    run_id: run_id.clone(),
+                    status: state.status.clone(),
+                    wait_reason: self.wait_reason(entity),
+                    stage: state.current_stage.clone(),
+                    stage_index: world
+                        .get::<crate::pipeline::StageCursor>(entity)
+                        .map(|c| c.index),
+                    num_stages: metadata.map(|m| m.num_stages),
+                    iteration: state.iteration,
+                    tool_calls: world
+                        .get::<TokenTotals>(entity)
+                        .map_or(0, |t| t.tool_calls),
+                    last_progress_at: world
+                        .get::<crate::pipeline::PersistWatermark>(entity)
+                        .and_then(|w| w.last_progress_at()),
+                    unattended: metadata.is_some_and(|m| m.unattended),
+                })
             })
             .collect()
     }
@@ -1353,7 +1474,11 @@ mod tests {
         assert_eq!(status, Some(AgentStatus::Active));
 
         let list = ask(&mut host, |reply| ControlOp::List { reply }).await;
-        assert_eq!(list, vec![("run-a".to_string(), AgentStatus::Active)]);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].run_id, "run-a");
+        assert_eq!(list[0].status, AgentStatus::Active);
+        // An active run is not waiting on anything, so there is nothing to explain.
+        assert_eq!(list[0].wait_reason, None);
 
         // Unknown run.
         let none = ask(&mut host, |reply| ControlOp::Status {
@@ -2016,6 +2141,7 @@ mod tests {
                 callback_url: None,
                 callback_secret: None,
                 title: None,
+                unattended: false,
             },
         ));
         assert!(
@@ -2373,6 +2499,7 @@ mod tests {
                 callback_url: None,
                 callback_secret: None,
                 title: None,
+                unattended: false,
             });
 
         // First emission after spawn: Spawned + Status + Tokens + Context.

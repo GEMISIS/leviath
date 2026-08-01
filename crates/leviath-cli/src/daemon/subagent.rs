@@ -31,6 +31,13 @@ pub struct SubAgentHandle {
     /// per-run opt-out can't be side-stepped by spawning a sub-agent whose
     /// blueprint declares command seeds.
     pub no_seed_commands: bool,
+    /// The parent run's `--yolo` setting, inherited by children.
+    ///
+    /// A child spawned attended under an unattended parent stops at its first
+    /// approval prompt with nobody there to answer, and takes the parent down
+    /// with it whenever the parent is waiting on it. The operator asked for an
+    /// unattended run; the tree is the run.
+    pub unattended: bool,
 }
 
 // The sub-agent tool-name list lives in `leviath-tools` (next to the tool
@@ -120,7 +127,7 @@ async fn spawn(h: &SubAgentHandle, args: &serde_json::Value) -> String {
         &full_task,
         None,
         &h.workdir,
-        false,
+        h.unattended,
         Vec::new(),
         child_max_depth,
         // Sub-agents receive their whole task via `full_task`; no region flags.
@@ -269,16 +276,11 @@ fn is_terminal(status: &AgentStatus) -> bool {
     )
 }
 
+/// What the parent model is told a child's status is. `Display` rather than
+/// `label` so a failed child reports why it failed, which is the whole reason
+/// the parent asked.
 fn label(status: &AgentStatus) -> String {
-    match status {
-        AgentStatus::Idle => "idle".to_string(),
-        AgentStatus::Active => "active".to_string(),
-        AgentStatus::Paused => "paused".to_string(),
-        AgentStatus::Waiting => "waiting".to_string(),
-        AgentStatus::Complete => "complete".to_string(),
-        AgentStatus::Cancelled => "cancelled".to_string(),
-        AgentStatus::Error { message } => format!("error: {message}"),
-    }
+    status.to_string()
 }
 
 #[cfg(test)]
@@ -304,6 +306,7 @@ mod tests {
             workdir: work.path().to_string_lossy().to_string(),
             max_depth: 3,
             no_seed_commands: false,
+            unattended: false,
         };
 
         for bad in [
@@ -342,6 +345,7 @@ mod tests {
             workdir: work.path().to_string_lossy().to_string(),
             max_depth: 3,
             no_seed_commands: false,
+            unattended: false,
         };
         let out = spawn(
             &h,
@@ -372,6 +376,7 @@ mod tests {
             workdir: env!("CARGO_MANIFEST_DIR").to_string(),
             max_depth: 3,
             no_seed_commands: false,
+            unattended: false,
         }
     }
 

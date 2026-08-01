@@ -70,8 +70,8 @@ impl RiskyExecutors for RealExecutors {
         real_run(args).await
     }
 
-    async fn ps(&self, _args: commands::ps::PsArgs) -> anyhow::Result<()> {
-        commands::ps::send_list(&control_client()?).await
+    async fn ps(&self, args: commands::ps::PsArgs) -> anyhow::Result<()> {
+        commands::ps::send_list(&control_client()?, &args).await
     }
 
     async fn msg(&self, args: commands::ctl::MsgArgs) -> anyhow::Result<()> {

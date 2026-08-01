@@ -124,6 +124,103 @@ pub enum AgentStatus {
     Cancelled,
 }
 
+impl AgentStatus {
+    /// The short, stable lowercase word for this status.
+    ///
+    /// One table, because three used to drift independently: `lev ps`, the
+    /// [`WorldEvent`](crate::host::WorldEvent) stream (and through it the REST
+    /// WebSocket), and the `check_agent` tool result the model reads. The
+    /// strings are part of the daemon's wire contract, so they are fixed here
+    /// rather than derived from the variant names.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Active => "active",
+            Self::Waiting => "waiting",
+            Self::Paused => "paused",
+            Self::Complete => "complete",
+            Self::Error { .. } => "error",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl std::fmt::Display for AgentStatus {
+    /// [`AgentStatus::label`], except that an error carries its message. Use
+    /// this where a human (or the model) reads the status; use `label` where a
+    /// fixed vocabulary is expected.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Error { message } => write!(f, "error: {message}"),
+            other => f.write_str(other.label()),
+        }
+    }
+}
+
+/// Why an agent's status is [`AgentStatus::Waiting`].
+///
+/// `Waiting` alone is four unrelated situations wearing one word, and they call
+/// for opposite responses from an operator: a fan-out parent whose workers are
+/// churning is healthy and needs nothing, while a run parked on a tool-approval
+/// prompt is stopped dead until a person answers it. Issue #184 is what happens
+/// when the two are indistinguishable - an operator reading `waiting` across a
+/// factory concluded it had stalled and started killing healthy runs.
+///
+/// Derived on demand from markers the engine already sets (see
+/// [`WorldHost::wait_reason`](crate::host::WorldHost::wait_reason)); nothing
+/// tracks it separately, so it cannot fall out of sync with the status it
+/// explains.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "reason")]
+pub enum WaitReason {
+    /// Blocked on a tool-approval prompt. Needs a person (or `--yolo`).
+    ToolApproval,
+
+    /// Blocked on a question the agent itself asked (`ask_user_*`,
+    /// `present_for_review`). Needs a person.
+    UserPrompt,
+
+    /// Blocked on a taint-gate clearance prompt. Needs a person.
+    TaintGate,
+
+    /// Blocked on a blueprint stage-boundary checkpoint. Needs a person.
+    InteractionPoint,
+
+    /// Parked while fan-out workers run. Healthy; resolves on its own.
+    FanOutWorkers {
+        /// Workers still to finish, counting both running and not-yet-started.
+        outstanding: usize,
+    },
+
+    /// Parked while spawned sub-agents run (`requires_children`). Healthy;
+    /// resolves on its own.
+    Children {
+        /// Children that have not reached a terminal status.
+        outstanding: usize,
+    },
+}
+
+impl WaitReason {
+    /// Whether clearing this needs a person. `false` means the run is parked on
+    /// other work and will move on by itself.
+    pub fn needs_a_person(&self) -> bool {
+        !matches!(self, Self::FanOutWorkers { .. } | Self::Children { .. })
+    }
+}
+
+impl std::fmt::Display for WaitReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ToolApproval => f.write_str("tool approval"),
+            Self::UserPrompt => f.write_str("user prompt"),
+            Self::TaintGate => f.write_str("taint gate"),
+            Self::InteractionPoint => f.write_str("checkpoint"),
+            Self::FanOutWorkers { outstanding } => write!(f, "workers({outstanding})"),
+            Self::Children { outstanding } => write!(f, "children({outstanding})"),
+        }
+    }
+}
+
 /// Result of an eviction attempt, including tokens freed and regions needing LLM compaction.
 #[derive(Debug, Clone)]
 pub struct EvictionResult {

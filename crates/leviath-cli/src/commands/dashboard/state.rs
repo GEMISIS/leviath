@@ -808,7 +808,7 @@ impl Dashboard {
     pub(super) async fn sync_daemon_runs(&mut self, control: &ControlClient) {
         self.daemon_run_ids = match control.request(&ControlRequest::List).await {
             Ok(ControlResponse::List { runs }) => {
-                Some(runs.into_iter().map(|(run_id, _)| run_id).collect())
+                Some(runs.into_iter().map(|entry| entry.run_id).collect())
             }
             _ => None,
         };
@@ -2126,7 +2126,10 @@ mod tests {
             let mut lines = BufReader::new(read_half).lines();
             let _ = lines.next_line().await;
             let _ = write_half
-                .write_all(b"{\"result\":\"list\",\"runs\":[[\"run-a\",\"Active\"]]}\n")
+                .write_all(
+                    b"{\"result\":\"list\",\"runs\":[{\"run_id\":\"run-a\",\"status\":\"Active\",\
+                      \"stage\":\"plan\",\"iteration\":1,\"tool_calls\":0}]}\n",
+                )
                 .await;
         });
 
