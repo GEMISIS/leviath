@@ -23,7 +23,6 @@ use leviath_runtime::pipeline::{AgentBlueprint, force_transition};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::config::Config;
 use crate::daemon::client::resolve_spawn_args;
 use crate::daemon::spawn::build_agent;
 use crate::daemon::tool_service::CliToolService;
@@ -32,7 +31,9 @@ use crate::daemon::tool_service::CliToolService;
 /// from inside a world-system (which has no access to the daemon's context).
 #[derive(Clone)]
 pub struct DaemonFanOutSpawner {
-    pub config: Config,
+    /// Spawn-time config, read fresh per worker so a `config.toml` edit reaches
+    /// fan-out workers too (shared with the daemon's main spawner).
+    pub config: Arc<crate::daemon::config_reload::ConfigReloader>,
     pub shared_mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
     pub mcp_tool_defs: Vec<Tool>,
     /// Shared MCP pool for per-agent `[[mcp_servers]]` - a fan-out worker
@@ -118,10 +119,11 @@ impl FanOutSpawner for DaemonFanOutSpawner {
         // `worker_agent`/`worker_query` worker warms them here for its siblings).
         let mcp_defs = self.worker_mcp_defs(&args.blueprint_path);
 
+        let config = self.config.current();
         let child = build_agent(
             world,
             self.tool_service.as_ref(),
-            &self.config,
+            &config,
             self.shared_mcp.clone(),
             &mcp_defs,
             &self.hub,
@@ -203,6 +205,7 @@ fn discover_worker(agents_dir: Option<&Path>, query: &str) -> Result<PathBuf, St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use leviath_core::blueprint::WorkerFailurePolicy;
 
     fn cfg(stage: Option<&str>, agent: Option<&str>, query: Option<&str>) -> FanOutConfig {
@@ -345,7 +348,9 @@ mod tests {
     fn spawner_with(tool_service: Arc<CliToolService>) -> DaemonFanOutSpawner {
         let shared_mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         DaemonFanOutSpawner {
-            config: Config::default(),
+            config: Arc::new(crate::daemon::config_reload::ConfigReloader::fixed(
+                Config::default(),
+            )),
             shared_mcp: shared_mcp.clone(),
             mcp_tool_defs: vec![],
             mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(shared_mcp, &[]),
@@ -433,7 +438,7 @@ mod tests {
         let parent = build_agent(
             world.world_mut(),
             cli.as_ref(),
-            &spawner.config,
+            &spawner.config.current(),
             spawner.shared_mcp.clone(),
             &spawner.mcp_tool_defs,
             &spawner.hub,

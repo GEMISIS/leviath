@@ -72,6 +72,11 @@ directory in your config does not open it to agents that never asked. When an ag
 paths nothing grants, it still runs; the reads are refused and a spawn warning shows the exact
 stanza to add. `lev add` and `lev validate` both report what an agent asks for.
 
+You do not need to restart the daemon after editing the grant: it reloads `config.toml` on
+change, so the **next `lev run` picks up the new grant automatically** (see
+[the daemon docs](/docs/daemon#config-changes-take-effect-on-the-next-run)). An agent that just
+failed on a refused read succeeds the next time you run it, once you have added the grant.
+
 The rules that keep this safe:
 
 - **Read-only.** Only `read_file`, `read_files`, and `list_dir` can leave the workdir.

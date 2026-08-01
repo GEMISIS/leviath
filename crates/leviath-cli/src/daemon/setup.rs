@@ -185,11 +185,22 @@ pub fn build_host(
         host.register(run_id, entity);
     }
 
+    // Config hot-reload: after boot, spawn-time config (permissions,
+    // `[read_paths]`, sandbox, limits, taint) is served from here, reloaded
+    // when `config.toml` changes on disk. The boot infrastructure (provider
+    // registry, MCP pool, network policy, telemetry) keeps the boot snapshot -
+    // those hold live connections and need a restart - so the reloader takes a
+    // clone and the boot snapshot stays usable below.
+    let reloader = std::sync::Arc::new(crate::daemon::config_reload::ConfigReloader::new(
+        Config::config_path(),
+        config.clone(),
+    ));
+
     // Install the fan-out spawner as a world resource so the runtime's fan-out
     // systems can start workers (it captures the same context as the spawner
     // below, cloned before those move into the closure).
     let fanout_spawner = DaemonFanOutSpawner {
-        config: config.clone(),
+        config: reloader.clone(),
         shared_mcp: shared_mcp.clone(),
         mcp_tool_defs: mcp_tool_defs.clone(),
         mcp_pool: mcp_pool.clone(),
@@ -243,13 +254,16 @@ pub fn build_host(
     // disk. Capture the shared context (cloned before the spawner moves the
     // originals below).
     let reload_tools = tool_service.clone();
-    let reload_config = config.clone();
+    let reload_reloader = reloader.clone();
     let reload_mcp = shared_mcp.clone();
     let reload_defs = mcp_tool_defs.clone();
     let reload_hub = hub.clone();
     let reload_tx = subagent_tx.clone();
     let reload_runs = runs_dir.clone();
     host.set_reloader(Box::new(move |world, run_id| {
+        // Pages a run back in with the current on-disk config, matching what a
+        // real restart would restore it with.
+        let reload_config = reload_reloader.current();
         crate::daemon::recovery::reload_run(
             world,
             reload_tools.as_ref(),
@@ -305,6 +319,7 @@ pub fn build_host(
     // servers' defs plus this blueprint's declared servers' defs (warmed above).
     let spawn_pool = mcp_pool.clone();
     let spawn_runs_dir = runs_dir.clone();
+    let spawn_reloader = reloader.clone();
     host.set_spawner(Box::new(move |world, args| {
         // Stake out the run directory before anything that can fail: blueprint
         // parsing, sandbox creation, provider resolution and seed validation all
@@ -314,6 +329,10 @@ pub fn build_host(
         // recovering run's own metadata.
         write_placeholder_meta(&spawn_runs_dir, args);
         let defs = per_agent_mcp_defs(&spawn_pool, &mcp_tool_defs, &args.blueprint_path);
+        // Fresh config per spawn: a `config.toml` edit (a new `[read_paths]`
+        // grant, a permission change) takes effect on the next `lev run`
+        // without a daemon restart.
+        let config = spawn_reloader.current();
         build_agent(
             world.world_mut(),
             tool_service.as_ref(),
