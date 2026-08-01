@@ -2,7 +2,7 @@
 title: Observability
 group: Reference
 group_order: 3
-order: 8
+order: 12
 ---
 
 # Observability

@@ -2,7 +2,7 @@
 title: Agent Client Protocol
 group: Reference
 group_order: 3
-order: 7
+order: 11
 ---
 
 # Agent Client Protocol (editor integration)

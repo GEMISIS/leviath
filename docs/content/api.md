@@ -2,7 +2,7 @@
 title: HTTP API
 group: Reference
 group_order: 3
-order: 1
+order: 2
 ---
 
 # HTTP API (`lev serve`)
