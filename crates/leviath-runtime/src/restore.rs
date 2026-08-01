@@ -136,7 +136,8 @@ pub fn restore_agent(
         window.current_tokens = window.calculate_tokens();
     }
 
-    // 2. Jump to the persisted stage, swapping in its inference config.
+    // 2. Jump to the persisted stage, swapping in its inference config and
+    //    tool-result routing.
     if let Some(inf) = world
         .get::<StageInferences>(entity)
         .expect("a spawned agent has stage inferences")
@@ -144,13 +145,28 @@ pub fn restore_agent(
         .get(stage_index)
         .cloned()
     {
-        let cfg = world
+        let setup = &world
             .get::<StageSetups>(entity)
             .expect("a spawned agent has stage setups")
-            .0[stage_index]
-            .inference_config
-            .clone();
+            .0[stage_index];
+        let cfg = setup.inference_config.clone();
+        let routing = setup.routing.clone();
         world.entity_mut(entity).insert((inf, cfg));
+        // Mirror `attach_stage_components`' routing arm: present ⇒ insert,
+        // absent ⇒ clear the stale one. Without this a reloaded agent kept the
+        // spawn stage's routing (or none) for every future tool batch.
+        match routing {
+            Some(routing) => {
+                world
+                    .entity_mut(entity)
+                    .insert(crate::components::ToolResultRoutingComponent { routing });
+            }
+            None => {
+                world
+                    .entity_mut(entity)
+                    .remove::<crate::components::ToolResultRoutingComponent>();
+            }
+        }
         world
             .get_mut::<StageCursor>(entity)
             .expect("a spawned agent has a stage cursor")
@@ -368,6 +384,57 @@ mod tests {
         assert_eq!(world.get::<TokenTotals>(entity).unwrap().prompt_tokens, 100);
         // Still ready to (re-)infer.
         assert!(world.get::<ReadyToInfer>(entity).is_some());
+    }
+
+    #[test]
+    fn restore_swaps_in_the_stage_routing_and_clears_stale() {
+        use crate::components::ToolResultRoutingComponent;
+
+        // The restored stage routes tool results: the component comes in.
+        let (mut world, entity) = agent_world();
+        let routed = leviath_core::ToolResultRouting {
+            default_region: "knowledge".to_string(),
+            ..Default::default()
+        };
+        world
+            .get_mut::<StageSetups>(entity)
+            .unwrap()
+            .0
+            .get_mut(1)
+            .unwrap()
+            .routing = Some(routed);
+        restore_agent(
+            &mut world,
+            entity,
+            &snapshot(),
+            1,
+            7,
+            TokenTotals::default(),
+        );
+        assert_eq!(
+            world
+                .get::<ToolResultRoutingComponent>(entity)
+                .expect("stage 1's routing swapped in")
+                .routing
+                .default_region,
+            "knowledge"
+        );
+
+        // The restored stage has no routing: a stale component (left over from
+        // the spawn stage) is cleared rather than routing future batches.
+        let (mut world, entity) = agent_world();
+        world.entity_mut(entity).insert(ToolResultRoutingComponent {
+            routing: leviath_core::ToolResultRouting::default(),
+        });
+        restore_agent(
+            &mut world,
+            entity,
+            &snapshot(),
+            1,
+            7,
+            TokenTotals::default(),
+        );
+        assert!(world.get::<ToolResultRoutingComponent>(entity).is_none());
     }
 
     fn meta_with(run_id: &str, status: RunStatus, updated_at: i64) -> RunMeta {
