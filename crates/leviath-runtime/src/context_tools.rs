@@ -60,7 +60,7 @@ pub fn handle_context_tool(
                 let Some(k) = key else {
                     return "[error] HashMap regions require a 'key' argument".to_string();
                 };
-                match region.upsert_by_key(k, content.to_string(), tokens) {
+                match region.upsert_by_key(k, content, tokens) {
                     Ok(()) => format!("Stored in '{region_name}' section under key '{k}'."),
                     Err(e) => format!("[error] {e}"),
                 }
@@ -96,7 +96,7 @@ pub fn handle_context_tool(
                         .to_string();
                 };
                 if let Some(existing) = region.get_by_key(k) {
-                    let new_content = format!("{}\n{}", existing.content, content);
+                    let new_content = format!("{}\n{}", existing.content(), content);
                     let new_tokens = leviath_core::estimate_tokens(&new_content);
                     // Upserting an already-present key updates in place with no
                     // budget check, so this cannot fail.
@@ -105,7 +105,7 @@ pub fn handle_context_tool(
                         .expect("infallible: existing HashMap key updates in place");
                     format!("Appended to '{region_name}' section under key '{k}'.")
                 } else {
-                    match region.upsert_by_key(k, content.to_string(), tokens) {
+                    match region.upsert_by_key(k, content, tokens) {
                         Ok(()) => {
                             format!("Created entry in '{region_name}' section under key '{k}'.")
                         }
@@ -132,7 +132,7 @@ pub fn handle_context_tool(
             if matches!(region.kind, RegionKind::HashMap { .. }) {
                 if let Some(k) = key {
                     match region.get_by_key(k) {
-                        Some(entry) => entry.content.clone(),
+                        Some(entry) => entry.content_owned(),
                         None => {
                             format!("[not found] No entry with key '{k}' in region '{region_name}'")
                         }
@@ -154,7 +154,7 @@ pub fn handle_context_tool(
                 let text = region
                     .content
                     .iter()
-                    .map(|e| e.content.as_str())
+                    .map(|e| e.content())
                     .collect::<Vec<_>>()
                     .join("\n\n");
                 if text.is_empty() {
@@ -467,7 +467,7 @@ mod tests {
         // A stray keyless entry in a hashmap region is skipped by the listing.
         w.get_region_mut("files")
             .unwrap()
-            .add_entry("keyless".to_string(), 1)
+            .add_entry("keyless", 1)
             .unwrap();
         let listing = call(&mut w, "context_read", json!({"region": "files"}));
         assert!(listing.contains("a.rs") && !listing.contains("keyless"));

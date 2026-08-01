@@ -1093,7 +1093,7 @@ mod tests {
             .get_region("plan")
             .unwrap();
         assert_eq!(plan.content.len(), 1);
-        assert_eq!(plan.content[0].content, "the plan");
+        assert_eq!(plan.content[0].content(), "the plan");
     }
 
     #[tokio::test]
@@ -1144,7 +1144,7 @@ mod tests {
             .unwrap()
             .get_region("plan")
             .unwrap();
-        assert_eq!(plan.content[0].content, "the plan");
+        assert_eq!(plan.content[0].content(), "the plan");
     }
 
     #[tokio::test]
@@ -1226,8 +1226,8 @@ mod tests {
             .get_region("plan")
             .unwrap();
         assert_eq!(plan.content.len(), 1);
-        assert!(plan.content[0].content.contains("[revised by user"));
-        assert!(plan.content[0].content.contains("the edited plan"));
+        assert!(plan.content[0].content().contains("[revised by user"));
+        assert!(plan.content[0].content().contains("the edited plan"));
         for _ in 0..8 {
             tokio::task::yield_now().await;
         }

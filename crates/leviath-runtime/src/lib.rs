@@ -9,6 +9,7 @@
 pub(crate) mod cancel;
 pub(crate) mod compaction_bridge;
 pub mod components;
+pub mod content_interner;
 pub mod context_setup;
 pub(crate) mod context_tools;
 pub(crate) mod context_transform;
@@ -43,6 +44,7 @@ pub mod world;
 mod test_support;
 
 pub use components::{AgentState, AgentStatus, ContextWindow, ParentRef, SubAgentChildren};
+pub use content_interner::ContentInternerRes;
 pub use fanout::{FanOutSpawner, FanOutSpawnerRes};
 pub use inference_bridge::RetryPolicy;
 pub use inference_pool::{InferencePoolConfig, InferencePools};

@@ -41,7 +41,7 @@ pub fn apply_context_transforms(world: &mut World, parent: Entity, child: Entity
                 let joined = region
                     .content
                     .iter()
-                    .map(|e| e.content.as_str())
+                    .map(|e| e.content())
                     .collect::<Vec<_>>()
                     .join("\n");
                 if !joined.is_empty() {
@@ -434,10 +434,10 @@ mod tests {
         let cw = w.get::<ContextWindow>(child).unwrap();
         let task = cw.get_region("task").unwrap();
         assert!(task.current_tokens > 0);
-        assert_eq!(task.content[0].content, "the plan");
+        assert_eq!(task.content[0].content(), "the plan");
         let inputs = cw.get_region("inputs").unwrap();
-        assert!(inputs.content[0].content.contains("\"keep\""));
-        assert!(!inputs.content[0].content.contains("\"drop\""));
+        assert!(inputs.content[0].content().contains("\"keep\""));
+        assert!(!inputs.content[0].content().contains("\"drop\""));
     }
 
     #[test]
@@ -668,7 +668,7 @@ mod tests {
                 .get_region("task")
                 .unwrap()
                 .content[0]
-                .content,
+                .content(),
             "the long plan"
         );
         // ...and the region is queued for deferred summarization.
@@ -801,7 +801,7 @@ mod tests {
                 .get_region("task")
                 .unwrap()
                 .content[0]
-                .content,
+                .content(),
             "SHORT"
         );
         assert!(world.get::<AwaitingContentSummary>(e).is_none());
@@ -830,7 +830,7 @@ mod tests {
                 .get_region("task")
                 .unwrap()
                 .content[0]
-                .content,
+                .content(),
             "keep me"
         );
         assert!(world.get::<AwaitingContentSummary>(e2).is_none());

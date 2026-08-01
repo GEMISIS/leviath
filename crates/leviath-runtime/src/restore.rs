@@ -98,6 +98,7 @@ pub fn restore_agent(
         let mut window = world
             .get_mut::<ContextWindow>(entity)
             .expect("a spawned agent has a context window");
+        let interner = window.interner().clone();
         for snap_region in &snapshot.regions {
             if let Some(region) = window
                 .regions
@@ -107,13 +108,16 @@ pub fn restore_agent(
                 region.content = snap_region
                     .entries
                     .iter()
-                    .map(|e| RegionEntry {
-                        content: e.content.clone(),
-                        tokens: e.tokens,
-                        timestamp: 0,
-                        metadata: e.metadata.clone(),
-                        kind: e.kind.clone(),
-                        key: e.key.clone(),
+                    .map(|e| {
+                        RegionEntry::from_parts_interned(
+                            &interner,
+                            &e.content,
+                            e.tokens,
+                            0,
+                            e.metadata.clone(),
+                            e.kind.clone(),
+                            e.key.clone(),
+                        )
                     })
                     .collect();
                 // Rebuild the taint alongside the content. Assigning `content`
@@ -348,7 +352,7 @@ mod tests {
         let window = world.get::<ContextWindow>(entity).unwrap();
         let region = window.get_region("conversation").unwrap();
         assert_eq!(region.content.len(), 2);
-        assert_eq!(region.content[0].content, "prior user turn");
+        assert_eq!(region.content[0].content(), "prior user turn");
         assert_eq!(region.content[0].kind, EntryKind::UserMessage);
         assert_eq!(region.current_tokens, 8);
 

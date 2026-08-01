@@ -1334,7 +1334,12 @@ pub fn spawn_agent_seeded(
     // Seed the window from the blueprint layout + task, then apply stage 0's
     // context setup (layout swap + system-prompt injection) just as entering any
     // later stage would.
-    let mut window = ContextWindow::new(blueprint.context_layout.total_budget_tokens);
+    let interner = world
+        .get_resource::<crate::ContentInternerRes>()
+        .map(|r| r.handle())
+        .unwrap_or_default();
+    let mut window =
+        ContextWindow::with_interner(blueprint.context_layout.total_budget_tokens, interner);
     // Attach compiled custom-region scripts BEFORE seeding, so seed writes
     // pass through each region's on_write hook like any other entry.
     window.region_scripts = region_scripts;
