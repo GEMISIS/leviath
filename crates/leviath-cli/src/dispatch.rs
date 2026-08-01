@@ -42,6 +42,12 @@ pub enum Commands {
     #[command(alias = "kill")]
     Cancel(commands::ctl::CancelArgs),
 
+    /// Pause a running agent (it finishes its in-flight step, then holds)
+    Pause(commands::ctl::PauseArgs),
+
+    /// Resume a paused agent
+    Resume(commands::ctl::ResumeArgs),
+
     /// Answer a pending interaction (or list open ones with no request id)
     Respond(commands::ctl::RespondArgs),
 
@@ -114,6 +120,10 @@ pub trait RiskyExecutors {
     async fn msg(&self, args: commands::ctl::MsgArgs) -> anyhow::Result<()>;
     /// `lev cancel` - resolves the control-socket path and cancels a run.
     async fn cancel(&self, args: commands::ctl::CancelArgs) -> anyhow::Result<()>;
+    /// `lev pause` - resolves the control-socket path and pauses a run.
+    async fn pause(&self, args: commands::ctl::PauseArgs) -> anyhow::Result<()>;
+    /// `lev resume` - resolves the control-socket path and resumes a run.
+    async fn resume(&self, args: commands::ctl::ResumeArgs) -> anyhow::Result<()>;
     /// `lev respond` - resolves the control-socket path and answers/lists interactions.
     async fn respond(&self, args: commands::ctl::RespondArgs) -> anyhow::Result<()>;
     /// `lev setup` - interactive (blocking stdin) or `--non-interactive`.
@@ -160,6 +170,8 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Ps(args) => ex.ps(args).await,
         Commands::Msg(args) => ex.msg(args).await,
         Commands::Cancel(args) => ex.cancel(args).await,
+        Commands::Pause(args) => ex.pause(args).await,
+        Commands::Resume(args) => ex.resume(args).await,
         Commands::Respond(args) => ex.respond(args).await,
         Commands::List(args) => commands::list::execute(args).await,
         Commands::Add(args) => commands::add::execute(args).await,
@@ -203,6 +215,12 @@ mod tests {
             Ok(())
         }
         async fn cancel(&self, _args: commands::ctl::CancelArgs) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn pause(&self, _args: commands::ctl::PauseArgs) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn resume(&self, _args: commands::ctl::ResumeArgs) -> anyhow::Result<()> {
             Ok(())
         }
         async fn setup(&self, _args: commands::setup::SetupArgs) -> anyhow::Result<()> {
@@ -320,6 +338,22 @@ mod tests {
             force: false,
         };
         assert!(dispatch(Commands::Cancel(args), &MockRisky).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_pause_variant_is_routed_through_the_executor() {
+        let args = commands::ctl::PauseArgs {
+            run_id: "r".to_string(),
+        };
+        assert!(dispatch(Commands::Pause(args), &MockRisky).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_resume_variant_is_routed_through_the_executor() {
+        let args = commands::ctl::ResumeArgs {
+            run_id: "r".to_string(),
+        };
+        assert!(dispatch(Commands::Resume(args), &MockRisky).await.is_ok());
     }
 
     #[tokio::test]

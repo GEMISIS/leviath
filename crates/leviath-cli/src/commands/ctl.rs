@@ -1,7 +1,7 @@
-//! `lev msg` / `lev cancel` - control operations on a running agent in the
-//! shared-world daemon.
+//! `lev msg` / `lev cancel` / `lev pause` / `lev resume` - control operations
+//! on a running agent in the shared-world daemon.
 //!
-//! Both send a control request over the daemon socket and report the boolean
+//! Each sends a control request over the daemon socket and reports the boolean
 //! outcome. The request/response cores are tested here; the socket-path
 //! resolution + connect live in the binary behind [`crate::dispatch::RiskyExecutors`].
 
@@ -32,6 +32,20 @@ pub struct CancelArgs {
     /// driving it, restart the daemon so it picks up the new state.
     #[arg(long)]
     pub force: bool,
+}
+
+/// Arguments for `lev pause`.
+#[derive(clap::Args, Debug, Clone)]
+pub struct PauseArgs {
+    /// The run id to pause.
+    pub run_id: String,
+}
+
+/// Arguments for `lev resume`.
+#[derive(clap::Args, Debug, Clone)]
+pub struct ResumeArgs {
+    /// The run id to resume.
+    pub run_id: String,
 }
 
 /// Arguments for `lev respond` - answer a pending `ask_user` interaction the
@@ -87,6 +101,33 @@ pub async fn send_message(client: &ControlClient, args: &MsgArgs) -> anyhow::Res
         },
         "message delivered",
         "no agent accepted the message",
+    )
+    .await
+}
+
+/// `lev pause`: park a run. The daemon refuses (`ok: false`) when the run does
+/// not exist or is not in a pausable state (waiting on input, or finished).
+pub async fn pause_run(client: &ControlClient, args: &PauseArgs) -> anyhow::Result<()> {
+    send_bool(
+        client,
+        ControlRequest::Pause {
+            run_id: args.run_id.clone(),
+        },
+        "paused",
+        "no such run, or it is not pausable in its current state",
+    )
+    .await
+}
+
+/// `lev resume`: un-pause a run.
+pub async fn resume_run(client: &ControlClient, args: &ResumeArgs) -> anyhow::Result<()> {
+    send_bool(
+        client,
+        ControlRequest::Resume {
+            run_id: args.run_id.clone(),
+        },
+        "resumed",
+        "no such run, or it is not paused",
     )
     .await
 }
@@ -313,6 +354,66 @@ mod tests {
         })
         .await;
         assert!(r.unwrap_err().to_string().contains("no agent accepted"));
+    }
+
+    #[tokio::test]
+    async fn pause_applied() {
+        let r = with_daemon(r#"{"result":"ok","ok":true}"#, |c| async move {
+            pause_run(
+                &c,
+                &PauseArgs {
+                    run_id: "r".to_string(),
+                },
+            )
+            .await
+        })
+        .await;
+        assert!(r.is_ok());
+    }
+
+    #[tokio::test]
+    async fn pause_refused() {
+        let r = with_daemon(r#"{"result":"ok","ok":false}"#, |c| async move {
+            pause_run(
+                &c,
+                &PauseArgs {
+                    run_id: "r".to_string(),
+                },
+            )
+            .await
+        })
+        .await;
+        assert!(r.unwrap_err().to_string().contains("not pausable"));
+    }
+
+    #[tokio::test]
+    async fn resume_applied() {
+        let r = with_daemon(r#"{"result":"ok","ok":true}"#, |c| async move {
+            resume_run(
+                &c,
+                &ResumeArgs {
+                    run_id: "r".to_string(),
+                },
+            )
+            .await
+        })
+        .await;
+        assert!(r.is_ok());
+    }
+
+    #[tokio::test]
+    async fn resume_refused() {
+        let r = with_daemon(r#"{"result":"ok","ok":false}"#, |c| async move {
+            resume_run(
+                &c,
+                &ResumeArgs {
+                    run_id: "r".to_string(),
+                },
+            )
+            .await
+        })
+        .await;
+        assert!(r.unwrap_err().to_string().contains("not paused"));
     }
 
     #[tokio::test]
