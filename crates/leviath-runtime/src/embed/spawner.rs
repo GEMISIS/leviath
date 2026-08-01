@@ -421,9 +421,66 @@ mod tests {
         );
     }
 
+    /// A provider that never answers - enough to be *registered*, which is all
+    /// stage resolution asks of it.
+    struct StubProvider;
+
+    #[async_trait::async_trait]
+    impl leviath_providers::Provider for StubProvider {
+        async fn infer(
+            &self,
+            _request: leviath_providers::InferenceRequest,
+        ) -> Result<leviath_providers::InferenceResponse, leviath_providers::ProviderError>
+        {
+            Err(leviath_providers::ProviderError::ApiError(
+                "stub".to_string(),
+            ))
+        }
+        async fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len()
+        }
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            8192
+        }
+        fn name(&self) -> &str {
+            "mock"
+        }
+        fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn stub_provider_metadata_is_exercised() {
+        use leviath_providers::Provider as _;
+        let p = StubProvider;
+        assert_eq!(p.name(), "mock");
+        assert_eq!(p.count_tokens("abc", "m").await, 3);
+        assert_eq!(p.max_context_tokens("m"), 8192);
+        let _ = p.capabilities("m");
+        assert!(
+            p.infer(leviath_providers::InferenceRequest {
+                system: vec![],
+                messages: vec![],
+                model: "m".to_string(),
+                max_tokens: 1,
+                temperature: 0.0,
+                tools: vec![],
+                extra: serde_json::Value::Null,
+                request_timeout_secs: None,
+            })
+            .await
+            .is_err()
+        );
+    }
+
+    /// A world whose registry has the `mock` provider these manifests name, so
+    /// a spawn gets past stage resolution to whatever it is actually testing.
     fn pipeline_world() -> crate::world::PipelineWorld {
+        let mut registry = crate::providers::ProviderRegistry::new();
+        registry.register("mock".to_string(), Arc::new(StubProvider));
         crate::world::PipelineWorld::new(
-            crate::providers::ProviderRegistry::new(),
+            registry,
             Arc::new(super::super::BasicToolService::new(
                 crate::interaction_hub::InteractionHub::new(),
             )),
@@ -493,6 +550,42 @@ conversation = { kind = "sliding_window", max_items = 10, max_tokens = 2000 }
             )
             .unwrap_err();
         assert!(err.contains("invalid blueprint"));
+    }
+
+    #[tokio::test]
+    async fn a_stage_with_no_registered_provider_is_a_spawn_error() {
+        // Issue #190: an embedder that never registered the provider a stage
+        // names used to get a live agent that could not take a single turn.
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = r#"[agent]
+name = "ghostly"
+version = "0.0.0"
+description = "d"
+
+[stages.only]
+mode = "autonomous"
+model = { provider = "ghost", model = "m" }
+description = "Only stage"
+
+[context.regions]
+conversation = { kind = "sliding_window", max_items = 10, max_tokens = 2000 }
+"#;
+        let path = dir.path().join("ghostly.leviath");
+        std::fs::write(&path, manifest).unwrap();
+        let mut world = pipeline_world();
+        let err = spawner()
+            .spawn(
+                &mut world,
+                &SpawnArgs {
+                    run_id: "r".to_string(),
+                    blueprint_path: path.to_string_lossy().into_owned(),
+                    workdir: dir.path().to_string_lossy().into_owned(),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(err.contains("no usable provider"), "got: {err}");
+        assert!(err.contains("ghost"), "got: {err}");
     }
 
     #[tokio::test]
