@@ -7,8 +7,42 @@
 //! crate) is the packaged product; this crate is for embedding the same
 //! machinery in your own application.
 //!
-//! ```
+//! Build a world, spawn an agent, watch the events:
+//!
+//! ```no_run
 //! use leviath::prelude::*;
+//!
+//! # async fn embed() -> std::result::Result<(), Box<dyn std::error::Error>> {
+//! let world = AgentWorld::builder()
+//!     .provider(ProviderCreds {
+//!         api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+//!         ..ProviderCreds::simple("anthropic")
+//!     })
+//!     .build()?;
+//!
+//! let mut events = world.events();
+//! let run = world
+//!     .spawn(SpawnSpec::new(
+//!         BlueprintSource::Path("coder.leviath".into()),
+//!         "Build a CSV parser",
+//!         std::env::current_dir()?,
+//!     ))
+//!     .await?;
+//!
+//! while let Some(event) = events.next().await {
+//!     match event {
+//!         AgentEvent::StageTransition { from, to, .. } => println!("{from} -> {to}"),
+//!         AgentEvent::ToolCallStarted { tool, .. } => println!("running {tool}"),
+//!         AgentEvent::Interaction { request, .. } => {
+//!             // The agent asked a question: answer it via world.answer(...).
+//!         }
+//!         AgentEvent::Completed { run_id, status, .. } if run_id == run.as_ref() => break,
+//!         _ => {}
+//!     }
+//! }
+//! world.shutdown().await;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! Each module below is a re-export of one of the underlying workspace
@@ -55,10 +89,13 @@ pub use leviath_agent_client as agent_client;
 
 /// The types most embeddings touch first, importable in one line.
 pub mod prelude {
+    pub use leviath_core::interaction::{InteractionRequest, InteractionResponse};
     pub use leviath_core::{
-        BudgetSpec, ContextLayout, Error, PolicyConfig, RegionDefinition, Result,
+        Blueprint, BudgetSpec, ContextLayout, Error, PolicyConfig, RegionDefinition, Result,
     };
     pub use leviath_runtime::{
-        AgentState, AgentStatus, ContextWindow, ProviderRegistry, build_provider_registry,
+        AgentEvent, AgentState, AgentStatus, AgentWorld, AgentWorldBuilder, BasicToolService,
+        BlueprintSource, ContextWindow, EmbedError, EventStream, ProviderCreds, ProviderRegistry,
+        RunId, SpawnSpec, ToolService, WorldEvent, build_provider_registry,
     };
 }
