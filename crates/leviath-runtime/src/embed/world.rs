@@ -703,10 +703,10 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].0, run_id);
 
-        // A live, parked agent is controllable: pause/resume round-trips, and
-        // a message is accepted.
-        assert!(world.pause(&run_id).await);
-        assert!(world.resume(&run_id).await);
+        // A live, parked agent still accepts messages. (Pause is refused
+        // while the agent waits on input - see the capacity test below for
+        // the pause/resume round-trip.)
+        assert!(!world.pause(&run_id).await);
         assert!(world.send_message(&run_id, "prefer something boring").await);
 
         // Answering resumes the run to completion.
@@ -1149,6 +1149,40 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
             .await
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn pause_and_resume_round_trip_on_an_active_run() {
+        // Zero inference permits for the model: the agent stays Active,
+        // parked on the pool, which is exactly when pause applies.
+        let dir = tempfile::tempdir().unwrap();
+        let mut pool = InferencePoolConfig::new();
+        pool.set_limit("m", 0);
+        let world = AgentWorld::builder()
+            .register_provider(
+                "mock",
+                Arc::new(Mock {
+                    responses: Mutex::new(VecDeque::new()),
+                }),
+            )
+            .inference_pool(pool)
+            .build()
+            .expect("builds");
+        let run_id = world
+            .spawn(SpawnSpec::new(
+                BlueprintSource::Toml(ASKER.to_string()),
+                "wait around",
+                dir.path(),
+            ))
+            .await
+            .expect("spawns");
+
+        // Agents spawn Active, and with no permits nothing can change that.
+        assert_eq!(world.status(&run_id).await, Some(AgentStatus::Active));
+        assert!(world.pause(&run_id).await);
+        assert!(world.resume(&run_id).await);
+        assert!(world.cancel(&run_id).await);
+        world.shutdown().await;
     }
 
     #[test]

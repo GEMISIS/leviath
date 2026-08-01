@@ -108,6 +108,8 @@ impl EmbedSpawner {
             &seeds,
             stages,
             false,
+            // The default nudge policy; blueprints override per stage/agent.
+            leviath_core::NudgeConfig::default(),
             HashMap::new(),
         )?;
 
