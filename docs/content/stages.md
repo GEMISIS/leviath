@@ -62,6 +62,10 @@ stuck_after_minutes         = 30
 Any subset applies; the first threshold to trip fires the edge.
 
 > [!TIP]
-> When a `stuck` (or `error`) edge fires, the runtime writes *why* into the target stage's
+> When a `stuck` or `error` edge fires, the runtime writes *why* into the target stage's
 > [context](/docs/context), so the recovery stage starts out knowing what went wrong instead of
-> rediscovering it.
+> rediscovering it. The same happens when a stage hits its iteration cap: whatever stage runs
+> next is told the work was cut off, not finished. Stuck reasons go to a `stuck_report` region
+> when the blueprint declares one; error and iteration-cap notes prefer an `error_report` region.
+> Declare them `pinned` (a small budget like 2000 tokens is plenty) so the note survives edge
+> transforms; without them, notes land in `conversation`.

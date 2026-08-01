@@ -332,6 +332,75 @@ fn all_builtin_stuck_edges_are_armed_and_bounded() {
     }
 }
 
+/// Every built-in agent with an `error`-conditioned edge must give the runtime's
+/// abnormal-ending notes (issue #154: inference errors, iteration caps) a home:
+///   1. a pinned `error_report` region, so the note survives every edge
+///      transform into the stage that acts on it (the runtime falls back to
+///      `conversation`, but a bundled agent should use the durable region);
+///   2. that region must NOT be the agent's first pinned region -
+///      `apply_stage_context` injects stage instructions into the first pinned
+///      region, and a 2k-token report region would swallow them;
+///   3. every error-edge target's system prompt must tell the model to read
+///      `error_report` - the region is useless if no prompt points at it.
+#[test]
+fn builtin_error_edges_have_a_pinned_error_report_region() {
+    use leviath_core::{RegionKind, TransitionCondition};
+
+    for (name, path) in &discover_agent_manifests() {
+        let content = std::fs::read_to_string(path).unwrap();
+        let bp = leviath_core::manifest::parse_manifest(&content).unwrap();
+
+        let error_targets: std::collections::BTreeSet<&str> = bp
+            .stages
+            .iter()
+            .filter_map(|s| s.transitions.as_ref())
+            .flatten()
+            .filter(|(_, e)| e.condition == TransitionCondition::Error)
+            .map(|(target, _)| target.as_str())
+            .collect();
+        if error_targets.is_empty() {
+            continue; // e.g. parallel-fixer, which declares no error edge
+        }
+
+        let pinned: Vec<&str> = bp
+            .context_layout
+            .regions
+            .iter()
+            .filter(|r| matches!(r.kind, RegionKind::Pinned))
+            .map(|r| r.name.as_str())
+            .collect();
+        assert!(
+            pinned.contains(&"error_report"),
+            "agent '{name}' has error edges but no pinned `error_report` region - \
+             the runtime's error/iteration-cap notes would land in the evictable \
+             `conversation` window instead"
+        );
+        assert_ne!(
+            pinned.first(),
+            Some(&"error_report"),
+            "agent '{name}': `error_report` is the FIRST pinned region, so stage \
+             instructions would be injected into it (apply_stage_context targets \
+             the first pinned region) - declare it after the other pinned regions"
+        );
+
+        for target in error_targets {
+            let stage = bp
+                .find_stage(target)
+                .unwrap_or_else(|| panic!("agent '{name}': error edge → unknown stage '{target}'"));
+            assert!(
+                stage
+                    .config
+                    .get("system_prompt")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|p| p.contains("error_report")),
+                "agent '{name}' stage '{target}' is an error-edge target but its \
+                 system prompt never mentions `error_report` - the model won't \
+                 know where the runtime put the error text"
+            );
+        }
+    }
+}
+
 /// A stage with two or more *choosable* outgoing edges is routed by an LLM
 /// (`resolve_transition_sync` returns `Choose`, and `build_transition_prompt`
 /// asks the model to name a stage). Without a `transition_prompt` the model gets

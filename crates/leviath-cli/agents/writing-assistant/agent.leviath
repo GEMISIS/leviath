@@ -168,6 +168,9 @@ Edit the draft for structure and substance (not line-level polish yet):
 
 Make the edits directly (write the improved version). Note any substantive changes
 in `revisions` (context_append). Hand to proofread only once the structure is sound.
+
+If `error_report` says a previous stage hit its iteration cap, that stage was cut
+off before finishing - check the draft for missing sections before polishing it.
 """
 
 # Custom transform: keep task/outline/research/sources pinned, compact the draft
@@ -233,8 +236,9 @@ available_tools = ["read_file", "bash"]
 max_iterations = 8
 max_revisits = 1
 system_prompt = """
-Something failed (a research fetch or a file write). Read the error from context,
-note a workaround, then return to draft to continue with the material available.
+Something failed (a research fetch or a file write). The `error_report` region
+holds the error text the runtime captured - read it first, note a workaround,
+then return to draft to continue with the material available.
 """
 
 [stages.error_recovery.transitions.draft]
@@ -259,3 +263,8 @@ revisions     = { kind = "sliding_window", max_items = 15, budget = "4%", max_to
 
 conversation  = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }
 scratch       = { kind = "clearable", budget = "5%", max_tokens = 6000 }
+
+# Written by the RUNTIME on an abnormal stage ending (issue #154): a failed
+# inference call's error text, or a note that a stage hit its iteration cap.
+# Pinned so it survives the edge transform into the stage that acts on it.
+error_report  = { kind = "pinned", budget = "1%", max_tokens = 2000 }

@@ -72,6 +72,9 @@ using these tiers:
 
 Drop noise, duplicates, and irrelevant items entirely (don't write them). If a
 critical configured source came back empty, consider one more collect pass.
+
+If `error_report` says the collect stage hit its iteration cap, it was cut off
+before checking every source - flag the unchecked ones as gaps for the briefing.
 """
 
 [stages.prioritize.transitions.brief]
@@ -124,9 +127,10 @@ available_tools = ["read_file", "bash"]
 max_iterations = 8
 max_revisits = 1
 system_prompt = """
-A source fetch or parse failed. Read the error from context, note which source is
-unavailable, and record that gap so the briefing can flag it. Then return to
-prioritize with whatever was successfully collected.
+A source fetch or parse failed. The `error_report` region holds the error text
+the runtime captured - read it first, note which source is unavailable, and
+record that gap so the briefing can flag it. Then return to prioritize with
+whatever was successfully collected.
 """
 
 [stages.error_recovery.transitions.prioritize]
@@ -147,3 +151,8 @@ priorities  = { kind = "sliding_window", max_items = 25, budget = "10%", max_tok
 brief       = { kind = "clearable",      budget = "5%", max_tokens = 6000 }
 
 conversation = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }
+
+# Written by the RUNTIME on an abnormal stage ending (issue #154): a failed
+# inference call's error text, or a note that a stage hit its iteration cap.
+# Pinned so it survives the edge transform into the stage that acts on it.
+error_report = { kind = "pinned", budget = "1%", max_tokens = 2000 }

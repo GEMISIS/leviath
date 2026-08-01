@@ -407,7 +407,7 @@ transform = "custom"
 # stage-specific region including `test_results`, the raw evidence reassess most
 # needs. Compact only the conversation and leave the rest intact.
 [stages.implement.transitions.reassess.transform_config]
-carry = ["discovery", "workflow", "task", "constraints", "architecture", "plan", "codebase", "implementation", "prototypes", "changelog", "decisions", "errors", "test_results", "stuck_report"]
+carry = ["discovery", "workflow", "task", "constraints", "architecture", "plan", "codebase", "implementation", "prototypes", "changelog", "decisions", "errors", "test_results", "stuck_report", "error_report"]
 compact = ["conversation"]
 clear = ["scratch"]
 compact_prompt = "Summarize what was attempted in this stage: which files were edited and how often, which tests were run and their outcome, and the last point at which anything demonstrably worked."
@@ -461,6 +461,10 @@ anything that passed there and fails now is a regression, and is grounds for
 NEEDS CHANGES on its own. Hold the work to `workflow`'s DONE WHEN line, and say
 so if the implement stage skipped its own stated workflow (no baseline captured,
 verification never run).
+
+If `error_report` says the implement stage hit its iteration cap, it was cut off
+before declaring the work done - assume the implementation is incomplete and
+verify every DONE WHEN criterion rather than sampling.
 
 End with one of:
   APPROVED - no significant issues
@@ -552,7 +556,7 @@ bash      = "test_results"
 hint = "Corrected plan in hand - retry implementation"
 transform = "custom"
 [stages.reassess.transitions.implement.transform_config]
-carry = ["discovery", "workflow", "task", "constraints", "architecture", "plan", "codebase", "implementation", "prototypes", "changelog", "decisions", "errors", "stuck_report"]
+carry = ["discovery", "workflow", "task", "constraints", "architecture", "plan", "codebase", "implementation", "prototypes", "changelog", "decisions", "errors", "stuck_report", "error_report"]
 compact = ["conversation"]
 clear = ["scratch", "test_results"]
 compact_prompt = "Summarize the reassessment as three things: the wrong assumption, the corrected approach, and what must be reverted first."
@@ -573,7 +577,7 @@ max_iterations = 10
 max_revisits = 2
 system_prompt = """
 An error occurred during implementation. Your job:
-1. Read the error details from the conversation context.
+1. Read the error text the runtime captured in the `error_report` region.
 2. Diagnose the root cause.
 3. Suggest a fix or workaround.
 
@@ -613,6 +617,10 @@ prototypes   = { kind = "pinned", budget = "4%", max_tokens = 6000 }
 # Written by the RUNTIME when a `stuck` edge fires (issue #106): which threshold
 # tripped and why. Pinned so it survives the edge transform into `reassess`.
 stuck_report = { kind = "pinned", budget = "1%", max_tokens = 2000 }
+# Written by the RUNTIME on an abnormal stage ending (issue #154): a failed
+# inference call's error text, or a note that a stage hit its iteration cap.
+# Pinned so it survives the edge transform into `error_recovery` or `review`.
+error_report = { kind = "pinned", budget = "1%", max_tokens = 2000 }
 # Deterministic repo scan, run once at spawn - the discover stage starts from
 # facts instead of burning iterations on `ls`. `git ls-files` behaves identically
 # on POSIX and Windows shells; outside a git repo it fails and this is simply

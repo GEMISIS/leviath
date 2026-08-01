@@ -69,6 +69,9 @@ Quantify everything (timestamps, counts, rates). For each finding, append to
 with SEVERITY in {critical, warning, info}. Keep a running tally in `severity_index`
 (context_write), e.g. "critical: 2, warning: 5, info: 3". Use the `script` stage
 when you need precise parsing/aggregation you can't eyeball.
+
+If `error_report` says a previous stage hit its iteration cap, that stage was cut
+off before finishing - treat its output as incomplete and re-check what it missed.
 """
 
 [stages.analyze.tool_routing]
@@ -167,9 +170,10 @@ available_tools = ["read_file", "bash"]
 max_iterations = 10
 max_revisits = 1
 system_prompt = """
-A read or script execution failed. Read the error from context, diagnose it
-(a malformed log line, a script bug, a missing file), note a workaround, then
-return to analyze to continue with the data available.
+A read or script execution failed. The `error_report` region holds the error
+text the runtime captured - read it first, diagnose it (a malformed log line, a
+script bug, a missing file), note a workaround, then return to analyze to
+continue with the data available.
 """
 
 [stages.error_recovery.transitions.analyze]
@@ -192,3 +196,8 @@ scripts_history = { kind = "compact_history", source_region = "scripts", budget 
 
 conversation    = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }
 scratch         = { kind = "clearable", budget = "6%", max_tokens = 6000 }
+
+# Written by the RUNTIME on an abnormal stage ending (issue #154): a failed
+# inference call's error text, or a note that a stage hit its iteration cap.
+# Pinned so it survives the edge transform into the stage that acts on it.
+error_report    = { kind = "pinned", budget = "1%", max_tokens = 2000 }

@@ -74,6 +74,9 @@ Compare across the `landscape`, organizing by THEME not by source:
 Record the key comparative judgments in `comparisons` (context_write) and any
 source disagreements you notice. Flag threads that deserve a deep_dive before you
 can rank them fairly. Help the reader see the shape of the field.
+
+If `error_report` says a previous stage hit its iteration cap, that stage was cut
+off before finishing - treat its coverage as incomplete when judging the field.
 """
 
 [stages.compare.transitions.survey]
@@ -156,8 +159,9 @@ available_tools = ["read_file", "bash"]
 max_iterations = 8
 max_revisits = 1
 system_prompt = """
-A source fetch failed during the survey. Read the error from context, note the
-gap, and return to compare to continue with the coverage you have.
+A call failed during the survey. The `error_report` region holds the error text
+the runtime captured - read it first, note the gap it leaves, and return to
+compare to continue with the coverage you have.
 """
 
 [stages.error_recovery.transitions.compare]
@@ -181,3 +185,8 @@ comparisons        = { kind = "compacting",      budget = "25%", compact_at = "8
 comparison_history = { kind = "compact_history", source_region = "comparisons", budget = "3%", max_tokens = 10000 }
 
 conversation       = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }
+
+# Written by the RUNTIME on an abnormal stage ending (issue #154): a failed
+# inference call's error text, or a note that a stage hit its iteration cap.
+# Pinned so it survives the edge transform into the stage that acts on it.
+error_report       = { kind = "pinned", budget = "1%", max_tokens = 2000 }
