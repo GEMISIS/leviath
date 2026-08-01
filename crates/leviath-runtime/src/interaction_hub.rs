@@ -8,9 +8,10 @@
 //! open requests over the control channel via [`InteractionHub::pending`] and
 //! delivers answers with [`InteractionHub::answer`] - no filesystem, no polling.
 //!
-//! `ask` blocks the calling tool worker until the request is answered or
-//! cancelled; with the tool lane sequential today that serializes interactive
-//! agents, which is acceptable (the lane becomes a pool later).
+//! `ask` blocks its caller until the request is answered or cancelled, which for
+//! a person at a keyboard can be a very long time. When the caller is a tool
+//! batch it waits [`off_lane`](crate::tool_bridge::off_lane), so a prompt nobody
+//! has answered yet costs the tool lane no capacity.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -84,7 +85,14 @@ impl InteractionHub {
         // agent's status (Active → Waiting) for the dashboard to surface.
         self.nudge();
         // The lock is released before awaiting; answer()/cancel() can run.
-        rx.await
+        //
+        // Off the tool lane, because there is no bound on how long a person
+        // takes: a batch that held lane capacity through a prompt was capacity
+        // no other agent's tools could use (issue #191). Callers that are not
+        // tool batches - the gate-prompt and interaction-point lanes - have no
+        // ticket, and for them this is a plain await.
+        crate::tool_bridge::off_lane(rx)
+            .await
             .unwrap_or_else(|_| InteractionResponse::text(id, ""))
     }
 
@@ -142,11 +150,9 @@ impl InteractionHub {
     ///
     /// This is the per-agent counterpart of [`Self::cancel`], which is keyed by
     /// request id - an id a canceller of a *run* doesn't have. Without it,
-    /// cancelling a run left its `ask` future blocked forever: the future holds a
-    /// tool-lane worker (the lane has a fixed worker count, so enough of them
-    /// stall every other agent's tool batches), and the orphaned request keeps
-    /// being surfaced by `lev respond` and the dashboard for a run that no longer
-    /// exists.
+    /// cancelling a run left its `ask` future blocked forever, and the orphaned
+    /// request kept being surfaced by `lev respond` and the dashboard for a run
+    /// that no longer exists.
     pub fn cancel_for_agent(&self, agent_id: &str) -> usize {
         // Dropping each entry drops its responder, waking `submit` with an error.
         let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
@@ -240,6 +246,104 @@ mod tests {
         assert_eq!(response.value.as_deref(), Some("hello"));
         // No longer pending.
         assert!(hub.pending().is_empty());
+    }
+
+    /// An unanswered prompt must not hold tool-lane capacity.
+    ///
+    /// The answer can arrive from another agent's tool call, and on a lane with
+    /// no room left that call is queued behind the batch that is waiting for it.
+    /// That is the shape that froze whole factories in issue #191: everything
+    /// looked `waiting`, nothing was failed, and nothing ever moved again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_batch_waiting_on_a_prompt_does_not_hold_the_tool_lane() {
+        use crate::tool_bridge::{ToolJob, ToolLane, ToolLaneStats};
+        use bevy_ecs::entity::Entity;
+
+        let hub = InteractionHub::new();
+        let (job_tx, job_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (result_tx, mut results) = tokio::sync::mpsc::unbounded_channel();
+        let stats = Arc::new(ToolLaneStats::new(1));
+        let lane = ToolLane::new(
+            tokio::runtime::Handle::current(),
+            result_tx,
+            Arc::new(Notify::new()),
+            1,
+            stats.clone(),
+        );
+        let serving = lane.serve(job_rx);
+        let submit = |entity: u32, exec: crate::tool_bridge::BoxedToolExec| {
+            stats.enqueued();
+            job_tx
+                .send(ToolJob {
+                    entity: Entity::from_raw_u32(entity).expect("a small index is a valid id"),
+                    exec,
+                    cancel: crate::cancel::CancelToken::new(),
+                })
+                .expect("the lane is serving");
+        };
+
+        // The whole lane, spent on waiting for an answer.
+        let asking = hub.backend_for("agent-a");
+        submit(
+            1,
+            Box::new(move || {
+                Box::pin(async move {
+                    let response = asking.ask(req("q1")).await;
+                    vec![("q1".to_string(), response.value.unwrap_or_default())]
+                })
+            }),
+        );
+        wait_for_prompt(&hub).await;
+        assert_eq!(stats.parked(), 1, "the asker stepped off the lane");
+
+        // The answer, as another batch - only reachable if the lane is free.
+        let answering = hub.clone();
+        submit(
+            2,
+            Box::new(move || {
+                Box::pin(async move {
+                    answering.answer(InteractionResponse::text("q1", "hello"));
+                    vec![("answered".to_string(), "ok".to_string())]
+                })
+            }),
+        );
+
+        let mut answers = Vec::new();
+        for _ in 0..2 {
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), results.recv())
+                .await
+                .expect("both batches finished")
+                .expect("an outcome arrived");
+            answers.extend(outcome.results);
+        }
+        answers.sort();
+        assert_eq!(
+            answers,
+            vec![
+                ("answered".to_string(), "ok".to_string()),
+                ("q1".to_string(), "hello".to_string()),
+            ],
+            "the asker got its answer from the batch behind it"
+        );
+
+        drop(job_tx);
+        tokio::time::timeout(std::time::Duration::from_secs(30), serving)
+            .await
+            .expect("the lane drained")
+            .expect("the lane task ended");
+    }
+
+    /// Block until a prompt is registered. `submit` inserts synchronously before
+    /// awaiting, but on a multi-threaded runtime the batch task may not have been
+    /// polled yet, so yielding a fixed number of times is not enough.
+    async fn wait_for_prompt(hub: &InteractionHub) {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while hub.pending().is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the prompt was raised");
     }
 
     #[tokio::test]

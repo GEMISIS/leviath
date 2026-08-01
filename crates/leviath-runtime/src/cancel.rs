@@ -3,14 +3,13 @@
 //! Cancelling an agent sets its status, which stops the dispatch systems from
 //! starting *new* work - but an inference request or tool batch handed to the
 //! async lanes before that keeps running to completion. For a stalled provider
-//! call that is up to the job timeout; for a tool batch there was no bound at
-//! all, and the batch holds one of the tool lane's fixed number of workers the
-//! whole time.
+//! call that is up to the job timeout; for a tool batch there is no bound at
+//! all, and the batch holds tool-lane capacity the whole time.
 //!
 //! A [`CancelToken`] is handed to each async job when it is dispatched and kept
 //! on the agent, so cancelling the agent drops the in-flight future at its next
-//! await point: the HTTP request is aborted, the pool permit and lane worker are
-//! released, and the result is never applied.
+//! await point: the HTTP request is aborted, the pool permit and lane capacity
+//! are released, and the result is never applied.
 //!
 //! This is deliberately a few lines rather than a dependency: the whole contract
 //! is "set a flag once, wake anyone waiting".

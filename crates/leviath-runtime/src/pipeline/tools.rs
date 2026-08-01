@@ -580,7 +580,7 @@ pub fn dispatch_tools(
             None => exec,
         };
         let cancel = crate::cancel::CancelToken::new();
-        // The lane worker is alive for the world's lifetime; a failed send would
+        // The lane is alive for the world's lifetime; a failed send would
         // only happen during shutdown, where dropping the job is fine.
         stage.stats.enqueued();
         let _ = stage.jobs.send(ToolJob {

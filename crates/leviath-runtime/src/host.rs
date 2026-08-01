@@ -2441,9 +2441,9 @@ mod tests {
         );
     }
 
-    /// Cancelling a run closes its open prompts. The blocked `ask` occupies a
-    /// tool-lane worker, and the lane has a fixed worker count - leaving it
-    /// parked forever is what starves every other agent's tool batches.
+    /// Cancelling a run closes its open prompts. The blocked `ask` waits off the
+    /// lane, so it no longer starves anyone, but a prompt left open for a run
+    /// that no longer exists is still surfaced to whoever is meant to answer it.
     #[tokio::test]
     async fn cancel_closes_the_runs_open_interactions() {
         let mut host = host_with(vec![]);
