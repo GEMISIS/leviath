@@ -159,6 +159,13 @@ pub fn build_host(
     );
     // Opt-in accurate pre-inference budget guard (off by default).
     world.set_exact_token_counting(config.limits.exact_token_counting);
+    // How long a run may sit unable to dispatch before the watchdog fails it
+    // rather than leaving it "running" for ever (issue #190).
+    world
+        .world_mut()
+        .insert_resource(leviath_runtime::pipeline::StallTimeout(
+            config.limits.stall_timeout_secs,
+        ));
     // Share the hub with the tick loop so a blocked agent's open prompt is
     // reflected into its status (Active ↔ Waiting) for the dashboard to surface.
     world.insert_interaction_hub(hub.clone());
