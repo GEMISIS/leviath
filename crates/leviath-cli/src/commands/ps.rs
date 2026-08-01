@@ -7,7 +7,7 @@
 use anyhow::bail;
 use leviath_runtime::components::AgentStatus;
 use leviath_runtime::control_socket::{ControlClient, ControlResponse};
-use leviath_runtime::host::RunListEntry;
+use leviath_runtime::host::{DaemonHealth, RunListEntry};
 
 /// `lev ps --help`. Every status an operator can see, and what to do about it.
 pub const PS_LONG_ABOUT: &str = "\
@@ -41,7 +41,16 @@ These do not - the run is parked on other work and resumes by itself:
 
 So `waiting: children(3)` alongside busy children is a healthy factory, while
 `waiting: tool approval` is stopped until someone answers. Run with `--yolo` to
-approve automatically, including for sub-agents and fan-out workers.";
+approve automatically, including for sub-agents and fan-out workers.
+
+A `lanes:` line under the table means the daemon itself is worth a look. It
+shows the tool lane's occupancy - batches running, parked on a wait, and queued
+behind them - and, if the daemon has stopped getting anywhere, how many re-drive
+cycles it has gone without a single run moving. A run parked on a wait costs the
+lane nothing, so `parked` is not a problem on its own; `queued` with no progress
+is.
+
+--json prints {\"runs\": [...], \"health\": {...}} with the same two halves.";
 
 /// Arguments for `lev ps`.
 #[derive(clap::Args, Debug, Clone, Default)]
@@ -93,11 +102,45 @@ fn stage_cell(entry: &RunListEntry) -> String {
     }
 }
 
-/// Render a run listing as an aligned table (or a friendly note when empty).
+/// The daemon-wide footer: what the tool lane is holding, and whether the daemon
+/// as a whole has stopped getting anywhere.
+///
+/// Absent while everything is healthy, so an ordinary listing stays a table and
+/// nothing else. A lane at capacity is worth mentioning; a dead-cycle streak is
+/// worth mentioning loudly, because every row above it can look busy while the
+/// factory as a whole has not moved in hours (issue #191).
+fn health_footer(health: &DaemonHealth) -> Option<String> {
+    let saturated = health.tools_busy >= health.tools_workers && health.tools_queued > 0;
+    if !saturated && health.dead_cycles == 0 {
+        return None;
+    }
+    let mut line = format!(
+        "lanes: tools {}/{} busy",
+        health.tools_busy, health.tools_workers
+    );
+    if health.tools_parked > 0 {
+        line.push_str(&format!(", {} parked", health.tools_parked));
+    }
+    if health.tools_queued > 0 {
+        line.push_str(&format!(", {} queued", health.tools_queued));
+    }
+    if health.dead_cycles > 0 {
+        let seconds = health.dead_cycles as i64 * health.redrive_secs as i64;
+        line.push_str(&format!(
+            "  ·  no progress for {} cycles ({})",
+            health.dead_cycles,
+            humanize_age(seconds)
+        ));
+    }
+    Some(line)
+}
+
+/// Render a run listing as an aligned table (or a friendly note when empty),
+/// with the daemon's own health underneath when it has something to say.
 ///
 /// `now` is unix seconds, passed in rather than read here so the output is
 /// deterministic under test.
-pub fn format_runs(runs: &[RunListEntry], now: i64) -> String {
+pub fn format_runs(runs: &[RunListEntry], health: &DaemonHealth, now: i64) -> String {
     if runs.is_empty() {
         return "no agents running".to_string();
     }
@@ -153,25 +196,36 @@ pub fn format_runs(runs: &[RunListEntry], now: i64) -> String {
         .iter()
         .filter(|e| e.wait_reason.as_ref().is_some_and(|r| r.needs_a_person()))
         .count();
-    match blocked {
+    let mut out = match blocked {
         0 => table,
         1 => format!("{table}\n\n1 run needs an answer: lev respond"),
         n => format!("{table}\n\n{n} runs need an answer: lev respond"),
+    };
+    if let Some(footer) = health_footer(health) {
+        out.push_str(&format!("\n\n{footer}"));
     }
+    out
 }
 
 /// Query the daemon for its runs and print the listing.
 pub async fn send_list(client: &ControlClient, args: &PsArgs) -> anyhow::Result<()> {
     match client.list().await {
-        Ok(ControlResponse::List { runs }) => {
+        Ok(ControlResponse::List { runs, health }) => {
             match args.json {
-                // `RunListEntry` is plain data with no map keys to reject, so
-                // serializing it cannot fail.
+                // Plain data with no map keys to reject, so serializing cannot
+                // fail.
                 true => println!(
                     "{}",
-                    serde_json::to_string_pretty(&runs).expect("a run listing serializes")
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "runs": runs,
+                        "health": health,
+                    }))
+                    .expect("a run listing serializes")
                 ),
-                false => println!("{}", format_runs(&runs, chrono::Utc::now().timestamp())),
+                false => println!(
+                    "{}",
+                    format_runs(&runs, &health, chrono::Utc::now().timestamp())
+                ),
             }
             Ok(())
         }

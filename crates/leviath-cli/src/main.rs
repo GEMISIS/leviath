@@ -310,7 +310,7 @@ async fn real_daemon_status() -> anyhow::Result<()> {
     let running = is_daemon_running(&id);
     let count = if running {
         match control_client()?.list().await {
-            Ok(ControlResponse::List { runs }) => runs.len(),
+            Ok(ControlResponse::List { runs, .. }) => runs.len(),
             _ => 0,
         }
     } else {
