@@ -607,9 +607,13 @@ mod tests {
     }
 
     /// Folding `..` past the top is unresolvable no matter what any allowlist
-    /// says. A leading `..` against an empty base leaves nothing to pop on
-    /// every platform - `/..` would not, since it is not absolute on Windows
-    /// and gets reshaped by the workdir join there.
+    /// says. Mirrors `resolve_rejects_excessive_parent_dir_traversal`: a
+    /// *relative* base (`wd`) gives the accumulator exactly one leading
+    /// `Normal` component and no platform-specific root/drive/prefix, so the
+    /// first `..` pops `wd` and the second calls `pop()` on an empty
+    /// accumulator - firing the bail on every OS. `/..` or an empty base does
+    /// not: neither is absolute on Windows, and the join reshapes them so the
+    /// `pop()` never fails there.
     #[test]
     fn folding_past_the_root_is_unresolvable() {
         let policy = leviath_core::ReadPathPolicy {
@@ -618,8 +622,8 @@ mod tests {
             ..Default::default()
         };
         let err = BuiltinTools::resolve_outside(
-            "../x",
-            Path::new(""),
+            "../../x",
+            Path::new("wd"),
             &policy,
             leviath_core::canonicalize_for_match,
         )
