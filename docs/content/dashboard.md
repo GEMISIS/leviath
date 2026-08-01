@@ -46,6 +46,7 @@ flowchart LR
 | `i` | Respond to or message the agent |
 | `/` | Search |
 | `k` | Kill the run |
+| `p` / `r` | Pause / resume the run |
 | `?` | Help |
 
 > [!TIP]
