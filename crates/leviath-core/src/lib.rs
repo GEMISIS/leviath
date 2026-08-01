@@ -34,9 +34,9 @@ pub mod telemetry;
 pub mod text;
 
 pub use blueprint::{
-    Blueprint, ContextTransform, EdgeTransform, FileTrackingConfig, ReadPathsConfig,
-    RepetitionDetectionConfig, Stage, StuckConfig, ToolResultRouting, TransitionCondition,
-    TransitionEdge,
+    Blueprint, ContextTransform, EdgeTransform, FileTrackingConfig, NudgeConfig, ReadPathsConfig,
+    RepetitionDetectionConfig, ResolvedNudge, Stage, StuckConfig, ToolResultRouting,
+    TransitionCondition, TransitionEdge, resolve_nudge,
 };
 pub use cache::CacheHint;
 pub use credentials::{

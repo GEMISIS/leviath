@@ -285,11 +285,14 @@ pub(crate) fn edited_path(call: &crate::components::ToolCall) -> Option<&str> {
         .flatten()
 }
 
-/// The "use your tools" nudge injected when a model responds with text before
-/// making any tool call.
-pub(crate) const NUDGE_TEXT: &str = "You have tools available. Please use them to complete the task. Start by reading the relevant files in the working directory.";
-/// How many text-only responses to nudge before accepting the text as final.
-pub(crate) const MAX_TEXT_ONLY_NUDGES: usize = 3;
+/// The global config's `[nudge]` defaults, captured per agent at spawn time so
+/// a hot-reloaded config applies from the next run rather than mutating live
+/// ones (same snapshot semantics as the batch-tool-hint global). Absent on
+/// worlds that spawn agents without going through the seeded spawn (tests,
+/// embedders); [`leviath_core::resolve_nudge`] then falls through to the
+/// built-in defaults.
+#[derive(Component, Debug, Clone, Default)]
+pub struct GlobalNudge(pub leviath_core::NudgeConfig);
 
 /// Whether this stage's deliverable *is* its text response.
 ///
@@ -309,14 +312,19 @@ pub(crate) fn stage_output_is_reviewed(bp: &AgentBlueprint, cursor: &StageCursor
 }
 
 /// Empty-response system: for each `ReadyForTransition` agent decide whether the
-/// stage is done. If the agent has already made tool calls, or we've nudged the
-/// max number of times, the text response is accepted and the agent advances to
-/// `ResolveTransition`. Otherwise (text only, no work yet) the response + a
-/// "use your tools" nudge are added to context and the agent loops back to
-/// `ReadyToInfer`. Ported from `AgentEngine::loop_handle_empty_tool_calls`.
+/// stage is done. If the agent has already made tool calls, its nudge is
+/// disabled, or it has been nudged its budgeted number of times, the text
+/// response is accepted and the agent advances to `ResolveTransition`.
+/// Otherwise (text only, no work yet) the response + the stage's nudge are
+/// added to context and the agent loops back to `ReadyToInfer`. Ported from
+/// `AgentEngine::loop_handle_empty_tool_calls`.
 ///
-/// A stage whose output is reviewed is never nudged - see
-/// `stage_output_is_reviewed`.
+/// The nudge is programmable per stage (`[stages.<name>.nudge]`), per agent
+/// (`[agent.nudge]`), and globally (config `[nudge]`), each field cascading
+/// independently through [`leviath_core::resolve_nudge`]. With nothing
+/// configured, a stage whose output is reviewed is never nudged - see
+/// `stage_output_is_reviewed` - but an explicit `enabled` at any level speaks
+/// for itself. The text supports `{stage}` and `{regions}` placeholders.
 #[allow(clippy::type_complexity)]
 pub fn handle_empty_response(
     mut agents: Query<
@@ -327,17 +335,23 @@ pub fn handle_empty_response(
             &mut StageProgress,
             &AgentBlueprint,
             &StageCursor,
+            Option<&GlobalNudge>,
         ),
         With<ReadyForTransition>,
     >,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, mut window, infer, mut progress, bp, cursor) in agents.iter_mut() {
+    for (entity, mut window, infer, mut progress, bp, cursor, global) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
-        if progress.total_tool_calls > 0
-            || progress.text_only_nudges >= MAX_TEXT_ONLY_NUDGES
-            || stage_output_is_reviewed(bp, cursor)
+        let stage = bp.0.stages.get(cursor.index);
+        let nudge = leviath_core::resolve_nudge(
+            global.map(|g| &g.0),
+            bp.0.nudge.as_ref(),
+            stage.and_then(|s| s.nudge.as_ref()),
+            stage_output_is_reviewed(bp, cursor),
+        );
+        if progress.total_tool_calls > 0 || !nudge.enabled || progress.text_only_nudges >= nudge.max
         {
             commands
                 .entity(entity)
@@ -352,17 +366,36 @@ pub fn handle_empty_response(
                 infer.response.clone(),
                 response_tokens,
             );
-            let nudge_tokens = leviath_core::estimate_tokens(NUDGE_TEXT);
-            let _ = window.add_typed_entry(
-                "conversation",
-                leviath_core::EntryKind::UserMessage,
-                NUDGE_TEXT.to_string(),
-                nudge_tokens,
+            let stage_name = stage.map(|s| s.name.as_str()).unwrap_or("");
+            let regions = stage
+                .and_then(|s| s.context_layout.as_ref())
+                .unwrap_or(&bp.0.context_layout)
+                .regions
+                .iter()
+                .filter(|r| r.required)
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let text = leviath_core::text::interpolate(
+                &nudge.text,
+                &[("stage", stage_name), ("regions", &regions)],
             );
+            inject_system_nudge(&mut window, &text);
             commands
                 .entity(entity)
                 .remove::<ReadyForTransition>()
                 .insert(ReadyToInfer);
         }
     }
+}
+
+/// Append a `[System]` nudge to the conversation region: the one injection path
+/// shared by the empty-response nudge, the required-region nudges, and the
+/// transition-gate hold, so every nudge reaches the model with the same shape.
+/// (An unprefixed `Text` entry assembles as a user message, so the prefix is
+/// what distinguishes framework guidance from real user input.)
+pub(crate) fn inject_system_nudge(window: &mut ContextWindow, text: &str) {
+    let content = format!("[System] {text}");
+    let tokens = leviath_core::estimate_tokens(&content);
+    let _ = window.add_to_region("conversation", content, tokens);
 }

@@ -1136,6 +1136,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_nudge_max_bounds_the_loop_end_to_end() {
+        // `[agent.nudge] max = 1` (issue #127): the second text-only response
+        // is final, so a two-response script finishes where the default cap
+        // would have demanded four. A third scripted response left unconsumed
+        // would keep the driver looping past run_until_idle's budget.
+        let mut world = build_world(registry_with(vec![text("thinking"), text("final")]));
+        let mut bp = blueprint();
+        bp.nudge = Some(leviath_core::NudgeConfig {
+            max: Some(1),
+            ..Default::default()
+        });
+        let e = world.spawn_agent((
+            AgentBlueprint(bp),
+            StageCursor { index: 0 },
+            agent_state(),
+            crate::components::MessageInbox::default(),
+            StageProgress::default(),
+            StageInferences(vec![stage("m")]),
+            StageSetups(vec![setup()]),
+            VisitCounts::default(),
+            window(),
+            stage("m"),
+            setup().inference_config,
+            ReadyToInfer,
+        ));
+
+        world.run_until_idle(30).await;
+
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Complete));
+    }
+
+    #[tokio::test]
     async fn agent_runs_tools_then_completes() {
         // First response calls a tool; after the tool result comes back the
         // second response is text-only, finishing the run.

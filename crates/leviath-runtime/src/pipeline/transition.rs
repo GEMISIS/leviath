@@ -642,21 +642,22 @@ pub(crate) fn unmet_required_regions(
 }
 
 /// Inject a `[System]` nudge into the conversation region for each unmet required
-/// region, so the stage re-run tells the agent exactly what to populate.
+/// region, so the stage re-run tells the agent exactly what to populate. A custom
+/// `required_message` may name the region via a `{region}` placeholder; the
+/// generated default is built through the same substitution.
 pub(crate) fn inject_required_region_nudges(
     window: &mut ContextWindow,
     unmet: &[(String, Option<String>)],
 ) {
+    const DEFAULT_REQUIRED_MESSAGE: &str = "Required context region '{region}' is still empty. \
+         You must populate it (e.g. via context_write with region=\"{region}\") before this \
+         stage can complete.";
     for (name, msg) in unmet {
-        let text = msg.clone().unwrap_or_else(|| {
-            format!(
-                "Required context region '{name}' is still empty. You must populate it \
-                 (e.g. via context_write with region=\"{name}\") before this stage can complete."
-            )
-        });
-        let content = format!("[System] {text}");
-        let tokens = leviath_core::estimate_tokens(&content);
-        let _ = window.add_to_region("conversation", content, tokens);
+        let text = leviath_core::text::interpolate(
+            msg.as_deref().unwrap_or(DEFAULT_REQUIRED_MESSAGE),
+            &[("region", name)],
+        );
+        crate::pipeline::response::inject_system_nudge(window, &text);
     }
 }
 
@@ -815,9 +816,7 @@ pub(crate) fn hold_for_gate(
     window: &mut ContextWindow,
     commands: &mut Commands,
 ) {
-    let content = format!("[System] {nudge}");
-    let tokens = leviath_core::estimate_tokens(&content);
-    let _ = window.add_to_region("conversation", content, tokens);
+    crate::pipeline::response::inject_system_nudge(window, nudge);
     progress.gate_reentries += 1;
     commands
         .entity(entity)
@@ -1323,7 +1322,10 @@ pub fn spawn_agent(
     let seeds = std::collections::HashMap::from([("task".to_string(), task.to_string())]);
     // No compiled custom-region scripts on this path: script-backed regions
     // require the seeded spawn (the CLI resolves and compiles them). A custom
-    // region spawned through here renders its fallback shape.
+    // region spawned through here renders its fallback shape. Global nudge
+    // defaults are likewise a seeded-spawn concern (the CLI reads them from
+    // config.toml); agents spawned through here cascade straight from the
+    // blueprint to the built-in defaults.
     spawn_agent_seeded(
         world,
         agent_id,
@@ -1331,6 +1333,7 @@ pub fn spawn_agent(
         &seeds,
         stages,
         global_batch_tool_hint,
+        leviath_core::NudgeConfig::default(),
         std::collections::HashMap::new(),
     )
 }
@@ -1339,6 +1342,12 @@ pub fn spawn_agent(
 /// (caller-input regions filled by the CLI/ACP/API, plus blueprint-resolved
 /// seeds) rather than a single task string. `spawn_agent` is the thin wrapper
 /// that seeds only the `task` key.
+///
+/// `global_nudge` is the caller's config-level `[nudge]` defaults, captured on
+/// the agent as a [`crate::pipeline::response::GlobalNudge`] component; each
+/// field is resolved per stage against the blueprint's agent-level and
+/// per-stage nudge settings when an empty response is handled.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_agent_seeded(
     world: &mut World,
     agent_id: String,
@@ -1346,6 +1355,7 @@ pub fn spawn_agent_seeded(
     seeds: &std::collections::HashMap<String, String>,
     stages: Vec<ResolvedStage>,
     global_batch_tool_hint: bool,
+    global_nudge: leviath_core::NudgeConfig,
     region_scripts: std::collections::HashMap<
         String,
         std::sync::Arc<leviath_scripting::region_hook::RegionScript>,
@@ -1459,9 +1469,11 @@ pub fn spawn_agent_seeded(
         ))
         .id();
     // Inserted after spawn: the bundle above is already at bevy's 15-tuple limit.
-    world
-        .entity_mut(entity)
-        .insert((ledger, StageIoBuffer::default()));
+    world.entity_mut(entity).insert((
+        ledger,
+        StageIoBuffer::default(),
+        crate::pipeline::response::GlobalNudge(global_nudge),
+    ));
     if let Some(detector) = repetition {
         world.entity_mut(entity).insert(detector);
     }
