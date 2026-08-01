@@ -31,6 +31,21 @@ requests since the previous version.
   answer blind.
 - A stage holding for its sub-agents could be walked back to `active` while
   those children were still running, if an unrelated prompt of its own resolved.
+- Fixed a slot leak that could park the daemon with capacity it could not see.
+  Releasing an inference-pool permit now wakes the tick loop, so the agents
+  queued on a full model pool are re-driven and can take the freed slot. A
+  cancelled inference used to hand its slot back in silence, and the loop is
+  event-driven, so the freed capacity stayed invisible until something
+  unrelated happened to wake it.
+- The daemon now re-drives itself on a timer (every 30s) instead of relying
+  solely on wakeups. Any missed wake anywhere is bounded to one interval rather
+  than parking the daemon indefinitely - previously an agent whose provider was
+  not registered, for example, sat at iteration 0 with the daemon completely
+  idle and silent.
+- Added a lane heartbeat so pool pressure is visible: per-model inference
+  occupancy, tool-lane busy/queued counts, and agents by status. It logs at
+  `info` only when a lane is at capacity with work queued behind it, and at
+  `debug` otherwise, so an idle daemon stays quiet.
 - Pause and resume are now user-facing: `lev pause <run-id>` and
   `lev resume <run-id>`, `POST /api/agents/{id}/pause` and `/resume` on the
   HTTP API, and `p`/`r` in the dashboard. A paused run shows as `paused` in

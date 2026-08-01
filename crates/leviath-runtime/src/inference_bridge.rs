@@ -181,6 +181,11 @@ pub async fn run_inference_job(
     // and reports nothing: the agent is already terminal, so there is no outcome
     // to apply. Releasing the permit here is the point; a cancelled run used to
     // hold its model's pool slot for as long as the provider took to answer.
+    //
+    // Note this arm sends no outcome and so never reaches the `wake` below: the
+    // tick loop learns the slot is free from the permit's own `Drop` (see
+    // `InferencePools::with_wake`). Without that, this return frees a slot in
+    // silence and every agent queued on this model stays parked (issue #189).
     let result = tokio::select! {
         biased;
         _ = cancel.cancelled() => {
