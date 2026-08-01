@@ -213,6 +213,11 @@ waiting for a permit just stay in their ready-to-infer state, which costs nothin
 comes from `[limits] max_concurrent_inferences` in the [config](/docs/configuration), and per-model
 limits override it.
 
+Waiting for a permit is ordinary backpressure and is never treated as a failure, however long it
+lasts. Waiting for a provider that isn't configured is a different thing entirely: that agent has
+nothing to wait for, so it is failed once its stall outlives `[limits] stall_timeout_secs`
+(60 seconds by default; `0` waits indefinitely).
+
 This is a different knob from the two it is often confused with: fan-out's `max_workers` bounds
 how many *sub-agents* a stage spawns ([Sub-agents](/docs/sub-agents)), and
 `[rate_limits.<provider>]` shapes *request rate* to a provider. The pool bounds concurrency; the

@@ -14,14 +14,18 @@ pub(crate) struct SilentPanics {
     /// Held for the guard's lifetime: swapping the process-global hook has to be
     /// serialized against every other test that does it.
     _lock: std::sync::MutexGuard<'static, ()>,
-    /// The hook to put back. `Option` because `Drop` only has `&mut self` and
-    /// `set_hook` needs the box by value.
-    previous: Option<PanicHook>,
+    /// The hook to put back.
+    previous: PanicHook,
 }
 
 /// What `std::panic::take_hook` hands back, named so the field above doesn't
 /// trip `clippy::type_complexity`.
 type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
+
+/// The hook installed while the guard lives: print nothing. A named function
+/// rather than two `|_| {}` closures so the silencer and the throwaway below are
+/// the same (exercised) code.
+fn swallow_panic(_: &std::panic::PanicHookInfo<'_>) {}
 
 impl SilentPanics {
     pub(crate) fn install() -> Self {
@@ -29,18 +33,20 @@ impl SilentPanics {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        std::panic::set_hook(Box::new(swallow_panic));
         Self {
             _lock: lock,
-            previous: Some(previous),
+            previous,
         }
     }
 }
 
 impl Drop for SilentPanics {
     fn drop(&mut self) {
-        if let Some(previous) = self.previous.take() {
-            std::panic::set_hook(previous);
-        }
+        // Swap a throwaway in so the real hook can be moved out of `&mut self`.
+        // (An `Option` + `take` would work too, but its `None` arm can never be
+        // reached, and the coverage gate counts that.)
+        let previous = std::mem::replace(&mut self.previous, Box::new(swallow_panic));
+        std::panic::set_hook(previous);
     }
 }

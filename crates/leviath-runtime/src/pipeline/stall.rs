@@ -166,9 +166,8 @@ pub fn fail_stalled_dispatch(
             continue; // still inside the grace period
         }
         let message = format!(
-            "provider '{}' is not configured, so this run could never start its \
-             first inference; add it to config.toml (or run `lev setup`) and \
-             restart the daemon",
+            "provider '{}' is not configured, so this run has no way to go on; \
+             add it to config.toml (or run `lev setup`) and restart the daemon",
             si.provider_name
         );
         tracing::error!(
@@ -333,10 +332,11 @@ mod tests {
             world.get::<AgentState>(inside).unwrap().status,
             AgentStatus::Active
         );
-        assert!(matches!(
-            world.get::<AgentState>(past).unwrap().status,
-            AgentStatus::Error { .. }
-        ));
+        let status = &world.get::<AgentState>(past).unwrap().status;
+        assert!(
+            matches!(status, AgentStatus::Error { message } if message.contains("ghost")),
+            "got: {status:?}"
+        );
     }
 
     #[test]
@@ -370,10 +370,11 @@ mod tests {
 
         run(&mut world);
 
-        assert!(matches!(
-            world.get::<AgentState>(e).unwrap().status,
-            AgentStatus::Error { .. }
-        ));
+        let status = &world.get::<AgentState>(e).unwrap().status;
+        assert!(
+            matches!(status, AgentStatus::Error { message } if message.contains("ghost")),
+            "got: {status:?}"
+        );
     }
 
     #[test]

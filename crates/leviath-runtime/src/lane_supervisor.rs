@@ -72,6 +72,16 @@ mod tests {
 
     use crate::test_support::SilentPanics;
 
+    /// The `report_lost` callback both tests below hand to the supervisor:
+    /// forward whatever it reports. Shared (rather than an inline closure per
+    /// test) because the "left alone" test's callback must never run, and an
+    /// unexecuted closure body is an uncovered region.
+    fn forward_to(tx: mpsc::UnboundedSender<String>) -> impl FnOnce(String) + Send + 'static {
+        move |message| {
+            let _ = tx.send(message);
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_panicking_job_is_reported_instead_of_vanishing() {
         let _silent = SilentPanics::install();
@@ -82,9 +92,7 @@ mod tests {
             async {
                 panic!("the provider adapter blew up");
             },
-            move |message| {
-                let _ = tx.send(message);
-            },
+            forward_to(tx),
         );
 
         let message = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
@@ -100,14 +108,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_job_that_reports_for_itself_is_left_alone() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let seen = calls.clone();
-        spawn_supervised(&Handle::current(), "inference", async {}, move |_| {
-            seen.fetch_add(1, Ordering::SeqCst);
-        });
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spawn_supervised(&Handle::current(), "inference", async {}, forward_to(tx));
         // Give the supervisor every chance to fire spuriously.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(
+            rx.try_recv().is_err(),
+            "a job that returned normally owes no synthesized outcome"
+        );
     }
 
     #[tokio::test]
@@ -123,9 +131,9 @@ mod tests {
         assert!(message.contains("boom"), "got: {message}");
 
         // An aborted task's does not - it never ran to a panic.
-        let handle = tokio::spawn(async {
-            std::future::pending::<()>().await;
-        });
+        let handle = tokio::spawn(std::future::pending::<()>());
+        // Let it be polled once, so the abort interrupts a task that started.
+        tokio::task::yield_now().await;
         handle.abort();
         let err = handle.await.expect_err("the task was aborted");
         let message = lost_lane_message("transition", err);

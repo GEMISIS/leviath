@@ -94,6 +94,8 @@ process-wide state once at startup rather than per run:
 - provider keys and `[model_providers]` (the provider registry)
 - `[[mcp_servers]]` (live MCP connections), `[observability]` (the telemetry pipeline), and
   `[security] allow_local_network` (the outbound-network policy)
+- `[limits] stall_timeout_secs`, along with the other limits the world is built with
+  (`max_concurrent_inferences`, `max_concurrent_tools`, `exact_token_counting`)
 
 ## Control surface
 

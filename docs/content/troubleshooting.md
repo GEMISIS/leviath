@@ -44,6 +44,20 @@ isn't mounted, so it returns **405 Method Not Allowed** (the read routes still w
 An agent needs at least one [provider](/docs/providers). Run `lev setup`, or point Leviath at a
 local [Ollama](https://ollama.com) for a no-key start.
 
+## A run says `running` but never does anything
+
+Check its provider first. If a stage's model list names only providers you haven't configured,
+`lev run` refuses the spawn outright and tells you which ones it tried — configure one with
+`lev setup`, or add it to `config.toml` and restart the daemon.
+
+A run that gets past that and still can't dispatch (say you removed a provider key after it
+started) is failed after `[limits] stall_timeout_secs`, 60 seconds by default. Its `meta.json`
+records the reason. Set the limit to `0` to wait indefinitely instead.
+
+Waiting for a busy model is *not* this. An agent queued behind other in-flight requests to the same
+model is working as intended and is never failed, however long the queue takes — raise
+`[limits] max_concurrent_inferences` if you want more of them running at once.
+
 ## An agent seems stuck in a loop
 
 That's what [stuck detection](/docs/stages#graph) is for. Add a `condition = "stuck"` transition
