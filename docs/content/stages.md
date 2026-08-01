@@ -43,6 +43,76 @@ hint = "Implementation complete, ready for review"
 condition = "stuck"          # a runtime condition, not the agent's choice
 ```
 
+An edge with a `hint` and no `condition` is `condition = "llm_choice"`; writing it out explicitly
+is equivalent. The full set of values is `always`, `llm_choice`, `error`, `max_iterations`, and
+`stuck`. An unrecognized value is a hard parse error rather than a silently ignored edge, so a typo
+fails at `lev validate` instead of at 2am.
+
+### Stage keys that shape routing
+
+| Key | Default | Effect |
+|---|---|---|
+| `max_revisits` | unlimited | How many times this stage may be re-entered, not counting the first visit. An edge whose target is out of budget is dropped from the choices |
+| `transition_prompt` | built-in | Overrides the prompt used to ask the model which edge to take |
+| `allow_complete` | `false` | Offers the model an explicit `DONE` answer that ends the run, instead of forcing it down the single available edge |
+| `requires_children` | `false` | Holds the stage until every sub-agent it spawned has finished |
+| `allow_as_worker` | `false` | Opts this stage in to being the target of a [fan-out](/docs/sub-agents). Off by default, so you can only fan out into a stage designed for it |
+| `accepts_messages` | `true` | Whether `lev msg` reaches this stage. See [Human-in-the-loop](/docs/interaction) |
+
+### Carrying context across an edge
+
+Each edge decides what the next stage inherits, with `transform`:
+
+```toml
+[stages.implement.transitions.review]
+hint      = "Ready for review"
+transform = "compact"        # direct | clear | compact | summarize | custom
+```
+
+- `direct` (the default) carries everything as-is.
+- `clear` drops stage-specific regions and keeps pinned ones.
+- `compact`, and its alias `summarize`, sends the stage's content through an LLM summarization pass
+  before the next stage starts.
+- `custom` takes a `transform_config` naming regions individually:
+
+```toml
+[stages.implement.transitions.review]
+transform = "custom"
+
+[stages.implement.transitions.review.transform_config]
+carry          = ["system", "files"]     # pass through untouched
+compact        = ["conversation"]        # summarize into the next stage
+clear          = ["scratch"]             # drop entirely
+compact_prompt = "Summarize what changed and why"
+```
+
+Regions declared `pinned` are immune to edge transforms, which is why the error and stuck reports
+below are worth pinning.
+
+### Gating an edge on actual work
+
+A stage that was supposed to change files can announce it is done without having changed any. An
+edge `gate` refuses the transition until the stage has something to show for itself:
+
+```toml
+[stages.implement.transitions.review]
+hint = "Implementation complete, ready for review"
+gate = { require_modifications = true, max_attempts = 3 }
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `require_modifications` | `false` | Require at least one successful file-modifying tool call in the stage being left |
+| `message` | generated | The nudge injected when the gate blocks |
+| `region` | unset | A region whose non-emptiness also satisfies the gate |
+| `tools` | `[]` | Extra tool names counted as modifying, beyond the built-in `write_file` and `edit_file` |
+| `max_attempts` | `3` | How many times the stage is re-run before the gate gives up and lets the transition through with a warning |
+
+Per-stage tool counters reset on stage entry and are not restored when a run resumes after a daemon
+restart, but context regions are. Pointing `region` at whatever the write tools are routed into
+keeps a resumed run honest. Set `tools` when an agent's writes go through MCP or
+[script tools](/docs/rhai-tools) rather than the built-ins.
+
 <a id="graph"></a>
 
 ## Stuck detection

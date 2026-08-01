@@ -183,6 +183,70 @@ back through discovery instead of guessing. Projects with no tests at all are ha
 the plan must include *building* verification (a smoke test to write and run), stated plainly
 rather than invented.
 
+## Tracking files the agent touches
+
+`[context.file_tracking]` keeps a running list of what the agent has read and written, in its own
+region, so a later stage knows what has already been looked at.
+
+```toml
+[context.file_tracking]
+region          = "files"    # default "files"
+track_reads     = true       # default true
+track_writes    = true       # default true
+max_file_tokens = 4000       # cap on how much of one file is tracked
+```
+
+## Catching an agent going in circles
+
+`[repetition_detection]` fails a stage that keeps making the same call or reading without ever
+writing. This is separate from the `stuck` edge in [stages](/docs/stages#stuck-detection): a stuck
+edge routes somewhere useful, this one stops the loop.
+
+```toml
+[repetition_detection]
+enabled             = true
+max_repeat_calls    = 5      # identical tool call, back to back
+max_readonly_streak = 30     # read-only calls with no modification in between
+```
+
+## Discovering tools mid-run
+
+By default a stage advertises a fixed tool set resolved at spawn, and a tool that appears later is
+invisible to it. `dynamic_tools` opts an agent in to re-advertising:
+
+```toml
+[agent]
+dynamic_tools = true
+```
+
+With it on, a script tool written into the run's own `tools/` directory becomes callable on the
+next inference. Off (the default) is the safer choice, since it means an agent cannot grow its own
+capabilities mid-run.
+
+## Handing context to a sub-agent
+
+`[[transforms]]` maps one blueprint's regions onto another's when a parent spawns a child, so the
+child starts with the parent's findings under its own region names.
+
+```toml
+[[transforms]]
+from_blueprint = "researcher"
+to_blueprint   = "writing-assistant"
+
+[[transforms.mappings]]
+from_region = "findings"
+to_region   = "source_material"
+transform   = "direct"        # direct | summarize | extract
+
+[[transforms.mappings]]
+from_region = "conversation"
+to_region   = "brief"
+transform   = "summarize"
+```
+
+`extract` additionally takes `fields` to pull named pieces out. See
+[Sub-agents](/docs/sub-agents).
+
 ## Validate before you run
 
 ```bash
