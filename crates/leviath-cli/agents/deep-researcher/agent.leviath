@@ -84,6 +84,10 @@ Analyze the `sources` against `sources_index`. Be rigorous:
 
 Prefer following a key citation (follow_citations) over re-searching when a claim
 hinges on a source you haven't read directly.
+
+If `error_report` says a previous stage hit its iteration cap, that stage was cut
+off before finishing - treat its output as incomplete and verify coverage before
+concluding.
 """
 
 [stages.analyze.transitions.gather]
@@ -171,9 +175,9 @@ available_tools = ["read_file", "bash"]
 max_iterations = 8
 max_revisits = 1
 system_prompt = """
-A source fetch or parse failed. Read the error from context, record which source
-is unavailable and why (as a gap), and hand back to analyze to continue with the
-material you do have.
+A call failed mid-research. The `error_report` region holds the error text the
+runtime captured - read it first. Record which source is unavailable and why (as
+a gap), and hand back to analyze to continue with the material you do have.
 """
 
 [stages.error_recovery.transitions.analyze]
@@ -199,3 +203,8 @@ analysis         = { kind = "compacting",      budget = "30%", compact_at = "80%
 analysis_history = { kind = "compact_history", source_region = "analysis", budget = "3%", max_tokens = 15000 }
 
 conversation   = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }
+
+# Written by the RUNTIME on an abnormal stage ending (issue #154): a failed
+# inference call's error text, or a note that a stage hit its iteration cap.
+# Pinned so it survives the edge transform into the stage that acts on it.
+error_report   = { kind = "pinned", budget = "1%", max_tokens = 2000 }

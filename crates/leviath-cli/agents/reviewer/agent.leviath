@@ -157,6 +157,10 @@ Order findings most-severe first and group by severity level:
 For each: file and line, one-sentence defect summary, the failure scenario, and the
 fix. End with a short overall assessment (ship / ship-with-fixes / needs-work) that
 matches the severity_index totals.
+
+If `error_report` says an earlier stage hit its iteration cap, the review was cut
+off before covering everything - say so in the overall assessment and list what
+went unreviewed.
 """
 
 # Explicit empty transitions = terminal.
@@ -171,9 +175,9 @@ available_tools = ["read_file", "bash"]
 max_iterations = 10
 max_revisits = 1
 system_prompt = """
-An error occurred during review. Diagnose it from context, note a workaround
-(e.g. skip an unreadable file and record why), then return to deep_review to
-continue with the rest.
+An error occurred during review. The `error_report` region holds the error text
+the runtime captured - read it first, note a workaround (e.g. skip an unreadable
+file and record why), then return to deep_review to continue with the rest.
 """
 
 [stages.error_handler.transitions.deep_review]
@@ -218,3 +222,8 @@ report          = { kind = "clearable", budget = "7%",  max_tokens = 8000 }
 # `conversation` region - the layout that replaces it on each stage transition is
 # rebuilt from this table, so an auto-added one would be dropped after stage 1.
 conversation    = { kind = "sliding_window", max_items = 30, budget = "15%", max_tokens = 18000, strategy = "bulk", overflow = 10 }
+
+# Written by the RUNTIME on an abnormal stage ending (issue #154): a failed
+# inference call's error text, or a note that a stage hit its iteration cap.
+# Pinned so it survives the edge transform into the stage that acts on it.
+error_report    = { kind = "pinned", budget = "1%", max_tokens = 2000 }

@@ -331,7 +331,7 @@ transform = "custom"
 # stage-specific region including `test_results`, which is the raw evidence
 # reassess most needs. Compact only the conversation and leave the rest intact.
 [stages.implement.transitions.reassess.transform_config]
-carry = ["discovery", "workflow", "architecture", "conventions", "task", "plan", "codebase", "implementation", "prototypes", "errors", "test_results", "stuck_report"]
+carry = ["discovery", "workflow", "architecture", "conventions", "task", "plan", "codebase", "implementation", "prototypes", "errors", "test_results", "stuck_report", "error_report"]
 compact = ["conversation"]
 clear = ["scratch"]
 compact_prompt = "Summarize what was attempted in this stage: which files were edited and how often, which tests were run and their outcome, and the last point at which anything demonstrably worked."
@@ -380,6 +380,10 @@ which is where changes are made and re-reviewed.
    baseline captured, verification never run), say so.
 5. Check: correctness vs. the task, edge cases, error handling, security, and
    code quality/conventions.
+
+If `error_report` says the implement stage hit its iteration cap, it was cut off
+before declaring the work done - assume the implementation is incomplete and
+verify every DONE WHEN criterion rather than sampling.
 
 End with one of:
   APPROVED - no significant issues
@@ -471,7 +475,7 @@ bash      = "test_results"
 hint = "Corrected plan in hand - retry implementation"
 transform = "custom"
 [stages.reassess.transitions.implement.transform_config]
-carry = ["discovery", "workflow", "architecture", "conventions", "task", "plan", "codebase", "implementation", "prototypes", "errors", "stuck_report"]
+carry = ["discovery", "workflow", "architecture", "conventions", "task", "plan", "codebase", "implementation", "prototypes", "errors", "stuck_report", "error_report"]
 compact = ["conversation"]
 clear = ["scratch", "test_results"]
 compact_prompt = "Summarize the reassessment as three things: the wrong assumption, the corrected approach, and what must be reverted first."
@@ -490,11 +494,12 @@ available_tools = ["read_file", "bash", "context_append"]
 max_iterations = 10
 max_revisits = 2
 system_prompt = """
-An error occurred. Read the error details from context, diagnose the root cause,
-and note a fix or workaround. Append a one-line summary of the failure to the
-`errors` region (context_append) so repeated failures become visible as a pattern,
-then transition back to implement to retry. If you see the SAME error recurring in
-`errors`, change approach rather than repeating the fix.
+An error occurred. The `error_report` region holds the error text the runtime
+captured - read it first, diagnose the root cause, and note a fix or workaround.
+Append a one-line summary of the failure to the `errors` region (context_append)
+so repeated failures become visible as a pattern, then transition back to
+implement to retry. If you see the SAME error recurring in `errors`, change
+approach rather than repeating the fix.
 """
 
 # Route tool chatter to scratch (clearable), not `errors`: `errors` is a
@@ -541,6 +546,10 @@ prototypes   = { kind = "pinned", budget = "4%", max_tokens = 6000 }
 # Written by the RUNTIME when a `stuck` edge fires (issue #106): which threshold
 # tripped and why. Pinned so it survives the edge transform into `reassess`.
 stuck_report = { kind = "pinned", budget = "1%", max_tokens = 2000 }
+# Written by the RUNTIME on an abnormal stage ending (issue #154): a failed
+# inference call's error text, or a note that a stage hit its iteration cap.
+# Pinned so it survives the edge transform into `error_recovery` or `review`.
+error_report = { kind = "pinned", budget = "1%", max_tokens = 2000 }
 
 # ── Discovery (issue #108): written by the discover stage, read by every later
 # stage. Pinned, so no edge transform can clear or compact them. `required` puts

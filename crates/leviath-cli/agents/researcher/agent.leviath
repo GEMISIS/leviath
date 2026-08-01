@@ -79,6 +79,10 @@ Analyze the `raw_findings` against the `sources_index`. Do three things:
 
 Use web_fetch for a targeted follow-up only when a specific gap blocks a claim.
 Flag open questions you couldn't resolve.
+
+If `error_report` says a previous stage hit its iteration cap, that stage was cut
+off before finishing - treat its output as incomplete and verify coverage before
+concluding.
 """
 
 [stages.analyze.tool_routing]
@@ -129,9 +133,10 @@ available_tools = ["read_file", "bash"]
 max_iterations = 8
 max_revisits = 1
 system_prompt = """
-Something failed during research (a source fetch, a parse, etc.). Read the
-error from context, work out what went wrong, and note a workaround. Then hand
-back to analyze to continue with whatever material is available.
+Something failed during research (a source fetch, a parse, etc.). The
+`error_report` region holds the error text the runtime captured - read it first,
+work out what went wrong, and note a workaround. Then hand back to analyze to
+continue with whatever material is available.
 """
 
 [stages.error_recovery.transitions.analyze]
@@ -169,3 +174,8 @@ synthesis_history = { kind = "compact_history", source_region = "synthesis", bud
 # the per-stage layout is rebuilt from this table on each transition, so an
 # auto-added one would be dropped after the first stage.
 conversation      = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }
+
+# Written by the RUNTIME on an abnormal stage ending (issue #154): a failed
+# inference call's error text, or a note that a stage hit its iteration cap.
+# Pinned so it survives the edge transform into the stage that acts on it.
+error_report      = { kind = "pinned", budget = "1%", max_tokens = 2000 }
