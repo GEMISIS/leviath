@@ -783,7 +783,7 @@ fn world_event_run_id_reads_the_run_id_from_a_log_event() {
         agent_id: "a".to_string(),
         line: "some output".to_string(),
     };
-    assert_eq!(world_event_run_id(&ev), "run-log");
+    assert_eq!(ev.run_id(), "run-log");
 }
 
 // ─── session/prompt: spawn / message failures ────────────────────────────────

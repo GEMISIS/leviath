@@ -304,6 +304,7 @@ pub fn dispatch_tools(
     hub: Option<Res<InteractionHub>>,
     gate_stage: Option<Res<crate::gate_prompt::GatePromptStage>>,
     persist: Option<Res<PersistenceStage>>,
+    sink: Option<Res<crate::host::WorldEventSink>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -560,6 +561,19 @@ pub fn dispatch_tools(
             }
             _ => (noop_progress(), None),
         };
+        // Announce each lane-bound call before it starts executing. Inline
+        // results (context tools, refusals, blocks) never reach the lane and
+        // are deliberately not announced.
+        if let (Some(sink), Some(md)) = (sink.as_ref(), metadata) {
+            for call in &lane_calls {
+                let _ = sink.0.send(crate::host::WorldEvent::ToolCallStarted {
+                    run_id: md.run_id.clone(),
+                    agent_id: state.agent_id.clone(),
+                    call_id: call.id.clone(),
+                    tool: call.name.clone(),
+                });
+            }
+        }
         let exec = service.0.exec_for(entity, lane_calls, progress);
         let exec = match ack {
             Some(ack) => barrier_then(exec, ack, BATCH_JOURNAL_ACK_TIMEOUT),

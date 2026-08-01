@@ -8552,3 +8552,211 @@ fn collect_compaction_records_success_and_failure() {
         vec![crate::telemetry::ActivityRecord::Compaction { success: false }]
     );
 }
+
+// ── source-emitted world events (stage transitions + tool calls) ──
+
+#[test]
+fn resolve_transition_emits_a_stage_transition_event() {
+    use crate::host::{WorldEvent, WorldEventSink};
+    let bp = blueprint(vec![
+        stage_named("a", None, false, None),
+        stage_named("b", None, false, None),
+    ]);
+    let mut world = World::new();
+    let (sink_tx, mut sink_rx) = tokio::sync::broadcast::channel(16);
+    world.insert_resource(WorldEventSink(sink_tx));
+    let e = spawn_transition_agent(
+        &mut world,
+        bp,
+        vec![stage("m", vec![], None), stage("m", vec![], None)],
+        VisitCounts::default(),
+    );
+    world.entity_mut(e).insert(run_metadata());
+
+    run_transition(&mut world);
+
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+    let ev = sink_rx.try_recv().expect("stage transition event");
+    assert_eq!(
+        ev,
+        WorldEvent::StageTransition {
+            run_id: "run-1".to_string(),
+            agent_id: "a".to_string(),
+            from: "s".to_string(), // the fixture agent's starting stage name
+            to: "b".to_string(),
+            iteration: 1,
+        }
+    );
+    assert!(sink_rx.try_recv().is_err(), "exactly one event");
+}
+
+#[test]
+fn stage_transition_event_needs_run_metadata() {
+    use crate::host::WorldEventSink;
+    // A sink is installed but the agent carries no RunMetadata (a bare test
+    // agent): the transition happens, the stream stays silent.
+    let bp = blueprint(vec![
+        stage_named("a", None, false, None),
+        stage_named("b", None, false, None),
+    ]);
+    let mut world = World::new();
+    let (sink_tx, mut sink_rx) = tokio::sync::broadcast::channel(16);
+    world.insert_resource(WorldEventSink(sink_tx));
+    let e = spawn_transition_agent(
+        &mut world,
+        bp,
+        vec![stage("m", vec![], None), stage("m", vec![], None)],
+        VisitCounts::default(),
+    );
+
+    run_transition(&mut world);
+
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+    assert!(sink_rx.try_recv().is_err(), "no event without metadata");
+}
+
+#[test]
+fn collect_choice_emits_a_stage_transition_event() {
+    use crate::host::{WorldEvent, WorldEventSink};
+    let (mut world, tx) = world_with_transition_results();
+    let (sink_tx, mut sink_rx) = tokio::sync::broadcast::channel(16);
+    world.insert_resource(WorldEventSink(sink_tx));
+    let bp = blueprint(vec![
+        stage_named("a", None, false, None),
+        stage_named("b", None, false, None),
+    ]);
+    let e = spawn_responding_agent(
+        &mut world,
+        bp,
+        vec![si("m0"), si("m1")],
+        vec![plain_edge("b")],
+    );
+    world.entity_mut(e).insert(run_metadata());
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Ok(resp("b")),
+    })
+    .unwrap();
+
+    run_collect_transition(&mut world);
+
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+    let ev = sink_rx.try_recv().expect("stage transition event");
+    assert_eq!(
+        ev,
+        WorldEvent::StageTransition {
+            run_id: "run-1".to_string(),
+            agent_id: "a".to_string(),
+            from: "s".to_string(),
+            to: "b".to_string(),
+            iteration: 1,
+        }
+    );
+}
+
+#[tokio::test]
+async fn dispatch_tools_announces_lane_calls() {
+    use crate::host::{WorldEvent, WorldEventSink};
+    let (jtx, mut jrx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+    world.insert_resource(ToolStage(jtx));
+    let (sink_tx, mut sink_rx) = tokio::sync::broadcast::channel(16);
+    world.insert_resource(WorldEventSink(sink_tx));
+    let e = world
+        .spawn((
+            agent_state(),
+            infer_result(true),
+            conv_window(),
+            ReadyForTools,
+            run_metadata(),
+        ))
+        .id();
+
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    assert!(world.get::<AwaitingTools>(e).is_some());
+    let _ = jrx.try_recv().expect("job enqueued");
+    let ev = sink_rx.try_recv().expect("tool call started event");
+    assert_eq!(
+        ev,
+        WorldEvent::ToolCallStarted {
+            run_id: "run-1".to_string(),
+            agent_id: "a".to_string(),
+            call_id: "t".to_string(),
+            tool: "n".to_string(),
+        }
+    );
+    assert!(sink_rx.try_recv().is_err(), "one event per lane call");
+}
+
+#[test]
+fn collect_tools_reports_finished_lane_calls() {
+    use crate::host::{WorldEvent, WorldEventSink};
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolResults(rx));
+    let (sink_tx, mut sink_rx) = tokio::sync::broadcast::channel(16);
+    world.insert_resource(WorldEventSink(sink_tx));
+    let e = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            infer_with(vec![tc("c1", "read"), tc("c2", "write")]),
+            agent_state(),
+            run_metadata(),
+            AwaitingTools,
+        ))
+        .id();
+    tx.send(ToolOutcome {
+        elapsed: std::time::Duration::ZERO,
+        entity: e,
+        // A success, a failure, and a result whose id matches no known call
+        // (the tool name falls back to empty rather than panicking).
+        results: vec![
+            ("c1".to_string(), "file body".to_string()),
+            ("c2".to_string(), "[error] denied".to_string()),
+            ("zz".to_string(), "stray".to_string()),
+        ],
+    })
+    .unwrap();
+
+    run_collect_tools(&mut world);
+
+    assert_eq!(
+        sink_rx.try_recv().expect("first finish"),
+        WorldEvent::ToolCallFinished {
+            run_id: "run-1".to_string(),
+            agent_id: "a".to_string(),
+            call_id: "c1".to_string(),
+            tool: "read".to_string(),
+            ok: true,
+            summary: "file body".to_string(),
+        }
+    );
+    assert_eq!(
+        sink_rx.try_recv().expect("second finish"),
+        WorldEvent::ToolCallFinished {
+            run_id: "run-1".to_string(),
+            agent_id: "a".to_string(),
+            call_id: "c2".to_string(),
+            tool: "write".to_string(),
+            ok: false,
+            summary: "[error] denied".to_string(),
+        }
+    );
+    assert_eq!(
+        sink_rx.try_recv().expect("stray finish"),
+        WorldEvent::ToolCallFinished {
+            run_id: "run-1".to_string(),
+            agent_id: "a".to_string(),
+            call_id: "zz".to_string(),
+            tool: String::new(),
+            ok: true,
+            summary: "stray".to_string(),
+        }
+    );
+    assert!(sink_rx.try_recv().is_err(), "no extra events");
+}

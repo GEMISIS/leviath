@@ -40,19 +40,10 @@ async fn handle_ws(
                 match event {
                     Ok(ev) => {
                         // If filtering by run_id, skip non-matching events
-                        if let Some(ref filter) = filter_run_id {
-                            let event_run_id = match &ev {
-                                ServerEvent::AgentStatus { run_id, .. } => run_id,
-                                ServerEvent::ContextUpdate { run_id, .. } => run_id,
-                                ServerEvent::Log { run_id, .. } => run_id,
-                                ServerEvent::InteractionNeeded { run_id, .. } => run_id,
-                                ServerEvent::AgentSpawned { run_id, .. } => run_id,
-                                ServerEvent::AgentCompleted { run_id, .. } => run_id,
-                                ServerEvent::Tokens { run_id, .. } => run_id,
-                            };
-                            if event_run_id != filter {
-                                continue;
-                            }
+                        if let Some(ref filter) = filter_run_id
+                            && ev.run_id() != filter
+                        {
+                            continue;
                         }
 
                         // ServerEvent always serializes; a failure is a bug.
@@ -798,26 +789,6 @@ mod tests {
         assert_some_byte_arrived(result);
     }
 
-    /// Single shared copy of the `run_id`-extraction match every test below
-    /// exercises, instead of each test carrying its own inline copy.
-    /// `llvm-cov` counts coverage per source line, not per logical match: with
-    /// the match duplicated inline across tests that each construct only 1-5 of
-    /// the 7 `ServerEvent` variants, most arms of most copies read as never hit -
-    /// even though every arm works, just not from that copy's test data. A
-    /// single shared function means every arm only needs to be hit once, from
-    /// any caller, to be covered.
-    fn get_run_id(ev: &ServerEvent) -> &str {
-        match ev {
-            ServerEvent::AgentStatus { run_id, .. } => run_id,
-            ServerEvent::ContextUpdate { run_id, .. } => run_id,
-            ServerEvent::Log { run_id, .. } => run_id,
-            ServerEvent::InteractionNeeded { run_id, .. } => run_id,
-            ServerEvent::AgentSpawned { run_id, .. } => run_id,
-            ServerEvent::AgentCompleted { run_id, .. } => run_id,
-            ServerEvent::Tokens { run_id, .. } => run_id,
-        }
-    }
-
     #[test]
     fn server_event_run_id_extraction_agent_status() {
         let ev = ServerEvent::AgentStatus {
@@ -829,7 +800,7 @@ mod tests {
             tool_calls: 0,
             accepts_messages: true,
         };
-        assert_eq!(get_run_id(&ev), "run-123");
+        assert_eq!(ev.run_id(), "run-123");
     }
 
     #[test]
@@ -840,7 +811,7 @@ mod tests {
             total_tokens: 100,
             max_tokens: 200000,
         };
-        assert_eq!(get_run_id(&ev), "run-ctx");
+        assert_eq!(ev.run_id(), "run-ctx");
     }
 
     #[test]
@@ -894,7 +865,7 @@ mod tests {
         ];
 
         for (ev, expected) in variants {
-            assert_eq!(get_run_id(&ev), expected);
+            assert_eq!(ev.run_id(), expected);
         }
     }
 
@@ -920,8 +891,8 @@ mod tests {
             accepts_messages: true,
         };
 
-        assert_eq!(get_run_id(&matching), filter);
-        assert_ne!(get_run_id(&non_matching), filter);
+        assert_eq!(matching.run_id(), filter);
+        assert_ne!(non_matching.run_id(), filter);
     }
 
     #[test]

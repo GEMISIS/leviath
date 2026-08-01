@@ -148,6 +148,12 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
             run_id,
             line,
         },
+        // Everything else (stage transitions, tool call start/finish, and any
+        // variant the runtime grows later - the enum is non-exhaustive) is
+        // forwarded verbatim as its own serde-tagged JSON.
+        other => ServerEvent::World {
+            event: serde_json::to_value(&other).unwrap_or(serde_json::Value::Null),
+        },
     }
 }
 
@@ -426,6 +432,54 @@ mod tests {
             }),
             "log"
         );
+        // Source-emitted events (and any future variant) ride the generic
+        // passthrough, keeping their own serde tags inside `event`.
+        assert_eq!(
+            mapped_tag(WorldEvent::StageTransition {
+                run_id: "r".into(),
+                agent_id: "a".into(),
+                from: "plan".into(),
+                to: "implement".into(),
+                iteration: 1
+            }),
+            "world"
+        );
+        assert_eq!(
+            mapped_tag(WorldEvent::ToolCallStarted {
+                run_id: "r".into(),
+                agent_id: "a".into(),
+                call_id: "c1".into(),
+                tool: "read_file".into()
+            }),
+            "world"
+        );
+        assert_eq!(
+            mapped_tag(WorldEvent::ToolCallFinished {
+                run_id: "r".into(),
+                agent_id: "a".into(),
+                call_id: "c1".into(),
+                tool: "read_file".into(),
+                ok: true,
+                summary: "ok".into()
+            }),
+            "world"
+        );
+    }
+
+    #[test]
+    fn passthrough_keeps_the_inner_event_tag_and_run_id() {
+        let ev = to_server_event(WorldEvent::StageTransition {
+            run_id: "run-9".into(),
+            agent_id: "a".into(),
+            from: "plan".into(),
+            to: "implement".into(),
+            iteration: 2,
+        });
+        assert_eq!(ev.run_id(), "run-9");
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["event"]["event"], "stage_transition");
+        assert_eq!(json["event"]["from"], "plan");
+        assert_eq!(json["event"]["to"], "implement");
     }
 
     #[tokio::test]

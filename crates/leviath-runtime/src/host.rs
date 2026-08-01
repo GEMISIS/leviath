@@ -318,9 +318,17 @@ pub enum ControlOp {
     },
 }
 
-/// A change in the world, broadcast to subscribers (the HTTP/WS gateway) so they
-/// get pushed updates instead of polling. Emitted by the host as it drives the
-/// world; streamed over the control transport via `ControlRequest::Subscribe`.
+/// A change in the world, broadcast to subscribers (the HTTP/WS gateway and
+/// in-process embedders) so they get pushed updates instead of polling. The
+/// coarse per-run variants (`Spawned`/`Status`/`Tokens`/`Context`/`Completed`)
+/// are emitted by the host's change-detection pass as it drives the world;
+/// `StageTransition`/`ToolCallStarted`/`ToolCallFinished`/`Log` are pushed at
+/// the source by pipeline systems through [`WorldEventSink`]. Streamed over the
+/// control transport via `ControlRequest::Subscribe`.
+///
+/// Marked non-exhaustive: new variants are additive, so consumers outside this
+/// crate must keep a catch-all arm.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum WorldEvent {
@@ -394,6 +402,52 @@ pub enum WorldEvent {
         /// The terminal status label.
         status: String,
     },
+    /// A run moved from one stage to another. Emitted by the transition systems
+    /// at the moment the new stage is entered (the initial stage at spawn is
+    /// covered by [`WorldEvent::Spawned`], not by this).
+    StageTransition {
+        /// The run id.
+        run_id: String,
+        /// The agent id.
+        agent_id: String,
+        /// The stage being left.
+        from: String,
+        /// The stage being entered.
+        to: String,
+        /// How many times the destination stage has been entered, this entry
+        /// included.
+        iteration: usize,
+    },
+    /// A tool call was handed to the async tool lane for execution. Inline
+    /// calls (context tools, refusals, gate blocks) resolve without touching
+    /// the lane and don't produce this event.
+    ToolCallStarted {
+        /// The run id.
+        run_id: String,
+        /// The agent id.
+        agent_id: String,
+        /// The provider-assigned tool call id.
+        call_id: String,
+        /// The tool name.
+        tool: String,
+    },
+    /// A lane-executed tool call returned. Paired with
+    /// [`WorldEvent::ToolCallStarted`] by `call_id`.
+    ToolCallFinished {
+        /// The run id.
+        run_id: String,
+        /// The agent id.
+        agent_id: String,
+        /// The provider-assigned tool call id.
+        call_id: String,
+        /// The tool name.
+        tool: String,
+        /// Whether the call took effect (`false` for `[error]`/`[blocked]`/
+        /// `[unavailable]` results).
+        ok: bool,
+        /// The result, flattened to one line and truncated.
+        summary: String,
+    },
     /// A run produced a per-agent log/output line (readable assistant output or
     /// an operational `[Tokens: …]` / `[tool] …` / `[error] …` line).
     Log {
@@ -404,6 +458,26 @@ pub enum WorldEvent {
         /// The log line text.
         line: String,
     },
+}
+
+impl WorldEvent {
+    /// The run id this event belongs to. Every variant carries one; this saves
+    /// consumers an exhaustive match (which, with the enum non-exhaustive,
+    /// they could not write anyway).
+    pub fn run_id(&self) -> &str {
+        match self {
+            WorldEvent::Spawned { run_id, .. }
+            | WorldEvent::Status { run_id, .. }
+            | WorldEvent::Tokens { run_id, .. }
+            | WorldEvent::Context { run_id, .. }
+            | WorldEvent::Interaction { run_id, .. }
+            | WorldEvent::Completed { run_id, .. }
+            | WorldEvent::StageTransition { run_id, .. }
+            | WorldEvent::ToolCallStarted { run_id, .. }
+            | WorldEvent::ToolCallFinished { run_id, .. }
+            | WorldEvent::Log { run_id, .. } => run_id,
+        }
+    }
 }
 
 /// A world resource holding a clone of the host's [`WorldEvent`] broadcast
@@ -3566,5 +3640,80 @@ mod tests {
         // blueprint's shape or how it was launched.
         assert_eq!(list[0].num_stages, None);
         assert!(!list[0].unattended);
+    }
+
+    #[test]
+    fn every_world_event_variant_carries_its_run_id() {
+        let rid = "run-x".to_string();
+        let aid = "agent-x".to_string();
+        let events = vec![
+            WorldEvent::Spawned {
+                run_id: rid.clone(),
+                agent_id: aid.clone(),
+                blueprint: "b".to_string(),
+            },
+            WorldEvent::Status {
+                run_id: rid.clone(),
+                agent_id: aid.clone(),
+                status: "active".to_string(),
+                stage: "s".to_string(),
+                iteration: 1,
+                tool_calls: 0,
+                accepts_messages: false,
+            },
+            WorldEvent::Tokens {
+                run_id: rid.clone(),
+                agent_id: aid.clone(),
+                prompt_tokens: 1,
+                completion_tokens: 2,
+                cached_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            WorldEvent::Context {
+                run_id: rid.clone(),
+                agent_id: aid.clone(),
+                total_tokens: 3,
+                max_tokens: 4,
+            },
+            WorldEvent::Interaction {
+                run_id: rid.clone(),
+                agent_id: aid.clone(),
+                request: InteractionRequest::free_text("i", "p", "s", true),
+            },
+            WorldEvent::Completed {
+                run_id: rid.clone(),
+                agent_id: aid.clone(),
+                status: "complete".to_string(),
+            },
+            WorldEvent::StageTransition {
+                run_id: rid.clone(),
+                agent_id: aid.clone(),
+                from: "a".to_string(),
+                to: "b".to_string(),
+                iteration: 1,
+            },
+            WorldEvent::ToolCallStarted {
+                run_id: rid.clone(),
+                agent_id: aid.clone(),
+                call_id: "c".to_string(),
+                tool: "t".to_string(),
+            },
+            WorldEvent::ToolCallFinished {
+                run_id: rid.clone(),
+                agent_id: aid.clone(),
+                call_id: "c".to_string(),
+                tool: "t".to_string(),
+                ok: true,
+                summary: "s".to_string(),
+            },
+            WorldEvent::Log {
+                run_id: rid.clone(),
+                agent_id: aid.clone(),
+                line: "l".to_string(),
+            },
+        ];
+        for ev in events {
+            assert_eq!(ev.run_id(), "run-x");
+        }
     }
 }
