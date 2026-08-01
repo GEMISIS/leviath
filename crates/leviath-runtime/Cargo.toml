@@ -27,6 +27,8 @@ leviath-tools = { workspace = true }
 bevy_ecs = { workspace = true }
 bevy_tasks = { workspace = true }
 tokio = { workspace = true }
+tokio-stream = { workspace = true, features = ["sync"] }
+futures-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

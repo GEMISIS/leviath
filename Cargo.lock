@@ -2456,6 +2456,7 @@ dependencies = [
  "bevy_ecs",
  "bevy_tasks",
  "chrono",
+ "futures-core",
  "leviath-core",
  "leviath-providers",
  "leviath-scripting",
@@ -2468,6 +2469,7 @@ dependencies = [
  "temp-env",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "tracing",
 ]
 
@@ -4570,6 +4572,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
