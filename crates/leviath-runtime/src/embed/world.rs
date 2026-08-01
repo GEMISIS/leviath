@@ -409,13 +409,16 @@ impl AgentWorld {
         self.hub.answer(response)
     }
 
-    /// Shut the world down: stop the serve loop, then drain any queued
-    /// persistence writes before returning.
+    /// Shut the world down and wait for it to finish. The serve loop drains
+    /// every queued persistence write before it returns (its own
+    /// flush-and-stop), so once this resolves nothing is left in flight.
     pub async fn shutdown(self) {
         let _ = self.ask(|reply| ControlOp::Shutdown { reply }).await;
-        if let Ok(mut host) = self.serve_task.await {
-            host.world_mut().flush_and_stop().await;
-        }
+        // Joining is enough: `WorldHost::serve` flushes on its way out, and a
+        // second flush would tick a world whose persistence resource is
+        // already gone. `Err` here means the task was aborted; there is
+        // nothing left to wait for either way.
+        drop(self.serve_task.await);
     }
 }
 
