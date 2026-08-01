@@ -317,12 +317,12 @@ And here is Leviath scored against [12-Factor Agents](https://github.com/humanla
 | 1 | Natural language to tool calls | ✓ | Provider tool calls map 1:1 into the runtime; a text-protocol fallback exists only for the Claude Code transport |
 | 2 | Own your prompts | ✓ | Stage, system, and transition prompts live in your blueprint TOML; a few small framework nudges are fixed text |
 | 3 | Own your context window | ✓ | Region kinds, per-stage layouts, per-tool routing, percentage budgets |
-| 4 | Tools are structured outputs | partial | Tools declare JSON Schemas; arguments are checked per-handler, not schema-validated at dispatch |
+| 4 | Tools are structured outputs | ✓ | Tools declare JSON Schemas, and every call is validated against its schema at dispatch before it runs, built-in, script, and MCP alike |
 | 5 | Unify execution and business state | ✓ | One append-only run journal, replayable with `lev context` |
 | 6 | Launch / pause / resume | ✓ | Launch via CLI, REST, or ACP; `lev pause` / `lev resume`, `POST /api/agents/{id}/pause` and `/resume`, dashboard `p` / `r`; a paused run shows as paused everywhere and survives a daemon restart |
 | 7 | Contact humans with tool calls | ✓ | `ask_user_*` tools plus blueprint `interaction_points`, answered from CLI, REST, or ACP |
 | 8 | Own your control flow | ✓ | Graph transitions with error, max-iterations, stuck, and LLM-choice conditions |
-| 9 | Compact errors into context | partial | Tool errors land in context; inference errors currently go to logs, not context |
+| 9 | Compact errors into context | ✓ | Tool errors, inference errors, and iteration caps all land in context; a blueprint routes them to a pinned `error_report` or `stuck_report` region so the recovery stage starts out knowing what went wrong |
 | 10 | Small, focused agents | ✓ | Per-stage models, tools, and prompts; sub-agents; bounded fan-out |
 | 11 | Trigger from anywhere | partial | CLI, REST + WebSocket, ACP stdio, signed webhooks out; no built-in scheduler, so use system cron |
 | 12 | Stateless reducer | ✗ | The engine is a stateful ECS world; the run journal's fold is a true reducer, but the loop itself isn't |
@@ -336,13 +336,13 @@ And here is Leviath scored against [12-Factor Agents](https://github.com/humanla
 
 ## CLI
 
-The [At a glance](#at-a-glance) block above covers the daily commands; the full surface (packaging, testing, policy, auth, daemon control) is in `lev --help` and the [CLI reference](https://leviath.dev/docs/cli).
+The [At a glance](#at-a-glance) block above covers the daily commands; the full surface (packaging, testing, policy, auth, daemon control) is in `lev --help` and the [CLI reference](https://leviath.dev/docs/cli). Every `config.toml` key and environment variable is in the [configuration reference](https://leviath.dev/docs/configuration).
 
 Leviath also connects to [Model Context Protocol](https://modelcontextprotocol.io) tool servers over stdio or HTTP: `lev mcp add` detects OAuth servers and opens your browser to log in, and tokens are stored with `0600` permissions and refreshed automatically. [MCP docs →](https://leviath.dev/docs/mcp)
 
 ## Providers
 
-Anthropic, OpenAI, Google (Gemini), OpenRouter, local [Ollama](https://ollama.com) with no key, and the Claude Code subscription transport, with per-stage model fallback, optional client-side rate limits enforced before each call, and custom OpenAI-compatible providers as Rhai scripts. [Provider docs →](https://leviath.dev/docs/providers)
+Anthropic, OpenAI, Google (Gemini), OpenRouter, local [Ollama](https://ollama.com) with no key, and the Claude Code subscription transport, with per-stage model fallback, optional client-side rate limits enforced before each call, and custom OpenAI-compatible providers as [Rhai scripts](https://leviath.dev/docs/rhai-providers). [Provider docs →](https://leviath.dev/docs/providers)
 
 ## Releases
 

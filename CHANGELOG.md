@@ -37,6 +37,28 @@ requests since the previous version.
   conversation region.
 - Removed the unused message priority field; inbox delivery was always
   first-in, first-out in practice and now is by contract.
+- Agents can be granted read access outside their working directory with a
+  `[read_paths]` block. The declaration is inert on its own: your config must
+  grant it via `[security] read_paths` or `[agent_read_paths.<agent>]`, access
+  is read-only, and every path is checked after resolving symlinks.
+- The daemon now watches `config.toml` and reloads it when it changes, so a
+  permission, grant, sandbox, limit, or taint edit applies to the next
+  `lev run` with no restart. A half-written file leaves the last good config in
+  place. Boot-time wiring (providers, MCP, telemetry) still needs a restart.
+- Inference errors and iteration caps are written into the next stage's
+  context instead of only the logs, preferring a pinned `error_report` region
+  when the blueprint declares one, so a recovery stage no longer has to
+  rediscover what went wrong.
+- The empty-response nudge is now configurable per stage, per agent, and
+  machine-wide through `[nudge]` (`enabled`, `max`, `text`, with `{stage}` and
+  `{regions}` placeholders). A stage whose deliverable is prose can turn it off
+  rather than being told to use tools it does not have.
+- Tool batches are journaled at dispatch and each call as it completes, so a
+  daemon that dies mid-batch replays the results it already has instead of
+  re-running the calls. Anything that never finished comes back as an
+  interrupted result the model is told to verify first.
+- Completion webhooks now carry a stable delivery id, so a receiver can
+  deduplicate retries of the same delivery.
 
 ## 0.1.1 - 2026-07-31
 
