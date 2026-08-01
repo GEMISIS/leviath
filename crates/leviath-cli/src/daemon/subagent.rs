@@ -199,12 +199,18 @@ async fn send(h: &SubAgentHandle, args: &serde_json::Value) -> String {
     if agent_id.is_empty() || message.is_empty() {
         return "[error] send_to_agent requires 'agent_id' and 'message'".to_string();
     }
+    // Empty string means unset, same as absent: delivery defaults to the
+    // conversation region, which is what the tool's schema documents.
+    let target_region = Some(str_arg(args, "target_region"))
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     let (tx, rx) = oneshot::channel();
     if h.sender
         .send(SubAgentOp::Send {
             run_id: agent_id.to_string(),
             caller_run_id: h.parent_run_id.clone(),
             content: message.to_string(),
+            target_region,
             reply: tx,
         })
         .is_err()
@@ -744,6 +750,64 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             .await
             .contains("shutting down")
         );
+    }
+
+    /// A host that answers only `Send`, recording each op's `target_region`.
+    #[allow(clippy::type_complexity)]
+    fn send_recording_host() -> (
+        SubAgentHandle,
+        std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let regions = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let regions_task = regions.clone();
+        let task = tokio::spawn(async move {
+            while let Some(op) = rx.recv().await {
+                match op {
+                    SubAgentOp::Send {
+                        reply,
+                        target_region,
+                        ..
+                    } => {
+                        regions_task.lock().unwrap().push(target_region);
+                        let _ = reply.send(true);
+                    }
+                    // Any other op: drop it unanswered; callers see a dropped
+                    // oneshot, which every handler already tolerates.
+                    other => drop(other),
+                }
+            }
+        });
+        (handle_with(tx), regions, task)
+    }
+
+    /// `target_region` was schema-advertised and documented but never read on
+    /// this path; the host op now carries it. Absent and empty both mean the
+    /// documented default (conversation), so they forward as `None`.
+    #[tokio::test]
+    async fn send_forwards_target_region() {
+        let (h, regions, task) = send_recording_host();
+        for args in [
+            json!({ "agent_id": "c", "message": "hi", "target_region": "notes" }),
+            json!({ "agent_id": "c", "message": "hi" }),
+            json!({ "agent_id": "c", "message": "hi", "target_region": "" }),
+        ] {
+            assert!(
+                handle(&h, &tc("send_to_agent", args))
+                    .await
+                    .contains("Delivered message")
+            );
+        }
+        assert_eq!(
+            *regions.lock().unwrap(),
+            vec![Some("notes".to_string()), None, None]
+        );
+        // A non-Send op goes through the recording host's drop arm.
+        handle(&h, &tc("check_agent", json!({ "agent_id": "c" }))).await;
+        // Closing the handle ends the host loop; the task exits cleanly.
+        drop(h);
+        task.await.unwrap();
     }
 
     #[tokio::test]

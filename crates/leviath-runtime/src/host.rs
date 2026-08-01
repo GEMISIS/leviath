@@ -169,6 +169,10 @@ pub enum SubAgentOp {
         caller_run_id: String,
         /// The message body.
         content: String,
+        /// Context region to deliver into (`None` = the "conversation"
+        /// default). The `send_to_agent` tool advertised this from the start
+        /// but the op had no field to carry it, so it was silently dropped.
+        target_region: Option<String>,
         /// Reply: whether the message was accepted.
         reply: oneshot::Sender<bool>,
     },
@@ -768,6 +772,7 @@ impl WorldHost {
                 run_id,
                 caller_run_id,
                 content,
+                target_region,
                 reply,
             } => {
                 if !self.is_within_tree(&run_id, &caller_run_id) {
@@ -781,7 +786,7 @@ impl WorldHost {
                     .send_message(AgentMessage {
                         agent_id: run_id,
                         content,
-                        target_region: None,
+                        target_region,
                     })
                     .is_ok();
                 let _ = reply.send(ok);
@@ -1673,6 +1678,7 @@ mod tests {
             run_id: "child".to_string(),
             caller_run_id: "parent".to_string(),
             content: "carry on".to_string(),
+            target_region: None,
             reply,
         })
         .await;
@@ -1689,6 +1695,7 @@ mod tests {
             run_id: "outsider".to_string(),
             caller_run_id: "run-a".to_string(),
             content: "take this".to_string(),
+            target_region: None,
             reply,
         })
         .await;
@@ -1708,6 +1715,7 @@ mod tests {
             run_id: "no-such-run".to_string(),
             caller_run_id: "run-a".to_string(),
             content: "hello?".to_string(),
+            target_region: None,
             reply,
         })
         .await;
@@ -1722,10 +1730,49 @@ mod tests {
             run_id: "run-a".to_string(),
             caller_run_id: "run-a".to_string(),
             content: "hello child".to_string(),
+            target_region: None,
             reply,
         })
         .await;
         assert!(ok);
+    }
+
+    /// The op's `target_region` reaches the named region, not just the
+    /// default conversation. The `send_to_agent` tool advertised this
+    /// parameter from the start, but the op had no field to carry it, so it
+    /// was silently dropped on this path.
+    #[tokio::test]
+    async fn subagent_send_delivers_into_the_target_region() {
+        let mut host = host_with(vec![]);
+        let e = spawn(&mut host, "run-a", "run-a");
+        host.world
+            .world_mut()
+            .get_mut::<crate::components::ContextWindow>(e)
+            .unwrap()
+            .add_region(Region::new(
+                "notes".to_string(),
+                RegionKind::Clearable,
+                5000,
+            ));
+
+        let ok = ask_sub(&mut host, |reply| SubAgentOp::Send {
+            run_id: "run-a".to_string(),
+            caller_run_id: "run-a".to_string(),
+            content: "filed under notes".to_string(),
+            target_region: Some("notes".to_string()),
+            reply,
+        })
+        .await;
+        assert!(ok);
+
+        host.world.tick(); // intake → inbox → window
+        let window = host
+            .world
+            .world()
+            .get::<crate::components::ContextWindow>(e)
+            .unwrap();
+        assert!(window.get_region("notes").unwrap().current_tokens > 0);
+        assert_eq!(window.get_region("conversation").unwrap().current_tokens, 0);
     }
 
     #[tokio::test]
