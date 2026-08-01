@@ -17,6 +17,12 @@ readme = "README.md"
 # to count), so any executable code added here would ship untested. The guard
 # fails the build on anything other than doc comments and `pub use` lines.
 
+[features]
+# The daemon's control transport, forwarded from leviath-runtime. Off by
+# default: embedders talk to the world in-process via leviath::runtime's
+# AgentWorld; only a client for a running lev daemon needs the socket.
+control-socket = ["leviath-runtime/control-socket"]
+
 [dependencies]
 leviath-core = { workspace = true }
 leviath-runtime = { workspace = true }
