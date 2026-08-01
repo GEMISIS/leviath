@@ -28,7 +28,7 @@ pub struct PersistWatermark {
 /// The sending end of the persistence I/O lane (the receiving end is drained by
 /// `persistence_bridge::persistence_worker`).
 #[derive(Resource)]
-pub struct PersistenceStage(pub UnboundedSender<PersistJob>);
+pub struct PersistenceStage(pub UnboundedSender<PersistMsg>);
 
 /// Persistence-dispatch system: for each agent carrying run metadata whose
 /// (iteration, stage, status) has changed since its last snapshot, build the
@@ -267,7 +267,7 @@ pub fn dispatch_persistence(
             };
             Some(serde_json::to_string(&ip_state).expect("InteractionPointState always serializes"))
         });
-        let _ = stage.0.send(PersistJob {
+        let _ = stage.0.send(PersistMsg::Snapshot(Box::new(PersistJob {
             run_id: md.run_id.clone(),
             meta,
             context,
@@ -277,6 +277,6 @@ pub fn dispatch_persistence(
             taint_audit,
             fanout,
             interactions,
-        });
+        })));
     }
 }

@@ -27,7 +27,7 @@ use crate::inference_bridge::{InferenceJob, InferenceOutcome, run_inference_job}
 use crate::inference_pool::InferencePools;
 use crate::interaction_hub::InteractionHub;
 use crate::persistence::{RunMetadata, TokenTotals, build_context_snapshot, build_run_meta};
-use crate::persistence_bridge::PersistJob;
+use crate::persistence_bridge::{PersistJob, PersistMsg};
 use crate::providers::ProviderRegistry;
 use crate::tool_bridge::{BoxedToolExec, ToolJob, ToolOutcome};
 

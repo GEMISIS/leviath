@@ -46,6 +46,28 @@ pub struct PersistJob {
     pub interactions: Option<String>,
 }
 
+/// One message on the persistence lane.
+pub enum PersistMsg {
+    /// A whole-agent snapshot (`meta.json` + `context.json` + the archive step).
+    /// Boxed: a snapshot dwarfs an `Append` and the channel moves these by value.
+    Snapshot(Box<PersistJob>),
+    /// Append one journal record to `<runs_dir>/<run_id>/run.lvr` - how a tool
+    /// batch's dispatch and per-call completions reach the archive between
+    /// snapshots (issue #96).
+    Append {
+        /// The run id (its directory name under the runs dir).
+        run_id: String,
+        /// The record to append. Boxed like `Snapshot`'s job: `RunRecord`'s
+        /// checkpoint variants are large and the channel moves these by value.
+        record: Box<leviath_core::run_archive::RunRecord>,
+        /// Fired once the append has been attempted (written, skipped, or
+        /// failed) - the dispatch-side barrier that keeps a batch record ahead
+        /// of the batch's side effects. `None` for fire-and-forget appends
+        /// (per-call results).
+        ack: Option<tokio::sync::oneshot::Sender<()>>,
+    },
+}
+
 /// The single-lane persistence worker: writes each [`PersistJob`]'s files under
 /// `runs_dir`, one at a time, until the job channel closes (world shutdown).
 ///
@@ -53,23 +75,69 @@ pub struct PersistJob {
 /// (`<runs_dir>/../machine-id`, created once) and a per-process `world_id` - which
 /// it stamps into every run's portable archive so a run copied to another machine
 /// is unambiguously attributable (see [`leviath_core::run_archive`]).
-pub async fn persistence_worker(runs_dir: PathBuf, mut jobs: UnboundedReceiver<PersistJob>) {
+pub async fn persistence_worker(runs_dir: PathBuf, mut jobs: UnboundedReceiver<PersistMsg>) {
     let machine_id = load_or_create_machine_id(&runs_dir);
     let world_id = generate_id();
     // The last context window archived per run, so the next write can be stored
     // as a compact diff rather than a full snapshot.
     let mut last_context: std::collections::HashMap<String, ContextSnapshot> =
         std::collections::HashMap::new();
-    while let Some(job) = jobs.recv().await {
-        let prev = last_context.get(&job.run_id);
-        write_snapshot(&runs_dir, &job, &machine_id, &world_id, prev).await;
-        // Drop a fully-terminal run's cached context (it won't be written again),
-        // so the map stays bounded by the set of *live* runs rather than every
-        // run the daemon has ever seen.
-        if is_terminal_run(&job.meta.status) {
-            last_context.remove(&job.run_id);
-        } else {
-            last_context.insert(job.run_id.clone(), job.context.clone());
+    while let Some(msg) = jobs.recv().await {
+        match msg {
+            PersistMsg::Snapshot(job) => {
+                let prev = last_context.get(&job.run_id);
+                write_snapshot(&runs_dir, &job, &machine_id, &world_id, prev).await;
+                // Drop a fully-terminal run's cached context (it won't be written
+                // again), so the map stays bounded by the set of *live* runs
+                // rather than every run the daemon has ever seen.
+                if is_terminal_run(&job.meta.status) {
+                    last_context.remove(&job.run_id);
+                } else {
+                    last_context.insert(job.run_id.clone(), job.context.clone());
+                }
+            }
+            PersistMsg::Append {
+                run_id,
+                record,
+                ack,
+            } => {
+                append_record(&runs_dir, &run_id, &record).await;
+                // Ack unconditionally - persistence is best-effort and the
+                // dispatch-side barrier must never stall on a failed append.
+                if let Some(ack) = ack {
+                    let _ = ack.send(());
+                }
+            }
+        }
+    }
+}
+
+/// Append a single record to an *existing* run archive. A run whose first
+/// snapshot hasn't landed yet has no `run.lvr` (and no preamble/Header), so the
+/// append is skipped rather than corrupting the file - the single-worker lane
+/// makes that ordering all but impossible in practice, since the spawn tick's
+/// snapshot is queued before any batch can dispatch. Best-effort like the rest
+/// of the lane.
+async fn append_record(
+    runs_dir: &Path,
+    run_id: &str,
+    record: &leviath_core::run_archive::RunRecord,
+) {
+    let path = runs_dir.join(run_id).join("run.lvr");
+    if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+        tracing::warn!(run_id = %run_id, "persistence: record append skipped, no archive yet");
+        return;
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    leviath_core::run_archive::write_record(&mut buf, record)
+        .expect("writing to a Vec never fails");
+    match tokio::fs::OpenOptions::new().append(true).open(&path).await {
+        Ok(mut file) => {
+            let _ = file.write_all(&buf).await;
+            let _ = file.flush().await;
+        }
+        Err(e) => {
+            tracing::warn!(run_id = %run_id, error = %e, "persistence: record append failed");
         }
     }
 }
@@ -345,7 +413,7 @@ mod tests {
     async fn worker_writes_meta_and_context_then_exits_on_close() {
         let dir = tempfile::tempdir().unwrap();
         let (tx, rx) = mpsc::unbounded_channel();
-        tx.send(PersistJob {
+        tx.send(PersistMsg::Snapshot(Box::new(PersistJob {
             run_id: "run-1".to_string(),
             meta: meta("run-1"),
             context: context(),
@@ -355,7 +423,7 @@ mod tests {
             taint_audit: None,
             fanout: None,
             interactions: None,
-        })
+        })))
         .unwrap();
         drop(tx); // close so the worker loop ends
 
@@ -523,7 +591,7 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut terminal = job("run-term");
         terminal.meta.status = leviath_core::run_meta::RunStatus::Complete;
-        tx.send(terminal).unwrap();
+        tx.send(PersistMsg::Snapshot(Box::new(terminal))).unwrap();
         drop(tx);
         persistence_worker(dir.path().to_path_buf(), rx).await;
         assert!(dir.path().join("run-term").join("meta.json").exists());
@@ -553,6 +621,90 @@ mod tests {
         write_snapshot(dir.path(), &job("run-1"), "m", "w", None).await;
         // meta.json still written despite the archive failure.
         assert!(run_dir.join("meta.json").exists());
+    }
+
+    fn batch_record(iteration: usize, call_id: &str) -> leviath_core::run_archive::RunRecord {
+        leviath_core::run_archive::RunRecord::ToolBatch {
+            calls: vec![leviath_core::run_archive::ToolCallRecord {
+                id: call_id.to_string(),
+                name: "shell".to_string(),
+                arguments: "{}".to_string(),
+                result: None,
+                thought_signature: None,
+            }],
+            at: 1,
+            stage_index: 0,
+            iteration,
+            response: "running".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_appends_records_after_a_snapshot_and_acks() {
+        // A Snapshot creates the archive; a subsequent Append lands behind it on
+        // the same single-worker lane, so the record always follows the Header.
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(PersistMsg::Snapshot(Box::new(job("run-1"))))
+            .unwrap();
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        tx.send(PersistMsg::Append {
+            run_id: "run-1".to_string(),
+            record: Box::new(batch_record(0, "c1")),
+            ack: Some(ack_tx),
+        })
+        .unwrap();
+        tx.send(PersistMsg::Append {
+            run_id: "run-1".to_string(),
+            record: Box::new(leviath_core::run_archive::RunRecord::ToolCallDone {
+                iteration: 0,
+                call_id: "c1".to_string(),
+                result: "ran".to_string(),
+                at: 2,
+            }),
+            ack: None, // the fire-and-forget per-call path
+        })
+        .unwrap();
+        drop(tx);
+        persistence_worker(dir.path().to_path_buf(), rx).await;
+
+        ack_rx.await.expect("append acked");
+        let bytes = std::fs::read(dir.path().join("run-1").join("run.lvr")).unwrap();
+        let (_v, records) = leviath_core::run_archive::read_archive(&mut bytes.as_slice()).unwrap();
+        let folded = leviath_core::run_archive::fold(&records).unwrap();
+        let pending = folded.pending_batch.expect("batch folds as pending");
+        assert_eq!(pending.calls[0].result.as_deref(), Some("ran"));
+    }
+
+    #[tokio::test]
+    async fn append_without_an_archive_is_skipped_but_still_acks() {
+        // No snapshot ever landed for this run: appending would write a frame
+        // with no preamble/Header, so it is skipped - and the ack still fires so
+        // the dispatch-side barrier never hangs on the miss.
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        tx.send(PersistMsg::Append {
+            run_id: "run-none".to_string(),
+            record: Box::new(batch_record(0, "c1")),
+            ack: Some(ack_tx),
+        })
+        .unwrap();
+        drop(tx);
+        persistence_worker(dir.path().to_path_buf(), rx).await;
+
+        ack_rx.await.expect("acked despite the skip");
+        assert!(!dir.path().join("run-none").join("run.lvr").exists());
+    }
+
+    #[tokio::test]
+    async fn append_open_failure_is_swallowed() {
+        // `run.lvr` exists but is a directory: the existence probe passes and the
+        // append open fails; best-effort means no panic (and the ack still fires
+        // via the worker, exercised above - here we call the writer directly).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("run-1").join("run.lvr")).unwrap();
+        append_record(dir.path(), "run-1", &batch_record(0, "c1")).await;
     }
 
     #[test]

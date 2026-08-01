@@ -855,7 +855,7 @@ fn dispatch_persistence_emits_stage_index_and_drains_io_buffer() {
 
     run_dispatch_persistence(&mut world);
 
-    let job = rx.try_recv().expect("job sent");
+    let job = snapshot_job(rx.try_recv().expect("job sent"));
     assert_eq!(job.stages.len(), 2);
     assert_eq!(job.stages[0].name, "plan");
     assert_eq!(job.stages[0].status, StageRunStatus::Active);
@@ -892,7 +892,7 @@ fn dispatch_persistence_records_tree_links() {
 
     run_dispatch_persistence(&mut world);
 
-    let job = rx.try_recv().expect("job sent");
+    let job = snapshot_job(rx.try_recv().expect("job sent"));
     // The persisted meta carries the tree links for a deterministic restore.
     assert_eq!(job.meta.children, vec!["kid-1".to_string()]);
     assert_eq!(job.meta.depth, 3);
@@ -937,7 +937,7 @@ fn dispatch_persistence_serializes_fan_out_waiting() {
     );
 
     run_dispatch_persistence(&mut world);
-    let job = rx.try_recv().expect("job sent");
+    let job = snapshot_job(rx.try_recv().expect("job sent"));
     assert!(job.fanout.is_some(), "fan-out waiting state persisted");
 }
 
@@ -976,7 +976,7 @@ async fn dispatch_persistence_serializes_interaction_point() {
     }
 
     run_dispatch_persistence(&mut world);
-    let job = rx.try_recv().expect("job sent");
+    let job = snapshot_job(rx.try_recv().expect("job sent"));
     let json = job.interactions.expect("interaction-point state persisted");
     let state: crate::interaction_points::InteractionPointState =
         serde_json::from_str(&json).unwrap();
@@ -1006,7 +1006,7 @@ fn dispatch_persistence_omits_interactions_when_not_at_a_point() {
         PersistWatermark::default(),
     ));
     run_dispatch_persistence(&mut world);
-    let job = rx.try_recv().expect("job sent");
+    let job = snapshot_job(rx.try_recv().expect("job sent"));
     assert!(job.interactions.is_none());
 }
 
@@ -1025,7 +1025,11 @@ fn dispatch_persistence_omits_interactions_without_a_hub() {
         crate::interaction_points::AwaitingInteractionPoint,
     ));
     run_dispatch_persistence(&mut world);
-    assert!(rx.try_recv().expect("job sent").interactions.is_none());
+    assert!(
+        snapshot_job(rx.try_recv().expect("job sent"))
+            .interactions
+            .is_none()
+    );
 }
 
 #[test]
@@ -1044,7 +1048,11 @@ fn dispatch_persistence_omits_interactions_when_request_not_yet_registered() {
         crate::interaction_points::AwaitingInteractionPoint,
     ));
     run_dispatch_persistence(&mut world);
-    assert!(rx.try_recv().expect("job sent").interactions.is_none());
+    assert!(
+        snapshot_job(rx.try_recv().expect("job sent"))
+            .interactions
+            .is_none()
+    );
 }
 
 #[test]
@@ -1073,7 +1081,7 @@ fn dispatch_persistence_flushes_buffered_io_without_a_watermark_change() {
         .logs
         .push((0, "late log".to_string()));
     run_dispatch_persistence(&mut world);
-    let job = rx.try_recv().expect("append-triggered job");
+    let job = snapshot_job(rx.try_recv().expect("append-triggered job"));
     assert_eq!(job.log_appends, vec![(0, "late log".to_string())]);
 }
 
@@ -1170,7 +1178,7 @@ fn dispatch_persistence_persists_taint_audit_when_the_gate_has_events() {
     s.run(&mut world);
     run_dispatch_persistence(&mut world);
 
-    let job = prx.try_recv().expect("persist job");
+    let job = snapshot_job(prx.try_recv().expect("persist job"));
     let (idx, json) = job.taint_audit.expect("taint audit persisted");
     assert_eq!(idx, 1);
     assert!(json.contains("shell"));
@@ -1189,7 +1197,7 @@ fn dispatch_persistence_skips_taint_audit_when_the_gate_is_empty() {
         enabled_gate(), // no events recorded
     ));
     run_dispatch_persistence(&mut world);
-    let job = prx.try_recv().expect("persist job");
+    let job = snapshot_job(prx.try_recv().expect("persist job"));
     assert!(job.taint_audit.is_none());
 }
 
@@ -6979,11 +6987,19 @@ fn run_metadata() -> RunMetadata {
     }
 }
 
-fn world_with_persistence() -> (World, mpsc::UnboundedReceiver<PersistJob>) {
+fn world_with_persistence() -> (World, mpsc::UnboundedReceiver<PersistMsg>) {
     let (tx, rx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(PersistenceStage(tx));
     (world, rx)
+}
+
+/// Unwrap the snapshot job a dispatch-persistence test expects on the lane.
+fn snapshot_job(msg: PersistMsg) -> PersistJob {
+    match msg {
+        PersistMsg::Snapshot(job) => *job,
+        PersistMsg::Append { .. } => panic!("expected a snapshot on the lane"),
+    }
 }
 
 fn run_dispatch_persistence(world: &mut World) {
@@ -7155,7 +7171,7 @@ fn persistence_writes_on_first_dispatch_then_debounces() {
     let _e = spawn_persistable(&mut world);
 
     run_dispatch_persistence(&mut world);
-    let job = rx.try_recv().expect("first snapshot written");
+    let job = snapshot_job(rx.try_recv().expect("first snapshot written"));
     assert_eq!(job.run_id, "run-1");
 
     // No change ⇒ no second write.
@@ -7173,7 +7189,7 @@ fn persistence_rewrites_when_iteration_changes() {
 
     world.get_mut::<AgentState>(e).unwrap().iteration += 1;
     run_dispatch_persistence(&mut world);
-    let job = rx.try_recv().expect("second snapshot after change");
+    let job = snapshot_job(rx.try_recv().expect("second snapshot after change"));
     assert_eq!(job.meta.iteration, 1);
 }
 
@@ -7186,7 +7202,7 @@ fn persistence_rewrites_when_status_changes() {
 
     world.get_mut::<AgentState>(e).unwrap().status = AgentStatus::Complete;
     run_dispatch_persistence(&mut world);
-    let job = rx.try_recv().expect("snapshot after completion");
+    let job = snapshot_job(rx.try_recv().expect("snapshot after completion"));
     assert_eq!(job.meta.status, leviath_core::run_meta::RunStatus::Complete);
 }
 
