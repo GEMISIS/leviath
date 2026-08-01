@@ -428,7 +428,9 @@ object. The recognized directives:
 - `// @tool <name>` is required and names the tool (must match a stage's `available_tools` entry).
 - `// @description <text>` is an optional one-liner shown to the model.
 - `// @param <name> <type> <required|optional> "<description>"` is repeatable. `<type>` is a JSON
-  schema type: `string`, `integer`, `number`, `boolean`, `array`, `object`.
+  schema type: `string`, `integer`, `number`, `boolean`, `array`, `object`. A typo here produces a
+  schema that does not compile, which switches off [argument validation](/docs/tools#argument-validation)
+  for the tool (the daemon logs a warning); calls still run, just unchecked.
 - `// @requires <cap> [<cap>...]` lists platform capabilities the tool needs (`network`, `shell`,
   `filesystem`), comma or space separated and repeatable. Leviath drops the tool where the platform
   cannot provide one.
