@@ -6,5 +6,13 @@
 //! same machinery ([`PipelineWorld`](crate::world::PipelineWorld) +
 //! [`WorldHost`](crate::host::WorldHost)) assembled from plain values.
 
+mod error;
+mod spawner;
+mod stream;
 mod tool_service;
+mod world;
+
+pub use error::EmbedError;
+pub use stream::EventStream;
 pub use tool_service::BasicToolService;
+pub use world::{AgentWorld, AgentWorldBuilder, BlueprintSource, RunId, SpawnSpec};
