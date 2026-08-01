@@ -999,12 +999,10 @@ mod tests {
     #[test]
     fn a_completion_counts_even_without_an_open_span() {
         let h = harness();
-        let TelemetryEvent::RunCompleted { run_id, status, .. } = run_completed("ghost", 10) else {
-            unreachable!("run_completed builds a RunCompleted")
-        };
+        // No `RunStarted` for this id, so the span map has nothing to remove.
         h.sink.emit(TelemetryEvent::RunCompleted {
-            run_id,
-            status,
+            run_id: "ghost".to_string(),
+            status: "complete".to_string(),
             prompt_tokens: 0,
             completion_tokens: 0,
             tool_calls: 0,
