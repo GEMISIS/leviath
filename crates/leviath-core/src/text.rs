@@ -58,6 +58,21 @@ pub fn estimate_tokens(s: &str) -> usize {
     s.len().div_ceil(4)
 }
 
+/// Substitute `{name}` placeholders in a template.
+///
+/// Plain sequential `str::replace`, the same scheme `CompactionConfig`'s
+/// `user_prompt` uses for `{content}` / `{region_name}` - not a template
+/// language. Placeholders absent from `vars` pass through untouched, so a
+/// nudge or required-region message can contain literal braces without
+/// escaping as long as they don't collide with a supported name.
+pub fn interpolate(template: &str, vars: &[(&str, &str)]) -> String {
+    let mut out = template.to_string();
+    for (name, value) in vars {
+        out = out.replace(&format!("{{{name}}}"), value);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,6 +85,20 @@ mod tests {
         assert_eq!(estimate_tokens("abcde"), 2);
         // Bytes, not chars: one 3-byte character still costs one budget unit.
         assert_eq!(estimate_tokens("\u{65e5}"), 1);
+    }
+
+    #[test]
+    fn interpolate_replaces_known_placeholders_and_keeps_the_rest() {
+        // Present, repeated, and absent placeholders in one template.
+        assert_eq!(
+            interpolate(
+                "populate {region} - yes, {region} - in stage {stage} {unknown}",
+                &[("region", "plan"), ("stage", "design")]
+            ),
+            "populate plan - yes, plan - in stage design {unknown}"
+        );
+        // No vars: the template passes through unchanged.
+        assert_eq!(interpolate("no placeholders", &[]), "no placeholders");
     }
 
     #[test]
