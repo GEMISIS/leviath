@@ -221,8 +221,12 @@ impl std::fmt::Display for PoolOccupancy {
 /// semaphore was closed. Extracted as a free function (rather than an inline
 /// `.expect(...)`) so both arms - the ordinary `Ok` and the never-in-practice
 /// `Err` - are exercised directly by unit tests, keeping the region covered.
-fn expect_permit(result: Result<OwnedSemaphorePermit, AcquireError>) -> OwnedSemaphorePermit {
-    result.expect("inference pool semaphore is never closed")
+///
+/// Shared with the tool lane, whose semaphore is never closed either.
+pub(crate) fn expect_permit(
+    result: Result<OwnedSemaphorePermit, AcquireError>,
+) -> OwnedSemaphorePermit {
+    result.expect("a lane semaphore is never closed")
 }
 
 /// An RAII permit occupying one slot of a model's inference pool. Dropping it
