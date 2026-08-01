@@ -38,7 +38,7 @@ Use it for:
 ```bash
 lev run coder --task "Build a CLI that converts CSV to JSON"    # run a coding agent...
 lev run deep-researcher --task "Survey solid-state batteries"   # ...or a research agent
-lev ps                           # list running agents
+lev ps                           # list running agents, and what each is waiting on
 lev msg <agent-id> "..."         # steer a running agent mid-task
 lev respond                      # answer questions agents are waiting on
 lev dash                         # watch everything in the TUI dashboard

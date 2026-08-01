@@ -61,8 +61,10 @@ report on:
 stateDiagram-v2
   [*] --> Starting
   Starting --> Running
-  Running --> WaitingInput: ask_user / tool approval
-  WaitingInput --> Running: you respond
+  Running --> WaitingInput: prompt, or holding for children
+  WaitingInput --> Running: answered, or children done
+  Running --> Paused: lev pause
+  Paused --> Running: lev resume
   Running --> Complete
   Running --> CompleteInteractive: done, still accepting messages
   Running --> Error: unrecoverable error
@@ -76,6 +78,12 @@ stateDiagram-v2
 These are the exact `RunStatus` values the [dashboard](/docs/dashboard) and [API](/docs/api)
 report. `CompleteInteractive` means every required stage finished but the agent is still
 accepting [messages](/docs/interaction).
+
+`WaitingInput` covers two very different situations: a run stopped on a prompt somebody has
+to answer, and a run parked while its own [sub-agents](/docs/sub-agents) or
+[fan-out](/docs/stages) workers get on with it. The second needs nothing from you.
+[`lev ps`](/docs/cli#reading-lev-ps) tells them apart, so reach for it before concluding a
+run is stuck.
 
 ## Stages and models
 

@@ -7685,6 +7685,36 @@ fn reflect_is_a_noop_without_a_hub_resource() {
     assert!(world.get::<AwaitingInteraction>(e).is_none());
 }
 
+/// A stage holding for its sub-agents owns its own `Waiting`. Reflection must
+/// not touch it: the clearing arm would otherwise walk the parent back to
+/// `Active` the moment an unrelated prompt of its own resolved, un-parking a run
+/// whose children are still going.
+#[test]
+fn reflect_leaves_an_agent_waiting_on_its_children_alone() {
+    let hub = InteractionHub::new(); // empty ⇒ nothing pending
+    let mut world = World::new();
+    world.insert_resource(hub);
+    let e = world
+        .spawn((
+            reflect_state("a", AgentStatus::Waiting),
+            AwaitingInteraction,
+            crate::pipeline::WaitingForChildren,
+        ))
+        .id();
+
+    run_reflect(&mut world);
+
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Waiting,
+        "the children are still running; nothing has un-parked this stage"
+    );
+    assert!(
+        world.get::<AwaitingInteraction>(e).is_some(),
+        "the query skipped this agent entirely, marker included"
+    );
+}
+
 fn spawn_persistable(world: &mut World) -> Entity {
     world
         .spawn((
@@ -7737,6 +7767,50 @@ fn persistence_rewrites_when_status_changes() {
     run_dispatch_persistence(&mut world);
     let job = snapshot_job(rx.try_recv().expect("snapshot after completion"));
     assert_eq!(job.meta.status, leviath_core::run_meta::RunStatus::Complete);
+}
+
+/// `last_progress_at` is what `lev ps` ages its rows against, so it must move
+/// only when the agent does. `updated_at` cannot serve: the heartbeat advances
+/// it on a run that is doing nothing at all, which is exactly how a wedged run
+/// gets mistaken for a busy one (issue #184).
+#[test]
+fn last_progress_at_tracks_progress_and_not_the_heartbeat() {
+    let (mut world, mut rx) = world_with_persistence();
+    let e = spawn_persistable(&mut world);
+
+    run_dispatch_persistence(&mut world);
+    let _ = rx.try_recv().expect("first snapshot");
+    let first = world
+        .get::<PersistWatermark>(e)
+        .unwrap()
+        .last_progress_at()
+        .expect("the first snapshot is progress");
+
+    // Backdate both stamps past the heartbeat window, then dispatch with the
+    // agent unchanged: a beat is written, but nothing moved.
+    let stale = first - (PERSIST_HEARTBEAT_SECS + 5);
+    world.get_mut::<PersistWatermark>(e).unwrap().backdate(stale);
+    run_dispatch_persistence(&mut world);
+    let _ = rx.try_recv().expect("the heartbeat still writes a snapshot");
+    assert_eq!(
+        world.get::<PersistWatermark>(e).unwrap().last_progress_at(),
+        Some(stale),
+        "a heartbeat is not progress"
+    );
+
+    // A real iteration does move it.
+    world.get_mut::<AgentState>(e).unwrap().iteration += 1;
+    run_dispatch_persistence(&mut world);
+    let _ = rx.try_recv().expect("snapshot after real progress");
+    assert!(
+        world
+            .get::<PersistWatermark>(e)
+            .unwrap()
+            .last_progress_at()
+            .expect("still stamped")
+            > stale,
+        "a new iteration is progress"
+    );
 }
 
 // ── async LLM-choice transition ──

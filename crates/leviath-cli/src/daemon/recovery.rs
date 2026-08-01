@@ -712,6 +712,96 @@ mod tests {
         assert_eq!(world.agent_status(*entity), Some(AgentStatus::Paused));
     }
 
+    /// Reload one run from `runs_dir` and hand back the world plus its entity.
+    async fn reload_single(runs: &Path, run_id: &str) -> (PipelineWorld, Entity) {
+        let (mut world, cli) = test_world();
+        let restored = reload_persisted_agents(
+            &mut world,
+            cli.as_ref(),
+            &Config::default(),
+            Arc::new(Mutex::new(ToolExecutor::new())),
+            &[],
+            &InteractionHub::new(),
+            runs,
+            999,
+            &sub_tx(),
+        );
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].0, run_id);
+        let entity = restored[0].1;
+        (world, entity)
+    }
+
+    /// An unattended run comes back unattended. Dropping `--yolo` on reload was
+    /// meant as the safe side, but it converted a running unattended job into
+    /// one parked on a prompt nobody was watching for (issue #184).
+    #[tokio::test]
+    async fn reload_keeps_an_unattended_run_unattended() {
+        let agent = agent_dir();
+        let manifest = agent.path().join("agent.leviath");
+        let runs = tempfile::tempdir().unwrap();
+        write_run(
+            runs.path(),
+            "run-yolo",
+            manifest.to_str().unwrap(),
+            RunStatus::Running,
+            None,
+        );
+        // Flip the persisted flag the way a `--yolo` launch would have.
+        let meta_path = runs.path().join("run-yolo").join("meta.json");
+        let mut meta: RunMeta =
+            serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
+        meta.yolo = true;
+        std::fs::write(&meta_path, serde_json::to_string(&meta).unwrap()).unwrap();
+
+        let (world, entity) = reload_single(runs.path(), "run-yolo").await;
+        assert!(
+            world
+                .world()
+                .get::<RunMetadata>(entity)
+                .expect("reloaded run has metadata")
+                .unattended
+        );
+        assert!(
+            world
+                .world()
+                .get::<leviath_runtime::components::InteractionAutoApprove>(entity)
+                .is_some(),
+            "an unattended reload still auto-approves its checkpoints"
+        );
+    }
+
+    /// A run launched without `--yolo` must not acquire it on reload, and a
+    /// `meta.json` written before the field existed reads as attended.
+    #[tokio::test]
+    async fn reload_does_not_invent_unattended() {
+        let agent = agent_dir();
+        let manifest = agent.path().join("agent.leviath");
+        let runs = tempfile::tempdir().unwrap();
+        write_run(
+            runs.path(),
+            "run-plain",
+            manifest.to_str().unwrap(),
+            RunStatus::Running,
+            None,
+        );
+        // Strip the field entirely: exactly what an older binary wrote.
+        let meta_path = runs.path().join("run-plain").join("meta.json");
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
+        raw.as_object_mut().unwrap().remove("yolo");
+        std::fs::write(&meta_path, serde_json::to_string(&raw).unwrap()).unwrap();
+
+        let (world, entity) = reload_single(runs.path(), "run-plain").await;
+        assert!(
+            !world
+                .world()
+                .get::<RunMetadata>(entity)
+                .expect("reloaded run has metadata")
+                .unattended
+        );
+    }
+
     #[tokio::test]
     async fn reloads_nonterminal_runs_and_restores_state() {
         let agent = agent_dir();

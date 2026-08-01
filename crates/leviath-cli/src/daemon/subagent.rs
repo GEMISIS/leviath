@@ -556,6 +556,32 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         assert_eq!(seen[0].max_depth, Some(2));
     }
 
+    /// A child of an unattended parent is unattended. Spawning it attended left
+    /// it stopped at its first approval prompt with nobody there to answer, and
+    /// parked the parent behind it for good (issue #184).
+    #[tokio::test]
+    async fn spawn_hands_the_parents_unattended_setting_to_the_child() {
+        for unattended in [false, true] {
+            let bp = temp_blueprint();
+            let (mut h, seen, _t) = fake_host(Ok("child-1".to_string()), vec![], false);
+            h.unattended = unattended;
+            let out = handle(
+                &h,
+                &tc(
+                    "spawn_agent",
+                    json!({"blueprint": bp.path().to_str().unwrap(), "task": "go"}),
+                ),
+            )
+            .await;
+            assert!(out.contains("Spawned sub-agent"), "{out}");
+            let seen = seen.lock().unwrap();
+            assert_eq!(
+                seen[0].yolo, unattended,
+                "a child inherits the parent's unattended setting"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn spawn_with_wait_blocks_until_the_child_finishes() {
         let bp = temp_blueprint();
