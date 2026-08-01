@@ -25,6 +25,12 @@
 //! is what [`off_lane`] does, and it is what makes the deadlock impossible:
 //! waiting costs the lane nothing, and the batch takes a permit again when it has
 //! something to do.
+//!
+//! **Order**: which of two batches submitted together gets in first is not
+//! fixed - they race for the permit as separate tasks. Nothing depends on it,
+//! since an agent only ever has one batch in flight, and once both are actually
+//! waiting the semaphore hands out permits first-come-first-served, so nothing
+//! is starved either.
 
 use std::future::Future;
 use std::pin::Pin;

@@ -897,6 +897,11 @@ fn limits_fields(config: &Config) -> Vec<Field> {
             help: "Fail a run that can never dispatch (unconfigured provider). 0 waits forever.",
             value: FieldValue::Number(Some(config.limits.stall_timeout_secs)),
         },
+        Field {
+            label: "Dead cycles before relief",
+            help: "Widen the tool lane after this many 30s cycles with work queued and nothing moving. 0 never does.",
+            value: FieldValue::Number(Some(config.limits.dead_cycles_before_relief as u64)),
+        },
     ]
 }
 
@@ -925,6 +930,12 @@ fn apply_limits_fields(config: &mut Config, fields: &[Field]) {
             (5, FieldValue::Number(n)) => {
                 config.limits.stall_timeout_secs =
                     n.unwrap_or(Config::default().limits.stall_timeout_secs)
+            }
+            // Same rule: unset keeps the default, 0 is an explicit "never".
+            (6, FieldValue::Number(n)) => {
+                config.limits.dead_cycles_before_relief = n
+                    .map(|n| n as u32)
+                    .unwrap_or(Config::default().limits.dead_cycles_before_relief)
             }
             _ => {}
         }

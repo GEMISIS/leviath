@@ -423,6 +423,10 @@ fn default_stall_timeout_secs() -> u64 {
     leviath_runtime::pipeline::DEFAULT_STALL_TIMEOUT_SECS
 }
 
+fn default_dead_cycles_before_relief() -> u32 {
+    leviath_runtime::host::DEFAULT_DEAD_CYCLES_BEFORE_RELIEF
+}
+
 /// Runtime resource limits with safe defaults baked in.
 ///
 /// Both fields default to a bounded value so a fresh install can't accidentally
@@ -477,6 +481,21 @@ pub struct LimitsConfig {
     /// Read once at daemon start, so a change needs a daemon restart.
     #[serde(default = "default_stall_timeout_secs")]
     pub stall_timeout_secs: u64,
+
+    /// How many consecutive safety re-drives may find the tool lane full and no
+    /// run moving before the daemon widens the lane to break the jam.
+    ///
+    /// The daemon re-drives itself every 30 seconds, so the default of `10` is
+    /// five minutes of a full lane going nowhere. Relief only ever *adds*
+    /// capacity, never cancels anything, and is capped at one extra lane's worth
+    /// over the daemon's life, so it cannot run away.
+    ///
+    /// `0` turns relief off. Detection and reporting stay on either way, so
+    /// `lev ps` and the metrics still show the streak.
+    ///
+    /// Read once at daemon start, so a change needs a daemon restart.
+    #[serde(default = "default_dead_cycles_before_relief")]
+    pub dead_cycles_before_relief: u32,
 }
 
 impl Default for LimitsConfig {
@@ -488,6 +507,7 @@ impl Default for LimitsConfig {
             exact_token_counting: false,
             script_shell_timeout_secs: default_script_shell_timeout_secs(),
             stall_timeout_secs: default_stall_timeout_secs(),
+            dead_cycles_before_relief: default_dead_cycles_before_relief(),
         }
     }
 }
@@ -1579,6 +1599,9 @@ mod tests {
         assert_eq!(limits.default_max_iterations, Some(50));
         // Exact token counting is opt-in, off by default.
         assert!(!limits.exact_token_counting);
+        // Relief is on by default: ten 30-second cycles of a full lane going
+        // nowhere before the daemon widens it.
+        assert_eq!(limits.dead_cycles_before_relief, 10);
         // And the top-level Config carries the same defaults.
         assert_eq!(Config::default().limits.max_concurrent_inferences, Some(8));
     }
@@ -1616,6 +1639,7 @@ mod tests {
         let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
         assert_eq!(config.limits.max_concurrent_inferences, Some(8));
         assert_eq!(config.limits.default_max_iterations, Some(50));
+        assert_eq!(config.limits.dead_cycles_before_relief, 10);
     }
 
     #[test]
@@ -2788,6 +2812,7 @@ enabled = false
                 exact_token_counting: false,
                 script_shell_timeout_secs: 45,
                 stall_timeout_secs: 90,
+                dead_cycles_before_relief: 6,
             },
             batch_tool_hint: true,
             nudge: leviath_core::NudgeConfig {
@@ -2844,6 +2869,7 @@ enabled = false
         assert_eq!(deserialized.limits.max_concurrent_inferences, Some(4));
         assert_eq!(deserialized.limits.max_concurrent_tools, 3);
         assert_eq!(deserialized.limits.script_shell_timeout_secs, 45);
+        assert_eq!(deserialized.limits.dead_cycles_before_relief, 6);
         assert_eq!(
             deserialized.tool_script_permissions.http_get,
             ScriptPermission::Allow
