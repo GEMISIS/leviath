@@ -782,7 +782,6 @@ impl WorldHost {
                         agent_id: run_id,
                         content,
                         target_region: None,
-                        priority: 0,
                     })
                     .is_ok();
                 let _ = reply.send(ok);
@@ -1048,7 +1047,6 @@ impl WorldHost {
                         agent_id,
                         content,
                         target_region,
-                        priority: 0,
                     })
                     .is_ok();
                 let _ = reply.send(ok);
