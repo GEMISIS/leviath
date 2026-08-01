@@ -52,13 +52,13 @@ the stage automatically instead of burning tokens.
 
 ## A run vanished when I closed my terminal
 
-It didn't — `lev run` hands the agent to the [daemon](/docs/daemon), which keeps hosting it. Bring
+It didn't. `lev run` hands the agent to the [daemon](/docs/daemon), which keeps hosting it. Bring
 it back with `lev ps` or `lev dash`. If the daemon itself was stopped, it reloads interrupted runs
 on its next start.
 
 ## Install fails with an auth error
 
-No token is needed — the repos and release assets are public. A 401/403 during install usually
+No token is needed, because the repos and release assets are public. A 401/403 during install usually
 means leftovers from the private alpha: remove any
 `url."https://…@github.com/GEMISIS/".insteadOf` rewrite from `~/.gitconfig`, unset stale
 `GITHUB_TOKEN` / `HOMEBREW_GITHUB_API_TOKEN` exports (an expired token *fails* requests that
