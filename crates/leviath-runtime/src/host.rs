@@ -571,6 +571,9 @@ pub struct WorldHost {
     /// Extra tool-lane permits the relief valve has handed out over this
     /// daemon's life.
     relief_granted: usize,
+    /// Dead cycles the daemon tolerates before widening the tool lane. `0`
+    /// disables relief. See [`Self::set_dead_cycles_before_relief`].
+    dead_cycles_before_relief: u32,
 }
 
 /// How often the serve loop re-drives the world on its own.
@@ -585,6 +588,14 @@ pub struct WorldHost {
 /// knob. A no-op re-drive is one tick over a handful of systems plus an event
 /// diff, so at this cadence it costs nothing measurable.
 const DEFAULT_REDRIVE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How many consecutive dead cycles trigger the tool-lane relief valve.
+///
+/// At the 30-second re-drive that is five minutes of a full lane going nowhere -
+/// long enough that ordinary backpressure never reaches it, short enough that a
+/// genuinely wedged daemon is not left overnight. Served from
+/// `[limits] dead_cycles_before_relief`; `0` disables relief.
+pub const DEFAULT_DEAD_CYCLES_BEFORE_RELIEF: u32 = 10;
 
 impl WorldHost {
     /// Wrap a world with a fresh interaction hub.
@@ -620,6 +631,7 @@ impl WorldHost {
             dead_cycles: 0,
             last_progress: None,
             relief_granted: 0,
+            dead_cycles_before_relief: DEFAULT_DEAD_CYCLES_BEFORE_RELIEF,
         }
     }
 
@@ -642,7 +654,59 @@ impl WorldHost {
             false => 0,
         };
         self.log_lane_pressure(&snapshot);
-        self.observe_lanes(&snapshot, 0);
+        let relief = self.relieve_if_wedged(&snapshot);
+        self.observe_lanes(&snapshot, relief);
+    }
+
+    /// Widen the tool lane if the daemon has been going nowhere long enough, and
+    /// report how much capacity was added.
+    ///
+    /// Deliberately additive. The tempting reading of "force-reclaim stuck
+    /// slots" is to kill whatever is holding them, and that is the wrong move
+    /// here: a run parked on an `ask_user` is doing exactly what it should, and
+    /// an operator who mistook `waiting` for `stuck` and started killing healthy
+    /// runs is the story behind issue #184. Handing out more capacity unwedges a
+    /// jammed lane without having to be right about which run deserves to die.
+    ///
+    /// Only the tool lane is widened. A full inference pool is a deliberate cap
+    /// on requests in flight to a provider, and forcing extra ones past it would
+    /// trade a wedge for a rate limit.
+    ///
+    /// Capped at one extra lane's worth over the daemon's life. If that is not
+    /// enough, the problem is not capacity and more of it will not help.
+    fn relieve_if_wedged(&mut self, snapshot: &LaneSnapshot) -> usize {
+        let threshold = self.dead_cycles_before_relief;
+        if threshold == 0 || self.dead_cycles < threshold || !snapshot.tools_saturated {
+            return 0;
+        }
+        // The snapshot's width already includes everything granted so far, so
+        // back it out to get the lane's configured width - the budget.
+        let configured = snapshot.tools_workers.saturating_sub(self.relief_granted);
+        let remaining = configured.saturating_sub(self.relief_granted);
+        let granted = self
+            .world
+            .relieve_tool_lane(remaining.min(snapshot.tools_queued));
+        self.relief_granted += granted;
+        tracing::error!(
+            dead_cycles = self.dead_cycles,
+            granted,
+            relief_granted = self.relief_granted,
+            tools_queued = snapshot.tools_queued,
+            tools_parked = snapshot.tools_parked,
+            "the tool lane has not drained in {} cycles; widening it by {granted}",
+            self.dead_cycles
+        );
+        // Give the widened lane a fresh interval to show whether it helped,
+        // rather than granting again on the very next re-drive.
+        self.dead_cycles = 0;
+        granted
+    }
+
+    /// How many dead cycles the daemon tolerates before widening the tool lane.
+    /// `0` disables relief; detection and reporting are unaffected. Served from
+    /// `[limits] dead_cycles_before_relief`.
+    pub fn set_dead_cycles_before_relief(&mut self, cycles: u32) {
+        self.dead_cycles_before_relief = cycles;
     }
 
     /// Hand one daemon-wide health sample to the telemetry sink.
@@ -2051,6 +2115,174 @@ mod tests {
 
         host.observe_redrive();
         assert_eq!(host.dead_cycles, 0, "something moved");
+    }
+
+    /// Fill the world's tool lane and queue one batch behind it, returning a
+    /// handle that releases the blocking batch.
+    ///
+    /// Uses the world's real lane rather than poking the counters, because the
+    /// point of relief is that the queued batch actually runs afterwards.
+    async fn wedge_the_tool_lane(host: &mut WorldHost) -> Arc<tokio::sync::Notify> {
+        let snapshot = host.world_mut().lane_snapshot();
+        let stage = host
+            .world_mut()
+            .world()
+            .resource::<crate::pipeline::ToolStage>()
+            .clone();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let submit = |exec: crate::tool_bridge::BoxedToolExec| {
+            stage.stats.enqueued();
+            stage
+                .jobs
+                .send(crate::tool_bridge::ToolJob {
+                    // The lane never looks at the entity; these batches belong to
+                    // no agent.
+                    entity: Entity::from_raw_u32(9_001).expect("a small index is a valid id"),
+                    exec,
+                    cancel: crate::cancel::CancelToken::new(),
+                })
+                .expect("the lane is serving");
+        };
+        // Every batch here blocks until `release` fires, and nothing in these
+        // tests ever fires it. That is deliberate: a batch that can finish on its
+        // own makes the lane's occupancy a moving target, and the counts these
+        // tests assert on stop being deterministic.
+        let mut blocker = || {
+            let held = release.clone();
+            submit(Box::new(move || {
+                Box::pin(async move {
+                    held.notified().await;
+                    Vec::new()
+                })
+            }));
+        };
+        // Take whatever capacity is still free, so the lane is genuinely full
+        // rather than merely busy.
+        for _ in 0..snapshot.tools_workers.saturating_sub(snapshot.tools_busy) {
+            blocker();
+        }
+        // Wait for them to actually be holding it before queueing anything
+        // behind them: batches race each other for a permit, so one submitted
+        // alongside could get in first.
+        await_full_lane(host).await;
+        blocker(); // and one behind them, which can only run once there is room
+        await_saturation(host).await;
+        release
+    }
+
+    /// Block until every unit of the world's tool-lane capacity is held.
+    async fn await_full_lane(host: &mut WorldHost) {
+        await_lane(host, "the lane filled up", |snapshot| {
+            snapshot.tools_busy >= snapshot.tools_workers
+        })
+        .await;
+    }
+
+    /// Block until the world's tool lane reports itself saturated.
+    async fn await_saturation(host: &mut WorldHost) {
+        await_lane(host, "the lane saturated", |snapshot| {
+            snapshot.tools_saturated
+        })
+        .await;
+    }
+
+    /// Block until the world's tool lane drains its queue.
+    async fn await_drained_queue(host: &mut WorldHost) {
+        await_lane(host, "the queued batch got in", |snapshot| {
+            snapshot.tools_queued == 0
+        })
+        .await;
+    }
+
+    /// Poll the lane until `done`, or fail with `context`. Bounded so a wedge in
+    /// the code under test fails the run instead of hanging it.
+    async fn await_lane(
+        host: &mut WorldHost,
+        context: &str,
+        done: fn(&crate::world::LaneSnapshot) -> bool,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while !done(&host.world_mut().lane_snapshot()) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{context}"));
+    }
+
+    /// The relief valve: a tool lane that has not drained in long enough gets
+    /// wider, so whatever is queued behind the jam can run.
+    ///
+    /// Additive on purpose. Killing whatever holds the lane is the tempting
+    /// reading of "reclaim stuck slots", and it is wrong: a run parked on an
+    /// `ask_user` is behaving correctly, and an operator killing healthy
+    /// `waiting` runs is the story behind issue #184.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_lane_that_never_drains_is_widened_rather_than_emptied() {
+        leviath_testkit::with_tracing(|| async {
+            let mut host = host_with_full_pool(1);
+            host.set_dead_cycles_before_relief(2);
+            let _release = wedge_the_tool_lane(&mut host).await;
+
+            host.observe_redrive(); // baseline
+            host.observe_redrive(); // 1
+            assert_eq!(host.relief_granted, 0, "still inside the grace period");
+            host.observe_redrive(); // 2 → relief
+            assert_eq!(host.relief_granted, 1, "the lane got wider");
+            assert_eq!(
+                host.dead_cycles, 0,
+                "the streak restarts so relief is not granted again immediately"
+            );
+            assert_eq!(host.health().tools_workers, 2);
+
+            // Which is the whole point: the batch that was queued behind the
+            // jam gets a permit, while the batch already holding one keeps it.
+            await_drained_queue(&mut host).await;
+            assert_eq!(host.world_mut().lane_snapshot().tools_busy, 2);
+        })
+        .await;
+    }
+
+    /// Relief is capped at one extra lane's worth over the daemon's life. If
+    /// that much did not help, the problem is not capacity.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn relief_stops_after_one_extra_lane_s_worth() {
+        leviath_testkit::with_tracing(|| async {
+            let mut host = host_with_full_pool(1);
+            host.set_dead_cycles_before_relief(1);
+            let _release = wedge_the_tool_lane(&mut host).await;
+
+            host.observe_redrive();
+            host.observe_redrive();
+            assert_eq!(host.relief_granted, 1);
+
+            // Wedge it again at the wider width and keep pushing: the budget is
+            // spent, so nothing more is handed out.
+            let _release_two = wedge_the_tool_lane(&mut host).await;
+            for _ in 0..4 {
+                host.observe_redrive();
+            }
+            assert_eq!(host.relief_granted, 1, "the budget was already spent");
+        })
+        .await;
+    }
+
+    /// Relief is off when the operator says so, and detection carries on
+    /// regardless - the streak is still counted and still reported.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn relief_can_be_turned_off_without_turning_off_detection() {
+        leviath_testkit::with_tracing(|| async {
+            let mut host = host_with_full_pool(1);
+            host.set_dead_cycles_before_relief(0);
+            let _release = wedge_the_tool_lane(&mut host).await;
+
+            for _ in 0..4 {
+                host.observe_redrive();
+            }
+            assert_eq!(host.relief_granted, 0, "relief is disabled");
+            assert_eq!(host.dead_cycles, 3, "but the streak is still counted");
+        })
+        .await;
     }
 
     /// Every re-drive hands the sink a daemon-wide sample, including the quiet
