@@ -412,6 +412,82 @@ impl StageInference {
     }
 }
 
+/// A provider whose `infer` panics, standing in for any bug that kills a lane
+/// task before it can report - the case that used to leave the agent waiting on
+/// an outcome that would never arrive (issue #190).
+struct Exploding;
+#[async_trait::async_trait]
+impl Provider for Exploding {
+    async fn infer(
+        &self,
+        _r: InferenceRequest,
+    ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
+        panic!("provider adapter blew up")
+    }
+    async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+        1
+    }
+    fn max_context_tokens(&self, _m: &str) -> usize {
+        100_000
+    }
+    fn name(&self) -> &str {
+        "exploding"
+    }
+    fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
+        leviath_providers::ModelCapabilities::default()
+    }
+}
+
+/// Register [`Exploding`] under `"exploding"` in an already-built test world.
+fn register_exploding(world: &mut World) {
+    world
+        .resource_mut::<Providers>()
+        .0
+        .register("exploding".to_string(), Arc::new(Exploding));
+}
+
+#[tokio::test]
+async fn exploding_provider_metadata_is_exercised() {
+    // Keep the mock's non-`infer` trait methods measured.
+    let p = Exploding;
+    assert_eq!(p.name(), "exploding");
+    assert_eq!(p.count_tokens("t", "m").await, 1);
+    assert_eq!(p.max_context_tokens("m"), 100_000);
+    let _ = p.capabilities("m");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_panicking_inference_job_reports_an_error_instead_of_vanishing() {
+    let (mut world, mut rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    register_exploding(&mut world);
+    let e = world
+        .spawn((
+            agent_state(),
+            window(),
+            stage("m", vec![], None).clone_with_provider("exploding"),
+            ReadyToInfer,
+        ))
+        .id();
+
+    let _silent = crate::test_support::SilentPanics::install();
+    run(&mut world);
+
+    // The agent is parked on `AwaitingInference`, which the driver reads as
+    // "busy" - so an outcome has to arrive or it waits for ever.
+    assert!(world.get::<AwaitingInference>(e).is_some());
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("the supervisor reports promptly")
+        .expect("an outcome");
+    assert_eq!(outcome.entity, e);
+    let err = outcome
+        .result
+        .expect_err("a dead job is an error")
+        .to_string();
+    assert!(err.contains("panicked"), "got: {err}");
+    assert!(err.contains("provider adapter blew up"), "got: {err}");
+}
+
 // ── collect system ──
 
 fn agent_state() -> AgentState {
@@ -4886,6 +4962,39 @@ async fn compaction_dispatches_when_over_threshold() {
     assert!(world.get::<ReadyToInfer>(e).is_none());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_panicking_compaction_job_reports_an_error_instead_of_vanishing() {
+    let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    register_exploding(&mut world);
+    let (ctx, mut crx) = mpsc::unbounded_channel();
+    world.resource_mut::<InferenceStage>().compaction_outcomes = ctx;
+    let e = world
+        .spawn((
+            compacting_window(),
+            compaction_settings("exploding", "m"),
+            agent_state(),
+            ReadyToInfer,
+        ))
+        .id();
+
+    let _silent = crate::test_support::SilentPanics::install();
+    run_dispatch_compaction(&mut world);
+
+    // Compaction is best-effort, but *waiting* for it is not: the agent is held
+    // `AwaitingCompaction` until an outcome lands.
+    assert!(world.get::<AwaitingCompaction>(e).is_some());
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), crx.recv())
+        .await
+        .expect("the supervisor reports promptly")
+        .expect("an outcome");
+    assert_eq!(outcome.entity, e);
+    let err = outcome
+        .result
+        .expect_err("a dead job is an error")
+        .to_string();
+    assert!(err.contains("compaction"), "got: {err}");
+}
+
 #[tokio::test]
 async fn compaction_skips_non_active_agent() {
     let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
@@ -8029,6 +8138,39 @@ async fn dispatch_choice_moves_to_awaiting_response_and_injects_prompt() {
     // The spawned routing job reports back on the transition lane.
     let outcome = trx.recv().await.expect("routing outcome");
     assert_eq!(outcome.entity, e);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_panicking_routing_job_reports_an_error_instead_of_vanishing() {
+    let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    register_exploding(&mut world);
+    let (ttx, mut trx) = mpsc::unbounded_channel();
+    world.resource_mut::<InferenceStage>().transition_outcomes = ttx;
+
+    let bp = blueprint(vec![stage_named("a", None, false, None)]);
+    let e = spawn_choosing_agent(&mut world, bp, vec![si("m0")], vec![plain_edge("a")]);
+    world
+        .entity_mut(e)
+        .insert(stage_infs_head().clone_with_provider("exploding"));
+
+    let _silent = crate::test_support::SilentPanics::install();
+    let mut schedule = Schedule::default();
+    schedule.add_systems(dispatch_transition_choice);
+    schedule.run(&mut world);
+
+    // Parked on `AwaitingTransitionResponse`: without an outcome the agent is
+    // stranded mid-route, having already left its stage behind.
+    assert!(world.get::<AwaitingTransitionResponse>(e).is_some());
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), trx.recv())
+        .await
+        .expect("the supervisor reports promptly")
+        .expect("an outcome");
+    assert_eq!(outcome.entity, e);
+    let err = outcome
+        .result
+        .expect_err("a dead job is an error")
+        .to_string();
+    assert!(err.contains("transition-choice"), "got: {err}");
 }
 
 #[tokio::test]

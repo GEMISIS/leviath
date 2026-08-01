@@ -1709,13 +1709,30 @@ pub fn dispatch_transition_choice(
             exact_token_counting: false,
         };
         let cancel = crate::cancel::CancelToken::new();
-        stage.runtime.spawn(run_inference_job(
-            job,
-            stage.transition_outcomes.clone(),
-            stage.wake.clone(),
-            crate::inference_bridge::RetryPolicy::default(),
-            cancel.clone(),
-        ));
+        // Supervised for the same reason as the inference lane: the agent is
+        // about to wait on `AwaitingTransitionResponse`, so a job that dies
+        // without reporting would strand it mid-route.
+        let lost_outcomes = stage.transition_outcomes.clone();
+        let lost_wake = stage.wake.clone();
+        crate::lane_supervisor::spawn_supervised(
+            &stage.runtime,
+            "transition-choice",
+            run_inference_job(
+                job,
+                stage.transition_outcomes.clone(),
+                stage.wake.clone(),
+                crate::inference_bridge::RetryPolicy::default(),
+                cancel.clone(),
+            ),
+            move |message| {
+                let _ = lost_outcomes.send(crate::inference_bridge::InferenceOutcome {
+                    entity,
+                    result: Err(leviath_providers::ProviderError::Other(message)),
+                    latency: std::time::Duration::ZERO,
+                });
+                lost_wake.notify_one();
+            },
+        );
         track_in_flight(&mut commands, entity, in_flight, cancel);
         commands
             .entity(entity)

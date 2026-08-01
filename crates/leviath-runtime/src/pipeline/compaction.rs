@@ -24,6 +24,36 @@ pub struct CompactionResults(pub UnboundedReceiver<CompactionOutcome>);
 /// the same 0.9 the imperative `evict_and_compact` uses.
 pub(crate) const EVICTION_THRESHOLD: f32 = 0.9;
 
+/// Spawn a compaction job under the lane supervisor, so a job that dies without
+/// reporting still produces an outcome.
+///
+/// Compaction is best-effort, but *waiting* for it is not: the agent is held
+/// `AwaitingCompaction` until an outcome lands. A lost job would park it there
+/// for good. The synthesized error takes the collect system's failure path,
+/// which returns the agent to `ReadyToInfer` with its context untouched - the
+/// same place a genuine summarization failure leaves it.
+fn spawn_supervised_compaction(stage: &InferenceStage, entity: Entity, job: CompactionJob) {
+    let lost_outcomes = stage.compaction_outcomes.clone();
+    let lost_wake = stage.wake.clone();
+    crate::lane_supervisor::spawn_supervised(
+        &stage.runtime,
+        "compaction",
+        run_compaction_job(
+            job,
+            std::time::Duration::from_secs(leviath_providers::DEFAULT_INFERENCE_TIMEOUT_SECS),
+            stage.compaction_outcomes.clone(),
+            stage.wake.clone(),
+        ),
+        move |message| {
+            let _ = lost_outcomes.send(CompactionOutcome {
+                entity,
+                result: Err(leviath_providers::ProviderError::Other(message)),
+            });
+            lost_wake.notify_one();
+        },
+    );
+}
+
 /// Compaction-dispatch system: for each `ReadyToInfer` agent with
 /// [`CompactionSettings`] whose window is over the eviction threshold, do the
 /// synchronous eviction inline; if that surfaces regions needing LLM
@@ -93,17 +123,16 @@ pub fn dispatch_compaction(
             continue; // pool full - skip compaction this round
         };
 
-        stage.runtime.spawn(run_compaction_job(
+        spawn_supervised_compaction(
+            &stage,
+            entity,
             CompactionJob {
                 entity,
                 provider,
                 requests,
                 permit,
             },
-            std::time::Duration::from_secs(leviath_providers::DEFAULT_INFERENCE_TIMEOUT_SECS),
-            stage.compaction_outcomes.clone(),
-            stage.wake.clone(),
-        ));
+        );
         commands
             .entity(entity)
             .remove::<ReadyToInfer>()
@@ -306,19 +335,16 @@ pub fn dispatch_edge_compact(
                 let requests = build_edge_compact_requests(window, &pending.0, config)?;
                 let provider = providers.0.get(&config.provider)?;
                 let permit = stage.pools.try_acquire(&config.model)?;
-                stage.runtime.spawn(run_compaction_job(
+                spawn_supervised_compaction(
+                    &stage,
+                    entity,
                     CompactionJob {
                         entity,
                         provider,
                         requests,
                         permit,
                     },
-                    std::time::Duration::from_secs(
-                        leviath_providers::DEFAULT_INFERENCE_TIMEOUT_SECS,
-                    ),
-                    stage.compaction_outcomes.clone(),
-                    stage.wake.clone(),
-                ));
+                );
                 Some(())
             })
             .is_some();
