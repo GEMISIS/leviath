@@ -71,7 +71,7 @@ pub fn dispatch_compaction(
             let content: String = region
                 .content
                 .iter()
-                .map(|e| e.content.as_str())
+                .map(|e| e.content())
                 .collect::<Vec<_>>()
                 .join("\n\n");
             if content.is_empty() {
@@ -345,7 +345,7 @@ pub(crate) fn build_edge_compact_requests(
             let content = region
                 .content
                 .iter()
-                .map(|e| e.content.as_str())
+                .map(|e| e.content())
                 .collect::<Vec<_>>()
                 .join("\n\n");
             (!content.is_empty())

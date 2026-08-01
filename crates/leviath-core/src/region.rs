@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::intern::{ContentInterner, InternedString};
+
 /// The kind of content stored in a region entry.
 ///
 /// Entries carry typed metadata instead of relying on text-prefix parsing
@@ -311,43 +313,11 @@ impl Region {
     /// Add an entry with a taint level. Used when taint tracking is enabled.
     pub fn add_tainted_entry(
         &mut self,
-        content: String,
+        content: impl AsRef<str>,
         tokens: usize,
         taint_level: crate::taint::TaintLevel,
     ) -> crate::error::Result<()> {
-        // Validate against schema if present
-        if let Some(schema) = &self.schema {
-            schema.validate(&content)?;
-        }
-
-        // Check token budget
-        if self.current_tokens + tokens > self.max_tokens {
-            return Err(crate::error::Error::TokenBudgetExceeded {
-                used: self.current_tokens + tokens,
-                max: self.max_tokens,
-            });
-        }
-
-        // Add entry
-        self.content.push(RegionEntry {
-            content,
-            tokens,
-            timestamp: chrono::Utc::now().timestamp(),
-            metadata: None,
-            kind: EntryKind::default(),
-            key: None,
-        });
-        self.current_tokens += tokens;
-
-        // Update taint tracking
-        if let Some(taint) = &mut self.taint {
-            taint.add_entry(taint_level);
-        }
-
-        // Enforce SlidingWindow max_items limit
-        self.enforce_sliding_window();
-
-        Ok(())
+        self.insert_tainted_entry(RegionEntry::new(content, tokens), taint_level)
     }
 
     /// Add a typed entry with a taint level.
@@ -360,44 +330,14 @@ impl Region {
     /// both keeps its `ToolResult` kind and raises the region's taint level.
     pub fn add_typed_tainted_entry(
         &mut self,
-        content: String,
+        content: impl AsRef<str>,
         tokens: usize,
         kind: EntryKind,
         taint_level: crate::taint::TaintLevel,
     ) -> crate::error::Result<()> {
-        // Validate against schema if present
-        if let Some(schema) = &self.schema {
-            schema.validate(&content)?;
-        }
-
-        // Check token budget
-        if self.current_tokens + tokens > self.max_tokens {
-            return Err(crate::error::Error::TokenBudgetExceeded {
-                used: self.current_tokens + tokens,
-                max: self.max_tokens,
-            });
-        }
-
-        // Add entry
-        self.content.push(RegionEntry {
-            content,
-            tokens,
-            timestamp: chrono::Utc::now().timestamp(),
-            metadata: None,
-            kind,
-            key: None,
-        });
-        self.current_tokens += tokens;
-
-        // Update taint tracking with the supplied level
-        if let Some(taint) = &mut self.taint {
-            taint.add_entry(taint_level);
-        }
-
-        // Enforce SlidingWindow max_items limit
-        self.enforce_sliding_window();
-
-        Ok(())
+        let mut entry = RegionEntry::new(content, tokens);
+        entry.kind = kind;
+        self.insert_tainted_entry(entry, taint_level)
     }
 
     /// Add a validation schema to this region.
@@ -406,86 +346,80 @@ impl Region {
         self
     }
 
-    /// Add an entry to this region.
+    /// Insert a pre-built entry (runtime boundary).
     ///
-    /// Validates content against schema if present, checks token budget,
-    /// and adds the entry to the region.
-    pub fn add_entry(&mut self, content: String, tokens: usize) -> crate::error::Result<()> {
-        // Validate against schema if present
+    /// Validates the entry's content against schema if present, checks the
+    /// token budget, and pushes. Used by context windows that have already
+    /// interned the text — domain code should prefer [`Self::add_entry`].
+    pub fn insert_entry(&mut self, entry: RegionEntry) -> crate::error::Result<()> {
         if let Some(schema) = &self.schema {
-            schema.validate(&content)?;
+            schema.validate(entry.content())?;
         }
-
-        // Check token budget
-        if self.current_tokens + tokens > self.max_tokens {
+        if self.current_tokens + entry.tokens > self.max_tokens {
             return Err(crate::error::Error::TokenBudgetExceeded {
-                used: self.current_tokens + tokens,
+                used: self.current_tokens + entry.tokens,
                 max: self.max_tokens,
             });
         }
-
-        // Add entry
-        self.content.push(RegionEntry {
-            content,
-            tokens,
-            timestamp: chrono::Utc::now().timestamp(),
-            metadata: None,
-            kind: EntryKind::default(),
-            key: None,
-        });
+        let tokens = entry.tokens;
+        self.content.push(entry);
         self.current_tokens += tokens;
-
-        // Track taint as Public for untagged entries
         if let Some(taint) = &mut self.taint {
             taint.add_entry(crate::taint::TaintLevel::Public);
         }
-
-        // Enforce SlidingWindow max_items limit
         self.enforce_sliding_window();
-
         Ok(())
+    }
+
+    /// Like [`Self::insert_entry`] but records `taint_level` when tracking is on.
+    pub fn insert_tainted_entry(
+        &mut self,
+        entry: RegionEntry,
+        taint_level: crate::taint::TaintLevel,
+    ) -> crate::error::Result<()> {
+        if let Some(schema) = &self.schema {
+            schema.validate(entry.content())?;
+        }
+        if self.current_tokens + entry.tokens > self.max_tokens {
+            return Err(crate::error::Error::TokenBudgetExceeded {
+                used: self.current_tokens + entry.tokens,
+                max: self.max_tokens,
+            });
+        }
+        let tokens = entry.tokens;
+        self.content.push(entry);
+        self.current_tokens += tokens;
+        if let Some(taint) = &mut self.taint {
+            taint.add_entry(taint_level);
+        }
+        self.enforce_sliding_window();
+        Ok(())
+    }
+
+    /// Add an entry to this region.
+    ///
+    /// Validates content against schema if present, checks token budget,
+    /// and adds the entry to the region. Allocates uniquely — no interner
+    /// required. Runtime paths that need cross-agent sharing should build a
+    /// [`RegionEntry::interned`] value and call [`Self::insert_entry`].
+    pub fn add_entry(
+        &mut self,
+        content: impl AsRef<str>,
+        tokens: usize,
+    ) -> crate::error::Result<()> {
+        self.insert_entry(RegionEntry::new(content, tokens))
     }
 
     /// Add an entry with metadata.
     pub fn add_entry_with_metadata(
         &mut self,
-        content: String,
+        content: impl AsRef<str>,
         tokens: usize,
         metadata: serde_json::Value,
     ) -> crate::error::Result<()> {
-        // Validate against schema if present
-        if let Some(schema) = &self.schema {
-            schema.validate(&content)?;
-        }
-
-        // Check token budget
-        if self.current_tokens + tokens > self.max_tokens {
-            return Err(crate::error::Error::TokenBudgetExceeded {
-                used: self.current_tokens + tokens,
-                max: self.max_tokens,
-            });
-        }
-
-        // Add entry
-        self.content.push(RegionEntry {
-            content,
-            tokens,
-            timestamp: chrono::Utc::now().timestamp(),
-            metadata: Some(metadata),
-            kind: EntryKind::default(),
-            key: None,
-        });
-        self.current_tokens += tokens;
-
-        // Track taint as Public for untagged entries
-        if let Some(taint) = &mut self.taint {
-            taint.add_entry(crate::taint::TaintLevel::Public);
-        }
-
-        // Enforce SlidingWindow max_items limit
-        self.enforce_sliding_window();
-
-        Ok(())
+        let mut entry = RegionEntry::new(content, tokens);
+        entry.metadata = Some(metadata);
+        self.insert_entry(entry)
     }
 
     /// Add an entry with a specific [`EntryKind`] to this region.
@@ -495,43 +429,13 @@ impl Region {
     /// text-prefix parsing.
     pub fn add_typed_entry(
         &mut self,
-        content: String,
+        content: impl AsRef<str>,
         tokens: usize,
         kind: EntryKind,
     ) -> crate::error::Result<()> {
-        // Validate against schema if present
-        if let Some(schema) = &self.schema {
-            schema.validate(&content)?;
-        }
-
-        // Check token budget
-        if self.current_tokens + tokens > self.max_tokens {
-            return Err(crate::error::Error::TokenBudgetExceeded {
-                used: self.current_tokens + tokens,
-                max: self.max_tokens,
-            });
-        }
-
-        // Add entry
-        self.content.push(RegionEntry {
-            content,
-            tokens,
-            timestamp: chrono::Utc::now().timestamp(),
-            metadata: None,
-            kind,
-            key: None,
-        });
-        self.current_tokens += tokens;
-
-        // Track taint as Public for untagged entries
-        if let Some(taint) = &mut self.taint {
-            taint.add_entry(crate::taint::TaintLevel::Public);
-        }
-
-        // Enforce SlidingWindow max_items limit
-        self.enforce_sliding_window();
-
-        Ok(())
+        let mut entry = RegionEntry::new(content, tokens);
+        entry.kind = kind;
+        self.insert_entry(entry)
     }
 
     /// Carry an already-accepted entry into this region verbatim, preserving
@@ -570,9 +474,10 @@ impl Region {
     pub fn upsert_by_key(
         &mut self,
         key: &str,
-        content: String,
+        content: impl AsRef<str>,
         tokens: usize,
     ) -> Result<(), String> {
+        let content = content.as_ref();
         // If key exists, update in place
         if let Some(pos) = self
             .content
@@ -581,7 +486,7 @@ impl Region {
         {
             let old_tokens = self.content[pos].tokens;
             self.current_tokens -= old_tokens;
-            self.content[pos].content = content;
+            self.content[pos].set_content(content);
             self.content[pos].tokens = tokens;
             self.content[pos].timestamp = chrono::Utc::now().timestamp();
             self.current_tokens += tokens;
@@ -615,14 +520,14 @@ impl Region {
             ));
         }
 
-        self.content.push(RegionEntry {
+        self.content.push(RegionEntry::make_unique(
             content,
             tokens,
-            timestamp: chrono::Utc::now().timestamp(),
-            metadata: None,
-            kind: EntryKind::default(),
-            key: Some(key.to_string()),
-        });
+            EntryKind::default(),
+            None,
+            Some(key.to_string()),
+            None,
+        ));
         self.current_tokens += tokens;
         Ok(())
     }
@@ -836,10 +741,16 @@ impl Region {
 /// A single entry within a region.
 ///
 /// Each entry has content and metadata tracking its token usage.
+///
+/// Text is stored as a reference-counted string. Callers only see plain `&str`
+/// through [`Self::content`]. Sharing across agents is a *runtime* concern:
+/// construct with [`Self::interned`] at the window/restore boundary; domain
+/// code uses [`Self::new`] / the region convenience writers, which allocate
+/// uniquely and never require an interner parameter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegionEntry {
-    /// The actual content of this entry
-    pub content: String,
+    /// Interned payload. Private: only constructors / [`Self::set_content`] intern.
+    content: InternedString,
 
     /// Token count for this entry
     pub tokens: usize,
@@ -859,6 +770,131 @@ pub struct RegionEntry {
     /// Optional key for HashMap regions. When set, upsert semantics apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+}
+
+impl RegionEntry {
+    /// Unique allocation — no interner, no cross-entry sharing.
+    ///
+    /// Domain code and tests use this. Runtime paths that need sharing use
+    /// [`Self::interned`] instead.
+    pub fn new(content: impl AsRef<str>, tokens: usize) -> Self {
+        Self::make_unique(content, tokens, EntryKind::default(), None, None, None)
+    }
+
+    /// Intern through `interner` so identical text shares one allocation.
+    ///
+    /// Used at the runtime boundary (context window writes, restore).
+    pub fn interned(interner: &ContentInterner, content: impl AsRef<str>, tokens: usize) -> Self {
+        Self::make_interned(
+            interner,
+            content,
+            tokens,
+            EntryKind::default(),
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// Full constructor with unique allocation (tests, offline rebuilds).
+    pub fn from_parts(
+        content: impl AsRef<str>,
+        tokens: usize,
+        timestamp: i64,
+        metadata: Option<serde_json::Value>,
+        kind: EntryKind,
+        key: Option<String>,
+    ) -> Self {
+        Self::make_unique(content, tokens, kind, metadata, key, Some(timestamp))
+    }
+
+    /// Full constructor that interns through `interner` (restore / window writes).
+    pub fn from_parts_interned(
+        interner: &ContentInterner,
+        content: impl AsRef<str>,
+        tokens: usize,
+        timestamp: i64,
+        metadata: Option<serde_json::Value>,
+        kind: EntryKind,
+        key: Option<String>,
+    ) -> Self {
+        Self::make_interned(
+            interner,
+            content,
+            tokens,
+            kind,
+            metadata,
+            key,
+            Some(timestamp),
+        )
+    }
+
+    /// Borrow the entry text as plain `&str`.
+    #[inline]
+    pub fn content(&self) -> &str {
+        self.content.as_str()
+    }
+
+    /// Replace text with a unique allocation.
+    #[inline]
+    pub fn set_content(&mut self, content: impl AsRef<str>) {
+        self.content = InternedString::unique(content);
+    }
+
+    /// Replace text, re-interning through `interner`.
+    #[inline]
+    pub fn set_content_interned(&mut self, interner: &ContentInterner, content: impl AsRef<str>) {
+        self.content = interner.intern(content);
+    }
+
+    /// Owned copy for snapshots / provider payloads.
+    #[inline]
+    pub fn content_owned(&self) -> String {
+        self.content.as_str().to_owned()
+    }
+
+    /// True when both entries share the same heap allocation.
+    #[inline]
+    pub fn shares_content_with(&self, other: &Self) -> bool {
+        self.content.ptr_eq(&other.content)
+    }
+
+    fn make_unique(
+        content: impl AsRef<str>,
+        tokens: usize,
+        kind: EntryKind,
+        metadata: Option<serde_json::Value>,
+        key: Option<String>,
+        timestamp: Option<i64>,
+    ) -> Self {
+        Self {
+            content: InternedString::unique(content),
+            tokens,
+            timestamp: timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp()),
+            metadata,
+            kind,
+            key,
+        }
+    }
+
+    fn make_interned(
+        interner: &ContentInterner,
+        content: impl AsRef<str>,
+        tokens: usize,
+        kind: EntryKind,
+        metadata: Option<serde_json::Value>,
+        key: Option<String>,
+        timestamp: Option<i64>,
+    ) -> Self {
+        Self {
+            content: interner.intern(content),
+            tokens,
+            timestamp: timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp()),
+            metadata,
+            kind,
+            key,
+        }
+    }
 }
 
 /// Validation schema for a region's content.
@@ -987,6 +1023,8 @@ pub trait Validator: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    use super::ContentInterner;
+
     use super::*;
 
     #[test]
@@ -1092,7 +1130,7 @@ mod tests {
         let mut source = Region::new("conversation".to_string(), RegionKind::Temporary, 10_000);
         source
             .add_typed_entry(
-                "result body".to_string(),
+                "result body",
                 10,
                 EntryKind::ToolResult {
                     tool_call_id: "call_1".to_string(),
@@ -1127,7 +1165,7 @@ mod tests {
     fn carry_entry_rejects_over_budget() {
         let mut dest = Region::new("small".to_string(), RegionKind::Temporary, 5);
         let mut source = Region::new("src".to_string(), RegionKind::Temporary, 100);
-        source.add_entry("filler".to_string(), 10).unwrap();
+        source.add_entry("filler", 10).unwrap();
         let err = dest.carry_entry(source.content[0].clone()).unwrap_err();
         assert_eq!(err.to_string(), "Content exceeds token budget: 10 > 5");
         assert!(dest.content.is_empty());
@@ -1152,7 +1190,7 @@ mod tests {
             dest.carry_entry(entry.clone()).unwrap();
         }
         assert_eq!(dest.content.len(), 3);
-        assert_eq!(dest.content[0].content, "msg1");
+        assert_eq!(dest.content[0].content(), "msg1");
     }
 
     #[test]
@@ -1166,23 +1204,23 @@ mod tests {
             50000,
         );
 
-        region.add_entry("msg1".to_string(), 10).unwrap();
-        region.add_entry("msg2".to_string(), 20).unwrap();
-        region.add_entry("msg3".to_string(), 30).unwrap();
+        region.add_entry("msg1", 10).unwrap();
+        region.add_entry("msg2", 20).unwrap();
+        region.add_entry("msg3", 30).unwrap();
         assert_eq!(region.entry_count(), 3);
         assert_eq!(region.current_tokens, 60);
 
         // Adding a 4th entry should evict the oldest
-        region.add_entry("msg4".to_string(), 40).unwrap();
+        region.add_entry("msg4", 40).unwrap();
         assert_eq!(region.entry_count(), 3);
-        assert_eq!(region.content[0].content, "msg2");
-        assert_eq!(region.content[2].content, "msg4");
+        assert_eq!(region.content[0].content(), "msg2");
+        assert_eq!(region.content[2].content(), "msg4");
         assert_eq!(region.current_tokens, 90); // 20 + 30 + 40
 
         // Adding a 5th entry should evict again
-        region.add_entry("msg5".to_string(), 50).unwrap();
+        region.add_entry("msg5", 50).unwrap();
         assert_eq!(region.entry_count(), 3);
-        assert_eq!(region.content[0].content, "msg3");
+        assert_eq!(region.content[0].content(), "msg3");
         assert_eq!(region.current_tokens, 120); // 30 + 40 + 50
     }
 
@@ -1198,18 +1236,18 @@ mod tests {
         );
 
         region
-            .add_entry_with_metadata("a".to_string(), 10, serde_json::json!({"idx": 1}))
+            .add_entry_with_metadata("a", 10, serde_json::json!({"idx": 1}))
             .unwrap();
         region
-            .add_entry_with_metadata("b".to_string(), 20, serde_json::json!({"idx": 2}))
+            .add_entry_with_metadata("b", 20, serde_json::json!({"idx": 2}))
             .unwrap();
         region
-            .add_entry_with_metadata("c".to_string(), 30, serde_json::json!({"idx": 3}))
+            .add_entry_with_metadata("c", 30, serde_json::json!({"idx": 3}))
             .unwrap();
 
         assert_eq!(region.entry_count(), 2);
-        assert_eq!(region.content[0].content, "b");
-        assert_eq!(region.content[1].content, "c");
+        assert_eq!(region.content[0].content(), "b");
+        assert_eq!(region.content[1].content(), "c");
         assert_eq!(region.current_tokens, 50);
     }
 
@@ -1280,7 +1318,7 @@ mod tests {
         let schema = RegionSchema::new(ContentFormat::Json);
         let mut region =
             Region::new("data".to_string(), RegionKind::Temporary, 1000).with_schema(schema);
-        let result = region.add_entry("not json".to_string(), 10);
+        let result = region.add_entry("not json", 10);
         assert!(result.is_err());
         assert_eq!(region.entry_count(), 0);
     }
@@ -1290,7 +1328,7 @@ mod tests {
         let schema = RegionSchema::new(ContentFormat::Json);
         let mut region =
             Region::new("data".to_string(), RegionKind::Temporary, 1000).with_schema(schema);
-        let result = region.add_entry("{\"a\":1}".to_string(), 10);
+        let result = region.add_entry("{\"a\":1}", 10);
         assert!(result.is_ok());
         assert_eq!(region.entry_count(), 1);
     }
@@ -1298,7 +1336,7 @@ mod tests {
     #[test]
     fn test_add_entry_rejects_over_budget() {
         let mut region = Region::new("data".to_string(), RegionKind::Temporary, 10);
-        let result = region.add_entry("too much".to_string(), 20);
+        let result = region.add_entry("too much", 20);
         assert_eq!(
             result.unwrap_err().to_string(),
             "Content exceeds token budget: 20 > 10"
@@ -1311,16 +1349,14 @@ mod tests {
         let schema = RegionSchema::new(ContentFormat::Json);
         let mut region =
             Region::new("data".to_string(), RegionKind::Temporary, 1000).with_schema(schema);
-        let result =
-            region.add_entry_with_metadata("not json".to_string(), 10, serde_json::json!({}));
+        let result = region.add_entry_with_metadata("not json", 10, serde_json::json!({}));
         assert!(result.is_err());
     }
 
     #[test]
     fn test_add_entry_with_metadata_rejects_over_budget() {
         let mut region = Region::new("data".to_string(), RegionKind::Temporary, 10);
-        let result =
-            region.add_entry_with_metadata("too much".to_string(), 20, serde_json::json!({}));
+        let result = region.add_entry_with_metadata("too much", 20, serde_json::json!({}));
         assert_eq!(
             result.unwrap_err().to_string(),
             "Content exceeds token budget: 20 > 10"
@@ -1331,7 +1367,7 @@ mod tests {
     fn test_add_entry_with_metadata_stores_metadata() {
         let mut region = Region::new("data".to_string(), RegionKind::Temporary, 1000);
         region
-            .add_entry_with_metadata("hello".to_string(), 5, serde_json::json!({"k": "v"}))
+            .add_entry_with_metadata("hello", 5, serde_json::json!({"k": "v"}))
             .unwrap();
         assert_eq!(
             region.content[0].metadata,
@@ -1344,8 +1380,8 @@ mod tests {
     #[test]
     fn test_clear_removes_all_content_and_resets_tokens() {
         let mut region = Region::new("data".to_string(), RegionKind::Temporary, 1000);
-        region.add_entry("a".to_string(), 10).unwrap();
-        region.add_entry("b".to_string(), 20).unwrap();
+        region.add_entry("a", 10).unwrap();
+        region.add_entry("b", 20).unwrap();
         assert_eq!(region.entry_count(), 2);
 
         region.clear();
@@ -1356,11 +1392,11 @@ mod tests {
     #[test]
     fn test_remove_oldest_returns_and_removes_first_entry() {
         let mut region = Region::new("data".to_string(), RegionKind::Temporary, 1000);
-        region.add_entry("first".to_string(), 10).unwrap();
-        region.add_entry("second".to_string(), 20).unwrap();
+        region.add_entry("first", 10).unwrap();
+        region.add_entry("second", 20).unwrap();
 
         let removed = region.remove_oldest().unwrap();
-        assert_eq!(removed.content, "first");
+        assert_eq!(removed.content(), "first");
         assert_eq!(region.entry_count(), 1);
         assert_eq!(region.current_tokens, 20);
     }
@@ -1380,7 +1416,7 @@ mod tests {
             },
             1000,
         );
-        region.add_entry("x".to_string(), 20).unwrap();
+        region.add_entry("x", 20).unwrap();
         assert!(region.needs_compaction());
     }
 
@@ -1393,7 +1429,7 @@ mod tests {
             },
             1000,
         );
-        region.add_entry("x".to_string(), 20).unwrap();
+        region.add_entry("x", 20).unwrap();
         assert!(!region.needs_compaction());
     }
 
@@ -1551,11 +1587,7 @@ mod tests {
         let mut region =
             Region::new("test".to_string(), RegionKind::Temporary, 1000).with_taint_tracking();
         region
-            .add_tainted_entry(
-                "secret data".to_string(),
-                10,
-                crate::taint::TaintLevel::Private,
-            )
+            .add_tainted_entry("secret data", 10, crate::taint::TaintLevel::Private)
             .unwrap();
         assert_eq!(
             region.taint_level(),
@@ -1569,11 +1601,7 @@ mod tests {
         let mut region = Region::new("test".to_string(), RegionKind::Temporary, 1000)
             .with_taint_tracking()
             .with_schema(RegionSchema::new(ContentFormat::Json));
-        let result = region.add_tainted_entry(
-            "not json".to_string(),
-            10,
-            crate::taint::TaintLevel::Internal,
-        );
+        let result = region.add_tainted_entry("not json", 10, crate::taint::TaintLevel::Internal);
         assert!(result.is_err());
         assert_eq!(region.entry_count(), 0);
     }
@@ -1582,11 +1610,7 @@ mod tests {
     fn test_add_tainted_entry_checks_budget() {
         let mut region =
             Region::new("test".to_string(), RegionKind::Temporary, 10).with_taint_tracking();
-        let result = region.add_tainted_entry(
-            "too much".to_string(),
-            20,
-            crate::taint::TaintLevel::Internal,
-        );
+        let result = region.add_tainted_entry("too much", 20, crate::taint::TaintLevel::Internal);
         assert!(result.is_err());
     }
 
@@ -1594,7 +1618,7 @@ mod tests {
     fn test_add_entry_tracks_taint_as_public() {
         let mut region =
             Region::new("test".to_string(), RegionKind::Temporary, 1000).with_taint_tracking();
-        region.add_entry("public data".to_string(), 10).unwrap();
+        region.add_entry("public data", 10).unwrap();
         assert_eq!(region.taint_level(), Some(crate::taint::TaintLevel::Public));
     }
 
@@ -1603,10 +1627,10 @@ mod tests {
         let mut region =
             Region::new("test".to_string(), RegionKind::Temporary, 1000).with_taint_tracking();
         region
-            .add_tainted_entry("private".to_string(), 10, crate::taint::TaintLevel::Private)
+            .add_tainted_entry("private", 10, crate::taint::TaintLevel::Private)
             .unwrap();
         region
-            .add_tainted_entry("public".to_string(), 10, crate::taint::TaintLevel::Public)
+            .add_tainted_entry("public", 10, crate::taint::TaintLevel::Public)
             .unwrap();
         assert_eq!(
             region.taint_level(),
@@ -1622,7 +1646,7 @@ mod tests {
         let mut region =
             Region::new("test".to_string(), RegionKind::Temporary, 1000).with_taint_tracking();
         region
-            .add_tainted_entry("private".to_string(), 10, crate::taint::TaintLevel::Private)
+            .add_tainted_entry("private", 10, crate::taint::TaintLevel::Private)
             .unwrap();
         region.clear();
         assert_eq!(region.taint_level(), Some(crate::taint::TaintLevel::Public));
@@ -1641,10 +1665,10 @@ mod tests {
         .with_taint_tracking();
 
         region
-            .add_tainted_entry("private".to_string(), 10, crate::taint::TaintLevel::Private)
+            .add_tainted_entry("private", 10, crate::taint::TaintLevel::Private)
             .unwrap();
         region
-            .add_tainted_entry("public1".to_string(), 10, crate::taint::TaintLevel::Public)
+            .add_tainted_entry("public1", 10, crate::taint::TaintLevel::Public)
             .unwrap();
         assert_eq!(
             region.taint_level(),
@@ -1653,7 +1677,7 @@ mod tests {
 
         // Third entry evicts the private one
         region
-            .add_tainted_entry("public2".to_string(), 10, crate::taint::TaintLevel::Public)
+            .add_tainted_entry("public2", 10, crate::taint::TaintLevel::Public)
             .unwrap();
         assert_eq!(region.entry_count(), 2);
         assert_eq!(region.taint_level(), Some(crate::taint::TaintLevel::Public));
@@ -1687,7 +1711,7 @@ mod tests {
 
         region
             .add_typed_tainted_entry(
-                "secret data".to_string(),
+                "secret data",
                 10,
                 EntryKind::ToolResult {
                     tool_call_id: "tc_1".to_string(),
@@ -1761,7 +1785,7 @@ mod tests {
         .with_taint_tracking();
 
         let result = region.add_typed_tainted_entry(
-            "too large".to_string(),
+            "too large",
             100,
             EntryKind::ToolResult {
                 tool_call_id: "tc_1".to_string(),
@@ -1781,7 +1805,7 @@ mod tests {
 
         // Non-JSON content should fail validation
         let result = region.add_typed_tainted_entry(
-            "not json".to_string(),
+            "not json",
             5,
             EntryKind::Text,
             crate::taint::TaintLevel::Public,
@@ -1805,7 +1829,7 @@ mod tests {
 
         region
             .add_typed_tainted_entry(
-                "data".to_string(),
+                "data",
                 10,
                 EntryKind::Text,
                 crate::taint::TaintLevel::Private,
@@ -1823,7 +1847,7 @@ mod tests {
         let mut region = Region::new("conv".to_string(), RegionKind::Temporary, 50000);
         region
             .add_typed_entry(
-                "assistant response".to_string(),
+                "assistant response",
                 10,
                 EntryKind::AssistantTurn {
                     tool_calls: vec![
@@ -1845,7 +1869,7 @@ mod tests {
             .unwrap();
         region
             .add_typed_entry(
-                "result 1".to_string(),
+                "result 1",
                 5,
                 EntryKind::ToolResult {
                     tool_call_id: "tc_1".to_string(),
@@ -1856,7 +1880,7 @@ mod tests {
             .unwrap();
         region
             .add_typed_entry(
-                "result 2".to_string(),
+                "result 2",
                 5,
                 EntryKind::ToolResult {
                     tool_call_id: "tc_2".to_string(),
@@ -1874,7 +1898,7 @@ mod tests {
         let mut region = Region::new("conv".to_string(), RegionKind::Temporary, 50000);
         region
             .add_typed_entry(
-                "assistant with no tools".to_string(),
+                "assistant with no tools",
                 10,
                 EntryKind::AssistantTurn { tool_calls: vec![] },
             )
@@ -1893,15 +1917,13 @@ mod tests {
     #[test]
     fn test_turn_group_size_at_non_assistant_entries() {
         let mut region = Region::new("conv".to_string(), RegionKind::Temporary, 50000);
+        region.add_typed_entry("hello", 5, EntryKind::Text).unwrap();
         region
-            .add_typed_entry("hello".to_string(), 5, EntryKind::Text)
-            .unwrap();
-        region
-            .add_typed_entry("hi".to_string(), 5, EntryKind::UserMessage)
+            .add_typed_entry("hi", 5, EntryKind::UserMessage)
             .unwrap();
         region
             .add_typed_entry(
-                "orphan result".to_string(),
+                "orphan result",
                 5,
                 EntryKind::ToolResult {
                     tool_call_id: "tc_x".to_string(),
@@ -1924,7 +1946,7 @@ mod tests {
         // AssistantTurn with 2 tool calls
         region
             .add_typed_entry(
-                "assistant".to_string(),
+                "assistant",
                 100,
                 EntryKind::AssistantTurn {
                     tool_calls: vec![
@@ -1946,7 +1968,7 @@ mod tests {
             .unwrap();
         region
             .add_typed_entry(
-                "result 1".to_string(),
+                "result 1",
                 30,
                 EntryKind::ToolResult {
                     tool_call_id: "tc_1".to_string(),
@@ -1957,7 +1979,7 @@ mod tests {
             .unwrap();
         region
             .add_typed_entry(
-                "result 2".to_string(),
+                "result 2",
                 20,
                 EntryKind::ToolResult {
                     tool_call_id: "tc_2".to_string(),
@@ -1968,7 +1990,7 @@ mod tests {
             .unwrap();
         // A trailing user message that should survive
         region
-            .add_typed_entry("user msg".to_string(), 10, EntryKind::UserMessage)
+            .add_typed_entry("user msg", 10, EntryKind::UserMessage)
             .unwrap();
 
         assert_eq!(region.entry_count(), 4);
@@ -1977,11 +1999,11 @@ mod tests {
         let removed = region.remove_oldest().unwrap();
         // The returned entry is the AssistantTurn, with tokens adjusted to
         // include the extra tokens from the 2 ToolResult entries.
-        assert_eq!(removed.content, "assistant");
+        assert_eq!(removed.content(), "assistant");
         assert_eq!(removed.tokens, 100 + 30 + 20); // 150
         // Only the user message remains
         assert_eq!(region.entry_count(), 1);
-        assert_eq!(region.content[0].content, "user msg");
+        assert_eq!(region.content[0].content(), "user msg");
         assert_eq!(region.current_tokens, 10);
     }
 
@@ -1995,7 +2017,7 @@ mod tests {
         // AssistantTurn (Private) + 1 ToolResult (Internal) + 1 trailing Public entry
         region
             .add_typed_tainted_entry(
-                "assistant".to_string(),
+                "assistant",
                 10,
                 EntryKind::AssistantTurn {
                     tool_calls: vec![SerializedToolCall {
@@ -2010,7 +2032,7 @@ mod tests {
             .unwrap();
         region
             .add_typed_tainted_entry(
-                "result".to_string(),
+                "result",
                 5,
                 EntryKind::ToolResult {
                     tool_call_id: "tc_1".to_string(),
@@ -2021,11 +2043,7 @@ mod tests {
             )
             .unwrap();
         region
-            .add_tainted_entry(
-                "public stuff".to_string(),
-                5,
-                crate::taint::TaintLevel::Public,
-            )
+            .add_tainted_entry("public stuff", 5, crate::taint::TaintLevel::Public)
             .unwrap();
 
         assert_eq!(
@@ -2036,7 +2054,7 @@ mod tests {
 
         // Evict the turn group (AssistantTurn + ToolResult)
         let removed = region.remove_oldest().unwrap();
-        assert_eq!(removed.content, "assistant");
+        assert_eq!(removed.content(), "assistant");
         assert_eq!(region.entry_count(), 1);
         // Taint should have called remove_oldest twice (once per group member),
         // leaving only the Public entry's taint.
@@ -2060,7 +2078,7 @@ mod tests {
         // Add an AssistantTurn + 2 ToolResults = 3 entries (fills the window)
         region
             .add_typed_entry(
-                "assistant".to_string(),
+                "assistant",
                 10,
                 EntryKind::AssistantTurn {
                     tool_calls: vec![
@@ -2082,7 +2100,7 @@ mod tests {
             .unwrap();
         region
             .add_typed_entry(
-                "r1".to_string(),
+                "r1",
                 5,
                 EntryKind::ToolResult {
                     tool_call_id: "tc_1".to_string(),
@@ -2093,7 +2111,7 @@ mod tests {
             .unwrap();
         region
             .add_typed_entry(
-                "r2".to_string(),
+                "r2",
                 5,
                 EntryKind::ToolResult {
                     tool_call_id: "tc_2".to_string(),
@@ -2108,12 +2126,12 @@ mod tests {
         // Adding a 4th entry should evict the entire turn group (3 entries)
         // because the group at index 0 is an AssistantTurn with 2 ToolResults.
         region
-            .add_typed_entry("user msg".to_string(), 15, EntryKind::UserMessage)
+            .add_typed_entry("user msg", 15, EntryKind::UserMessage)
             .unwrap();
 
         // After eviction: only the new user message remains
         assert_eq!(region.entry_count(), 1);
-        assert_eq!(region.content[0].content, "user msg");
+        assert_eq!(region.content[0].content(), "user msg");
         assert_eq!(region.current_tokens, 15);
     }
 
@@ -2125,7 +2143,7 @@ mod tests {
             Region::new("data".to_string(), RegionKind::Temporary, 1000).with_taint_tracking();
 
         region
-            .add_entry_with_metadata("content".to_string(), 10, serde_json::json!({"key": "val"}))
+            .add_entry_with_metadata("content", 10, serde_json::json!({"key": "val"}))
             .unwrap();
 
         assert_eq!(region.taint_level(), Some(crate::taint::TaintLevel::Public));
@@ -2145,7 +2163,7 @@ mod tests {
 
         region
             .add_typed_entry(
-                "assistant response".to_string(),
+                "assistant response",
                 10,
                 EntryKind::AssistantTurn { tool_calls: vec![] },
             )
@@ -2175,9 +2193,9 @@ mod tests {
             region.add_entry(format!("msg{}", i), 10).unwrap();
         }
         assert_eq!(region.entry_count(), 3);
-        assert_eq!(region.content[0].content, "msg2");
-        assert_eq!(region.content[1].content, "msg3");
-        assert_eq!(region.content[2].content, "msg4");
+        assert_eq!(region.content[0].content(), "msg2");
+        assert_eq!(region.content[1].content(), "msg3");
+        assert_eq!(region.content[2].content(), "msg4");
     }
 
     #[test]
@@ -2198,9 +2216,9 @@ mod tests {
         assert_eq!(region.entry_count(), 8);
 
         // Adding one more (9 total > 5+3=8) triggers bulk eviction → down to 5
-        region.add_entry("msg8".to_string(), 10).unwrap();
+        region.add_entry("msg8", 10).unwrap();
         assert_eq!(region.entry_count(), 5);
-        assert_eq!(region.content[0].content, "msg4");
+        assert_eq!(region.content[0].content(), "msg4");
     }
 
     #[test]
@@ -2216,7 +2234,7 @@ mod tests {
         // Add AssistantTurn + ToolResult (turn group of 2)
         region
             .add_typed_entry(
-                "assistant".to_string(),
+                "assistant",
                 10,
                 EntryKind::AssistantTurn {
                     tool_calls: vec![SerializedToolCall {
@@ -2230,7 +2248,7 @@ mod tests {
             .unwrap();
         region
             .add_typed_entry(
-                "result".to_string(),
+                "result",
                 5,
                 EntryKind::ToolResult {
                     tool_call_id: "tc1".to_string(),
@@ -2240,18 +2258,18 @@ mod tests {
             )
             .unwrap();
         // Add more entries to exceed overflow
-        region.add_entry("msg2".to_string(), 10).unwrap();
-        region.add_entry("msg3".to_string(), 10).unwrap();
-        region.add_entry("msg4".to_string(), 10).unwrap();
+        region.add_entry("msg2", 10).unwrap();
+        region.add_entry("msg3", 10).unwrap();
+        region.add_entry("msg4", 10).unwrap();
         // 5 entries, under overflow (5 < 3+2=5 is not >), no eviction yet
         assert_eq!(region.entry_count(), 5);
 
         // Adding 6th entry: 6 > 5 triggers bulk eviction
-        region.add_entry("msg5".to_string(), 10).unwrap();
+        region.add_entry("msg5", 10).unwrap();
         // Turn group (assistant+result=2) evicted together, then msg2 evicted
         // to get down to max_items=3
         assert_eq!(region.entry_count(), 3);
-        assert_eq!(region.content[0].content, "msg3");
+        assert_eq!(region.content[0].content(), "msg3");
     }
 
     #[test]
@@ -2310,7 +2328,7 @@ mod tests {
         }
         // Should have bulk-evicted down to max_items=5
         assert_eq!(region.entry_count(), 5);
-        assert_eq!(region.content[0].content, "msg7");
+        assert_eq!(region.content[0].content(), "msg7");
         // Compaction flag should be cleared after fallback
         assert!(!region.needs_message_compaction);
     }
@@ -2324,19 +2342,17 @@ mod tests {
     fn test_remove_entries_by_prefix() {
         let mut region = Region::new("system".to_string(), RegionKind::Pinned, 50000);
         region
-            .add_entry("[Stage instructions: Be terse.]".to_string(), 10)
+            .add_entry("[Stage instructions: Be terse.]", 10)
             .unwrap();
+        region.add_entry("Core identity block", 20).unwrap();
         region
-            .add_entry("Core identity block".to_string(), 20)
-            .unwrap();
-        region
-            .add_entry("[Stage instructions: Be verbose.]".to_string(), 15)
+            .add_entry("[Stage instructions: Be verbose.]", 15)
             .unwrap();
 
         assert_eq!(region.entry_count(), 3);
         region.remove_entries_by_prefix("[Stage instructions:");
         assert_eq!(region.entry_count(), 1);
-        assert_eq!(region.content[0].content, "Core identity block");
+        assert_eq!(region.content[0].content(), "Core identity block");
         assert_eq!(region.current_tokens, 20);
     }
 
@@ -2346,21 +2362,17 @@ mod tests {
             Region::new("system".to_string(), RegionKind::Pinned, 50000).with_taint_tracking();
         region
             .add_tainted_entry(
-                "[Stage instructions: Be terse.]".to_string(),
+                "[Stage instructions: Be terse.]",
                 10,
                 crate::taint::TaintLevel::Private,
             )
             .unwrap();
         region
-            .add_tainted_entry(
-                "Core identity block".to_string(),
-                20,
-                crate::taint::TaintLevel::Public,
-            )
+            .add_tainted_entry("Core identity block", 20, crate::taint::TaintLevel::Public)
             .unwrap();
         region
             .add_tainted_entry(
-                "[Stage instructions: Be verbose.]".to_string(),
+                "[Stage instructions: Be verbose.]",
                 15,
                 crate::taint::TaintLevel::Internal,
             )
@@ -2374,7 +2386,7 @@ mod tests {
 
         region.remove_entries_by_prefix("[Stage instructions:");
         assert_eq!(region.entry_count(), 1);
-        assert_eq!(region.content[0].content, "Core identity block");
+        assert_eq!(region.content[0].content(), "Core identity block");
         assert_eq!(region.current_tokens, 20);
         // After removing Private and Internal entries, only Public remains
         assert_eq!(region.taint_level(), Some(crate::taint::TaintLevel::Public));
@@ -2414,7 +2426,7 @@ mod tests {
 
         // Add 5 entries (3+2): at threshold, no eviction
         region
-            .add_tainted_entry("private".to_string(), 10, crate::taint::TaintLevel::Private)
+            .add_tainted_entry("private", 10, crate::taint::TaintLevel::Private)
             .unwrap();
         for i in 1..5 {
             region
@@ -2425,7 +2437,7 @@ mod tests {
 
         // 6th entry triggers bulk eviction to max_items=3
         region
-            .add_tainted_entry("pub5".to_string(), 10, crate::taint::TaintLevel::Public)
+            .add_tainted_entry("pub5", 10, crate::taint::TaintLevel::Public)
             .unwrap();
         assert_eq!(region.entry_count(), 3);
         // Private entry was evicted, only public remain
@@ -2486,7 +2498,7 @@ mod tests {
     fn test_add_typed_entry_validates_schema() {
         let mut region = Region::new("data".to_string(), RegionKind::Temporary, 1000)
             .with_schema(RegionSchema::new(ContentFormat::Json));
-        let result = region.add_typed_entry("not json".to_string(), 5, EntryKind::Text);
+        let result = region.add_typed_entry("not json", 5, EntryKind::Text);
         assert!(result.is_err());
         assert_eq!(region.entry_count(), 0);
     }
@@ -2494,7 +2506,7 @@ mod tests {
     #[test]
     fn test_add_typed_entry_checks_budget() {
         let mut region = Region::new("data".to_string(), RegionKind::Temporary, 10);
-        let result = region.add_typed_entry("too big".to_string(), 20, EntryKind::UserMessage);
+        let result = region.add_typed_entry("too big", 20, EntryKind::UserMessage);
         assert!(result.is_err());
         assert_eq!(region.entry_count(), 0);
     }
@@ -2504,7 +2516,7 @@ mod tests {
         // When taint tracking is NOT enabled, the taint level is silently ignored.
         let mut region = Region::new("data".to_string(), RegionKind::Temporary, 1000);
         region
-            .add_tainted_entry("data".to_string(), 10, crate::taint::TaintLevel::Private)
+            .add_tainted_entry("data", 10, crate::taint::TaintLevel::Private)
             .unwrap();
         assert_eq!(region.entry_count(), 1);
         assert_eq!(region.taint_level(), None);
@@ -2513,8 +2525,8 @@ mod tests {
     #[test]
     fn test_remove_entries_by_prefix_no_match() {
         let mut region = Region::new("system".to_string(), RegionKind::Pinned, 50000);
-        region.add_entry("Keep this".to_string(), 10).unwrap();
-        region.add_entry("And this".to_string(), 20).unwrap();
+        region.add_entry("Keep this", 10).unwrap();
+        region.add_entry("And this", 20).unwrap();
         region.remove_entries_by_prefix("[Stage instructions:");
         assert_eq!(region.entry_count(), 2);
         assert_eq!(region.current_tokens, 30);
@@ -2530,17 +2542,17 @@ mod tests {
             10000,
         );
         region
-            .upsert_by_key("src/main.rs", "fn main() {}".to_string(), 10)
+            .upsert_by_key("src/main.rs", "fn main() {}", 10)
             .unwrap();
         region
-            .upsert_by_key("src/lib.rs", "pub mod foo;".to_string(), 8)
+            .upsert_by_key("src/lib.rs", "pub mod foo;", 8)
             .unwrap();
 
         assert_eq!(region.entry_count(), 2);
         assert_eq!(region.current_tokens, 18);
 
         let entry = region.get_by_key("src/main.rs").unwrap();
-        assert_eq!(entry.content, "fn main() {}");
+        assert_eq!(entry.content(), "fn main() {}");
         assert_eq!(entry.key.as_deref(), Some("src/main.rs"));
     }
 
@@ -2551,17 +2563,13 @@ mod tests {
             RegionKind::HashMap { max_entries: None },
             10000,
         );
-        region
-            .upsert_by_key("file.rs", "version 1".to_string(), 10)
-            .unwrap();
+        region.upsert_by_key("file.rs", "version 1", 10).unwrap();
         assert_eq!(region.current_tokens, 10);
 
-        region
-            .upsert_by_key("file.rs", "version 2".to_string(), 15)
-            .unwrap();
+        region.upsert_by_key("file.rs", "version 2", 15).unwrap();
         assert_eq!(region.entry_count(), 1);
         assert_eq!(region.current_tokens, 15);
-        assert_eq!(region.get_by_key("file.rs").unwrap().content, "version 2");
+        assert_eq!(region.get_by_key("file.rs").unwrap().content(), "version 2");
     }
 
     #[test]
@@ -2571,8 +2579,8 @@ mod tests {
             RegionKind::HashMap { max_entries: None },
             10000,
         );
-        region.upsert_by_key("a.rs", "aaa".to_string(), 10).unwrap();
-        region.upsert_by_key("b.rs", "bbb".to_string(), 20).unwrap();
+        region.upsert_by_key("a.rs", "aaa", 10).unwrap();
+        region.upsert_by_key("b.rs", "bbb", 20).unwrap();
 
         assert!(region.remove_by_key("a.rs"));
         assert_eq!(region.entry_count(), 1);
@@ -2588,8 +2596,8 @@ mod tests {
             RegionKind::HashMap { max_entries: None },
             10000,
         );
-        region.upsert_by_key("x.rs", "x".to_string(), 5).unwrap();
-        region.upsert_by_key("y.rs", "y".to_string(), 5).unwrap();
+        region.upsert_by_key("x.rs", "x", 5).unwrap();
+        region.upsert_by_key("y.rs", "y", 5).unwrap();
 
         let keys = region.keys();
         assert_eq!(keys.len(), 2);
@@ -2604,16 +2612,16 @@ mod tests {
             RegionKind::HashMap { max_entries: None },
             30, // tight budget
         );
-        region.upsert_by_key("a.rs", "aaa".to_string(), 10).unwrap();
+        region.upsert_by_key("a.rs", "aaa", 10).unwrap();
         // Make 'a' older by manually adjusting timestamp
         region.content[0].timestamp -= 100;
-        region.upsert_by_key("b.rs", "bbb".to_string(), 10).unwrap();
-        region.upsert_by_key("c.rs", "ccc".to_string(), 10).unwrap();
+        region.upsert_by_key("b.rs", "bbb", 10).unwrap();
+        region.upsert_by_key("c.rs", "ccc", 10).unwrap();
         assert_eq!(region.entry_count(), 3);
         assert_eq!(region.current_tokens, 30);
 
         // Adding d.rs should evict a.rs (oldest timestamp)
-        region.upsert_by_key("d.rs", "ddd".to_string(), 10).unwrap();
+        region.upsert_by_key("d.rs", "ddd", 10).unwrap();
         assert_eq!(region.entry_count(), 3);
         assert!(region.get_by_key("a.rs").is_none());
         assert!(region.get_by_key("d.rs").is_some());
@@ -2628,13 +2636,13 @@ mod tests {
             },
             10000,
         );
-        region.upsert_by_key("a.rs", "aaa".to_string(), 10).unwrap();
+        region.upsert_by_key("a.rs", "aaa", 10).unwrap();
         region.content[0].timestamp -= 100; // make oldest
-        region.upsert_by_key("b.rs", "bbb".to_string(), 10).unwrap();
+        region.upsert_by_key("b.rs", "bbb", 10).unwrap();
         assert_eq!(region.entry_count(), 2);
 
         // Adding c.rs should evict a.rs (oldest, max_entries=2)
-        region.upsert_by_key("c.rs", "ccc".to_string(), 10).unwrap();
+        region.upsert_by_key("c.rs", "ccc", 10).unwrap();
         assert_eq!(region.entry_count(), 2);
         assert!(region.get_by_key("a.rs").is_none());
         assert!(region.get_by_key("c.rs").is_some());
@@ -2647,7 +2655,7 @@ mod tests {
             RegionKind::HashMap { max_entries: None },
             5, // very small
         );
-        let result = region.upsert_by_key("big.rs", "huge content".to_string(), 100);
+        let result = region.upsert_by_key("big.rs", "huge content", 100);
         assert!(result.is_err());
     }
 
@@ -2684,34 +2692,27 @@ mod tests {
     #[test]
     fn test_region_entry_key_default_none() {
         let mut region = Region::new("test".to_string(), RegionKind::Temporary, 1000);
-        region.add_entry("content".to_string(), 10).unwrap();
+        region.add_entry("content", 10).unwrap();
         assert!(region.content[0].key.is_none());
     }
 
     #[test]
     fn test_region_entry_key_serde_skip_when_none() {
-        let entry = RegionEntry {
-            content: "test".to_string(),
-            tokens: 5,
-            timestamp: 0,
-            metadata: None,
-            kind: EntryKind::default(),
-            key: None,
-        };
+        let entry = RegionEntry::from_parts("test", 5, 0, None, EntryKind::default(), None);
         let json = serde_json::to_string(&entry).unwrap();
         assert!(!json.contains("key"));
     }
 
     #[test]
     fn test_region_entry_key_serde_roundtrip() {
-        let entry = RegionEntry {
-            content: "test".to_string(),
-            tokens: 5,
-            timestamp: 0,
-            metadata: None,
-            kind: EntryKind::default(),
-            key: Some("mykey".to_string()),
-        };
+        let entry = RegionEntry::from_parts(
+            "test",
+            5,
+            0,
+            None,
+            EntryKind::default(),
+            Some("mykey".to_string()),
+        );
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("mykey"));
         let back: RegionEntry = serde_json::from_str(&json).unwrap();
@@ -2752,14 +2753,14 @@ mod tests {
             5000,
         );
         region
-            .upsert_by_key("config.toml", "[package]\nname = \"foo\"".to_string(), 12)
+            .upsert_by_key("config.toml", "[package]\nname = \"foo\"", 12)
             .unwrap();
 
         assert_eq!(region.entry_count(), 1);
         assert_eq!(region.current_tokens, 12);
 
         let entry = region.get_by_key("config.toml").unwrap();
-        assert_eq!(entry.content, "[package]\nname = \"foo\"");
+        assert_eq!(entry.content(), "[package]\nname = \"foo\"");
         assert_eq!(entry.tokens, 12);
         assert_eq!(entry.key.as_deref(), Some("config.toml"));
     }
@@ -2771,19 +2772,17 @@ mod tests {
             RegionKind::HashMap { max_entries: None },
             5000,
         );
-        region
-            .upsert_by_key("readme.md", "# Old".to_string(), 20)
-            .unwrap();
+        region.upsert_by_key("readme.md", "# Old", 20).unwrap();
         assert_eq!(region.current_tokens, 20);
 
         region
-            .upsert_by_key("readme.md", "# New and improved".to_string(), 35)
+            .upsert_by_key("readme.md", "# New and improved", 35)
             .unwrap();
         assert_eq!(region.entry_count(), 1);
         assert_eq!(region.current_tokens, 35);
 
         let entry = region.get_by_key("readme.md").unwrap();
-        assert_eq!(entry.content, "# New and improved");
+        assert_eq!(entry.content(), "# New and improved");
         assert_eq!(entry.tokens, 35);
     }
 
@@ -2797,23 +2796,23 @@ mod tests {
 
         // Insert entries that together fill the budget
         region
-            .upsert_by_key("first.rs", "first content".to_string(), 40)
+            .upsert_by_key("first.rs", "first content", 40)
             .unwrap();
         region.content[0].timestamp -= 200; // oldest
 
         region
-            .upsert_by_key("second.rs", "second content".to_string(), 40)
+            .upsert_by_key("second.rs", "second content", 40)
             .unwrap();
         region.content[1].timestamp -= 100; // middle age
 
         region
-            .upsert_by_key("third.rs", "third content".to_string(), 20)
+            .upsert_by_key("third.rs", "third content", 20)
             .unwrap();
         // total = 100, at budget
 
         // Inserting another entry that exceeds budget should evict oldest
         region
-            .upsert_by_key("fourth.rs", "fourth content".to_string(), 30)
+            .upsert_by_key("fourth.rs", "fourth content", 30)
             .unwrap();
 
         // first.rs (oldest timestamp) should have been evicted
@@ -2833,17 +2832,13 @@ mod tests {
             50000,
         );
 
-        region
-            .upsert_by_key("alpha", "aaa".to_string(), 10)
-            .unwrap();
+        region.upsert_by_key("alpha", "aaa", 10).unwrap();
         region.content[0].timestamp -= 200; // make oldest
 
-        region.upsert_by_key("beta", "bbb".to_string(), 10).unwrap();
+        region.upsert_by_key("beta", "bbb", 10).unwrap();
         region.content[1].timestamp -= 100;
 
-        region
-            .upsert_by_key("gamma", "ccc".to_string(), 10)
-            .unwrap();
+        region.upsert_by_key("gamma", "ccc", 10).unwrap();
 
         // Only 2 entries should remain, oldest evicted
         assert_eq!(region.entry_count(), 2);
@@ -2859,14 +2854,12 @@ mod tests {
             RegionKind::HashMap { max_entries: None },
             5000,
         );
-        region
-            .upsert_by_key("exists", "hello".to_string(), 5)
-            .unwrap();
+        region.upsert_by_key("exists", "hello", 5).unwrap();
 
         // Found
         let found = region.get_by_key("exists");
         assert!(found.is_some());
-        assert_eq!(found.unwrap().content, "hello");
+        assert_eq!(found.unwrap().content(), "hello");
 
         // Not found
         let missing = region.get_by_key("does_not_exist");
@@ -2880,9 +2873,7 @@ mod tests {
             RegionKind::HashMap { max_entries: None },
             5000,
         );
-        region
-            .upsert_by_key("target", "remove me".to_string(), 25)
-            .unwrap();
+        region.upsert_by_key("target", "remove me", 25).unwrap();
         assert_eq!(region.current_tokens, 25);
 
         let removed = region.remove_by_key("target");
@@ -2915,9 +2906,9 @@ mod tests {
         assert!(region.keys().is_empty());
 
         // Populated
-        region.upsert_by_key("one", "1".to_string(), 5).unwrap();
-        region.upsert_by_key("two", "2".to_string(), 5).unwrap();
-        region.upsert_by_key("three", "3".to_string(), 5).unwrap();
+        region.upsert_by_key("one", "1", 5).unwrap();
+        region.upsert_by_key("two", "2", 5).unwrap();
+        region.upsert_by_key("three", "3", 5).unwrap();
 
         let keys = region.keys();
         assert_eq!(keys.len(), 3);
@@ -2937,34 +2928,34 @@ mod tests {
     #[test]
     fn test_region_entry_serialization_with_key_field() {
         // Entry with key
-        let entry_with_key = RegionEntry {
-            content: "some data".to_string(),
-            tokens: 10,
-            timestamp: 1234567890,
-            metadata: None,
-            kind: EntryKind::default(),
-            key: Some("mykey".to_string()),
-        };
+        let entry_with_key = RegionEntry::from_parts(
+            "some data",
+            10,
+            1234567890,
+            None,
+            EntryKind::default(),
+            Some("mykey".to_string()),
+        );
         let json = serde_json::to_string(&entry_with_key).unwrap();
         let deserialized: RegionEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.key.as_deref(), Some("mykey"));
-        assert_eq!(deserialized.content, "some data");
+        assert_eq!(deserialized.content(), "some data");
         assert_eq!(deserialized.tokens, 10);
 
         // Entry without key
-        let entry_no_key = RegionEntry {
-            content: "no key data".to_string(),
-            tokens: 7,
-            timestamp: 1234567890,
-            metadata: None,
-            kind: EntryKind::default(),
-            key: None,
-        };
+        let entry_no_key = RegionEntry::from_parts(
+            "no key data",
+            7,
+            1234567890,
+            None,
+            EntryKind::default(),
+            None,
+        );
         let json = serde_json::to_string(&entry_no_key).unwrap();
         assert!(!json.contains("\"key\""));
         let deserialized: RegionEntry = serde_json::from_str(&json).unwrap();
         assert!(deserialized.key.is_none());
-        assert_eq!(deserialized.content, "no key data");
+        assert_eq!(deserialized.content(), "no key data");
     }
 
     #[test]
@@ -3014,12 +3005,8 @@ mod tests {
             10_000,
         )
         .with_taint_tracking();
-        region
-            .upsert_by_key("k1", "value one".to_string(), 10)
-            .unwrap();
-        region
-            .upsert_by_key("k2", "value two".to_string(), 10)
-            .unwrap();
+        region.upsert_by_key("k1", "value one", 10).unwrap();
+        region.upsert_by_key("k2", "value two", 10).unwrap();
 
         assert!(region.remove_by_key("k1"));
         assert!(!region.remove_by_key("missing"));
@@ -3040,12 +3027,8 @@ mod tests {
             10_000,
         )
         .with_taint_tracking();
-        region
-            .upsert_by_key("first", "aaa".to_string(), 10)
-            .unwrap();
-        region
-            .upsert_by_key("second", "bbb".to_string(), 10)
-            .unwrap();
+        region.upsert_by_key("first", "aaa", 10).unwrap();
+        region.upsert_by_key("second", "bbb", 10).unwrap();
 
         // Only the most-recently-inserted key survives after LRU eviction.
         assert_eq!(region.entry_count(), 1);
@@ -3069,5 +3052,38 @@ mod tests {
         region.evict_lru_entry();
         assert_eq!(region.entry_count(), 0);
         assert_eq!(region.current_tokens, 0);
+    }
+    #[test]
+    fn interned_entries_share_allocation_via_same_interner() {
+        let ix = ContentInterner::new();
+        let mut a = Region::new("pin".into(), RegionKind::Pinned, 10_000);
+        let mut b = Region::new("pin".into(), RegionKind::Pinned, 10_000);
+        let text = "architecture: shared across agents";
+        a.insert_entry(RegionEntry::interned(&ix, text, 20))
+            .unwrap();
+        b.insert_entry(RegionEntry::interned(&ix, text, 20))
+            .unwrap();
+        assert!(a.content[0].shares_content_with(&b.content[0]));
+        b.insert_entry(RegionEntry::interned(&ix, "private turn", 5))
+            .unwrap();
+        assert_eq!(a.content[0].content(), text);
+        assert!(!a.content[0].shares_content_with(&b.content[1]));
+    }
+
+    #[test]
+    fn domain_add_entry_allocates_uniquely() {
+        let mut a = Region::new("pin".into(), RegionKind::Pinned, 1000);
+        let mut b = Region::new("pin".into(), RegionKind::Pinned, 1000);
+        a.add_entry("same", 1).unwrap();
+        b.add_entry("same", 1).unwrap();
+        assert!(!a.content[0].shares_content_with(&b.content[0]));
+        assert_eq!(a.content[0].content(), b.content[0].content());
+    }
+
+    #[test]
+    fn domain_add_entry_does_not_require_interner() {
+        let mut region = Region::new("pin".into(), RegionKind::Pinned, 1000);
+        region.add_entry("hello", 5).unwrap();
+        assert_eq!(region.content[0].content(), "hello");
     }
 }

@@ -240,7 +240,7 @@ mod tests {
                 .unwrap()
                 .content
                 .iter()
-                .any(|e| e.content.contains("build a parser"))
+                .any(|e| e.content().contains("build a parser"))
         );
         assert!(
             window
@@ -248,7 +248,7 @@ mod tests {
                 .unwrap()
                 .content
                 .iter()
-                .any(|e| e.content.contains("focus on safety"))
+                .any(|e| e.content().contains("focus on safety"))
         );
         // An unknown seed key targets no region and is silently dropped.
         assert!(window.get_region("ghost").is_none());
@@ -327,7 +327,11 @@ mod tests {
             !region.content.is_empty(),
             "an oversized seed must be trimmed, not dropped"
         );
-        assert!(region.content[0].content.ends_with(SEED_TRUNCATION_MARKER));
+        assert!(
+            region.content[0]
+                .content()
+                .ends_with(SEED_TRUNCATION_MARKER)
+        );
     }
 
     #[test]
@@ -348,7 +352,7 @@ mod tests {
                 .unwrap()
                 .content
                 .iter()
-                .any(|e| e.content.contains("fallback text"))
+                .any(|e| e.content().contains("fallback text"))
         );
     }
 
@@ -375,7 +379,7 @@ mod tests {
                 .unwrap()
                 .content
                 .iter()
-                .any(|e| e.content.contains("do the thing"))
+                .any(|e| e.content().contains("do the thing"))
         );
         // Blueprint-declared tool_results / conversation are not duplicated.
         assert_eq!(
@@ -415,7 +419,7 @@ mod tests {
                 .unwrap()
                 .content
                 .iter()
-                .any(|e| e.content.contains("seed task"))
+                .any(|e| e.content().contains("seed task"))
         );
     }
 
@@ -456,7 +460,7 @@ mod tests {
                 .unwrap()
                 .content
                 .iter()
-                .any(|e| e.content.contains("fallback seed"))
+                .any(|e| e.content().contains("fallback seed"))
         );
     }
 
@@ -493,7 +497,7 @@ mod tests {
                 .unwrap()
                 .content
                 .iter()
-                .any(|e| e.content.contains("carried content"))
+                .any(|e| e.content().contains("carried content"))
         );
         assert!(window.get_region("scratch").unwrap().content.is_empty());
         // Token total recomputed from the surviving content.
@@ -632,7 +636,7 @@ mod tests {
         assert!(
             conv.content
                 .iter()
-                .any(|e| e.content.contains("hello from stage 0")),
+                .any(|e| e.content().contains("hello from stage 0")),
             "carried conversation must retain its history"
         );
     }

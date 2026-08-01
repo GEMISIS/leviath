@@ -153,6 +153,7 @@ impl PipelineWorld {
 
         let mut world = World::new();
         world.insert_resource(Providers(providers));
+        world.insert_resource(crate::ContentInternerRes::new());
         world.insert_resource(InferenceStage {
             pools: Arc::new(InferencePools::new(pool_config)),
             outcomes: inf_tx,
@@ -1759,7 +1760,7 @@ mod tests {
             .get::<crate::components::ContextWindow>(entity)
             .unwrap();
         assert_eq!(
-            win.get_region("conversation").unwrap().content[0].content,
+            win.get_region("conversation").unwrap().content[0].content(),
             "restored turn"
         );
     }

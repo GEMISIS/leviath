@@ -216,17 +216,33 @@ pub struct ContextWindow {
         String,
         std::sync::Arc<leviath_scripting::region_hook::RegionScript>,
     >,
+
+    /// World-scoped interner handle (cloned from [`crate::ContentInternerRes`]
+    /// at spawn). Write paths intern through this handle; domain `Region`
+    /// methods never see it.
+    interner: leviath_core::ContentInterner,
 }
 
 impl ContextWindow {
     /// Create a new context window with the specified budget.
     pub fn new(max_tokens: usize) -> Self {
+        Self::with_interner(max_tokens, leviath_core::ContentInterner::new())
+    }
+
+    /// Build a window that shares `interner` with other agents in the same World.
+    pub fn with_interner(max_tokens: usize, interner: leviath_core::ContentInterner) -> Self {
         Self {
             regions: Vec::new(),
             current_tokens: 0,
             max_tokens,
             region_scripts: std::collections::HashMap::new(),
+            interner,
         }
+    }
+
+    /// The interner handle this window uses for entry text.
+    pub fn interner(&self) -> &leviath_core::ContentInterner {
+        &self.interner
     }
 
     /// The compiled script backing `region_name`, when it is a custom region
@@ -323,8 +339,13 @@ impl ContextWindow {
         else {
             return Ok(()); // the region's script dropped the entry
         };
+        let interner = self.interner.clone();
         self.write_to_region(region_name, tokens, &mut |region, tokens| {
-            region.add_entry(content.clone(), tokens)
+            region.insert_entry(leviath_core::RegionEntry::interned(
+                &interner,
+                content.as_str(),
+                tokens,
+            ))
         })
     }
 
@@ -341,9 +362,14 @@ impl ContextWindow {
             // Dropped by the script: the region keeps its current content.
             return self.get_region(region_name).is_some();
         };
+        let interner = self.interner.clone();
         if let Some(region) = self.get_region_mut(region_name) {
             region.clear();
-            let _ = region.add_entry(content, tokens);
+            let _ = region.insert_entry(leviath_core::RegionEntry::interned(
+                &interner,
+                content.as_str(),
+                tokens,
+            ));
             self.current_tokens = self.calculate_tokens();
             true
         } else {
@@ -367,8 +393,12 @@ impl ContextWindow {
         else {
             return Ok(());
         };
+        let interner = self.interner.clone();
         self.write_to_region(region_name, tokens, &mut |region, tokens| {
-            region.add_typed_entry(content.clone(), tokens, kind.clone())
+            let mut entry =
+                leviath_core::RegionEntry::interned(&interner, content.as_str(), tokens);
+            entry.kind = kind.clone();
+            region.insert_entry(entry)
         })
     }
 
@@ -646,7 +676,7 @@ impl ContextWindow {
                     let text = region
                         .content
                         .iter()
-                        .map(|e| e.content.as_str())
+                        .map(|e| e.content())
                         .collect::<Vec<_>>()
                         .join("\n\n");
                     system_blocks.push(leviath_providers::SystemBlock {
@@ -658,7 +688,7 @@ impl ContextWindow {
                     let text = region
                         .content
                         .iter()
-                        .map(|e| e.content.as_str())
+                        .map(|e| e.content())
                         .collect::<Vec<_>>()
                         .join("\n\n");
                     system_blocks.push(leviath_providers::SystemBlock {
@@ -692,7 +722,7 @@ impl ContextWindow {
                             EntryKind::UserMessage => {
                                 messages.push(leviath_providers::Message {
                                     role: "user".to_string(),
-                                    content: entry.content.clone().into(),
+                                    content: entry.content().into(),
                                     cache_breakpoint: false,
                                 });
                             }
@@ -700,14 +730,14 @@ impl ContextWindow {
                                 if tool_calls.is_empty() {
                                     messages.push(leviath_providers::Message {
                                         role: "assistant".to_string(),
-                                        content: entry.content.clone().into(),
+                                        content: entry.content().into(),
                                         cache_breakpoint: false,
                                     });
                                 } else {
                                     let mut blocks = Vec::new();
-                                    if !entry.content.is_empty() {
+                                    if !entry.content().is_empty() {
                                         blocks.push(leviath_providers::ContentBlock::Text {
-                                            text: entry.content.clone(),
+                                            text: entry.content_owned(),
                                         });
                                     }
                                     for tc in tool_calls {
@@ -734,13 +764,13 @@ impl ContextWindow {
                                 pending_tool_results.push(
                                     leviath_providers::ContentBlock::ToolResult {
                                         tool_use_id: tool_call_id.clone(),
-                                        content: entry.content.clone(),
+                                        content: entry.content_owned(),
                                         is_error: *is_error,
                                     },
                                 );
                             }
                             EntryKind::Text => {
-                                let trimmed = entry.content.trim();
+                                let trimmed = entry.content().trim();
                                 if let Some(rest) = trimmed.strip_prefix("Assistant: ") {
                                     messages.push(leviath_providers::Message {
                                         role: "assistant".to_string(),
@@ -756,7 +786,7 @@ impl ContextWindow {
                                 } else {
                                     messages.push(leviath_providers::Message {
                                         role: "user".to_string(),
-                                        content: entry.content.clone().into(),
+                                        content: entry.content().into(),
                                         cache_breakpoint: false,
                                     });
                                 }
@@ -781,7 +811,7 @@ impl ContextWindow {
                     let text = region
                         .content
                         .iter()
-                        .map(|e| e.content.as_str())
+                        .map(|e| e.content())
                         .collect::<Vec<_>>()
                         .join("\n\n");
                     system_blocks.push(leviath_providers::SystemBlock {
@@ -793,7 +823,7 @@ impl ContextWindow {
                     let text = region
                         .content
                         .iter()
-                        .map(|e| e.content.as_str())
+                        .map(|e| e.content())
                         .collect::<Vec<_>>()
                         .join("\n\n");
                     system_blocks.push(leviath_providers::SystemBlock {
@@ -805,7 +835,7 @@ impl ContextWindow {
                     let text = region
                         .content
                         .iter()
-                        .map(|e| e.content.as_str())
+                        .map(|e| e.content())
                         .collect::<Vec<_>>()
                         .join("\n\n");
                     system_blocks.push(leviath_providers::SystemBlock {
@@ -838,9 +868,9 @@ impl ContextWindow {
                         .iter()
                         .map(|e| {
                             if let Some(key) = &e.key {
-                                format!("### [{}]\n{}", key, e.content)
+                                format!("### [{}]\n{}", key, e.content())
                             } else {
-                                e.content.clone()
+                                e.content_owned()
                             }
                         })
                         .collect::<Vec<_>>()
@@ -1000,8 +1030,12 @@ impl ContextWindow {
         else {
             return Ok(());
         };
+        let interner = self.interner.clone();
         self.write_to_region(region_name, tokens, &mut |region, tokens| {
-            region.add_tainted_entry(content.clone(), tokens, taint_level)
+            region.insert_tainted_entry(
+                leviath_core::RegionEntry::interned(&interner, content.as_str(), tokens),
+                taint_level,
+            )
         })
     }
 
@@ -1023,8 +1057,12 @@ impl ContextWindow {
         else {
             return Ok(());
         };
+        let interner = self.interner.clone();
         self.write_to_region(region_name, tokens, &mut |region, tokens| {
-            region.add_typed_tainted_entry(content.clone(), tokens, kind.clone(), taint_level)
+            let mut entry =
+                leviath_core::RegionEntry::interned(&interner, content.as_str(), tokens);
+            entry.kind = kind.clone();
+            region.insert_tainted_entry(entry, taint_level)
         })
     }
 
@@ -1170,14 +1208,14 @@ mod tests {
     fn replace_region_overwrites_existing_and_reports_missing() {
         let mut window = ContextWindow::new(10000);
         let mut region = Region::new("plan".to_string(), RegionKind::Pinned, 6000);
-        region.add_entry("old plan".to_string(), 3).unwrap();
+        region.add_entry("old plan", 3).unwrap();
         window.add_region(region);
 
         // Replacing an existing region overwrites its content wholesale.
         assert!(window.replace_region("plan", "new plan".to_string(), 3));
         let plan = window.get_region("plan").unwrap();
         assert_eq!(plan.content.len(), 1);
-        assert_eq!(plan.content[0].content, "new plan");
+        assert_eq!(plan.content[0].content(), "new plan");
 
         // A missing region is a no-op that reports false.
         assert!(!window.replace_region("nope", "x".to_string(), 1));
@@ -1187,12 +1225,8 @@ mod tests {
     fn test_clearable_eviction() {
         let mut window = ContextWindow::new(10000);
         let mut region = Region::new("scratch".to_string(), RegionKind::Clearable, 5000);
-        region
-            .add_entry("test content 1".to_string(), 1000)
-            .unwrap();
-        region
-            .add_entry("test content 2".to_string(), 1000)
-            .unwrap();
+        region.add_entry("test content 1", 1000).unwrap();
+        region.add_entry("test content 2", 1000).unwrap();
         window.add_region(region);
 
         assert_eq!(window.current_tokens, 2000);
@@ -1208,11 +1242,9 @@ mod tests {
     fn test_temporary_eviction_oldest_first() {
         let mut window = ContextWindow::new(10000);
         let mut region = Region::new("temp".to_string(), RegionKind::Temporary, 5000);
-        region.add_entry("old content".to_string(), 1000).unwrap();
-        region
-            .add_entry("middle content".to_string(), 1000)
-            .unwrap();
-        region.add_entry("new content".to_string(), 1000).unwrap();
+        region.add_entry("old content", 1000).unwrap();
+        region.add_entry("middle content", 1000).unwrap();
+        region.add_entry("new content", 1000).unwrap();
         window.add_region(region);
 
         assert_eq!(window.current_tokens, 3000);
@@ -1225,7 +1257,7 @@ mod tests {
         // Check that oldest was removed
         let region = window.get_region("temp").unwrap();
         assert_eq!(region.content.len(), 2);
-        assert_eq!(region.content[0].content, "middle content");
+        assert_eq!(region.content[0].content(), "middle content");
     }
 
     fn assert_sliding_window_unreduced(initial_count: usize, after_count: usize) {
@@ -1246,9 +1278,9 @@ mod tests {
             },
             5000,
         );
-        region.add_entry("msg 1".to_string(), 1000).unwrap();
-        region.add_entry("msg 2".to_string(), 1000).unwrap();
-        region.add_entry("msg 3".to_string(), 1000).unwrap();
+        region.add_entry("msg 1", 1000).unwrap();
+        region.add_entry("msg 2", 1000).unwrap();
+        region.add_entry("msg 3", 1000).unwrap();
         window.add_region(region);
 
         let initial_count = window.get_region("conversation").unwrap().content.len();
@@ -1277,9 +1309,7 @@ mod tests {
     fn test_pinned_never_touched() {
         let mut window = ContextWindow::new(10000);
         let mut region = Region::new("architecture".to_string(), RegionKind::Pinned, 3000);
-        region
-            .add_entry("architecture diagram".to_string(), 2000)
-            .unwrap();
+        region.add_entry("architecture diagram", 2000).unwrap();
         window.add_region(region);
 
         let initial_tokens = window.get_region("architecture").unwrap().current_tokens;
@@ -1303,19 +1333,13 @@ mod tests {
 
         // Add Clearable region
         let mut clearable = Region::new("scratch".to_string(), RegionKind::Clearable, 2000);
-        clearable
-            .add_entry("scratch data".to_string(), 1000)
-            .unwrap();
+        clearable.add_entry("scratch data", 1000).unwrap();
         window.add_region(clearable);
 
         // Add Temporary region
         let mut temporary = Region::new("temp".to_string(), RegionKind::Temporary, 3000);
-        temporary
-            .add_entry("temp data 1".to_string(), 1000)
-            .unwrap();
-        temporary
-            .add_entry("temp data 2".to_string(), 1000)
-            .unwrap();
+        temporary.add_entry("temp data 1", 1000).unwrap();
+        temporary.add_entry("temp data 2", 1000).unwrap();
         window.add_region(temporary);
 
         assert_eq!(window.current_tokens, 3000);
@@ -1389,9 +1413,7 @@ mod tests {
             },
             900,
         );
-        compacting
-            .add_entry("lots of content".to_string(), 600)
-            .unwrap();
+        compacting.add_entry("lots of content", 600).unwrap();
         window.add_region(compacting);
 
         assert_eq!(window.current_tokens, 600);
@@ -1414,8 +1436,8 @@ mod tests {
             },
             1100,
         );
-        compacting.add_entry("data 1".to_string(), 500).unwrap();
-        compacting.add_entry("data 2".to_string(), 500).unwrap();
+        compacting.add_entry("data 1", 500).unwrap();
+        compacting.add_entry("data 2", 500).unwrap();
         window.add_region(compacting);
 
         // 200 free tokens, request 500 → needs compaction
@@ -1431,9 +1453,7 @@ mod tests {
         // a configuration error instead of silently doing nothing useful.
         let mut window = ContextWindow::new(1000);
         let mut pinned = Region::new("architecture".to_string(), RegionKind::Pinned, 2000);
-        pinned
-            .add_entry("huge pinned doc".to_string(), 1500)
-            .unwrap();
+        pinned.add_entry("huge pinned doc", 1500).unwrap();
         window.add_region(pinned);
 
         let result = window.try_evict(100);
@@ -1451,11 +1471,11 @@ mod tests {
         let mut window = ContextWindow::new(2000);
 
         let mut region_a = Region::new("a".to_string(), RegionKind::Clearable, 1000);
-        region_a.add_entry("small".to_string(), 500).unwrap();
+        region_a.add_entry("small", 500).unwrap();
         window.add_region(region_a);
 
         let mut region_b = Region::new("b".to_string(), RegionKind::Clearable, 1000);
-        region_b.add_entry("large".to_string(), 1000).unwrap();
+        region_b.add_entry("large", 1000).unwrap();
         window.add_region(region_b);
 
         assert_eq!(window.current_tokens, 1500);
@@ -1534,7 +1554,7 @@ mod tests {
         window.add_region(region);
 
         let region = window.get_region_mut("test").unwrap();
-        region.add_entry("new content".to_string(), 50).unwrap();
+        region.add_entry("new content", 50).unwrap();
         assert_eq!(region.content.len(), 1);
 
         assert!(window.get_region_mut("nonexistent").is_none());
@@ -1562,9 +1582,9 @@ mod tests {
     fn test_context_window_calculate_tokens() {
         let mut window = ContextWindow::new(10000);
         let mut r1 = Region::new("a".to_string(), RegionKind::Pinned, 5000);
-        r1.add_entry("x".to_string(), 100).unwrap();
+        r1.add_entry("x", 100).unwrap();
         let mut r2 = Region::new("b".to_string(), RegionKind::Temporary, 5000);
-        r2.add_entry("y".to_string(), 200).unwrap();
+        r2.add_entry("y", 200).unwrap();
         window.add_region(r1);
         window.add_region(r2);
 
@@ -1661,9 +1681,7 @@ mod tests {
         // When the only region is Pinned (within budget), eviction frees nothing.
         let mut window = ContextWindow::new(10000);
         let mut pinned = Region::new("pinned".to_string(), RegionKind::Pinned, 5000);
-        pinned
-            .add_entry("important data".to_string(), 2000)
-            .unwrap();
+        pinned.add_entry("important data", 2000).unwrap();
         window.add_region(pinned);
 
         let result = with_tracing(|| window.try_evict(500)).unwrap();
@@ -1718,8 +1736,8 @@ mod tests {
     fn try_evict_continues_loop_when_each_entry_removal_is_insufficient() {
         let mut window = ContextWindow::new(1000);
         let mut temp = Region::new("cache".to_string(), RegionKind::Temporary, 800);
-        temp.add_entry("entry1".to_string(), 50).unwrap();
-        temp.add_entry("entry2".to_string(), 50).unwrap();
+        temp.add_entry("entry1", 50).unwrap();
+        temp.add_entry("entry2", 50).unwrap();
         window.add_region(temp);
         window.current_tokens = 950; // 95% full
 
@@ -2346,7 +2364,7 @@ mod tests {
             10_000,
         );
         region
-            .add_entry("summary of earlier conversation".to_string(), 50)
+            .add_entry("summary of earlier conversation", 50)
             .unwrap();
         window.add_region(region);
 
@@ -2373,9 +2391,7 @@ mod tests {
             },
             10_000,
         );
-        region
-            .add_entry("implementation details".to_string(), 50)
-            .unwrap();
+        region.add_entry("implementation details", 50).unwrap();
         window.add_region(region);
 
         let assembled = window.assemble();
@@ -2395,7 +2411,7 @@ mod tests {
     fn test_assemble_temporary_region_produces_system_block_never() {
         let mut window = ContextWindow::new(100_000);
         let mut region = Region::new("scratch".to_string(), RegionKind::Temporary, 10_000);
-        region.add_entry("temp data".to_string(), 20).unwrap();
+        region.add_entry("temp data", 20).unwrap();
         window.add_region(region);
 
         let assembled = window.assemble();
@@ -2412,7 +2428,7 @@ mod tests {
     fn test_assemble_clearable_region_produces_system_block_never() {
         let mut window = ContextWindow::new(100_000);
         let mut region = Region::new("cache".to_string(), RegionKind::Clearable, 10_000);
-        region.add_entry("clearable data".to_string(), 20).unwrap();
+        region.add_entry("clearable data", 20).unwrap();
         window.add_region(region);
 
         let assembled = window.assemble();
@@ -2439,8 +2455,8 @@ mod tests {
         // never silently dropped.
         let mut window = ContextWindow::new(100_000);
         let mut region = Region::new("brain".to_string(), custom_kind("b.rhai", false), 10_000);
-        region.add_entry("thought one".to_string(), 10).unwrap();
-        region.add_entry("thought two".to_string(), 10).unwrap();
+        region.add_entry("thought one", 10).unwrap();
+        region.add_entry("thought two", 10).unwrap();
         window.add_region(region);
 
         let assembled = window.assemble();
@@ -2460,8 +2476,8 @@ mod tests {
     fn try_evict_evicts_non_persistent_custom_regions_oldest_first() {
         let mut window = ContextWindow::new(100);
         let mut region = Region::new("brain".to_string(), custom_kind("b.rhai", false), 100);
-        region.add_entry("old".to_string(), 40).unwrap();
-        region.add_entry("new".to_string(), 40).unwrap();
+        region.add_entry("old", 40).unwrap();
+        region.add_entry("new", 40).unwrap();
         window.add_region(region);
         window.current_tokens = 80;
 
@@ -2469,7 +2485,7 @@ mod tests {
         assert!(result.tokens_freed >= 40);
         let brain = window.get_region("brain").unwrap();
         assert_eq!(brain.content.len(), 1);
-        assert_eq!(brain.content[0].content, "new");
+        assert_eq!(brain.content[0].content(), "new");
     }
 
     #[test]
@@ -2478,7 +2494,7 @@ mod tests {
         // exceeds the whole window budget the pinned over-budget guard fires.
         let mut window = ContextWindow::new(50);
         let mut vault = Region::new("vault".to_string(), custom_kind("v.rhai", true), 100);
-        vault.add_entry("precious".to_string(), 60).unwrap();
+        vault.add_entry("precious", 60).unwrap();
         window.add_region(vault);
         window.current_tokens = 60;
 
@@ -2549,7 +2565,7 @@ mod tests {
             .unwrap()
             .content
             .iter()
-            .map(|e| e.content.as_str())
+            .map(|e| e.content())
             .collect();
         assert_eq!(
             contents,
@@ -2562,7 +2578,7 @@ mod tests {
         assert!(window.replace_region("brain", "e".to_string(), 1));
         let region = window.get_region("brain").unwrap();
         assert_eq!(region.content.len(), 1);
-        assert_eq!(region.content[0].content, "text:e");
+        assert_eq!(region.content[0].content(), "text:e");
     }
 
     #[test]
@@ -2649,7 +2665,11 @@ mod tests {
         assert!(result.tokens_freed >= 40);
         let brain = window.get_region("brain").unwrap();
         assert_eq!(brain.content.len(), 1);
-        assert_eq!(brain.content[0].content, "new", "oldest-first fallback ran");
+        assert_eq!(
+            brain.content[0].content(),
+            "new",
+            "oldest-first fallback ran"
+        );
     }
 
     #[test]
@@ -2698,7 +2718,7 @@ mod tests {
             .add_to_region("plain", "untouched".to_string(), 2)
             .unwrap();
         assert_eq!(
-            window.get_region("plain").unwrap().content[0].content,
+            window.get_region("plain").unwrap().content[0].content(),
             "untouched"
         );
     }
@@ -2730,7 +2750,7 @@ mod tests {
 
         let region = window.get_region("brain").unwrap();
         assert_eq!(region.content.len(), 1);
-        assert_eq!(region.content[0].content, "next");
+        assert_eq!(region.content[0].content(), "next");
         assert_eq!(window.current_tokens, 20);
     }
 
@@ -2809,7 +2829,7 @@ mod tests {
             .unwrap()
             .content
             .iter()
-            .map(|e| e.content.as_str())
+            .map(|e| e.content())
             .collect();
         assert_eq!(
             contents,
@@ -3334,7 +3354,7 @@ mod tests {
         // Only a Pinned region, no SlidingWindow with user messages
         let mut pinned = Region::new("system".to_string(), RegionKind::Pinned, 10_000);
         pinned
-            .add_entry("You are a helpful assistant.".to_string(), 20)
+            .add_entry("You are a helpful assistant.", 20)
             .unwrap();
         window.add_region(pinned);
 
@@ -3566,15 +3586,11 @@ mod tests {
 
         // Add regions in "wrong" order: volatile first, stable last
         let mut clearable = Region::new("scratch".to_string(), RegionKind::Clearable, 10_000);
-        clearable
-            .add_entry("clearable data".to_string(), 20)
-            .unwrap();
+        clearable.add_entry("clearable data", 20).unwrap();
         window.add_region(clearable);
 
         let mut temporary = Region::new("temp".to_string(), RegionKind::Temporary, 10_000);
-        temporary
-            .add_entry("temporary data".to_string(), 20)
-            .unwrap();
+        temporary.add_entry("temporary data", 20).unwrap();
         window.add_region(temporary);
 
         let mut compacting = Region::new(
@@ -3584,15 +3600,11 @@ mod tests {
             },
             10_000,
         );
-        compacting
-            .add_entry("compacting data".to_string(), 20)
-            .unwrap();
+        compacting.add_entry("compacting data", 20).unwrap();
         window.add_region(compacting);
 
         let mut pinned = Region::new("system".to_string(), RegionKind::Pinned, 10_000);
-        pinned
-            .add_entry("pinned system prompt".to_string(), 20)
-            .unwrap();
+        pinned.add_entry("pinned system prompt", 20).unwrap();
         window.add_region(pinned);
 
         let assembled = window.assemble();
@@ -3750,7 +3762,7 @@ mod tests {
         let mut window = ContextWindow::new(100_000);
 
         let mut temp = Region::new("temp".to_string(), RegionKind::Temporary, 10_000);
-        temp.add_entry("temp data".to_string(), 10).unwrap();
+        temp.add_entry("temp data", 10).unwrap();
         window.add_region(temp);
 
         let mut history = Region::new(
@@ -3760,7 +3772,7 @@ mod tests {
             },
             10_000,
         );
-        history.add_entry("summary data".to_string(), 10).unwrap();
+        history.add_entry("summary data", 10).unwrap();
         window.add_region(history);
 
         let assembled = window.assemble();
@@ -3814,10 +3826,10 @@ mod tests {
             10_000,
         );
         region
-            .upsert_by_key("src/main.rs", "fn main() {}".to_string(), 10)
+            .upsert_by_key("src/main.rs", "fn main() {}", 10)
             .unwrap();
         region
-            .upsert_by_key("src/lib.rs", "pub mod foo;".to_string(), 8)
+            .upsert_by_key("src/lib.rs", "pub mod foo;", 8)
             .unwrap();
         window.add_region(region);
 
@@ -3839,9 +3851,7 @@ mod tests {
             RegionKind::HashMap { max_entries: None },
             10_000,
         );
-        region
-            .upsert_by_key("a.rs", "content".to_string(), 5)
-            .unwrap();
+        region.upsert_by_key("a.rs", "content", 5).unwrap();
         window.add_region(region);
 
         let assembled = window.assemble();
@@ -3863,7 +3873,7 @@ mod tests {
             10_000,
         );
         region
-            .upsert_by_key("config.toml", "key = \"value\"".to_string(), 10)
+            .upsert_by_key("config.toml", "key = \"value\"", 10)
             .unwrap();
         window.add_region(region);
 
@@ -3894,13 +3904,11 @@ mod tests {
             10_000,
         );
         region
-            .upsert_by_key("alpha.rs", "fn alpha() {}".to_string(), 10)
+            .upsert_by_key("alpha.rs", "fn alpha() {}", 10)
             .unwrap();
+        region.upsert_by_key("beta.rs", "fn beta() {}", 10).unwrap();
         region
-            .upsert_by_key("beta.rs", "fn beta() {}".to_string(), 10)
-            .unwrap();
-        region
-            .upsert_by_key("gamma.rs", "fn gamma() {}".to_string(), 10)
+            .upsert_by_key("gamma.rs", "fn gamma() {}", 10)
             .unwrap();
         window.add_region(region);
 
@@ -3945,7 +3953,7 @@ mod tests {
         // Pinned region
         let mut pinned = Region::new("system".to_string(), RegionKind::Pinned, 10_000);
         pinned
-            .add_entry("You are a helpful assistant.".to_string(), 20)
+            .add_entry("You are a helpful assistant.", 20)
             .unwrap();
         window.add_region(pinned);
 
@@ -3956,7 +3964,7 @@ mod tests {
             10_000,
         );
         hashmap
-            .upsert_by_key("main.rs", "fn main() {}".to_string(), 10)
+            .upsert_by_key("main.rs", "fn main() {}", 10)
             .unwrap();
         window.add_region(hashmap);
 
@@ -3970,11 +3978,7 @@ mod tests {
             50_000,
         );
         sliding
-            .add_typed_entry(
-                "Hello there".to_string(),
-                10,
-                leviath_core::EntryKind::UserMessage,
-            )
+            .add_typed_entry("Hello there", 10, leviath_core::EntryKind::UserMessage)
             .unwrap();
         window.add_region(sliding);
 
@@ -4079,6 +4083,22 @@ mod tests {
                 .iter()
                 .any(|b| b.text.contains("keyless content")),
             "keyless HashMap entry should appear verbatim in a system block"
+        );
+    }
+    #[test]
+    fn shared_interner_deduplicates_pinned_text_across_windows() {
+        let interner = leviath_core::ContentInterner::new();
+        let mut a = ContextWindow::with_interner(10_000, interner.clone());
+        let mut b = ContextWindow::with_interner(10_000, interner);
+        assert!(a.interner().ptr_eq(b.interner()));
+        a.add_region(Region::new("pin".into(), RegionKind::Pinned, 5_000));
+        b.add_region(Region::new("pin".into(), RegionKind::Pinned, 5_000));
+        let text = "shared architecture block";
+        a.add_to_region("pin", text.into(), 10).unwrap();
+        b.add_to_region("pin", text.into(), 10).unwrap();
+        assert!(
+            a.get_region("pin").unwrap().content[0]
+                .shares_content_with(&b.get_region("pin").unwrap().content[0])
         );
     }
 }

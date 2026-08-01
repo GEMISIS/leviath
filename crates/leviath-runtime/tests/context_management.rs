@@ -65,15 +65,13 @@ fn test_eviction_cascade_temporary_then_compacting() {
 
     // Add a Clearable region
     let mut clearable = Region::new("scratch".to_string(), RegionKind::Clearable, 3000);
-    clearable
-        .add_entry("scratch data".to_string(), 1500)
-        .unwrap();
+    clearable.add_entry("scratch data", 1500).unwrap();
     window.add_region(clearable);
 
     // Add a Temporary region
     let mut temp = Region::new("temp".to_string(), RegionKind::Temporary, 4000);
-    temp.add_entry("temp old".to_string(), 1000).unwrap();
-    temp.add_entry("temp new".to_string(), 1000).unwrap();
+    temp.add_entry("temp old", 1000).unwrap();
+    temp.add_entry("temp new", 1000).unwrap();
     window.add_region(temp);
 
     // Add a SlidingWindow region (should never be touched)
@@ -85,8 +83,8 @@ fn test_eviction_cascade_temporary_then_compacting() {
         },
         4000,
     );
-    sliding.add_entry("msg 1".to_string(), 500).unwrap();
-    sliding.add_entry("msg 2".to_string(), 500).unwrap();
+    sliding.add_entry("msg 1", 500).unwrap();
+    sliding.add_entry("msg 2", 500).unwrap();
     window.add_region(sliding);
 
     assert_eq!(window.current_tokens, 4500);
@@ -138,15 +136,15 @@ fn test_token_budget_enforcement() {
     let mut region = Region::new("test".to_string(), RegionKind::Pinned, 1000);
 
     // Adding within budget should succeed
-    assert!(region.add_entry("small".to_string(), 100).is_ok());
+    assert!(region.add_entry("small", 100).is_ok());
     assert_eq!(region.current_tokens, 100);
 
     // Adding more within budget should succeed
-    assert!(region.add_entry("medium".to_string(), 500).is_ok());
+    assert!(region.add_entry("medium", 500).is_ok());
     assert_eq!(region.current_tokens, 600);
 
     // Exceeding budget should fail
-    let result = region.add_entry("too large".to_string(), 500);
+    let result = region.add_entry("too large", 500);
     assert!(result.is_err());
     assert_eq!(region.current_tokens, 600); // unchanged
 }
@@ -156,16 +154,16 @@ fn test_region_content_management() {
     let mut region = Region::new("test".to_string(), RegionKind::Temporary, 5000);
 
     // Add multiple entries
-    region.add_entry("entry 1".to_string(), 100).unwrap();
-    region.add_entry("entry 2".to_string(), 200).unwrap();
-    region.add_entry("entry 3".to_string(), 300).unwrap();
+    region.add_entry("entry 1", 100).unwrap();
+    region.add_entry("entry 2", 200).unwrap();
+    region.add_entry("entry 3", 300).unwrap();
 
     assert_eq!(region.entry_count(), 3);
     assert_eq!(region.current_tokens, 600);
 
     // Remove oldest
     let removed = region.remove_oldest().unwrap();
-    assert_eq!(removed.content, "entry 1");
+    assert_eq!(removed.content(), "entry 1");
     assert_eq!(removed.tokens, 100);
     assert_eq!(region.entry_count(), 2);
     assert_eq!(region.current_tokens, 500);
@@ -187,11 +185,11 @@ fn test_compacting_region_needs_compaction() {
     );
 
     // Below threshold
-    region.add_entry("data".to_string(), 300).unwrap();
+    region.add_entry("data", 300).unwrap();
     assert!(!region.needs_compaction());
 
     // Above threshold
-    region.add_entry("more data".to_string(), 300).unwrap();
+    region.add_entry("more data", 300).unwrap();
     assert!(region.needs_compaction());
 }
 
@@ -234,12 +232,8 @@ fn test_eviction_result_needs_compaction_when_compacting_full() {
         },
         1400,
     );
-    compacting
-        .add_entry("data block 1".to_string(), 600)
-        .unwrap();
-    compacting
-        .add_entry("data block 2".to_string(), 600)
-        .unwrap();
+    compacting.add_entry("data block 1", 600).unwrap();
+    compacting.add_entry("data block 2", 600).unwrap();
     window.add_region(compacting);
 
     assert_eq!(window.current_tokens, 1200);
@@ -257,9 +251,7 @@ fn test_eviction_clears_then_identifies_compaction() {
 
     // Add clearable region
     let mut clearable = Region::new("scratch".to_string(), RegionKind::Clearable, 1000);
-    clearable
-        .add_entry("scratch stuff".to_string(), 400)
-        .unwrap();
+    clearable.add_entry("scratch stuff", 400).unwrap();
     window.add_region(clearable);
 
     // Add compacting region over threshold
@@ -270,7 +262,7 @@ fn test_eviction_clears_then_identifies_compaction() {
         },
         1200,
     );
-    compacting.add_entry("impl data".to_string(), 900).unwrap();
+    compacting.add_entry("impl data", 900).unwrap();
     window.add_region(compacting);
 
     assert_eq!(window.current_tokens, 1300);
@@ -499,18 +491,10 @@ async fn test_file_tracking_sync_assembly_integration() {
             && let Some(region) = window.get_region_mut("files")
         {
             region
-                .upsert_by_key(
-                    "src/main.py",
-                    "def main():\n    print('hello')".to_string(),
-                    10,
-                )
+                .upsert_by_key("src/main.py", "def main():\n    print('hello')", 10)
                 .unwrap();
             region
-                .upsert_by_key(
-                    "src/utils.py",
-                    "def helper():\n    return 42".to_string(),
-                    8,
-                )
+                .upsert_by_key("src/utils.py", "def helper():\n    return 42", 8)
                 .unwrap();
         }
     }

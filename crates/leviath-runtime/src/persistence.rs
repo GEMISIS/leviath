@@ -135,7 +135,7 @@ pub fn build_context_snapshot(window: &ContextWindow, stage_name: &str) -> Conte
                 .iter()
                 .enumerate()
                 .map(|(i, e)| RegionEntrySnapshot {
-                    content: e.content.clone(),
+                    content: e.content_owned(),
                     tokens: e.tokens,
                     kind: e.kind.clone(),
                     metadata: e.metadata.clone(),
