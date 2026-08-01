@@ -144,6 +144,33 @@ impl TelemetryEvent {
     }
 }
 
+/// How the daemon as a whole is doing, sampled once per safety re-drive.
+///
+/// Deliberately not a [`TelemetryEvent`]: every variant of that enum belongs to
+/// one run, and this belongs to none of them. The distinction is the point. A
+/// daemon whose lanes are full and whose runs have all stopped moving emits no
+/// per-run telemetry at all, precisely because nothing is happening, so the
+/// silence that issue #191 reported was indistinguishable from an idle night.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LaneHealth {
+    /// Agents doing work, or ready to.
+    pub agents_active: usize,
+    /// Agents blocked on input, a child, or a prompt.
+    pub agents_waiting: usize,
+    /// Tool batches holding lane capacity and running.
+    pub tools_busy: usize,
+    /// Tool batches waiting for lane capacity.
+    pub tools_queued: usize,
+    /// Tool batches parked on an unbounded wait, holding no capacity.
+    pub tools_parked: usize,
+    /// The tool lane's concurrency cap, including any relief granted.
+    pub tools_workers: usize,
+    /// Consecutive re-drives that found a lane at capacity and no run moving.
+    pub dead_cycles: u32,
+    /// Extra tool-lane capacity handed out on this sample, if any.
+    pub relief_granted: usize,
+}
+
 /// Where telemetry events go.
 ///
 /// Implementations must tolerate being called from the engine's tick loop:
@@ -151,6 +178,10 @@ impl TelemetryEvent {
 pub trait TelemetrySink: Send + Sync {
     /// Record one event.
     fn emit(&self, event: TelemetryEvent);
+
+    /// Record one daemon-wide health sample. Default: ignore it, so a sink that
+    /// only cares about runs needs no changes.
+    fn observe_lanes(&self, _health: LaneHealth) {}
 
     /// Flush any buffered export before shutdown. Default: nothing buffered.
     fn force_flush(&self) {}
@@ -167,6 +198,7 @@ impl TelemetrySink for NoopSink {
 #[derive(Default)]
 pub struct MemorySink {
     events: std::sync::Mutex<Vec<TelemetryEvent>>,
+    lanes: std::sync::Mutex<Vec<LaneHealth>>,
     flushes: std::sync::atomic::AtomicUsize,
 }
 
@@ -174,6 +206,11 @@ impl MemorySink {
     /// A snapshot of everything emitted so far, in order.
     pub fn events(&self) -> Vec<TelemetryEvent> {
         self.events.lock().expect("telemetry event lock").clone()
+    }
+
+    /// Every lane-health sample recorded so far, in order.
+    pub fn lane_samples(&self) -> Vec<LaneHealth> {
+        self.lanes.lock().expect("telemetry lane lock").clone()
     }
 
     /// How many times `force_flush` was called.
@@ -188,6 +225,10 @@ impl TelemetrySink for MemorySink {
             .lock()
             .expect("telemetry event lock")
             .push(event);
+    }
+
+    fn observe_lanes(&self, health: LaneHealth) {
+        self.lanes.lock().expect("telemetry lane lock").push(health);
     }
 
     fn force_flush(&self) {
@@ -225,6 +266,21 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].kind(), "run_started");
         assert_eq!(events[1].kind(), "stage_entered");
+    }
+
+    #[test]
+    fn memory_sink_records_lane_samples_and_the_noop_ignores_them() {
+        let sink = MemorySink::default();
+        assert!(sink.lane_samples().is_empty());
+        sink.observe_lanes(LaneHealth {
+            dead_cycles: 3,
+            ..Default::default()
+        });
+        assert_eq!(sink.lane_samples().len(), 1);
+        assert_eq!(sink.lane_samples()[0].dead_cycles, 3);
+
+        // The default trait body: a sink that only cares about runs drops it.
+        NoopSink.observe_lanes(LaneHealth::default());
     }
 
     #[test]

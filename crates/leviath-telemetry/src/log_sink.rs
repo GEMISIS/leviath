@@ -7,7 +7,7 @@
 //! the same reason this is hand-rolled rather than `opentelemetry-stdout`,
 //! which writes to stdout unconditionally.)
 
-use leviath_core::telemetry::{LogKind, TelemetryEvent, TelemetrySink};
+use leviath_core::telemetry::{LaneHealth, LogKind, TelemetryEvent, TelemetrySink};
 
 /// One readable line for an event.
 pub(crate) fn format_event(event: &TelemetryEvent) -> String {
@@ -94,12 +94,32 @@ pub(crate) fn format_event(event: &TelemetryEvent) -> String {
     }
 }
 
+/// One readable line for a daemon-wide health sample.
+pub(crate) fn format_lane_health(health: &LaneHealth) -> String {
+    format!(
+        "lanes: agents active={} waiting={}, tools {}/{} busy, {} parked, {} queued, \
+         dead cycles {}, relief {}",
+        health.agents_active,
+        health.agents_waiting,
+        health.tools_busy,
+        health.tools_workers,
+        health.tools_parked,
+        health.tools_queued,
+        health.dead_cycles,
+        health.relief_granted,
+    )
+}
+
 /// [`TelemetrySink`] that narrates events as `tracing` lines (→ stderr).
 pub struct LogSink;
 
 impl TelemetrySink for LogSink {
     fn emit(&self, event: TelemetryEvent) {
         tracing::info!(target: "leviath::telemetry", "{}", format_event(&event));
+    }
+
+    fn observe_lanes(&self, health: LaneHealth) {
+        tracing::info!(target: "leviath::telemetry", "{}", format_lane_health(&health));
     }
 }
 
@@ -262,5 +282,33 @@ mod tests {
             tool_calls: 0,
             at_ms: 0,
         });
+    }
+
+    /// The daemon-wide line reads as one sentence, with the numbers an operator
+    /// asks for in the order they ask for them.
+    #[test]
+    fn lane_health_formats_to_one_line() {
+        let line = format_lane_health(&LaneHealth {
+            agents_active: 6,
+            agents_waiting: 2,
+            tools_busy: 8,
+            tools_queued: 12,
+            tools_parked: 3,
+            tools_workers: 8,
+            dead_cycles: 4,
+            relief_granted: 2,
+        });
+        assert_eq!(
+            line,
+            "lanes: agents active=6 waiting=2, tools 8/8 busy, 3 parked, 12 queued, \
+             dead cycles 4, relief 2"
+        );
+        assert!(!line.contains('\n'), "one line: {line}");
+    }
+
+    #[test]
+    fn observe_lanes_routes_through_tracing_without_panicking() {
+        let _guard = leviath_testkit::tracing_guard();
+        LogSink.observe_lanes(LaneHealth::default());
     }
 }
