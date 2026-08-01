@@ -142,6 +142,26 @@ impl TokenTotals {
     }
 }
 
+/// Whether a run in `status` carrying `flags` stopped with nothing to show for
+/// itself.
+///
+/// Three things have to hold. The run has to have *stopped* - an agent that
+/// hasn't written anything yet is not an empty run, it is a busy one. It has to
+/// have modified nothing. And its blueprint has to have offered a way to modify
+/// something, or the question does not apply to it (see
+/// [`no_output_tools`](leviath_core::run_meta::RunFlags::no_output_tools)).
+///
+/// One definition, called by both `meta.json` and the run listing, so what an
+/// operator reads in `lev ps` and what a harness reads off disk cannot drift
+/// apart.
+pub fn is_empty_output(status: &AgentStatus, flags: &leviath_core::run_meta::RunFlags) -> bool {
+    matches!(
+        run_status_from(status),
+        RunStatus::Complete | RunStatus::Error | RunStatus::Cancelled
+    ) && flags.modified_file_count == 0
+        && !flags.no_output_tools
+}
+
 /// Map an agent's ECS status to the on-disk [`RunStatus`].
 pub fn run_status_from(status: &AgentStatus) -> RunStatus {
     match status {
@@ -236,16 +256,9 @@ pub fn build_run_meta(
     depth: usize,
     max_child_depth: usize,
 ) -> RunMeta {
-    // `empty_output` is only meaningful once the run has stopped: a running
-    // agent that hasn't written anything *yet* is not an empty run. Nor is one
-    // whose blueprint never offered a way to write - see `no_output_tools`.
     let status = run_status_from(&state.status);
     let mut flags = flags.0.clone();
-    flags.empty_output = matches!(
-        status,
-        RunStatus::Complete | RunStatus::Error | RunStatus::Cancelled
-    ) && flags.modified_file_count == 0
-        && !flags.no_output_tools;
+    flags.empty_output = is_empty_output(&state.status, &flags);
     RunMeta {
         run_id: md.run_id.clone(),
         agent_name: md.agent_name.clone(),
@@ -410,6 +423,36 @@ mod tests {
             &["mcp__fs__put"],
             Some(&["mcp__other__put"])
         )]));
+    }
+
+    #[test]
+    fn is_empty_output_needs_a_stopped_run_that_could_have_written() {
+        let nothing = leviath_core::run_meta::RunFlags::default();
+        // Running: it has not finished not-writing yet.
+        assert!(!is_empty_output(&AgentStatus::Active, &nothing));
+        assert!(!is_empty_output(&AgentStatus::Idle, &nothing));
+        assert!(!is_empty_output(&AgentStatus::Paused, &nothing));
+        assert!(!is_empty_output(&AgentStatus::Waiting, &nothing));
+        // Every way of stopping counts.
+        for status in [
+            AgentStatus::Complete,
+            AgentStatus::Cancelled,
+            AgentStatus::Error {
+                message: "x".to_string(),
+            },
+        ] {
+            assert!(is_empty_output(&status, &nothing));
+        }
+        // Wrote something.
+        let mut wrote = leviath_core::run_meta::RunFlags::default();
+        wrote.record_modification("src/a.rs");
+        assert!(!is_empty_output(&AgentStatus::Complete, &wrote));
+        // Had nothing to write with.
+        let incapable = leviath_core::run_meta::RunFlags {
+            no_output_tools: true,
+            ..Default::default()
+        };
+        assert!(!is_empty_output(&AgentStatus::Complete, &incapable));
     }
 
     #[test]
