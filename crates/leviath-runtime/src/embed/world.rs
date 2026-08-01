@@ -888,6 +888,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
             &self,
             _entity: bevy_ecs::entity::Entity,
             calls: Vec<leviath_providers::ToolCall>,
+            _progress: crate::pipeline::ToolProgress,
         ) -> crate::tool_bridge::BoxedToolExec {
             Box::new(move || {
                 Box::pin(async move {

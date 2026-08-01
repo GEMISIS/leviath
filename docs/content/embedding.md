@@ -2,7 +2,7 @@
 title: Embedding
 group: Reference
 group_order: 3
-order: 9
+order: 13
 ---
 
 # Embedding Leviath in a Rust application
