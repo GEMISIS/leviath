@@ -15,6 +15,7 @@ pub(crate) mod context_transform;
 pub mod control_socket;
 pub mod custom_region;
 pub mod dynamic_interaction;
+pub mod embed;
 pub mod fanout;
 pub(crate) mod gate_prompt;
 pub mod host;
