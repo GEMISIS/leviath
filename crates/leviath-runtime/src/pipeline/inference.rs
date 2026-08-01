@@ -230,13 +230,32 @@ pub fn dispatch_inference(
                     exact_token_counting: stage.exact_token_counting,
                 };
                 let cancel = crate::cancel::CancelToken::new();
-                stage.runtime.spawn(run_inference_job(
-                    job,
-                    stage.outcomes.clone(),
-                    stage.wake.clone(),
-                    retry_policy_for(config),
-                    cancel.clone(),
-                ));
+                // Supervised: this agent is about to become `AwaitingInference`,
+                // which the driver reads as "busy". A job that died without
+                // reporting would leave it waiting on a completion that can no
+                // longer come, so the supervisor reports one in its place.
+                let lost_outcomes = stage.outcomes.clone();
+                let lost_wake = stage.wake.clone();
+                crate::lane_supervisor::spawn_supervised(
+                    &stage.runtime,
+                    "inference",
+                    run_inference_job(
+                        job,
+                        stage.outcomes.clone(),
+                        stage.wake.clone(),
+                        retry_policy_for(config),
+                        cancel.clone(),
+                    ),
+                    move |message| {
+                        let _ = lost_outcomes.send(InferenceOutcome {
+                            entity,
+                            result: Err(leviath_providers::ProviderError::Other(message)),
+                            // The job never got to measure itself.
+                            latency: std::time::Duration::ZERO,
+                        });
+                        lost_wake.notify_one();
+                    },
+                );
                 par_commands.command_scope(|mut commands| {
                     track_in_flight(&mut commands, entity, in_flight, cancel);
                     commands
