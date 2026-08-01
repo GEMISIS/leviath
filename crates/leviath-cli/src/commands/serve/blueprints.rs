@@ -806,16 +806,23 @@ prompt = "Run"
         let dir = agents_dir().join(&name);
         std::fs::create_dir_all(&dir).unwrap();
         let manifest_path = dir.join("agent.leviath");
-        std::fs::write(&manifest_path, test_manifest()).unwrap();
 
-        // Hold an exclusive (no-share) handle open for the duration of the
-        // delete attempt below, so `remove_dir_all` hits a sharing
-        // violation trying to unlink `manifest_path`.
-        let _locked = OpenOptions::new()
+        // Create the manifest THROUGH an exclusive (no-share) handle and hold
+        // it open for the duration of the delete attempt below, so
+        // `remove_dir_all` hits a sharing violation trying to unlink
+        // `manifest_path`. Writing the file first and reopening it exclusively
+        // was a CI flake: Windows Defender / the indexer briefly opens a
+        // just-written file, and then it is OUR exclusive open that gets the
+        // sharing violation. Creating it exclusively from the start leaves no
+        // closed-file window for a scanner to grab.
+        let mut locked = OpenOptions::new()
+            .create(true)
             .write(true)
             .share_mode(0)
             .open(&manifest_path)
             .unwrap();
+        std::io::Write::write_all(&mut locked, test_manifest().as_bytes()).unwrap();
+        let _locked = locked;
 
         let app = Router::new().route("/api/blueprints/{name}", delete(delete_blueprint));
         let req = Request::builder()
