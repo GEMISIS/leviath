@@ -50,6 +50,8 @@ mod response;
 pub use response::*;
 mod inference;
 pub use inference::*;
+mod resolve;
+pub use resolve::*;
 
 // ─── Phase marker components (an agent is in exactly one) ────────────────────
 
