@@ -154,7 +154,7 @@ pub fn build_host(
         tool_service.clone(),
         pool_config,
         config.limits.max_concurrent_tools,
-        runs_dir.clone(),
+        Some(runs_dir.clone()),
         runtime,
     );
     // Opt-in accurate pre-inference budget guard (off by default).
@@ -476,7 +476,7 @@ mod tests {
             tool_service.clone(),
             InferencePoolConfig::new(),
             1,
-            std::env::temp_dir(),
+            None,
             Handle::current(),
         );
         let mut reaper = make_reaper(tool_service.clone());

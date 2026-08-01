@@ -1461,7 +1461,7 @@ mod tests {
             cli.clone(),
             InferencePoolConfig::new(),
             1,
-            std::env::temp_dir(),
+            None,
             Handle::current(),
         );
         (world, cli)
