@@ -69,3 +69,38 @@ Any subset applies; the first threshold to trip fires the edge.
 > when the blueprint declares one; error and iteration-cap notes prefer an `error_report` region.
 > Declare them `pinned` (a small budget like 2000 tokens is plenty) so the note survives edge
 > transforms; without them, notes land in `conversation`.
+
+## Nudging
+
+When a stage's model replies with plain text before it has made a single tool call, the runtime
+normally injects a `[System]` nudge ("You have tools available...") and re-runs the stage, up to
+three times. That is the right reflex for a coding stage that stalls, and the wrong one for a stage
+whose deliverable *is* text: a planner told to "use your tools" goes hunting for a write tool it
+does not have.
+
+Each stage can say what should happen instead:
+
+```toml
+[agent.nudge]                # agent-wide default for every stage
+max = 2
+
+[stages.plan.nudge]
+enabled = false              # this stage's deliverable is text; never nudge
+
+[stages.implement.nudge]
+max = 2
+text = "You have edit tools. Make the change described in {regions} rather than describing it again."
+```
+
+All three keys are optional and cascade independently: a stage block wins over `[agent.nudge]`,
+which wins over the `[nudge]` section of your `config.toml`, which falls back to the built-in
+defaults. This is a UX knob, not a permission, so a manifest may raise `max` above the global
+setting as freely as it lowers it.
+
+The `text` may name `{stage}` (the stage's name) and `{regions}` (the comma-separated names of the
+stage's required context regions). The same substitution applies to a required region's
+`required_message`, where `{region}` names the region being demanded.
+
+With nothing configured, one stage shape is already exempt: a stage with interaction points
+presents its text for review, so it is never nudged for producing exactly that text. Setting
+`enabled` explicitly at any level overrides this in either direction.
