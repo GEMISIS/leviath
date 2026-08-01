@@ -98,7 +98,10 @@ pub struct GateAutoApprove;
 pub struct InteractionAutoApprove;
 
 /// Status of an agent.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+///
+/// `Hash` so the driver's quiescence check can fold an agent's status into its
+/// per-tick digest (see `PipelineWorld::agent_digest`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Hash)]
 pub enum AgentStatus {
     /// Agent is idle, ready for tasks
     Idle,

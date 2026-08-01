@@ -50,9 +50,25 @@ use crate::pipeline::{
 use crate::providers::ProviderRegistry;
 use crate::tool_bridge::ToolLane;
 
-/// Counts of agents in each phase-marker - the world's per-tick "fingerprint".
-/// Two consecutive equal fingerprints mean a tick changed nothing (quiescence).
-type Fingerprint = [usize; 12];
+/// What a tick can change, as one comparable value. Two consecutive equal
+/// fingerprints mean a tick changed nothing (quiescence).
+///
+/// Marker counts alone are not enough, because a tick can move an agent out of a
+/// marker and back into it. A stage that ends on `max_iterations` does exactly
+/// that: `enforce_max_iterations` swaps `ReadyToInfer` for `ResolveTransition` in
+/// the first chained group, and `resolve_transition` enters the next stage and
+/// re-arms `ReadyToInfer` in the second - one tick, a whole stage transition, and
+/// every count identical either side of it. The driver read that as quiescence
+/// and parked on an agent that no dispatch system had yet seen in its new stage,
+/// leaving the 30s re-drive to start the next stage (issue #197).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Fingerprint {
+    /// How many agents hold each phase marker.
+    markers: [usize; 12],
+    /// Per-agent run progress that no marker reflects (see
+    /// [`PipelineWorld::agent_digest`]).
+    agents: u64,
+}
 
 /// How many attributed system panics one [`PipelineWorld::run_to_fixed_point`]
 /// round will absorb before it stops driving. Each one fails a different agent,
@@ -693,9 +709,52 @@ impl PipelineWorld {
         q.iter(&self.world).count()
     }
 
-    /// Snapshot the per-phase marker counts.
+    /// Digest the run progress a phase marker cannot show: each agent's status,
+    /// which stage it is in, and its per-stage counters.
+    ///
+    /// Only values that step on a real event go in. Anything that moves on its
+    /// own (a clock, a stall timestamp) would keep the fixed-point loop from ever
+    /// converging, which is a spinning daemon rather than a parked one.
+    ///
+    /// The per-agent digests are XOR-folded, so archetype iteration order doesn't
+    /// matter; each one includes the entity id so two agents swapping states
+    /// can't cancel out.
+    fn agent_digest(&mut self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut query = self.world.query::<(
+            Entity,
+            &AgentState,
+            Option<&crate::pipeline::StageCursor>,
+            Option<&crate::pipeline::StageProgress>,
+        )>();
+        query
+            .iter(&self.world)
+            .map(|(entity, state, cursor, progress)| {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                entity.to_bits().hash(&mut hasher);
+                state.status.hash(&mut hasher);
+                state.current_stage.hash(&mut hasher);
+                state.iteration.hash(&mut hasher);
+                cursor.map(|c| c.index).hash(&mut hasher);
+                progress
+                    .map(|p| {
+                        (
+                            p.iterations,
+                            p.total_tool_calls,
+                            p.modifying_tool_calls,
+                            p.gate_reentries,
+                            p.stuck_fired,
+                        )
+                    })
+                    .hash(&mut hasher);
+                hasher.finish()
+            })
+            .fold(0, |acc, digest| acc ^ digest)
+    }
+
+    /// Snapshot the per-phase marker counts and the per-agent progress digest.
     fn fingerprint(&mut self) -> Fingerprint {
-        [
+        let markers = [
             self.count::<With<ReadyToInfer>>(),
             self.count::<With<AwaitingInference>>(),
             self.count::<With<ProcessResponse>>(),
@@ -708,7 +767,11 @@ impl PipelineWorld {
             self.count::<With<AwaitingCompaction>>(),
             self.count::<With<crate::title::PendingTitle>>(),
             self.count::<With<crate::title::AwaitingTitle>>(),
-        ]
+        ];
+        Fingerprint {
+            markers,
+            agents: self.agent_digest(),
+        }
     }
 
     /// Any agent waiting on an in-flight async job (inference, tools, a
