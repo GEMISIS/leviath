@@ -394,6 +394,12 @@ impl Dashboard {
             KeyCode::Char('k') => {
                 self.handle_kill_from_detail();
             }
+            KeyCode::Char('p') => {
+                self.handle_pause();
+            }
+            KeyCode::Char('r') => {
+                self.handle_resume();
+            }
             _ => {}
         }
     }
@@ -473,6 +479,60 @@ impl Dashboard {
         }
     }
 
+    /// Pause the selected agent (main list and detail view share this: unlike
+    /// kill, there is no input state to reset). Gated on the states the daemon
+    /// will actually pause, so an ineligible row sends nothing instead of
+    /// producing a guaranteed refusal toast.
+    fn handle_pause(&mut self) {
+        if let Some(agent) = self.selected_agent()
+            && matches!(
+                agent.status,
+                AgentDisplayStatus::Active | AgentDisplayStatus::Idle | AgentDisplayStatus::Stale
+            )
+        {
+            let agent_id = agent.id.clone();
+            let _ = self.cmd_tx.send(DaemonCommand::Pause {
+                run_id: agent_id.clone(),
+            });
+            // See the comment in `handle_kill_from_detail` - the index is still
+            // valid because the `cmd_tx.send` above does not touch
+            // `display_indices`/`agents`/`selected`.
+            let idx = self
+                .selected_agent_raw_idx()
+                .expect("selected_agent() returned Some above");
+            let a = self
+                .agents
+                .get_mut(idx)
+                .expect("index snapshotted from the still-unchanged display_indices/agents above");
+            a.status = AgentDisplayStatus::Paused;
+            self.add_log(format!("{}: pause requested", agent_id));
+        }
+    }
+
+    /// Resume the selected agent if it is paused.
+    fn handle_resume(&mut self) {
+        if let Some(agent) = self.selected_agent()
+            && agent.status == AgentDisplayStatus::Paused
+        {
+            let agent_id = agent.id.clone();
+            let _ = self.cmd_tx.send(DaemonCommand::Resume {
+                run_id: agent_id.clone(),
+            });
+            // See the comment in `handle_kill_from_detail` - the index is still
+            // valid because the `cmd_tx.send` above does not touch
+            // `display_indices`/`agents`/`selected`.
+            let idx = self
+                .selected_agent_raw_idx()
+                .expect("selected_agent() returned Some above");
+            let a = self
+                .agents
+                .get_mut(idx)
+                .expect("index snapshotted from the still-unchanged display_indices/agents above");
+            a.status = AgentDisplayStatus::Active;
+            self.add_log(format!("{}: resume requested", agent_id));
+        }
+    }
+
     fn handle_main_list_key(&mut self, key_code: KeyCode) {
         match key_code {
             KeyCode::Esc => {
@@ -527,6 +587,12 @@ impl Dashboard {
             }
             KeyCode::Char('k') => {
                 self.handle_kill_from_list();
+            }
+            KeyCode::Char('p') => {
+                self.handle_pause();
+            }
+            KeyCode::Char('r') => {
+                self.handle_resume();
             }
             KeyCode::Char('?') => {
                 self.show_help = true;
@@ -1545,6 +1611,125 @@ mod tests {
         dash.handle_key(key(KeyCode::Esc));
         assert!(!dash.input_mode);
         assert_eq!(dash.choice_selected, 0);
+    }
+
+    // ─── handle_pause / handle_resume ─────────────────────────────────────
+
+    /// Every state the daemon will pause is pausable from the list, sends the
+    /// command, and flips the row optimistically.
+    #[test]
+    fn pause_sends_command_for_each_pausable_state() {
+        for status in [
+            AgentDisplayStatus::Active,
+            AgentDisplayStatus::Idle,
+            AgentDisplayStatus::Stale,
+        ] {
+            let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+            let mut dash = Dashboard::new(cmd_tx);
+            dash.agents.push(make_test_agent("run-1", status.clone()));
+            dash.update_display_indices();
+            dash.handle_key(key(KeyCode::Char('p')));
+            assert_eq!(
+                cmd_rx.try_recv().ok(),
+                Some(DaemonCommand::Pause {
+                    run_id: "run-1".to_string()
+                }),
+                "pause from {status:?} sends the command"
+            );
+            assert_eq!(dash.agents[0].status, AgentDisplayStatus::Paused);
+        }
+    }
+
+    /// Waiting and finished runs are not pausable: nothing is sent, so the user
+    /// never sees a guaranteed refusal toast.
+    #[test]
+    fn pause_is_a_no_op_for_unpausable_states() {
+        for status in [
+            AgentDisplayStatus::Waiting,
+            AgentDisplayStatus::Paused,
+            AgentDisplayStatus::Complete,
+            AgentDisplayStatus::Cancelled,
+        ] {
+            let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+            let mut dash = Dashboard::new(cmd_tx);
+            dash.agents.push(make_test_agent("run-1", status.clone()));
+            dash.update_display_indices();
+            dash.handle_key(key(KeyCode::Char('p')));
+            assert!(
+                cmd_rx.try_recv().is_err(),
+                "pause from {status:?} sends nothing"
+            );
+            assert_eq!(dash.agents[0].status, status);
+        }
+    }
+
+    #[test]
+    fn resume_sends_command_for_a_paused_run_only() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Paused));
+        dash.update_display_indices();
+        dash.handle_key(key(KeyCode::Char('r')));
+        assert_eq!(
+            cmd_rx.try_recv().ok(),
+            Some(DaemonCommand::Resume {
+                run_id: "run-1".to_string()
+            })
+        );
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Active);
+    }
+
+    #[test]
+    fn resume_is_a_no_op_for_a_run_that_is_not_paused() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.handle_key(key(KeyCode::Char('r')));
+        assert!(cmd_rx.try_recv().is_err());
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Active);
+    }
+
+    /// With no agents at all, both keys fall through the `selected_agent()`
+    /// guard without panicking or sending.
+    #[test]
+    fn pause_and_resume_with_no_agents_do_nothing() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        dash.handle_key(key(KeyCode::Char('p')));
+        dash.handle_key(key(KeyCode::Char('r')));
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    /// The detail view shares the same handlers via its own `p`/`r` bindings.
+    #[test]
+    fn pause_and_resume_work_from_the_detail_view() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.detail_view = true;
+
+        dash.handle_key(key(KeyCode::Char('p')));
+        assert_eq!(
+            cmd_rx.try_recv().ok(),
+            Some(DaemonCommand::Pause {
+                run_id: "run-1".to_string()
+            })
+        );
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Paused);
+
+        dash.handle_key(key(KeyCode::Char('r')));
+        assert_eq!(
+            cmd_rx.try_recv().ok(),
+            Some(DaemonCommand::Resume {
+                run_id: "run-1".to_string()
+            })
+        );
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Active);
     }
 
     // ─── handle_cancel_from_list ──────────────────────────────────────────

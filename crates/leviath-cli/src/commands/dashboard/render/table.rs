@@ -365,6 +365,7 @@ impl Dashboard {
             ));
             spans.push(Span::raw(" kill  "));
         }
+        self.push_pause_resume_spans(&mut spans);
         spans.push(Span::styled(
             "[?]",
             Style::default().fg(C_DIM).add_modifier(Modifier::BOLD),
@@ -376,6 +377,30 @@ impl Dashboard {
         ));
         spans.push(Span::raw(" back"));
         Line::from(spans)
+    }
+
+    /// Append a `[p] pause` or `[r] resume` hint matching what the selected
+    /// agent's state actually allows (the same gates as the key handlers).
+    fn push_pause_resume_spans(&self, spans: &mut Vec<Span<'static>>) {
+        let Some(status) = self.selected_agent().map(|a| a.status.clone()) else {
+            return;
+        };
+        if matches!(
+            status,
+            AgentDisplayStatus::Active | AgentDisplayStatus::Idle | AgentDisplayStatus::Stale
+        ) {
+            spans.push(Span::styled(
+                "[p]",
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::raw(" pause  "));
+        } else if status == AgentDisplayStatus::Paused {
+            spans.push(Span::styled(
+                "[r]",
+                Style::default().fg(C_WARN).add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::raw(" resume  "));
+        }
     }
 
     fn build_main_list_help_bar(&self) -> Line<'static> {
@@ -419,6 +444,7 @@ impl Dashboard {
             ));
             spans.push(Span::raw(" kill  "));
         }
+        self.push_pause_resume_spans(&mut spans);
         spans.push(Span::styled(
             "[?]",
             Style::default().fg(C_DIM).add_modifier(Modifier::BOLD),
@@ -666,6 +692,57 @@ mod tests {
                 dash.draw_log_panel(f, area);
             })
             .unwrap();
+    }
+
+    fn rendered_buffer(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    /// The pause/resume hint tracks what the selected agent's state allows, in
+    /// both the main list and the detail view: `[p]` for a pausable run, `[r]`
+    /// for a paused one, neither for a finished one (or an empty list).
+    #[test]
+    fn help_bars_show_pause_or_resume_to_match_the_selected_agent() {
+        for detail_view in [false, true] {
+            for (status, expect_pause, expect_resume) in [
+                (Some(AgentDisplayStatus::Active), true, false),
+                (Some(AgentDisplayStatus::Paused), false, true),
+                (Some(AgentDisplayStatus::Complete), false, false),
+                (None, false, false),
+            ] {
+                let backend = TestBackend::new(200, 2);
+                let mut terminal = Terminal::new(backend).unwrap();
+                let mut dash = make_test_dashboard();
+                if let Some(status) = &status {
+                    dash.agents.push(make_test_agent("run-1", status.clone()));
+                    dash.update_display_indices();
+                }
+                dash.detail_view = detail_view;
+                terminal
+                    .draw(|f| {
+                        let area = Rect::new(0, 0, 200, 1);
+                        dash.draw_help_bar(f, area);
+                    })
+                    .unwrap();
+                let rendered = rendered_buffer(&terminal);
+                assert_eq!(
+                    rendered.contains("[p] pause"),
+                    expect_pause,
+                    "{status:?} detail={detail_view}"
+                );
+                assert_eq!(
+                    rendered.contains("[r] resume"),
+                    expect_resume,
+                    "{status:?} detail={detail_view}"
+                );
+            }
+        }
     }
 
     #[test]

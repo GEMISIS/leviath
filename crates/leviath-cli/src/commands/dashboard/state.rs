@@ -636,9 +636,13 @@ impl Dashboard {
                 agent.tokens_out = run.completion_tokens;
                 agent.cached_tokens = run.cached_tokens;
                 agent.title = run.title.clone();
+                // Paused freezes the elapsed timer the same way a wait does:
+                // nothing is running, so the clock should not tick against it.
                 let now_is_waiting = matches!(
                     status,
-                    AgentDisplayStatus::Waiting | AgentDisplayStatus::CompleteInteractive
+                    AgentDisplayStatus::Waiting
+                        | AgentDisplayStatus::CompleteInteractive
+                        | AgentDisplayStatus::Paused
                 );
                 let is_terminal = matches!(
                     status,
@@ -763,6 +767,7 @@ impl Dashboard {
                         run.status,
                         RunStatus::WaitingInput
                             | RunStatus::CompleteInteractive
+                            | RunStatus::Paused
                             | RunStatus::Complete
                             | RunStatus::Cancelled
                             | RunStatus::Error
@@ -1044,6 +1049,24 @@ mod tests {
         assert_eq!(dash.agents[dash.display_indices[0]].id, "run-2"); // Active
         assert_eq!(dash.agents[dash.display_indices[1]].id, "run-3"); // Waiting
         assert_eq!(dash.agents[dash.display_indices[2]].id, "run-1"); // Complete
+    }
+
+    /// Paused sorts with Stale: above the finished states (it is the user's
+    /// deliberately parked unfinished business), below Active/Waiting.
+    #[test]
+    fn update_display_indices_ranks_paused_above_finished_runs() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-done", AgentDisplayStatus::Complete));
+        dash.agents
+            .push(make_test_agent("run-paused", AgentDisplayStatus::Paused));
+        dash.agents
+            .push(make_test_agent("run-live", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+
+        assert_eq!(dash.agents[dash.display_indices[0]].id, "run-live");
+        assert_eq!(dash.agents[dash.display_indices[1]].id, "run-paused");
+        assert_eq!(dash.agents[dash.display_indices[2]].id, "run-done");
     }
 
     /// Write a `run.lvr` for `run_id` with `points` context checkpoints.
@@ -2264,6 +2287,43 @@ mod tests {
                 cleanup_run(run_id);
             },
         );
+    }
+
+    /// A paused run shows PAUSED with its elapsed timer frozen, both when first
+    /// observed and when an already-tracked ACTIVE row flips to paused on a
+    /// later sync (the disk is authoritative - this is what makes the `p`
+    /// key's optimistic flip stick instead of reverting to ACTIVE).
+    #[test]
+    fn sync_from_run_state_paused_run_shows_paused_with_frozen_timer() {
+        crate::runstate::with_isolated_runs_dir("sync-paused-run", |_d| {
+            let run_id = "test-sync-paused";
+            cleanup_run(run_id);
+            let mut meta = make_run_meta(run_id, RunStatus::Running);
+            runstate::create_run(&meta).unwrap();
+
+            let mut dash = make_test_dashboard();
+            dash.sync_from_run_state();
+            let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+            assert_eq!(agent.status, AgentDisplayStatus::Active);
+            assert!(agent.active_until.is_none());
+
+            // The daemon pauses the run and persists the new status.
+            meta.status = RunStatus::Paused;
+            runstate::write_meta(&meta).unwrap();
+            dash.sync_from_run_state();
+            let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+            assert_eq!(agent.status, AgentDisplayStatus::Paused);
+            assert!(agent.active_until.is_some(), "timer frozen while paused");
+
+            // A dashboard opened while the run is already paused agrees.
+            let mut fresh = make_test_dashboard();
+            fresh.sync_from_run_state();
+            let agent = fresh.agents.iter().find(|a| a.id == run_id).unwrap();
+            assert_eq!(agent.status, AgentDisplayStatus::Paused);
+            assert!(agent.active_until.is_some());
+
+            cleanup_run(run_id);
+        });
     }
 
     #[test]
