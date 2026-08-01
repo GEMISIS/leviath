@@ -93,6 +93,8 @@ talk to it:
 | `lev ps` | List running agents and their status |
 | `lev msg <id> <text>` | Send a message to a running agent |
 | `lev respond` | Answer a pending `ask_user` question |
+| `lev pause <run-id>` | Pause a run |
+| `lev resume <run-id>` | Resume a paused run |
 | `lev cancel <run-id>` | Cancel a run |
 | `lev context <run-id>` | Show a run's context-window history |
 

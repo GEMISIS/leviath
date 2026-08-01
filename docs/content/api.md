@@ -61,6 +61,7 @@ Base path `/api`; all JSON unless noted.
 | `GET /api/agents/{id}` · `DELETE …` | Get one · cancel |
 | `GET /api/agents/{id}/result` · `/logs` · `/context` · `/context/history` | Run output, logs, context |
 | `GET /api/agents/tree` · `/{id}/tree-status` · `/{id}/children` | Sub-agent tree + token roll-ups |
+| `POST /api/agents/{id}/pause` · `/resume` | Pause a run · resume it |
 | `POST /api/agents/{id}/message` | Steer a running agent |
 | `GET/POST /api/agents/{id}/interaction` | Read / answer a pending question |
 | `GET/POST/PUT/DELETE /api/blueprints[/{name}]` · `/validate` | Blueprint CRUD + validation |

@@ -9,6 +9,20 @@ in [the release docs](https://leviath.dev/docs/releases); each versioned
 GitHub release also carries auto-generated notes listing the merged pull
 requests since the previous version.
 
+## Unreleased
+
+- Pause and resume are now user-facing: `lev pause <run-id>` and
+  `lev resume <run-id>`, `POST /api/agents/{id}/pause` and `/resume` on the
+  HTTP API, and `p`/`r` in the dashboard. A paused run shows as `paused` in
+  `lev ps`, the dashboard, and the API, and comes back still paused after a
+  daemon restart.
+- Pausing a run that is waiting on input (or already finished) is now refused
+  instead of silently accepted; the old behavior could wedge a fan-out parent
+  by overwriting the status its merge poll depends on.
+- Note for downgraders: run metadata written while a run is paused uses the
+  new `paused` status, which older `lev` binaries cannot read. Resume or
+  cancel paused runs before downgrading.
+
 ## 0.1.1 - 2026-07-31
 
 Post-launch cleanup.

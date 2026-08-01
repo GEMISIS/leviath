@@ -319,7 +319,7 @@ And here is Leviath scored against [12-Factor Agents](https://github.com/humanla
 | 3 | Own your context window | ✓ | Region kinds, per-stage layouts, per-tool routing, percentage budgets |
 | 4 | Tools are structured outputs | partial | Tools declare JSON Schemas; arguments are checked per-handler, not schema-validated at dispatch |
 | 5 | Unify execution and business state | ✓ | One append-only run journal, replayable with `lev context` |
-| 6 | Launch / pause / resume | partial | Launch via CLI, REST, or ACP; pause and resume exist in the runtime but have no user-facing command yet |
+| 6 | Launch / pause / resume | ✓ | Launch via CLI, REST, or ACP; `lev pause` / `lev resume`, `POST /api/agents/{id}/pause` and `/resume`, dashboard `p` / `r`; a paused run shows as paused everywhere and survives a daemon restart |
 | 7 | Contact humans with tool calls | ✓ | `ask_user_*` tools plus blueprint `interaction_points`, answered from CLI, REST, or ACP |
 | 8 | Own your control flow | ✓ | Graph transitions with error, max-iterations, stuck, and LLM-choice conditions |
 | 9 | Compact errors into context | partial | Tool errors land in context; inference errors currently go to logs, not context |
