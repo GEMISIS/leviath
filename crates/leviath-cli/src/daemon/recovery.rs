@@ -601,6 +601,11 @@ mod tests {
             flags: leviath_core::run_meta::RunFlags {
                 modified_files: vec!["src/a.rs".to_string()],
                 modified_file_count: 1,
+                // Contradicts what this manifest would compute on a fresh
+                // spawn (it advertises `write_file`), which is the point: the
+                // flags describe how the run actually executed, so the
+                // persisted answer wins over a re-derived one (issue #192).
+                no_output_tools: true,
                 ..Default::default()
             },
             yolo: false,
@@ -879,6 +884,9 @@ mod tests {
             .unwrap();
         assert_eq!(flags.0.modified_files, vec!["src/a.rs".to_string()]);
         assert_eq!(flags.0.modified_file_count, 1);
+        // Including the capability answer, which the blueprint on disk would
+        // now compute differently - the run is judged as it ran (issue #192).
+        assert!(flags.0.no_output_tools);
     }
 
     /// Fresh + stale differ on every observable field, so the assertions below

@@ -145,9 +145,28 @@ pub struct RunFlags {
     /// Total successful file-modifying tool calls across the run (uncapped).
     #[serde(default)]
     pub modified_file_count: usize,
-    /// The run reached a terminal status having modified nothing.
+    /// The run reached a terminal status having modified nothing, and its
+    /// blueprint gave it a way to modify something. See [`Self::no_output_tools`].
     #[serde(default)]
     pub empty_output: bool,
+    /// No stage of the blueprint advertised a file-modifying tool, so this run
+    /// could never have produced the file changes `empty_output` looks for.
+    ///
+    /// Recorded because "modified no files" only diagnoses an agent that was
+    /// supposed to modify files. A router that spawns sub-agents, or an agent
+    /// whose answer is its text, would otherwise report itself empty on every
+    /// successful run - which is what happened in issue #192. The framework has
+    /// no basis to judge such a run, so it says nothing rather than accusing.
+    ///
+    /// This mirrors the escape the runtime's `gate_blocks` already applies per
+    /// stage: a `require_modifications` gate on a stage that advertises no
+    /// modifying tool is skipped, because it could never pass.
+    ///
+    /// Phrased negatively so the `false` that [`Default`] and `serde(default)`
+    /// produce means "was capable" - the behavior every `meta.json` written
+    /// before this field had.
+    #[serde(default)]
+    pub no_output_tools: bool,
     /// How many stages exhausted their `max_iterations`.
     #[serde(default)]
     pub max_iterations_hit: usize,
@@ -593,10 +612,13 @@ mod tests {
             1,
         );
         meta.flags.empty_output = true;
-        let json = serde_json::to_string(&meta).unwrap();
-        let stripped = json.replace(r#","flags":{"modified_files":[],"modified_file_count":0,"empty_output":true,"max_iterations_hit":0,"gates_forced":0,"workspace_lost":false}"#, "");
-        assert!(!stripped.contains("flags"));
-        let back: RunMeta = serde_json::from_str(&stripped).unwrap();
+        // Drop the key structurally rather than by string surgery: a literal
+        // spelling of the serialized flags silently stops matching the moment a
+        // field is added, and the test then passes for the wrong reason.
+        let mut json = serde_json::to_value(&meta).unwrap();
+        json.as_object_mut().unwrap().remove("flags").unwrap();
+        assert!(!json.to_string().contains("flags"));
+        let back: RunMeta = serde_json::from_value(json).unwrap();
         assert_eq!(back.flags, RunFlags::default());
     }
 

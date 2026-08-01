@@ -81,6 +81,57 @@ pub struct TokenTotals {
 #[derive(Component, Clone, Default, Debug, PartialEq)]
 pub struct RunOutcomeFlags(pub leviath_core::run_meta::RunFlags);
 
+impl RunOutcomeFlags {
+    /// Seed a fresh run's flags from the blueprint it is about to run.
+    ///
+    /// Every counter starts at zero; the one thing decided here is
+    /// [`no_output_tools`], which is fixed for the run's lifetime and so is
+    /// answered once rather than re-derived on every persist tick.
+    ///
+    /// Judged across *every* stage, not only the ones the run reaches: a run
+    /// cancelled in the first stage of an agent that writes files really did
+    /// produce nothing, and should still say so.
+    ///
+    /// [`no_output_tools`]: leviath_core::run_meta::RunFlags::no_output_tools
+    pub fn for_blueprint(bp: &leviath_core::Blueprint) -> Self {
+        Self(leviath_core::run_meta::RunFlags {
+            no_output_tools: !bp.stages.iter().any(stage_can_modify),
+            ..Default::default()
+        })
+    }
+}
+
+/// Whether `stage` advertises a tool whose writes the framework would record:
+/// a built-in [`MODIFYING_TOOLS`] name, or one that this stage's own outgoing
+/// transition gates name (the declared escape hatch for agents whose writes go
+/// through MCP or script tools).
+///
+/// Deliberately the same test the transition gate applies in `gate_blocks`, so
+/// a gated stage and the run's flags cannot disagree about what "can modify"
+/// means.
+/// `shell` is absent from both: an agent can edit through `sed -i` without the
+/// framework seeing it, so shell capability is real but unverifiable - which
+/// is exactly why such a run should still be reported as empty rather than
+/// excused.
+///
+/// [`MODIFYING_TOOLS`]: leviath_core::blueprint::MODIFYING_TOOLS
+fn stage_can_modify(stage: &leviath_core::Stage) -> bool {
+    stage.available_tools.iter().any(|t| {
+        let canonical = leviath_tools::canonical_tool_name(t);
+        leviath_core::blueprint::MODIFYING_TOOLS.contains(&canonical)
+            || stage
+                .transitions
+                .iter()
+                .flat_map(|edges| edges.values())
+                .filter_map(|edge| edge.gate.as_ref())
+                .any(|gate| {
+                    gate.tools
+                        .iter()
+                        .any(|extra| leviath_tools::canonical_tool_name(extra) == canonical)
+                })
+    })
+}
+
 impl TokenTotals {
     /// Add one inference response's usage to the running totals.
     pub fn add_usage(&mut self, usage: &leviath_providers::TokenUsage) {
@@ -186,13 +237,15 @@ pub fn build_run_meta(
     max_child_depth: usize,
 ) -> RunMeta {
     // `empty_output` is only meaningful once the run has stopped: a running
-    // agent that hasn't written anything *yet* is not an empty run.
+    // agent that hasn't written anything *yet* is not an empty run. Nor is one
+    // whose blueprint never offered a way to write - see `no_output_tools`.
     let status = run_status_from(&state.status);
     let mut flags = flags.0.clone();
     flags.empty_output = matches!(
         status,
         RunStatus::Complete | RunStatus::Error | RunStatus::Cancelled
-    ) && flags.modified_file_count == 0;
+    ) && flags.modified_file_count == 0
+        && !flags.no_output_tools;
     RunMeta {
         run_id: md.run_id.clone(),
         agent_name: md.agent_name.clone(),
@@ -266,6 +319,97 @@ mod tests {
             title: Some("Do It".to_string()),
             unattended: false,
         }
+    }
+
+    /// A stage advertising `tools`, with `gate_tools` named by the gate on its
+    /// single outgoing edge. `gate_tools: None` gives the stage no transitions
+    /// at all, which is the other half of the `Option` the scan walks.
+    fn stage_with(tools: &[&str], gate_tools: Option<&[&str]>) -> leviath_core::Stage {
+        let mut stage = leviath_core::Stage::new(
+            "s".to_string(),
+            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        );
+        stage.available_tools = tools.iter().map(|t| (*t).to_string()).collect();
+        stage.transitions = gate_tools.map(|extra| {
+            let gate = (!extra.is_empty()).then(|| leviath_core::blueprint::TransitionGate {
+                require_modifications: true,
+                tools: extra.iter().map(|t| (*t).to_string()).collect(),
+                ..Default::default()
+            });
+            std::collections::HashMap::from([(
+                "next".to_string(),
+                leviath_core::blueprint::TransitionEdge {
+                    target: "next".to_string(),
+                    condition: leviath_core::blueprint::TransitionCondition::Always,
+                    hint: None,
+                    transform: leviath_core::blueprint::EdgeTransform::Direct,
+                    gate,
+                    stuck: None,
+                },
+            )])
+        });
+        stage
+    }
+
+    fn blueprint_of(stages: Vec<leviath_core::Stage>) -> leviath_core::Blueprint {
+        leviath_core::Blueprint::new(
+            "bp".to_string(),
+            "d".to_string(),
+            stages,
+            leviath_core::ContextLayout::new(vec![], 1000),
+        )
+    }
+
+    fn no_output_tools(stages: Vec<leviath_core::Stage>) -> bool {
+        RunOutcomeFlags::for_blueprint(&blueprint_of(stages))
+            .0
+            .no_output_tools
+    }
+
+    #[test]
+    fn for_blueprint_asks_whether_any_stage_could_have_written() {
+        // A blueprint with no stages at all offers nothing.
+        assert!(no_output_tools(vec![]));
+        // Read-only, and the sub-agent tools a router would use: nothing the
+        // framework tracks as a file change. This is the issue #192 case.
+        assert!(no_output_tools(vec![stage_with(
+            &["read_file", "spawn_agent", "context_write"],
+            None
+        )]));
+        // `shell` confers no tracked write: an agent editing through `sed -i`
+        // leaves no record, so silence from it stays suspicious rather than
+        // excused. The alias resolves, so `bash` is judged as `shell`.
+        assert!(no_output_tools(vec![stage_with(&["bash"], None)]));
+        // A built-in modifying tool, under either name.
+        assert!(!no_output_tools(vec![stage_with(&["write_file"], None)]));
+        assert!(!no_output_tools(vec![stage_with(&["edit_file"], None)]));
+        // Only one stage needs it.
+        assert!(!no_output_tools(vec![
+            stage_with(&["read_file"], None),
+            stage_with(&["write_file"], None),
+        ]));
+    }
+
+    #[test]
+    fn for_blueprint_honors_a_gate_declaring_its_own_write_tool() {
+        // An MCP/script write tool the stage advertises AND a gate names is a
+        // tracked write - the same escape hatch `stage_modifying_tools` gives.
+        assert!(!no_output_tools(vec![stage_with(
+            &["mcp__fs__put"],
+            Some(&["mcp__fs__put"])
+        )]));
+        // Declared by the gate but never advertised: the stage cannot call it.
+        assert!(no_output_tools(vec![stage_with(
+            &["read_file"],
+            Some(&["mcp__fs__put"])
+        )]));
+        // Transitions present, but no gate on the edge.
+        assert!(no_output_tools(vec![stage_with(&["read_file"], Some(&[]))]));
+        // A gate that names a tool unrelated to what the stage advertises.
+        assert!(no_output_tools(vec![stage_with(
+            &["mcp__fs__put"],
+            Some(&["mcp__other__put"])
+        )]));
     }
 
     #[test]
@@ -468,6 +612,23 @@ mod tests {
         );
         assert!(!meta.flags.empty_output);
         assert_eq!(meta.flags.modified_files, vec!["src/a.rs".to_string()]);
+
+        // Finished having written nothing, with nothing to write *with*: the
+        // framework has no basis to call this empty, so it doesn't (issue #192).
+        let mut incapable = RunOutcomeFlags::default();
+        incapable.0.no_output_tools = true;
+        let meta = build_run_meta(
+            &metadata(),
+            &state(AgentStatus::Complete),
+            &TokenTotals::default(),
+            &incapable,
+            0,
+            1000,
+            0,
+            0,
+        );
+        assert!(!meta.flags.empty_output);
+        assert!(meta.flags.no_output_tools);
     }
 
     #[test]
