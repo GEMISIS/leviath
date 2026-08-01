@@ -263,6 +263,47 @@ fn a_run_first_seen_terminal_gets_a_complete_story_in_one_pass() {
     ));
 }
 
+/// The `empty_output` a run reports when it finishes carrying `flags`. A named
+/// helper so both answers are read off a real event rather than pattern-matched
+/// with an arm that never runs.
+fn completion_empty_output(flags: Option<crate::persistence::RunOutcomeFlags>) -> bool {
+    let (mut world, sink) = world_with_sink();
+    let mut spawned = world.spawn((meta("r1"), agent("plan", 0, AgentStatus::Complete)));
+    if let Some(flags) = flags {
+        spawned.insert(flags);
+    }
+    observe(&mut world);
+    sink.events()
+        .into_iter()
+        .find_map(|e| match e {
+            TelemetryEvent::RunCompleted { empty_output, .. } => Some(empty_output),
+            _ => None,
+        })
+        .expect("a terminal run reports a completion")
+}
+
+/// Whether a finished run produced anything rides along with the completion,
+/// so a collector can chart the rate rather than only find it on disk (#192).
+#[test]
+fn a_completion_reports_whether_the_run_produced_anything() {
+    // No flags component at all: nothing to report, so no verdict is invented.
+    assert!(!completion_empty_output(None));
+    // Finished having written nothing, with the means to write.
+    assert!(completion_empty_output(Some(
+        crate::persistence::RunOutcomeFlags::default()
+    )));
+    // Wrote something.
+    let mut wrote = crate::persistence::RunOutcomeFlags::default();
+    wrote.0.record_modification("src/a.rs");
+    assert!(!completion_empty_output(Some(wrote)));
+    // Never had a way to write: not this run's failing.
+    let incapable = crate::persistence::RunOutcomeFlags(leviath_core::run_meta::RunFlags {
+        no_output_tools: true,
+        ..Default::default()
+    });
+    assert!(!completion_empty_output(Some(incapable)));
+}
+
 #[test]
 fn activity_records_drain_into_enriched_events() {
     let (mut world, sink) = world_with_sink();

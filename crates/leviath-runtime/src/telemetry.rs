@@ -108,11 +108,12 @@ pub fn observe_lifecycle(
         Option<&mut TelemetryState>,
         Option<&mut StageActivity>,
         Option<&StageIoBuffer>,
+        Option<&crate::persistence::RunOutcomeFlags>,
     )>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, md, state, cursor, totals, ledger, entered, ts, activity, buffer) in
+    for (entity, md, state, cursor, totals, ledger, entered, ts, activity, buffer, flags) in
         agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
@@ -262,6 +263,8 @@ pub fn observe_lifecycle(
                     prompt_tokens: totals.prompt_tokens,
                     completion_tokens: totals.completion_tokens,
                     tool_calls: totals.tool_calls,
+                    empty_output: flags
+                        .is_some_and(|f| crate::persistence::is_empty_output(&state.status, &f.0)),
                     at_ms: now_ms,
                 });
                 st.run_open = false;

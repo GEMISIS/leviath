@@ -74,10 +74,12 @@ pub(crate) fn format_event(event: &TelemetryEvent) -> String {
             prompt_tokens,
             completion_tokens,
             tool_calls,
+            empty_output,
             ..
         } => format!(
             "run {run_id} {status}: {prompt_tokens} in, {completion_tokens} out, \
-             {tool_calls} tool calls"
+             {tool_calls} tool calls{}",
+            if *empty_output { " (no output)" } else { "" }
         ),
         TelemetryEvent::Log {
             run_id,
@@ -243,9 +245,24 @@ mod tests {
                     prompt_tokens: 10,
                     completion_tokens: 4,
                     tool_calls: 2,
+                    empty_output: false,
                     at_ms: 0,
                 },
                 "run r1 complete: 10 in, 4 out, 2 tool calls",
+            ),
+            (
+                // Same tallies, but the run changed nothing: the line has to
+                // say so, or it reads as a success (issue #192).
+                TelemetryEvent::RunCompleted {
+                    run_id: "r1".to_string(),
+                    status: "complete".to_string(),
+                    prompt_tokens: 10,
+                    completion_tokens: 4,
+                    tool_calls: 2,
+                    empty_output: true,
+                    at_ms: 0,
+                },
+                "run r1 complete: 10 in, 4 out, 2 tool calls (no output)",
             ),
             (
                 TelemetryEvent::Log {
@@ -280,6 +297,7 @@ mod tests {
             prompt_tokens: 0,
             completion_tokens: 0,
             tool_calls: 0,
+            empty_output: false,
             at_ms: 0,
         });
     }
