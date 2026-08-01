@@ -332,9 +332,14 @@ pub fn collect_tools(
             Option<&mut StageProgress>,
             Option<&mut crate::persistence::RunOutcomeFlags>,
             Option<&mut crate::telemetry::StageActivity>,
+            (
+                Option<&crate::persistence::RunMetadata>,
+                Option<&crate::components::AgentState>,
+            ),
         ),
         With<AwaitingTools>,
     >,
+    sink: Option<Res<crate::host::WorldEventSink>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -352,11 +357,33 @@ pub fn collect_tools(
             progress,
             flags,
             activity,
+            (metadata, agent_state),
         )) = agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
         };
         crate::tick_scope::enter(outcome.entity);
+        // Report each lane call's completion before file tracking rewrites
+        // successful results. Pairs with `ToolCallStarted` by call id; inline
+        // context results (merged below) were never announced and are skipped.
+        if let (Some(sink), Some(md), Some(state)) = (sink.as_ref(), metadata, agent_state) {
+            for (id, result) in &outcome.results {
+                let tool = infer
+                    .tool_calls
+                    .iter()
+                    .find(|c| &c.tool_id == id)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_default();
+                let _ = sink.0.send(crate::host::WorldEvent::ToolCallFinished {
+                    run_id: md.run_id.clone(),
+                    agent_id: state.agent_id.clone(),
+                    call_id: id.clone(),
+                    tool,
+                    ok: !call_had_no_effect(result),
+                    summary: one_line(result, 200),
+                });
+            }
+        }
         // Merge the inline context-tool results (if any) with the lane results,
         // ordered by the original tool calls.
         let mut parts = outcome.results;

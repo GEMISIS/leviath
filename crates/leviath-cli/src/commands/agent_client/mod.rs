@@ -415,7 +415,7 @@ impl Server {
                         self.flush_output(&session_id, &mut tail, &run_id).await;
                         return StopReason::EndTurn;
                     };
-                    if world_event_run_id(&event) != run_id {
+                    if event.run_id() != run_id {
                         continue; // another run in the shared world
                     }
                     self.flush_output(&session_id, &mut tail, &run_id).await;
@@ -736,19 +736,6 @@ fn read_run_status(runs_dir: &std::path::Path, run_id: &str) -> Option<RunStatus
 /// work and is only idling for optional follow-up, so control returns to the
 /// client. `WaitingInput` does **not** - the agent is blocked on an interaction,
 /// which is exactly the state that must not be reported as "done".
-/// The run id carried by any [`WorldEvent`] variant.
-fn world_event_run_id(event: &WorldEvent) -> &str {
-    match event {
-        WorldEvent::Spawned { run_id, .. }
-        | WorldEvent::Status { run_id, .. }
-        | WorldEvent::Tokens { run_id, .. }
-        | WorldEvent::Context { run_id, .. }
-        | WorldEvent::Interaction { run_id, .. }
-        | WorldEvent::Completed { run_id, .. }
-        | WorldEvent::Log { run_id, .. } => run_id,
-    }
-}
-
 /// Mint a session id from the agent name - reuses the run-id generator's
 /// collision-resistant `<name>-<timestamp>-<suffix>` scheme.
 fn new_session_id(agent_name: &str) -> String {

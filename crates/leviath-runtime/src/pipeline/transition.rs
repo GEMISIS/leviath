@@ -846,9 +846,11 @@ pub fn resolve_transition(
             &mut ContextWindow,
             Option<&StageOutcome>,
             Option<&mut crate::persistence::RunOutcomeFlags>,
+            Option<&crate::persistence::RunMetadata>,
         ),
         With<ResolveTransition>,
     >,
+    sink: Option<Res<crate::host::WorldEventSink>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -865,6 +867,7 @@ pub fn resolve_transition(
         mut window,
         outcome,
         mut flags,
+        metadata,
     ) in agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
@@ -952,6 +955,7 @@ pub fn resolve_transition(
                 // new stage's layout/prompt setup.
                 let to_compact = apply_edge_transform(&mut window, &transform);
                 let setup = &setups.0[idx];
+                let from = state.current_stage.clone();
                 match enter_stage(
                     idx,
                     &bp.0,
@@ -962,11 +966,12 @@ pub fn resolve_transition(
                     setup,
                     &mut window,
                 ) {
-                    Ok(()) => {
+                    Ok(visit) => {
                         // Entering a stage is active work; clears a prior error
                         // status when recovering down an `error` edge.
                         state.status = AgentStatus::Active;
                         let name = bp.0.stages[idx].name.clone();
+                        emit_stage_transition(&sink, metadata, &state.agent_id, from, &name, visit);
                         let mut ec = commands.entity(entity);
                         ec.remove::<ResolveTransition>().remove::<StageOutcome>();
                         attach_stage_components(ec, stage_infs.0[idx].clone(), setup, idx, name);
@@ -1014,6 +1019,9 @@ pub fn resolve_transition(
 ///
 /// Returns `Err` only when the system prompt doesn't fit its region - the same
 /// hard failure the imperative loop raises; the caller marks the agent `Error`.
+/// `Ok` carries the stage's updated visit count (this entry included), which the
+/// transition systems stamp into the [`StageTransition`](crate::host::WorldEvent)
+/// event.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn enter_stage(
     idx: usize,
@@ -1024,15 +1032,40 @@ pub(crate) fn enter_stage(
     visits: &mut VisitCounts,
     setup: &StageSetup,
     window: &mut ContextWindow,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     cursor.index = idx;
     let name = blueprint.stages[idx].name.clone();
     state.current_stage = name.clone();
     state.accepts_messages = setup.accepts_messages;
     *progress = StageProgress::default();
-    *visits.0.entry(name).or_insert(0) += 1;
+    let visit = visits.0.entry(name).or_insert(0);
+    *visit += 1;
+    let visit = *visit;
 
-    apply_stage_context(setup, window)
+    apply_stage_context(setup, window).map(|()| visit)
+}
+
+/// Push a [`StageTransition`](crate::host::WorldEvent::StageTransition) event
+/// into the world's event stream. A no-op in worlds that don't stream (no
+/// [`WorldEventSink`](crate::host::WorldEventSink) resource) and for bare
+/// agents without run metadata.
+fn emit_stage_transition(
+    sink: &Option<Res<crate::host::WorldEventSink>>,
+    metadata: Option<&crate::persistence::RunMetadata>,
+    agent_id: &str,
+    from: String,
+    to: &str,
+    iteration: usize,
+) {
+    if let (Some(sink), Some(md)) = (sink.as_ref(), metadata) {
+        let _ = sink.0.send(crate::host::WorldEvent::StageTransition {
+            run_id: md.run_id.clone(),
+            agent_id: agent_id.to_string(),
+            from,
+            to: to.to_string(),
+            iteration,
+        });
+    }
 }
 
 /// Apply a stage's context setup to a window: swap to the stage's layout (if any)
@@ -1157,7 +1190,7 @@ pub fn force_transition(world: &mut World, entity: Entity, target_idx: usize) {
             &setup,
             &mut window,
         ) {
-            Ok(()) => Some((stage_inf, setup, name)),
+            Ok(_) => Some((stage_inf, setup, name)),
             Err(message) => {
                 state.status = AgentStatus::Error { message };
                 None
@@ -1709,7 +1742,9 @@ pub fn collect_transition_choice(
         &mut ContextWindow,
         &AwaitingTransitionResponse,
         Option<&mut crate::persistence::RunOutcomeFlags>,
+        Option<&crate::persistence::RunMetadata>,
     )>,
+    sink: Option<Res<crate::host::WorldEventSink>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -1725,6 +1760,7 @@ pub fn collect_transition_choice(
             mut window,
             resp,
             mut flags,
+            metadata,
         )) = agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
@@ -1802,6 +1838,7 @@ pub fn collect_transition_choice(
                 }
                 let to_compact = apply_edge_transform(&mut window, &transform);
                 let setup = &setups.0[idx];
+                let from = state.current_stage.clone();
                 match enter_stage(
                     idx,
                     &bp.0,
@@ -1812,8 +1849,9 @@ pub fn collect_transition_choice(
                     setup,
                     &mut window,
                 ) {
-                    Ok(()) => {
+                    Ok(visit) => {
                         let name = bp.0.stages[idx].name.clone();
+                        emit_stage_transition(&sink, metadata, &state.agent_id, from, &name, visit);
                         let mut ec = commands.entity(outcome.entity);
                         ec.remove::<AwaitingTransitionResponse>();
                         attach_stage_components(ec, stage_infs.0[idx].clone(), setup, idx, name);

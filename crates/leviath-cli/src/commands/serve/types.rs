@@ -123,6 +123,33 @@ pub enum ServerEvent {
         #[serde(default)]
         cache_write_tokens: usize,
     },
+    /// A world event with no dedicated WebSocket translation (stage
+    /// transitions, tool call start/finish, and whatever the runtime adds
+    /// next), forwarded verbatim. `event` is the runtime's own serde-tagged
+    /// [`WorldEvent`](leviath_runtime::host::WorldEvent) JSON, so clients get
+    /// new event kinds without a server release.
+    World { event: serde_json::Value },
+}
+
+impl ServerEvent {
+    /// The run id this event belongs to, for per-run subscription filtering.
+    /// `World` events read it from the wrapped JSON (every runtime event
+    /// carries one; an absent field filters as the empty string).
+    pub fn run_id(&self) -> &str {
+        match self {
+            ServerEvent::AgentStatus { run_id, .. }
+            | ServerEvent::ContextUpdate { run_id, .. }
+            | ServerEvent::Log { run_id, .. }
+            | ServerEvent::InteractionNeeded { run_id, .. }
+            | ServerEvent::AgentSpawned { run_id, .. }
+            | ServerEvent::AgentCompleted { run_id, .. }
+            | ServerEvent::Tokens { run_id, .. } => run_id,
+            ServerEvent::World { event } => event
+                .get("run_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -557,5 +584,94 @@ mod tests {
         };
         let json = serde_json::to_string(&err).unwrap();
         assert!(json.contains("\"error\":\"not found\""));
+    }
+
+    #[test]
+    fn server_event_run_id_covers_every_variant() {
+        let cases: Vec<(ServerEvent, &str)> = vec![
+            (
+                ServerEvent::AgentStatus {
+                    agent_id: "a".to_string(),
+                    run_id: "r1".to_string(),
+                    status: "active".to_string(),
+                    stage: "s".to_string(),
+                    iteration: 0,
+                    tool_calls: 0,
+                    accepts_messages: false,
+                },
+                "r1",
+            ),
+            (
+                ServerEvent::ContextUpdate {
+                    agent_id: "a".to_string(),
+                    run_id: "r2".to_string(),
+                    total_tokens: 1,
+                    max_tokens: 2,
+                },
+                "r2",
+            ),
+            (
+                ServerEvent::Log {
+                    agent_id: "a".to_string(),
+                    run_id: "r3".to_string(),
+                    line: "l".to_string(),
+                },
+                "r3",
+            ),
+            (
+                ServerEvent::InteractionNeeded {
+                    agent_id: "a".to_string(),
+                    run_id: "r4".to_string(),
+                    request: serde_json::Value::Null,
+                },
+                "r4",
+            ),
+            (
+                ServerEvent::AgentSpawned {
+                    agent_id: "a".to_string(),
+                    run_id: "r5".to_string(),
+                    parent_id: None,
+                    blueprint: "b".to_string(),
+                },
+                "r5",
+            ),
+            (
+                ServerEvent::AgentCompleted {
+                    agent_id: "a".to_string(),
+                    run_id: "r6".to_string(),
+                    status: "complete".to_string(),
+                    result: None,
+                },
+                "r6",
+            ),
+            (
+                ServerEvent::Tokens {
+                    agent_id: "a".to_string(),
+                    run_id: "r7".to_string(),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                "r7",
+            ),
+            (
+                ServerEvent::World {
+                    event: serde_json::json!({"event": "stage_transition", "run_id": "r8"}),
+                },
+                "r8",
+            ),
+            // A wrapped event with no run_id filters as the empty string
+            // rather than panicking (real world events always carry one).
+            (
+                ServerEvent::World {
+                    event: serde_json::Value::Null,
+                },
+                "",
+            ),
+        ];
+        for (ev, want) in cases {
+            assert_eq!(ev.run_id(), want);
+        }
     }
 }
