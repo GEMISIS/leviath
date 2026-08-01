@@ -78,3 +78,16 @@ relay.
 Measured caveats: the CLI adds ~130 tokens of its own context to **every** call (including your
 account email address and the current date) with no flag to disable it; no prompt caching; a
 subprocess per call; Anthropic models only.
+
+Enable it through `lev setup`, or directly:
+
+```toml
+[providers]
+claude_code_enabled = true
+claude_code_binary  = "/usr/local/bin/claude"   # unset resolves `claude` on PATH
+claude_code_effort  = "medium"                  # low | medium | high | xhigh | max
+```
+
+It is off unless you turn it on, and `lev setup` defaults to declining, so pressing Enter through
+the wizard leaves it off. `claude_code_effort` is always sent explicitly: left to itself the CLI
+picks `high` with adaptive thinking, spending output tokens and latency Leviath never asked for.
