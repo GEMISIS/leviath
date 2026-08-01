@@ -185,6 +185,96 @@ pub fn restore_agent(
     world.entity_mut(entity).insert(totals);
 }
 
+/// The synthesized result for a call whose completion never reached the journal.
+/// It tells the model plainly that the effect may or may not have landed, so the
+/// re-issued turn verifies before re-running side-effecting work.
+pub const INTERRUPTED_TOOL_RESULT: &str = "[error] interrupted: the daemon restarted while this tool call was executing and its \
+     result was lost. Verify whether it took effect before re-running side-effecting work.";
+
+/// The synthesized result for one interrupted call: the base text, plus - for a
+/// sub-agent tool on a run with known children - the child runs to check before
+/// spawning again. Mechanical dedupe is impossible here (the model mints a fresh
+/// call id when it re-issues), so informed re-issue is the guarantee.
+fn interrupted_result(tool_name: &str, children: &[String]) -> String {
+    if leviath_tools::is_subagent_tool(tool_name) && !children.is_empty() {
+        format!(
+            "{INTERRUPTED_TOOL_RESULT} This run already has child agent runs: {}; check them \
+             with check_agent before spawning again.",
+            children.join(", ")
+        )
+    } else {
+        INTERRUPTED_TOOL_RESULT.to_string()
+    }
+}
+
+/// Replay a tool batch that was dispatched but never applied before the crash
+/// (folded from the run journal as a
+/// [`PendingToolBatch`](leviath_core::run_archive::PendingToolBatch)): land the
+/// assistant turn plus one result per call in the context window, exactly as
+/// `apply_tool_results` would have - real journaled results for calls that
+/// finished, [`INTERRUPTED_TOOL_RESULT`] for calls that didn't. The turn is
+/// always fully paired, so the request assembler's orphan sanitizer keeps it,
+/// and the re-issued inference sees precisely what already ran instead of
+/// blindly re-executing the whole batch (issue #96).
+///
+/// Call after [`restore_agent`], which swaps the restored stage's
+/// `ToolResultRoutingComponent` in - the routing and per-tool sensitivities are
+/// read off the entity so replayed results route and taint like live ones.
+/// `children` is the run's known child-run ids (`meta.children`), folded into
+/// the synthesized text of interrupted sub-agent calls. Secondary bookkeeping
+/// (modification counters, telemetry, file tracking, log lines) is deliberately
+/// skipped: totals and outcome flags are already restored from the persisted
+/// metadata, and the dead process's calls have no live stage to report to.
+pub fn restore_pending_batch(
+    world: &mut World,
+    entity: Entity,
+    batch: &leviath_core::run_archive::PendingToolBatch,
+    children: &[String],
+) {
+    let calls: Vec<crate::components::ToolCall> = batch
+        .calls
+        .iter()
+        .map(|c| crate::components::ToolCall {
+            tool_id: c.id.clone(),
+            name: c.name.clone(),
+            // Journaled arguments are stringified JSON; a record that doesn't
+            // parse (torn write) survives as a raw string rather than dropping
+            // the call and orphaning the turn.
+            arguments: serde_json::from_str(&c.arguments)
+                .unwrap_or_else(|_| serde_json::Value::String(c.arguments.clone())),
+            thought_signature: c.thought_signature.clone(),
+        })
+        .collect();
+    let merged: Vec<(String, String)> = batch
+        .calls
+        .iter()
+        .map(|c| {
+            let result = c
+                .result
+                .clone()
+                .unwrap_or_else(|| interrupted_result(&c.name, children));
+            (c.id.clone(), result)
+        })
+        .collect();
+    let routing = world
+        .get::<crate::components::ToolResultRoutingComponent>(entity)
+        .map(|c| c.routing.clone());
+    let sensitivities = world
+        .get::<crate::pipeline::ToolSensitivities>(entity)
+        .map(|s| s.0.clone());
+    let mut window = world
+        .get_mut::<ContextWindow>(entity)
+        .expect("a spawned agent has a context window");
+    crate::pipeline::apply_tool_results(
+        &mut window,
+        &batch.response,
+        &calls,
+        &merged,
+        routing.as_ref(),
+        sensitivities.as_ref(),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,6 +474,318 @@ mod tests {
         assert_eq!(world.get::<TokenTotals>(entity).unwrap().prompt_tokens, 100);
         // Still ready to (re-)infer.
         assert!(world.get::<ReadyToInfer>(entity).is_some());
+    }
+
+    // ── pending-batch replay (#96) ──
+
+    fn pending_call(
+        id: &str,
+        name: &str,
+        result: Option<&str>,
+    ) -> leviath_core::run_archive::ToolCallRecord {
+        leviath_core::run_archive::ToolCallRecord {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments: r#"{"path":"x.txt"}"#.to_string(),
+            result: result.map(str::to_string),
+            thought_signature: None,
+        }
+    }
+
+    fn pending_batch(
+        calls: Vec<leviath_core::run_archive::ToolCallRecord>,
+    ) -> leviath_core::run_archive::PendingToolBatch {
+        leviath_core::run_archive::PendingToolBatch {
+            stage_index: 1,
+            iteration: 7,
+            response: "writing then checking".to_string(),
+            calls,
+        }
+    }
+
+    /// The `conversation` entries of `entity`'s window.
+    fn conv_entries(world: &World, entity: Entity) -> Vec<RegionEntry> {
+        world
+            .get::<ContextWindow>(entity)
+            .unwrap()
+            .get_region("conversation")
+            .unwrap()
+            .content
+            .clone()
+    }
+
+    #[test]
+    fn pending_batch_replays_real_results_and_synthesizes_interrupted_ones() {
+        let (mut world, entity) = agent_world();
+        restore_agent(
+            &mut world,
+            entity,
+            &snapshot(),
+            1,
+            7,
+            TokenTotals::default(),
+        );
+        restore_pending_batch(
+            &mut world,
+            entity,
+            &pending_batch(vec![
+                pending_call("c1", "write_file", Some("Wrote 42 bytes to x.txt")),
+                pending_call("c2", "shell", None),
+            ]),
+            &[],
+        );
+
+        let entries = conv_entries(&world, entity);
+        // The assistant turn landed with both calls, then one result per call:
+        // the journaled real result and the synthesized interrupted one.
+        let turn = entries
+            .iter()
+            .find_map(|e| match &e.kind {
+                EntryKind::AssistantTurn { tool_calls } if !tool_calls.is_empty() => {
+                    Some(tool_calls.clone())
+                }
+                _ => None,
+            })
+            .expect("assistant turn appended");
+        assert_eq!(turn.len(), 2);
+        assert_eq!(turn[0].id, "c1");
+        assert_eq!(
+            turn[0].arguments,
+            serde_json::json!({"path": "x.txt"}),
+            "journaled arguments parsed back to JSON"
+        );
+        let result_of = |id: &str| {
+            entries
+                .iter()
+                .find(|e| {
+                    matches!(&e.kind, EntryKind::ToolResult { tool_call_id, .. } if tool_call_id == id)
+                })
+                .map(|e| e.content.clone())
+                .expect("a result per call")
+        };
+        assert_eq!(result_of("c1"), "Wrote 42 bytes to x.txt");
+        assert!(result_of("c2").contains("interrupted"));
+        assert!(result_of("c2").contains("Verify whether it took effect"));
+    }
+
+    #[test]
+    fn pending_batch_survives_request_assembly_unstripped() {
+        // The whole point of pairing the turn with a result per call: the
+        // assembler's orphan sanitizer must keep every block, so the re-issued
+        // request shows the model exactly what already ran. A sliding-window
+        // conversation, since that's the kind assembled as typed messages.
+        let (mut world, entity) = agent_world();
+        world
+            .get_mut::<ContextWindow>(entity)
+            .unwrap()
+            .get_region_mut("conversation")
+            .unwrap()
+            .kind = RegionKind::SlidingWindow {
+            max_items: 100,
+            eviction_strategy: Default::default(),
+        };
+        restore_agent(
+            &mut world,
+            entity,
+            &snapshot(),
+            1,
+            7,
+            TokenTotals::default(),
+        );
+        restore_pending_batch(
+            &mut world,
+            entity,
+            &pending_batch(vec![pending_call("c1", "shell", None)]),
+            &[],
+        );
+
+        let assembled = world.get::<ContextWindow>(entity).unwrap().assemble();
+        let mut tool_uses = 0;
+        let mut tool_results = 0;
+        for msg in &assembled.messages {
+            if let leviath_providers::MessageContent::Blocks(blocks) = &msg.content {
+                for block in blocks {
+                    match block {
+                        leviath_providers::ContentBlock::ToolUse { id, .. } => {
+                            assert_eq!(id, "c1");
+                            tool_uses += 1;
+                        }
+                        leviath_providers::ContentBlock::ToolResult { tool_use_id, .. } => {
+                            assert_eq!(tool_use_id, "c1");
+                            tool_results += 1;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert_eq!((tool_uses, tool_results), (1, 1), "nothing stripped");
+    }
+
+    #[test]
+    fn pending_batch_routes_results_through_the_restored_stage_routing() {
+        // Stage 1 routes results to `knowledge`: the replayed result's full text
+        // lands there and the conversation keeps the pointer - identical to the
+        // live apply path, because it IS the live apply path.
+        let (mut world, entity) = agent_world();
+        world
+            .get_mut::<ContextWindow>(entity)
+            .unwrap()
+            .add_region(Region::new(
+                "knowledge".to_string(),
+                RegionKind::Pinned,
+                10_000,
+            ));
+        world
+            .get_mut::<StageSetups>(entity)
+            .unwrap()
+            .0
+            .get_mut(1)
+            .unwrap()
+            .routing = Some(leviath_core::ToolResultRouting {
+            default_region: "knowledge".to_string(),
+            ..Default::default()
+        });
+        restore_agent(
+            &mut world,
+            entity,
+            &snapshot(),
+            1,
+            7,
+            TokenTotals::default(),
+        );
+        restore_pending_batch(
+            &mut world,
+            entity,
+            &pending_batch(vec![pending_call("c1", "read_file", Some("the file body"))]),
+            &[],
+        );
+
+        let window = world.get::<ContextWindow>(entity).unwrap();
+        let knowledge = window.get_region("knowledge").unwrap();
+        assert!(
+            knowledge
+                .content
+                .iter()
+                .any(|e| e.content.contains("the file body")),
+            "full text routed to the knowledge region"
+        );
+        assert!(
+            conv_entries(&world, entity).iter().any(
+                |e| matches!(&e.kind, EntryKind::ToolResult { tool_call_id, .. } if tool_call_id == "c1")
+            ),
+            "conversation keeps the paired pointer result"
+        );
+    }
+
+    #[test]
+    fn pending_batch_taints_results_per_tool_sensitivity() {
+        use leviath_core::taint::TaintLevel;
+        let (mut world, entity) = agent_world();
+        world
+            .get_mut::<ContextWindow>(entity)
+            .unwrap()
+            .get_region_mut("conversation")
+            .unwrap()
+            .enable_taint_tracking();
+        world
+            .entity_mut(entity)
+            .insert(crate::pipeline::ToolSensitivities(
+                [("read_file".to_string(), TaintLevel::Private)]
+                    .into_iter()
+                    .collect(),
+            ));
+        restore_agent(
+            &mut world,
+            entity,
+            &snapshot(),
+            1,
+            7,
+            TokenTotals::default(),
+        );
+        restore_pending_batch(
+            &mut world,
+            entity,
+            &pending_batch(vec![pending_call("c1", "read_file", Some("secret body"))]),
+            &[],
+        );
+
+        let window = world.get::<ContextWindow>(entity).unwrap();
+        assert_eq!(
+            window.get_region("conversation").unwrap().taint_level(),
+            Some(TaintLevel::Private),
+            "replayed result tainted like a live one"
+        );
+    }
+
+    #[test]
+    fn unparseable_journaled_arguments_survive_as_a_raw_string() {
+        let (mut world, entity) = agent_world();
+        restore_agent(
+            &mut world,
+            entity,
+            &snapshot(),
+            1,
+            7,
+            TokenTotals::default(),
+        );
+        let mut call = pending_call("c1", "shell", None);
+        call.arguments = "not json {".to_string();
+        restore_pending_batch(&mut world, entity, &pending_batch(vec![call]), &[]);
+
+        let entries = conv_entries(&world, entity);
+        let turn = entries
+            .iter()
+            .find_map(|e| match &e.kind {
+                EntryKind::AssistantTurn { tool_calls } if !tool_calls.is_empty() => {
+                    Some(tool_calls.clone())
+                }
+                _ => None,
+            })
+            .expect("turn still lands");
+        assert_eq!(
+            turn[0].arguments,
+            serde_json::Value::String("not json {".to_string())
+        );
+    }
+
+    #[test]
+    fn interrupted_subagent_calls_point_at_known_children() {
+        // A sub-agent call with known children gets the check-first note; other
+        // shapes (children but a non-subagent tool, a subagent tool but no
+        // children) get the plain interrupted text.
+        let kids = vec!["run-kid-1".to_string(), "run-kid-2".to_string()];
+        let enriched = interrupted_result("spawn_agent", &kids);
+        assert!(enriched.contains("run-kid-1, run-kid-2"));
+        assert!(enriched.contains("check_agent"));
+        assert_eq!(interrupted_result("shell", &kids), INTERRUPTED_TOOL_RESULT);
+        assert_eq!(
+            interrupted_result("spawn_agent", &[]),
+            INTERRUPTED_TOOL_RESULT
+        );
+
+        // And end-to-end: the enriched text is what lands in the window.
+        let (mut world, entity) = agent_world();
+        restore_agent(
+            &mut world,
+            entity,
+            &snapshot(),
+            1,
+            7,
+            TokenTotals::default(),
+        );
+        restore_pending_batch(
+            &mut world,
+            entity,
+            &pending_batch(vec![pending_call("c1", "spawn_agent", None)]),
+            &kids,
+        );
+        assert!(
+            conv_entries(&world, entity)
+                .iter()
+                .any(|e| e.content.contains("already has child agent runs")),
+            "the synthesized sub-agent note lands in the window"
+        );
     }
 
     #[test]

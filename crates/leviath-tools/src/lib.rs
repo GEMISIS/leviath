@@ -18,6 +18,7 @@ mod defs;
 mod exec;
 mod platform;
 pub use context::*;
+pub use defs::{SUBAGENT_TOOLS, is_subagent_tool};
 pub use platform::*;
 
 /// Built-in tools: read_file, write_file, edit_file, list_dir, shell.
@@ -84,6 +85,14 @@ mod tests {
             ToolContext::new(dir.to_path_buf()),
             PlatformCapabilities::mobile(),
         )
+    }
+
+    #[test]
+    fn subagent_predicate_covers_the_five_names_and_nothing_else() {
+        for name in SUBAGENT_TOOLS {
+            assert!(is_subagent_tool(name));
+        }
+        assert!(!is_subagent_tool("read_file"));
     }
 
     // ── Tool definitions ──────────────────────────────────────────────────

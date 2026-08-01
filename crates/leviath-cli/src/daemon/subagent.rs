@@ -33,19 +33,10 @@ pub struct SubAgentHandle {
     pub no_seed_commands: bool,
 }
 
-/// The tool names routed to the sub-agent handler.
-pub const SUBAGENT_TOOLS: &[&str] = &[
-    "spawn_agent",
-    "check_agent",
-    "wait_for_agent",
-    "send_to_agent",
-    "kill_agent",
-];
-
-/// Whether `name` is a sub-agent tool (routed here rather than to builtin/MCP).
-pub fn is_subagent_tool(name: &str) -> bool {
-    SUBAGENT_TOOLS.contains(&name)
-}
+// The sub-agent tool-name list lives in `leviath-tools` (next to the tool
+// defs), shared with the runtime's crash-replay synthesis; re-exported here for
+// the existing dispatch-routing callers.
+pub use leviath_tools::{SUBAGENT_TOOLS, is_subagent_tool};
 
 /// How often `wait_for_agent` / `spawn_agent(wait=true)` polls the child.
 const WAIT_POLL: Duration = Duration::from_millis(500);
