@@ -46,6 +46,15 @@ pub struct RunMetadata {
     pub callback_secret: Option<String>,
     /// Short human-readable title (None until generated).
     pub title: Option<String>,
+    /// Whether this run is unattended (launched with `--yolo`).
+    ///
+    /// Recorded on the agent so anything holding the world can ask. Two things
+    /// need it: the sub-agent and fan-out spawners, which pass it down so a
+    /// child of an unattended run is unattended too, and `meta.json`, so a
+    /// daemon restart resumes the run the way it was launched. Both used to
+    /// hardcode "attended", which stranded unattended runs on prompts no one was
+    /// there to answer.
+    pub unattended: bool,
 }
 
 /// Running token + tool-call totals accumulated across an agent's inferences, for
@@ -218,6 +227,7 @@ pub fn build_run_meta(
         depth,
         max_child_depth,
         flags,
+        yolo: md.unattended,
     }
 }
 
@@ -254,6 +264,7 @@ mod tests {
             callback_url: Some("http://cb".to_string()),
             callback_secret: Some("sekret".to_string()),
             title: Some("Do It".to_string()),
+            unattended: false,
         }
     }
 

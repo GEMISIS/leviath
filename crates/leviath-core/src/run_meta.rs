@@ -114,6 +114,18 @@ pub struct RunMeta {
     /// Why this run may have produced nothing useful - see [`RunFlags`].
     #[serde(default)]
     pub flags: RunFlags,
+    /// Whether the run was launched unattended (`--yolo`), so a daemon restart
+    /// resumes it the way it was started.
+    ///
+    /// This used to be dropped on reload, on the reasoning that forgetting a
+    /// launch override can only prompt more, never less. In practice it meant a
+    /// restart silently converted an unattended run into one parked on a prompt
+    /// nobody was watching for - the operator's own consent, given at launch,
+    /// discarded by an implementation detail they never saw. Runs written before
+    /// this field existed default to attended, so nothing is escalated
+    /// retroactively.
+    #[serde(default)]
+    pub yolo: bool,
 }
 
 /// Post-hoc diagnosis of a run's productivity, persisted in `meta.json` so a
@@ -224,6 +236,7 @@ impl RunMeta {
             depth: 0,
             max_child_depth: 0,
             flags: RunFlags::default(),
+            yolo: false,
         }
     }
 

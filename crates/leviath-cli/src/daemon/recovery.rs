@@ -324,9 +324,17 @@ fn reload_one(
         metadata: meta.metadata.clone(),
         callback_url: meta.callback_url.clone(),
         callback_secret: meta.callback_secret.clone(),
-        // Launch overrides aren't persisted; a reloaded run reverts to its
-        // blueprint's own tool policy (safe-side: more prompting, never less).
-        yolo: false,
+        // `--yolo` is the one launch override that survives a reload, because
+        // it is the one whose loss strands the run. Dropping it looked like the
+        // safe choice - forgetting an override can only prompt more, never less
+        // - but "more prompting" for an unattended run means stopping forever on
+        // a prompt nobody is watching for. The operator gave this consent at
+        // launch and never withdrew it; a daemon restart is not a withdrawal.
+        // Runs written before `yolo` was persisted default to `false`.
+        //
+        // `--allow` and `--max-depth` stay unpersisted: losing them narrows what
+        // the run may do, which is the harmless direction.
+        yolo: meta.yolo,
         // Belt and braces: seeds aren't replayed on reload at all (see above),
         // so a resumed run can never re-execute a command seed.
         no_seed_commands: true,
@@ -595,6 +603,7 @@ mod tests {
                 modified_file_count: 1,
                 ..Default::default()
             },
+            yolo: false,
         };
         std::fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
         if let Some(ctx) = context {

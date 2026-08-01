@@ -123,6 +123,14 @@ pub struct FanOutState {
 }
 
 impl FanOutWaiting {
+    /// Workers this parent is still parked on: in-flight plus not-yet-started.
+    ///
+    /// Surfaced by `lev ps` so "waiting" on a fan-out parent reads as progress
+    /// against a known denominator rather than an unexplained stall.
+    pub fn outstanding(&self) -> usize {
+        self.active.len() + self.pending.len()
+    }
+
     /// Project to the serializable [`FanOutState`] (workers by run-id).
     pub(crate) fn to_state(&self) -> FanOutState {
         FanOutState {
@@ -532,6 +540,7 @@ mod tests {
                         callback_url: None,
                         callback_secret: None,
                         title: None,
+                        unattended: false,
                     },
                 ))
                 .id())

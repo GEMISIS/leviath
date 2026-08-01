@@ -23,6 +23,23 @@ pub struct PersistWatermark {
     last: Option<(usize, usize, leviath_core::run_meta::RunStatus)>,
     /// When the last snapshot was written, for the heartbeat above.
     last_written_at: Option<i64>,
+    /// When the watermark itself last changed - that is, when the agent last
+    /// actually moved.
+    ///
+    /// `last_written_at` cannot answer that: the heartbeat advances it whether
+    /// or not anything happened, which is the whole point of the heartbeat and
+    /// exactly why `meta.json`'s `updated_at` is not evidence of progress. Issue
+    /// #184 was reported on the strength of a fresh `updated_at`, so this is the
+    /// timestamp `lev ps` ages its rows against.
+    last_progress_at: Option<i64>,
+}
+
+impl PersistWatermark {
+    /// Unix seconds when this agent last made progress (iteration, stage, or
+    /// status changed). `None` before the first snapshot.
+    pub fn last_progress_at(&self) -> Option<i64> {
+        self.last_progress_at
+    }
 }
 
 /// The sending end of the persistence I/O lane (the receiving end is drained by
@@ -46,13 +63,20 @@ pub struct PersistenceStage(pub UnboundedSender<PersistMsg>);
 /// `WaitingInput`) never shows the prompt and the run looks frozen. This system
 /// closes that gap: an agent whose id has an open hub request flips
 /// `Active → Waiting` (tagged [`AwaitingInteraction`]); when the request clears
-/// it flips back `Waiting → Active`. Fan-out waiting ([`FanOutWaiting`]) is left
-/// untouched. No-op when the world has no hub resource (test worlds).
+/// it flips back `Waiting → Active`. No-op when the world has no hub resource
+/// (test worlds).
+///
+/// Agents parked by the engine rather than by a prompt - fan-out parents
+/// ([`FanOutWaiting`]) and stages holding for sub-agents
+/// ([`WaitingForChildren`]) - are excluded. Their `Waiting` belongs to whoever
+/// set it, and the clearing arm below would otherwise walk them back to `Active`
+/// the moment an unrelated prompt of theirs resolved, un-parking a run whose
+/// children are still going.
 pub fn reflect_interaction_status(
     hub: Option<Res<InteractionHub>>,
     mut agents: Query<
         (Entity, &mut AgentState, Option<&AwaitingInteraction>),
-        Without<FanOutWaiting>,
+        (Without<FanOutWaiting>, Without<WaitingForChildren>),
     >,
     mut commands: Commands,
 ) {
@@ -200,6 +224,7 @@ pub fn dispatch_persistence(
         }
         if watermark_changed {
             watermark.last = Some(current);
+            watermark.last_progress_at = Some(now);
         }
         watermark.last_written_at = Some(now);
 

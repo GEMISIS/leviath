@@ -33,6 +33,7 @@ pub enum Commands {
     Run(commands::run::RunArgs),
 
     /// List agents running in the shared-world daemon
+    #[command(long_about = commands::ps::PS_LONG_ABOUT)]
     Ps(commands::ps::PsArgs),
 
     /// Send a message to a running agent
@@ -358,7 +359,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_ps_variant_is_routed_through_the_executor() {
-        let result = dispatch(Commands::Ps(commands::ps::PsArgs {}), &MockRisky).await;
+        let result = dispatch(Commands::Ps(commands::ps::PsArgs::default()), &MockRisky).await;
         assert!(result.is_ok());
     }
 
