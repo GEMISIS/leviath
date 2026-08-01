@@ -173,12 +173,17 @@ impl PipelineWorld {
     /// Build a world: wire the pool/bridge resources, register the providers and
     /// tool service, spawn the tool worker onto `runtime`, and assemble the tick
     /// schedule. Agents are added later via [`Self::spawn_agent`].
+    ///
+    /// `runs_dir` is where agent snapshots persist (`<runs_dir>/<run_id>/`, the
+    /// daemon's on-disk layout). `None` keeps the world entirely in memory:
+    /// snapshots are still produced and drained (so log events and watermarks
+    /// behave identically) but nothing is ever written to disk.
     pub fn new(
         providers: ProviderRegistry,
         tool_service: Arc<dyn ToolService>,
         pool_config: InferencePoolConfig,
         tool_concurrency: usize,
-        runs_dir: std::path::PathBuf,
+        runs_dir: Option<std::path::PathBuf>,
         runtime: Handle,
     ) -> Self {
         // `Query::par_iter` fans out over the compute task pool; initialize it
@@ -1074,14 +1079,14 @@ mod tests {
     }
 
     fn build_world(providers: ProviderRegistry) -> PipelineWorld {
-        // These agents carry no RunMetadata, so persistence never fires and the
-        // runs dir is never written; any path is fine.
+        // These agents carry no RunMetadata, so persistence never fires; run the
+        // world fully in memory.
         PipelineWorld::new(
             providers,
             Arc::new(EchoTools),
             InferencePoolConfig::new(),
             1,
-            std::env::temp_dir(),
+            None,
             Handle::current(),
         )
     }
@@ -1568,7 +1573,7 @@ mod tests {
             Arc::new(EchoTools),
             InferencePoolConfig::new(),
             1,
-            dir.path().to_path_buf(),
+            Some(dir.path().to_path_buf()),
             Handle::current(),
         );
         world.spawn_agent((
@@ -1653,7 +1658,7 @@ mod tests {
             Arc::new(EchoTools),
             InferencePoolConfig::new(),
             1,
-            dir.path().to_path_buf(),
+            Some(dir.path().to_path_buf()),
             Handle::current(),
         );
         world.spawn_agent((
@@ -1754,7 +1759,7 @@ mod tests {
             Arc::new(EchoTools),
             InferencePoolConfig::new(),
             1,
-            dir.path().to_path_buf(),
+            Some(dir.path().to_path_buf()),
             Handle::current(),
         );
         world.insert_interaction_hub(crate::interaction_hub::InteractionHub::new());
@@ -1838,7 +1843,7 @@ mod tests {
             Arc::new(EchoTools),
             InferencePoolConfig::new(),
             1,
-            dir.path().to_path_buf(),
+            Some(dir.path().to_path_buf()),
             Handle::current(),
         );
         world.spawn_agent((
@@ -1891,6 +1896,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn in_memory_world_runs_and_flushes_without_touching_disk() {
+        // `runs_dir: None` is the embedding mode: the agent runs to completion,
+        // snapshots are produced and drained exactly as in the persistent world
+        // (same watermark/log behavior), but nothing lands on disk. The tempdir
+        // doubles as the agent workdir and as the canary a persistent world
+        // would have written run dirs and a machine-id into.
+        let dir = tempfile::tempdir().unwrap();
+        let mut world = PipelineWorld::new(
+            registry_with(vec![with_tool("c1", "do"), text("done")]),
+            Arc::new(EchoTools),
+            InferencePoolConfig::new(),
+            1,
+            None,
+            Handle::current(),
+        );
+        let entity = world.spawn_agent((
+            AgentBlueprint(blueprint()),
+            StageCursor { index: 0 },
+            agent_state(),
+            crate::components::MessageInbox::default(),
+            StageProgress::default(),
+            StageInferences(vec![stage("m")]),
+            StageSetups(vec![setup()]),
+            VisitCounts::default(),
+            window(),
+            stage("m"),
+            setup().inference_config,
+            crate::persistence::RunMetadata {
+                run_id: "run-inmem".to_string(),
+                agent_name: "a".to_string(),
+                agent_path: "/p".to_string(),
+                task: "t".to_string(),
+                model: None,
+                workdir: dir.path().to_string_lossy().to_string(),
+                num_stages: 1,
+                started_at: 0,
+                parent_run_id: None,
+                metadata: std::collections::HashMap::new(),
+                callback_url: None,
+                callback_secret: None,
+                title: None,
+            },
+            crate::persistence::TokenTotals::default(),
+            crate::pipeline::PersistWatermark::default(),
+            ReadyToInfer,
+        ));
+
+        world.run_until_idle(20).await;
+        world.flush_and_stop().await;
+
+        assert_eq!(world.agent_status(entity), Some(AgentStatus::Complete));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
     async fn world_init_and_restore_needs_no_daemon_infra() {
         // `PipelineWorld::new` + `restore::restore_agent` form a self-contained
         // spin-up→restore path: no control socket, HTTP server, PID files, or build
@@ -1905,7 +1965,7 @@ mod tests {
             Arc::new(EchoTools),
             InferencePoolConfig::new(),
             1,
-            dir.path().to_path_buf(),
+            Some(dir.path().to_path_buf()),
             Handle::current(),
         );
         let entity = world.spawn_agent((

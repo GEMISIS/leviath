@@ -1424,7 +1424,7 @@ mod tests {
             Arc::new(NoTools),
             InferencePoolConfig::new(),
             1,
-            std::env::temp_dir(),
+            None,
             Handle::current(),
         );
         WorldHost::new(world)

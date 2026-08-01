@@ -75,7 +75,25 @@ pub enum PersistMsg {
 /// (`<runs_dir>/../machine-id`, created once) and a per-process `world_id` - which
 /// it stamps into every run's portable archive so a run copied to another machine
 /// is unambiguously attributable (see [`leviath_core::run_archive`]).
-pub async fn persistence_worker(runs_dir: PathBuf, mut jobs: UnboundedReceiver<PersistMsg>) {
+///
+/// `runs_dir: None` means the world runs in memory only: the worker drains and
+/// drops every message without touching the filesystem (no run dirs, no
+/// machine-id), while keeping the channel-close shutdown contract so
+/// [`flush_and_stop`](crate::world::PipelineWorld::flush_and_stop) still joins
+/// it - and still acking appends, so a dispatch-side barrier never waits on a
+/// dead channel.
+pub async fn persistence_worker(
+    runs_dir: Option<PathBuf>,
+    mut jobs: UnboundedReceiver<PersistMsg>,
+) {
+    let Some(runs_dir) = runs_dir else {
+        while let Some(msg) = jobs.recv().await {
+            if let PersistMsg::Append { ack: Some(ack), .. } = msg {
+                let _ = ack.send(());
+            }
+        }
+        return;
+    };
     let machine_id = load_or_create_machine_id(&runs_dir);
     let world_id = generate_id();
     // The last context window archived per run, so the next write can be stored
@@ -427,7 +445,7 @@ mod tests {
         .unwrap();
         drop(tx); // close so the worker loop ends
 
-        persistence_worker(dir.path().to_path_buf(), rx).await;
+        persistence_worker(Some(dir.path().to_path_buf()), rx).await;
 
         let run_dir = dir.path().join("run-1");
         let meta_json = std::fs::read_to_string(run_dir.join("meta.json")).unwrap();
@@ -593,8 +611,37 @@ mod tests {
         terminal.meta.status = leviath_core::run_meta::RunStatus::Complete;
         tx.send(PersistMsg::Snapshot(Box::new(terminal))).unwrap();
         drop(tx);
-        persistence_worker(dir.path().to_path_buf(), rx).await;
+        persistence_worker(Some(dir.path().to_path_buf()), rx).await;
         assert!(dir.path().join("run-term").join("meta.json").exists());
+    }
+
+    #[tokio::test]
+    async fn worker_without_a_runs_dir_drains_messages_and_writes_nothing() {
+        // `runs_dir: None` is the in-memory mode: snapshots are received and
+        // dropped, appends are still acked (a dispatch-side barrier must not
+        // wait on a dead channel), the worker still ends when the channel
+        // closes, and the directory a persistent world would have written to
+        // stays empty (no run dirs, no machine-id next to it).
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(PersistMsg::Snapshot(Box::new(job("run-a")))).unwrap();
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        tx.send(PersistMsg::Append {
+            run_id: "run-a".to_string(),
+            record: Box::new(batch_record(0, "c1")),
+            ack: Some(ack_tx),
+        })
+        .unwrap();
+        tx.send(PersistMsg::Append {
+            run_id: "run-a".to_string(),
+            record: Box::new(batch_record(0, "c2")),
+            ack: None, // the fire-and-forget shape drains too
+        })
+        .unwrap();
+        drop(tx);
+        persistence_worker(None, rx).await;
+        assert_eq!(ack_rx.await, Ok(()));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]
