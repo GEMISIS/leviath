@@ -179,7 +179,19 @@ So `waiting: children(3)` next to busy children is a factory working as designed
 to approve automatically; sub-agents and fan-out workers inherit it, and it survives a
 daemon restart.
 
-`lev ps --json` prints the same data unformatted, for scripts.
+A finished run can also read `complete (no output)`, `cancelled (no output)` or
+`error (no output)`. That means the run changed no files, though its agent had a tool to
+change them with. Almost always the edits went through the shell, which the framework
+cannot see: `sed -i`, `tee` and redirects leave no record, so nothing downstream knows the
+work happened. Re-apply those edits with `write_file` or `edit_file`, or name the tool you
+do write with in a transition [gate](/docs/stages) so it counts.
+
+Agents that never had a file-writing tool are never marked this way. A router that
+delegates, or a researcher whose answer is its report, has nothing to be measured against,
+so the run says nothing rather than reporting a failure it cannot have had.
+
+`lev ps --json` prints the same data unformatted, for scripts, including an `empty_output`
+field. The completion webhook carries the same key.
 
 ## The daemon and API
 

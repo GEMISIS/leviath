@@ -113,6 +113,23 @@ restart, but context regions are. Pointing `region` at whatever the write tools 
 keeps a resumed run honest. Set `tools` when an agent's writes go through MCP or
 [script tools](/docs/rhai-tools) rather than the built-ins.
 
+### What counts as output
+
+A gate and the run's own `empty_output` verdict ask the same question, at different scopes, and
+answer it from the same evidence: a successful call to `write_file`, `edit_file`, or a tool named
+in a gate's `tools` list. Nothing else counts. `shell` in particular does not, because an agent
+can edit with `sed -i` and leave the framework no way to know it happened.
+
+That is a question about coding agents, so it is only asked of them. If no stage of a blueprint
+advertises a file-modifying tool, the run is never reported as having produced nothing - a router
+that delegates and a researcher that writes a report have no file changes to be missing, and
+saying otherwise would be an accusation with no evidence behind it. The consequence for an agent
+that does write through MCP is that it looks the same way, so name the tool in a gate's `tools`
+list to be counted.
+
+`lev ps` marks such a run `complete (no output)`, and the flag rides along in `meta.json`, the
+completion webhook, and the `leviath.runs.total` metric.
+
 <a id="graph"></a>
 
 ## Stuck detection

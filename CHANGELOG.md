@@ -11,6 +11,23 @@ requests since the previous version.
 
 ## Unreleased
 
+- A run is no longer reported as having produced nothing when it never had a
+  way to produce anything. `empty_output` in `meta.json` has meant "modified no
+  files" since it was added for coding agents, so a router that delegates to
+  sub-agents, or an agent whose answer is its text, was flagged on every
+  successful run. Blueprints that advertise no file-modifying tool at any stage
+  are now exempt, matching the escape a transition gate already makes for a
+  stage that could never satisfy it. Agents that can write are judged exactly as
+  before, `shell` included: edits made with `sed -i` still leave no record, and
+  a run that made only those is still reported.
+- That verdict is now visible. `lev ps` reads `complete (no output)`, the
+  completion webhook carries an `empty_output` key, and the flag rides in
+  `lev ps --json`. It had been written to disk and read back only on restart, so
+  a run that finished with nothing to show for it looked exactly like one that
+  worked.
+- New `leviath.runs.total` metric, counting finished runs by terminal status and
+  by whether they produced output, so the empty-run rate can be charted and
+  alerted on.
 - `lev ps` says why a run is waiting. `waiting` was one word for six unrelated
   situations, so an operator could not tell a run stopped on an approval prompt
   from a parent parked while its workers churn. It now reads

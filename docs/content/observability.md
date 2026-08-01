@@ -42,7 +42,15 @@ stuck or looping run is visible as a shape, not just a log line.
 **Metrics.** Per run: `leviath.agents.active`, `leviath.tokens.total` and
 `leviath.tool_calls.total` counters, and `leviath.stage_duration` and
 `leviath.inference_latency` histograms, labeled by agent, stage, provider, and
-model.
+model. Plus `leviath.runs.total`, one count per finished run, attributed by
+`leviath.status` and `leviath.empty_output`.
+
+That last attribute is worth charting. A run reaching `complete` only means its
+pipeline got to the end; it does not mean anything came of it. Dividing the
+empty runs by the total gives you a rate to alert on, and a jump in it is
+usually one agent that started editing through the shell, where the framework
+cannot see the writes. Runs by agents that never had a file-writing tool are
+excluded, so a fleet of routers and researchers does not drown the signal.
 
 Per daemon, sampled every 30 seconds: `leviath.tool_lane.busy`,
 `leviath.tool_lane.queued`, and `leviath.tool_lane.parked` for what the tool
