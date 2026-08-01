@@ -624,7 +624,8 @@ mod tests {
         // stays empty (no run dirs, no machine-id next to it).
         let dir = tempfile::tempdir().unwrap();
         let (tx, rx) = mpsc::unbounded_channel();
-        tx.send(PersistMsg::Snapshot(Box::new(job("run-a")))).unwrap();
+        tx.send(PersistMsg::Snapshot(Box::new(job("run-a"))))
+            .unwrap();
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         tx.send(PersistMsg::Append {
             run_id: "run-a".to_string(),
@@ -713,7 +714,7 @@ mod tests {
         })
         .unwrap();
         drop(tx);
-        persistence_worker(dir.path().to_path_buf(), rx).await;
+        persistence_worker(Some(dir.path().to_path_buf()), rx).await;
 
         ack_rx.await.expect("append acked");
         let bytes = std::fs::read(dir.path().join("run-1").join("run.lvr")).unwrap();
@@ -738,7 +739,7 @@ mod tests {
         })
         .unwrap();
         drop(tx);
-        persistence_worker(dir.path().to_path_buf(), rx).await;
+        persistence_worker(Some(dir.path().to_path_buf()), rx).await;
 
         ack_rx.await.expect("acked despite the skip");
         assert!(!dir.path().join("run-none").join("run.lvr").exists());

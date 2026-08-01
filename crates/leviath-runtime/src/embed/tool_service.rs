@@ -18,7 +18,7 @@ use leviath_tools::{BuiltinTools, ToolContext};
 
 use crate::dynamic_interaction::dispatch_dynamic_interaction;
 use crate::interaction_hub::{HubInteractionBackend, InteractionHub};
-use crate::pipeline::ToolService;
+use crate::pipeline::{ToolProgress, ToolService};
 use crate::tool_bridge::BoxedToolExec;
 
 /// One registered agent's tool state: its confined built-in tools and its
@@ -80,7 +80,12 @@ impl BasicToolService {
 }
 
 impl ToolService for BasicToolService {
-    fn exec_for(&self, entity: Entity, calls: Vec<leviath_providers::ToolCall>) -> BoxedToolExec {
+    fn exec_for(
+        &self,
+        entity: Entity,
+        calls: Vec<leviath_providers::ToolCall>,
+        progress: ToolProgress,
+    ) -> BoxedToolExec {
         let state = self
             .agents
             .lock()
@@ -95,10 +100,9 @@ impl ToolService for BasicToolService {
                     // spawner): answer every call rather than dropping the
                     // batch, which would strand the agent.
                     for call in calls {
-                        results.push((
-                            call.id,
-                            "[error] no tool state registered for this agent".to_string(),
-                        ));
+                        let answer = "[error] no tool state registered for this agent";
+                        progress(&call.id, answer);
+                        results.push((call.id, answer.to_string()));
                     }
                     return results;
                 };
@@ -122,6 +126,7 @@ impl ToolService for BasicToolService {
                         Some(result) => result,
                         None => state.tools.execute(&call.name, call.arguments).await,
                     };
+                    progress(&call.id, &result);
                     results.push((call.id, result));
                 }
                 results
@@ -147,6 +152,7 @@ impl ToolService for BasicToolService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::noop_progress;
     use leviath_core::interaction::InteractionResponse;
 
     fn call(id: &str, name: &str, args: serde_json::Value) -> leviath_providers::ToolCall {
@@ -180,6 +186,7 @@ mod tests {
                     serde_json::json!({"path": "out.txt", "content": "made"}),
                 ),
             ],
+            noop_progress(),
         );
         let results = exec().await;
         assert_eq!(results[0].0, "c1");
@@ -199,8 +206,12 @@ mod tests {
         let e = entity(1);
         svc.register(e, "agent-a", dir.path().to_path_buf());
 
-        let results =
-            svc.exec_for(e, vec![call("c1", "no_such_tool", serde_json::Value::Null)])().await;
+        let results = svc.exec_for(
+            e,
+            vec![call("c1", "no_such_tool", serde_json::Value::Null)],
+            noop_progress(),
+        )()
+        .await;
         assert!(results[0].1.starts_with("[error]"));
     }
 
@@ -210,6 +221,7 @@ mod tests {
         let results = svc.exec_for(
             entity(9),
             vec![call("c1", "read_file", serde_json::json!({"path": "x"}))],
+            noop_progress(),
         )()
         .await;
         assert_eq!(results.len(), 1);
@@ -232,6 +244,7 @@ mod tests {
                 "ask_user_text",
                 serde_json::json!({"prompt": "Which database?"}),
             )],
+            noop_progress(),
         );
         let worker = tokio::spawn(async move { exec().await });
 
@@ -269,6 +282,7 @@ mod tests {
         let results = svc.exec_for(
             e,
             vec![call("c1", "read_file", serde_json::json!({"path": "x"}))],
+            noop_progress(),
         )()
         .await;
         assert!(results[0].1.contains("no tool state"));
