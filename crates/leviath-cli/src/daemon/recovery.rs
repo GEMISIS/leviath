@@ -345,7 +345,7 @@ fn reload_one(
         .ok()
         .and_then(|bytes| run_archive::read_archive_lenient(&mut bytes.as_slice()).ok())
         .and_then(|(_version, records)| run_archive::fold(&records));
-    let (snapshot, stage_index, iteration, totals) = match folded {
+    let (snapshot, stage_index, iteration, totals, pending_batch) = match folded {
         Some(folded) => {
             let totals = totals_from(&folded.meta);
             (
@@ -353,6 +353,7 @@ fn reload_one(
                 folded.meta.stage_index,
                 folded.meta.iteration,
                 totals,
+                folded.pending_batch,
             )
         }
         None => {
@@ -370,6 +371,9 @@ fn reload_one(
                 meta.stage_index,
                 meta.iteration,
                 totals_from(meta),
+                // No journal ⇒ no batch record ⇒ the pre-journal behavior
+                // (plain re-inference).
+                None,
             )
         }
     };
@@ -381,6 +385,21 @@ fn reload_one(
         iteration,
         totals,
     );
+
+    // A tool batch was in flight when the daemon died and its results never
+    // reached the window: replay what the journal recorded - real results for
+    // completed calls, verify-first errors for interrupted ones - so the
+    // re-issued inference sees what already ran instead of re-executing the
+    // batch's side effects (issue #96). fold() only surfaces a batch that is
+    // genuinely unapplied (same iteration, turn absent from the window).
+    if let Some(batch) = pending_batch {
+        leviath_runtime::restore::restore_pending_batch(
+            world.world_mut(),
+            entity,
+            &batch,
+            &meta.children,
+        );
+    }
 
     // `build_agent` stamps fresh run metadata; preserve the original identity.
     {
@@ -876,6 +895,231 @@ mod tests {
         assert_eq!(restored.len(), 1);
         // The valid prefix folds → resume still uses the journal's fresh state.
         assert_restored_from_archive(&world, restored[0].1);
+    }
+
+    /// Append raw journal records to an existing `run.lvr`, the way the live
+    /// lane journals a batch dispatch and its per-call completions.
+    fn append_archive_records(
+        runs_dir: &Path,
+        run_id: &str,
+        records: &[leviath_core::run_archive::RunRecord],
+    ) {
+        use std::io::Write;
+        let mut buf = Vec::new();
+        for r in records {
+            leviath_core::run_archive::write_record(&mut buf, r).unwrap();
+        }
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(runs_dir.join(run_id).join("run.lvr"))
+            .unwrap();
+        f.write_all(&buf).unwrap();
+    }
+
+    fn batch_call(
+        id: &str,
+        name: &str,
+        result: Option<&str>,
+    ) -> leviath_core::run_archive::ToolCallRecord {
+        leviath_core::run_archive::ToolCallRecord {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments: "{}".to_string(),
+            result: result.map(str::to_string),
+            thought_signature: None,
+        }
+    }
+
+    /// The conversation entries of a reloaded agent's window.
+    fn conversation_of(world: &PipelineWorld, entity: Entity) -> Vec<leviath_core::RegionEntry> {
+        world
+            .world()
+            .get::<leviath_runtime::components::ContextWindow>(entity)
+            .unwrap()
+            .get_region("conversation")
+            .unwrap()
+            .content
+            .clone()
+    }
+
+    /// The #96 crash-resume path end to end: a batch was dispatched (journaled),
+    /// one call completed (journaled), one didn't, and the daemon died before
+    /// the batch applied. Reload replays the recorded result and synthesizes a
+    /// verify-first error for the lost one - and the agent re-infers from there
+    /// instead of re-executing the batch.
+    #[tokio::test]
+    async fn reload_replays_a_pending_tool_batch_instead_of_reexecuting() {
+        use leviath_core::run_archive::RunRecord;
+        let agent = agent_dir();
+        let manifest = agent.path().join("agent.leviath");
+        let mpath = manifest.to_str().unwrap();
+        let runs = tempfile::tempdir().unwrap();
+
+        write_run(runs.path(), "run-batch", mpath, RunStatus::Running, None);
+        let ctx = ContextSnapshot {
+            stage_name: "implement".to_string(),
+            total_tokens: 0,
+            max_tokens: 100_000,
+            regions: vec![],
+        };
+        write_run_archive(runs.path(), "run-batch", mpath, 0, 9, 99, &ctx);
+        append_archive_records(
+            runs.path(),
+            "run-batch",
+            &[
+                RunRecord::ToolBatch {
+                    calls: vec![
+                        batch_call("c_done", "write_file", None),
+                        batch_call("c_lost", "shell", None),
+                    ],
+                    at: 3,
+                    stage_index: 0,
+                    iteration: 9,
+                    response: "writing then running".to_string(),
+                },
+                RunRecord::ToolCallDone {
+                    iteration: 9,
+                    call_id: "c_done".to_string(),
+                    result: "Wrote 42 bytes to x.txt".to_string(),
+                    at: 4,
+                },
+            ],
+        );
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
+        let restored = reload_persisted_agents(
+            &mut world,
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            runs.path(),
+            999,
+            &sub_tx(),
+        );
+
+        assert_eq!(restored.len(), 1);
+        let entity = restored[0].1;
+        let entries = conversation_of(&world, entity);
+        // The assistant turn landed with both calls...
+        assert!(entries.iter().any(|e| matches!(
+            &e.kind,
+            leviath_core::region::EntryKind::AssistantTurn { tool_calls } if tool_calls.len() == 2
+        )));
+        // ...the completed call keeps its real journaled result...
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.content == "Wrote 42 bytes to x.txt")
+        );
+        // ...and the lost call gets the verify-first synthesis.
+        assert!(entries.iter().any(|e| e.content.contains("interrupted")
+            && e.content.contains("Verify whether it took effect")));
+        // The agent re-infers from the reconstructed window.
+        assert!(
+            world
+                .world()
+                .get::<leviath_runtime::pipeline::ReadyToInfer>(entity)
+                .is_some()
+        );
+    }
+
+    /// The batch's assistant turn already reached the persisted window before
+    /// the crash (apply_tool_results ran; the Progress record landed): fold
+    /// clears the pending batch, so reload appends nothing a second time.
+    #[tokio::test]
+    async fn reload_does_not_replay_a_batch_already_in_the_window() {
+        use leviath_core::region::EntryKind;
+        use leviath_core::run_archive::RunRecord;
+        let agent = agent_dir();
+        let manifest = agent.path().join("agent.leviath");
+        let mpath = manifest.to_str().unwrap();
+        let runs = tempfile::tempdir().unwrap();
+
+        write_run(runs.path(), "run-applied", mpath, RunStatus::Running, None);
+        // The archived window already holds the batch's turn + paired result.
+        let ctx = ContextSnapshot {
+            stage_name: "implement".to_string(),
+            total_tokens: 2,
+            max_tokens: 100_000,
+            regions: vec![leviath_core::run_meta::RegionSnapshot {
+                name: "conversation".to_string(),
+                kind: "clearable".to_string(),
+                current_tokens: 2,
+                max_tokens: 100_000,
+                entries: vec![
+                    leviath_core::run_meta::RegionEntrySnapshot {
+                        content: "done".to_string(),
+                        tokens: 1,
+                        kind: EntryKind::AssistantTurn {
+                            tool_calls: vec![leviath_core::region::SerializedToolCall {
+                                id: "c1".to_string(),
+                                name: "write_file".to_string(),
+                                arguments: serde_json::Value::Null,
+                                thought_signature: None,
+                            }],
+                        },
+                        metadata: None,
+                        key: None,
+                        taint: Default::default(),
+                    },
+                    leviath_core::run_meta::RegionEntrySnapshot {
+                        content: "Wrote it".to_string(),
+                        tokens: 1,
+                        kind: EntryKind::ToolResult {
+                            tool_call_id: "c1".to_string(),
+                            tool_name: "write_file".to_string(),
+                            is_error: false,
+                        },
+                        metadata: None,
+                        key: None,
+                        taint: Default::default(),
+                    },
+                ],
+            }],
+        };
+        write_run_archive(runs.path(), "run-applied", mpath, 0, 9, 99, &ctx);
+        append_archive_records(
+            runs.path(),
+            "run-applied",
+            &[RunRecord::ToolBatch {
+                calls: vec![batch_call("c1", "write_file", None)],
+                at: 3,
+                stage_index: 0,
+                iteration: 9,
+                response: "done".to_string(),
+            }],
+        );
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
+        let restored = reload_persisted_agents(
+            &mut world,
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            runs.path(),
+            999,
+            &sub_tx(),
+        );
+
+        assert_eq!(restored.len(), 1);
+        let entries = conversation_of(&world, restored[0].1);
+        // Exactly the persisted turn - no second copy, no interrupted synthesis.
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| matches!(&e.kind, EntryKind::AssistantTurn { tool_calls } if !tool_calls.is_empty()))
+                .count(),
+            1
+        );
+        assert!(!entries.iter().any(|e| e.content.contains("interrupted")));
     }
 
     /// A temp agent dir holding the `software-engineer` manifest, whose stage 0

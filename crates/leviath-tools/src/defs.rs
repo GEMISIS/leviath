@@ -2,6 +2,23 @@
 
 use super::*;
 
+/// The tool names routed to the sub-agent handler (they run against the daemon's
+/// agent engine, not the builtin/MCP executors). One list, shared by the CLI's
+/// dispatch routing and the runtime's crash-replay synthesis, so the two can't
+/// drift.
+pub const SUBAGENT_TOOLS: &[&str] = &[
+    "spawn_agent",
+    "check_agent",
+    "wait_for_agent",
+    "send_to_agent",
+    "kill_agent",
+];
+
+/// Whether `name` is a sub-agent tool.
+pub fn is_subagent_tool(name: &str) -> bool {
+    SUBAGENT_TOOLS.contains(&name)
+}
+
 impl BuiltinTools {
     /// All tool definitions to advertise to the LLM, minus any whose required
     /// platform capabilities aren't provided by the current platform.
