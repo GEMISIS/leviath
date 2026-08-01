@@ -190,7 +190,7 @@ impl InferencePools {
 }
 
 /// How busy one model's pool is. `cap: None` means the model is unbounded.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PoolOccupancy {
     /// The model key the pool is scoped to.
     pub model: String,

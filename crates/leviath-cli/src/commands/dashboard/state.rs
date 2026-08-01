@@ -807,7 +807,7 @@ impl Dashboard {
     /// every run look dead.
     pub(super) async fn sync_daemon_runs(&mut self, control: &ControlClient) {
         self.daemon_run_ids = match control.request(&ControlRequest::List).await {
-            Ok(ControlResponse::List { runs }) => {
+            Ok(ControlResponse::List { runs, .. }) => {
                 Some(runs.into_iter().map(|entry| entry.run_id).collect())
             }
             _ => None,

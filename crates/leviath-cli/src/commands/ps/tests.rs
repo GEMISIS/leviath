@@ -4,6 +4,15 @@ use leviath_runtime::control_socket::{ControlId, bind_control_listener, control_
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::task::JoinHandle;
 
+/// A daemon with room to spare and nothing to report about itself.
+fn healthy_daemon() -> DaemonHealth {
+    DaemonHealth {
+        tools_workers: 8,
+        redrive_secs: 30,
+        ..Default::default()
+    }
+}
+
 fn entry(run_id: &str, status: AgentStatus) -> RunListEntry {
     RunListEntry {
         run_id: run_id.to_string(),
@@ -107,7 +116,7 @@ fn stage_cell_shows_position_only_for_multi_stage_blueprints() {
 
 #[test]
 fn format_runs_handles_empty() {
-    assert_eq!(format_runs(&[], 0), "no agents running");
+    assert_eq!(format_runs(&[], &healthy_daemon(), 0), "no agents running");
 }
 
 /// The whole point of the change: two runs both `Waiting`, telling the operator
@@ -127,7 +136,7 @@ fn format_runs_distinguishes_two_kinds_of_waiting() {
     parked.tool_calls = 1;
     parked.last_progress_at = Some(1_190);
 
-    let out = format_runs(&[blocked, parked], 1_200);
+    let out = format_runs(&[blocked, parked], &healthy_daemon(), 1_200);
     let lines: Vec<&str> = out.lines().collect();
     assert!(lines[0].starts_with("RUN"), "header row: {out}");
     assert!(lines[0].contains("AGE"), "header row: {out}");
@@ -149,10 +158,14 @@ fn format_runs_calls_out_only_the_runs_needing_an_answer() {
         e
     };
     assert!(
-        !format_runs(std::slice::from_ref(&healthy), 0).contains("needs an answer"),
+        !format_runs(std::slice::from_ref(&healthy), &healthy_daemon(), 0)
+            .contains("needs an answer"),
         "a fan-out parent is not blocked on anyone"
     );
-    assert!(!format_runs(&[entry("run-b", AgentStatus::Active)], 0).contains("needs an answer"));
+    assert!(
+        !format_runs(&[entry("run-b", AgentStatus::Active)], &healthy_daemon(), 0)
+            .contains("needs an answer")
+    );
 
     let prompt = |id: &str, reason: WaitReason| {
         let mut e = entry(id, AgentStatus::Waiting);
@@ -161,6 +174,7 @@ fn format_runs_calls_out_only_the_runs_needing_an_answer() {
     };
     let one = format_runs(
         &[prompt("run-c", WaitReason::TaintGate), healthy.clone()],
+        &healthy_daemon(),
         0,
     );
     assert!(one.ends_with("1 run needs an answer: lev respond"), "{one}");
@@ -171,6 +185,7 @@ fn format_runs_calls_out_only_the_runs_needing_an_answer() {
             prompt("run-d", WaitReason::InteractionPoint),
             healthy,
         ],
+        &healthy_daemon(),
         0,
     );
     assert!(two.ends_with("2 runs need an answer: lev respond"), "{two}");
@@ -189,7 +204,7 @@ fn format_runs_aligns_columns() {
     let short = entry("a", AgentStatus::Active);
     let mut long = entry("a-much-longer-run-id", AgentStatus::Waiting);
     long.wait_reason = Some(WaitReason::UserPrompt);
-    let out = format_runs(&[short, long], 0);
+    let out = format_runs(&[short, long], &healthy_daemon(), 0);
     let lines: Vec<&str> = out.lines().collect();
 
     let status_col = lines[0]
@@ -208,6 +223,85 @@ fn format_runs_aligns_columns() {
     for line in &lines {
         assert_eq!(line.trim_end(), *line, "no trailing blanks: {out:?}");
     }
+}
+
+/// A healthy daemon says nothing about itself. Every row can look busy while the
+/// factory as a whole is fine, and a footer on every listing would train
+/// operators to skip the one that matters.
+#[test]
+fn a_healthy_daemon_adds_no_footer() {
+    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &healthy_daemon(), 0);
+    assert!(!out.contains("lanes:"), "{out}");
+    // Parked batches on their own are not a problem: they hold no capacity.
+    let parked = DaemonHealth {
+        tools_parked: 3,
+        ..healthy_daemon()
+    };
+    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &parked, 0);
+    assert!(!out.contains("lanes:"), "{out}");
+}
+
+/// A full lane with work behind it is worth mentioning, even while runs are
+/// still moving - it is the first sign of the shape that wedges.
+#[test]
+fn a_saturated_lane_is_reported_under_the_table() {
+    let health = DaemonHealth {
+        tools_busy: 8,
+        tools_workers: 8,
+        tools_queued: 12,
+        tools_parked: 3,
+        ..healthy_daemon()
+    };
+    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &health, 0);
+    assert!(
+        out.ends_with("lanes: tools 8/8 busy, 3 parked, 12 queued"),
+        "{out}"
+    );
+}
+
+/// The dead-cycle streak, in cycles and in the wall-clock time an operator
+/// actually cares about.
+#[test]
+fn a_dead_cycle_streak_is_reported_in_cycles_and_minutes() {
+    let health = DaemonHealth {
+        tools_busy: 8,
+        tools_workers: 8,
+        tools_queued: 12,
+        dead_cycles: 4,
+        ..healthy_daemon()
+    };
+    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &health, 0);
+    assert!(
+        out.ends_with("lanes: tools 8/8 busy, 12 queued  ·  no progress for 4 cycles (2m)"),
+        "{out}"
+    );
+
+    // A streak counts even when the lane has since drained - the daemon still
+    // has not moved, and that is the part worth saying.
+    let drained = DaemonHealth {
+        dead_cycles: 1,
+        ..healthy_daemon()
+    };
+    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &drained, 0);
+    assert!(
+        out.ends_with("lanes: tools 0/8 busy  ·  no progress for 1 cycles (30s)"),
+        "{out}"
+    );
+}
+
+/// The footer sits below the "needs an answer" call-out rather than replacing
+/// it: they answer different questions and an operator may need both.
+#[test]
+fn the_footer_and_the_answer_call_out_coexist() {
+    let mut blocked = entry("run-a", AgentStatus::Waiting);
+    blocked.wait_reason = Some(WaitReason::ToolApproval);
+    let health = DaemonHealth {
+        dead_cycles: 2,
+        ..healthy_daemon()
+    };
+    let out = format_runs(&[blocked], &health, 0);
+    assert!(out.contains("1 run needs an answer: lev respond"), "{out}");
+    assert!(out.contains("no progress for 2 cycles"), "{out}");
 }
 
 /// Bind a control listener at a fresh id under `dir` and serve one canned

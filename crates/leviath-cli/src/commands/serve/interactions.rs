@@ -328,7 +328,10 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_unexpected_is_500() {
-        let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::List { runs: vec![] });
+        let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::List {
+            runs: vec![],
+            health: Default::default(),
+        });
         assert_eq!(
             status_of(
                 app_with(control),

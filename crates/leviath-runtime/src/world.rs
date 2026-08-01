@@ -89,7 +89,7 @@ pub enum TickOutcome {
 }
 
 /// How many agents are in each status. See [`PipelineWorld::lane_snapshot`].
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AgentCounts {
     /// Doing work, or ready to.
     pub active: usize,

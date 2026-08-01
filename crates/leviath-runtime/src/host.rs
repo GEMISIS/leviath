@@ -132,6 +132,36 @@ pub struct RunListEntry {
     pub unattended: bool,
 }
 
+/// The daemon's own health, alongside the run listing.
+///
+/// A per-run view answers "what is this run doing"; this answers "is the daemon
+/// getting anywhere at all". They are different questions, and issue #191 was
+/// only visible in the second: every individual run looked fine, and the factory
+/// as a whole had not moved in hours.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DaemonHealth {
+    /// Loaded agents by status.
+    pub agents: crate::world::AgentCounts,
+    /// Inference-pool occupancy, one entry per model actually used.
+    pub inference: Vec<crate::inference_pool::PoolOccupancy>,
+    /// Tool batches holding lane capacity and running.
+    pub tools_busy: usize,
+    /// Tool batches waiting for lane capacity.
+    pub tools_queued: usize,
+    /// Tool batches parked on an unbounded wait, holding no capacity.
+    pub tools_parked: usize,
+    /// The tool lane's concurrency cap, including any relief granted.
+    pub tools_workers: usize,
+    /// Consecutive safety re-drives that found a lane at capacity and no run
+    /// moving. Zero on a healthy daemon, and reset by any sign of progress.
+    pub dead_cycles: u32,
+    /// How many extra tool-lane permits the relief valve has handed out.
+    pub relief_granted: usize,
+    /// How often the daemon re-drives itself, so a client can turn
+    /// `dead_cycles` into wall-clock time.
+    pub redrive_secs: u64,
+}
+
 /// The daemon-installed function that turns [`SpawnArgs`] into a live agent:
 /// loads the blueprint, resolves stages/tools, spawns into the world, and
 /// returns the new entity (the host records the run-id mapping). Returns `Err`
@@ -273,10 +303,10 @@ pub enum ControlOp {
         /// Reply channel.
         reply: oneshot::Sender<bool>,
     },
-    /// List every known live run and its status.
+    /// List every known live run and its status, with the daemon's own health.
     List {
         /// Reply channel.
-        reply: oneshot::Sender<Vec<RunListEntry>>,
+        reply: oneshot::Sender<(Vec<RunListEntry>, DaemonHealth)>,
     },
     /// Deliver a message to a running agent (by agent id). Reply is `false` if the
     /// world's message channel is closed.
@@ -538,6 +568,9 @@ pub struct WorldHost {
     /// The progress fingerprint as of the previous re-drive, or `None` before
     /// the first one.
     last_progress: Option<u64>,
+    /// Extra tool-lane permits the relief valve has handed out over this
+    /// daemon's life.
+    relief_granted: usize,
 }
 
 /// How often the serve loop re-drives the world on its own.
@@ -586,6 +619,7 @@ impl WorldHost {
             redrive: DEFAULT_REDRIVE_INTERVAL,
             dead_cycles: 0,
             last_progress: None,
+            relief_granted: 0,
         }
     }
 
@@ -608,6 +642,26 @@ impl WorldHost {
             false => 0,
         };
         self.log_lane_pressure(&snapshot);
+    }
+
+    /// The daemon's own health: lane occupancy plus the dead-cycle count.
+    ///
+    /// Served alongside every run listing, because "is this run stuck" and "is
+    /// the daemon stuck" are answered by different numbers and an operator
+    /// looking at one wants the other in the same breath.
+    pub fn health(&self) -> DaemonHealth {
+        let snapshot = self.world.lane_snapshot();
+        DaemonHealth {
+            agents: snapshot.agents,
+            inference: snapshot.inference,
+            tools_busy: snapshot.tools_busy,
+            tools_queued: snapshot.tools_queued,
+            tools_parked: snapshot.tools_parked,
+            tools_workers: snapshot.tools_workers,
+            dead_cycles: self.dead_cycles,
+            relief_granted: self.relief_granted,
+            redrive_secs: self.redrive.as_secs(),
+        }
     }
 
     /// A number that changes exactly when some run observably moves.
@@ -1358,7 +1412,7 @@ impl WorldHost {
                 let _ = reply.send(ok);
             }
             ControlOp::List { reply } => {
-                let _ = reply.send(self.list());
+                let _ = reply.send((self.list(), self.health()));
             }
             ControlOp::Message {
                 agent_id,
@@ -2036,7 +2090,7 @@ mod tests {
         .await;
         assert_eq!(status, Some(AgentStatus::Active));
 
-        let list = ask(&mut host, |reply| ControlOp::List { reply }).await;
+        let (list, _health) = ask(&mut host, |reply| ControlOp::List { reply }).await;
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].run_id, "run-a");
         assert_eq!(list[0].status, AgentStatus::Active);
@@ -3456,7 +3510,7 @@ mod tests {
         // Despawn the entity behind the world's back; the run-id map is now stale.
         host.world_mut().world_mut().despawn(e);
 
-        let list = ask(&mut host, |reply| ControlOp::List { reply }).await;
+        let (list, _health) = ask(&mut host, |reply| ControlOp::List { reply }).await;
         assert!(list.is_empty()); // stale mapping filtered out
         let status = ask(&mut host, |reply| ControlOp::Status {
             run_id: "run-a".to_string(),
@@ -3744,7 +3798,7 @@ mod tests {
                 watermark
             },
         ));
-        let list = ask(&mut host, |reply| ControlOp::List { reply }).await;
+        let (list, _health) = ask(&mut host, |reply| ControlOp::List { reply }).await;
         assert_eq!(list[0].num_stages, Some(3));
         assert_eq!(list[0].tool_calls, 9);
         assert!(list[0].unattended);
@@ -3759,7 +3813,7 @@ mod tests {
         waiting_because(&mut host, e, |entity| {
             entity.insert(crate::pipeline::WaitingForChildren);
         });
-        let list = ask(&mut host, |reply| ControlOp::List { reply }).await;
+        let (list, _health) = ask(&mut host, |reply| ControlOp::List { reply }).await;
         assert_eq!(list.len(), 1);
         assert_eq!(
             list[0].wait_reason,

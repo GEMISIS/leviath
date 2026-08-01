@@ -25,7 +25,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{broadcast, oneshot};
 
 use crate::components::AgentStatus;
-use crate::host::{ControlOp, RunListEntry, SpawnArgs, WorldEvent};
+use crate::host::{ControlOp, DaemonHealth, RunListEntry, SpawnArgs, WorldEvent};
 use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 
 #[cfg(unix)]
@@ -247,10 +247,15 @@ pub enum ControlResponse {
         /// Whether the operation applied.
         ok: bool,
     },
-    /// A listing of runs, their statuses, and the context needed to read them.
+    /// A listing of runs, their statuses, and the context needed to read them,
+    /// with the daemon's own health alongside.
     List {
         /// One entry per live run.
         runs: Vec<RunListEntry>,
+        /// How the daemon itself is doing. Defaulted when absent so a listing
+        /// from an older daemon still parses.
+        #[serde(default)]
+        health: DaemonHealth,
     },
     /// A listing of open interactions.
     Interactions {
@@ -314,9 +319,8 @@ async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> Co
         ControlRequest::List => {
             let (reply, rx) = oneshot::channel();
             let _ = op_tx.send(ControlOp::List { reply });
-            ControlResponse::List {
-                runs: rx.await.unwrap_or_default(),
-            }
+            let (runs, health) = rx.await.unwrap_or_default();
+            ControlResponse::List { runs, health }
         }
         ControlRequest::Message {
             agent_id,
@@ -916,7 +920,7 @@ mod tests {
                         let _ = reply.send(true);
                     }
                     ControlOp::List { reply } => {
-                        let _ = reply.send(vec![listing_entry()]);
+                        let _ = reply.send((vec![listing_entry()], DaemonHealth::default()));
                     }
                     ControlOp::ListInteractions { reply } => {
                         let _ = reply.send(vec![]);
@@ -1066,7 +1070,8 @@ mod tests {
         assert_eq!(
             resp,
             ControlResponse::List {
-                runs: vec![listing_entry()]
+                runs: vec![listing_entry()],
+                health: DaemonHealth::default(),
             }
         );
     }
@@ -1427,7 +1432,10 @@ mod tests {
         let ok: ControlResponse = serde_json::from_str(&ok_line).unwrap();
         assert_eq!(
             std::mem::discriminant(&ok),
-            std::mem::discriminant(&ControlResponse::List { runs: vec![] })
+            std::mem::discriminant(&ControlResponse::List {
+                runs: vec![],
+                health: DaemonHealth::default(),
+            })
         );
 
         // Close the client so the handler sees EOF and returns cleanly.
@@ -1499,7 +1507,10 @@ mod tests {
         let list = client.list().await.unwrap();
         assert_eq!(
             std::mem::discriminant(&list),
-            std::mem::discriminant(&ControlResponse::List { runs: vec![] })
+            std::mem::discriminant(&ControlResponse::List {
+                runs: vec![],
+                health: DaemonHealth::default(),
+            })
         );
         assert_eq!(
             client.shutdown().await.unwrap(),
@@ -1709,7 +1720,10 @@ mod tests {
         );
         assert_eq!(
             dispatch(ControlRequest::List, &op_tx).await,
-            ControlResponse::List { runs: vec![] }
+            ControlResponse::List {
+                runs: vec![],
+                health: DaemonHealth::default(),
+            }
         );
         assert_eq!(
             dispatch(ControlRequest::ListInteractions, &op_tx).await,
