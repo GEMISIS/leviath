@@ -34,5 +34,9 @@ leviath-telemetry = { workspace = true }
 leviath-package = { workspace = true }
 leviath-agent-client = { workspace = true }
 
+# For examples/ only (the library itself is re-exports and needs nothing).
+[dev-dependencies]
+tokio = { workspace = true }
+
 [lints]
 workspace = true

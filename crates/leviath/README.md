@@ -12,29 +12,50 @@ one namespace so an application only needs a single dependency:
 leviath = "0.1"
 ```
 
+Running an agent in-process takes a provider, a blueprint, and an event
+loop. No daemon, no config file:
+
 ```rust
-use leviath::core::manifest::parse_manifest;
+use leviath::prelude::*;
 
-fn main() -> leviath::core::Result<()> {
-    let blueprint = parse_manifest(
-        r#"
-        [agent]
-        name = "hello"
-        version = "0.1.0"
+#[tokio::main]
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let world = AgentWorld::builder()
+        .provider(ProviderCreds {
+            api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+            ..ProviderCreds::simple("anthropic")
+        })
+        .build()?;
 
-        [model]
-        provider = "anthropic"
-        model = "claude-sonnet-4-6"
+    let mut events = world.events();
+    let run = world
+        .spawn(SpawnSpec::new(
+            BlueprintSource::Path("coder.leviath".into()),
+            "Build a CSV parser",
+            std::env::current_dir()?,
+        ))
+        .await?;
 
-        [[stages]]
-        name = "work"
-        prompt = "Do the task."
-        "#,
-    )?;
-    println!("{} has {} stage(s)", blueprint.name, blueprint.stages.len());
+    while let Some(event) = events.next().await {
+        match event {
+            AgentEvent::StageTransition { from, to, .. } => println!("{from} -> {to}"),
+            AgentEvent::Completed { run_id, status, .. } if run_id == run.as_ref() => {
+                println!("finished: {status}");
+                break;
+            }
+            _ => {}
+        }
+    }
+    world.shutdown().await;
     Ok(())
 }
 ```
+
+A full program that also answers the agent's questions lives in
+`examples/embedded_agent.rs` (`cargo run --example embedded_agent -p
+leviath`), and the embedding guide at
+[leviath.dev/docs/embedding](https://leviath.dev/docs/embedding) walks
+through the builder options, the event stream, and the tool-service seam.
 
 The most-used types are one import away with `use leviath::prelude::*;`.
 
