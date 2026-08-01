@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use leviath_core::config::ObservabilityConfig;
-use leviath_core::telemetry::{LogKind, TelemetryEvent, TelemetrySink};
+use leviath_core::telemetry::{LaneHealth, LogKind, TelemetryEvent, TelemetrySink};
 use opentelemetry::logs::{AnyValue, LogRecord, Logger, LoggerProvider, Severity};
 use opentelemetry::metrics::{Counter, Histogram, Meter, MeterProvider, UpDownCounter};
 use opentelemetry::trace::{
@@ -112,6 +112,82 @@ struct Instruments {
     tool_calls: Counter<u64>,
     stage_duration: Histogram<f64>,
     inference_latency: Histogram<f64>,
+    /// Tool-lane occupancy, re-stated on every health sample. Up-down counters
+    /// rather than plain counters because these go both ways, and the sink adds
+    /// the delta from the previous sample so a scrape reads the current value.
+    lane: LaneInstruments,
+}
+
+/// The daemon-wide instruments, kept together because they share the
+/// last-sample bookkeeping that turns a level into a delta.
+struct LaneInstruments {
+    tools_busy: UpDownCounter<i64>,
+    tools_queued: UpDownCounter<i64>,
+    tools_parked: UpDownCounter<i64>,
+    dead_cycles: Counter<u64>,
+    relief: Counter<u64>,
+    /// The previous sample's levels, so each one can be reported as a delta.
+    last: Mutex<LaneLevels>,
+}
+
+/// The gauge-shaped parts of [`LaneHealth`], as last reported.
+#[derive(Default, Clone, Copy)]
+struct LaneLevels {
+    tools_busy: i64,
+    tools_queued: i64,
+    tools_parked: i64,
+    dead_cycles: u32,
+}
+
+impl LaneInstruments {
+    fn new(meter: &Meter) -> Self {
+        Self {
+            tools_busy: meter
+                .i64_up_down_counter("leviath.tool_lane.busy")
+                .with_description("Tool batches currently holding lane capacity")
+                .build(),
+            tools_queued: meter
+                .i64_up_down_counter("leviath.tool_lane.queued")
+                .with_description("Tool batches waiting for lane capacity")
+                .build(),
+            tools_parked: meter
+                .i64_up_down_counter("leviath.tool_lane.parked")
+                .with_description("Tool batches parked on an unbounded wait, holding no capacity")
+                .build(),
+            dead_cycles: meter
+                .u64_counter("leviath.scheduler.dead_cycles.total")
+                .with_description("Re-drives that found the lanes full and no run moving")
+                .build(),
+            relief: meter
+                .u64_counter("leviath.tool_lane.relief.total")
+                .with_description("Extra tool-lane capacity handed out to break a wedge")
+                .build(),
+            last: Mutex::new(LaneLevels::default()),
+        }
+    }
+
+    /// Report one sample, converting the levels into the deltas an up-down
+    /// counter wants.
+    fn record(&self, health: &LaneHealth) {
+        let now = LaneLevels {
+            tools_busy: health.tools_busy as i64,
+            tools_queued: health.tools_queued as i64,
+            tools_parked: health.tools_parked as i64,
+            dead_cycles: health.dead_cycles,
+        };
+        let mut last = self.last.lock().expect("telemetry lane level lock");
+        self.tools_busy.add(now.tools_busy - last.tools_busy, &[]);
+        self.tools_queued
+            .add(now.tools_queued - last.tools_queued, &[]);
+        self.tools_parked
+            .add(now.tools_parked - last.tools_parked, &[]);
+        // A streak that grew is that many more dead cycles; one that reset is
+        // not negative progress, it is simply nothing to add.
+        self.dead_cycles
+            .add(now.dead_cycles.saturating_sub(last.dead_cycles) as u64, &[]);
+        self.relief.add(health.relief_granted as u64, &[]);
+        *last = now;
+    }
 }
 
 impl Instruments {
@@ -139,6 +215,7 @@ impl Instruments {
                 .with_description("Per-call inference latency by provider")
                 .with_unit("s")
                 .build(),
+            lane: LaneInstruments::new(meter),
         }
     }
 }
@@ -544,6 +621,10 @@ impl TelemetrySink for OtelSink {
         }
     }
 
+    fn observe_lanes(&self, health: LaneHealth) {
+        self.instruments.lane.record(&health);
+    }
+
     fn force_flush(&self) {
         let _ = self.tracer_provider.force_flush();
         let _ = self.meter_provider.force_flush();
@@ -883,6 +964,84 @@ mod tests {
         ] {
             assert!(names.contains(&expected.to_string()), "{names:?}");
         }
+    }
+
+    /// The daemon-wide instruments. Lane occupancy goes up and down, so the sink
+    /// turns each sample's level into a delta; a dead-cycle streak only ever
+    /// grows, and resetting to zero adds nothing rather than going backwards.
+    #[test]
+    fn lane_health_samples_export_as_deltas() {
+        let h = harness();
+        h.sink.observe_lanes(LaneHealth {
+            tools_busy: 3,
+            tools_queued: 5,
+            tools_parked: 1,
+            tools_workers: 8,
+            dead_cycles: 2,
+            ..Default::default()
+        });
+        // Busier, one more dead cycle, and some relief handed out.
+        h.sink.observe_lanes(LaneHealth {
+            agents_active: 6,
+            agents_waiting: 2,
+            tools_busy: 8,
+            tools_queued: 2,
+            tools_parked: 4,
+            tools_workers: 8,
+            dead_cycles: 3,
+            relief_granted: 2,
+        });
+        // The wedge cleared: the streak resets, which must not subtract.
+        h.sink.observe_lanes(LaneHealth {
+            tools_workers: 8,
+            ..Default::default()
+        });
+        h.sink.force_flush();
+
+        let exported = h.metrics.get_finished_metrics().unwrap();
+        let names: Vec<String> = exported
+            .iter()
+            .flat_map(|rm| rm.scope_metrics())
+            .flat_map(|sm| sm.metrics())
+            .map(|m| m.name().to_string())
+            .collect();
+        for expected in [
+            "leviath.tool_lane.busy",
+            "leviath.tool_lane.queued",
+            "leviath.tool_lane.parked",
+            "leviath.scheduler.dead_cycles.total",
+            "leviath.tool_lane.relief.total",
+        ] {
+            assert!(names.contains(&expected.to_string()), "{names:?}");
+        }
+    }
+
+    /// The delta arithmetic on its own, where the numbers are readable.
+    #[test]
+    fn lane_levels_become_deltas_and_streaks_only_climb() {
+        let meter = SdkMeterProvider::builder().build().meter("test");
+        let lane = LaneInstruments::new(&meter);
+        let levels = |lane: &LaneInstruments| *lane.last.lock().unwrap();
+
+        lane.record(&LaneHealth {
+            tools_busy: 4,
+            tools_queued: 2,
+            tools_parked: 1,
+            dead_cycles: 5,
+            ..Default::default()
+        });
+        let after = levels(&lane);
+        assert_eq!((after.tools_busy, after.tools_queued), (4, 2));
+        assert_eq!(after.dead_cycles, 5);
+
+        // A quiet sample takes the levels back down and the streak to zero.
+        lane.record(&LaneHealth::default());
+        let after = levels(&lane);
+        assert_eq!(
+            (after.tools_busy, after.tools_queued, after.tools_parked),
+            (0, 0, 0)
+        );
+        assert_eq!(after.dead_cycles, 0, "the streak reset");
     }
 
     #[test]

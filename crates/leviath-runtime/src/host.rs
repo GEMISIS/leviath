@@ -642,6 +642,31 @@ impl WorldHost {
             false => 0,
         };
         self.log_lane_pressure(&snapshot);
+        self.observe_lanes(&snapshot, 0);
+    }
+
+    /// Hand one daemon-wide health sample to the telemetry sink.
+    ///
+    /// `relief` is the capacity granted on this sample, which is a per-sample
+    /// figure rather than a running total: the sink accumulates it.
+    fn observe_lanes(&self, snapshot: &LaneSnapshot, relief: usize) {
+        // Every `PipelineWorld::new` installs the sink resource (a no-op one
+        // unless a host replaced it), so this is a hard invariant rather than a
+        // branch - the same reasoning as `set_exact_token_counting`.
+        self.world
+            .world()
+            .resource::<crate::telemetry::Telemetry>()
+            .0
+            .observe_lanes(leviath_core::telemetry::LaneHealth {
+                agents_active: snapshot.agents.active,
+                agents_waiting: snapshot.agents.waiting,
+                tools_busy: snapshot.tools_busy,
+                tools_queued: snapshot.tools_queued,
+                tools_parked: snapshot.tools_parked,
+                tools_workers: snapshot.tools_workers,
+                dead_cycles: self.dead_cycles,
+                relief_granted: relief,
+            });
     }
 
     /// The daemon's own health: lane occupancy plus the dead-cycle count.
@@ -2026,6 +2051,32 @@ mod tests {
 
         host.observe_redrive();
         assert_eq!(host.dead_cycles, 0, "something moved");
+    }
+
+    /// Every re-drive hands the sink a daemon-wide sample, including the quiet
+    /// ones. A wedged daemon produces no per-run telemetry at all, which is
+    /// exactly why the health sample cannot be conditional on something having
+    /// happened.
+    #[tokio::test]
+    async fn each_re_drive_reports_lane_health_to_the_telemetry_sink() {
+        let sink = Arc::new(leviath_core::telemetry::MemorySink::default());
+        let mut host = host_with_full_pool(1);
+        host.world_mut()
+            .world_mut()
+            .insert_resource(crate::telemetry::Telemetry(sink.clone()));
+        spawn(&mut host, "run-a", "agent-a");
+        spawn(&mut host, "run-b", "agent-b");
+        host.world_mut().run_to_fixed_point();
+        host.emit_events();
+
+        host.observe_redrive();
+        host.observe_redrive();
+
+        let samples = sink.lane_samples();
+        assert_eq!(samples.len(), 2, "one per re-drive");
+        assert_eq!(samples[0].dead_cycles, 0);
+        assert_eq!(samples[1].dead_cycles, 1, "the streak is carried through");
+        assert_eq!(samples[1].agents_active, 2);
     }
 
     /// Stillness on its own is not a dead cycle. An idle daemon has nothing
