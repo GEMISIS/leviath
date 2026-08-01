@@ -17,6 +17,7 @@ leviath-core = { workspace = true }
 leviath-providers = { workspace = true }
 leviath-sys = { workspace = true }
 serde_json = { workspace = true }
+jsonschema = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 

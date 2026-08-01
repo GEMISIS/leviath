@@ -17,9 +17,11 @@ mod context;
 mod defs;
 mod exec;
 mod platform;
+mod validate;
 pub use context::*;
 pub use defs::{SUBAGENT_TOOLS, is_subagent_tool};
 pub use platform::*;
+pub use validate::*;
 
 /// Built-in tools: read_file, write_file, edit_file, list_dir, shell.
 ///
