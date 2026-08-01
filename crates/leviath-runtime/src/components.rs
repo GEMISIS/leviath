@@ -4166,7 +4166,6 @@ mod tests {
         );
     }
 
-
     // ─── Status and wait-reason labels (issue #184) ──────────────────────────
 
     /// `label` is a wire contract: the `WorldEvent` stream and the REST

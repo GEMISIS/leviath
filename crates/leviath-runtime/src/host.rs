@@ -87,8 +87,10 @@ pub struct SpawnArgs {
     pub parent_run_id: Option<String>,
 }
 
-/// One row of [`WorldHost::list`]: a live run, its status, and enough context to
-/// judge whether that status is a problem.
+/// One row of a run listing ([`ControlRequest::List`]): a live run, its status,
+/// and enough context to judge whether that status is a problem.
+///
+/// [`ControlRequest::List`]: crate::control_socket::ControlRequest::List
 ///
 /// `lev ps` used to be a run id and a status word, which is why issue #184
 /// happened: `waiting` on its own says nothing about whether a person is needed,
@@ -1000,7 +1002,10 @@ impl WorldHost {
         if state.status != AgentStatus::Waiting {
             return None;
         }
-        if world.get::<crate::gate_prompt::AwaitingGatePrompt>(entity).is_some() {
+        if world
+            .get::<crate::gate_prompt::AwaitingGatePrompt>(entity)
+            .is_some()
+        {
             return Some(WaitReason::TaintGate);
         }
         if world
@@ -1024,9 +1029,9 @@ impl WorldHost {
                     c.children
                         .iter()
                         .filter(|&&child| {
-                            world.get::<AgentState>(child).is_some_and(|s| {
-                                !crate::pipeline::is_terminal_status(&s.status)
-                            })
+                            world
+                                .get::<AgentState>(child)
+                                .is_some_and(|s| !crate::pipeline::is_terminal_status(&s.status))
                         })
                         .count()
                 })
@@ -1071,9 +1076,7 @@ impl WorldHost {
                         .map(|c| c.index),
                     num_stages: metadata.map(|m| m.num_stages),
                     iteration: state.iteration,
-                    tool_calls: world
-                        .get::<TokenTotals>(entity)
-                        .map_or(0, |t| t.tool_calls),
+                    tool_calls: world.get::<TokenTotals>(entity).map_or(0, |t| t.tool_calls),
                     last_progress_at: world
                         .get::<crate::pipeline::PersistWatermark>(entity)
                         .and_then(|w| w.last_progress_at()),
