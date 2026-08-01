@@ -11,6 +11,26 @@ requests since the previous version.
 
 ## Unreleased
 
+- `lev ps` says why a run is waiting. `waiting` was one word for six unrelated
+  situations, so an operator could not tell a run stopped on an approval prompt
+  from a parent parked while its workers churn. It now reads
+  `waiting: tool approval` or `waiting: children(3)`, alongside stage,
+  iteration, tool-call, and age columns. `lev ps --help` defines every status
+  and reason, and `lev ps --json` prints the raw listing for scripts.
+- The `AGE` column measures time since the run last actually moved, which
+  `meta.json`'s `updated_at` does not: that also advances on a 30-second
+  heartbeat, so it stays fresh on a wedged run.
+- `--yolo` now applies to the whole run tree. Sub-agents and fan-out workers
+  inherit it instead of being spawned attended, so a child can no longer stop on
+  a prompt nobody is watching for and strand the parent waiting on it.
+- `--yolo` also survives a daemon restart, persisted as `yolo` in `meta.json`.
+  It used to be dropped on reload on the grounds that forgetting an override can
+  only prompt more; in practice that turned a running unattended job into one
+  parked forever. Runs written by older versions default to attended. A
+  configured `deny` still beats `--yolo`, and `ask_user_choice` still refuses to
+  answer blind.
+- A stage holding for its sub-agents could be walked back to `active` while
+  those children were still running, if an unrelated prompt of its own resolved.
 - Pause and resume are now user-facing: `lev pause <run-id>` and
   `lev resume <run-id>`, `POST /api/agents/{id}/pause` and `/resume` on the
   HTTP API, and `p`/`r` in the dashboard. A paused run shows as `paused` in

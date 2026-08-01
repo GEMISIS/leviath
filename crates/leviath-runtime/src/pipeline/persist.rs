@@ -40,6 +40,14 @@ impl PersistWatermark {
     pub fn last_progress_at(&self) -> Option<i64> {
         self.last_progress_at
     }
+
+    /// Move both stamps back to `at`, so a test can reach the heartbeat window
+    /// without sleeping through it.
+    #[cfg(test)]
+    pub(crate) fn backdate(&mut self, at: i64) {
+        self.last_written_at = Some(at);
+        self.last_progress_at = Some(at);
+    }
 }
 
 /// The sending end of the persistence I/O lane (the receiving end is drained by

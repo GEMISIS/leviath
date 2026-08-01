@@ -55,6 +55,10 @@ call until the answer comes back, then continues with it:
 > parking the run forever: a confirmation is approved, an edit submits the document unchanged, a
 > review is acknowledged, and a free-text or choice question is told no one answered so the model
 > decides for itself; a choice is never picked blind.
+>
+> Unattended applies to the whole run tree, not just the agent you launched: sub-agents and
+> fan-out workers inherit it, and it survives a daemon restart. Otherwise a child could stop
+> on a prompt nobody was watching for and take its parent down with it.
 
 ## Tool approval
 

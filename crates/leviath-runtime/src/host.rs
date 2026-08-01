@@ -2886,4 +2886,310 @@ mod tests {
         .await;
         assert_eq!(status, None);
     }
+
+    // ─── Wait reasons (issue #184) ───────────────────────────────────────────
+
+    /// Park `entity` at `Waiting` with `marker` attached, the way the engine
+    /// would, and ask the host to explain it.
+    fn waiting_because(
+        host: &mut WorldHost,
+        entity: Entity,
+        attach: impl FnOnce(&mut bevy_ecs::world::EntityWorldMut),
+    ) -> Option<WaitReason> {
+        {
+            let world = host.world_mut().world_mut();
+            world
+                .get_mut::<AgentState>(entity)
+                .expect("spawned agent has state")
+                .status = AgentStatus::Waiting;
+            let mut e = world.entity_mut(entity);
+            attach(&mut e);
+        }
+        host.wait_reason(entity)
+    }
+
+    /// A run that is not waiting has nothing to explain, whatever markers it
+    /// happens to be carrying.
+    #[tokio::test]
+    async fn wait_reason_is_none_unless_the_agent_is_waiting() {
+        let mut host = host_with(vec![]);
+        let e = spawn(&mut host, "run-a", "run-a");
+        host.world_mut()
+            .world_mut()
+            .entity_mut(e)
+            .insert(crate::pipeline::WaitingForChildren);
+        assert_eq!(host.wait_reason(e), None);
+    }
+
+    /// An entity the world no longer holds cannot be explained either.
+    #[tokio::test]
+    async fn wait_reason_is_none_for_an_unknown_entity() {
+        let mut host = host_with(vec![]);
+        let e = spawn(&mut host, "run-a", "run-a");
+        host.world_mut().world_mut().despawn(e);
+        assert_eq!(host.wait_reason(e), None);
+    }
+
+    /// `Waiting` with nothing claiming it: report nothing rather than guess.
+    #[tokio::test]
+    async fn wait_reason_is_none_when_nothing_claims_the_wait() {
+        let mut host = host_with(vec![]);
+        let e = spawn(&mut host, "run-a", "run-a");
+        assert_eq!(waiting_because(&mut host, e, |_| {}), None);
+    }
+
+    #[tokio::test]
+    async fn wait_reason_reports_a_taint_gate() {
+        let mut host = host_with(vec![]);
+        let e = spawn(&mut host, "run-a", "run-a");
+        let reason = waiting_because(&mut host, e, |entity| {
+            entity.insert(crate::gate_prompt::AwaitingGatePrompt(1));
+        });
+        assert_eq!(reason, Some(WaitReason::TaintGate));
+    }
+
+    #[tokio::test]
+    async fn wait_reason_reports_an_interaction_point() {
+        let mut host = host_with(vec![]);
+        let e = spawn(&mut host, "run-a", "run-a");
+        let reason = waiting_because(&mut host, e, |entity| {
+            entity.insert(crate::interaction_points::AwaitingInteractionPoint);
+        });
+        assert_eq!(reason, Some(WaitReason::InteractionPoint));
+    }
+
+    /// A stage holding for sub-agents counts only the children that have not
+    /// finished - the whole point is telling the operator how much is left.
+    #[tokio::test]
+    async fn wait_reason_counts_unfinished_children() {
+        let mut host = host_with(vec![]);
+        let parent = spawn(&mut host, "run-a", "run-a");
+        let running = spawn(&mut host, "run-b", "run-b");
+        let done = spawn(&mut host, "run-c", "run-c");
+        {
+            let world = host.world_mut().world_mut();
+            world
+                .get_mut::<AgentState>(done)
+                .expect("child has state")
+                .status = AgentStatus::Complete;
+        }
+        let reason = waiting_because(&mut host, parent, |entity| {
+            entity.insert((
+                crate::pipeline::WaitingForChildren,
+                SubAgentChildren {
+                    children: vec![running, done],
+                    max_child_depth: 3,
+                },
+            ));
+        });
+        assert_eq!(reason, Some(WaitReason::Children { outstanding: 1 }));
+    }
+
+    /// The marker can outlive the child list (a reload that lost them); report
+    /// the wait rather than dropping it.
+    #[tokio::test]
+    async fn wait_reason_reports_children_with_none_recorded() {
+        let mut host = host_with(vec![]);
+        let e = spawn(&mut host, "run-a", "run-a");
+        let reason = waiting_because(&mut host, e, |entity| {
+            entity.insert(crate::pipeline::WaitingForChildren);
+        });
+        assert_eq!(reason, Some(WaitReason::Children { outstanding: 0 }));
+    }
+
+    /// Open a real hub request for `agent_id` and leave it pending, returning
+    /// the task holding it (dropping the host cancels it).
+    fn open_prompt(
+        host: &WorldHost,
+        agent_id: &str,
+        request: InteractionRequest,
+    ) -> tokio::task::JoinHandle<InteractionResponse> {
+        let backend = host.interactions().backend_for(agent_id.to_string());
+        tokio::spawn(async move {
+            use crate::dynamic_interaction::InteractionBackend;
+            backend.ask(request).await
+        })
+    }
+
+    /// Let the spawned `ask` reach its first poll, so its request is registered
+    /// before the assertion looks for it. `submit` inserts before it awaits, so
+    /// yielding is enough - no sleeping, and no timeout branch to leave uncovered.
+    async fn await_pending(host: &WorldHost, agent_id: &str) {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            host.interactions()
+                .pending()
+                .iter()
+                .any(|(id, _)| id == agent_id),
+            "the hub registered a request for {agent_id}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_reason_distinguishes_a_tool_approval_from_a_question() {
+        let mut host = host_with(vec![]);
+        let e = spawn(&mut host, "run-a", "run-a");
+
+        let approval = open_prompt(
+            &host,
+            "run-a",
+            InteractionRequest::tool_approval("req-1", "shell", serde_json::json!({}), "implement"),
+        );
+        await_pending(&host, "run-a").await;
+        let reason = waiting_because(&mut host, e, |entity| {
+            entity.insert(AwaitingInteraction);
+        });
+        assert_eq!(reason, Some(WaitReason::ToolApproval));
+        // Release the prompt (rather than abandoning it) so the awaiting task
+        // finishes instead of leaking into the next case.
+        assert_eq!(host.interactions().cancel_for_agent("run-a"), 1);
+        approval.await.expect("the asking task finishes");
+
+        let question = open_prompt(
+            &host,
+            "run-a",
+            InteractionRequest::free_text("req-2", "which one?", "implement", true),
+        );
+        await_pending(&host, "run-a").await;
+        assert_eq!(host.wait_reason(e), Some(WaitReason::UserPrompt));
+        assert_eq!(host.interactions().cancel_for_agent("run-a"), 1);
+        question.await.expect("the asking task finishes");
+    }
+
+    /// The marker without a matching hub entry (the request cleared in the same
+    /// tick) still reads as a prompt rather than as nothing.
+    #[tokio::test]
+    async fn wait_reason_falls_back_to_user_prompt_without_a_hub_entry() {
+        let mut host = host_with(vec![]);
+        let e = spawn(&mut host, "run-a", "run-a");
+        let reason = waiting_because(&mut host, e, |entity| {
+            entity.insert(AwaitingInteraction);
+        });
+        assert_eq!(reason, Some(WaitReason::UserPrompt));
+    }
+
+    /// A gate prompt opens a hub request of its own, so the gate-blocked agent
+    /// carries `AwaitingInteraction` too. The specific marker has to win, or
+    /// every gate would report as a generic prompt.
+    #[tokio::test]
+    async fn a_gate_outranks_the_generic_interaction_marker() {
+        let mut host = host_with(vec![]);
+        let e = spawn(&mut host, "run-a", "run-a");
+        let reason = waiting_because(&mut host, e, |entity| {
+            entity.insert((
+                AwaitingInteraction,
+                crate::gate_prompt::AwaitingGatePrompt(1),
+            ));
+        });
+        assert_eq!(reason, Some(WaitReason::TaintGate));
+    }
+
+    /// A fan-out parent reports how many workers are left, so "waiting" reads as
+    /// progress against a denominator rather than an unexplained stall.
+    #[tokio::test]
+    async fn wait_reason_counts_outstanding_fan_out_workers() {
+        let mut host = host_with(vec![]);
+        let parent = spawn(&mut host, "run-a", "run-a");
+        let worker = spawn(&mut host, "run-b", "run-b");
+        {
+            let world = host.world_mut().world_mut();
+            world
+                .get_mut::<AgentState>(parent)
+                .expect("parent has state")
+                .status = AgentStatus::Waiting;
+            // One worker in flight and two items not yet started ⇒ three left.
+            crate::fanout::restore_fan_out_waiting(
+                world,
+                parent,
+                crate::fanout::FanOutState {
+                    config: leviath_core::blueprint::FanOutConfig {
+                        worker_agent: None,
+                        worker_stage: Some("work".to_string()),
+                        worker_query: None,
+                        merge_stage: None,
+                        max_workers: 2,
+                        on_worker_failure: Default::default(),
+                        split_prompt: String::new(),
+                    },
+                    max_workers: 2,
+                    pending: vec![
+                        crate::fanout::WorkItem::default(),
+                        crate::fanout::WorkItem::default(),
+                    ],
+                    active: vec![("item-1".to_string(), "run-b".to_string())],
+                    summaries: Vec::new(),
+                    failures: Vec::new(),
+                },
+                &|run_id| (run_id == "run-b").then_some(worker),
+            );
+        }
+        assert_eq!(
+            host.wait_reason(parent),
+            Some(WaitReason::FanOutWorkers { outstanding: 3 })
+        );
+    }
+
+    /// With run metadata attached, the listing reports the blueprint's shape and
+    /// whether the run is unattended - an unattended run sitting on a prompt is
+    /// the shape of a bug.
+    #[tokio::test]
+    async fn list_reports_blueprint_shape_and_unattended() {
+        let mut host = host_with(vec![]);
+        let e = spawn(&mut host, "run-a", "run-a");
+        host.world_mut().world_mut().entity_mut(e).insert((
+            RunMetadata {
+                run_id: "run-a".to_string(),
+                agent_name: "coder".to_string(),
+                agent_path: "/tmp/agent".to_string(),
+                task: "t".to_string(),
+                model: None,
+                workdir: "/tmp".to_string(),
+                num_stages: 3,
+                started_at: 0,
+                parent_run_id: None,
+                metadata: HashMap::new(),
+                callback_url: None,
+                callback_secret: None,
+                title: None,
+                unattended: true,
+            },
+            TokenTotals {
+                tool_calls: 9,
+                ..Default::default()
+            },
+            {
+                let mut watermark = crate::pipeline::PersistWatermark::default();
+                watermark.backdate(1_700);
+                watermark
+            },
+        ));
+        let list = ask(&mut host, |reply| ControlOp::List { reply }).await;
+        assert_eq!(list[0].num_stages, Some(3));
+        assert_eq!(list[0].tool_calls, 9);
+        assert!(list[0].unattended);
+        assert_eq!(list[0].last_progress_at, Some(1_700));
+    }
+
+    /// The listing carries the reason and the progress context, not just a word.
+    #[tokio::test]
+    async fn list_explains_a_waiting_run() {
+        let mut host = host_with(vec![]);
+        let e = spawn(&mut host, "run-a", "run-a");
+        waiting_because(&mut host, e, |entity| {
+            entity.insert(crate::pipeline::WaitingForChildren);
+        });
+        let list = ask(&mut host, |reply| ControlOp::List { reply }).await;
+        assert_eq!(list.len(), 1);
+        assert_eq!(
+            list[0].wait_reason,
+            Some(WaitReason::Children { outstanding: 0 })
+        );
+        assert_eq!(list[0].stage_index, Some(0));
+        // No RunMetadata on this fixture, so there is nothing to claim about the
+        // blueprint's shape or how it was launched.
+        assert_eq!(list[0].num_stages, None);
+        assert!(!list[0].unattended);
+    }
 }

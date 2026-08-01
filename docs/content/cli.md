@@ -104,7 +104,7 @@ Serve an agent over the [Agent Client Protocol](/docs/agent-client-protocol) as 
 
 | Command | Flags | Purpose |
 |---|---|---|
-| `lev ps` | | List runs in the daemon with their status |
+| `lev ps` | `--json` | List runs in the daemon with their status. See [below](#reading-lev-ps) |
 | `lev dash` | | Full-screen TUI [dashboard](/docs/dashboard) |
 | `lev msg <AGENT_ID> <CONTENT>` | | Deliver a message into a running agent's context |
 | `lev pause <RUN_ID>` | | Pause a run. It finishes its in-flight step, then holds |
@@ -130,6 +130,56 @@ Answer an interaction the daemon is holding. With no `REQUEST_ID`, lists the ope
 | `--session` | With `--approve`, allow that tool for the rest of the session |
 
 See [Human-in-the-loop](/docs/interaction) for what raises these.
+
+### Reading `lev ps`
+
+```
+RUN                             STATUS                  STAGE         ITER   TOOLS  AGE
+solo-1785568852-9fa61fd279dd    waiting: tool approval  work          1      1      41s
+busy-1785568852-384bad04c9ac    active                  work          13824  13824  0s
+waiter-1785568852-7895a2209850  waiting: children(1)    delegate 1/2  2      1      41s
+
+1 run needs an answer: lev respond
+```
+
+`AGE` is how long since the run last moved: a new iteration, a new stage, or a change of
+status. It is deliberately not `meta.json`'s `updated_at`, which also advances on a
+30-second heartbeat so that observers can tell a live daemon from a dead one. A fresh
+`updated_at` is therefore not evidence of progress; a fresh `AGE` is.
+
+| Status | Meaning |
+|---|---|
+| `active` | Running a turn, or waiting on the model or a tool |
+| `idle` | Spawned, not yet started |
+| `paused` | Paused with `lev pause` |
+| `waiting` | Blocked - the reason follows the colon |
+| `complete` | Finished |
+| `cancelled` | Cancelled with `lev cancel` |
+| `error` | Ended with the error shown |
+
+A `waiting` run always says what it is blocked on, because the answer decides whether you
+need to do anything. These are stopped until a person acts:
+
+| Reason | What to do |
+|---|---|
+| `tool approval` | A tool call needs approving - `lev respond` |
+| `user prompt` | The agent asked a question (`ask_user_*`) - answer it |
+| `taint gate` | A call needs clearance for the data it touches |
+| `checkpoint` | A blueprint stage-boundary review |
+
+These resolve on their own, and are a normal part of a healthy multi-agent run:
+
+| Reason | Meaning |
+|---|---|
+| `workers(n)` | A [fan-out](/docs/stages) parent, `n` workers still to finish |
+| `children(n)` | A stage holding for `n` spawned [sub-agents](/docs/sub-agents) |
+
+So `waiting: children(3)` next to busy children is a factory working as designed, while
+`waiting: tool approval` at ten minutes is a run nobody has answered. Launch with `--yolo`
+to approve automatically; sub-agents and fan-out workers inherit it, and it survives a
+daemon restart.
+
+`lev ps --json` prints the same data unformatted, for scripts.
 
 ## The daemon and API
 

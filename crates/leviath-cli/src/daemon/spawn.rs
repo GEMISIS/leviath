@@ -2002,6 +2002,51 @@ mod tests {
                 .is_some()
         );
         assert!(cli.take(entity).expect("tool state registered").unattended);
+        // Recorded on the agent, so the sub-agent and fan-out spawners can pass
+        // it down and `meta.json` can carry it across a restart.
+        assert!(
+            world
+                .world()
+                .get::<RunMetadata>(entity)
+                .expect("run metadata attached")
+                .unattended
+        );
+    }
+
+    /// The status a `--yolo` run reports is `active`, not `waiting`: nothing
+    /// should be opening a prompt for it in the first place.
+    #[tokio::test]
+    async fn build_agent_yolo_leaves_the_run_active_and_unattended() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"a\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+        let (mut world, cli) = test_world();
+        let mut args = spawn_args(&manifest.to_string_lossy());
+        args.yolo = true;
+        let entity = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &Config::default(),
+            Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            &[],
+            &InteractionHub::new(),
+            &args,
+            100,
+            sub_tx(),
+        )
+        .expect("spawn succeeds");
+
+        assert_eq!(world.agent_status(entity), Some(AgentStatus::Active));
+        let meta = world
+            .world()
+            .get::<RunMetadata>(entity)
+            .expect("run metadata attached");
+        assert!(meta.unattended);
     }
 
     #[tokio::test]

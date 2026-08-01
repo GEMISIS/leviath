@@ -417,6 +417,13 @@ mod tests {
     /// Build a world with a live parent agent (from `manifest`) and return the
     /// world, the spawner, and the parent entity.
     fn world_with_parent(manifest_path: &str) -> (PipelineWorld, DaemonFanOutSpawner, Entity) {
+        world_with_parent_yolo(manifest_path, false)
+    }
+
+    fn world_with_parent_yolo(
+        manifest_path: &str,
+        yolo: bool,
+    ) -> (PipelineWorld, DaemonFanOutSpawner, Entity) {
         let cli = Arc::new(CliToolService::new());
         let mut registry = leviath_runtime::ProviderRegistry::new();
         registry.register("anthropic".to_string(), Arc::new(FakeProvider));
@@ -439,7 +446,7 @@ mod tests {
             metadata: HashMap::new(),
             callback_url: None,
             callback_secret: None,
-            yolo: false,
+            yolo,
             no_seed_commands: false,
             allow: Vec::new(),
             max_depth: None,
@@ -479,6 +486,39 @@ mod tests {
         // The worker entered the `second` stage (index 1).
         assert_eq!(world.world().get::<StageCursor>(child).unwrap().index, 1);
         assert_eq!(world.agent_status(child), Some(AgentStatus::Active));
+    }
+
+    /// A worker of an unattended parent is unattended. Spawning workers attended
+    /// under a `--yolo` parent left them stopping on approval prompts nobody was
+    /// watching for, with the parent parked behind them (issue #184).
+    #[tokio::test]
+    async fn spawn_worker_inherits_the_parents_unattended_setting() {
+        for unattended in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let manifest = dir.path().join("agent.leviath");
+            std::fs::write(&manifest, two_stage_manifest()).unwrap();
+            let (mut world, spawner, parent) =
+                world_with_parent_yolo(&manifest.to_string_lossy(), unattended);
+
+            let child = spawner
+                .spawn_worker(
+                    world.world_mut(),
+                    parent,
+                    &cfg(Some("second"), None, None),
+                    "item-1",
+                    &serde_json::json!({"k": "v"}),
+                )
+                .expect("worker spawns");
+
+            assert_eq!(
+                world
+                    .world()
+                    .get::<RunMetadata>(child)
+                    .expect("worker has run metadata")
+                    .unattended,
+                unattended
+            );
+        }
     }
 
     #[tokio::test]

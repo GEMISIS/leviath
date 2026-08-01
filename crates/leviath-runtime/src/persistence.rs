@@ -391,6 +391,27 @@ mod tests {
         );
         assert_eq!(meta.depth, 1);
         assert_eq!(meta.max_child_depth, 4);
+        // Attended by default, so an ordinary run is never written as unattended.
+        assert!(!meta.yolo);
+    }
+
+    /// The snapshot carries `unattended` through to `meta.json`, which is what a
+    /// daemon restart reads back to resume the run the way it was launched.
+    #[test]
+    fn build_run_meta_records_an_unattended_run() {
+        let mut md = metadata();
+        md.unattended = true;
+        let meta = build_run_meta(
+            &md,
+            &state(AgentStatus::Active),
+            &TokenTotals::default(),
+            &RunOutcomeFlags::default(),
+            1,
+            2000,
+            1,
+            4,
+        );
+        assert!(meta.yolo);
     }
 
     #[test]

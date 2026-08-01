@@ -126,13 +126,54 @@ fn format_runs_distinguishes_two_kinds_of_waiting() {
 
     let out = format_runs(&[blocked, parked], 1_200);
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 3, "header plus one line per run: {out}");
     assert!(lines[0].starts_with("RUN"), "header row: {out}");
     assert!(lines[0].contains("AGE"), "header row: {out}");
     assert!(lines[1].contains("waiting: tool approval"), "{out}");
     assert!(lines[1].contains("10m"), "stuck for ten minutes: {out}");
     assert!(lines[2].contains("waiting: children(3)"), "{out}");
     assert!(lines[2].contains("10s"), "moved ten seconds ago: {out}");
+    // Only the approval needs a person; the children resolve themselves.
+    assert!(out.ends_with("1 run needs an answer: lev respond"), "{out}");
+}
+
+/// The call-out counts only the runs a person has to unblock, and stays away
+/// entirely when there are none.
+#[test]
+fn format_runs_calls_out_only_the_runs_needing_an_answer() {
+    let healthy = {
+        let mut e = entry("run-a", AgentStatus::Waiting);
+        e.wait_reason = Some(WaitReason::FanOutWorkers { outstanding: 4 });
+        e
+    };
+    assert!(
+        !format_runs(std::slice::from_ref(&healthy), 0).contains("needs an answer"),
+        "a fan-out parent is not blocked on anyone"
+    );
+    assert!(!format_runs(&[entry("run-b", AgentStatus::Active)], 0).contains("needs an answer"));
+
+    let prompt = |id: &str, reason: WaitReason| {
+        let mut e = entry(id, AgentStatus::Waiting);
+        e.wait_reason = Some(reason);
+        e
+    };
+    let one = format_runs(&[prompt("run-c", WaitReason::TaintGate), healthy.clone()], 0);
+    assert!(one.ends_with("1 run needs an answer: lev respond"), "{one}");
+
+    let two = format_runs(
+        &[
+            prompt("run-c", WaitReason::TaintGate),
+            prompt("run-d", WaitReason::InteractionPoint),
+            healthy,
+        ],
+        0,
+    );
+    assert!(two.ends_with("2 runs need an answer: lev respond"), "{two}");
+}
+
+/// Everything from a given column onwards, by character (never by byte - a run
+/// id is arbitrary text).
+fn from_column(line: &str, column: usize) -> String {
+    line.chars().skip(column).collect()
 }
 
 /// Columns line up against the header and the widest cell, and no line carries
@@ -144,14 +185,20 @@ fn format_runs_aligns_columns() {
     long.wait_reason = Some(WaitReason::UserPrompt);
     let out = format_runs(&[short, long], 0);
     let lines: Vec<&str> = out.lines().collect();
-    let run_col = lines[0].find("STATUS").expect("header has a STATUS column");
-    for line in &lines[1..] {
-        assert_eq!(
-            &line[run_col..run_col + 1],
-            line.split_whitespace().nth(1).unwrap().get(0..1).unwrap(),
-            "status column starts at the header offset: {out}"
-        );
-    }
+
+    let status_col = lines[0]
+        .chars()
+        .collect::<String>()
+        .find("STATUS")
+        .expect("header has a STATUS column");
+    assert!(
+        from_column(lines[1], status_col).starts_with("active"),
+        "the short row's status starts under the header: {out}"
+    );
+    assert!(
+        from_column(lines[2], status_col).starts_with("waiting: user prompt"),
+        "the long row's status starts under the same header: {out}"
+    );
     for line in &lines {
         assert_eq!(line.trim_end(), *line, "no trailing blanks: {out:?}");
     }

@@ -141,10 +141,23 @@ pub fn format_runs(runs: &[RunListEntry], now: i64) -> String {
     };
 
     let header_row = headers.map(str::to_string);
-    std::iter::once(render(&header_row))
+    let table = std::iter::once(render(&header_row))
         .chain(rows.iter().map(render))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+
+    // The rows that will not move until somebody acts. Worth calling out under
+    // the table: on a wide listing they are easy to miss among the healthy
+    // `waiting: children(n)` rows they used to be indistinguishable from.
+    let blocked = runs
+        .iter()
+        .filter(|e| e.wait_reason.as_ref().is_some_and(|r| r.needs_a_person()))
+        .count();
+    match blocked {
+        0 => table,
+        1 => format!("{table}\n\n1 run needs an answer: lev respond"),
+        n => format!("{table}\n\n{n} runs need an answer: lev respond"),
+    }
 }
 
 /// Query the daemon for its runs and print the listing.
@@ -152,7 +165,12 @@ pub async fn send_list(client: &ControlClient, args: &PsArgs) -> anyhow::Result<
     match client.list().await {
         Ok(ControlResponse::List { runs }) => {
             match args.json {
-                true => println!("{}", serde_json::to_string_pretty(&runs)?),
+                // `RunListEntry` is plain data with no map keys to reject, so
+                // serializing it cannot fail.
+                true => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&runs).expect("a run listing serializes")
+                ),
                 false => println!("{}", format_runs(&runs, chrono::Utc::now().timestamp())),
             }
             Ok(())

@@ -103,7 +103,7 @@ talk to it:
 
 | Command | Does |
 |---|---|
-| `lev ps` | List running agents and their status |
+| `lev ps` | List running agents and their status ([reading it](/docs/cli#reading-lev-ps)) |
 | `lev msg <id> <text>` | Send a message to a running agent |
 | `lev respond` | Answer a pending `ask_user` question |
 | `lev pause <run-id>` | Pause a run |

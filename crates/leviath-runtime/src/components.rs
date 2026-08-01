@@ -4165,4 +4165,86 @@ mod tests {
             "keyless HashMap entry should appear verbatim in a system block"
         );
     }
+
+
+    // ─── Status and wait-reason labels (issue #184) ──────────────────────────
+
+    /// `label` is a wire contract: the `WorldEvent` stream and the REST
+    /// WebSocket forward these words verbatim, so pinning them here is what
+    /// stops a rename from silently breaking an API consumer.
+    #[test]
+    fn status_labels_are_fixed() {
+        assert_eq!(AgentStatus::Idle.label(), "idle");
+        assert_eq!(AgentStatus::Active.label(), "active");
+        assert_eq!(AgentStatus::Waiting.label(), "waiting");
+        assert_eq!(AgentStatus::Paused.label(), "paused");
+        assert_eq!(AgentStatus::Complete.label(), "complete");
+        assert_eq!(AgentStatus::Cancelled.label(), "cancelled");
+        assert_eq!(
+            AgentStatus::Error {
+                message: "boom".to_string()
+            }
+            .label(),
+            "error"
+        );
+    }
+
+    /// `Display` matches `label` except for an error, which carries its message
+    /// - that is the difference between "a child failed" and knowing why.
+    #[test]
+    fn display_matches_label_except_for_an_error() {
+        for status in [
+            AgentStatus::Idle,
+            AgentStatus::Active,
+            AgentStatus::Waiting,
+            AgentStatus::Paused,
+            AgentStatus::Complete,
+            AgentStatus::Cancelled,
+        ] {
+            assert_eq!(status.to_string(), status.label());
+        }
+        assert_eq!(
+            AgentStatus::Error {
+                message: "disk full".to_string()
+            }
+            .to_string(),
+            "error: disk full"
+        );
+    }
+
+    #[test]
+    fn wait_reasons_read_as_short_phrases() {
+        assert_eq!(WaitReason::ToolApproval.to_string(), "tool approval");
+        assert_eq!(WaitReason::UserPrompt.to_string(), "user prompt");
+        assert_eq!(WaitReason::TaintGate.to_string(), "taint gate");
+        assert_eq!(WaitReason::InteractionPoint.to_string(), "checkpoint");
+        assert_eq!(
+            WaitReason::FanOutWorkers { outstanding: 4 }.to_string(),
+            "workers(4)"
+        );
+        assert_eq!(
+            WaitReason::Children { outstanding: 1 }.to_string(),
+            "children(1)"
+        );
+    }
+
+    /// The split the whole issue turns on: which of these an operator has to do
+    /// something about.
+    #[test]
+    fn only_prompts_need_a_person() {
+        for reason in [
+            WaitReason::ToolApproval,
+            WaitReason::UserPrompt,
+            WaitReason::TaintGate,
+            WaitReason::InteractionPoint,
+        ] {
+            assert!(reason.needs_a_person(), "{reason} is blocked on someone");
+        }
+        for reason in [
+            WaitReason::FanOutWorkers { outstanding: 2 },
+            WaitReason::Children { outstanding: 2 },
+        ] {
+            assert!(!reason.needs_a_person(), "{reason} resolves on its own");
+        }
+    }
 }
