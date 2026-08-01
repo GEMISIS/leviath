@@ -261,6 +261,60 @@ pub(super) async fn kill_agent(
     }
 }
 
+/// `POST /api/agents/{id}/pause`: park a run. The daemon refuses when the run
+/// does not exist or is not pausable (waiting on input, or finished), which
+/// both surface as 404 - the daemon's reply does not distinguish them.
+pub(super) async fn pause_agent(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    match state
+        .control
+        .request(&ControlRequest::Pause { run_id: id.clone() })
+        .await
+    {
+        Ok(ControlResponse::Ok { ok: true }) => Ok(StatusCode::NO_CONTENT),
+        Ok(ControlResponse::Ok { ok: false }) => Err(err(
+            StatusCode::NOT_FOUND,
+            format!("Agent run '{id}' not found or not pausable"),
+        )),
+        Ok(other) => Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Unexpected daemon response: {other:?}"),
+        )),
+        Err(e) => Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("Daemon not reachable: {e}"),
+        )),
+    }
+}
+
+/// `POST /api/agents/{id}/resume`: un-pause a run.
+pub(super) async fn resume_agent(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    match state
+        .control
+        .request(&ControlRequest::Resume { run_id: id.clone() })
+        .await
+    {
+        Ok(ControlResponse::Ok { ok: true }) => Ok(StatusCode::NO_CONTENT),
+        Ok(ControlResponse::Ok { ok: false }) => Err(err(
+            StatusCode::NOT_FOUND,
+            format!("Agent run '{id}' not found or not paused"),
+        )),
+        Ok(other) => Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Unexpected daemon response: {other:?}"),
+        )),
+        Err(e) => Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("Daemon not reachable: {e}"),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1291,6 +1345,112 @@ prompt = "Plan the work"
     async fn kill_agent_daemon_absent_is_503() {
         assert_eq!(
             delete_agent(no_daemon(), "a").await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    // ─── pause_agent / resume_agent ──────────────────────────────────────────
+
+    /// POST `/api/agents/{id}/pause` (or `/resume`) against a router holding
+    /// `control`, returning the response status.
+    async fn post_agent_action(control: ControlClient, id: &str, action: &str) -> StatusCode {
+        use axum::routing::post;
+        let (tx, _) = broadcast::channel(16);
+        let state = AppState {
+            config: Arc::new(Config::default()),
+            event_tx: tx,
+            control,
+            mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            limits: Default::default(),
+        };
+        let app = Router::new()
+            .route("/api/agents/{id}/pause", post(pause_agent))
+            .route("/api/agents/{id}/resume", post(resume_agent))
+            .with_state(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/agents/{id}/{action}"))
+            .body(Body::empty())
+            .unwrap();
+        app.oneshot(req).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn pause_agent_sends_pause_to_the_daemon() {
+        let (control, _dir, _srv) = fake_daemon(|req| {
+            assert!(matches!(req, ControlRequest::Pause { .. }));
+            ControlResponse::Ok { ok: true }
+        });
+        assert_eq!(
+            post_agent_action(control, "run-a", "pause").await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    #[tokio::test]
+    async fn pause_agent_refused_is_404() {
+        let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: false });
+        assert_eq!(
+            post_agent_action(control, "ghost", "pause").await,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn pause_agent_unexpected_response_is_500() {
+        let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Spawned {
+            run_id: "x".to_string(),
+        });
+        assert_eq!(
+            post_agent_action(control, "a", "pause").await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[tokio::test]
+    async fn pause_agent_daemon_absent_is_503() {
+        assert_eq!(
+            post_agent_action(no_daemon(), "a", "pause").await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_agent_sends_resume_to_the_daemon() {
+        let (control, _dir, _srv) = fake_daemon(|req| {
+            assert!(matches!(req, ControlRequest::Resume { .. }));
+            ControlResponse::Ok { ok: true }
+        });
+        assert_eq!(
+            post_agent_action(control, "run-a", "resume").await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_agent_refused_is_404() {
+        let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: false });
+        assert_eq!(
+            post_agent_action(control, "ghost", "resume").await,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_agent_unexpected_response_is_500() {
+        let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Spawned {
+            run_id: "x".to_string(),
+        });
+        assert_eq!(
+            post_agent_action(control, "a", "resume").await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_agent_daemon_absent_is_503() {
+        assert_eq!(
+            post_agent_action(no_daemon(), "a", "resume").await,
             StatusCode::SERVICE_UNAVAILABLE
         );
     }
