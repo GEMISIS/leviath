@@ -33,6 +33,19 @@ flowchart TB
 The daemon starts automatically the first time a command needs it, and on start it **reloads runs
 that were interrupted** so nothing is lost across a restart.
 
+What that means for tool calls interrupted mid-batch: the daemon journals every batch when it
+dispatches and every call's result as it finishes, so on reload the completed calls are **replayed
+from the journal, never re-executed** - a shell command or file write that already ran does not run
+twice. A call that was still executing when the daemon died comes back to the model as an error
+that says the effect may or may not have landed, with instructions to check before re-running
+anything side-effecting; an interrupted `spawn_agent` also lists the run's existing children so the
+model checks for the child instead of spawning a duplicate. The one window this cannot close is a
+crash in the instant between an external effect landing and its result reaching the journal (no
+journal can observe an external side effect atomically) - those calls surface as the same
+verify-first error rather than being silently re-run. If your receiver consumes completion
+webhooks, dedupe on `delivery_id` (see the [API guide](api.md)): a completion re-fired after a
+restart carries the same id as the original.
+
 ```mermaid
 stateDiagram-v2
   [*] --> Starting
