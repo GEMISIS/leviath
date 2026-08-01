@@ -417,32 +417,28 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
     async fn pool_runs_batches_concurrently_and_all_exit_on_close() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::Duration;
 
         let (jtx, jrx) = mpsc::unbounded_channel();
         let (rtx, mut rrx) = mpsc::unbounded_channel();
         let wake = Arc::new(Notify::new());
 
-        // Three jobs that each block on a barrier: they can only all finish if
-        // they run concurrently (a single-worker lane would deadlock the test's
-        // timeout). A shared counter + Notify serves as the rendezvous.
-        let arrived = Arc::new(AtomicUsize::new(0));
-        let go = Arc::new(Notify::new());
+        // Three jobs that each block on a rendezvous: they can only all finish
+        // if they run concurrently (a single-worker lane would deadlock the
+        // test's timeout). `tokio::sync::Barrier` rather than a hand-rolled
+        // counter + Notify: `notify_waiters` only wakes ALREADY-registered
+        // waiters, so the old counter check had a lost-wakeup window between
+        // loading the count and registering on `notified()` - a real deadlock
+        // that slow CI runners hit.
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
         for i in 1..=3u32 {
-            let arrived = arrived.clone();
-            let go = go.clone();
+            let barrier = barrier.clone();
             jtx.send(ToolJob {
                 entity: Entity::from_raw_u32(i).expect("index came from a live entity id"),
                 exec: Box::new(move || {
                     Box::pin(async move {
-                        if arrived.fetch_add(1, Ordering::SeqCst) + 1 == 3 {
-                            go.notify_waiters();
-                        }
-                        // Wait until all three have arrived (proving concurrency).
-                        while arrived.load(Ordering::SeqCst) < 3 {
-                            go.notified().await;
-                        }
+                        // Blocks until all three have arrived (proving concurrency).
+                        barrier.wait().await;
                         vec![("c".to_string(), "r".to_string())]
                     })
                 }),
@@ -460,9 +456,10 @@ mod tests {
             3,
             Arc::new(ToolLaneStats::new(3)),
         );
-        // All three outcomes must arrive; bounded so a serialization bug fails fast.
+        // All three outcomes must arrive; bounded so a serialization bug fails
+        // fast (generous for oversubscribed CI runners, instant when passing).
         for _ in 0..3 {
-            tokio::time::timeout(Duration::from_secs(5), rrx.recv())
+            tokio::time::timeout(Duration::from_secs(60), rrx.recv())
                 .await
                 .expect("all batches complete concurrently")
                 .expect("outcome present");
