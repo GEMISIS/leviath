@@ -2293,6 +2293,7 @@ dependencies = [
  "leviath-scripting",
  "leviath-telemetry",
  "leviath-tools",
+ "tokio",
 ]
 
 [[package]]

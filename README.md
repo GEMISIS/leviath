@@ -81,7 +81,7 @@ cargo install leviath-cli                # released version from crates.io
 cargo install --git https://github.com/GEMISIS/leviath.git --bin lev   # latest development build
 ```
 
-Leviath is also a library: add the [`leviath`](https://crates.io/crates/leviath) crate to embed the runtime in your own application.
+Leviath is also a library: add the [`leviath`](https://crates.io/crates/leviath) crate to embed the runtime in your own application. The [embedding guide](https://leviath.dev/docs/embedding) covers building a world, spawning agents, and streaming their events in-process.
 
 ### 2. Configure a provider
 

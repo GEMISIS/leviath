@@ -350,14 +350,25 @@ jobs:
           import pathlib, re, sys
 
           root = pathlib.Path("crates/leviath")
-          allowed_files = {"Cargo.toml", "README.md", "src/lib.rs"}
+          required_files = {"Cargo.toml", "README.md", "src/lib.rs"}
+          # Runnable examples are allowed (compiled by CI, exempt from the
+          # coverage gate like every examples/ dir); lib.rs stays locked to
+          # re-exports by the line check below.
+          example = re.compile(r"examples/\w[\w-]*\.rs")
           actual_files = {
               str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()
           }
-          if actual_files != allowed_files:
+          unexpected = sorted(
+              f
+              for f in actual_files
+              if f not in required_files and not example.fullmatch(f)
+          )
+          missing = sorted(required_files - actual_files)
+          if unexpected or missing:
               print(
                   "::error::crates/leviath must contain exactly "
-                  f"{sorted(allowed_files)}, found {sorted(actual_files)}. "
+                  f"{sorted(required_files)} plus optional examples/*.rs; "
+                  f"unexpected: {unexpected}, missing: {missing}. "
                   "The facade is coverage-exempt, so no other files (build.rs, "
                   "tests, extra modules) may live in it."
               )
