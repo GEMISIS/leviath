@@ -2122,14 +2122,17 @@ mod tests {
     ///
     /// Uses the world's real lane rather than poking the counters, because the
     /// point of relief is that the queued batch actually runs afterwards.
-    async fn wedge_the_tool_lane(host: &mut WorldHost) -> Arc<tokio::sync::Notify> {
+    async fn wedge_the_tool_lane(host: &mut WorldHost) -> crate::cancel::CancelToken {
         let snapshot = host.world_mut().lane_snapshot();
         let stage = host
             .world_mut()
             .world()
             .resource::<crate::pipeline::ToolStage>()
             .clone();
-        let release = Arc::new(tokio::sync::Notify::new());
+        // A cancel token rather than a `Notify`: it latches, so a batch that has
+        // not started yet still sees the release rather than waiting for a
+        // wake-up that already happened.
+        let release = crate::cancel::CancelToken::new();
         let submit = |exec: crate::tool_bridge::BoxedToolExec| {
             stage.stats.enqueued();
             stage
@@ -2143,15 +2146,15 @@ mod tests {
                 })
                 .expect("the lane is serving");
         };
-        // Every batch here blocks until `release` fires, and nothing in these
-        // tests ever fires it. That is deliberate: a batch that can finish on its
-        // own makes the lane's occupancy a moving target, and the counts these
-        // tests assert on stop being deterministic.
+        // Every batch here blocks until `release` fires. That is deliberate: a
+        // batch that can finish on its own makes the lane's occupancy a moving
+        // target, and the counts these tests assert on stop being deterministic.
+        // `release_the_lane` lets them all go at the end.
         let mut blocker = || {
             let held = release.clone();
             submit(Box::new(move || {
                 Box::pin(async move {
-                    held.notified().await;
+                    held.cancelled().await;
                     Vec::new()
                 })
             }));
@@ -2207,7 +2210,23 @@ mod tests {
             }
         })
         .await
-        .unwrap_or_else(|_| panic!("{context}"));
+        .expect(context);
+    }
+
+    /// Let every wedged batch finish and wait for the lane to empty, so the
+    /// batches are exercised end to end rather than abandoned mid-await.
+    ///
+    /// Takes a slice rather than one token so a test that wedged the lane twice
+    /// releases both before waiting; releasing one and waiting would wait for
+    /// batches still held by the other.
+    async fn release_the_lane(host: &mut WorldHost, releases: &[crate::cancel::CancelToken]) {
+        for release in releases {
+            release.cancel();
+        }
+        await_lane(host, "the lane emptied", |snapshot| {
+            snapshot.tools_busy == 0 && snapshot.tools_queued == 0
+        })
+        .await;
     }
 
     /// The relief valve: a tool lane that has not drained in long enough gets
@@ -2222,7 +2241,7 @@ mod tests {
         leviath_testkit::with_tracing(|| async {
             let mut host = host_with_full_pool(1);
             host.set_dead_cycles_before_relief(2);
-            let _release = wedge_the_tool_lane(&mut host).await;
+            let release = wedge_the_tool_lane(&mut host).await;
 
             host.observe_redrive(); // baseline
             host.observe_redrive(); // 1
@@ -2239,6 +2258,7 @@ mod tests {
             // jam gets a permit, while the batch already holding one keeps it.
             await_drained_queue(&mut host).await;
             assert_eq!(host.world_mut().lane_snapshot().tools_busy, 2);
+            release_the_lane(&mut host, &[release]).await;
         })
         .await;
     }
@@ -2250,7 +2270,7 @@ mod tests {
         leviath_testkit::with_tracing(|| async {
             let mut host = host_with_full_pool(1);
             host.set_dead_cycles_before_relief(1);
-            let _release = wedge_the_tool_lane(&mut host).await;
+            let release = wedge_the_tool_lane(&mut host).await;
 
             host.observe_redrive();
             host.observe_redrive();
@@ -2258,11 +2278,12 @@ mod tests {
 
             // Wedge it again at the wider width and keep pushing: the budget is
             // spent, so nothing more is handed out.
-            let _release_two = wedge_the_tool_lane(&mut host).await;
+            let release_two = wedge_the_tool_lane(&mut host).await;
             for _ in 0..4 {
                 host.observe_redrive();
             }
             assert_eq!(host.relief_granted, 1, "the budget was already spent");
+            release_the_lane(&mut host, &[release, release_two]).await;
         })
         .await;
     }
@@ -2274,13 +2295,14 @@ mod tests {
         leviath_testkit::with_tracing(|| async {
             let mut host = host_with_full_pool(1);
             host.set_dead_cycles_before_relief(0);
-            let _release = wedge_the_tool_lane(&mut host).await;
+            let release = wedge_the_tool_lane(&mut host).await;
 
             for _ in 0..4 {
                 host.observe_redrive();
             }
             assert_eq!(host.relief_granted, 0, "relief is disabled");
             assert_eq!(host.dead_cycles, 3, "but the streak is still counted");
+            release_the_lane(&mut host, &[release]).await;
         })
         .await;
     }
