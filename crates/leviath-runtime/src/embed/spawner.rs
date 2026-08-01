@@ -97,6 +97,9 @@ impl EmbedSpawner {
 
         let agent_name = blueprint.name.clone();
         let num_stages = blueprint.stages.len();
+        // Fixed for the run, so it is answered while the blueprint is in hand
+        // (issue #192). Embedders get the same treatment as daemon runs.
+        let outcome_flags = RunOutcomeFlags::for_blueprint(&blueprint);
         let model_label = stages
             .first()
             .map(|s| format!("{}/{}", s.provider_name, s.model));
@@ -137,7 +140,7 @@ impl EmbedSpawner {
             },
             TokenTotals::default(),
             PersistWatermark::default(),
-            RunOutcomeFlags::default(),
+            outcome_flags,
         ));
 
         if let Some(tools) = &self.basic_tools {

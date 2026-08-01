@@ -860,6 +860,12 @@ fn build_agent_inner(
     // is a hard error either way.
     let region_scripts = resolve_region_scripts(&blueprint, &args.blueprint_path)?;
 
+    // Whether any stage can produce a file change the framework would see -
+    // asked here, while the blueprint is still in hand, because it cannot
+    // change for the rest of the run. A run that could never write is never
+    // reported as having written nothing (issue #192).
+    let outcome_flags = leviath_runtime::persistence::RunOutcomeFlags::for_blueprint(&blueprint);
+
     // 6. Spawn the agent.
     let entity = spawn_agent_seeded(
         world,
@@ -898,7 +904,7 @@ fn build_agent_inner(
             PersistWatermark::default(),
             // Fresh counters; a reloaded run gets its accumulated flags put back
             // by `recovery::reload_persisted_agents`.
-            leviath_runtime::persistence::RunOutcomeFlags::default(),
+            outcome_flags,
         ));
         // Mark eligible runs for one-shot title generation (the `title` module
         // fills `RunMetadata.title`, which the dashboard displays and
@@ -1907,6 +1913,52 @@ mod tests {
                 .get::<leviath_runtime::TaintGate>(entity)
                 .is_none(),
             "no [security] block + global off ⇒ no taint gate"
+        );
+    }
+
+    /// The `no_output_tools` a freshly built agent carries.
+    async fn spawned_no_output_tools(manifest_body: &str) -> bool {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(&manifest, manifest_body).unwrap();
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let entity = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+            sub_tx(),
+        )
+        .expect("spawn succeeds");
+        world
+            .world()
+            .get::<leviath_runtime::persistence::RunOutcomeFlags>(entity)
+            .expect("build_agent attaches run outcome flags")
+            .0
+            .no_output_tools
+    }
+
+    #[tokio::test]
+    async fn build_agent_records_whether_the_blueprint_can_write_at_all() {
+        // A coding agent writes in `implement`, so silence from it is worth
+        // reporting.
+        assert!(!spawned_no_output_tools(&coder_manifest()).await);
+        // A router-shaped agent delegates and never writes. Reporting it as
+        // having "modified nothing" is an accusation the framework has no
+        // grounds for (issue #192).
+        assert!(
+            spawned_no_output_tools(
+                "[agent]\nname = \"router\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+                 [stages.triage]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
+                 available_tools = [\"read_file\", \"spawn_agent\"]\n",
+            )
+            .await
         );
     }
 
