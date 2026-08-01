@@ -27,7 +27,7 @@ use crate::components::{
 };
 use crate::interaction_hub::InteractionHub;
 use crate::persistence::{RunMetadata, TokenTotals};
-use crate::world::PipelineWorld;
+use crate::world::{LaneSnapshot, PipelineWorld};
 use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 use serde::{Deserialize, Serialize};
 
@@ -497,7 +497,7 @@ fn status_str(status: &AgentStatus) -> &'static str {
 }
 
 /// The last-emitted snapshot of an agent, for change detection.
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 struct Emitted {
     status: &'static str,
     stage: String,
@@ -532,6 +532,12 @@ pub struct WorldHost {
     /// How often [`Self::serve`] re-drives the world even though nothing woke
     /// it. See [`Self::set_redrive_interval`].
     redrive: Duration,
+    /// Consecutive re-drives that found the lanes full and nothing moved. See
+    /// [`Self::observe_redrive`].
+    dead_cycles: u32,
+    /// The progress fingerprint as of the previous re-drive, or `None` before
+    /// the first one.
+    last_progress: Option<u64>,
 }
 
 /// How often the serve loop re-drives the world on its own.
@@ -578,10 +584,54 @@ impl WorldHost {
             subagent_tx,
             subagent_rx,
             redrive: DEFAULT_REDRIVE_INTERVAL,
+            dead_cycles: 0,
+            last_progress: None,
         }
     }
 
-    /// Report what the lanes are holding, once per safety re-drive.
+    /// Take stock once per safety re-drive: has anything moved, and are the lanes
+    /// full? Updates the dead-cycle count and reports.
+    ///
+    /// A *dead cycle* is a whole re-drive interval in which some lane was at
+    /// capacity with work queued behind it and no run observably moved. Both
+    /// halves matter. Pressure on its own is just a busy daemon. Stillness on its
+    /// own is an idle one, or one agent in a long inference with nobody waiting.
+    /// Together they are the shape issue #191 reported: work to do, no capacity to
+    /// do it with, and no sign of that ever changing.
+    fn observe_redrive(&mut self) {
+        let snapshot = self.world.lane_snapshot();
+        let progress = self.progress_fingerprint();
+        let went_nowhere = snapshot.is_under_pressure() && self.last_progress == Some(progress);
+        self.last_progress = Some(progress);
+        self.dead_cycles = match went_nowhere {
+            true => self.dead_cycles.saturating_add(1),
+            false => 0,
+        };
+        self.log_lane_pressure(&snapshot);
+    }
+
+    /// A number that changes exactly when some run observably moves.
+    ///
+    /// Derived from the per-run snapshots `emit_events` already keeps to decide
+    /// what to broadcast, so an unchanged fingerprint means "nothing happened
+    /// that anyone watching would have been told about" - not merely "no event
+    /// was sent", which would also be true of a daemon nobody is subscribed to.
+    ///
+    /// Summed rather than fed through one hasher because a `HashMap` has no
+    /// iteration order to depend on. Every field it covers is either monotonic or
+    /// hashed, so two different worlds colliding takes a deliberate effort.
+    fn progress_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut total = self.emitted.len() as u64;
+        for entry in &self.emitted {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            entry.hash(&mut hasher);
+            total = total.wrapping_add(hasher.finish());
+        }
+        total
+    }
+
+    /// Report what the lanes are holding.
     ///
     /// The daemon otherwise logs nothing per tick, by design - observation goes
     /// through the telemetry sink. But a wedged daemon emits no telemetry either,
@@ -589,26 +639,41 @@ impl WorldHost {
     /// trace at all (issue #189). This is the one periodic line that can answer
     /// "is anything running, and what is it queued behind?".
     ///
-    /// Quiet by default: `info` only when a lane is at capacity with work behind
-    /// it, `debug` otherwise, so an idle daemon says nothing at `info`.
-    fn log_lane_pressure(&self) {
-        let snap = self.world.lane_snapshot();
-        if snap.is_under_pressure() {
+    /// Quiet by default: `warn` once the daemon has been going nowhere, `info`
+    /// while a lane is merely at capacity, `debug` otherwise, so an idle daemon
+    /// says nothing above `debug`.
+    fn log_lane_pressure(&self, snapshot: &LaneSnapshot) {
+        let agents = snapshot.agents.to_string();
+        let inference = snapshot.inference_summary();
+        if self.dead_cycles > 0 {
+            tracing::warn!(
+                dead_cycles = self.dead_cycles,
+                agents = %agents,
+                inference = %inference,
+                tools_busy = snapshot.tools_busy,
+                tools_workers = snapshot.tools_workers,
+                tools_queued = snapshot.tools_queued,
+                tools_parked = snapshot.tools_parked,
+                "no progress while the lanes are full"
+            );
+        } else if snapshot.is_under_pressure() {
             tracing::info!(
-                agents = %snap.agents,
-                inference = %snap.inference_summary(),
-                tools_busy = snap.tools_busy,
-                tools_workers = snap.tools_workers,
-                tools_queued = snap.tools_queued,
+                agents = %agents,
+                inference = %inference,
+                tools_busy = snapshot.tools_busy,
+                tools_workers = snapshot.tools_workers,
+                tools_queued = snapshot.tools_queued,
+                tools_parked = snapshot.tools_parked,
                 "lane heartbeat: at capacity with work queued"
             );
         } else {
             tracing::debug!(
-                agents = %snap.agents,
-                inference = %snap.inference_summary(),
-                tools_busy = snap.tools_busy,
-                tools_workers = snap.tools_workers,
-                tools_queued = snap.tools_queued,
+                agents = %agents,
+                inference = %inference,
+                tools_busy = snapshot.tools_busy,
+                tools_workers = snapshot.tools_workers,
+                tools_queued = snapshot.tools_queued,
+                tools_parked = snapshot.tools_parked,
                 "lane heartbeat"
             );
         }
@@ -1364,7 +1429,7 @@ impl WorldHost {
                 // park the daemon indefinitely with work left to do. Re-driving
                 // on a timer bounds that to one interval, and is where the lane
                 // heartbeat reports what the loop is actually waiting on.
-                _ = redrive.tick() => self.log_lane_pressure(),
+                _ = redrive.tick() => self.observe_redrive(),
                 op = control_rx.recv() => {
                     match op {
                         // Await the spawn preprocessor (e.g. lazy MCP connect) before
@@ -1838,7 +1903,7 @@ mod tests {
             let idle = host.world_mut().lane_snapshot();
             assert!(!idle.is_under_pressure(), "an empty world is not pressured");
             assert_eq!(idle.inference_summary(), "none");
-            host.log_lane_pressure(); // the `debug` arm
+            host.log_lane_pressure(&idle); // the `debug` arm
 
             // Two agents, one slot: one infers, one is queued behind a full pool.
             spawn(&mut host, "run-a", "agent-a");
@@ -1852,9 +1917,74 @@ mod tests {
                 busy.is_under_pressure(),
                 "a full pool with active agents is exactly the state worth reporting"
             );
-            host.log_lane_pressure(); // the `info` arm
+            host.log_lane_pressure(&busy); // the `info` arm
         })
         .await;
+    }
+
+    /// A daemon with work queued and nothing moving is what issue #191 reported,
+    /// and until now it looked identical to a busy one. Each re-drive that finds
+    /// the lanes full and the world unchanged is one dead cycle.
+    #[tokio::test]
+    async fn re_drives_that_go_nowhere_under_pressure_count_as_dead_cycles() {
+        leviath_testkit::with_tracing(|| async {
+            // Two agents, one inference slot, and a provider that never answers:
+            // one is stuck mid-call, the other is queued behind a full pool.
+            let mut host = host_with_full_pool(1);
+            spawn(&mut host, "run-a", "agent-a");
+            spawn(&mut host, "run-b", "agent-b");
+            host.world_mut().run_to_fixed_point();
+            host.emit_events();
+
+            // The first re-drive has nothing to compare against.
+            host.observe_redrive();
+            assert_eq!(host.dead_cycles, 0, "the first cycle sets the baseline");
+
+            host.observe_redrive();
+            assert_eq!(host.dead_cycles, 1, "a whole interval, nothing moved");
+            host.observe_redrive();
+            assert_eq!(host.dead_cycles, 2, "and another - this is the `warn` arm");
+        })
+        .await;
+    }
+
+    /// Any sign of life clears the count. A daemon that moves once every few
+    /// minutes is slow, not wedged, and must not accumulate towards relief.
+    #[tokio::test]
+    async fn a_run_that_moves_clears_the_dead_cycle_count() {
+        let mut host = host_with_full_pool(1);
+        let entity = spawn(&mut host, "run-a", "agent-a");
+        spawn(&mut host, "run-b", "agent-b");
+        host.world_mut().run_to_fixed_point();
+        host.emit_events();
+        host.observe_redrive();
+        host.observe_redrive();
+        assert_eq!(host.dead_cycles, 1, "wedged to begin with");
+
+        // One run advances an iteration, which is exactly what the fingerprint
+        // is built to notice.
+        host.world_mut()
+            .world_mut()
+            .get_mut::<AgentState>(entity)
+            .expect("the agent is loaded")
+            .iteration += 1;
+        host.emit_events();
+
+        host.observe_redrive();
+        assert_eq!(host.dead_cycles, 0, "something moved");
+    }
+
+    /// Stillness on its own is not a dead cycle. An idle daemon has nothing
+    /// queued and nothing to do, and counting it would fire relief at every quiet
+    /// spell.
+    #[tokio::test]
+    async fn an_idle_daemon_never_counts_a_dead_cycle() {
+        let mut host = host_with_full_pool(1);
+        host.emit_events();
+        for _ in 0..3 {
+            host.observe_redrive();
+        }
+        assert_eq!(host.dead_cycles, 0, "no pressure, no dead cycles");
     }
 
     /// Terminal agents are counted apart from live ones, so "nothing is running"
