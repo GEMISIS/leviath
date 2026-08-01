@@ -421,6 +421,12 @@ fn reload_one(
         );
     }
 
+    // A run the user paused stays paused across the restart: the default
+    // restore presents it `Active`, which would silently resume it.
+    if meta.status == RunStatus::Paused {
+        world.pause(entity);
+    }
+
     Ok(entity)
 }
 
@@ -625,6 +631,42 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join("run.lvr"), &buf).unwrap();
+    }
+
+    /// A run the user paused before the restart comes back paused, not the
+    /// default `Active` restore - a daemon restart must not silently resume it.
+    #[tokio::test]
+    async fn reload_keeps_a_paused_run_paused() {
+        let agent = agent_dir();
+        let manifest = agent.path().join("agent.leviath");
+        let runs = tempfile::tempdir().unwrap();
+        write_run(
+            runs.path(),
+            "run-paused",
+            manifest.to_str().unwrap(),
+            RunStatus::Paused,
+            None,
+        );
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
+        let restored = reload_persisted_agents(
+            &mut world,
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            runs.path(),
+            999,
+            &sub_tx(),
+        );
+
+        assert_eq!(restored.len(), 1);
+        let (run_id, entity) = &restored[0];
+        assert_eq!(run_id, "run-paused");
+        assert_eq!(world.agent_status(*entity), Some(AgentStatus::Paused));
     }
 
     #[tokio::test]

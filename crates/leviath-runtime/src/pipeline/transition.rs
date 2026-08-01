@@ -869,6 +869,12 @@ pub fn resolve_transition(
     ) in agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
+        // A pause that lands while a transition is pending must hold: entering
+        // the next stage flips the agent back to Active. The marker stays put,
+        // so the transition resolves on the first tick after resume.
+        if state.status == AgentStatus::Paused {
+            continue;
+        }
         let stage = &bp.0.stages[cursor.index];
         // How the stage ended governs the transition: an error/max-iterations
         // outcome follows its conditioned edge (e.g. → error_recovery) if present.

@@ -370,6 +370,7 @@ fn status_str(status: &AgentStatus) -> &'static str {
     match status {
         AgentStatus::Idle => "idle",
         AgentStatus::Active => "active",
+        AgentStatus::Paused => "paused",
         AgentStatus::Waiting => "waiting",
         AgentStatus::Complete => "complete",
         AgentStatus::Error { .. } => "error",
@@ -1369,7 +1370,16 @@ mod tests {
         );
         assert_eq!(
             host.world.agent_status(host.by_run_id["run-a"]),
-            Some(AgentStatus::Idle)
+            Some(AgentStatus::Paused)
+        );
+
+        // Pausing an already-paused run refuses rather than reporting success.
+        assert!(
+            !ask(&mut host, |reply| ControlOp::Pause {
+                run_id: "run-a".to_string(),
+                reply
+            })
+            .await
         );
 
         assert!(
@@ -1378,6 +1388,10 @@ mod tests {
                 reply
             })
             .await
+        );
+        assert_eq!(
+            host.world.agent_status(host.by_run_id["run-a"]),
+            Some(AgentStatus::Active)
         );
         assert!(
             ask(&mut host, |reply| ControlOp::Cancel {
@@ -2274,6 +2288,7 @@ mod tests {
     fn status_str_covers_all_variants() {
         assert_eq!(status_str(&AgentStatus::Idle), "idle");
         assert_eq!(status_str(&AgentStatus::Active), "active");
+        assert_eq!(status_str(&AgentStatus::Paused), "paused");
         assert_eq!(status_str(&AgentStatus::Waiting), "waiting");
         assert_eq!(status_str(&AgentStatus::Complete), "complete");
         assert_eq!(

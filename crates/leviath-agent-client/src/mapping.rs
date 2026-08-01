@@ -144,7 +144,9 @@ pub fn stop_reason_for(status: &RunStatus) -> Option<StopReason> {
         RunStatus::Complete | RunStatus::CompleteInteractive => Some(StopReason::EndTurn),
         RunStatus::Error => Some(StopReason::Refusal),
         RunStatus::Cancelled => Some(StopReason::Cancelled),
-        RunStatus::Starting | RunStatus::Running | RunStatus::WaitingInput => None,
+        RunStatus::Starting | RunStatus::Running | RunStatus::WaitingInput | RunStatus::Paused => {
+            None
+        }
     }
 }
 
@@ -420,6 +422,7 @@ this trailing text is ignored";
             (RunStatus::Starting, None),
             (RunStatus::Running, None),
             (RunStatus::WaitingInput, None),
+            (RunStatus::Paused, None),
             (RunStatus::Complete, Some(StopReason::EndTurn)),
             (RunStatus::CompleteInteractive, Some(StopReason::EndTurn)),
             (RunStatus::Error, Some(StopReason::Refusal)),

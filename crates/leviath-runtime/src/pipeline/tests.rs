@@ -3489,6 +3489,40 @@ fn transition_linear_advances_to_next_stage() {
 }
 
 #[test]
+fn transition_holds_while_paused_and_resolves_after_resume() {
+    // A pause that lands while a ResolveTransition is pending must not be
+    // undone by the transition system (entering a stage sets Active).
+    let bp = blueprint(vec![
+        stage_named("a", None, false, None),
+        stage_named("b", None, false, None),
+    ]);
+    let mut world = World::new();
+    let e = spawn_transition_agent(
+        &mut world,
+        bp,
+        vec![si("m0"), si("m1")],
+        VisitCounts::default(),
+    );
+    world.get_mut::<AgentState>(e).unwrap().status = AgentStatus::Paused;
+
+    run_transition(&mut world);
+
+    // Held: still paused, marker intact, cursor unmoved.
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Paused
+    );
+    assert!(world.get::<ResolveTransition>(e).is_some());
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 0);
+
+    // After resume the parked transition resolves normally.
+    world.get_mut::<AgentState>(e).unwrap().status = AgentStatus::Active;
+    run_transition(&mut world);
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+    assert!(world.get::<ResolveTransition>(e).is_none());
+}
+
+#[test]
 fn transition_terminal_marks_complete() {
     let bp = blueprint(vec![stage_named("only", None, false, None)]);
     let mut world = World::new();

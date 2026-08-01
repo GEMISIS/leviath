@@ -17,6 +17,7 @@ fn status_label(status: &AgentStatus) -> &'static str {
     match status {
         AgentStatus::Idle => "idle",
         AgentStatus::Active => "active",
+        AgentStatus::Paused => "paused",
         AgentStatus::Waiting => "waiting",
         AgentStatus::Complete => "complete",
         AgentStatus::Error { .. } => "error",
@@ -60,6 +61,7 @@ mod tests {
     fn status_labels_cover_every_variant() {
         assert_eq!(status_label(&AgentStatus::Idle), "idle");
         assert_eq!(status_label(&AgentStatus::Active), "active");
+        assert_eq!(status_label(&AgentStatus::Paused), "paused");
         assert_eq!(status_label(&AgentStatus::Waiting), "waiting");
         assert_eq!(status_label(&AgentStatus::Complete), "complete");
         assert_eq!(
