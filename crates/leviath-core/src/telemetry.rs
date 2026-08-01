@@ -96,6 +96,10 @@ pub enum TelemetryEvent {
         prompt_tokens: usize,
         completion_tokens: usize,
         tool_calls: usize,
+        /// Whether the run stopped having modified nothing, when its blueprint
+        /// gave it a way to. `complete` says the pipeline reached the end, not
+        /// that it achieved anything; this is the difference.
+        empty_output: bool,
         at_ms: i64,
     },
     /// One per-run log line, as also written to the stage's log files.
@@ -349,6 +353,7 @@ mod tests {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 tool_calls: 1,
+                empty_output: false,
                 at_ms: 0,
             },
             TelemetryEvent::Log {

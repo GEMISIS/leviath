@@ -112,6 +112,7 @@ struct Instruments {
     tool_calls: Counter<u64>,
     stage_duration: Histogram<f64>,
     inference_latency: Histogram<f64>,
+    runs: Counter<u64>,
     /// Tool-lane occupancy, re-stated on every health sample. Up-down counters
     /// rather than plain counters because these go both ways, and the sink adds
     /// the delta from the previous sample so a scrape reads the current value.
@@ -214,6 +215,16 @@ impl Instruments {
                 .f64_histogram("leviath.inference_latency")
                 .with_description("Per-call inference latency by provider")
                 .with_unit("s")
+                .build(),
+            // Every finished run, tagged with how it ended and whether it
+            // produced anything. One counter rather than a separate "empty
+            // runs" one: a bare count of empty runs cannot be normalized,
+            // whereas this divides into a rate.
+            runs: meter
+                .u64_counter("leviath.runs.total")
+                .with_description(
+                    "Finished runs by terminal status and whether they produced output",
+                )
                 .build(),
             lane: LaneInstruments::new(meter),
         }
@@ -561,8 +572,20 @@ impl TelemetrySink for OtelSink {
                 prompt_tokens,
                 completion_tokens,
                 tool_calls,
+                empty_output,
                 at_ms,
             } => {
+                // Counted before the span lookup: the metric answers "how many
+                // runs finished, and how many had nothing to show for it",
+                // which must not depend on whether this process happens to
+                // hold the run's open span.
+                self.instruments.runs.add(
+                    1,
+                    &[
+                        KeyValue::new("leviath.status", status.clone()),
+                        KeyValue::new("leviath.empty_output", empty_output),
+                    ],
+                );
                 let mut open = self.open.lock().expect("telemetry span map lock");
                 let Some(mut run) = open.remove(&run_id) else {
                     return;
@@ -581,6 +604,8 @@ impl TelemetrySink for OtelSink {
                 ));
                 run.span
                     .set_attribute(KeyValue::new("leviath.tool_calls", tool_calls as i64));
+                run.span
+                    .set_attribute(KeyValue::new("leviath.empty_output", empty_output));
                 run.span.end_with_timestamp(ms_to_time(at_ms));
                 self.instruments.active.add(-1, &[]);
             }
@@ -722,6 +747,7 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 4,
             tool_calls: 1,
+            empty_output: false,
             at_ms,
         }
     }
@@ -961,9 +987,41 @@ mod tests {
             "leviath.tool_calls.total",
             "leviath.stage_duration",
             "leviath.inference_latency",
+            "leviath.runs.total",
         ] {
             assert!(names.contains(&expected.to_string()), "{names:?}");
         }
+    }
+
+    /// The empty-run counter has to survive a completion whose span this
+    /// process never opened, or a daemon restart would silently under-count
+    /// exactly the runs the metric exists to find (issue #192).
+    #[test]
+    fn a_completion_counts_even_without_an_open_span() {
+        let h = harness();
+        let TelemetryEvent::RunCompleted { run_id, status, .. } = run_completed("ghost", 10) else {
+            unreachable!("run_completed builds a RunCompleted")
+        };
+        h.sink.emit(TelemetryEvent::RunCompleted {
+            run_id,
+            status,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            tool_calls: 0,
+            empty_output: true,
+            at_ms: 10,
+        });
+        h.sink.force_flush();
+
+        let exported = h.metrics.get_finished_metrics().unwrap();
+        assert!(
+            exported
+                .iter()
+                .flat_map(|rm| rm.scope_metrics())
+                .flat_map(|sm| sm.metrics())
+                .any(|m| m.name() == "leviath.runs.total"),
+            "a completion with no open span still counts"
+        );
     }
 
     /// The daemon-wide instruments. Lane occupancy goes up and down, so the sink
