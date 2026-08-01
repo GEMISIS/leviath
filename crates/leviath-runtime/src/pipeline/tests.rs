@@ -1932,7 +1932,12 @@ fn empty_response_with_an_out_of_range_cursor_uses_blueprint_defaults() {
 /// A tool service that echoes each call as `(id, "ran <name>")`.
 struct EchoService;
 impl ToolService for EchoService {
-    fn exec_for(&self, _entity: Entity, calls: Vec<leviath_providers::ToolCall>) -> BoxedToolExec {
+    fn exec_for(
+        &self,
+        _entity: Entity,
+        calls: Vec<leviath_providers::ToolCall>,
+        _progress: ToolProgress,
+    ) -> BoxedToolExec {
         Box::new(move || {
             Box::pin(async move {
                 calls
@@ -1948,7 +1953,12 @@ impl ToolService for EchoService {
 #[derive(Default)]
 struct RecordingService(Arc<std::sync::Mutex<Vec<(Entity, usize, String)>>>);
 impl ToolService for RecordingService {
-    fn exec_for(&self, _entity: Entity, _calls: Vec<leviath_providers::ToolCall>) -> BoxedToolExec {
+    fn exec_for(
+        &self,
+        _entity: Entity,
+        _calls: Vec<leviath_providers::ToolCall>,
+        _progress: ToolProgress,
+    ) -> BoxedToolExec {
         Box::new(|| Box::pin(async { Vec::new() }))
     }
     fn sync_stage(&self, entity: Entity, stage_index: usize, stage_name: &str) {
@@ -1982,7 +1992,11 @@ async fn sync_tool_stages_notifies_service_and_clears_marker() {
     // The transient marker is cleared after notifying.
     assert!(world.get::<StageJustEntered>(entity).is_none());
     // The service's tool executor still runs (returns no results here).
-    assert!(service.exec_for(entity, Vec::new())().await.is_empty());
+    assert!(
+        service.exec_for(entity, Vec::new(), noop_progress())()
+            .await
+            .is_empty()
+    );
 }
 
 #[test]
@@ -2010,7 +2024,8 @@ async fn default_refresh_tools_returns_none() {
     assert!(
         RefreshService(vec![]).exec_for(
             Entity::from_raw_u32(0).expect("a small literal index is always a valid entity id"),
-            Vec::new()
+            Vec::new(),
+            noop_progress(),
         )()
         .await
         .is_empty()
@@ -2020,7 +2035,12 @@ async fn default_refresh_tools_returns_none() {
 /// A service whose `refresh_tools` returns a fixed set of tool names.
 struct RefreshService(Vec<&'static str>);
 impl ToolService for RefreshService {
-    fn exec_for(&self, _e: Entity, _c: Vec<leviath_providers::ToolCall>) -> BoxedToolExec {
+    fn exec_for(
+        &self,
+        _e: Entity,
+        _c: Vec<leviath_providers::ToolCall>,
+        _progress: ToolProgress,
+    ) -> BoxedToolExec {
         Box::new(|| Box::pin(async { Vec::new() }))
     }
     fn refresh_tools(&self, _e: Entity, _idx: usize) -> Option<Vec<Tool>> {
@@ -2122,7 +2142,12 @@ fn refresh_advertised_tools_none_leaves_tools_but_clears_marker() {
 /// A service whose `wants_refresh` returns a fixed value.
 struct PollService(bool);
 impl ToolService for PollService {
-    fn exec_for(&self, _e: Entity, _c: Vec<leviath_providers::ToolCall>) -> BoxedToolExec {
+    fn exec_for(
+        &self,
+        _e: Entity,
+        _c: Vec<leviath_providers::ToolCall>,
+        _progress: ToolProgress,
+    ) -> BoxedToolExec {
         Box::new(|| Box::pin(async { Vec::new() }))
     }
     fn wants_refresh(&self, _e: Entity) -> bool {
@@ -2139,7 +2164,8 @@ async fn default_wants_refresh_returns_false() {
     assert!(
         PollService(false).exec_for(
             Entity::from_raw_u32(0).expect("a small literal index is always a valid entity id"),
-            Vec::new()
+            Vec::new(),
+            noop_progress(),
         )()
         .await
         .is_empty()
@@ -2225,6 +2251,253 @@ async fn dispatch_tools_enqueues_runnable_job_and_advances() {
     // Run the produced closure (covers the service's exec path).
     let results = (job.exec)().await;
     assert_eq!(results, vec![("t".to_string(), "ran n".to_string())]);
+}
+
+// ── batch journaling at dispatch (#96) ──
+
+/// A tool service whose executor reports each call through `progress` before
+/// returning - the shape the CLI executor has.
+struct ReportingService;
+impl ToolService for ReportingService {
+    fn exec_for(
+        &self,
+        _entity: Entity,
+        calls: Vec<leviath_providers::ToolCall>,
+        progress: ToolProgress,
+    ) -> BoxedToolExec {
+        Box::new(move || {
+            Box::pin(async move {
+                calls
+                    .into_iter()
+                    .map(|c| {
+                        let r = format!("ran {}", c.name);
+                        progress(&c.id, &r);
+                        (c.id, r)
+                    })
+                    .collect()
+            })
+        })
+    }
+}
+
+/// Unwrap the Append message a journaling test expects on the persistence lane.
+fn append_msg(
+    msg: PersistMsg,
+) -> (
+    String,
+    leviath_core::run_archive::RunRecord,
+    Option<tokio::sync::oneshot::Sender<()>>,
+) {
+    match msg {
+        PersistMsg::Append {
+            run_id,
+            record,
+            ack,
+        } => (run_id, *record, ack),
+        PersistMsg::Snapshot(_) => panic!("expected an append on the lane"),
+    }
+}
+
+#[tokio::test]
+async fn dispatch_journals_the_batch_then_each_completion() {
+    use leviath_core::run_archive::RunRecord;
+    let (jtx, mut jrx) = mpsc::unbounded_channel();
+    let (ptx, mut prx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(ReportingService)));
+    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(PersistenceStage(ptx));
+    // A batch mixing an inline-resolved call (a context tool) and a lane call.
+    let e = world
+        .spawn((
+            agent_state(),
+            infer_with(vec![
+                ctx_call("c_ctx", "notes", "hi"),
+                tc("c_lane", "read_file"),
+            ]),
+            notes_window(),
+            StageCursor { index: 0 },
+            run_metadata(),
+            ReadyForTools,
+        ))
+        .id();
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+    assert!(world.get::<AwaitingTools>(e).is_some());
+
+    // The dispatch-time record: batch identity with the inline result
+    // pre-filled and the lane call pending, plus a durability ack.
+    let (run_id, record, ack) = append_msg(prx.try_recv().expect("batch journaled at dispatch"));
+    assert_eq!(run_id, "run-1");
+    let RunRecord::ToolBatch {
+        calls,
+        stage_index,
+        iteration,
+        response,
+        ..
+    } = record
+    else {
+        panic!("expected a ToolBatch record, got {record:?}");
+    };
+    assert_eq!(stage_index, 0);
+    assert_eq!(iteration, agent_state().iteration);
+    assert_eq!(response, "r");
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].id, "c_ctx");
+    assert!(calls[0].result.is_some(), "inline result pre-filled");
+    assert_eq!(calls[1].id, "c_lane");
+    assert_eq!(calls[1].result, None, "lane call pending");
+    // Ack the record (standing in for the persistence worker) so the barrier
+    // releases immediately instead of timing out.
+    ack.expect("dispatch requests an ack").send(()).unwrap();
+
+    // Running the batch reports the lane call's completion as a ToolCallDone.
+    let job = jrx.try_recv().expect("lane job enqueued");
+    let results = (job.exec)().await;
+    assert_eq!(
+        results,
+        vec![("c_lane".to_string(), "ran read_file".to_string())]
+    );
+    let (_, record, ack) = append_msg(prx.try_recv().expect("completion journaled"));
+    assert!(ack.is_none(), "per-call appends are fire-and-forget");
+    let RunRecord::ToolCallDone {
+        iteration,
+        call_id,
+        result,
+        ..
+    } = record
+    else {
+        panic!("expected a ToolCallDone record, got {record:?}");
+    };
+    assert_eq!(iteration, agent_state().iteration);
+    assert_eq!(call_id, "c_lane");
+    assert_eq!(result, "ran read_file");
+}
+
+#[tokio::test]
+async fn dispatch_all_inline_batch_is_not_journaled() {
+    // A batch the dispatcher fully resolves inline never reaches the lane; its
+    // results land in the window, which the snapshot path persists - a batch
+    // record would be pure noise.
+    let (jtx, mut jrx) = mpsc::unbounded_channel();
+    let (ptx, mut prx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(PersistenceStage(ptx));
+    let e = world
+        .spawn((
+            agent_state(),
+            infer_with(vec![ctx_call("c1", "notes", "hi")]),
+            notes_window(),
+            StageCursor { index: 0 },
+            run_metadata(),
+            ReadyForTools,
+        ))
+        .id();
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    assert!(jrx.try_recv().is_err());
+    assert!(prx.try_recv().is_err(), "no batch record for inline-only");
+}
+
+#[tokio::test]
+async fn dispatch_without_run_metadata_is_unjournaled() {
+    // A lane present but no run metadata (an unpersisted agent): the batch
+    // dispatches with a no-op progress and nothing is journaled.
+    let (jtx, mut jrx) = mpsc::unbounded_channel();
+    let (ptx, mut prx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(ReportingService)));
+    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(PersistenceStage(ptx));
+    world.spawn((
+        agent_state(),
+        infer_with(vec![tc("c1", "read_file")]),
+        conv_window(),
+        ReadyForTools,
+    ));
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    let job = jrx.try_recv().expect("job still enqueued");
+    let results = (job.exec)().await;
+    assert_eq!(results.len(), 1);
+    assert!(prx.try_recv().is_err(), "no journal without run metadata");
+}
+
+#[tokio::test]
+async fn gate_held_batch_is_not_journaled_until_it_dispatches() {
+    // A batch held for a gate prompt has run nothing - journaling it would
+    // record calls that may yet be denied. The record is written on the
+    // post-resolution re-dispatch instead.
+    let (jtx, _jrx) = mpsc::unbounded_channel();
+    let (gtx, _grx) = mpsc::unbounded_channel();
+    let (ptx, mut prx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(PersistenceStage(ptx));
+    world.insert_resource(crate::interaction_hub::InteractionHub::new());
+    world.insert_resource(crate::gate_prompt::GatePromptStage {
+        outcomes: gtx,
+        wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+        runtime: tokio::runtime::Handle::current(),
+    });
+    let e = world
+        .spawn((
+            agent_state(),
+            infer_with(vec![tc("c_shell", "shell")]),
+            tainted_conv_window(),
+            StageCursor { index: 0 },
+            run_metadata(),
+            ReadyForTools,
+            enabled_gate(),
+        ))
+        .id();
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    assert!(
+        world
+            .get::<crate::gate_prompt::AwaitingGatePrompt>(e)
+            .is_some()
+    );
+    assert!(prx.try_recv().is_err(), "held batch not journaled");
+}
+
+#[tokio::test]
+async fn barrier_then_runs_after_the_ack() {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let exec: BoxedToolExec =
+        Box::new(|| Box::pin(async { vec![("c".to_string(), "r".to_string())] }));
+    tx.send(()).unwrap();
+    let wrapped = barrier_then(exec, rx, std::time::Duration::from_secs(5));
+    assert_eq!(wrapped().await, vec![("c".to_string(), "r".to_string())]);
+}
+
+#[tokio::test]
+async fn barrier_then_proceeds_when_the_sender_is_dropped() {
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    drop(tx); // worker gone (shutdown) - the batch must still run
+    let exec: BoxedToolExec = Box::new(|| Box::pin(async { Vec::new() }));
+    let wrapped = barrier_then(exec, rx, std::time::Duration::from_secs(5));
+    assert!(wrapped().await.is_empty());
+}
+
+#[tokio::test]
+async fn barrier_then_proceeds_on_timeout() {
+    // The sender stays alive but never fires (a wedged persistence lane): the
+    // bounded wait lapses and the batch runs anyway.
+    let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let exec: BoxedToolExec = Box::new(|| Box::pin(async { Vec::new() }));
+    let wrapped = barrier_then(exec, rx, std::time::Duration::from_millis(5));
+    assert!(wrapped().await.is_empty());
 }
 
 #[tokio::test]

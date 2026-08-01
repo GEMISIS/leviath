@@ -20,14 +20,33 @@ pub struct ToolsNeedRefresh;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct DynamicTools;
 
+/// Reports one tool call's result the moment it resolves, from inside the
+/// executor - `(tool_call_id, result)`. Dispatch builds one per batch to journal
+/// each completion as a `ToolCallDone` record, so a crash mid-batch loses only
+/// the calls that genuinely never finished (issue #96). Implementors that don't
+/// journal get a no-op.
+pub type ToolProgress = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
+/// A [`ToolProgress`] that reports nowhere - for worlds without a persistence
+/// lane and for `ToolService` impls under test.
+pub fn noop_progress() -> ToolProgress {
+    Arc::new(|_, _| {})
+}
+
 /// Provides a per-agent tool-execution closure. The concrete implementation
 /// (in the CLI) holds each agent's tool registry, workdir, and permission
 /// policy; the pipeline stays agnostic to *how* tools run. `exec_for` returns a
 /// boxed closure the tool worker runs off the tick.
 pub trait ToolService: Send + Sync {
     /// Build the closure that runs `calls` for `entity`, resolving `(id, result)`
-    /// pairs.
-    fn exec_for(&self, entity: Entity, calls: Vec<leviath_providers::ToolCall>) -> BoxedToolExec;
+    /// pairs. The executor calls `progress` with each call's result as it
+    /// resolves (per-call, not at batch end).
+    fn exec_for(
+        &self,
+        entity: Entity,
+        calls: Vec<leviath_providers::ToolCall>,
+        progress: ToolProgress,
+    ) -> BoxedToolExec;
 
     /// Notify the service that `entity` entered the stage at `stage_index` named
     /// `stage_name`, so it can re-sync that agent's per-stage tool permissions.
@@ -156,6 +175,29 @@ pub(crate) fn unoffered_tool_refusal(stage: &StageInference, name: &str) -> Opti
     })
 }
 
+/// How long a dispatched batch may wait for its journal record's ack before
+/// running anyway. The wait is what keeps the `ToolBatch` record on disk ahead
+/// of the batch's side effects; the bound is the liveness valve - a dead or
+/// backed-up persistence worker degrades to an unjournaled dispatch instead of
+/// wedging every tool batch behind it.
+pub(crate) const BATCH_JOURNAL_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Wrap a tool-execution closure so it first waits (bounded) for the batch's
+/// journal-record ack. Both outcomes - acked, or timeout/dropped sender -
+/// proceed to run the batch.
+pub(crate) fn barrier_then(
+    exec: BoxedToolExec,
+    ack: tokio::sync::oneshot::Receiver<()>,
+    timeout: std::time::Duration,
+) -> BoxedToolExec {
+    Box::new(move || {
+        Box::pin(async move {
+            let _ = tokio::time::timeout(timeout, ack).await;
+            exec().await
+        })
+    })
+}
+
 /// Tool-dispatch system: for each `ReadyForTools` agent, apply its `context_*`
 /// tool calls inline (they mutate the ECS window) and hand the rest to the
 /// sequential tool lane, moving it to `AwaitingTools`. If a batch is *all*
@@ -163,6 +205,12 @@ pub(crate) fn unoffered_tool_refusal(stage: &StageInference, name: &str) -> Opti
 /// immediately and the agent loops straight back to `ReadyToInfer`. The lane
 /// serializes execution, so there is no permit gate - every ready agent is
 /// enqueued in turn.
+///
+/// A persisted agent's batch is journaled at dispatch: a `ToolBatch` record
+/// (inline results pre-filled, lane calls pending) goes to the persistence lane
+/// with an ack the exec waits on, and a per-call [`ToolProgress`] journals each
+/// completion as a `ToolCallDone`. On a crash mid-batch, recovery replays the
+/// recorded results instead of re-running their side effects (issue #96).
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn dispatch_tools(
     mut agents: Query<
@@ -178,6 +226,8 @@ pub fn dispatch_tools(
             Option<&crate::gate_prompt::GateResolved>,
             Option<&crate::components::GateAutoApprove>,
             Option<&InFlightWork>,
+            Option<&StageCursor>,
+            Option<&RunMetadata>,
         ),
         With<ReadyForTools>,
     >,
@@ -187,6 +237,7 @@ pub fn dispatch_tools(
     script_rules: Option<Res<GateScriptRules>>,
     hub: Option<Res<InteractionHub>>,
     gate_stage: Option<Res<crate::gate_prompt::GatePromptStage>>,
+    persist: Option<Res<PersistenceStage>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -209,6 +260,8 @@ pub fn dispatch_tools(
         resolved,
         auto_gate,
         in_flight,
+        cursor,
+        metadata,
     ) in agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
@@ -379,7 +432,63 @@ pub fn dispatch_tools(
             continue;
         }
 
-        let exec = service.0.exec_for(entity, lane_calls);
+        // Journal the batch before it can run: a `ToolBatch` record with the
+        // dispatcher's inline results pre-filled and every lane call pending,
+        // plus a per-call progress hook that records each completion. Worlds
+        // without a persistence lane or run metadata (tests, unpersisted
+        // agents) dispatch unjournaled with a no-op progress.
+        let (progress, ack) = match (persist.as_ref(), metadata) {
+            (Some(persist), Some(md)) => {
+                let record = leviath_core::run_archive::RunRecord::ToolBatch {
+                    calls: result
+                        .tool_calls
+                        .iter()
+                        .map(|c| leviath_core::run_archive::ToolCallRecord {
+                            id: c.tool_id.clone(),
+                            name: c.name.clone(),
+                            arguments: c.arguments.to_string(),
+                            result: context_results
+                                .iter()
+                                .find(|(id, _)| id == &c.tool_id)
+                                .map(|(_, r)| r.clone()),
+                            thought_signature: c.thought_signature.clone(),
+                        })
+                        .collect(),
+                    at: chrono::Utc::now().timestamp(),
+                    stage_index: cursor.map_or(0, |c| c.index),
+                    iteration: state.iteration,
+                    response: result.response.clone(),
+                };
+                let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+                let _ = persist.0.send(PersistMsg::Append {
+                    run_id: md.run_id.clone(),
+                    record: Box::new(record),
+                    ack: Some(ack_tx),
+                });
+                let sender = persist.0.clone();
+                let run_id = md.run_id.clone();
+                let iteration = state.iteration;
+                let progress: ToolProgress = Arc::new(move |call_id: &str, result: &str| {
+                    let _ = sender.send(PersistMsg::Append {
+                        run_id: run_id.clone(),
+                        record: Box::new(leviath_core::run_archive::RunRecord::ToolCallDone {
+                            iteration,
+                            call_id: call_id.to_string(),
+                            result: result.to_string(),
+                            at: chrono::Utc::now().timestamp(),
+                        }),
+                        ack: None,
+                    });
+                });
+                (progress, Some(ack_rx))
+            }
+            _ => (noop_progress(), None),
+        };
+        let exec = service.0.exec_for(entity, lane_calls, progress);
+        let exec = match ack {
+            Some(ack) => barrier_then(exec, ack, BATCH_JOURNAL_ACK_TIMEOUT),
+            None => exec,
+        };
         let cancel = crate::cancel::CancelToken::new();
         // The lane worker is alive for the world's lifetime; a failed send would
         // only happen during shutdown, where dropping the job is fine.
