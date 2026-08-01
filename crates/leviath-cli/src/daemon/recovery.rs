@@ -20,6 +20,21 @@
 //! (`ask_user_*`, `present_for_review`, `edit_document`) and taint-gate prompts are
 //! not persisted - they block inside the transient tool-worker turn, so on restart
 //! they take the ordinary re-inference path and the model simply re-asks.
+//!
+//! ## Tool-call delivery contract (issue #96)
+//!
+//! A tool batch in flight at the crash is **replayed, not re-executed**. Dispatch
+//! journals the batch (a `ToolBatch` record) before its side effects can start,
+//! and every call's result the moment it finishes (`ToolCallDone`); when the fold
+//! surfaces such a pending batch, `reload_one` calls
+//! [`leviath_runtime::restore::restore_pending_batch`] to land the assistant turn
+//! with each completed call's real journaled result - so completed side effects
+//! are exactly-once across a restart. Calls whose completion never reached the
+//! journal (still executing, or the crash landed in the instant between the
+//! external effect and its journal append - a window no journal can close,
+//! since an external side effect can't be observed atomically) come back as
+//! verify-first `[error] interrupted` results rather than being silently re-run;
+//! the re-issued inference decides what still needs doing.
 
 use std::path::Path;
 use std::sync::Arc;

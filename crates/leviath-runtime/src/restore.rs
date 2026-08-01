@@ -7,6 +7,13 @@
 //! agent keeps the `ReadyToInfer` marker `spawn_agent` set, so **any inference
 //! that was in flight when the daemon stopped is re-issued** on the next tick -
 //! nothing is left stuck awaiting a job that died with the old process.
+//!
+//! A tool batch that was in flight is not blindly re-issued, though: when the run
+//! journal holds a dispatched-but-unapplied batch, [`restore_pending_batch`]
+//! reconstructs its assistant turn in the window first - real journaled results
+//! for calls that completed, a verify-first [`INTERRUPTED_TOOL_RESULT`] for calls
+//! that didn't - so the re-issued inference sees exactly what already ran and
+//! completed side effects never run twice (issue #96).
 
 use bevy_ecs::prelude::*;
 use leviath_core::region::RegionEntry;
