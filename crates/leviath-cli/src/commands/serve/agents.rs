@@ -1378,7 +1378,12 @@ prompt = "Plan the work"
     #[tokio::test]
     async fn pause_agent_sends_pause_to_the_daemon() {
         let (control, _dir, _srv) = fake_daemon(|req| {
-            assert!(matches!(req, ControlRequest::Pause { .. }));
+            assert_eq!(
+                std::mem::discriminant(&req),
+                std::mem::discriminant(&ControlRequest::Pause {
+                    run_id: String::new()
+                })
+            );
             ControlResponse::Ok { ok: true }
         });
         assert_eq!(
@@ -1418,7 +1423,12 @@ prompt = "Plan the work"
     #[tokio::test]
     async fn resume_agent_sends_resume_to_the_daemon() {
         let (control, _dir, _srv) = fake_daemon(|req| {
-            assert!(matches!(req, ControlRequest::Resume { .. }));
+            assert_eq!(
+                std::mem::discriminant(&req),
+                std::mem::discriminant(&ControlRequest::Resume {
+                    run_id: String::new()
+                })
+            );
             ControlResponse::Ok { ok: true }
         });
         assert_eq!(
