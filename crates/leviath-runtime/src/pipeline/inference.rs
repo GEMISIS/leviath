@@ -168,6 +168,7 @@ pub fn dispatch_inference(
             &StageInference,
             Option<&InFlightWork>,
             Option<&StageProgress>,
+            Option<&DispatchStall>,
         ),
         With<ReadyToInfer>,
     >,
@@ -188,13 +189,22 @@ pub fn dispatch_inference(
     // machinery *itself* unattributed rather than blamed on whichever agent a
     // previous system left recorded.
     crate::tick_scope::clear();
-    agents
-        .par_iter()
-        .for_each(|(entity, state, window, config, si, in_flight, progress)| {
+    let now = chrono::Utc::now().timestamp();
+    agents.par_iter().for_each(
+        |(entity, state, window, config, si, in_flight, progress, stalled)| {
             crate::tick_scope::run_agent_parallel(entity, &par_commands, &mut || {
                 if state.status != AgentStatus::Active {
                     return; // paused / waiting / cancelled - don't start new work
                 }
+                // Every decline below records why and since when, so the
+                // watchdog can tell a run that is waiting from one that is
+                // waiting for something that will never happen (issue #190).
+                let stall = |reason| {
+                    let noted = note_stall(stalled, reason, now);
+                    par_commands.command_scope(|mut commands| {
+                        commands.entity(entity).insert(noted);
+                    });
+                };
                 let Some(provider) = providers.0.get(&si.provider_name) else {
                     // Leave ready and retry later - but say so. A silently
                     // starved agent reads as a wedged run with no error.
@@ -202,6 +212,7 @@ pub fn dispatch_inference(
                         provider = %si.provider_name,
                         "inference waiting: provider not registered"
                     );
+                    stall(StallReason::ProviderMissing);
                     return;
                 };
                 let Some(permit) = stage.pools.try_acquire(&si.model) else {
@@ -212,6 +223,7 @@ pub fn dispatch_inference(
                         model = %si.model,
                         "inference waiting: per-model pool is full"
                     );
+                    stall(StallReason::PoolFull);
                     return;
                 };
                 let request = build_request(
@@ -261,8 +273,12 @@ pub fn dispatch_inference(
                     commands
                         .entity(entity)
                         .remove::<ReadyToInfer>()
+                        // Dispatched: whatever it was waiting for, it isn't
+                        // waiting any more.
+                        .remove::<DispatchStall>()
                         .insert(AwaitingInference);
                 });
             });
-        });
+        },
+    );
 }

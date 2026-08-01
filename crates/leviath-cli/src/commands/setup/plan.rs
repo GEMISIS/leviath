@@ -133,6 +133,12 @@ pub fn changes(before: &Config, plan: &SetupPlan) -> Vec<String> {
         Some(&before.batch_tool_hint),
         Some(&after.batch_tool_hint),
     );
+    push_if_changed(
+        &mut out,
+        "stall timeout (seconds)",
+        Some(&before.limits.stall_timeout_secs),
+        Some(&after.limits.stall_timeout_secs),
+    );
 
     let added = after
         .mcp_servers

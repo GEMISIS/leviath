@@ -419,6 +419,10 @@ fn default_script_shell_timeout_secs() -> u64 {
     60
 }
 
+fn default_stall_timeout_secs() -> u64 {
+    leviath_runtime::pipeline::DEFAULT_STALL_TIMEOUT_SECS
+}
+
 /// Runtime resource limits with safe defaults baked in.
 ///
 /// Both fields default to a bounded value so a fresh install can't accidentally
@@ -460,6 +464,19 @@ pub struct LimitsConfig {
     /// hang an agent on a runaway command. Defaults to `60`.
     #[serde(default = "default_script_shell_timeout_secs")]
     pub script_shell_timeout_secs: u64,
+
+    /// How long (seconds) a run may sit ready to work but unable to dispatch
+    /// before it is failed instead of left running.
+    ///
+    /// This only ever fires for something the runtime cannot resolve on its own -
+    /// today, a stage whose provider is not configured. Waiting for a busy
+    /// model's inference pool is ordinary backpressure and is never failed, no
+    /// matter how long it takes. Defaults to `60`; `0` disables the watchdog and
+    /// restores the old behaviour of waiting indefinitely.
+    ///
+    /// Read once at daemon start, so a change needs a daemon restart.
+    #[serde(default = "default_stall_timeout_secs")]
+    pub stall_timeout_secs: u64,
 }
 
 impl Default for LimitsConfig {
@@ -470,6 +487,7 @@ impl Default for LimitsConfig {
             default_max_iterations: default_default_max_iterations(),
             exact_token_counting: false,
             script_shell_timeout_secs: default_script_shell_timeout_secs(),
+            stall_timeout_secs: default_stall_timeout_secs(),
         }
     }
 }
@@ -2769,6 +2787,7 @@ enabled = false
                 default_max_iterations: Some(99),
                 exact_token_counting: false,
                 script_shell_timeout_secs: 45,
+                stall_timeout_secs: 90,
             },
             batch_tool_hint: true,
             nudge: leviath_core::NudgeConfig {

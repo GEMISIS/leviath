@@ -16,8 +16,12 @@ pub(crate) struct SilentPanics {
     _lock: std::sync::MutexGuard<'static, ()>,
     /// The hook to put back. `Option` because `Drop` only has `&mut self` and
     /// `set_hook` needs the box by value.
-    previous: Option<Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>>,
+    previous: Option<PanicHook>,
 }
+
+/// What `std::panic::take_hook` hands back, named so the field above doesn't
+/// trip `clippy::type_complexity`.
+type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
 
 impl SilentPanics {
     pub(crate) fn install() -> Self {

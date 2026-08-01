@@ -892,6 +892,11 @@ fn limits_fields(config: &Config) -> Vec<Field> {
             help: "Nudge models to request several tools in one turn.",
             value: FieldValue::Bool(config.batch_tool_hint),
         },
+        Field {
+            label: "Stall timeout (seconds)",
+            help: "Fail a run that can never dispatch (unconfigured provider). 0 waits forever.",
+            value: FieldValue::Number(Some(config.limits.stall_timeout_secs)),
+        },
     ]
 }
 
@@ -915,6 +920,12 @@ fn apply_limits_fields(config: &mut Config, fields: &[Field]) {
             }
             (3, FieldValue::Bool(b)) => config.limits.exact_token_counting = *b,
             (4, FieldValue::Bool(b)) => config.batch_tool_hint = *b,
+            // Unset means "leave the watchdog at its default", not "disable it";
+            // disabling is an explicit 0.
+            (5, FieldValue::Number(n)) => {
+                config.limits.stall_timeout_secs =
+                    n.unwrap_or(Config::default().limits.stall_timeout_secs)
+            }
             _ => {}
         }
     }

@@ -42,9 +42,10 @@ use crate::pipeline::{
     abort_terminal_work, check_workspace_health, collect_compaction, collect_inference,
     collect_tools, collect_transition_choice, deliver_messages, detect_stuck_stage,
     dispatch_compaction, dispatch_edge_compact, dispatch_inference, dispatch_persistence,
-    dispatch_tools, dispatch_transition_choice, enforce_max_iterations, gate_requires_children,
-    handle_empty_response, poll_dynamic_tool_refresh, process_response, reflect_interaction_status,
-    refresh_advertised_tools, require_context_regions, resolve_transition, sync_tool_stages,
+    dispatch_tools, dispatch_transition_choice, enforce_max_iterations, fail_stalled_dispatch,
+    gate_requires_children, handle_empty_response, poll_dynamic_tool_refresh, process_response,
+    reflect_interaction_status, refresh_advertised_tools, require_context_regions,
+    resolve_transition, sync_tool_stages,
 };
 use crate::providers::ProviderRegistry;
 use crate::tool_bridge::spawn_tool_pool;
@@ -345,6 +346,12 @@ impl PipelineWorld {
                 // this same tick.
                 crate::title::collect_title,
                 crate::title::dispatch_title,
+                // Fail a run whose dispatch has been declining for something
+                // that will never arrive. Last of the guards, and after *both*
+                // dispatch systems, so it reads stall records both lanes have
+                // refreshed on this same tick - and before persistence, so the
+                // failure reaches disk immediately.
+                fail_stalled_dispatch,
                 // Mirror open interaction-hub requests into agent status
                 // (Active ↔ Waiting) so the dashboard surfaces blocked prompts;
                 // must run before persistence so the status change is written.
@@ -1235,6 +1242,54 @@ mod tests {
             }),
         );
         r
+    }
+
+    #[tokio::test]
+    async fn an_agent_whose_provider_is_missing_wedges_at_iteration_zero() {
+        // Issue #190. The registry has no `script` provider, so
+        // `dispatch_inference` declines and leaves the agent `ReadyToInfer`.
+        // Nothing about the world changed, so the fixed point is reached
+        // immediately and nothing is in flight to wake the driver - the agent
+        // used to sit `Active` at iteration 0 for ever, which on disk reads as
+        // a `running` run with no tokens and a frozen `updated_at`.
+        let mut world = build_world(ProviderRegistry::new());
+        let e = spawn(&mut world);
+
+        world.run_until_idle(30).await;
+
+        // Nothing has dispatched, and within the grace period that is still
+        // just a wait - but it is now a *recorded* one.
+        let state = world.world().get::<AgentState>(e).expect("the agent");
+        assert_eq!(state.iteration, 0, "not a single inference happened");
+        assert_eq!(state.status, AgentStatus::Active);
+        let stall = world
+            .world()
+            .get::<crate::pipeline::DispatchStall>(e)
+            .expect("the decline is recorded");
+        assert_eq!(stall.reason, crate::pipeline::StallReason::ProviderMissing);
+
+        // Backdate it past the grace period, as the host's redrive timer would
+        // find it on a later tick, and the run fails with an answer rather than
+        // hanging.
+        let past =
+            chrono::Utc::now().timestamp() - crate::pipeline::DEFAULT_STALL_TIMEOUT_SECS as i64 - 1;
+        world
+            .world_mut()
+            .get_mut::<crate::pipeline::DispatchStall>(e)
+            .expect("the stall record")
+            .since = past;
+        world.run_to_fixed_point();
+
+        let status = world.agent_status(e);
+        assert!(
+            matches!(status, Some(AgentStatus::Error { ref message })
+                if message.contains("script") && message.contains("not configured")),
+            "got: {status:?}"
+        );
+        assert!(
+            world.world().get::<ReadyToInfer>(e).is_none(),
+            "and it is out of the dispatch systems"
+        );
     }
 
     #[tokio::test]

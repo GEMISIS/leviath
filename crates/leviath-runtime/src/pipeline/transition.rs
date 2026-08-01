@@ -1652,6 +1652,7 @@ pub fn dispatch_transition_choice(
             &StageCursor,
             &AwaitingTransitionChoice,
             Option<&InFlightWork>,
+            Option<&DispatchStall>,
         ),
         With<AwaitingTransitionChoice>,
     >,
@@ -1660,15 +1661,26 @@ pub fn dispatch_transition_choice(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, state, mut window, si, bp, cursor, choice, in_flight) in agents.iter_mut() {
+    let now = chrono::Utc::now().timestamp();
+    for (entity, state, mut window, si, bp, cursor, choice, in_flight, stalled) in agents.iter_mut()
+    {
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue; // paused / waiting / cancelled - don't start new work
         }
+        // Same bookkeeping as the inference lane: an agent parked here is
+        // runnable with nothing outstanding, so a decline that never resolves
+        // wedges the run just as thoroughly (issue #190).
         let Some(provider) = providers.0.get(&si.provider_name) else {
+            commands
+                .entity(entity)
+                .insert(note_stall(stalled, StallReason::ProviderMissing, now));
             continue; // provider not registered - retry later
         };
         let Some(permit) = stage.pools.try_acquire(&si.model) else {
+            commands
+                .entity(entity)
+                .insert(note_stall(stalled, StallReason::PoolFull, now));
             continue; // pool full - retry next tick
         };
 
@@ -1737,6 +1749,7 @@ pub fn dispatch_transition_choice(
         commands
             .entity(entity)
             .remove::<AwaitingTransitionChoice>()
+            .remove::<DispatchStall>()
             .insert(AwaitingTransitionResponse(choice.0.clone()));
     }
 }
