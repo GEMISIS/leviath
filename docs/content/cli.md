@@ -15,6 +15,7 @@ run `lev <command> --help` for the full, authoritative flag list.
 | Command | Purpose |
 |---|---|
 | `lev run <agent> --task "…"` | Start an agent (built-in name or a blueprint path) |
+| `lev run <agent> --workdir <dir>` | Run the agent over a different directory (default: where you ran the command) |
 | `lev create <name>` | Scaffold a new [`agent.leviath` blueprint](/docs/agents) |
 | `lev validate <path>` | Check a blueprint's graph, seeds, and permissions |
 | `lev test <path>` | Dry-run a blueprint |

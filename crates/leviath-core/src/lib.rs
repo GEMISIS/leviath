@@ -23,6 +23,7 @@ pub mod net;
 pub mod panic_payload;
 pub mod paths;
 pub mod policy;
+pub mod read_paths;
 pub mod region;
 pub mod run_archive;
 pub mod run_meta;
@@ -34,10 +35,9 @@ pub mod text;
 
 pub use blueprint::{
     Blueprint, ContextTransform, EdgeTransform, FileTrackingConfig, ReadPathsConfig,
-    RepetitionDetectionConfig, Stage, StuckConfig, ToolResultRouting,
-    TransitionCondition, TransitionEdge,
+    RepetitionDetectionConfig, Stage, StuckConfig, ToolResultRouting, TransitionCondition,
+    TransitionEdge,
 };
-pub use paths::ReadPathEntry;
 pub use cache::CacheHint;
 pub use credentials::{
     CredentialStore, CredentialStoreKind, MemoryStore, mcp_account, provider_account,
@@ -51,10 +51,13 @@ pub use net::{
 };
 pub use panic_payload::panic_message;
 pub use paths::{
-    agents_dir, data_dir, home_dir, is_safe_path_component, providers_dir, resolves_within,
-    tools_dir,
+    agents_dir, canonicalize_for_match, data_dir, home_dir, is_safe_path_component, providers_dir,
+    resolves_within, tools_dir,
 };
 pub use policy::{AllowlistRule, McpToolOverride, PolicyConfig};
+pub use read_paths::{
+    ReadPathDecision, ReadPathEntry, ReadPathPolicy, ReadPathSet, validate_entry_syntax,
+};
 pub use region::{
     ContentFormat, EntryKind, EvictionStrategy, Region, RegionEntry, RegionKind, RegionSchema,
     SerializedToolCall,

@@ -428,6 +428,302 @@ mod tests {
         );
     }
 
+    // ── [read_paths]: reads may be granted outside the workdir ────────────
+
+    /// Tools whose context carries a `[read_paths]` policy compiled for
+    /// `workdir` (no home, unix path semantics - the platform seams have
+    /// their own tests in `leviath_core::read_paths`).
+    fn make_tools_with_read_paths(
+        workdir: &std::path::Path,
+        blueprint: &[&str],
+        grants: &[&str],
+        allow_blueprint: bool,
+    ) -> BuiltinTools {
+        let compile = |entries: &[&str]| {
+            let raw: Vec<String> = entries.iter().map(|s| s.to_string()).collect();
+            leviath_core::ReadPathSet::compile(&raw, workdir, None, false)
+                .expect("test entries compile")
+        };
+        let policy = leviath_core::ReadPathPolicy {
+            agent: "tester".into(),
+            blueprint: compile(blueprint),
+            grants: compile(grants),
+            allow_blueprint,
+        };
+        BuiltinTools::new(ToolContext::new(workdir.to_path_buf()).with_read_paths(policy))
+    }
+
+    /// The whole point of the feature: a declared-and-granted directory is
+    /// readable, through every read-only tool.
+    #[tokio::test]
+    async fn read_tools_reach_a_declared_and_granted_outside_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("doc.md"), "outside contents").unwrap();
+        let entry = outside.path().to_str().unwrap();
+        let tools = make_tools_with_read_paths(dir.path(), &[entry], &[entry], false);
+
+        let target = outside.path().join("doc.md");
+        let target = target.to_str().unwrap();
+        let out = tools.read_file(&json!({ "path": target })).await;
+        assert_eq!(out, "outside contents");
+
+        let listed = tools
+            .list_dir(&json!({ "path": outside.path().to_str().unwrap() }))
+            .await;
+        assert!(listed.contains("doc.md"), "got: {listed}");
+
+        // `read_files` mixes inside and outside paths per element.
+        fs::write(dir.path().join("inside.txt"), "inside contents").unwrap();
+        let out = tools
+            .read_files(&json!({ "paths": ["inside.txt", target] }))
+            .await;
+        assert!(out.contains("inside contents"), "got: {out}");
+        assert!(out.contains("outside contents"), "got: {out}");
+    }
+
+    /// `[read_paths]` grants reads and nothing else: the same fully granted
+    /// path is still refused for `write_file` and `edit_file`, which never
+    /// consult the policy.
+    #[tokio::test]
+    async fn write_and_edit_stay_confined_despite_read_grants() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("doc.md"), "original").unwrap();
+        let entry = outside.path().to_str().unwrap();
+        let tools = make_tools_with_read_paths(dir.path(), &[entry], &[entry], false);
+
+        let target = outside.path().join("doc.md");
+        let target = target.to_str().unwrap();
+        let out = tools
+            .write_file(&json!({ "path": target, "content": "clobbered" }))
+            .await;
+        assert!(out.contains("[error]"), "got: {out}");
+        let out = tools
+            .edit_file(&json!({ "path": target, "old_str": "original", "new_str": "x" }))
+            .await;
+        assert!(out.contains("[error]"), "got: {out}");
+        assert_eq!(
+            fs::read_to_string(outside.path().join("doc.md")).unwrap(),
+            "original",
+            "a read grant must never permit a write"
+        );
+    }
+
+    /// Declared by the blueprint but granted by nothing: refused, and the
+    /// error says exactly which config stanza would grant it.
+    #[tokio::test]
+    async fn an_ungranted_declaration_is_refused_with_guidance() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("doc.md"), "secret").unwrap();
+        let entry = outside.path().to_str().unwrap();
+        let tools = make_tools_with_read_paths(dir.path(), &[entry], &[], false);
+
+        let target = outside.path().join("doc.md");
+        let out = tools
+            .read_file(&json!({ "path": target.to_str().unwrap() }))
+            .await;
+        assert!(out.contains("[error]"), "got: {out}");
+        assert!(out.contains("does not grant"), "got: {out}");
+        assert!(out.contains("[agent_read_paths.tester]"), "got: {out}");
+        assert!(!out.contains("secret"), "content must not leak");
+    }
+
+    /// The `allow_blueprint_read_paths` override honors declarations without
+    /// itemized grants - and still nothing beyond what is declared.
+    #[tokio::test]
+    async fn the_blanket_override_honors_declarations() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("doc.md"), "outside contents").unwrap();
+        let entry = outside.path().to_str().unwrap();
+        let tools = make_tools_with_read_paths(dir.path(), &[entry], &[], true);
+
+        let target = outside.path().join("doc.md");
+        let out = tools
+            .read_file(&json!({ "path": target.to_str().unwrap() }))
+            .await;
+        assert_eq!(out, "outside contents");
+
+        // Undeclared stays undeclared: the override widens nothing.
+        let undeclared = tempfile::tempdir().unwrap();
+        fs::write(undeclared.path().join("x.txt"), "x").unwrap();
+        let out = tools
+            .read_file(&json!({ "path": undeclared.path().join("x.txt").to_str().unwrap() }))
+            .await;
+        assert!(
+            out.contains("not in this agent's [read_paths]"),
+            "got: {out}"
+        );
+    }
+
+    /// With no `[read_paths]` at all, an outside read gets the original
+    /// workdir refusal, word for word - the policy is never consulted.
+    #[tokio::test]
+    async fn an_inactive_policy_keeps_the_workdir_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let out = tools.read_file(&json!({ "path": "/etc/hosts" })).await;
+        assert!(
+            out.contains("would escape the working directory"),
+            "got: {out}"
+        );
+    }
+
+    /// A relative request resolves against the workdir in the fallback too,
+    /// so a workdir-relative entry like `../shared` is reachable by the
+    /// matching relative request.
+    #[tokio::test]
+    async fn a_relative_request_reaches_a_relative_grant() {
+        let parent = tempfile::tempdir().unwrap();
+        let workdir = parent.path().join("work");
+        let shared = parent.path().join("shared");
+        fs::create_dir_all(&workdir).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(shared.join("doc.md"), "shared contents").unwrap();
+        let tools = make_tools_with_read_paths(&workdir, &["../shared"], &["../shared"], false);
+
+        let out = tools
+            .read_file(&json!({ "path": "../shared/doc.md" }))
+            .await;
+        assert_eq!(out, "shared contents");
+    }
+
+    /// An interior `.` in a fallback request is folded away (`Path::components`
+    /// drops it), so `<granted>/./doc.md` resolves the same as
+    /// `<granted>/doc.md`.
+    #[tokio::test]
+    async fn a_dot_component_is_folded_in_the_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("doc.md"), "outside contents").unwrap();
+        let entry = outside.path().to_str().unwrap();
+        let tools = make_tools_with_read_paths(dir.path(), &[entry], &[entry], false);
+
+        let target = format!("{}/./doc.md", outside.path().to_str().unwrap());
+        let out = tools.read_file(&json!({ "path": target })).await;
+        assert_eq!(out, "outside contents");
+    }
+
+    /// Folding `..` past the filesystem root is unresolvable no matter what
+    /// any allowlist says.
+    #[test]
+    fn folding_past_the_root_is_unresolvable() {
+        let policy = leviath_core::ReadPathPolicy {
+            agent: "tester".into(),
+            allow_blueprint: true,
+            ..Default::default()
+        };
+        let err = BuiltinTools::resolve_outside(
+            "/..",
+            Path::new("/w"),
+            &policy,
+            leviath_core::canonicalize_for_match,
+        )
+        .expect_err("popping past the root must be refused");
+        assert!(err.to_string().contains("cannot be resolved"), "{err}");
+    }
+
+    /// The fail-closed arm, driven through the injected canonicalizer so it
+    /// runs on every platform: a path nothing can verify is refused, never
+    /// matched.
+    #[test]
+    fn an_unverifiable_path_is_refused() {
+        fn unverifiable(_: &Path) -> Option<PathBuf> {
+            None
+        }
+        let policy = leviath_core::ReadPathPolicy {
+            agent: "tester".into(),
+            allow_blueprint: true,
+            ..Default::default()
+        };
+        let err =
+            BuiltinTools::resolve_outside("/outside/x", Path::new("/w"), &policy, unverifiable)
+                .expect_err("an unverifiable path must be refused");
+        assert!(err.to_string().contains("cannot be verified"), "{err}");
+    }
+
+    /// The attack the policy exists to stop: a symlink planted *inside* a
+    /// granted directory, pointing outside it. The policy sees the real
+    /// target, which no entry declares.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_inside_a_granted_directory_cannot_escape_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let granted = tempfile::tempdir().unwrap();
+        let secret_home = tempfile::tempdir().unwrap();
+        fs::write(secret_home.path().join("id_rsa"), "PRIVATE KEY").unwrap();
+        std::os::unix::fs::symlink(
+            secret_home.path().join("id_rsa"),
+            granted.path().join("innocent.md"),
+        )
+        .unwrap();
+        let entry = granted.path().to_str().unwrap();
+        let tools = make_tools_with_read_paths(dir.path(), &[entry], &[entry], false);
+
+        let out = tools
+            .read_file(&json!({ "path": granted.path().join("innocent.md").to_str().unwrap() }))
+            .await;
+        assert!(out.contains("[error]"), "got: {out}");
+        assert!(!out.contains("PRIVATE KEY"), "content must not leak");
+    }
+
+    /// The same attack against a glob entry - the variant the original PR
+    /// missed entirely. The pattern is matched against the symlink-resolved
+    /// real path, and the real target does not match it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_glob_grant_is_symlink_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let granted = tempfile::tempdir().unwrap();
+        let secret_home = tempfile::tempdir().unwrap();
+        fs::write(secret_home.path().join("id_rsa"), "PRIVATE KEY").unwrap();
+        std::os::unix::fs::symlink(
+            secret_home.path().join("id_rsa"),
+            granted.path().join("innocent.md"),
+        )
+        .unwrap();
+        // Patterns match the canonical real path, so build the entry from it.
+        let canonical = fs::canonicalize(granted.path()).unwrap();
+        let entry = format!("glob:{}/**", canonical.display());
+        let tools = make_tools_with_read_paths(dir.path(), &[&entry], &[&entry], false);
+
+        let out = tools
+            .read_file(&json!({ "path": granted.path().join("innocent.md").to_str().unwrap() }))
+            .await;
+        assert!(out.contains("[error]"), "got: {out}");
+        assert!(!out.contains("PRIVATE KEY"), "content must not leak");
+
+        // The positive pair: a real file under the same glob is readable, so
+        // the refusal above is the symlink and not the pattern.
+        fs::write(granted.path().join("real.md"), "real contents").unwrap();
+        let out = tools
+            .read_file(&json!({ "path": granted.path().join("real.md").to_str().unwrap() }))
+            .await;
+        assert_eq!(out, "real contents");
+    }
+
+    /// A symlink whose target stays inside the granted subtree is fine - the
+    /// rule is about where the path lands, exactly as in the workdir.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_within_a_granted_directory_is_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let granted = tempfile::tempdir().unwrap();
+        fs::create_dir(granted.path().join("real")).unwrap();
+        fs::write(granted.path().join("real/doc.md"), "granted contents").unwrap();
+        std::os::unix::fs::symlink(granted.path().join("real"), granted.path().join("link"))
+            .unwrap();
+        let entry = granted.path().to_str().unwrap();
+        let tools = make_tools_with_read_paths(dir.path(), &[entry], &[entry], false);
+
+        let out = tools
+            .read_file(&json!({ "path": granted.path().join("link/doc.md").to_str().unwrap() }))
+            .await;
+        assert_eq!(out, "granted contents");
+    }
+
     /// A symlink that stays *inside* the workdir keeps working - the rule is
     /// about where the path lands, not whether a symlink was involved. Agents
     /// operate on real repositories, which contain plenty of internal symlinks.

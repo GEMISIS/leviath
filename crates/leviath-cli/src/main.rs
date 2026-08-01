@@ -186,7 +186,7 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("a task is required (e.g. `-t \"do the thing\"`)"))?;
 
     ensure_daemon_running().await?;
-    let workdir = std::env::current_dir()?.to_string_lossy().to_string();
+    let workdir = commands::run::effective_workdir(args.workdir, std::env::current_dir()?)?;
     let spawn_args = leviath_cli::daemon::client::resolve_spawn_args(
         &path,
         &task,

@@ -148,6 +148,20 @@ entry stage's sandbox, time- and size-capped.
 > seed a blueprint will run; review them for third-party blueprints. Refuse with
 > `--no-seed-commands` or `[security] allow_seed_commands = false`.
 
+## Read paths
+
+An agent that needs to *read* beyond its workdir - run archives, design docs, sibling
+directories - declares them:
+
+```toml
+[read_paths]
+allow = ["~/.leviath/runs", "../shared-docs", "glob:~/design-docs/**"]
+```
+
+The declarations do nothing on their own: the user's config must grant them, they are
+read-only, and every access is checked against the symlink-resolved real path. See
+[Security](/docs/security) for the grant stanzas and the full matching rules.
+
 ## How the coding agents verify their work
 
 The bundled coding agents (`software-engineer`, `coder`) treat verification as workflow, not
