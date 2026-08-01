@@ -79,6 +79,8 @@ script_shell_timeout_secs = 60
 | `exact_token_counting` | `false` | Counts each assembled request exactly before sending and rejects one that would overflow the window. Costs a network round trip per inference on providers with a remote count endpoint |
 | `script_shell_timeout_secs` | `60` | Cap on a Rhai script tool's `shell()` host call |
 
+<a id="security"></a>
+
 ## `[security]`
 
 Machine-wide switches that are not part of the per-tool permission cascade.
@@ -140,6 +142,8 @@ shell = "allow"
 Resolution order, narrowest first: launch flag, stage, agent, this file, built-in default. A launch
 flag (`--allow`, `--yolo`) can turn `ask` into `allow` but can never lift a `deny`. The built-in
 defaults are in [Built-in tools](/docs/tools).
+
+<a id="tool_script_permissions"></a>
 
 ## `[tool_script_permissions]`
 
@@ -210,6 +214,8 @@ supports_system_prompt = true
 max_context_tokens   = 32768
 max_output_tokens    = 4096
 ```
+
+<a id="model_providersname"></a>
 
 ## `[model_providers.<name>]`
 
