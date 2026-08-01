@@ -1670,7 +1670,7 @@ fn empty_response_finishes_after_max_nudges() {
     let mut world = World::new();
     let progress = StageProgress {
         total_tool_calls: 0,
-        text_only_nudges: MAX_TEXT_ONLY_NUDGES,
+        text_only_nudges: leviath_core::blueprint::DEFAULT_MAX_NUDGES,
         iterations: 0,
         ..Default::default()
     };
@@ -1757,15 +1757,166 @@ fn empty_response_nudges_and_loops_back_when_text_only() {
     assert!(world.get::<ReadyToInfer>(e).is_some());
     assert!(world.get::<ResolveTransition>(e).is_none());
     assert_eq!(world.get::<StageProgress>(e).unwrap().text_only_nudges, 1);
+    // The default text goes in through the shared `[System]` injection path.
+    let injected = conversation_text(&world, e);
+    assert!(injected.contains(&format!(
+        "[System] {}",
+        leviath_core::blueprint::DEFAULT_NUDGE_TEXT
+    )));
+}
+
+#[test]
+fn empty_response_respects_a_stage_that_disables_its_nudge() {
+    // The issue-#127 shape: the stage knows its deliverable is text and says so.
+    let mut bp = nudge_bp(false);
+    bp.0.stages[0].nudge = Some(leviath_core::NudgeConfig {
+        enabled: Some(false),
+        ..Default::default()
+    });
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            infer_result(false),
+            StageProgress::default(),
+            bp,
+            StageCursor { index: 0 },
+            ReadyForTransition,
+        ))
+        .id();
+    run_empty(&mut world);
+    assert!(world.get::<ResolveTransition>(e).is_some());
+    assert_eq!(world.get::<StageProgress>(e).unwrap().text_only_nudges, 0);
+    assert!(conversation_text(&world, e).is_empty());
+}
+
+#[test]
+fn empty_response_honors_an_agent_level_max() {
+    // `[agent.nudge] max = 0`: the very first text-only response is final.
+    let mut bp = nudge_bp(false);
+    bp.0.nudge = Some(leviath_core::NudgeConfig {
+        max: Some(0),
+        ..Default::default()
+    });
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            infer_result(false),
+            StageProgress::default(),
+            bp,
+            StageCursor { index: 0 },
+            ReadyForTransition,
+        ))
+        .id();
+    run_empty(&mut world);
+    assert!(world.get::<ResolveTransition>(e).is_some());
+    assert!(world.get::<ReadyToInfer>(e).is_none());
+}
+
+#[test]
+fn empty_response_interpolates_custom_text_placeholders() {
+    // A custom text names the stage and its required regions.
+    let mut bp = nudge_bp(false);
+    bp.0.stages[0].nudge = Some(leviath_core::NudgeConfig {
+        text: Some("Populate {regions} to finish stage {stage}.".to_string()),
+        ..Default::default()
+    });
+    bp.0.context_layout
+        .regions
+        .push(leviath_core::layout::RegionDefinition::new(
+            "plan".to_string(),
+            RegionKind::Pinned,
+            1_000,
+        ));
+    bp.0.context_layout.regions[1].required = true;
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            infer_result(false),
+            StageProgress::default(),
+            bp,
+            StageCursor { index: 0 },
+            ReadyForTransition,
+        ))
+        .id();
+    run_empty(&mut world);
+    assert!(world.get::<ReadyToInfer>(e).is_some());
     assert!(
-        world
-            .get::<ContextWindow>(e)
-            .unwrap()
-            .get_region("conversation")
-            .unwrap()
-            .current_tokens
-            > 0
+        conversation_text(&world, e).contains("[System] Populate plan to finish stage a."),
+        "placeholders resolve against the stage name and required region names"
     );
+}
+
+#[test]
+fn empty_response_explicit_enabled_overrides_review_suppression() {
+    // The inverse of `empty_response_never_nudges_a_stage_whose_output_is
+    // _reviewed`: the suppression is only the default, and a stage author who
+    // explicitly asks for nudging on a reviewed stage gets it.
+    let mut bp = nudge_bp(true);
+    bp.0.stages[0].nudge = Some(leviath_core::NudgeConfig {
+        enabled: Some(true),
+        ..Default::default()
+    });
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            infer_result(false),
+            StageProgress::default(),
+            bp,
+            StageCursor { index: 0 },
+            ReadyForTransition,
+        ))
+        .id();
+    run_empty(&mut world);
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    assert_eq!(world.get::<StageProgress>(e).unwrap().text_only_nudges, 1);
+}
+
+#[test]
+fn empty_response_reads_the_global_nudge_component() {
+    // A spawn-time `GlobalNudge` snapshot participates in the cascade when the
+    // blueprint sets nothing at either level.
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            infer_result(false),
+            StageProgress::default(),
+            nudge_bp(false),
+            StageCursor { index: 0 },
+            ReadyForTransition,
+            GlobalNudge(leviath_core::NudgeConfig {
+                enabled: Some(false),
+                ..Default::default()
+            }),
+        ))
+        .id();
+    run_empty(&mut world);
+    assert!(world.get::<ResolveTransition>(e).is_some());
+    assert!(conversation_text(&world, e).is_empty());
+}
+
+#[test]
+fn empty_response_with_an_out_of_range_cursor_uses_blueprint_defaults() {
+    // A cursor past the stage list (nothing configures the nudge, no stage to
+    // name): the default text still goes in and the agent loops back.
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            infer_result(false),
+            StageProgress::default(),
+            nudge_bp(false),
+            StageCursor { index: 7 },
+            ReadyForTransition,
+        ))
+        .id();
+    run_empty(&mut world);
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    assert!(conversation_text(&world, e).contains(leviath_core::blueprint::DEFAULT_NUDGE_TEXT));
 }
 
 // ── tool-dispatch ──
@@ -5614,6 +5765,29 @@ fn require_context_regions_injects_default_message() {
         .map(|entry| entry.content.clone())
         .collect::<String>();
     assert!(conv.contains("Required context region 'plan' is still empty"));
+}
+
+#[test]
+fn require_context_regions_interpolates_a_custom_message() {
+    // A custom required_message may name its region via {region} - the same
+    // substitution the generated default goes through.
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            required_bp(
+                &["context_write"],
+                Some("Write {region} with context_write before finishing."),
+            ),
+            StageCursor { index: 0 },
+            window_with_plan(false),
+            ResolveTransition,
+        ))
+        .id();
+    run_require(&mut world);
+    assert!(
+        conversation_text(&world, e)
+            .contains("[System] Write plan with context_write before finishing.")
+    );
 }
 
 #[test]

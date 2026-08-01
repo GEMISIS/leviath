@@ -202,6 +202,15 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub batch_tool_hint: bool,
 
+    /// Machine-wide defaults for the empty-response nudge (`[nudge]`): the
+    /// `[System]` message injected when a stage's model replies with text
+    /// before making any tool call. All three keys (`enabled`, `max`, `text`)
+    /// are optional; an agent's `[agent.nudge]` or a stage's
+    /// `[stages.<name>.nudge]` overrides each field independently. See
+    /// [`leviath_core::resolve_nudge`].
+    #[serde(default)]
+    pub nudge: leviath_core::NudgeConfig,
+
     /// Completion-webhook delivery tuning (retry/backoff/timeout).
     #[serde(default)]
     pub webhook: WebhookConfig,
@@ -646,6 +655,7 @@ impl Default for Config {
             taint_tracking: false,
             limits: LimitsConfig::default(),
             batch_tool_hint: true,
+            nudge: leviath_core::NudgeConfig::default(),
             webhook: WebhookConfig::default(),
             observability: ObservabilityConfig::default(),
             sandbox: None,
@@ -2635,6 +2645,28 @@ anthropic_api_key = "sk-ant-test-key"
             config.providers.anthropic_api_key.as_deref(),
             Some("sk-ant-test-key")
         );
+        // No [nudge] section ⇒ every field unset ⇒ built-in defaults apply.
+        assert_eq!(config.nudge, leviath_core::NudgeConfig::default());
+    }
+
+    #[test]
+    fn config_parses_partial_nudge_section() {
+        // A [nudge] section only pins the keys it names.
+        let config: Config = toml::from_str(
+            r#"
+default_provider = "openai"
+agent_paths = []
+
+[providers]
+
+[nudge]
+enabled = false
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.nudge.enabled, Some(false));
+        assert_eq!(config.nudge.max, None);
+        assert_eq!(config.nudge.text, None);
     }
 
     #[test]
@@ -2739,6 +2771,11 @@ anthropic_api_key = "sk-ant-test-key"
                 script_shell_timeout_secs: 45,
             },
             batch_tool_hint: true,
+            nudge: leviath_core::NudgeConfig {
+                enabled: Some(true),
+                max: Some(2),
+                text: Some("Use your tools.".to_string()),
+            },
             webhook: WebhookConfig {
                 max_retries: 5,
                 base_delay_ms: 250,
@@ -2808,6 +2845,14 @@ anthropic_api_key = "sk-ant-test-key"
             Some(&ReadPathGrants {
                 allow: vec!["glob:~/design-docs/**".to_string()],
             })
+        );
+        assert_eq!(
+            deserialized.nudge,
+            leviath_core::NudgeConfig {
+                enabled: Some(true),
+                max: Some(2),
+                text: Some("Use your tools.".to_string()),
+            }
         );
         assert_eq!(deserialized.webhook.max_retries, 5);
         assert_eq!(deserialized.webhook.base_delay_ms, 250);

@@ -972,6 +972,7 @@ fn build_agent_inner(
         &seeds,
         stages,
         config.batch_tool_hint,
+        config.nudge.clone(),
         region_scripts,
     )?;
 
