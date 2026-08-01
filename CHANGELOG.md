@@ -46,6 +46,21 @@ requests since the previous version.
   occupancy, tool-lane busy/queued counts, and agents by status. It logs at
   `info` only when a lane is at capacity with work queued behind it, and at
   `debug` otherwise, so an idle daemon stays quiet.
+- Fixed runs that were spawned but never executed: they sat at iteration 0 with
+  no tokens, reported as `running` for ever. A `lev run` whose stages have no
+  configured provider is now refused outright, naming the stage and every
+  provider it tried, instead of starting a run that could never take a turn.
+- A spawn that fails now records the failure in the run directory it staked
+  out, rather than leaving a `starting` placeholder that claimed the run was
+  alive for ever.
+- A run that ends up unable to dispatch anyway - a provider removed from the
+  config after it started, say - is now failed once its stall outlives
+  `[limits] stall_timeout_secs` (default 60 seconds; `0` waits indefinitely, as
+  before). Waiting for a busy model's inference pool is never failed: that is
+  ordinary backpressure, however long it lasts.
+- An async lane task that dies without reporting (a provider adapter that
+  panics) no longer strands its agent waiting for a completion that can never
+  arrive; it surfaces as an ordinary inference, routing, or compaction error.
 - Pause and resume are now user-facing: `lev pause <run-id>` and
   `lev resume <run-id>`, `POST /api/agents/{id}/pause` and `/resume` on the
   HTTP API, and `p`/`r` in the dashboard. A paused run shows as `paused` in
