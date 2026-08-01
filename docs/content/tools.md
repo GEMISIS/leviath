@@ -88,6 +88,27 @@ model but executed by the engine's tool registry, since they act on the shared a
 | `send_to_agent` | Send a message into a running sub-agent's context. | `agent_id`, `message`, `target_region` (optional; defaults to the conversation) |
 | `kill_agent` | Kill a sub-agent and all its descendants. | `agent_id` |
 
+## Web access
+
+Web tools are not built in. They ship as [Rhai script tools](/docs/rhai-tools) beside the agents
+that use them, which is why they are editable and why an agent without them cannot reach the
+network at all.
+
+| Tool | Purpose | Arguments |
+| --- | --- | --- |
+| `web_search` | Search the web and return a JSON list of `{title, url, snippet}`. Uses Brave Search when `BRAVE_API_KEY` is set, otherwise a keyless Wikipedia search that works with no configuration. | `query`, `count` (optional, default 5) |
+| `web_fetch` | Fetch a URL and return its readable text. HTML is stripped to prose; large pages are truncated, and a blocked or oversized request returns a diagnostic rather than failing the run. | `url` |
+
+Both ship with `researcher`, `deep-researcher`, `wide-researcher`, `daily-briefer`, and
+`writing-assistant`. To give another agent web access, copy them into that agent's `tools/`
+directory, or drop them in `~/.leviath/tools/` to offer them to every agent.
+
+> [!WARNING]
+> Fetches cannot reach loopback, private, or link-local addresses unless you set
+> `[security] allow_local_network = true`. That default blocks cloud metadata endpoints, your own
+> `lev serve`, and the LAN, because the model chooses the URL out of context an attacker may have
+> influenced.
+
 ## Granting tools per stage
 
 A tool existing in the catalog does not mean an agent can call it. Two independent settings on each
@@ -112,6 +133,45 @@ edit_file = "allow"    # apply edits without prompting
 > `available_tools` and `tool_permissions` are separate gates: a tool must be listed in
 > `available_tools` to be offered at all, and its `tool_permissions` value then decides whether a
 > call is allowed, prompted, or refused.
+
+## Default permissions
+
+With nothing configured, tools fall back to these:
+
+| Tool | Default |
+|---|---|
+| `read_file`, `list_dir` | `allow` |
+| `write_file`, `edit_file`, `shell` (and its `bash` alias) | `ask` |
+| `ask_user_text`, `ask_user_choice`, `ask_user_confirm`, `edit_document` | `allow` |
+| `spawn_agent`, `check_agent`, `wait_for_agent`, `send_to_agent`, `kill_agent` | `allow` |
+| Everything else, built-in or MCP | `ask` |
+
+Read-only built-ins run freely, mutating ones ask, and human-in-the-loop tools are always allowed
+because prompting before a prompt would be circular.
+
+### How a policy is resolved
+
+Narrowest scope wins: **launch flag, then stage, then agent, then `config.toml`, then the built-in
+default above.**
+
+Two rules constrain that:
+
+- A blueprint may only **tighten** what your config set. A downloaded agent cannot grant itself
+  `shell = "allow"` over your `ask`. To trust one agent with more, name it in
+  `[agent_tool_permissions.<agent>]` in your own [config](/docs/configuration#tool-permissions).
+- A launch flag (`--allow`, `--yolo`) can turn an `ask` into an `allow`, but it can **never** lift
+  a `deny`.
+
+There are four layers in total. `available_tools` is visibility, `tool_permissions` is approval
+(alongside the schema check below, which runs before any prompt),
+`[tool_script_permissions]` gates what a Rhai script tool may do, and the
+[taint gate](/docs/security#taint-tracking-experimental) checks data flow before an
+exfiltration-capable call fires.
+
+> [!WARNING]
+> A tool set to `ask` in a headless context blocks until someone answers. It never auto-denies. For
+> unattended runs, either grant the tools explicitly with `--allow` or use `--yolo`, which cannot
+> override a `deny`.
 
 ## Argument validation
 
