@@ -888,6 +888,7 @@ mod tests {
             tool_calls: 7,
             last_progress_at: Some(1_000),
             unattended: false,
+            empty_output: false,
         }
     }
 

@@ -130,6 +130,16 @@ pub struct RunListEntry {
     /// be sitting on a prompt; if it is, something dropped the flag.
     #[serde(default)]
     pub unattended: bool,
+    /// Whether this run finished having modified nothing, when its blueprint
+    /// gave it a way to. Only ever true for a run that has stopped.
+    ///
+    /// The flag itself is as old as issue #107, but nothing ever showed it: it
+    /// went into `meta.json` and was read back only on restart, so a run that
+    /// finished with no work to show for it looked exactly like one that
+    /// succeeded. Defaulted for the same reason as `unattended` - an older
+    /// daemon simply omits it.
+    #[serde(default)]
+    pub empty_output: bool,
 }
 
 /// The daemon's own health, alongside the run listing.
@@ -1422,6 +1432,9 @@ impl WorldHost {
                         .get::<crate::pipeline::PersistWatermark>(entity)
                         .and_then(|w| w.last_progress_at()),
                     unattended: metadata.is_some_and(|m| m.unattended),
+                    empty_output: world
+                        .get::<crate::persistence::RunOutcomeFlags>(entity)
+                        .is_some_and(|f| crate::persistence::is_empty_output(&state.status, &f.0)),
                 })
             })
             .collect()
@@ -4218,6 +4231,39 @@ mod tests {
         assert_eq!(list[0].tool_calls, 9);
         assert!(list[0].unattended);
         assert_eq!(list[0].last_progress_at, Some(1_700));
+        // No outcome flags on this agent at all, so there is nothing to
+        // report and the listing does not invent a verdict.
+        assert!(!list[0].empty_output);
+    }
+
+    /// A run that stopped having produced nothing says so in the listing -
+    /// otherwise it is indistinguishable from one that did the work (#192).
+    #[tokio::test]
+    async fn list_reports_a_finished_run_that_produced_nothing() {
+        let mut host = host_with(vec![]);
+        let e = spawn(&mut host, "run-a", "run-a");
+        host.world_mut()
+            .world_mut()
+            .entity_mut(e)
+            .insert(crate::persistence::RunOutcomeFlags::default());
+        // Still running: nothing to say yet.
+        assert!(!ask(&mut host, |reply| ControlOp::List { reply }).await.0[0].empty_output);
+
+        host.world_mut()
+            .world_mut()
+            .get_mut::<AgentState>(e)
+            .expect("spawned agent has state")
+            .status = AgentStatus::Complete;
+        assert!(ask(&mut host, |reply| ControlOp::List { reply }).await.0[0].empty_output);
+
+        // ...unless it never had a way to write, which is not its failing.
+        host.world_mut()
+            .world_mut()
+            .get_mut::<crate::persistence::RunOutcomeFlags>(e)
+            .expect("just inserted")
+            .0
+            .no_output_tools = true;
+        assert!(!ask(&mut host, |reply| ControlOp::List { reply }).await.0[0].empty_output);
     }
 
     /// The listing carries the reason and the progress context, not just a word.

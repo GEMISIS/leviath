@@ -25,6 +25,7 @@ fn entry(run_id: &str, status: AgentStatus) -> RunListEntry {
         tool_calls: 0,
         last_progress_at: None,
         unattended: false,
+        empty_output: false,
     }
 }
 
@@ -67,6 +68,22 @@ fn status_cell_falls_back_to_the_bare_status() {
         )),
         "error: boom"
     );
+}
+
+/// A run that finished with nothing to show for it reads that way, instead of
+/// being indistinguishable from one that did the work (issue #192).
+#[test]
+fn status_cell_marks_a_finished_run_that_produced_nothing() {
+    let mut e = entry("r", AgentStatus::Complete);
+    e.empty_output = true;
+    assert_eq!(status_cell(&e), "complete (no output)");
+    e.status = AgentStatus::Cancelled;
+    assert_eq!(status_cell(&e), "cancelled (no output)");
+    // The waiting reason still wins: a blocked run needs answering, and it
+    // has not finished producing anything yet.
+    e.status = AgentStatus::Waiting;
+    e.wait_reason = Some(WaitReason::ToolApproval);
+    assert_eq!(status_cell(&e), "waiting: tool approval");
 }
 
 /// A non-waiting status never carries a reason, even if one somehow rode along.

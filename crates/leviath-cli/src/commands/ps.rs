@@ -29,6 +29,12 @@ Statuses:
   cancelled  cancelled with `lev kill`
   error      ended with the error shown
 
+A finished run marked `(no output)` changed no files, though its agent had a
+tool to change them with. Usually the work went through the shell, which the
+framework cannot see: edits made with `sed -i`, `tee` or a redirect are not
+recorded, so re-apply them with `edit_file` or `write_file`. Agents that never
+had a file-writing tool - a router, a researcher - are never marked this way.
+
 A `waiting` run says what it is blocked on. These need a person:
   tool approval  a tool call needs approving; answer with `lev respond`
   user prompt    the agent asked a question (ask_user_*); answer it
@@ -61,10 +67,16 @@ pub struct PsArgs {
 }
 
 /// The status cell for a run: the status word, plus what it is waiting on when
-/// that is the difference between "leave it alone" and "go answer it".
+/// that is the difference between "leave it alone" and "go answer it", or a
+/// note that a finished run has nothing to show for itself.
+///
+/// A run that ends having changed nothing looks identical to a successful one
+/// from the outside, which is how a whole batch of them can go unnoticed - the
+/// failure that produced issue #107 in the first place.
 fn status_cell(entry: &RunListEntry) -> String {
     match (&entry.status, &entry.wait_reason) {
         (AgentStatus::Waiting, Some(reason)) => format!("waiting: {reason}"),
+        (status, _) if entry.empty_output => format!("{status} (no output)"),
         (status, _) => status.to_string(),
     }
 }
