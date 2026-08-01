@@ -88,6 +88,11 @@ pub struct ToolCallRecord {
     pub arguments: String,
     /// The result text, once the tool has run (`None` while pending).
     pub result: Option<String>,
+    /// Opaque provider token that must be replayed with this call (Gemini's
+    /// `thought_signature`). Carried so a restored batch can rebuild the exact
+    /// assistant turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 /// The outbound request of one inference (a provider-agnostic digest - enough to
@@ -198,10 +203,37 @@ pub enum RunRecord {
         /// Unix seconds.
         at: i64,
     },
-    /// A batch of tool calls and their results.
+    /// A batch of tool calls, written when the batch is dispatched to the tool
+    /// lane - before anything runs. Calls the dispatcher already resolved inline
+    /// (context tools, refusals, gate denials) carry `result: Some(..)`; lane
+    /// calls start at `result: None` and are completed by matching
+    /// [`RunRecord::ToolCallDone`] records as each call finishes. A batch still
+    /// pending at fold time surfaces as [`FoldedRun::pending_batch`] so a
+    /// crash-resume can replay executed calls instead of re-running them.
     ToolBatch {
-        /// The calls (with results filled in).
+        /// The calls (inline results pre-filled; lane calls pending).
         calls: Vec<ToolCallRecord>,
+        /// Unix seconds.
+        at: i64,
+        /// The stage index the batch was dispatched in.
+        #[serde(default)]
+        stage_index: usize,
+        /// The stage-local iteration that produced the batch - the batch key
+        /// (one batch per iteration).
+        #[serde(default)]
+        iteration: usize,
+        /// The assistant text of the turn that issued the calls.
+        #[serde(default)]
+        response: String,
+    },
+    /// One tool call of the pending batch finished; its result.
+    ToolCallDone {
+        /// The iteration of the [`RunRecord::ToolBatch`] this belongs to.
+        iteration: usize,
+        /// The tool-call id.
+        call_id: String,
+        /// The result text.
+        result: String,
         /// Unix seconds.
         at: i64,
     },
@@ -456,6 +488,22 @@ pub fn read_archive_lenient(r: &mut dyn Read) -> io::Result<(u16, Vec<RunRecord>
 
 // ─── fold ───────────────────────────────────────────────────────────────────
 
+/// A tool batch that was dispatched but whose results never reached the context
+/// window - what a crash-resume must replay instead of re-running. `calls` carry
+/// every result recorded before the crash ([`RunRecord::ToolCallDone`] merged
+/// in); a call still at `result: None` genuinely never finished.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingToolBatch {
+    /// The stage index the batch was dispatched in.
+    pub stage_index: usize,
+    /// The stage-local iteration that produced the batch.
+    pub iteration: usize,
+    /// The assistant text of the turn that issued the calls.
+    pub response: String,
+    /// The calls, with every recorded result merged in.
+    pub calls: Vec<ToolCallRecord>,
+}
+
 /// The state reconstructed from a run journal - enough to resume or inspect the
 /// run at its latest recorded point.
 #[derive(Debug, Clone, PartialEq)]
@@ -472,6 +520,28 @@ pub struct FoldedRun {
     pub inference_count: usize,
     /// Number of tool calls recorded.
     pub tool_call_count: usize,
+    /// A dispatched tool batch whose results never made it into the context
+    /// window (the run crashed mid-batch). `None` when the run has no batch in
+    /// flight or the batch's turn already landed in `context`.
+    pub pending_batch: Option<PendingToolBatch>,
+}
+
+/// Whether `context` already contains the assistant turn of `batch` - i.e. the
+/// batch completed and `apply_tool_results` landed it before the crash, so there
+/// is nothing to replay. Matched by the first call id, which is unique per batch.
+pub fn context_contains_batch(context: &ContextSnapshot, batch: &PendingToolBatch) -> bool {
+    let Some(first_id) = batch.calls.first().map(|c| c.id.as_str()) else {
+        return false;
+    };
+    context.regions.iter().any(|region| {
+        region.entries.iter().any(|entry| {
+            matches!(
+                &entry.kind,
+                crate::region::EntryKind::AssistantTurn { tool_calls }
+                    if tool_calls.iter().any(|tc| tc.id == first_id)
+            )
+        })
+    })
 }
 
 /// Reconstruct a run's current state from its journal. Returns `None` if the
@@ -494,6 +564,7 @@ pub fn fold(records: &[RunRecord]) -> Option<FoldedRun> {
         messages: Vec::new(),
         inference_count: 0,
         tool_call_count: 0,
+        pending_batch: None,
     };
     for record in iter {
         match record {
@@ -510,7 +581,40 @@ pub fn fold(records: &[RunRecord]) -> Option<FoldedRun> {
                 folded.identity.world_id = world_id.clone();
             }
             RunRecord::Inference { .. } => folded.inference_count += 1,
-            RunRecord::ToolBatch { calls, .. } => folded.tool_call_count += calls.len(),
+            RunRecord::ToolBatch {
+                calls,
+                stage_index,
+                iteration,
+                response,
+                ..
+            } => {
+                folded.tool_call_count += calls.len();
+                // A later batch replaces an earlier one - only the newest can
+                // still be in flight.
+                folded.pending_batch = Some(PendingToolBatch {
+                    stage_index: *stage_index,
+                    iteration: *iteration,
+                    response: response.clone(),
+                    calls: calls.clone(),
+                });
+            }
+            RunRecord::ToolCallDone {
+                iteration,
+                call_id,
+                result,
+                ..
+            } => {
+                // Fill the matching pending call; a stale record for a replaced
+                // batch (iteration mismatch) is ignored.
+                if let Some(batch) = folded
+                    .pending_batch
+                    .as_mut()
+                    .filter(|b| b.iteration == *iteration)
+                    && let Some(call) = batch.calls.iter_mut().find(|c| c.id == *call_id)
+                {
+                    call.result = Some(result.clone());
+                }
+            }
             RunRecord::ContextCheckpoint { snapshot, .. } => folded.context = snapshot.clone(),
             RunRecord::ContextDiff { delta, .. } => apply_delta(&mut folded.context, delta),
             RunRecord::Message { message, .. } => folded.messages.push(message.clone()),
@@ -524,6 +628,16 @@ pub fn fold(records: &[RunRecord]) -> Option<FoldedRun> {
                 apply_delta(&mut folded.context, delta);
             }
         }
+    }
+    // The batch is only pending if it was never applied. Two applied signals: a
+    // later inference moved the iteration on (even if a sliding window has since
+    // evicted the turn), or the batch's assistant turn is already in the folded
+    // window (the Progress carrying it landed before the crash).
+    if let Some(batch) = &folded.pending_batch
+        && (folded.meta.iteration != batch.iteration
+            || context_contains_batch(&folded.context, batch))
+    {
+        folded.pending_batch = None;
     }
     Some(folded)
 }
@@ -604,6 +718,7 @@ pub fn replay_points(records: &[RunRecord]) -> Vec<RunPoint> {
             RunRecord::OwnershipChanged { .. }
             | RunRecord::Inference { .. }
             | RunRecord::ToolBatch { .. }
+            | RunRecord::ToolCallDone { .. }
             | RunRecord::Message { .. } => {}
         }
     }
@@ -851,7 +966,17 @@ mod tests {
                     name: "read_file".to_string(),
                     arguments: "{}".to_string(),
                     result: Some("body".to_string()),
+                    thought_signature: Some("sig".to_string()),
                 }],
+                at: 103,
+                stage_index: 0,
+                iteration: 0,
+                response: "reading".to_string(),
+            },
+            RunRecord::ToolCallDone {
+                iteration: 0,
+                call_id: "c1".to_string(),
+                result: "body".to_string(),
                 at: 103,
             },
             RunRecord::ContextCheckpoint {
@@ -1139,6 +1264,10 @@ mod tests {
         assert_eq!(folded.context.regions[0].entries.len(), 2);
         assert_eq!(folded.context.total_tokens, 3);
         assert_eq!(folded.meta.run_id, "run-1");
+        // The batch shares the meta's iteration and its turn never reached the
+        // window, so it folds as pending (with the ToolCallDone merged in).
+        let pending = folded.pending_batch.expect("batch never applied");
+        assert_eq!(pending.calls[0].result.as_deref(), Some("body"));
     }
 
     #[test]
@@ -1223,6 +1352,204 @@ mod tests {
         assert_eq!(folded.context.regions[0].entries.len(), 2);
     }
 
+    // ── pending tool batch (fold) ──
+
+    fn call(id: &str, result: Option<&str>) -> ToolCallRecord {
+        ToolCallRecord {
+            id: id.to_string(),
+            name: "shell".to_string(),
+            arguments: "{}".to_string(),
+            result: result.map(str::to_string),
+            thought_signature: None,
+        }
+    }
+
+    fn batch(iteration: usize, calls: Vec<ToolCallRecord>) -> RunRecord {
+        RunRecord::ToolBatch {
+            calls,
+            at: 10,
+            stage_index: 0,
+            iteration,
+            response: "running tools".to_string(),
+        }
+    }
+
+    /// An entry whose kind is the assistant turn that issued `call_ids`.
+    fn turn_entry(call_ids: &[&str]) -> RegionEntrySnapshot {
+        let mut e = entry("turn", 1);
+        e.kind = crate::region::EntryKind::AssistantTurn {
+            tool_calls: call_ids
+                .iter()
+                .map(|id| crate::region::SerializedToolCall {
+                    id: id.to_string(),
+                    name: "shell".to_string(),
+                    arguments: serde_json::Value::Null,
+                    thought_signature: None,
+                })
+                .collect(),
+        };
+        e
+    }
+
+    #[test]
+    fn fold_surfaces_a_pending_batch_with_merged_results() {
+        // meta().iteration is 0, matching the batch, and the context has no
+        // assistant turn for it - so the batch is genuinely pending. c1's
+        // ToolCallDone merges in; c2 keeps its dispatch-time inline result; c3
+        // stays pending.
+        let records = vec![
+            header(),
+            batch(
+                0,
+                vec![
+                    call("c1", None),
+                    call("c2", Some("inline")),
+                    call("c3", None),
+                ],
+            ),
+            RunRecord::ToolCallDone {
+                iteration: 0,
+                call_id: "c1".to_string(),
+                result: "ran".to_string(),
+                at: 11,
+            },
+        ];
+        let folded = fold(&records).unwrap();
+        let pending = folded.pending_batch.expect("batch is pending");
+        assert_eq!(pending.iteration, 0);
+        assert_eq!(pending.response, "running tools");
+        assert_eq!(pending.calls[0].result.as_deref(), Some("ran"));
+        assert_eq!(pending.calls[1].result.as_deref(), Some("inline"));
+        assert_eq!(pending.calls[2].result, None);
+        assert_eq!(folded.tool_call_count, 3);
+    }
+
+    #[test]
+    fn fold_keeps_only_the_latest_batch_and_ignores_stale_done_records() {
+        // The second batch replaces the first; a ToolCallDone for the replaced
+        // iteration is ignored, as is one naming a call the batch doesn't have.
+        let mut advanced = meta();
+        advanced.iteration = 1;
+        let records = vec![
+            header(),
+            batch(0, vec![call("c1", None)]),
+            RunRecord::Progress {
+                meta: Box::new(advanced),
+                delta: ContextDelta {
+                    stage_name: "plan".to_string(),
+                    total_tokens: 0,
+                    max_tokens: 10_000,
+                    regions: vec![],
+                },
+                at: 11,
+            },
+            batch(1, vec![call("c2", None)]),
+            RunRecord::ToolCallDone {
+                iteration: 0,
+                call_id: "c1".to_string(),
+                result: "stale".to_string(),
+                at: 12,
+            },
+            RunRecord::ToolCallDone {
+                iteration: 1,
+                call_id: "unknown".to_string(),
+                result: "nowhere to land".to_string(),
+                at: 13,
+            },
+        ];
+        let folded = fold(&records).unwrap();
+        let pending = folded.pending_batch.expect("latest batch is pending");
+        assert_eq!(pending.iteration, 1);
+        assert_eq!(pending.calls.len(), 1);
+        assert_eq!(pending.calls[0].id, "c2");
+        assert_eq!(pending.calls[0].result, None, "stale/unknown dones ignored");
+    }
+
+    #[test]
+    fn fold_clears_a_batch_once_the_iteration_moves_on() {
+        // A later inference bumped meta.iteration past the batch: the batch was
+        // applied (even if a sliding window evicted the turn), nothing to replay.
+        let mut advanced = meta();
+        advanced.iteration = 1;
+        let records = vec![
+            header(),
+            batch(0, vec![call("c1", Some("done"))]),
+            RunRecord::Progress {
+                meta: Box::new(advanced),
+                delta: ContextDelta {
+                    stage_name: "plan".to_string(),
+                    total_tokens: 0,
+                    max_tokens: 10_000,
+                    regions: vec![],
+                },
+                at: 11,
+            },
+        ];
+        assert_eq!(fold(&records).unwrap().pending_batch, None);
+    }
+
+    #[test]
+    fn fold_clears_a_batch_whose_turn_already_landed_in_the_window() {
+        // Same iteration, but the context already holds the batch's assistant
+        // turn: apply_tool_results ran before the crash, nothing to replay.
+        let records = vec![
+            header(),
+            batch(0, vec![call("c1", Some("done"))]),
+            RunRecord::ContextCheckpoint {
+                snapshot: snapshot("plan", vec![region("conv", vec![turn_entry(&["c1"])])]),
+                at: 11,
+            },
+        ];
+        assert_eq!(fold(&records).unwrap().pending_batch, None);
+    }
+
+    #[test]
+    fn context_contains_batch_matches_only_the_batch_turn() {
+        let pending = PendingToolBatch {
+            stage_index: 0,
+            iteration: 0,
+            response: String::new(),
+            calls: vec![call("c1", None)],
+        };
+        // A window with an unrelated turn does not match.
+        let other = snapshot("plan", vec![region("conv", vec![turn_entry(&["zz"])])]);
+        assert!(!context_contains_batch(&other, &pending));
+        // The batch's own turn matches by its first call id.
+        let own = snapshot(
+            "plan",
+            vec![region("conv", vec![turn_entry(&["c1", "c2"])])],
+        );
+        assert!(context_contains_batch(&own, &pending));
+        // A batch with no calls can never match.
+        let empty = PendingToolBatch {
+            calls: vec![],
+            ..pending
+        };
+        assert!(!context_contains_batch(&own, &empty));
+    }
+
+    #[test]
+    fn old_shape_tool_batch_json_still_parses() {
+        // Archives written before the batch-journal fields existed carry
+        // ToolBatch records without stage_index/iteration/response (and calls
+        // without thought_signature); serde defaults fill them in.
+        let json = br#"{"ToolBatch":{"calls":[{"id":"c1","name":"shell","arguments":"{}","result":"ok"}],"at":9}}"#;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(json.len() as u64).to_be_bytes());
+        buf.extend_from_slice(json);
+        let record = read_record(&mut buf.as_slice()).unwrap().unwrap();
+        assert_eq!(
+            record,
+            RunRecord::ToolBatch {
+                calls: vec![call("c1", Some("ok"))],
+                at: 9,
+                stage_index: 0,
+                iteration: 0,
+                response: String::new(),
+            }
+        );
+    }
+
     // ── replay_points (context-window history) ──
 
     #[test]
@@ -1267,6 +1594,13 @@ mod tests {
                     cached_tokens: 0,
                     cache_write_tokens: 0,
                 },
+                at: 1,
+            },
+            batch(0, vec![call("c1", None)]),
+            RunRecord::ToolCallDone {
+                iteration: 0,
+                call_id: "c1".to_string(),
+                result: "ran".to_string(),
                 at: 1,
             },
             RunRecord::ContextCheckpoint {
