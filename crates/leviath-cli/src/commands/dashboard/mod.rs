@@ -48,6 +48,12 @@ async fn daemon_background_loop(
             DaemonCommand::Cancel { run_id } => {
                 (run_id.clone(), ControlRequest::Cancel { run_id }, "cancel")
             }
+            DaemonCommand::Pause { run_id } => {
+                (run_id.clone(), ControlRequest::Pause { run_id }, "pause")
+            }
+            DaemonCommand::Resume { run_id } => {
+                (run_id.clone(), ControlRequest::Resume { run_id }, "resume")
+            }
             DaemonCommand::Answer { response } => (
                 response.request_id.clone(),
                 ControlRequest::AnswerInteraction { response },
@@ -408,6 +414,69 @@ mod tests {
             "got: {}",
             broken.message
         );
+    }
+
+    /// Drive one arbitrary command through the loop and return the outcome.
+    async fn command_outcome(
+        cmd: DaemonCommand,
+        reply: Option<&'static str>,
+    ) -> types::DaemonOutcome {
+        let dir = tempfile::tempdir().unwrap();
+        let (control, server) = replying_daemon(dir.path(), reply);
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<DaemonCommand>();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        tokio::spawn(daemon_background_loop(control, cmd_rx, out_tx));
+        cmd_tx.send(cmd).unwrap();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("an outcome was reported")
+            .expect("the loop is alive");
+        let _ = server.await;
+        outcome
+    }
+
+    /// Pause and resume ride the same forwarding path as cancel; the daemon's
+    /// refusal is labelled with the verb the user actually pressed.
+    #[tokio::test]
+    async fn daemon_background_loop_forwards_pause_and_resume() {
+        let ok = command_outcome(
+            DaemonCommand::Pause {
+                run_id: "run-1".to_string(),
+            },
+            Some(r#"{"result":"ok","ok":true}"#),
+        )
+        .await;
+        assert!(ok.ok);
+        assert_eq!(ok.run_id, "run-1");
+
+        let refused = command_outcome(
+            DaemonCommand::Pause {
+                run_id: "run-1".to_string(),
+            },
+            Some(r#"{"result":"ok","ok":false}"#),
+        )
+        .await;
+        assert!(!refused.ok);
+        assert!(refused.message.contains("no such run to pause"));
+
+        let ok = command_outcome(
+            DaemonCommand::Resume {
+                run_id: "run-1".to_string(),
+            },
+            Some(r#"{"result":"ok","ok":true}"#),
+        )
+        .await;
+        assert!(ok.ok);
+
+        let refused = command_outcome(
+            DaemonCommand::Resume {
+                run_id: "run-1".to_string(),
+            },
+            Some(r#"{"result":"ok","ok":false}"#),
+        )
+        .await;
+        assert!(!refused.ok);
+        assert!(refused.message.contains("no such run to resume"));
     }
 
     /// The loop stops when the dashboard has gone away, rather than spinning on

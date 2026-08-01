@@ -160,6 +160,10 @@ pub(super) struct LogEntry {
 pub(super) enum DaemonCommand {
     /// Cancel a run.
     Cancel { run_id: String },
+    /// Pause a run.
+    Pause { run_id: String },
+    /// Resume a paused run.
+    Resume { run_id: String },
     /// Answer a pending `ask_user` interaction.
     Answer {
         response: interaction::InteractionResponse,
@@ -260,6 +264,7 @@ mod tests {
                 .contains("boom")
         );
         assert!(AgentDisplayStatus::Idle.to_string().contains("IDLE"));
+        assert!(AgentDisplayStatus::Paused.to_string().contains("PAUSED"));
         assert!(AgentDisplayStatus::Cancelled.to_string().contains("CANCEL"));
         assert!(AgentDisplayStatus::Stale.to_string().contains("STALE"));
     }
@@ -279,6 +284,10 @@ mod tests {
         assert_eq!(AgentDisplayStatus::Cancelled.color(), C_DIM);
         // Stale is a warning, not a finished state: it wants attention.
         assert_eq!(AgentDisplayStatus::Stale.color(), C_WARN);
+        // Paused is deliberate unfinished business, not a dim afterthought.
+        assert_eq!(AgentDisplayStatus::Paused.color(), C_WARN);
+        assert!(!AgentDisplayStatus::Paused.is_terminal());
+        assert!(AgentDisplayStatus::Paused.is_killable());
         assert_eq!(AgentDisplayStatus::Waiting.color(), C_WARN);
         assert_eq!(AgentDisplayStatus::CompleteInteractive.color(), C_SUCCESS);
     }

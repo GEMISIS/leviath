@@ -143,6 +143,13 @@ impl Dashboard {
             ]),
             Line::from(vec![
                 Span::styled(
+                    "  p / r    ",
+                    Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("Pause / Resume agent"),
+            ]),
+            Line::from(vec![
+                Span::styled(
                     "  m        ",
                     Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD),
                 ),
@@ -248,6 +255,13 @@ impl Dashboard {
                     Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("Kill agent"),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  p / r    ",
+                    Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("Pause / Resume agent"),
             ]),
             Line::from(vec![
                 Span::styled(
@@ -508,6 +522,7 @@ mod tests {
 
         let rendered = rendered_buffer(&terminal);
         assert!(rendered.contains("Main list"));
+        assert!(rendered.contains("Pause / Resume agent"));
         assert!(!rendered.contains("Detail view"));
         assert!(!rendered.contains("Switch stage tab"));
     }
@@ -527,6 +542,7 @@ mod tests {
         let rendered = rendered_buffer(&terminal);
         assert!(rendered.contains("Detail view"));
         assert!(rendered.contains("Switch stage tab"));
+        assert!(rendered.contains("Pause / Resume agent"));
         assert!(!rendered.contains("Main list"));
         assert!(!rendered.contains("Select agent"));
     }
