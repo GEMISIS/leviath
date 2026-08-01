@@ -118,6 +118,13 @@ regex = "1"
 # `reqwest::Url` IS this crate's `Url`, so the two interoperate directly.
 url = "2.5"
 tiktoken-rs = "0.12"
+# Compiles tool-parameter JSON Schemas and validates model-supplied arguments
+# before dispatch (issue #155). `default-features = false` is deliberate: the
+# default resolve-http/resolve-file features would let a server-supplied MCP
+# schema pull external `$ref`s over the network or filesystem at validation
+# time. Without them an external `$ref` simply fails to compile, and a schema
+# that fails to compile skips validation instead of refusing calls.
+jsonschema = { version = "0.49", default-features = false }
 async-trait = "0.1"
 futures = "0.3"
 sha2 = "0.11"
