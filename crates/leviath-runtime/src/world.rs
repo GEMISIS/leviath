@@ -368,6 +368,11 @@ impl PipelineWorld {
 
     /// Mutable access to the underlying ECS world, for spawning agents (the CLI /
     /// daemon builds each agent's component bundle) and inspection.
+    ///
+    /// This is the unstable layer: it exposes raw `bevy_ecs` (re-exported as
+    /// [`crate::ecs`] so versions stay aligned) and carries no compatibility
+    /// promise across releases. Prefer [`crate::AgentWorld`] or
+    /// [`crate::host::WorldHost`] unless you are building your own assembly.
     pub fn world_mut(&mut self) -> &mut World {
         &mut self.world
     }
