@@ -1942,6 +1942,7 @@ mod tests {
                 callback_url: None,
                 callback_secret: None,
                 title: None,
+                unattended: false,
             },
             crate::persistence::TokenTotals::default(),
             crate::pipeline::PersistWatermark::default(),
