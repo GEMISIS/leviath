@@ -45,7 +45,10 @@ fn status_cell_falls_back_to_the_bare_status() {
     assert_eq!(status_cell(&entry("r", AgentStatus::Idle)), "idle");
     assert_eq!(status_cell(&entry("r", AgentStatus::Paused)), "paused");
     assert_eq!(status_cell(&entry("r", AgentStatus::Complete)), "complete");
-    assert_eq!(status_cell(&entry("r", AgentStatus::Cancelled)), "cancelled");
+    assert_eq!(
+        status_cell(&entry("r", AgentStatus::Cancelled)),
+        "cancelled"
+    );
     assert_eq!(
         status_cell(&entry(
             "r",
@@ -156,7 +159,10 @@ fn format_runs_calls_out_only_the_runs_needing_an_answer() {
         e.wait_reason = Some(reason);
         e
     };
-    let one = format_runs(&[prompt("run-c", WaitReason::TaintGate), healthy.clone()], 0);
+    let one = format_runs(
+        &[prompt("run-c", WaitReason::TaintGate), healthy.clone()],
+        0,
+    );
     assert!(one.ends_with("1 run needs an answer: lev respond"), "{one}");
 
     let two = format_runs(

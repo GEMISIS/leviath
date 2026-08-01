@@ -7789,9 +7789,14 @@ fn last_progress_at_tracks_progress_and_not_the_heartbeat() {
     // Backdate both stamps past the heartbeat window, then dispatch with the
     // agent unchanged: a beat is written, but nothing moved.
     let stale = first - (PERSIST_HEARTBEAT_SECS + 5);
-    world.get_mut::<PersistWatermark>(e).unwrap().backdate(stale);
+    world
+        .get_mut::<PersistWatermark>(e)
+        .unwrap()
+        .backdate(stale);
     run_dispatch_persistence(&mut world);
-    let _ = rx.try_recv().expect("the heartbeat still writes a snapshot");
+    let _ = rx
+        .try_recv()
+        .expect("the heartbeat still writes a snapshot");
     assert_eq!(
         world.get::<PersistWatermark>(e).unwrap().last_progress_at(),
         Some(stale),
