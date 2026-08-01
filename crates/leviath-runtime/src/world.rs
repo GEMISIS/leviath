@@ -1255,7 +1255,6 @@ mod tests {
                 agent_id: "a".to_string(),
                 content: "hello".to_string(),
                 target_region: Some("conversation".to_string()),
-                priority: 0,
             })
             .unwrap();
         world.tick(); // deliver_messages runs
@@ -1314,7 +1313,6 @@ mod tests {
             agent_id: "a".to_string(),
             content: "x".to_string(),
             target_region: None,
-            priority: 0,
         });
         assert!(err.is_err());
     }

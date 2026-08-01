@@ -1102,8 +1102,6 @@ pub struct AgentMessage {
     pub content: String,
     /// Which region to add the message to (default: "conversation")
     pub target_region: Option<String>,
-    /// Priority (higher = processed sooner)
-    pub priority: i32,
 }
 
 /// Inbox component for receiving messages sent to a running agent.
@@ -1121,11 +1119,11 @@ impl MessageInbox {
         }
     }
 
-    /// Add a message to the inbox.
+    /// Add a message to the inbox. Messages deliver in the order they
+    /// arrived; there used to be a priority field here, but no path that
+    /// sends a message ever set it, so FIFO is what always happened.
     pub fn push(&mut self, msg: AgentMessage) {
         self.messages.push(msg);
-        // Sort by priority descending so highest priority is first
-        self.messages.sort_by_key(|m| std::cmp::Reverse(m.priority));
     }
 
     /// Drain all messages from the inbox.
@@ -1344,7 +1342,6 @@ mod tests {
             agent_id: "agent-1".to_string(),
             content: "hello".to_string(),
             target_region: None,
-            priority: 0,
         });
         assert_eq!(inbox.messages.len(), 1);
 
@@ -1354,32 +1351,20 @@ mod tests {
     }
 
     #[test]
-    fn test_message_inbox_priority_ordering() {
+    fn message_inbox_preserves_fifo_order() {
         let mut inbox = MessageInbox::new();
-
-        inbox.push(AgentMessage {
-            agent_id: "a".to_string(),
-            content: "low".to_string(),
-            target_region: None,
-            priority: 1,
-        });
-        inbox.push(AgentMessage {
-            agent_id: "a".to_string(),
-            content: "high".to_string(),
-            target_region: None,
-            priority: 10,
-        });
-        inbox.push(AgentMessage {
-            agent_id: "a".to_string(),
-            content: "medium".to_string(),
-            target_region: None,
-            priority: 5,
-        });
+        for content in ["first", "second", "third"] {
+            inbox.push(AgentMessage {
+                agent_id: "a".to_string(),
+                content: content.to_string(),
+                target_region: None,
+            });
+        }
 
         let msgs = inbox.drain_all();
-        assert_eq!(msgs[0].content, "high");
-        assert_eq!(msgs[1].content, "medium");
-        assert_eq!(msgs[2].content, "low");
+        assert_eq!(msgs[0].content, "first");
+        assert_eq!(msgs[1].content, "second");
+        assert_eq!(msgs[2].content, "third");
     }
 
     #[test]
@@ -1611,7 +1596,6 @@ mod tests {
             agent_id: "a".to_string(),
             content: "msg".to_string(),
             target_region: None,
-            priority: 0,
         });
         let _ = inbox.drain_all();
         assert!(inbox.messages.is_empty());
@@ -1626,13 +1610,11 @@ mod tests {
             agent_id: "agent-1".to_string(),
             content: "hello".to_string(),
             target_region: Some("conv".to_string()),
-            priority: 5,
         };
         let cloned = msg.clone();
         assert_eq!(cloned.agent_id, "agent-1");
         assert_eq!(cloned.content, "hello");
         assert_eq!(cloned.target_region, Some("conv".to_string()));
-        assert_eq!(cloned.priority, 5);
     }
 
     #[test]

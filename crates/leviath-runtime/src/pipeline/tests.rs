@@ -3909,7 +3909,6 @@ fn msg(agent_id: &str, content: &str, region: Option<&str>) -> AgentMessage {
         agent_id: agent_id.to_string(),
         content: content.to_string(),
         target_region: region.map(String::from),
-        priority: 0,
     }
 }
 
