@@ -1159,7 +1159,7 @@ fn dispatch_persistence_persists_taint_audit_when_the_gate_has_events() {
     let (mut world, mut prx) = world_with_persistence();
     let (jtx, _jrx) = mpsc::unbounded_channel();
     world.insert_resource(ToolServiceRes(std::sync::Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     world.spawn((
         run_metadata(),
         agent_state(),
@@ -2230,7 +2230,7 @@ async fn dispatch_tools_enqueues_runnable_job_and_advances() {
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     let e = world
         .spawn((
             agent_state(),
@@ -2305,7 +2305,7 @@ async fn dispatch_journals_the_batch_then_each_completion() {
     let (ptx, mut prx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(ReportingService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     world.insert_resource(PersistenceStage(ptx));
     // A batch mixing an inline-resolved call (a context tool) and a lane call.
     let e = world
@@ -2384,7 +2384,7 @@ async fn dispatch_all_inline_batch_is_not_journaled() {
     let (ptx, mut prx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     world.insert_resource(PersistenceStage(ptx));
     let e = world
         .spawn((
@@ -2412,7 +2412,7 @@ async fn dispatch_without_run_metadata_is_unjournaled() {
     let (ptx, mut prx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(ReportingService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     world.insert_resource(PersistenceStage(ptx));
     world.spawn((
         agent_state(),
@@ -2440,7 +2440,7 @@ async fn gate_held_batch_is_not_journaled_until_it_dispatches() {
     let (ptx, mut prx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     world.insert_resource(PersistenceStage(ptx));
     world.insert_resource(crate::interaction_hub::InteractionHub::new());
     world.insert_resource(crate::gate_prompt::GatePromptStage {
@@ -2505,7 +2505,7 @@ async fn dispatch_tools_skips_non_active_agent() {
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     let mut st = agent_state();
     st.status = AgentStatus::Cancelled;
     let e = world
@@ -2581,7 +2581,7 @@ async fn dispatch_tools_applies_all_context_inline() {
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     let e = world
         .spawn((
             agent_state(),
@@ -2638,7 +2638,7 @@ async fn dispatch_tools_refuses_a_tool_the_stage_never_offered() {
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     let (_, result) = infer_with(vec![tc("c1", "write_file"), tc("c2", "read_file")]);
     let e = world
         .spawn((
@@ -2681,7 +2681,7 @@ async fn dispatch_tools_tells_a_toolless_stage_to_answer_directly() {
     let (jtx, _jrx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     let (_, result) = infer_with(vec![tc("c1", "read_file")]);
     let e = world
         .spawn((
@@ -2713,7 +2713,7 @@ async fn dispatch_tools_matches_an_offered_tool_through_its_alias() {
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     let canonical = leviath_tools::canonical_tool_name("bash");
     assert_ne!(
         canonical, "bash",
@@ -2749,7 +2749,7 @@ async fn dispatch_tools_honours_the_stage_tool_filter() {
     let (jtx, _jrx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     let mut offers = offering(&["read_file", "write_file"]);
     offers.tool_filter = Some(vec!["read_file".to_string()]);
     let (_, result) = infer_with(vec![tc("c1", "write_file")]);
@@ -2772,7 +2772,7 @@ async fn dispatch_tools_treats_an_empty_tool_filter_as_no_narrowing() {
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     let mut offers = offering(&["read_file"]);
     offers.tool_filter = Some(vec![]);
     let (_, result) = infer_with(vec![tc("c1", "read_file")]);
@@ -2799,7 +2799,7 @@ async fn dispatch_tools_refuses_an_unoffered_context_tool() {
     let (jtx, _jrx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     let (_, result) = infer_with(vec![ctx_call("c1", "notes", "smuggled")]);
     let e = world
         .spawn((
@@ -2827,7 +2827,7 @@ async fn dispatch_tools_partitions_context_and_lane() {
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     let e = world
         .spawn((
             agent_state(),
@@ -2887,7 +2887,7 @@ async fn dispatch_tools_refuses_arguments_that_fail_the_advertised_schema() {
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     let result = crate::components::InferenceResult {
         response: "r".to_string(),
         tool_calls: vec![
@@ -2934,7 +2934,7 @@ async fn dispatch_tools_skips_validation_when_the_schema_does_not_compile() {
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     let result = crate::components::InferenceResult {
         response: "r".to_string(),
         tool_calls: vec![fcall("c1", "typod", serde_json::json!({"whatever": true}))],
@@ -2969,7 +2969,7 @@ async fn dispatch_tools_validates_through_a_tool_alias() {
     let (jtx, _jrx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     let canonical = leviath_tools::canonical_tool_name("bash");
     assert_ne!(
         canonical, "bash",
@@ -3012,7 +3012,7 @@ async fn dispatch_tools_validates_an_mcp_style_schema() {
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     let schema = serde_json::json!({
         "type": "object",
         "properties": {
@@ -3115,7 +3115,7 @@ async fn dispatch_tools_gate_blocks_outbound_leak_but_allows_inbound() {
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     // `shell` is outbound (clearance Public) over Internal data ⇒ blocked;
     // `read_file` is inbound ⇒ always allowed ⇒ goes to the lane.
     let e = world
@@ -3149,7 +3149,7 @@ async fn dispatch_tools_holds_batch_for_an_interactive_gate_prompt() {
     let (gtx, _grx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(std::sync::Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     world.insert_resource(crate::interaction_hub::InteractionHub::new());
     world.insert_resource(crate::gate_prompt::GatePromptStage {
         outcomes: gtx,
@@ -3190,7 +3190,7 @@ async fn dispatch_tools_auto_approves_a_gate_block_under_yolo() {
     let (gtx, _grx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(std::sync::Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     world.insert_resource(crate::interaction_hub::InteractionHub::new());
     world.insert_resource(crate::gate_prompt::GatePromptStage {
         outcomes: gtx,
@@ -3243,7 +3243,7 @@ async fn dispatch_tools_executes_a_gate_approved_call_and_blocks_a_denied_one() 
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(std::sync::Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     let mut resolved = crate::gate_prompt::GateResolved::default();
     resolved.approved.insert("c_ok".to_string());
     resolved
@@ -3288,7 +3288,7 @@ async fn dispatch_tools_falls_through_for_a_resolved_agents_unprompted_call() {
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     let e = world
         .spawn((
             agent_state(),
@@ -3314,7 +3314,7 @@ async fn dispatch_tools_gate_allows_outbound_via_allowlist() {
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     // An allowlist rule permits `shell` up to Internal sensitivity.
     world.insert_resource(PolicyGate(leviath_core::PolicyConfig {
         allowlist: vec![leviath_core::policy::AllowlistRule {
@@ -3349,7 +3349,7 @@ async fn dispatch_tools_gate_allows_outbound_via_scripted_rule() {
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
-    world.insert_resource(ToolStage(jtx));
+    world.insert_resource(ToolStage::detached(jtx));
     // No static allowlist, but a scripted rule that permits `shell`.
     let checker: std::sync::Arc<crate::taint::ScriptRuleChecker> =
         std::sync::Arc::new(|tool: &str, _target: Option<&str>, _taint| {

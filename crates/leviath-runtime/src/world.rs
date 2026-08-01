@@ -87,6 +87,71 @@ pub enum TickOutcome {
     Unattributed,
 }
 
+/// How many agents are in each status. See [`PipelineWorld::lane_snapshot`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct AgentCounts {
+    /// Doing work, or ready to.
+    pub active: usize,
+    /// Blocked on input, a child, or a prompt.
+    pub waiting: usize,
+    /// Parked by the user.
+    pub paused: usize,
+    /// Spawned but not yet started.
+    pub idle: usize,
+    /// Finished, still loaded pending reaping.
+    pub terminal: usize,
+}
+
+impl std::fmt::Display for AgentCounts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "active={} waiting={} paused={} idle={} terminal={}",
+            self.active, self.waiting, self.paused, self.idle, self.terminal
+        )
+    }
+}
+
+/// What the world is holding and what it is waiting on, at one instant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneSnapshot {
+    /// Loaded agents by status.
+    pub agents: AgentCounts,
+    /// Inference-pool occupancy, one entry per model actually used.
+    pub inference: Vec<crate::inference_pool::PoolOccupancy>,
+    /// Tool-lane workers currently running a batch.
+    pub tools_busy: usize,
+    /// Tool batches waiting for a free worker.
+    pub tools_queued: usize,
+    /// The tool lane's worker count.
+    pub tools_workers: usize,
+    /// Every worker busy with batches still queued behind them.
+    pub tools_saturated: bool,
+}
+
+impl LaneSnapshot {
+    /// Whether some lane is at capacity with work queued behind it - the shape
+    /// worth raising the log level for.
+    #[must_use]
+    pub fn is_under_pressure(&self) -> bool {
+        self.tools_saturated
+            || (self.agents.active > 0 && self.inference.iter().any(|p| p.is_full()))
+    }
+
+    /// The per-model inference occupancy, rendered for a log line.
+    #[must_use]
+    pub fn inference_summary(&self) -> String {
+        if self.inference.is_empty() {
+            return "none".to_string();
+        }
+        self.inference
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
 /// The shared ECS world that hosts and drives every agent.
 pub struct PipelineWorld {
     world: World,
@@ -137,12 +202,14 @@ impl PipelineWorld {
         let (cs_tx, cs_rx) = unbounded_channel();
         let (title_tx, title_rx) = unbounded_channel();
 
+        let tool_stats = Arc::new(crate::tool_bridge::ToolLaneStats::new(tool_concurrency));
         let tool_tasks = spawn_tool_pool(
             &runtime,
             tool_job_rx,
             tool_res_tx,
             wake.clone(),
             tool_concurrency,
+            tool_stats.clone(),
         );
         // Retained so `flush_and_stop` can drain it on shutdown. Left to its own
         // devices otherwise: it exits when the world (and thus its PersistenceStage
@@ -154,7 +221,10 @@ impl PipelineWorld {
         let mut world = World::new();
         world.insert_resource(Providers(providers));
         world.insert_resource(InferenceStage {
-            pools: Arc::new(InferencePools::new(pool_config)),
+            // The wake goes into the pools, not just the bridges: freeing a slot
+            // has to re-drive dispatch, or the agents parked on a full pool never
+            // learn that capacity came back (issue #189).
+            pools: Arc::new(InferencePools::new(pool_config).with_wake(wake.clone())),
             outcomes: inf_tx,
             transition_outcomes: trans_tx,
             compaction_outcomes: compact_tx,
@@ -182,7 +252,7 @@ impl PipelineWorld {
         world.insert_resource(TransitionResults(trans_rx));
         world.insert_resource(CompactionResults(compact_rx));
         world.insert_resource(ToolServiceRes(tool_service));
-        world.insert_resource(ToolStage(tool_job_tx));
+        world.insert_resource(ToolStage::new(tool_job_tx, tool_stats));
         world.insert_resource(ToolResults(tool_res_rx));
         world.insert_resource(PersistenceStage(persist_tx));
         world.insert_resource(MessageIntake(msg_rx));
@@ -415,6 +485,42 @@ impl PipelineWorld {
             .resource::<crate::telemetry::Telemetry>()
             .0
             .force_flush();
+    }
+
+    /// A point-in-time read of what the world is holding and what it is waiting
+    /// on: agents by status, per-model inference-pool occupancy, and tool-lane
+    /// occupancy.
+    ///
+    /// This is the answer to "the daemon has been quiet for hours - is anything
+    /// actually running?", which issue #189 had no way to ask.
+    pub fn lane_snapshot(&self) -> LaneSnapshot {
+        let mut agents = AgentCounts::default();
+        for state in self
+            .world
+            .iter_entities()
+            .filter_map(|e| e.get::<AgentState>())
+        {
+            match state.status {
+                AgentStatus::Active => agents.active += 1,
+                AgentStatus::Waiting => agents.waiting += 1,
+                AgentStatus::Paused => agents.paused += 1,
+                AgentStatus::Idle => agents.idle += 1,
+                // Terminal agents linger until the reaper unloads them; counting
+                // them apart keeps "nothing is running" honest.
+                AgentStatus::Complete | AgentStatus::Error { .. } | AgentStatus::Cancelled => {
+                    agents.terminal += 1
+                }
+            }
+        }
+        let tools = self.world.resource::<ToolStage>().stats.clone();
+        LaneSnapshot {
+            agents,
+            inference: self.world.resource::<InferenceStage>().pools.occupancy(),
+            tools_busy: tools.busy(),
+            tools_queued: tools.queued(),
+            tools_workers: tools.workers(),
+            tools_saturated: tools.is_saturated(),
+        }
     }
 
     /// The status of an agent, if it still exists.

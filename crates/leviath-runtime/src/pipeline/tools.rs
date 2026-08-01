@@ -77,9 +77,31 @@ pub trait ToolService: Send + Sync {
 #[derive(Resource, Clone)]
 pub struct ToolServiceRes(pub Arc<dyn ToolService>);
 
-/// The job sender feeding the tool lane, as a world resource.
+/// The job sender feeding the tool lane, as a world resource, paired with the
+/// lane's occupancy counters so dispatch can record what it queued.
 #[derive(Resource, Clone)]
-pub struct ToolStage(pub UnboundedSender<ToolJob>);
+pub struct ToolStage {
+    /// Where batches are handed to the lane.
+    pub jobs: UnboundedSender<ToolJob>,
+    /// Shared with the lane's workers; see [`crate::tool_bridge::ToolLaneStats`].
+    pub stats: Arc<crate::tool_bridge::ToolLaneStats>,
+}
+
+impl ToolStage {
+    /// A stage wired to a real lane's counters.
+    pub fn new(
+        jobs: UnboundedSender<ToolJob>,
+        stats: Arc<crate::tool_bridge::ToolLaneStats>,
+    ) -> Self {
+        Self { jobs, stats }
+    }
+
+    /// A stage with counters of its own, for callers that drive `dispatch_tools`
+    /// without a lane behind it (tests read the channel directly).
+    pub fn detached(jobs: UnboundedSender<ToolJob>) -> Self {
+        Self::new(jobs, Arc::new(crate::tool_bridge::ToolLaneStats::new(1)))
+    }
+}
 
 /// Context-tool results computed inline by [`dispatch_tools`] (the `context_*`
 /// tools mutate the ECS window, so they can't run on the async lane), held until
@@ -546,7 +568,8 @@ pub fn dispatch_tools(
         let cancel = crate::cancel::CancelToken::new();
         // The lane worker is alive for the world's lifetime; a failed send would
         // only happen during shutdown, where dropping the job is fine.
-        let _ = stage.0.send(ToolJob {
+        stage.stats.enqueued();
+        let _ = stage.jobs.send(ToolJob {
             entity,
             exec,
             cancel: cancel.clone(),

@@ -65,6 +65,83 @@ pub struct ToolOutcome {
 /// same channel by taking the lock only long enough to `recv()`.
 pub type SharedJobRx = Arc<Mutex<UnboundedReceiver<ToolJob>>>;
 
+/// Live occupancy of the tool lane.
+///
+/// The lane is a fixed number of workers reading one **unbounded** queue, so
+/// dispatch never blocks and a saturated lane is invisible from the outside: the
+/// batches just pile up. Several things a batch can await have no time bound at
+/// all (a tool-approval prompt, an `ask_user`, a `wait_for_agent` poll), so
+/// enough of them stall every other agent's tools. Counting what is queued and
+/// what is running is what makes that legible instead of guesswork.
+#[derive(Debug)]
+pub struct ToolLaneStats {
+    queued: std::sync::atomic::AtomicUsize,
+    busy: std::sync::atomic::AtomicUsize,
+    workers: usize,
+}
+
+impl ToolLaneStats {
+    /// Stats for a lane of `workers` workers.
+    pub fn new(workers: usize) -> Self {
+        Self {
+            queued: std::sync::atomic::AtomicUsize::new(0),
+            busy: std::sync::atomic::AtomicUsize::new(0),
+            workers: workers.max(1),
+        }
+    }
+
+    /// Record a batch handed to the lane.
+    pub fn enqueued(&self) {
+        self.queued
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Record a worker picking a batch up: it leaves the queue and occupies a
+    /// worker.
+    fn started(&self) {
+        self.queued
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        self.busy.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Record a worker finishing a batch, however it ended.
+    fn finished(&self) {
+        self.busy.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Batches waiting for a free worker.
+    pub fn queued(&self) -> usize {
+        self.queued.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Workers currently running a batch.
+    pub fn busy(&self) -> usize {
+        self.busy.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The lane's worker count - its concurrency cap.
+    pub fn workers(&self) -> usize {
+        self.workers
+    }
+
+    /// Whether every worker is occupied and batches are waiting behind them.
+    #[must_use]
+    pub fn is_saturated(&self) -> bool {
+        self.busy() >= self.workers && self.queued() > 0
+    }
+}
+
+/// Marks a worker as busy for as long as it is held, so the count is restored on
+/// **every** exit - including the cancel path, which leaves the batch by way of
+/// `continue` rather than falling out the bottom.
+struct BusyGuard<'a>(&'a ToolLaneStats);
+
+impl Drop for BusyGuard<'_> {
+    fn drop(&mut self) {
+        self.0.finished();
+    }
+}
+
 /// One tool worker: pulls [`ToolJob`]s from the shared channel and runs them,
 /// reporting each outcome and waking the tick loop. Holds the receiver lock only
 /// across `recv()` (so sibling workers can run their `exec().await` in parallel),
@@ -74,6 +151,7 @@ pub async fn tool_worker(
     jobs: SharedJobRx,
     results: UnboundedSender<ToolOutcome>,
     wake: Arc<Notify>,
+    stats: Arc<ToolLaneStats>,
 ) {
     loop {
         // Serialize only the receive; drop the guard before executing.
@@ -89,6 +167,8 @@ pub async fn tool_worker(
         else {
             return; // channel closed → shut down
         };
+        stats.started();
+        let _busy = BusyGuard(&stats); // released on every path out, cancel included
         // A cancelled agent's batch is dropped rather than run to completion.
         // This is what returns the worker to the pool: several of the things a
         // batch can await are unbounded (a tool-approval prompt, an `ask_user`,
@@ -120,10 +200,18 @@ pub fn spawn_tool_pool(
     results: UnboundedSender<ToolOutcome>,
     wake: Arc<Notify>,
     workers: usize,
+    stats: Arc<ToolLaneStats>,
 ) -> Vec<JoinHandle<()>> {
     let shared: SharedJobRx = Arc::new(Mutex::new(jobs));
     (0..workers.max(1))
-        .map(|_| runtime.spawn(tool_worker(shared.clone(), results.clone(), wake.clone())))
+        .map(|_| {
+            runtime.spawn(tool_worker(
+                shared.clone(),
+                results.clone(),
+                wake.clone(),
+                stats.clone(),
+            ))
+        })
         .collect()
 }
 
@@ -200,7 +288,14 @@ mod tests {
         .unwrap();
         drop(jtx);
 
-        let handles = spawn_tool_pool(&Handle::current(), jrx, rtx, wake, 1);
+        let handles = spawn_tool_pool(
+            &Handle::current(),
+            jrx,
+            rtx,
+            wake,
+            1,
+            Arc::new(ToolLaneStats::new(1)),
+        );
         tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
             .await
             .expect("the batch started");
@@ -230,7 +325,7 @@ mod tests {
         jtx.send(job(2, vec![("c2", "r2")])).unwrap();
         drop(jtx); // close the job channel so the worker loop ends
 
-        tool_worker(shared(jrx), rtx, wake).await;
+        tool_worker(shared(jrx), rtx, wake, Arc::new(ToolLaneStats::new(1))).await;
 
         let first = rrx.try_recv().unwrap();
         assert_eq!(
@@ -274,7 +369,14 @@ mod tests {
         jtx.send(job(2, vec![("c2", "r2")])).unwrap();
         drop(jtx);
 
-        let handles = spawn_tool_pool(&Handle::current(), jrx, rtx, wake, 1);
+        let handles = spawn_tool_pool(
+            &Handle::current(),
+            jrx,
+            rtx,
+            wake,
+            1,
+            Arc::new(ToolLaneStats::new(1)),
+        );
         // Wait until the stuck batch is actually executing, then cancel it.
         tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
             .await
@@ -310,7 +412,7 @@ mod tests {
         jtx.send(job(9, vec![("c", "r")])).unwrap();
         drop(jtx);
         // Must drain the job and not panic despite the failed send.
-        tool_worker(shared(jrx), rtx, wake).await;
+        tool_worker(shared(jrx), rtx, wake, Arc::new(ToolLaneStats::new(1))).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
@@ -350,7 +452,14 @@ mod tests {
         }
         drop(jtx);
 
-        let handles = spawn_tool_pool(&Handle::current(), jrx, rtx, wake, 3);
+        let handles = spawn_tool_pool(
+            &Handle::current(),
+            jrx,
+            rtx,
+            wake,
+            3,
+            Arc::new(ToolLaneStats::new(3)),
+        );
         // All three outcomes must arrive; bounded so a serialization bug fails fast.
         for _ in 0..3 {
             tokio::time::timeout(Duration::from_secs(5), rrx.recv())
@@ -370,7 +479,14 @@ mod tests {
         let wake = Arc::new(Notify::new());
         jtx.send(job(7, vec![("c", "r")])).unwrap();
         drop(jtx);
-        let handles = spawn_tool_pool(&Handle::current(), jrx, rtx, wake, 0);
+        let handles = spawn_tool_pool(
+            &Handle::current(),
+            jrx,
+            rtx,
+            wake,
+            0,
+            Arc::new(ToolLaneStats::new(0)),
+        );
         assert_eq!(handles.len(), 1); // clamped up to one worker
         let out = rrx.recv().await.unwrap();
         assert_eq!(
@@ -380,5 +496,79 @@ mod tests {
         for h in handles {
             h.await.unwrap();
         }
+    }
+
+    /// A lane with no workers is still reported as having one, matching
+    /// `spawn_tool_pool`'s own clamp - otherwise the saturation check compares
+    /// against a lane width that never existed.
+    #[test]
+    fn lane_stats_clamp_the_worker_count_to_one() {
+        assert_eq!(ToolLaneStats::new(0).workers(), 1);
+    }
+
+    #[test]
+    fn lane_stats_track_queue_depth_and_saturation() {
+        let stats = ToolLaneStats::new(2);
+        assert_eq!((stats.queued(), stats.busy()), (0, 0));
+        assert!(!stats.is_saturated(), "an idle lane is not saturated");
+
+        stats.enqueued();
+        stats.enqueued();
+        stats.enqueued();
+        assert_eq!(stats.queued(), 3);
+        // Both workers pick a batch up: two leave the queue, two become busy.
+        stats.started();
+        stats.started();
+        assert_eq!((stats.queued(), stats.busy()), (1, 2));
+        assert!(
+            stats.is_saturated(),
+            "every worker busy with a batch still queued behind them"
+        );
+
+        stats.finished();
+        assert!(
+            !stats.is_saturated(),
+            "a free worker means the queue is draining"
+        );
+    }
+
+    /// The counters have to come back on **every** exit. The cancel path leaves
+    /// via `continue`, which is exactly the shape that skips a decrement written
+    /// at the bottom of the loop body - so a cancelled batch would permanently
+    /// consume one of the lane's fixed workers, as far as the numbers knew.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancelled_batch_gives_its_worker_back_to_the_count() {
+        let (jtx, jrx) = mpsc::unbounded_channel();
+        let (rtx, mut rrx) = mpsc::unbounded_channel();
+        let wake = Arc::new(Notify::new());
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let cancel = crate::cancel::CancelToken::new();
+        let stats = Arc::new(ToolLaneStats::new(1));
+
+        stats.enqueued();
+        jtx.send(held_job(7, started.clone(), release, cancel.clone()))
+            .unwrap();
+        drop(jtx);
+
+        let handles = spawn_tool_pool(&Handle::current(), jrx, rtx, wake, 1, stats.clone());
+        tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+            .await
+            .expect("the batch started");
+        assert_eq!(
+            (stats.queued(), stats.busy()),
+            (0, 1),
+            "running: off the queue, on a worker"
+        );
+
+        cancel.cancel();
+        for h in handles {
+            tokio::time::timeout(std::time::Duration::from_secs(5), h)
+                .await
+                .expect("the worker was freed by the cancel")
+                .unwrap();
+        }
+        assert_eq!(stats.busy(), 0, "the cancelled batch released its worker");
+        assert!(rrx.try_recv().is_err(), "and reported no results");
     }
 }

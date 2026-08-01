@@ -15,6 +15,7 @@
 //! resume, a delivered message) is applied immediately.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use bevy_ecs::entity::Entity;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -454,7 +455,23 @@ pub struct WorldHost {
     /// clone so the receiver never closes (its `recv` never yields `None`).
     subagent_tx: UnboundedSender<SubAgentOp>,
     subagent_rx: UnboundedReceiver<SubAgentOp>,
+    /// How often [`Self::serve`] re-drives the world even though nothing woke
+    /// it. See [`Self::set_redrive_interval`].
+    redrive: Duration,
 }
+
+/// How often the serve loop re-drives the world on its own.
+///
+/// The loop is event-driven, so a missed wake anywhere parks it indefinitely -
+/// the daemon looks alive while nothing progresses, which is what issue #189
+/// reported as hours of frozen agents. This bounds any such wedge to one
+/// interval instead of "until something unrelated happens", and gives the lane
+/// heartbeat a place to run.
+///
+/// Deliberately not configurable: it is a correctness backstop, not a tuning
+/// knob. A no-op re-drive is one tick over a handful of systems plus an event
+/// diff, so at this cadence it costs nothing measurable.
+const DEFAULT_REDRIVE_INTERVAL: Duration = Duration::from_secs(30);
 
 impl WorldHost {
     /// Wrap a world with a fresh interaction hub.
@@ -486,7 +503,49 @@ impl WorldHost {
             emitted_interactions: HashSet::new(),
             subagent_tx,
             subagent_rx,
+            redrive: DEFAULT_REDRIVE_INTERVAL,
         }
+    }
+
+    /// Report what the lanes are holding, once per safety re-drive.
+    ///
+    /// The daemon otherwise logs nothing per tick, by design - observation goes
+    /// through the telemetry sink. But a wedged daemon emits no telemetry either,
+    /// precisely because nothing is happening, so "frozen for hours" left no
+    /// trace at all (issue #189). This is the one periodic line that can answer
+    /// "is anything running, and what is it queued behind?".
+    ///
+    /// Quiet by default: `info` only when a lane is at capacity with work behind
+    /// it, `debug` otherwise, so an idle daemon says nothing at `info`.
+    fn log_lane_pressure(&self) {
+        let snap = self.world.lane_snapshot();
+        if snap.is_under_pressure() {
+            tracing::info!(
+                agents = %snap.agents,
+                inference = %snap.inference_summary(),
+                tools_busy = snap.tools_busy,
+                tools_workers = snap.tools_workers,
+                tools_queued = snap.tools_queued,
+                "lane heartbeat: at capacity with work queued"
+            );
+        } else {
+            tracing::debug!(
+                agents = %snap.agents,
+                inference = %snap.inference_summary(),
+                tools_busy = snap.tools_busy,
+                tools_workers = snap.tools_workers,
+                tools_queued = snap.tools_queued,
+                "lane heartbeat"
+            );
+        }
+    }
+
+    /// Override how often [`Self::serve`] re-drives the world with no wake.
+    ///
+    /// Exists so tests don't have to wait out the 30-second default; the daemon
+    /// uses it as-is.
+    pub fn set_redrive_interval(&mut self, every: Duration) {
+        self.redrive = every;
     }
 
     /// A sender for [`SubAgentOp`]s. The daemon hands a clone to each agent's tool
@@ -1214,12 +1273,24 @@ impl WorldHost {
     pub async fn serve(&mut self, mut control_rx: UnboundedReceiver<ControlOp>) {
         let wake = self.world.wake_handle();
         let shutdown = self.world.shutdown_handle();
+        // `interval_at` rather than `interval`: the latter's first tick is
+        // immediately ready, which would spin one pointless pass at startup.
+        // `Delay` keeps a slow drive from queueing a burst of catch-up ticks.
+        let mut redrive =
+            tokio::time::interval_at(tokio::time::Instant::now() + self.redrive, self.redrive);
+        redrive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         'serve: loop {
             self.world.run_to_fixed_point();
             self.emit_events();
             tokio::select! {
                 _ = wake.notified() => {}
                 _ = shutdown.notified() => break 'serve,
+                // The backstop. Everything else here is edge-triggered, so a
+                // release or completion that forgets to wake us would otherwise
+                // park the daemon indefinitely with work left to do. Re-driving
+                // on a timer bounds that to one interval, and is where the lane
+                // heartbeat reports what the loop is actually waiting on.
+                _ = redrive.tick() => self.log_lane_pressure(),
                 op = control_rx.recv() => {
                     match op {
                         // Await the spawn preprocessor (e.g. lazy MCP connect) before
@@ -1462,6 +1533,291 @@ mod tests {
         let (tx, rx) = oneshot::channel();
         host.handle(make(tx));
         rx.await.unwrap()
+    }
+
+    /// A provider whose call never returns while `hang` is set - the stalled
+    /// request that holds its pool permit until something cancels the job.
+    ///
+    /// The non-hanging arm is not decoration: a body that only ever diverges has
+    /// no reachable return, so the answering path is what keeps this honest (and
+    /// measurable) - the same shape `inference_bridge`'s `Scripted` uses.
+    struct Hangs {
+        hang: bool,
+    }
+    #[async_trait::async_trait]
+    impl Provider for Hangs {
+        async fn infer(
+            &self,
+            _req: InferenceRequest,
+        ) -> leviath_providers::Result<InferenceResponse> {
+            if self.hang {
+                std::future::pending().await
+            } else {
+                Err(ProviderError::Other("not hanging".to_string()))
+            }
+        }
+        async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+            1
+        }
+        fn max_context_tokens(&self, _m: &str) -> usize {
+            100_000
+        }
+        fn name(&self) -> &str {
+            "hangs"
+        }
+        fn capabilities(&self, _m: &str) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+    }
+
+    /// The stalling provider's own surface. `infer` never returns by design, so
+    /// it is reached under a timeout; the rest are plain accessors the dispatch
+    /// path reads.
+    #[tokio::test]
+    async fn the_hanging_provider_answers_everything_except_a_hanging_infer() {
+        fn request() -> InferenceRequest {
+            InferenceRequest {
+                system: vec![],
+                messages: vec![],
+                model: "m".to_string(),
+                max_tokens: 1,
+                temperature: 0.0,
+                tools: vec![],
+                extra: serde_json::Value::Null,
+                request_timeout_secs: None,
+            }
+        }
+        let p = Hangs { hang: true };
+        assert_eq!(p.name(), "hangs");
+        assert_eq!(p.count_tokens("t", "m").await, 1);
+        assert_eq!(p.max_context_tokens("m"), 100_000);
+        let _ = p.capabilities("m");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), p.infer(request()))
+                .await
+                .is_err(),
+            "hanging: the whole point is that the call never lands"
+        );
+        // ...and the answering arm, so the call has a reachable way out.
+        assert!(Hangs { hang: false }.infer(request()).await.is_err());
+    }
+
+    /// A host whose only provider hangs, with model `m` capped at `limit`
+    /// concurrent inferences - so the second agent to want a slot is starved
+    /// until the first one gives its permit back.
+    fn host_with_full_pool(limit: usize) -> WorldHost {
+        let mut registry = crate::providers::ProviderRegistry::new();
+        registry.register("script".to_string(), Arc::new(Hangs { hang: true }));
+        let mut pools = InferencePoolConfig::new();
+        pools.set_limit("m", limit);
+        WorldHost::new(PipelineWorld::new(
+            registry,
+            Arc::new(NoTools),
+            pools,
+            1,
+            std::env::temp_dir(),
+            Handle::current(),
+        ))
+    }
+
+    /// How long [`serve_until_inferring`] waits at each park before calling the loop
+    /// wedged. A wake that is coming lands as soon as the freeing task is
+    /// polled, so this is only ever spent proving the *absence* of one.
+    const PARK: std::time::Duration = std::time::Duration::from_millis(250);
+
+    /// Drive `host` exactly the way [`WorldHost::serve`] does - run the world to
+    /// quiescence, then park until something wakes it - and report whether
+    /// `entity` got dispatched within `rounds` parks. `false` means the loop
+    /// parked with nothing left to wake it, which is the daemon wedging.
+    ///
+    /// Takes the entity rather than a predicate closure on purpose: a generic
+    /// parameter would give each call site its own instantiation, and no single
+    /// one of them exercises both the "it happened" and "we wedged" exits.
+    async fn serve_until_inferring(
+        host: &mut WorldHost,
+        rounds: usize,
+        park: std::time::Duration,
+        entity: Entity,
+    ) -> bool {
+        let wake = host.world_mut().wake_handle();
+        for _ in 0..rounds {
+            host.world_mut().run_to_fixed_point();
+            if is_inferring(host, entity) {
+                return true;
+            }
+            if tokio::time::timeout(park, wake.notified()).await.is_err() {
+                break; // parked with no wake pending - nothing will re-drive us
+            }
+        }
+        false
+    }
+
+    /// Whether `entity` has been handed a pool permit and dispatched.
+    fn is_inferring(host: &mut WorldHost, entity: Entity) -> bool {
+        host.world_mut()
+            .world()
+            .get::<crate::pipeline::AwaitingInference>(entity)
+            .is_some()
+    }
+
+    /// Regression for #189 ("slots=0 for hours, in_progress frozen").
+    ///
+    /// Releasing an inference permit has to wake the tick loop, because
+    /// `dispatch_inference` leaves a slot-starved agent `ReadyToInfer` to be
+    /// "retried on a later tick" - and the loop is event-driven, so a later tick
+    /// only happens when something wakes it. A cancelled job frees its permit
+    /// from a detached task, *after* the tick chain has already run to
+    /// quiescence over the cancel. If that release is silent, the freed slot is
+    /// invisible: capacity sits idle while every agent queued behind it stays
+    /// parked, for as long as it takes some unrelated event to wake the loop.
+    #[tokio::test]
+    async fn releasing_a_cancelled_runs_permit_wakes_the_starved_agent_behind_it() {
+        let mut host = host_with_full_pool(1);
+
+        // Dispatch the holder first and on its own, so which agent wins the
+        // single permit is decided here rather than by the parallel dispatch.
+        let holder = spawn(&mut host, "run-a", "agent-a");
+        host.world_mut().run_to_fixed_point();
+        assert!(is_inferring(&mut host, holder), "the holder takes the slot");
+
+        let starved = spawn(&mut host, "run-b", "agent-b");
+        host.world_mut().run_to_fixed_point();
+        assert!(
+            !is_inferring(&mut host, starved),
+            "the second agent is starved on the full pool"
+        );
+        // And it stays starved for as long as the slot is genuinely held - the
+        // cap is real, not an artifact of the wake. Several rounds, because the
+        // first park consumes the wake the spawn itself stored; the loop has to
+        // reach a park with nothing pending before "wedged" means anything.
+        assert!(
+            !serve_until_inferring(&mut host, 3, PARK, starved).await,
+            "no slot, no dispatch"
+        );
+
+        // Cancel the holder the way `lev cancel` does. The tick chain aborts its
+        // in-flight work; the permit itself comes back later, on the job's task.
+        assert!(
+            ask(&mut host, |reply| ControlOp::Cancel {
+                run_id: "run-a".to_string(),
+                reply,
+            })
+            .await
+        );
+
+        assert!(
+            serve_until_inferring(&mut host, 8, PARK, starved).await,
+            "the freed slot must wake the loop so the starved agent can take it; \
+             without that wake the daemon parks with capacity it cannot see"
+        );
+    }
+
+    /// The backstop, on its own terms: `serve` must make progress from a timer
+    /// alone, with nothing ever waking it. Whatever else goes silent - a release
+    /// that forgets to notify, a lane that reports nothing - the daemon still
+    /// re-examines the world instead of parking indefinitely.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn serve_redrives_the_world_on_its_own_timer_with_no_wake() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Counts ticks from inside the schedule, so the assertion is about the
+        // loop actually running - not about some state that a single startup
+        // pass could equally have produced.
+        static TICKS: AtomicUsize = AtomicUsize::new(0);
+        TICKS.store(0, Ordering::SeqCst);
+        fn count_ticks() {
+            TICKS.fetch_add(1, Ordering::SeqCst);
+        }
+
+        let mut host = host_with(vec![]);
+        host.world_mut().add_test_system(count_ticks);
+        host.set_redrive_interval(std::time::Duration::from_millis(20));
+        let shutdown = host.world_mut().shutdown_handle();
+
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(async move {
+            host.serve(op_rx).await;
+        });
+
+        // Nothing is ever sent on `op_tx`, nothing is spawned, and no wake is
+        // signalled: an empty world quiesces immediately, so every tick past the
+        // first handful is one the timer produced.
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let ticks = TICKS.load(Ordering::SeqCst);
+        shutdown.notify_one();
+        drop(op_tx);
+        handle.await.unwrap();
+
+        assert!(
+            ticks > 3,
+            "the timer must keep driving the world with nothing waking it; saw {ticks} ticks"
+        );
+    }
+
+    /// The heartbeat's two levels. Under pressure it is worth an `info` line;
+    /// idle it must not be, or a healthy daemon spams the log forever.
+    #[tokio::test]
+    async fn the_lane_heartbeat_distinguishes_pressure_from_idle() {
+        leviath_testkit::with_tracing(|| async {
+            // Idle: no agents, no pools touched, nothing queued.
+            let mut host = host_with_full_pool(1);
+            let idle = host.world_mut().lane_snapshot();
+            assert!(!idle.is_under_pressure(), "an empty world is not pressured");
+            assert_eq!(idle.inference_summary(), "none");
+            host.log_lane_pressure(); // the `debug` arm
+
+            // Two agents, one slot: one infers, one is queued behind a full pool.
+            spawn(&mut host, "run-a", "agent-a");
+            spawn(&mut host, "run-b", "agent-b");
+            host.world_mut().run_to_fixed_point();
+
+            let busy = host.world_mut().lane_snapshot();
+            assert_eq!(busy.agents.active, 2);
+            assert_eq!(busy.inference_summary(), "m=1/1");
+            assert!(
+                busy.is_under_pressure(),
+                "a full pool with active agents is exactly the state worth reporting"
+            );
+            host.log_lane_pressure(); // the `info` arm
+        })
+        .await;
+    }
+
+    /// Terminal agents are counted apart from live ones, so "nothing is running"
+    /// can't be read as "everything is running" just because finished runs are
+    /// still loaded.
+    #[tokio::test]
+    async fn the_lane_snapshot_counts_agents_by_status() {
+        let mut host = host_with(vec![]);
+        let active = spawn(&mut host, "run-active", "a");
+        let paused = spawn(&mut host, "run-paused", "b");
+        let waiting = spawn(&mut host, "run-waiting", "c");
+        let done = spawn(&mut host, "run-done", "d");
+        let idle = spawn(&mut host, "run-idle", "e");
+        host.world_mut().set_status(paused, AgentStatus::Paused);
+        host.world_mut().set_status(waiting, AgentStatus::Waiting);
+        host.world_mut().set_status(done, AgentStatus::Complete);
+        host.world_mut().set_status(idle, AgentStatus::Idle);
+
+        let counts = host.world_mut().lane_snapshot().agents;
+        assert_eq!(counts.active, 1);
+        assert_eq!(counts.paused, 1);
+        assert_eq!(counts.waiting, 1);
+        assert_eq!(counts.terminal, 1);
+        assert_eq!(counts.idle, 1);
+        assert_eq!(
+            counts.to_string(),
+            "active=1 waiting=1 paused=1 idle=1 terminal=1"
+        );
+        // The other two terminal statuses land in the same bucket.
+        host.world_mut().set_status(active, AgentStatus::Cancelled);
+        host.world_mut().set_status(
+            paused,
+            AgentStatus::Error {
+                message: "boom".to_string(),
+            },
+        );
+        assert_eq!(host.world_mut().lane_snapshot().agents.terminal, 3);
     }
 
     #[tokio::test]
@@ -2267,13 +2623,16 @@ mod tests {
     #[tokio::test]
     async fn serve_drives_agents_and_handles_ops_until_shutdown() {
         let mut host = host_with(vec![text("t1"), text("t2"), text("t3"), text("t4")]);
-        let e = spawn(&mut host, "run-a", "agent-a");
+        spawn(&mut host, "run-a", "agent-a");
         let shutdown = host.world_mut().shutdown_handle();
+        // Watch the event stream rather than the entity: a run that finishes is
+        // reaped out of the world once it has been seen terminal, so the
+        // broadcast is the durable record that it ran to completion.
+        let mut events = host.subscribe();
         let (op_tx, op_rx) = mpsc::unbounded_channel();
 
         let handle = tokio::spawn(async move {
             host.serve(op_rx).await;
-            host
         });
 
         // Query status via the live serve loop.
@@ -2286,10 +2645,20 @@ mod tests {
             .unwrap();
         let _ = rx.await.unwrap();
 
-        shutdown.notify_one();
-        let host = handle.await.unwrap();
         // The agent ran to completion under the serve loop.
-        assert_eq!(host.world.agent_status(e), Some(AgentStatus::Complete));
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(WorldEvent::Completed { run_id, status, .. }) = events.recv().await {
+                    return (run_id, status);
+                }
+            }
+        })
+        .await
+        .expect("the serve loop must drive the agent to a terminal status");
+        assert_eq!(completed, ("run-a".to_string(), "complete".to_string()));
+
+        shutdown.notify_one();
+        handle.await.unwrap();
     }
 
     #[tokio::test]
@@ -2336,7 +2705,10 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let mut host = host_with(vec![]);
         host.set_spawner(child_spawner());
-        let _parent = spawn(&mut host, "parent", "parent");
+        // An inert parent: no `ReadyToInfer`, so it never infers, never errors on
+        // the empty response script, and stays live for the child to attach to.
+        let parent = host.world_mut().spawn_agent((agent_state("parent"),));
+        host.register("parent", parent);
         // Count preprocessor invocations: it must fire for the sub-agent Spawn,
         // and NOT for the non-Spawn Check op (the `_ => None` arm).
         let calls = Arc::new(AtomicUsize::new(0));
