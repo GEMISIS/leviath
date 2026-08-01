@@ -401,6 +401,12 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                 stage.batch_tool_hint = Some(bth);
             }
 
+            // Parse per-stage nudge settings: [stages.<name>.nudge]. Absent ⇒
+            // each field inherits agent/global.
+            if let Some(nudge_table) = stage_value.get("nudge").and_then(|v| v.as_table()) {
+                stage.nudge = Some(parse_nudge_config(nudge_table));
+            }
+
             // Parse per-stage sandbox override: [stages.<name>.sandbox]
             if let Some(sandbox_table) = stage_value.get("sandbox").and_then(|v| v.as_table()) {
                 stage.sandbox = Some(parse_sandbox_config(sandbox_table)?);
@@ -678,6 +684,12 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
     // Absent ⇒ inherit the global config toggle; a per-stage value overrides it.
     if let Some(bth) = agent.get("batch_tool_hint").and_then(|v| v.as_bool()) {
         blueprint.batch_tool_hint = Some(bth);
+    }
+
+    // Parse agent-level nudge defaults: [agent.nudge]. Absent ⇒ each field
+    // inherits the global config's [nudge] section; a per-stage block wins.
+    if let Some(nudge_table) = agent.get("nudge").and_then(|v| v.as_table()) {
+        blueprint.nudge = Some(parse_nudge_config(nudge_table));
     }
 
     // Parse agent-level sandbox config: [sandbox]
@@ -1154,6 +1166,29 @@ fn parse_transition_gate(table: &toml::value::Table) -> crate::blueprint::Transi
         gate.max_attempts = Some(max as usize);
     }
     gate
+}
+
+/// Parse an `[agent.nudge]` / `[stages.X.nudge]` table into a `NudgeConfig`.
+/// Every key is optional; an empty table is inert (each field still inherits
+/// the broader level).
+fn parse_nudge_config(table: &toml::value::Table) -> crate::blueprint::NudgeConfig {
+    let mut nudge = crate::blueprint::NudgeConfig::default();
+    if let Some(enabled) = table.get("enabled").and_then(|v| v.as_bool()) {
+        nudge.enabled = Some(enabled);
+    }
+    // A negative count is a typo, not "never accept the text" - fall back to
+    // inheriting rather than wrapping around.
+    if let Some(max) = table
+        .get("max")
+        .and_then(|v| v.as_integer())
+        .filter(|max| *max >= 0)
+    {
+        nudge.max = Some(max as usize);
+    }
+    if let Some(text) = table.get("text").and_then(|v| v.as_str()) {
+        nudge.text = Some(text.trim().to_string());
+    }
+    nudge
 }
 
 fn parse_security_config(security_table: &toml::value::Table) -> crate::SecurityConfig {
@@ -2799,6 +2834,96 @@ mode = "autonomous"
         let bp = parse_manifest(toml).unwrap();
         assert_eq!(bp.batch_tool_hint, None);
         assert_eq!(bp.find_stage("main").unwrap().batch_tool_hint, None);
+    }
+
+    #[test]
+    fn parse_manifest_agent_and_stage_nudge_blocks() {
+        let toml = r#"
+[agent]
+name = "nudge-test"
+
+[agent.nudge]
+max = 2
+
+[stages.plan]
+mode = "autonomous"
+
+[stages.plan.nudge]
+enabled = false
+
+[stages.implement]
+mode = "autonomous"
+
+[stages.implement.nudge]
+max = 5
+text = "  Edit the files named in {regions}.  "
+
+[stages.review]
+mode = "autonomous"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        // Agent-level `[agent.nudge]` parsed; unset fields stay None.
+        let agent_nudge = bp.nudge.as_ref().unwrap();
+        assert_eq!(agent_nudge.enabled, None);
+        assert_eq!(agent_nudge.max, Some(2));
+        assert_eq!(agent_nudge.text, None);
+        // Stage-level blocks: each carries only what it names.
+        let plan = bp.find_stage("plan").unwrap().nudge.as_ref().unwrap();
+        assert_eq!(plan.enabled, Some(false));
+        assert_eq!(plan.max, None);
+        let implement = bp.find_stage("implement").unwrap().nudge.as_ref().unwrap();
+        assert_eq!(implement.max, Some(5));
+        // Text is trimmed, placeholders kept verbatim for the runtime.
+        assert_eq!(
+            implement.text.as_deref(),
+            Some("Edit the files named in {regions}.")
+        );
+        // A stage with no block inherits (None).
+        assert!(bp.find_stage("review").unwrap().nudge.is_none());
+    }
+
+    #[test]
+    fn parse_manifest_nudge_ignores_bad_types_and_negative_max() {
+        // An empty block is inert; wrong-typed values and a negative `max`
+        // fall back to inheriting rather than misconfiguring the stage.
+        let toml = r#"
+[agent]
+name = "nudge-bad"
+
+[agent.nudge]
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.nudge]
+enabled = "yes"
+max = -1
+text = 7
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        assert_eq!(
+            bp.nudge.as_ref().unwrap(),
+            &crate::blueprint::NudgeConfig::default()
+        );
+        assert_eq!(
+            bp.find_stage("main").unwrap().nudge.as_ref().unwrap(),
+            &crate::blueprint::NudgeConfig::default()
+        );
+    }
+
+    #[test]
+    fn parse_manifest_no_nudge_blocks_is_none() {
+        // No nudge block anywhere ⇒ both levels None ⇒ inherit global.
+        let toml = r#"
+[agent]
+name = "no-nudge"
+
+[stages.main]
+mode = "autonomous"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        assert!(bp.nudge.is_none());
+        assert!(bp.find_stage("main").unwrap().nudge.is_none());
     }
 
     #[test]

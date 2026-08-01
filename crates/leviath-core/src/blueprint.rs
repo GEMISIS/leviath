@@ -58,6 +58,12 @@ pub struct Blueprint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_tool_hint: Option<bool>,
 
+    /// Agent-level default for the empty-response nudge. `None` inherits the
+    /// global config's `[nudge]` section; a per-stage `[stages.<name>.nudge]`
+    /// overrides this. See [`resolve_nudge`] for the cascade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nudge: Option<NudgeConfig>,
+
     /// Repetition detection configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repetition_detection: Option<RepetitionDetectionConfig>,
@@ -128,6 +134,7 @@ impl Blueprint {
             metadata: HashMap::new(),
             security: None,
             batch_tool_hint: None,
+            nudge: None,
             repetition_detection: None,
             file_tracking: None,
             sandbox: None,
@@ -746,6 +753,14 @@ pub struct Stage {
     #[serde(default)]
     pub batch_tool_hint: Option<bool>,
 
+    /// Per-stage empty-response nudge settings. Each field independently
+    /// inherits the agent-level `Blueprint.nudge` (which in turn inherits the
+    /// global config's `[nudge]` section). A stage whose deliverable is text -
+    /// a planner, a briefing writer - sets `enabled = false` here so it is
+    /// never told to "use your tools". See [`resolve_nudge`].
+    #[serde(default)]
+    pub nudge: Option<NudgeConfig>,
+
     /// Per-stage sandbox override. `None` inherits the agent-level
     /// `Blueprint.sandbox` (which in turn inherits the global default = host).
     /// Set a tighter sandbox here to isolate a single stage - e.g. run analysis
@@ -787,6 +802,7 @@ impl Stage {
             allow_as_worker: false,
             security: None,
             batch_tool_hint: None,
+            nudge: None,
             sandbox: None,
             tool_result_routing: None,
         }
@@ -1075,6 +1091,86 @@ pub const DEFAULT_GATE_ATTEMPTS: usize = 3;
 /// [`TransitionGate::tools`].
 pub const MODIFYING_TOOLS: &[&str] = &["write_file", "edit_file"];
 
+/// Settings for the empty-response nudge: the `[System]` message injected when
+/// a stage's model replies with text before making any tool call.
+///
+/// Every field is optional. A field left unset cascades stage → agent → global
+/// config and finally to the built-in default, so a `[stages.<name>.nudge]`
+/// block only has to name what it wants to change. An empty block is inert.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NudgeConfig {
+    /// Whether the nudge fires at all. When unset at every level, the default
+    /// is on - except for a stage with interaction points, whose text response
+    /// is its work product and which is left alone. Setting this explicitly at
+    /// any level overrides that implicit rule in both directions.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+
+    /// How many text-only responses to nudge before accepting the text as
+    /// final. Defaults to [`DEFAULT_MAX_NUDGES`].
+    #[serde(default)]
+    pub max: Option<usize>,
+
+    /// The nudge text. Defaults to [`DEFAULT_NUDGE_TEXT`]. Supports `{stage}`
+    /// (the stage's name) and `{regions}` (comma-separated names of the
+    /// stage's required context regions) placeholders.
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+/// Default nudge injected when a model responds with text before making any
+/// tool call, used when no [`NudgeConfig`] level sets `text`.
+pub const DEFAULT_NUDGE_TEXT: &str = "You have tools available. Please use them to complete the task. Start by reading the relevant files in the working directory.";
+
+/// Default number of text-only responses to nudge before accepting the text as
+/// final, used when no [`NudgeConfig`] level sets `max`.
+pub const DEFAULT_MAX_NUDGES: usize = 3;
+
+/// A fully-resolved nudge policy for one stage: every [`NudgeConfig`] field
+/// cascaded and defaulted. Produced by [`resolve_nudge`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedNudge {
+    /// Whether the nudge fires for this stage.
+    pub enabled: bool,
+    /// Text-only responses tolerated before the text is accepted as final.
+    pub max: usize,
+    /// The nudge text, before placeholder interpolation.
+    pub text: String,
+}
+
+/// Resolve the nudge policy for a stage, cascading each field independently
+/// stage → agent → global. Narrowest level wins with no clamping - like
+/// [`crate::taint::resolve_batch_tool_hint`], this is a UX knob, not a
+/// permission, so a manifest may raise `max` above the global setting.
+///
+/// `stage_is_reviewed` feeds only the *default* for `enabled`: a stage with
+/// interaction points presents its text for the user to approve, so nudging it
+/// to "use your tools" is off unless some level explicitly turns it on.
+pub fn resolve_nudge(
+    global: Option<&NudgeConfig>,
+    agent: Option<&NudgeConfig>,
+    stage: Option<&NudgeConfig>,
+    stage_is_reviewed: bool,
+) -> ResolvedNudge {
+    fn field<T: Clone>(
+        global: Option<&NudgeConfig>,
+        agent: Option<&NudgeConfig>,
+        stage: Option<&NudgeConfig>,
+        get: impl Fn(&NudgeConfig) -> Option<T>,
+    ) -> Option<T> {
+        stage
+            .and_then(&get)
+            .or_else(|| agent.and_then(&get))
+            .or_else(|| global.and_then(&get))
+    }
+    ResolvedNudge {
+        enabled: field(global, agent, stage, |c| c.enabled).unwrap_or(!stage_is_reviewed),
+        max: field(global, agent, stage, |c| c.max).unwrap_or(DEFAULT_MAX_NUDGES),
+        text: field(global, agent, stage, |c| c.text.clone())
+            .unwrap_or_else(|| DEFAULT_NUDGE_TEXT.to_string()),
+    }
+}
+
 /// Condition that determines when a transition edge is available.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1167,6 +1263,76 @@ mod tests {
     use crate::layout::ContextLayout;
     use crate::layout::RegionDefinition;
     use crate::region::RegionKind;
+
+    #[test]
+    fn resolve_nudge_defaults_when_nothing_is_configured() {
+        // No config anywhere: on for a normal stage, off for a reviewed one,
+        // with the built-in cap and text.
+        let normal = resolve_nudge(None, None, None, false);
+        assert!(normal.enabled);
+        assert_eq!(normal.max, DEFAULT_MAX_NUDGES);
+        assert_eq!(normal.text, DEFAULT_NUDGE_TEXT);
+        let reviewed = resolve_nudge(None, None, None, true);
+        assert!(!reviewed.enabled);
+        // The other fields don't depend on review status.
+        assert_eq!(reviewed.max, DEFAULT_MAX_NUDGES);
+        assert_eq!(reviewed.text, DEFAULT_NUDGE_TEXT);
+    }
+
+    #[test]
+    fn resolve_nudge_cascades_each_field_independently() {
+        let global = NudgeConfig {
+            enabled: Some(true),
+            max: Some(10),
+            text: Some("global".to_string()),
+        };
+        let agent = NudgeConfig {
+            max: Some(2),
+            ..Default::default()
+        };
+        let stage = NudgeConfig {
+            text: Some("stage".to_string()),
+            ..Default::default()
+        };
+        let resolved = resolve_nudge(Some(&global), Some(&agent), Some(&stage), false);
+        // enabled from global, max from agent, text from stage.
+        assert!(resolved.enabled);
+        assert_eq!(resolved.max, 2);
+        assert_eq!(resolved.text, "stage");
+        // The stage level wins over both when it sets a field.
+        let stage_all = NudgeConfig {
+            enabled: Some(false),
+            max: Some(0),
+            text: Some("s".to_string()),
+        };
+        let resolved = resolve_nudge(Some(&global), Some(&agent), Some(&stage_all), false);
+        assert_eq!(
+            resolved,
+            ResolvedNudge {
+                enabled: false,
+                max: 0,
+                text: "s".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_nudge_explicit_enabled_overrides_review_suppression() {
+        // A reviewed stage is only *implicitly* exempt: any level that sets
+        // `enabled` speaks for itself, in either direction.
+        let on = NudgeConfig {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        assert!(resolve_nudge(None, None, Some(&on), true).enabled);
+        assert!(resolve_nudge(None, Some(&on), None, true).enabled);
+        assert!(resolve_nudge(Some(&on), None, None, true).enabled);
+        let off = NudgeConfig {
+            enabled: Some(false),
+            ..Default::default()
+        };
+        assert!(!resolve_nudge(None, None, Some(&off), false).enabled);
+    }
 
     #[test]
     fn test_blueprint_creation() {
