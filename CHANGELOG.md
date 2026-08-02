@@ -178,9 +178,10 @@ requests since the previous version.
   the prompt exactly as cancelling it does, so an approval and a taint gate both
   deny, the model is told no answer came, and a checkpoint proceeds with no user
   text. A timeout is never read as consent. Set it to `0` to wait indefinitely.
-- `lev validate` warns when an autonomous stage offers one of these tools
-  without opting out, naming the stage and the tools, since that combination is
-  the shape the whole problem took.
+- `lev validate`'s `blocking-tool-in-autonomous-stage` warning now takes
+  `required_tools` as the answer it is asking for. Keeping a tool says the same
+  thing `allow_blocking_tools` says, one tool at a time, and says it about the
+  run as well as the manifest.
 - A run is no longer reported as having produced nothing when it never had a
   way to produce anything. `empty_output` in `meta.json` has meant "modified no
   files" since it was added for coding agents, so a router that delegates to

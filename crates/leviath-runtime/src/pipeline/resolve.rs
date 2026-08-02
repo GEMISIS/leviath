@@ -197,8 +197,8 @@ pub fn filter_tools_by_available(all: &[Tool], available: &[String]) -> Vec<Tool
 ///
 /// Same filter as [`filter_tools_by_available`], then - for an unattended run -
 /// minus every tool whose only outcome is a prompt for a person
-/// ([`leviath_tools::HUMAN_INTERACTION_TOOLS`]), unless the stage named it in
-/// `required_tools`.
+/// ([`BLOCKING_INTERACTION_TOOLS`](crate::dynamic_interaction::BLOCKING_INTERACTION_TOOLS)),
+/// unless the stage named it in `required_tools`.
 ///
 /// Dropping the definition rather than auto-answering the call is what makes the
 /// difference visible to the model: it never sees the tool, so it decides for
@@ -214,7 +214,7 @@ pub fn filter_tools_for_stage(
     let mut tools = filter_tools_by_available(all, available);
     if unattended {
         tools.retain(|t| {
-            !leviath_tools::is_human_interaction_tool(&t.name)
+            !crate::dynamic_interaction::BLOCKING_INTERACTION_TOOLS.contains(&t.name.as_str())
                 || required
                     .iter()
                     .any(|n| leviath_tools::canonical_tool_name(n) == t.name)

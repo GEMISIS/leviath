@@ -19,9 +19,7 @@ mod exec;
 mod platform;
 mod validate;
 pub use context::*;
-pub use defs::{
-    HUMAN_INTERACTION_TOOLS, SUBAGENT_TOOLS, is_human_interaction_tool, is_subagent_tool,
-};
+pub use defs::{SUBAGENT_TOOLS, is_subagent_tool};
 pub use platform::*;
 pub use validate::*;
 
@@ -120,25 +118,6 @@ mod tests {
             assert!(is_subagent_tool(name));
         }
         assert!(!is_subagent_tool("read_file"));
-    }
-
-    /// The list an unattended run cuts against. Every name has to be a real
-    /// advertised tool, and the predicate has to see through an alias - a stage
-    /// naming one of these under an alias would otherwise slip through the cut.
-    #[test]
-    fn human_interaction_predicate_covers_the_blocking_tools_and_nothing_else() {
-        let dir = std::env::temp_dir();
-        let advertised = make_tools(&dir).names();
-        for name in HUMAN_INTERACTION_TOOLS {
-            assert!(is_human_interaction_tool(name));
-            assert!(
-                advertised.iter().any(|n| n == name),
-                "'{name}' is not a built-in tool"
-            );
-        }
-        assert!(!is_human_interaction_tool("read_file"));
-        // `bash` resolves to `shell`, which does not block on a person.
-        assert!(!is_human_interaction_tool("bash"));
     }
 
     // ── Tool definitions ──────────────────────────────────────────────────

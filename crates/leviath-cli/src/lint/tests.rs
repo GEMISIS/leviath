@@ -354,6 +354,31 @@ allow_blocking_tools = true
     assert!(lint(&toml, &LintEnv::default()).is_empty());
 }
 
+/// Naming the tool in `required_tools` says the same thing one tool at a time,
+/// and says it about the runtime too: the stage keeps that tool when the run is
+/// unattended. The lint has nothing left to point out.
+#[test]
+fn required_tools_silences_the_warning_for_that_tool() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 10
+available_tools = ["ask_user_text", "ask_user_confirm"]
+required_tools = ["ask_user_text"]
+"#,
+    );
+    // Only the tool that was *not* kept is still worth remarking on.
+    let findings = lint(&toml, &LintEnv::default());
+    assert_eq!(codes(&findings), ["blocking-tool-in-autonomous-stage"]);
+    assert!(
+        findings[0].message.contains("ask_user_confirm"),
+        "{:?}",
+        findings[0].message
+    );
+}
+
 /// An interactive stage is where a person is expected, so the same grant is
 /// unremarkable there.
 #[test]

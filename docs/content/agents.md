@@ -113,7 +113,8 @@ whichever provider your config makes the default, which is rarely what the autho
 invisible until the run picks the wrong model. `lev validate` reports both.
 `available_tools` is what the stage may call. `required_tools` is the small exception to the
 unattended cut: a `--yolo` run drops every tool that blocks on a person, and a stage names here the
-ones it wants kept anyway. Every entry must also be in `available_tools`. See
+ones it wants kept anyway. Every entry must also be in `available_tools`, and naming one also
+settles the `blocking-tool-in-autonomous-stage` lint for it. See
 [human-in-the-loop tools](/docs/tools#these-tools-need-someone-there).
 
 ## Context regions

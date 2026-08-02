@@ -118,10 +118,13 @@ required_tools = ["ask_user_text", "ask_user_choice"]
 ```
 
 `required_tools` entries must also appear in `available_tools`; `lev validate` rejects a manifest
-where they do not, and warns about an autonomous stage that offers one of these tools without
-opting out. Pair the opt-out with
-[`interaction_timeout_secs`](/docs/configuration#limits) so a prompt nobody answers still releases
-the run rather than parking it for good.
+where they do not. It also warns (`blocking-tool-in-autonomous-stage`) about an autonomous stage
+that grants one of these tools without saying it meant to. Naming the tool in `required_tools`
+settles that, and keeps the tool through an unattended run; `allow_blocking_tools = true` on the
+stage settles the warning alone, for a stage that only ever runs attended.
+
+Pair the opt-out with [`interaction_timeout_secs`](/docs/configuration#limits) so a prompt nobody
+answers still releases the run rather than parking it for good.
 
 ## Sub-agents
 
