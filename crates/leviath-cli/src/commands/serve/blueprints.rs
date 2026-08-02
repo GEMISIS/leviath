@@ -837,6 +837,7 @@ prompt = "Run"
         let mut locked = OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(true)
             .share_mode(0)
             .open(&manifest_path)
             .unwrap();
