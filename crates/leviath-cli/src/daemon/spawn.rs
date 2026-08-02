@@ -1105,6 +1105,50 @@ mod tests {
     }
 
     #[test]
+    fn fallback_order_parses_provider_slash_model_and_drops_junk() {
+        // The `tracing::warn!` on the reject path evaluates its field
+        // expressions only under a real subscriber.
+        crate::test_support::with_tracing(|| {
+            let parsed = parse_fallback_order(&[
+                // A model id containing a slash must survive intact, which is
+                // the common OpenRouter shape.
+                "openrouter/deepseek/deepseek-v4-flash".to_string(),
+                "anthropic/claude-sonnet-5".to_string(),
+                // Rejected: a bare provider gives us no model to send.
+                "anthropic".to_string(),
+                "/no-provider".to_string(),
+                "no-model/".to_string(),
+                String::new(),
+            ]);
+            assert_eq!(
+                parsed
+                    .iter()
+                    .map(|e| (e.provider.as_str(), e.model.as_str()))
+                    .collect::<Vec<_>>(),
+                vec![
+                    ("openrouter", "deepseek/deepseek-v4-flash"),
+                    ("anthropic", "claude-sonnet-5"),
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn model_defaults_carries_the_fallback_chain_from_config() {
+        let mut config = Config {
+            default_provider: "openrouter".to_string(),
+            default_model: Some("deepseek".to_string()),
+            ..Default::default()
+        };
+        config.providers.fallback_order = vec!["anthropic/claude-sonnet-5".to_string()];
+        let defaults = model_defaults(&config);
+        assert_eq!(defaults.provider, "openrouter");
+        assert_eq!(defaults.model.as_deref(), Some("deepseek"));
+        assert_eq!(defaults.fallback_order.len(), 1);
+        assert_eq!(defaults.fallback_order[0].provider, "anthropic");
+    }
+
+    #[test]
     fn discover_script_tools_registers_and_drops_collisions() {
         crate::test_support::with_tracing(|| {});
         // Point LEVIATH_HOME at an empty temp dir so the global tools/ scan is

@@ -2636,6 +2636,52 @@ mod tests {
         assert_eq!(samples[1].agents_active, 2);
     }
 
+    /// The same tick reports which providers are out of service, and reports
+    /// the empty case too: a collector needs that to see a provider come back,
+    /// not merely stop being mentioned (issue #201).
+    #[tokio::test]
+    async fn each_re_drive_reports_providers_out_of_service() {
+        let sink = Arc::new(leviath_core::telemetry::MemorySink::default());
+        let mut host = host_with(vec![]);
+        host.world_mut()
+            .world_mut()
+            .insert_resource(crate::telemetry::Telemetry(sink.clone()));
+        let policy = crate::pipeline::CircuitPolicy {
+            failures_before_open: 1,
+            cooldown_secs: 300,
+        };
+        let mut circuits = crate::pipeline::ProviderCircuits::default();
+        circuits.record_failure(
+            "openrouter",
+            leviath_providers::UnavailableReason::CreditsExhausted,
+            chrono::Utc::now().timestamp(),
+            &policy,
+        );
+        host.world_mut().world_mut().insert_resource(circuits);
+        host.world_mut().world_mut().insert_resource(policy);
+
+        host.observe_redrive();
+
+        let samples = sink.provider_samples();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].len(), 1);
+        assert_eq!(samples[0][0].provider, "openrouter");
+        assert_eq!(samples[0][0].reason, "credits-exhausted");
+        assert_eq!(samples[0][0].consecutive_failures, 1);
+        assert!(samples[0][0].retry_in_secs > 0);
+        // It also reaches `lev ps` through the health snapshot.
+        assert_eq!(host.health().providers_down.len(), 1);
+
+        // The provider recovers, and the empty sample says so.
+        host.world_mut()
+            .world_mut()
+            .resource_mut::<crate::pipeline::ProviderCircuits>()
+            .record_success("openrouter");
+        host.observe_redrive();
+        assert!(sink.provider_samples()[1].is_empty());
+        assert!(host.health().providers_down.is_empty());
+    }
+
     /// Stillness on its own is not a dead cycle. An idle daemon has nothing
     /// queued and nothing to do, and counting it would fire relief at every quiet
     /// spell.

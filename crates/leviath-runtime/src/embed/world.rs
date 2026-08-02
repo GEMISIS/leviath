@@ -915,6 +915,27 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         }
     }
 
+    /// The failover chain is ordered and additive, and setting a default model
+    /// afterwards must not wipe it (issue #201).
+    #[test]
+    fn fallback_models_accumulate_in_order_beside_the_default() {
+        let builder = AgentWorldBuilder::new()
+            .fallback_model("anthropic", "sonnet")
+            .fallback_model("openai", "gpt")
+            .default_model("openrouter", "deepseek");
+        assert_eq!(builder.defaults.provider, "openrouter");
+        assert_eq!(builder.defaults.model.as_deref(), Some("deepseek"));
+        assert_eq!(
+            builder
+                .defaults
+                .fallback_order
+                .iter()
+                .map(|e| (e.provider.as_str(), e.model.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("anthropic", "sonnet"), ("openai", "gpt")]
+        );
+    }
+
     #[tokio::test]
     async fn every_builder_option_composes_and_state_dir_persists_runs() {
         let dir = tempfile::tempdir().unwrap();
@@ -936,6 +957,10 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
                 }),
             )
             .default_model("mock", "m")
+            // Repeated on purpose: the chain is ordered, so it must accumulate
+            // rather than replace, and it must not disturb the default model.
+            .fallback_model("ollama", "llama")
+            .fallback_model("mock", "spare")
             .state_dir(state.path())
             .inference_pool(InferencePoolConfig::new())
             .tool_concurrency(2)
