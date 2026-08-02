@@ -72,6 +72,97 @@ impl ReadPathEntry {
             ReadPathEntry::Regex(re) => re.is_match(normalized),
         }
     }
+
+    /// One concrete path this entry matches, or `None` when none can be
+    /// synthesized from the pattern alone.
+    ///
+    /// This exists for *reporting*, not for enforcement: to say whether a
+    /// config grant covers what a blueprint declares, something has to stand in
+    /// for "a path the declaration would let through", and the honest stand-in
+    /// is a path built from the declaration itself. Every synthesized sample is
+    /// checked back against its own entry, so a sample that cannot be trusted
+    /// comes back as `None` and the caller reports "cannot tell" rather than
+    /// guessing.
+    pub fn sample_path(&self) -> Option<PathBuf> {
+        match self {
+            // The root itself is inside the subtree it grants.
+            ReadPathEntry::Exact(root) => Some(root.clone()),
+            ReadPathEntry::Glob { pattern, options } => {
+                let sample = fill_glob_wildcards(pattern.as_str())?;
+                pattern
+                    .matches_with(&sample, *options)
+                    .then(|| PathBuf::from(sample))
+            }
+            ReadPathEntry::Regex(re) => {
+                let literal = literal_prefix(strip_regex_anchors(re.as_str()));
+                // A file inside the literal directory prefix first: it is the
+                // shape a real read takes, and it is what a `**` grant covers.
+                // The bare literal second, for a regex that is all literal.
+                let in_dir = literal
+                    .rsplit_once('/')
+                    .map(|(dir, _)| format!("{dir}/{SAMPLE_COMPONENT}"));
+                [in_dir, (!literal.is_empty()).then_some(literal)]
+                    .into_iter()
+                    .flatten()
+                    .find(|candidate| re.is_match(candidate))
+                    .map(PathBuf::from)
+            }
+        }
+    }
+}
+
+/// The component substituted for a wildcard when synthesizing a sample path.
+/// Deliberately unlikely to appear in a real pattern as a literal.
+const SAMPLE_COMPONENT: &str = "_leviath_probe";
+
+/// Replace a glob's wildcards with a literal component so the pattern becomes
+/// a concrete path. `None` for a character class, whose expansion would have to
+/// be guessed at (`[` also carries glob's escape syntax).
+fn fill_glob_wildcards(pattern: &str) -> Option<String> {
+    let mut out = String::with_capacity(pattern.len());
+    let mut previous_was_star = false;
+    for ch in pattern.chars() {
+        match ch {
+            '[' => return None,
+            // A run of `*` or `**` collapses to one substitution.
+            '*' => {
+                if !previous_was_star {
+                    out.push_str(SAMPLE_COMPONENT);
+                }
+                previous_was_star = true;
+                continue;
+            }
+            '?' => out.push('x'),
+            other => out.push(other),
+        }
+        previous_was_star = false;
+    }
+    Some(out)
+}
+
+/// Undo the `^(?:...)$` anchoring [`compile_regex`] applies, so the pattern
+/// text can be read for its literal prefix. Text that is not anchored that way
+/// is returned as-is.
+fn strip_regex_anchors(pattern: &str) -> &str {
+    pattern
+        .strip_prefix("^(?:")
+        .and_then(|rest| rest.strip_suffix(")$"))
+        .unwrap_or(pattern)
+}
+
+/// The leading run of characters a regex matches literally, stopping at the
+/// first metacharacter (an escape included: what follows it is literal, but the
+/// prefix is already long enough to be useful).
+fn literal_prefix(pattern: &str) -> String {
+    pattern
+        .chars()
+        .take_while(|c| {
+            !matches!(
+                c,
+                '.' | '[' | ']' | '(' | ')' | '{' | '}' | '*' | '+' | '?' | '|' | '^' | '$' | '\\'
+            )
+        })
+        .collect()
 }
 
 /// Normalize a canonicalized path string for glob/regex matching.
@@ -156,6 +247,49 @@ impl ReadPathSet {
             .iter()
             .any(|e| e.matches(canonical, &normalized))
     }
+
+    /// Whether `path` matches any entry, comparing text instead of the
+    /// filesystem: an `Exact` entry is a component-wise prefix test on the path
+    /// as written, with no canonicalization.
+    ///
+    /// [`matches`](Self::matches) is the enforcement path and must resolve
+    /// symlinks; this is the reporting path, which must not. A grant naming a
+    /// directory that does not exist yet, or one behind macOS's `/tmp` ->
+    /// `/private/tmp` link, is still a grant the user wrote, and telling them it
+    /// is missing would be wrong. The trade is the other way too: a report is a
+    /// pattern-level answer, so a run can still be refused at a path this says
+    /// is covered.
+    pub fn matches_lexically(&self, path: &Path) -> bool {
+        let normalized = normalize_match_str(&path.to_string_lossy(), self.windows);
+        self.entries.iter().any(|entry| match entry {
+            ReadPathEntry::Exact(root) => {
+                let root = normalize_match_str(&root.to_string_lossy(), self.windows);
+                covers_lexically(&normalized, &root, self.windows)
+            }
+            // Glob and regex entries already match on the normalized string
+            // alone; the path argument goes unread.
+            other => other.matches(path, &normalized),
+        })
+    }
+}
+
+/// Whether `path` is `root` or sits under it, on component boundaries so
+/// `/a/bc` is not read as living under `/a/b`. Case-folded under Windows
+/// semantics, matching how glob and regex entries compare there.
+fn covers_lexically(path: &str, root: &str, windows: bool) -> bool {
+    let fold = |s: &str| {
+        if windows {
+            s.to_lowercase()
+        } else {
+            s.to_string()
+        }
+    };
+    let path = fold(path);
+    let root = fold(root);
+    let trimmed = root.trim_end_matches('/');
+    // A root of `/` (or `C:/`) trims to `""`/`C:`, and every path under it
+    // starts with the separator the trim removed.
+    path == trimmed || path.starts_with(&format!("{trimmed}/"))
 }
 
 /// The outcome of checking one path against a [`ReadPathPolicy`].
@@ -802,5 +936,167 @@ mod tests {
         for entry in ["", "glob:[", "regex:(", "regex:relative/.*", "~oops"] {
             assert!(validate_entry_syntax(entry).is_err(), "{entry}");
         }
+    }
+
+    // -- sample paths ------------------------------------------------------
+
+    /// The one sample an entry stands for, or `None` when none could be built.
+    fn sample(entry: &str, workdir: &str, home: Option<&str>) -> Option<String> {
+        set(&[entry], workdir, home, false).entries()[0]
+            .sample_path()
+            .map(|p| p.to_string_lossy().into_owned())
+    }
+
+    #[test]
+    fn an_exact_entry_samples_as_its_own_root() {
+        assert_eq!(
+            sample("/data/runs", "/w", None).as_deref(),
+            Some("/data/runs")
+        );
+        assert_eq!(
+            sample("~/docs", "/w", Some("/home/me")).as_deref(),
+            Some("/home/me/docs")
+        );
+        // A relative entry samples as the workdir-resolved path it compiled to.
+        assert_eq!(
+            sample("../shared", "/w/run", None).as_deref(),
+            Some("/w/run/../shared")
+        );
+    }
+
+    #[test]
+    fn glob_wildcards_are_filled_with_a_literal_component() {
+        assert_eq!(
+            sample("glob:/data/**", "/w", None).as_deref(),
+            Some("/data/_leviath_probe")
+        );
+        assert_eq!(
+            sample("glob:/data/*/notes", "/w", None).as_deref(),
+            Some("/data/_leviath_probe/notes")
+        );
+        assert_eq!(
+            sample("glob:/data/log?", "/w", None).as_deref(),
+            Some("/data/logx")
+        );
+        // A pattern with no wildcards at all samples as itself.
+        assert_eq!(
+            sample("glob:/data/notes", "/w", None).as_deref(),
+            Some("/data/notes")
+        );
+    }
+
+    /// A character class carries glob's escape syntax too, so its expansion
+    /// would have to be guessed at. Refuse rather than report a wrong answer.
+    #[test]
+    fn a_glob_character_class_has_no_sample() {
+        assert_eq!(sample("glob:/data/[abc]/x", "/w", None), None);
+    }
+
+    /// `*` cannot cross a separator, so a sample that put one there would not
+    /// match the pattern it came from. The self-check catches it.
+    #[test]
+    fn a_sample_that_fails_its_own_pattern_is_refused() {
+        let entry = ReadPathEntry::Glob {
+            pattern: glob::Pattern::new("/data/*").expect("pattern compiles"),
+            options: glob::MatchOptions {
+                case_sensitive: true,
+                require_literal_separator: true,
+                require_literal_leading_dot: false,
+            },
+        };
+        // Force the mismatch: a pattern whose only wildcard is escaped as a
+        // literal `*` can never match the substituted component.
+        let literal_star = ReadPathEntry::Glob {
+            pattern: glob::Pattern::new("/data/[*]").expect("pattern compiles"),
+            options: glob::MatchOptions {
+                case_sensitive: true,
+                require_literal_separator: true,
+                require_literal_leading_dot: false,
+            },
+        };
+        assert!(entry.sample_path().is_some());
+        assert_eq!(literal_star.sample_path(), None);
+    }
+
+    #[test]
+    fn a_regex_samples_a_file_inside_its_literal_prefix() {
+        assert_eq!(
+            sample("regex:/data/archives/.*", "/w", None).as_deref(),
+            Some("/data/archives/_leviath_probe")
+        );
+        // All-literal: the pattern itself is the only path it matches.
+        assert_eq!(
+            sample("regex:/data/archives", "/w", None).as_deref(),
+            Some("/data/archives")
+        );
+        assert_eq!(
+            sample("regex:~/runs/.*", "/w", Some("/home/me")).as_deref(),
+            Some("/home/me/runs/_leviath_probe")
+        );
+    }
+
+    /// Nothing literal to build on, and nothing that self-checks: report
+    /// "cannot tell" instead of a sample the entry does not match.
+    #[test]
+    fn a_regex_with_no_usable_literal_prefix_has_no_sample() {
+        let entry =
+            ReadPathEntry::Regex(regex::Regex::new("^(?:[/a-z]+)$").expect("regex compiles"));
+        assert_eq!(entry.sample_path(), None);
+    }
+
+    /// Anchoring is added at compile time; a regex that arrives without it is
+    /// read as its own body rather than as a leading `^`, which would leave no
+    /// literal prefix to build on.
+    #[test]
+    fn an_unanchored_regex_is_read_as_written() {
+        let entry = ReadPathEntry::Regex(regex::Regex::new("/data/x.*").expect("regex compiles"));
+        assert_eq!(entry.sample_path(), Some(PathBuf::from("/data/x")));
+    }
+
+    // -- lexical matching --------------------------------------------------
+
+    #[test]
+    fn lexical_matching_covers_a_root_and_its_subtree() {
+        let s = set(&["/data/runs"], "/w", None, false);
+        assert!(s.matches_lexically(Path::new("/data/runs")));
+        assert!(s.matches_lexically(Path::new("/data/runs/june/1")));
+        assert!(!s.matches_lexically(Path::new("/data/runs-old/1")));
+        assert!(!s.matches_lexically(Path::new("/data")));
+    }
+
+    /// The whole point of the lexical variant: a grant naming a directory that
+    /// does not exist yet is still a grant. `matches` refuses it (it cannot
+    /// canonicalize the root), `matches_lexically` does not.
+    #[test]
+    fn lexical_matching_does_not_need_the_root_to_exist() {
+        let s = set(&["/definitely/not/here"], "/w", None, false);
+        assert!(s.matches_lexically(Path::new("/definitely/not/here/x")));
+        assert!(!s.matches(Path::new("/definitely/not/here/x")));
+    }
+
+    /// The entry is written `/`-first so it compiles as an absolute root on
+    /// every host; only the case folding is under test.
+    #[test]
+    fn lexical_matching_folds_case_under_windows_semantics() {
+        let windows = set(&["/Users/Me/docs"], "/w", None, true);
+        assert!(windows.matches_lexically(Path::new("/users/me/docs/notes.md")));
+        let unix = set(&["/Users/Me/docs"], "/w", None, false);
+        assert!(!unix.matches_lexically(Path::new("/users/me/docs/notes.md")));
+    }
+
+    /// A filesystem root trims to nothing; everything under it still matches.
+    #[test]
+    fn lexical_matching_handles_a_root_entry() {
+        let s = set(&["/"], "/w", None, false);
+        assert!(s.matches_lexically(Path::new("/etc/passwd")));
+        assert!(s.matches_lexically(Path::new("/")));
+    }
+
+    #[test]
+    fn lexical_matching_uses_the_pattern_entries_unchanged() {
+        let s = set(&["glob:/data/**", "regex:/logs/.*"], "/w", None, false);
+        assert!(s.matches_lexically(Path::new("/data/x/y")));
+        assert!(s.matches_lexically(Path::new("/logs/today")));
+        assert!(!s.matches_lexically(Path::new("/elsewhere/x")));
     }
 }

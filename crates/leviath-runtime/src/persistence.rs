@@ -55,6 +55,12 @@ pub struct RunMetadata {
     /// hardcode "attended", which stranded unattended runs on prompts no one was
     /// there to answer.
     pub unattended: bool,
+    /// How much of the blueprint's `[read_paths]` the config granted, resolved
+    /// once at spawn (see [`ReadPathGrantCounts`]). `None` when the blueprint
+    /// declares none, which is nearly every agent.
+    ///
+    /// [`ReadPathGrantCounts`]: leviath_core::run_meta::ReadPathGrantCounts
+    pub read_paths: Option<leviath_core::run_meta::ReadPathGrantCounts>,
 }
 
 /// Running token + tool-call totals accumulated across an agent's inferences, for
@@ -303,6 +309,7 @@ pub fn build_run_meta(
         max_child_depth,
         flags,
         yolo: md.unattended,
+        read_paths: md.read_paths,
     }
 }
 
@@ -340,6 +347,7 @@ mod tests {
             callback_secret: Some("sekret".to_string()),
             title: Some("Do It".to_string()),
             unattended: false,
+            read_paths: None,
         }
     }
 

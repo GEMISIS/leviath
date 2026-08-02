@@ -69,8 +69,28 @@ allow_blueprint_read_paths = true
 
 A grant applies to a path only when the running blueprint also declares it, so listing a
 directory in your config does not open it to agents that never asked. When an agent declares
-paths nothing grants, it still runs; the reads are refused and a spawn warning shows the exact
-stanza to add. `lev add` and `lev validate` both report what an agent asks for.
+paths nothing grants, it still runs; the reads are refused.
+
+Every surface says which side of that line an agent is on, so a missing grant turns up before a
+run does:
+
+```console
+$ lev validate cto
+✓ Blueprint 'cto' is valid.
+  3 stages, version 1.0.0
+  WARN your config does not grant glob:~/design-docs/**: reads matching them will be refused [read-paths-not-granted]
+       add to your config.toml: [agent_read_paths.cto] allow = ["glob:~/design-docs/**"]
+  NOTE declares [read_paths] (reads outside the run workdir): 2 declared, 1 granted [read-paths-declared]
+       ~/.leviath/runs: granted; glob:~/design-docs/**: NOT granted
+```
+
+`lev list` prints the same counts under each agent, `lev run` repeats the warning and the stanza
+when you start one, and `lev ps` grows a `READS` column reading granted over declared - `0/2` is a
+run that is up and will be refused every read outside its workdir. `lev add` reports the status of
+what you just installed.
+
+Those checks compare patterns, not paths on disk, so treat them as the first answer rather than the
+last: an individual read is still matched against the real, symlink-resolved path at run time.
 
 You do not need to restart the daemon after editing the grant: it reloads `config.toml` on
 change, so the **next `lev run` picks up the new grant automatically** (see
@@ -97,6 +117,25 @@ The rules that keep this safe:
 
 Pick the run's workdir itself with `lev run <agent> --workdir <dir>` (defaults to the directory
 you ran the command from).
+
+### Coming from a build where the blueprint allowlist stood alone
+
+`[read_paths]` reached its current shape after 0.1.1, and the change is worth knowing about if you
+wrote blueprints against an earlier build of it:
+
+- **A blueprint's `[read_paths]` is now a declaration, not a grant.** An agent that used to read
+  outside its workdir on the strength of its manifest alone reads nothing outside it now, until
+  your `config.toml` grants the same paths. Add the `[agent_read_paths.<name>]` block above, or
+  set `allow_blueprint_read_paths = true` if you would rather trust your blueprints wholesale.
+- **`regex:` entries must be absolute.** They have to start with `/`, a drive letter, or `~/`, and
+  they are anchored end to end. A catch-all like `regex:.*` is refused when the manifest is parsed,
+  so `lev validate` fails rather than the agent quietly losing access. Write the subtree you mean -
+  `regex:~/design-docs/.*` - or use `glob:` for anything workdir-relative.
+- **Glob patterns cannot contain `.` or `..` components** anywhere but a relative entry's leading
+  run, which is folded into the workdir at compile time.
+
+Run `lev validate <agent>` against each of your blueprints after upgrading. It names every entry
+that is inert and prints the config block that would fix it.
 
 ## Taint tracking (experimental)
 

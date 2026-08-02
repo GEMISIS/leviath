@@ -8,6 +8,7 @@ pub mod daemon;
 pub mod dispatch;
 pub mod lint;
 pub mod logging;
+pub mod read_path_report;
 pub mod render;
 pub mod runstate;
 #[cfg(test)]

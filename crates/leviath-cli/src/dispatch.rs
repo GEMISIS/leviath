@@ -462,7 +462,13 @@ mod tests {
         let args = commands::add::AddArgs {
             package: "definitely-not-a-real-bundle-xyz.leviath-bundle".to_string(),
         };
-        let result = dispatch(Commands::Add(args), &MockRisky).await;
+        // `add` loads the real config to report the `[read_paths]` grant status
+        // of what it installs, so it needs the same isolation every other
+        // config-touching test takes.
+        let result = crate::config::with_isolated_config_path_async("dispatch-add", |_| {
+            dispatch(Commands::Add(args), &MockRisky)
+        })
+        .await;
         assert!(result.is_err());
     }
 

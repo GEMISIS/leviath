@@ -4,6 +4,7 @@ use clap::Args;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::resolve_cwd;
 use crate::config::Config;
 use leviath_core::manifest::parse_manifest;
 
@@ -19,19 +20,44 @@ struct AgentInfo {
     name: String,
     version: String,
     description: String,
+    /// The agent's `[read_paths]` grant status under the active config, when it
+    /// declares any. Shown because a declaration nothing grants is inert, and
+    /// the listing is where someone looks before running an agent they just
+    /// installed or copied over from another machine.
+    read_paths: Option<String>,
 }
 
-fn read_agent_info(manifest_path: &Path) -> Option<AgentInfo> {
+fn read_agent_info(manifest_path: &Path, config: &Config, cwd: &Path) -> Option<AgentInfo> {
     let content = fs::read_to_string(manifest_path).ok()?;
     let blueprint = parse_manifest(&content).ok()?;
+    let read_paths = read_path_summary(&blueprint, config, cwd);
     Some(AgentInfo {
         name: blueprint.name,
         version: blueprint.version,
         description: blueprint.description,
+        read_paths,
     })
 }
 
-fn scan_directory_for_agents(dir: &Path) -> Vec<(PathBuf, AgentInfo)> {
+/// The one-line `[read_paths]` verdict for an agent, or `None` when it declares
+/// none. A config whose own grant list is broken says so here rather than
+/// staying silent; `lev validate` and the spawn error carry the detail.
+fn read_path_summary(
+    blueprint: &leviath_core::Blueprint,
+    config: &Config,
+    cwd: &Path,
+) -> Option<String> {
+    match crate::read_path_report::build(blueprint, config, cwd)? {
+        Ok(report) if report.has_ungranted() => Some(format!(
+            "read_paths: {} - `lev validate` shows which",
+            report.summary()
+        )),
+        Ok(report) => Some(format!("read_paths: {}", report.summary())),
+        Err(e) => Some(format!("read_paths: {e}")),
+    }
+}
+
+fn scan_directory_for_agents(dir: &Path, config: &Config, cwd: &Path) -> Vec<(PathBuf, AgentInfo)> {
     let mut agents = Vec::new();
     if !dir.exists() {
         return agents;
@@ -40,7 +66,7 @@ fn scan_directory_for_agents(dir: &Path) -> Vec<(PathBuf, AgentInfo)> {
     // Check if this directory itself has an agent.leviath
     let direct_manifest = dir.join("agent.leviath");
     if direct_manifest.exists()
-        && let Some(info) = read_agent_info(&direct_manifest)
+        && let Some(info) = read_agent_info(&direct_manifest, config, cwd)
     {
         agents.push((dir.to_path_buf(), info));
     }
@@ -52,7 +78,7 @@ fn scan_directory_for_agents(dir: &Path) -> Vec<(PathBuf, AgentInfo)> {
             if path.is_dir() {
                 let manifest_path = path.join("agent.leviath");
                 if manifest_path.exists()
-                    && let Some(info) = read_agent_info(&manifest_path)
+                    && let Some(info) = read_agent_info(&manifest_path, config, cwd)
                 {
                     agents.push((path, info));
                 }
@@ -63,27 +89,18 @@ fn scan_directory_for_agents(dir: &Path) -> Vec<(PathBuf, AgentInfo)> {
     agents
 }
 
-#[cfg(test)]
-thread_local! {
-    /// Test-only toggle letting `execute_falls_back_to_default_cwd_via_forced_error`
-    /// force [`resolve_cwd`]'s `Err` arm deterministically on every platform,
-    /// as a companion to
-    /// `execute_falls_back_to_default_cwd_when_current_dir_is_gone`'s genuine
-    /// Unix-only filesystem reproduction (real `remove_dir_all` of the live
-    /// CWD is a sharing violation on Windows, not a success, so that same
-    /// trick isn't available there).
-    static FORCE_CWD_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Real CWD lookup, with a test-only failure-injection toggle so its `Err`
-/// arm can be forced deterministically (see [`FORCE_CWD_ERROR`]) without
-/// changing what production actually calls.
-fn resolve_cwd() -> std::io::Result<PathBuf> {
-    #[cfg(test)]
-    if FORCE_CWD_ERROR.with(|f| f.get()) {
-        return Err(std::io::Error::other("forced CWD error for testing"));
+/// One agent's listing: the name line every section shares, plus the
+/// `[read_paths]` line when there is one.
+fn print_agent(info: &AgentInfo) {
+    let desc = if info.description.is_empty() {
+        String::new()
+    } else {
+        format!(" - {}", info.description)
+    };
+    println!("  {} (v{}){}", info.name, info.version, desc);
+    if let Some(read_paths) = &info.read_paths {
+        println!("      {read_paths}");
     }
-    std::env::current_dir()
 }
 
 pub async fn execute(_args: ListArgs) -> anyhow::Result<()> {
@@ -117,17 +134,12 @@ fn print_agent_listing(
     let mut found_runnable = false;
 
     // 1. Installed agents (~/.leviath/agents/)
-    let installed = scan_directory_for_agents(agents_dir);
+    let installed = scan_directory_for_agents(agents_dir, config, cwd);
     if !installed.is_empty() {
         found_runnable = true;
         println!("Installed agents (~/.leviath/agents/):");
         for (_path, info) in &installed {
-            let desc = if info.description.is_empty() {
-                String::new()
-            } else {
-                format!(" - {}", info.description)
-            };
-            println!("  {} (v{}){}", info.name, info.version, desc);
+            print_agent(info);
         }
         println!();
     }
@@ -135,35 +147,25 @@ fn print_agent_listing(
     // 2. Local (current directory)
     let local_manifest = cwd.join("agent.leviath");
     if local_manifest.exists()
-        && let Some(info) = read_agent_info(&local_manifest)
+        && let Some(info) = read_agent_info(&local_manifest, config, cwd)
     {
         found_runnable = true;
-        let desc = if info.description.is_empty() {
-            String::new()
-        } else {
-            format!(" - {}", info.description)
-        };
         println!("Local (current directory):");
-        println!("  {} (v{}){}", info.name, info.version, desc);
+        print_agent(&info);
         println!();
     }
 
     // 3. Config's agent_paths directories
     let mut config_agents = Vec::new();
     for agent_path in &config.agent_paths {
-        let found = scan_directory_for_agents(agent_path);
+        let found = scan_directory_for_agents(agent_path, config, cwd);
         config_agents.extend(found);
     }
     if !config_agents.is_empty() {
         found_runnable = true;
         println!("From configured paths:");
         for (_path, info) in &config_agents {
-            let desc = if info.description.is_empty() {
-                String::new()
-            } else {
-                format!(" - {}", info.description)
-            };
-            println!("  {} (v{}){}", info.name, info.version, desc);
+            print_agent(info);
         }
         println!();
     }
@@ -180,7 +182,7 @@ fn print_agent_listing(
         .map(|a| format!("{} (v{})", a.name, a.version))
         .collect();
     if let Some(exe_dir) = exe_dir {
-        for (_path, info) in scan_directory_for_agents(&exe_dir.join("agents")) {
+        for (_path, info) in scan_directory_for_agents(&exe_dir.join("agents"), config, cwd) {
             let entry = format!("{} (v{})", info.name, info.version);
             if !builtin_names.contains(&entry) {
                 builtin_names.push(entry);
@@ -253,6 +255,17 @@ mod tests {
         write_manifest_with_description(dir, name, "Test agent");
     }
 
+    /// The scanners under a config that grants nothing, which is what every
+    /// test predating `[read_paths]` reporting assumed. Tests that care about
+    /// grants call the real functions with a config of their own.
+    fn read_agent_info(manifest_path: &Path) -> Option<AgentInfo> {
+        super::read_agent_info(manifest_path, &Config::default(), Path::new("/work"))
+    }
+
+    fn scan_directory_for_agents(dir: &Path) -> Vec<(PathBuf, AgentInfo)> {
+        super::scan_directory_for_agents(dir, &Config::default(), Path::new("/work"))
+    }
+
     fn write_manifest_with_description(dir: &Path, name: &str, description: &str) {
         let content = format!(
             r#"[agent]
@@ -272,6 +285,86 @@ system = {{ kind = "pinned", max_tokens = 1000 }}
             name, description
         );
         write_test_agent(dir, content);
+    }
+
+    /// An agent that asks to read outside its workdir, for the grant-status
+    /// line. Written as an absolute entry so it compiles the same on every OS.
+    fn write_read_paths_manifest(dir: &Path, name: &str) {
+        let content = format!(
+            r#"[agent]
+name = "{name}"
+version = "1.0.0"
+description = "Test agent"
+
+[stages.main]
+mode = "autonomous"
+model = {{ provider = "anthropic", model = "claude-sonnet-4-6" }}
+description = "Main"
+max_iterations = 5
+
+[context.regions]
+system = {{ kind = "pinned", max_tokens = 1000 }}
+
+[read_paths]
+allow = ["/data/runs"]
+"#
+        );
+        write_test_agent(dir, content);
+    }
+
+    fn info_with_config(dir: &Path, config: &Config) -> AgentInfo {
+        super::read_agent_info(&dir.join("agent.leviath"), config, Path::new("/work"))
+            .expect("manifest parses")
+    }
+
+    /// The reported bug, in the listing: an agent whose declarations nothing
+    /// grants must say so, and point at where the detail is.
+    #[test]
+    fn an_ungranted_read_paths_declaration_is_listed_as_such() {
+        let dir = tempfile::tempdir().unwrap();
+        write_read_paths_manifest(dir.path(), "cto");
+        let summary = info_with_config(dir.path(), &Config::default())
+            .read_paths
+            .expect("declares read paths");
+        assert!(summary.contains("1 declared, 0 granted"), "{summary}");
+        assert!(summary.contains("lev validate"), "{summary}");
+    }
+
+    #[test]
+    fn a_granted_read_paths_declaration_needs_no_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+        write_read_paths_manifest(dir.path(), "cto");
+        let mut config = Config::default();
+        config.security.read_paths = vec!["/data/runs".to_string()];
+        let summary = info_with_config(dir.path(), &config)
+            .read_paths
+            .expect("declares read paths");
+        assert_eq!(summary, "read_paths: 1 declared, 1 granted");
+    }
+
+    /// A grant list that cannot compile is a hard spawn error later; saying so
+    /// here beats printing a count derived from nothing.
+    #[test]
+    fn a_broken_grant_list_is_reported_on_the_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        write_read_paths_manifest(dir.path(), "cto");
+        let mut config = Config::default();
+        config.security.read_paths = vec!["regex:relative/.*".to_string()];
+        let summary = info_with_config(dir.path(), &config)
+            .read_paths
+            .expect("declares read paths");
+        assert!(summary.contains("config.toml"), "{summary}");
+    }
+
+    #[test]
+    fn an_agent_declaring_no_read_paths_gets_no_line() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(dir.path(), "plain");
+        assert!(
+            info_with_config(dir.path(), &Config::default())
+                .read_paths
+                .is_none()
+        );
     }
 
     #[test]
@@ -556,7 +649,7 @@ system = { kind = "pinned", max_tokens = 1000 }
 
     /// Cross-platform companion to the Unix-only real-filesystem test above:
     /// forces [`resolve_cwd`]'s `Err` arm deterministically via
-    /// [`FORCE_CWD_ERROR`] so `execute`'s `unwrap_or_default()` fallback is
+    /// [`super::super::force_cwd_error`] so `execute`'s `unwrap_or_default()` fallback is
     /// also exercised on Windows, where the real filesystem race isn't
     /// reproducible.
     #[tokio::test]
@@ -564,12 +657,12 @@ system = { kind = "pinned", max_tokens = 1000 }
         // Isolated: this reaches `Config::load()`, which reads process-wide
         // environment. Unisolated it races every `temp_env` test in the binary.
         crate::config::with_isolated_config_path_async("list-cwd-forced", |_fake_dir| async move {
-            FORCE_CWD_ERROR.with(|f| f.set(true));
+            crate::commands::force_cwd_error(true);
             let args = ListArgs {
                 filter: "all".to_string(),
             };
             let result = execute(args).await;
-            FORCE_CWD_ERROR.with(|f| f.set(false));
+            crate::commands::force_cwd_error(false);
 
             assert!(result.is_ok());
         })

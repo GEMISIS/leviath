@@ -248,6 +248,7 @@ mod tests {
             known_tools,
             known_models: crate::commands::models::closed_catalog_models(),
             available_providers: None,
+            read_paths: None,
         }
     }
 

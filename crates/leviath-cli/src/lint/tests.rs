@@ -668,6 +668,135 @@ fn no_read_paths_means_no_note() {
     );
 }
 
+// ─── read_paths grant status (issue #209) ────────────────────────────────────
+
+/// A blueprint declaring `entries`, plus a `LintEnv` carrying the verdict a
+/// config of `grants` would give. Absolute entries so they compile the same on
+/// every OS.
+fn read_paths_env(entries: &[&str], grants: &[&str]) -> (String, LintEnv) {
+    let listed = entries
+        .iter()
+        .map(|e| format!("\"{e}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let toml = format!(
+        "{}\n[read_paths]\nallow = [{listed}]\n",
+        manifest(CLEAN_STAGE)
+    );
+    let blueprint = leviath_core::manifest::parse_manifest(&toml).expect("the fixture parses");
+    let mut config = crate::config::Config::default();
+    config.security.read_paths = grants.iter().map(|s| s.to_string()).collect();
+    let env = LintEnv::default().with_read_paths(&blueprint, &config, Path::new("/work"));
+    (toml, env)
+}
+
+/// The reported bug: with nothing granting them, the declared entries are
+/// named as inert and the stanza that would fix it is on the fix line.
+#[test]
+fn ungranted_read_paths_are_warned_about_with_the_stanza_to_add() {
+    let (toml, env) = read_paths_env(&["/data/runs", "glob:/docs/**"], &[]);
+    let findings = lint(&toml, &env);
+    assert_eq!(
+        codes(&findings),
+        ["read-paths-not-granted", "read-paths-declared"]
+    );
+    assert!(findings[0].message.contains("/data/runs"), "{findings:?}");
+    assert!(
+        findings[0].message.contains("glob:/docs/**"),
+        "{findings:?}"
+    );
+    let fix = findings[0].fix.as_deref().expect("a fix names the stanza");
+    assert!(fix.contains("[agent_read_paths.lint-fixture]"), "{fix}");
+}
+
+/// A partial grant is the case the old spawn warning missed entirely: it only
+/// fired when the grant list was empty.
+#[test]
+fn a_partial_grant_names_only_what_is_still_refused() {
+    let (toml, env) = read_paths_env(&["/data/runs", "glob:/docs/**"], &["/data/runs"]);
+    let findings = lint(&toml, &env);
+    assert_eq!(
+        codes(&findings),
+        ["read-paths-not-granted", "read-paths-declared"]
+    );
+    assert!(!findings[0].message.contains("/data/runs,"), "{findings:?}");
+    assert!(
+        findings[0].message.contains("glob:/docs/**"),
+        "{findings:?}"
+    );
+    assert!(
+        findings[1].message.contains("2 declared, 1 granted"),
+        "{findings:?}"
+    );
+}
+
+/// Fully granted: the note says so, per entry, and nothing warns.
+#[test]
+fn granted_read_paths_are_a_note_only() {
+    let (toml, env) = read_paths_env(&["/data/runs"], &["/data/runs"]);
+    let findings = lint(&toml, &env);
+    assert_eq!(codes(&findings), ["read-paths-declared"]);
+    assert!(
+        findings[0].message.contains("1 declared, 1 granted"),
+        "{findings:?}"
+    );
+    assert!(
+        findings[0]
+            .fix
+            .as_deref()
+            .is_some_and(|f| f.contains("/data/runs: granted")),
+        "{findings:?}"
+    );
+}
+
+/// The blanket override grants everything, and says which switch did it.
+#[test]
+fn the_blanket_override_is_named_on_the_note() {
+    let toml = format!(
+        "{}\n[read_paths]\nallow = [\"/data/runs\"]\n",
+        manifest(CLEAN_STAGE)
+    );
+    let blueprint = leviath_core::manifest::parse_manifest(&toml).expect("the fixture parses");
+    let mut config = crate::config::Config::default();
+    config.security.allow_blueprint_read_paths = true;
+    let env = LintEnv::default().with_read_paths(&blueprint, &config, Path::new("/work"));
+    let findings = lint(&toml, &env);
+    assert_eq!(codes(&findings), ["read-paths-declared"]);
+    assert!(
+        findings[0]
+            .fix
+            .as_deref()
+            .is_some_and(|f| f.contains("allow_blueprint_read_paths")),
+        "{findings:?}"
+    );
+}
+
+/// An entry no representative path can be built from is reported as unchecked
+/// rather than as inert, and is not offered up for granting.
+#[test]
+fn an_uncheckable_entry_is_not_called_ungranted() {
+    let (toml, env) = read_paths_env(&["glob:/docs/[ab]/**"], &["/data/runs"]);
+    let findings = lint(&toml, &env);
+    assert_eq!(codes(&findings), ["read-paths-declared"]);
+    assert!(
+        findings[0]
+            .fix
+            .as_deref()
+            .is_some_and(|f| f.contains("cannot be checked")),
+        "{findings:?}"
+    );
+}
+
+/// A grant list of the user's own that will not compile is a hard spawn error;
+/// `lev validate` is where it should surface first.
+#[test]
+fn a_malformed_config_grant_is_warned_about() {
+    let (toml, env) = read_paths_env(&["/data/runs"], &["regex:relative/.*"]);
+    let findings = lint(&toml, &env);
+    assert_eq!(codes(&findings), ["read-paths-grant-invalid"]);
+    assert!(findings[0].message.contains("config.toml"), "{findings:?}");
+}
+
 /// An entry amounting to "everything" gets its own warning on top of the note.
 #[test]
 fn a_broad_read_path_entry_gets_its_own_warning() {

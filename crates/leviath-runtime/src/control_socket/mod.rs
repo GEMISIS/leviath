@@ -899,6 +899,7 @@ mod tests {
             last_progress_at: Some(1_000),
             unattended: false,
             empty_output: false,
+            read_paths: None,
         }
     }
 

@@ -179,7 +179,8 @@ allow = ["~/.leviath/runs", "../shared-docs", "glob:~/design-docs/**"]
 ```
 
 The declarations do nothing on their own: the user's config must grant them, they are
-read-only, and every access is checked against the symlink-resolved real path. See
+read-only, and every access is checked against the symlink-resolved real path. Run
+`lev validate` to see which of them the config on this machine actually grants. See
 [Security](/docs/security) for the grant stanzas and the full matching rules.
 
 ## How the coding agents verify their work

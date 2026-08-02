@@ -567,6 +567,22 @@ fn build_read_path_policy(
     ))
 }
 
+/// How many of a blueprint's `[read_paths]` entries the config grants, for the
+/// run listing. `None` when the blueprint declares none, and when the user's
+/// own grant list will not compile - that is a hard spawn error a line above,
+/// so there is no half-answer to record.
+fn read_path_grant_counts(
+    blueprint: &leviath_core::Blueprint,
+    config: &crate::config::Config,
+    workdir: &std::path::Path,
+) -> Option<leviath_core::run_meta::ReadPathGrantCounts> {
+    let report = crate::read_path_report::build(blueprint, config, workdir)?.ok()?;
+    Some(leviath_core::run_meta::ReadPathGrantCounts {
+        declared: report.declared(),
+        granted: report.granted(),
+    })
+}
+
 /// Raise the read tools to `Private` for an agent whose `[read_paths]` are
 /// actually granted: they can pull in content from outside the workdir -
 /// design docs, run archives, whatever else was granted - which the default
@@ -792,6 +808,10 @@ fn build_agent_inner(
     // taint bump below, captured before the policy moves into the context.
     let read_paths_granted = read_path_policy.is_active()
         && (read_path_policy.allow_blueprint || !read_path_policy.grants.is_empty());
+    // The same question, per entry, recorded on the run so `lev ps` can show
+    // that a live run is up but blind to paths its author designed it around.
+    let read_path_counts =
+        read_path_grant_counts(&blueprint, config, std::path::Path::new(&args.workdir));
     let tool_ctx = leviath_tools::ToolContext::new(std::path::PathBuf::from(&args.workdir))
         .with_read_paths(read_path_policy);
     let mut builtins = leviath_tools::BuiltinTools::new(tool_ctx);
@@ -991,6 +1011,7 @@ fn build_agent_inner(
         callback_secret: args.callback_secret.clone(),
         title: None,
         unattended: args.yolo,
+        read_paths: read_path_counts,
     };
     {
         let mut entity_mut = world.entity_mut(entity);

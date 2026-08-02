@@ -610,6 +610,7 @@ mod tests {
                 ..Default::default()
             },
             yolo: false,
+            read_paths: None,
         };
         std::fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
         if let Some(ctx) = context {

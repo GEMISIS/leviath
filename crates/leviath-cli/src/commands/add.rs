@@ -17,7 +17,11 @@ fn agents_dir_or_error(dir: Option<std::path::PathBuf>) -> anyhow::Result<std::p
 pub async fn execute(args: AddArgs) -> anyhow::Result<()> {
     let installer = leviath_package::AgentInstaller::new();
     let agents_dir = resolve_agents_dir()?;
-    execute_with(&args, &installer, &agents_dir).await
+    // Best-effort, unlike `lev list`: a config that will not parse is a reason
+    // to say less about the package being installed, never a reason to refuse
+    // to install it.
+    let config = crate::config::Config::load().ok();
+    execute_with(&args, &installer, &agents_dir, config.as_ref()).await
 }
 
 /// Resolve `~/.leviath/agents`, the install root for `lev add`.
@@ -54,6 +58,7 @@ async fn execute_with(
     args: &AddArgs,
     installer: &leviath_package::AgentInstaller,
     agents_dir: &Path,
+    config: Option<&crate::config::Config>,
 ) -> anyhow::Result<()> {
     tracing::info!("Installing agent package");
 
@@ -61,7 +66,7 @@ async fn execute_with(
 
     if package_path.is_dir() {
         // Directory install: copy directory into <agents_dir>/<name>/
-        install_from_dir(package_path, agents_dir)?;
+        install_from_dir(package_path, agents_dir, config)?;
     } else if package_path.exists() || args.package.ends_with(".leviath-bundle") {
         // Bundle file installation
         if !package_path.exists() {
@@ -75,7 +80,7 @@ async fn execute_with(
             installed.version,
             installed.path.display()
         );
-        print_capabilities(&installed.name, &installed.path);
+        print_capabilities(&installed.name, &installed.path, config);
     } else {
         // Only local installs exist: agent directories and .leviath-bundle
         // files. Fail with a clear message rather than guessing at intent.
@@ -101,9 +106,15 @@ async fn execute_with(
 /// Empty means the package declares nothing unusual - a plain prompt-and-stages
 /// agent - in which case there is nothing to warn about and we stay quiet.
 ///
-/// Pure over `(manifest_toml, dir_entries)` so the whole table is testable
-/// without a filesystem or an installed agent.
-pub(crate) fn describe_capabilities(manifest_toml: &str, script_tools: &[String]) -> Vec<String> {
+/// Pure over `(manifest_toml, dir_entries, read_paths)` so the whole table is
+/// testable without a filesystem or an installed agent. `read_paths` is the
+/// grant report for this package under the active config, when one could be
+/// built; without it the `[read_paths]` line falls back to stating the rule.
+pub(crate) fn describe_capabilities(
+    manifest_toml: &str,
+    script_tools: &[String],
+    read_paths: Option<&crate::read_path_report::GrantReport>,
+) -> Vec<String> {
     let mut findings = Vec::new();
     // `toml::from_str`, not `manifest_toml.parse::<toml::Value>()`. In toml 1.x
     // `FromStr for Value` parses a single *value*, not a document - so a real
@@ -195,10 +206,21 @@ pub(crate) fn describe_capabilities(manifest_toml: &str, script_tools: &[String]
             .iter()
             .filter_map(|e| e.as_str().map(str::to_string))
             .collect();
+        // With the active config in hand, say which of them are actually live
+        // rather than repeating the rule and leaving the user to work it out.
+        let status = match read_paths {
+            Some(report) if report.has_ungranted() => format!(
+                "; {} - grant the rest with [agent_read_paths.{}] in your config",
+                report.summary(),
+                report.agent
+            ),
+            Some(report) => format!("; {}, all granted by your config", report.summary()),
+            None => "; inert unless you grant it via [security] read_paths / \
+                     allow_blueprint_read_paths or [agent_read_paths.<name>] in your config"
+                .to_string(),
+        };
         findings.push(format!(
-            "asks to read outside its workdir (read-only): {}; inert unless you grant it \
-             via [security] read_paths / allow_blueprint_read_paths or \
-             [agent_read_paths.<name>] in your config",
+            "asks to read outside its workdir (read-only): {}{status}",
             listed.join(", ")
         ));
     }
@@ -243,10 +265,11 @@ fn collect_seed_commands(value: &toml::Value) -> Vec<String> {
 }
 
 /// Print the capability inventory for a freshly installed agent, if it has one.
-fn print_capabilities(name: &str, install_dir: &Path) {
+fn print_capabilities(name: &str, install_dir: &Path, config: Option<&crate::config::Config>) {
     let manifest = std::fs::read_to_string(install_dir.join("agent.leviath")).unwrap_or_default();
     let scripts = script_tool_names(install_dir);
-    let findings = describe_capabilities(&manifest, &scripts);
+    let report = read_path_report(&manifest, config);
+    let findings = describe_capabilities(&manifest, &scripts, report.as_ref());
     if findings.is_empty() {
         return;
     }
@@ -255,6 +278,23 @@ fn print_capabilities(name: &str, install_dir: &Path) {
         println!("    - {finding}");
     }
     println!("  Inspect it with:  lev validate {name}");
+}
+
+/// The `[read_paths]` grant report for a just-installed manifest, when there is
+/// a config to judge it against and the manifest parses.
+///
+/// The workdir a relative entry resolves against is the directory a `lev run`
+/// would default to, which at install time is the one `lev add` was run from.
+/// A broken grant list yields no report: the inventory falls back to stating
+/// the rule, and `lev validate` says what is wrong with the config.
+fn read_path_report(
+    manifest_toml: &str,
+    config: Option<&crate::config::Config>,
+) -> Option<crate::read_path_report::GrantReport> {
+    let config = config?;
+    let blueprint = leviath_core::manifest::parse_manifest(manifest_toml).ok()?;
+    let workdir = crate::commands::resolve_cwd().unwrap_or_default();
+    crate::read_path_report::build(&blueprint, config, &workdir)?.ok()
 }
 
 /// Names of the `.rhai` tool scripts an installed agent ships.
@@ -279,7 +319,11 @@ fn script_tool_names(install_dir: &Path) -> Vec<String> {
 ///
 /// The agent name is read from `agent.leviath` in the directory (falling back
 /// to the directory's own name).
-fn install_from_dir(src: &Path, agents_dir: &Path) -> anyhow::Result<()> {
+fn install_from_dir(
+    src: &Path,
+    agents_dir: &Path,
+    config: Option<&crate::config::Config>,
+) -> anyhow::Result<()> {
     let manifest_path = src.join("agent.leviath");
     if !manifest_path.exists() {
         anyhow::bail!(
@@ -306,7 +350,7 @@ fn install_from_dir(src: &Path, agents_dir: &Path) -> anyhow::Result<()> {
 
     copy_dir_recursive(src, &install_dir)?;
     println!("Installed agent '{}' to {}", name, install_dir.display());
-    print_capabilities(&name, &install_dir);
+    print_capabilities(&name, &install_dir, config);
     println!("Run with:  lev run {} --task \"...\"", name);
     Ok(())
 }
@@ -370,7 +414,14 @@ fn parse_agent_name(content: &str) -> Option<String> {
 
 #[cfg(test)]
 mod capability_tests {
-    use super::describe_capabilities;
+    use std::path::Path;
+
+    /// The inventory with no config to judge `[read_paths]` against - the
+    /// fallback wording, and what every test here predating grant reporting
+    /// assumed. The grant-aware tests below pass a real report.
+    fn describe_capabilities(manifest_toml: &str, script_tools: &[String]) -> Vec<String> {
+        super::describe_capabilities(manifest_toml, script_tools, None)
+    }
 
     /// A plain agent declares nothing unusual, so the inventory stays quiet -
     /// a warning that fires on everything teaches people to skip it.
@@ -494,11 +545,61 @@ mod capability_tests {
         );
     }
 
+    /// With a config to judge against, the inventory says which entries are
+    /// live instead of restating the rule. This is what someone installing an
+    /// agent on a fresh machine needs to know.
+    #[test]
+    fn read_path_declarations_carry_their_grant_status() {
+        let manifest = "[agent]\nname = \"cto\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n\
+                        [stages.main]\nmode = \"autonomous\"\n\n\
+                        [context.regions]\nsystem = { kind = \"pinned\", max_tokens = 1000 }\n\n\
+                        [read_paths]\nallow = [\"/data/runs\", \"/data/docs\"]\n";
+        let blueprint = leviath_core::manifest::parse_manifest(manifest).expect("parses");
+
+        let mut config = crate::config::Config::default();
+        config.security.read_paths = vec!["/data/runs".to_string()];
+        let partial = crate::read_path_report::build(&blueprint, &config, Path::new("/work"))
+            .expect("declares read paths")
+            .expect("grants compile");
+        let findings = super::describe_capabilities(manifest, &[], Some(&partial));
+        assert!(
+            findings[0].contains("2 declared, 1 granted"),
+            "{findings:?}"
+        );
+        assert!(
+            findings[0].contains("[agent_read_paths.cto]"),
+            "{findings:?}"
+        );
+
+        config.security.read_paths.push("/data/docs".to_string());
+        let full = crate::read_path_report::build(&blueprint, &config, Path::new("/work"))
+            .expect("declares read paths")
+            .expect("grants compile");
+        let findings = super::describe_capabilities(manifest, &[], Some(&full));
+        assert!(findings[0].contains("all granted"), "{findings:?}");
+    }
+
     /// An empty `allow` array asks for nothing - stay quiet.
     #[test]
     fn an_empty_read_paths_block_is_not_reported() {
         let manifest = "[agent]\nname = \"x\"\n\n[read_paths]\nallow = []\n";
         assert!(describe_capabilities(manifest, &[]).is_empty());
+    }
+
+    /// Every way the grant report can be unavailable at install time: no
+    /// config to judge against, and a manifest the parser refuses. Both fall
+    /// back to stating the rule rather than guessing.
+    #[test]
+    fn no_grant_report_is_built_without_a_config_or_a_parseable_manifest() {
+        let manifest = "[agent]\nname = \"x\"\n\n[read_paths]\nallow = [\"/data/runs\"]\n";
+        assert!(super::read_path_report(manifest, None).is_none());
+        assert!(
+            super::read_path_report(
+                "not valid toml [[[",
+                Some(&crate::config::Config::default())
+            )
+            .is_none()
+        );
     }
 
     /// The `tools/` scan that feeds the inventory: only `.rhai` files count, and
@@ -538,7 +639,7 @@ mod capability_tests {
             let tools = dir.path().join("tools");
             std::fs::create_dir(&tools).unwrap();
             std::fs::write(tools.join("t.rhai"), "// @tool t\n").unwrap();
-            super::print_capabilities("q", dir.path());
+            super::print_capabilities("q", dir.path(), None);
 
             // And the quiet path: a plain agent prints nothing.
             let plain = tempfile::tempdir().unwrap();
@@ -547,7 +648,7 @@ mod capability_tests {
                 "[agent]\nname = \"p\"\n\n[stages.main]\nprompt = \"p\"\n",
             )
             .unwrap();
-            super::print_capabilities("p", plain.path());
+            super::print_capabilities("p", plain.path(), None);
         });
     }
 
@@ -561,6 +662,20 @@ mod capability_tests {
 mod tests {
     use super::*;
     use crate::test_support::{with_tracing, write_test_agent};
+
+    /// The installers with no config to judge `[read_paths]` against, which is
+    /// what every test here predating grant reporting assumed.
+    async fn execute_with(
+        args: &AddArgs,
+        installer: &leviath_package::AgentInstaller,
+        agents_dir: &Path,
+    ) -> anyhow::Result<()> {
+        super::execute_with(args, installer, agents_dir, None).await
+    }
+
+    fn install_from_dir(src: &Path, agents_dir: &Path) -> anyhow::Result<()> {
+        super::install_from_dir(src, agents_dir, None)
+    }
 
     // ─── agents_dir_or_error ─────────────────────────────────────────────
 
@@ -1107,11 +1222,16 @@ name = "second"
         let rt = tokio::runtime::Runtime::new().unwrap();
         with_tracing(|| {
             rt.block_on(async {
-                let args = AddArgs {
-                    package: "definitely-not-a-real-bundle-xyz.leviath-bundle".to_string(),
-                };
-                let err = execute(args).await.unwrap_err();
-                assert!(err.to_string().contains("Package file not found"));
+                // Isolated: `execute` reads the active config, to report
+                // `[read_paths]` grant status on what it installs.
+                crate::config::with_isolated_config_path_async("add-real-wrapper", |_fake| async {
+                    let args = AddArgs {
+                        package: "definitely-not-a-real-bundle-xyz.leviath-bundle".to_string(),
+                    };
+                    let err = execute(args).await.unwrap_err();
+                    assert!(err.to_string().contains("Package file not found"));
+                })
+                .await;
             })
         });
     }

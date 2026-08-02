@@ -140,6 +140,14 @@ pub struct RunListEntry {
     /// daemon simply omits it.
     #[serde(default)]
     pub empty_output: bool,
+    /// How much of this run's `[read_paths]` its config granted at spawn.
+    /// `None` for a blueprint that declares none, which is nearly every agent.
+    ///
+    /// Worth a column of its own because an ungranted declaration is inert: the
+    /// run is up, looks healthy, and will be refused the reads its author
+    /// designed it around.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_paths: Option<leviath_core::run_meta::ReadPathGrantCounts>,
 }
 
 /// Everything one [`ControlOp::List`] answers with: the live runs, the runs that
@@ -1576,6 +1584,7 @@ impl WorldHost {
             empty_output: world
                 .get::<crate::persistence::RunOutcomeFlags>(entity)
                 .is_some_and(|f| crate::persistence::is_empty_output(&state.status, &f.0)),
+            read_paths: metadata.and_then(|m| m.read_paths),
         }
     }
 
@@ -3414,6 +3423,7 @@ mod tests {
                 callback_secret: None,
                 title: None,
                 unattended: false,
+                read_paths: None,
             },
         ));
         assert!(
@@ -3788,6 +3798,7 @@ mod tests {
                 callback_secret: None,
                 title: None,
                 unattended: false,
+                read_paths: None,
             });
 
         // First emission after spawn: Spawned + Status + Tokens + Context.
@@ -4041,6 +4052,7 @@ mod tests {
             last_progress_at: None,
             unattended: false,
             empty_output: false,
+            read_paths: None,
         };
         host.record_finished(entry(AgentStatus::Cancelled), 100);
         host.record_finished(entry(AgentStatus::Complete), 200);
@@ -4069,6 +4081,7 @@ mod tests {
                     last_progress_at: None,
                     unattended: false,
                     empty_output: false,
+                    read_paths: None,
                 },
                 100,
             );
@@ -4579,6 +4592,7 @@ mod tests {
                 callback_secret: None,
                 title: None,
                 unattended: true,
+                read_paths: None,
             },
             TokenTotals {
                 tool_calls: 9,
