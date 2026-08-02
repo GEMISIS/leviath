@@ -56,6 +56,33 @@ there. That matters because a stage naming no model of its own falls back to `an
 machine with only an OpenRouter key can resolve to a provider it has no credential for, spawn, and
 sit at iteration 0.
 
+## Every run dies immediately with a payment or auth error
+
+The account behind that provider is out of credits, or its key was rejected. Every run starts,
+fails on its first request, and ends at iteration 0 with no tool calls.
+
+Run `lev ps`. A provider in this state is listed under the table with the reason and how long until
+it is tried again, and `lev ps --json` carries the same under `health.providers_down`. After a few
+failures in a row Leviath stops sending work there at all, so the flood of dead runs stops.
+
+To keep working through it, give the host somewhere else to go:
+
+```toml
+[providers]
+fallback_order = ["anthropic/claude-sonnet-5"]
+```
+
+Runs then move to that model instead of failing. This is read per run, so it takes effect on the
+next `lev run` without a restart, and so does topping the original account back up. See
+[Providers](/docs/providers#when-a-provider-keeps-failing) for the thresholds.
+
+A run that has nowhere left to go is failed after `[limits] stall_timeout_secs` with a message
+saying every provider it could use is out of service, rather than being left to sit there.
+
+If the runs are failing on the very first request and you are not sure the credential is the
+problem at all, `lev doctor` checks the provider wiring layer by layer and names the first one that
+breaks.
+
 ## A run says `running` but never does anything
 
 Check its provider first, with `lev doctor`. If a stage's model list names only providers you

@@ -55,10 +55,17 @@ google_api_key      = "..."          # env fallback: GOOGLE_API_KEY
 claude_code_enabled = false          # opt in to the Claude Code CLI transport
 claude_code_binary  = "/usr/local/bin/claude"   # unset resolves `claude` on PATH
 claude_code_effort  = "medium"       # low | medium | high | xhigh | max
+fallback_order      = ["anthropic/claude-sonnet-5", "openai/gpt-5.6-mini"]
 ```
 
 `claude_code_enabled` is off unless you turn it on. See
 [Providers](/docs/providers#claude-code-transport) for the terms note that goes with it.
+
+`fallback_order` is where a run goes when the provider it is using stops being usable: out of
+credits, or a rejected key. Entries are `provider/model` pairs, best first, tried after the stage's
+own model list and your default model. One naming a provider you have not configured is skipped.
+It is read per run, so a change takes effect on the next `lev run` with no restart. See
+[Providers](/docs/providers#a-host-wide-fallback-chain).
 
 ## `[limits]`
 
@@ -73,6 +80,8 @@ stall_timeout_secs        = 60   # fail a run that can never dispatch
 dead_cycles_before_relief = 10   # widen the tool lane after this long going nowhere
 finished_retention_secs   = 300  # keep a finished run in `lev ps` this long
 wedge_timeout_secs        = 0    # fail a run nothing can reach any more; 0 is off
+provider_failures_before_open  = 3     # pull a provider after this many failures in a row
+provider_circuit_cooldown_secs = 300   # how long before it is tried again
 ```
 
 | Key | Default | Notes |
@@ -86,6 +95,8 @@ wedge_timeout_secs        = 0    # fail a run nothing can reach any more; 0 is o
 | `dead_cycles_before_relief` | `10` | How many consecutive 30-second cycles the daemon may spend with a full tool lane and no run moving before it widens the lane. See [the tool lane](/docs/engine#the-tool-lane). `0` never widens it; the count is still reported either way |
 | `finished_retention_secs` | `300` | How long a run stays in [`lev ps`](/docs/cli#runs-that-have-finished) after it ends, so a script polling on an interval can see how it ended instead of finding it gone. `0` drops it as soon as it finishes. Held in memory, so a daemon restart clears it whatever this is set to |
 | `wedge_timeout_secs` | `0` (off) | How long a run may sit in a state no part of the engine can reach before it is failed instead of left reported as running. Never fires on a run that is merely slow: an agent waiting on the model, a tool, its sub-agents, or a person is exempt however long it takes. Off by default because it fails runs; `300` is a sensible value if something outside Leviath tracks your slots. See [reconciling an external work queue](/docs/daemon#reconciling-an-external-work-queue) |
+| `provider_failures_before_open` | `3` | Consecutive failures that only you can fix (out of credits, rejected key) before a provider is taken out of service for every run. Three rather than one because a single payment error can be one oversized request. `0` disables it, leaving per-run failover on its own |
+| `provider_circuit_cooldown_secs` | `300` | How long a provider stays out before one request is let through to see whether it recovered. A success puts it straight back; a failure restarts the wait. See [Providers](/docs/providers#when-a-provider-keeps-failing) |
 
 <a id="security"></a>
 

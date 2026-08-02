@@ -61,6 +61,15 @@ the one number that separates a busy daemon from a wedged one, and it is worth
 alerting on: a healthy factory sits at zero, and anything sustained above it
 means work is arriving that nothing is getting to.
 
+On the same 30-second tick: `leviath.provider.circuit.open`, one per provider
+Leviath has stopped sending work to, and `leviath.provider.circuit.opened.total`
+counting each time one was pulled, attributed by `leviath.provider` and
+`leviath.reason` (`credits-exhausted`, `auth-failed`, `forbidden`). Alert on the
+first: it goes to zero on its own when the provider recovers, so a non-zero
+reading means somebody has to top up an account or fix a key. This is the signal
+that a drained account otherwise hides, because the runs it kills die before
+producing any per-run telemetry at all.
+
 **Logs.** Log records carry the run's trace ID, so a collector that joins the
 three signals can jump from a log line to the exact span that produced it.
 
