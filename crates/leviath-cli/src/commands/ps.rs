@@ -59,6 +59,13 @@ an interval learns how a run ended rather than finding it gone. Set
 moment it finishes. The record is held in memory, so a daemon restart clears it;
 `meta.json` and the REST API keep the durable copy.
 
+An `out of service` block under the table lists providers the daemon has stopped
+sending work to, because each failed several times in a row for something only
+you can fix: an account out of credits, or a key that was rejected. Runs move to
+the next provider a stage lists (or one from `[providers] fallback_order`); a run
+with none left is failed rather than left waiting. Each entry says how long until
+that provider is tried again, and topping up the account needs no restart.
+
 A `lanes:` line under the table means the daemon itself is worth a look. It
 shows the tool lane's occupancy - batches running, parked on a wait, and queued
 behind them - and, if the daemon has stopped getting anywhere, how many re-drive
@@ -271,6 +278,40 @@ fn stage_cell(entry: &RunListEntry) -> String {
     }
 }
 
+/// The providers currently out of service, with why and when each is retried.
+///
+/// This is the line that would have answered issue #201 on sight. Ten runs
+/// dying in a row produced ten identical error rows and nothing that said "the
+/// OpenRouter account is empty", so the shape of the problem was invisible from
+/// the listing.
+fn providers_footer(health: &DaemonHealth) -> Option<String> {
+    if health.providers_down.is_empty() {
+        return None;
+    }
+    let each = health
+        .providers_down
+        .iter()
+        .map(|c| {
+            format!(
+                "  {} ({}, {} failures) - retrying in {}",
+                c.provider,
+                c.reason.label(),
+                c.consecutive_failures,
+                humanize_age(c.retry_in_secs as i64)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let noun = match health.providers_down.len() {
+        1 => "provider is",
+        _ => "providers are",
+    };
+    Some(format!(
+        "{} {noun} out of service:\n{each}",
+        health.providers_down.len()
+    ))
+}
+
 /// The daemon-wide footer: what the tool lane is holding, and whether the daemon
 /// as a whole has stopped getting anywhere.
 ///
@@ -382,6 +423,9 @@ pub fn format_runs(
         1 => format!("{table}\n\n1 run needs an answer: lev respond"),
         n => format!("{table}\n\n{n} runs need an answer: lev respond"),
     };
+    if let Some(footer) = providers_footer(health) {
+        out.push_str(&format!("\n\n{footer}"));
+    }
     if let Some(footer) = health_footer(health) {
         out.push_str(&format!("\n\n{footer}"));
     }

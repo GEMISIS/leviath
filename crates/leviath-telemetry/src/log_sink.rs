@@ -7,7 +7,7 @@
 //! the same reason this is hand-rolled rather than `opentelemetry-stdout`,
 //! which writes to stdout unconditionally.)
 
-use leviath_core::telemetry::{LaneHealth, LogKind, TelemetryEvent, TelemetrySink};
+use leviath_core::telemetry::{LaneHealth, LogKind, ProviderHealth, TelemetryEvent, TelemetrySink};
 
 /// One readable line for an event.
 pub(crate) fn format_event(event: &TelemetryEvent) -> String {
@@ -112,6 +112,27 @@ pub(crate) fn format_lane_health(health: &LaneHealth) -> String {
     )
 }
 
+/// One readable line for the providers currently out of service.
+///
+/// `None` while everything is serving, so a healthy daemon does not narrate a
+/// line saying nothing is wrong on every re-drive.
+pub(crate) fn format_providers_down(down: &[ProviderHealth]) -> Option<String> {
+    if down.is_empty() {
+        return None;
+    }
+    let each = down
+        .iter()
+        .map(|p| {
+            format!(
+                "{} ({}, {} failures, retry in {}s)",
+                p.provider, p.reason, p.consecutive_failures, p.retry_in_secs
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("providers out of service: {each}"))
+}
+
 /// [`TelemetrySink`] that narrates events as `tracing` lines (→ stderr).
 pub struct LogSink;
 
@@ -122,6 +143,12 @@ impl TelemetrySink for LogSink {
 
     fn observe_lanes(&self, health: LaneHealth) {
         tracing::info!(target: "leviath::telemetry", "{}", format_lane_health(&health));
+    }
+
+    fn observe_providers(&self, down: &[ProviderHealth]) {
+        if let Some(line) = format_providers_down(down) {
+            tracing::warn!(target: "leviath::telemetry", "{line}");
+        }
     }
 }
 
@@ -328,5 +355,49 @@ mod tests {
     fn observe_lanes_routes_through_tracing_without_panicking() {
         let _guard = leviath_testkit::tracing_guard();
         LogSink.observe_lanes(LaneHealth::default());
+    }
+
+    #[test]
+    fn providers_down_formats_to_one_line() {
+        let line = format_providers_down(&[
+            ProviderHealth {
+                provider: "openrouter".to_string(),
+                reason: "credits-exhausted".to_string(),
+                consecutive_failures: 3,
+                retry_in_secs: 240,
+            },
+            ProviderHealth {
+                provider: "anthropic".to_string(),
+                reason: "auth-failed".to_string(),
+                consecutive_failures: 5,
+                retry_in_secs: 30,
+            },
+        ])
+        .expect("something is down");
+        assert_eq!(
+            line,
+            "providers out of service: openrouter (credits-exhausted, 3 failures, retry in 240s), \
+             anthropic (auth-failed, 5 failures, retry in 30s)"
+        );
+        assert!(!line.contains('\n'), "one line: {line}");
+    }
+
+    /// A healthy daemon must not narrate "nothing is wrong" every 30 seconds.
+    #[test]
+    fn nothing_down_is_no_line_at_all() {
+        assert_eq!(format_providers_down(&[]), None);
+        let _guard = leviath_testkit::tracing_guard();
+        LogSink.observe_providers(&[]);
+    }
+
+    #[test]
+    fn observe_providers_routes_through_tracing_without_panicking() {
+        let _guard = leviath_testkit::tracing_guard();
+        LogSink.observe_providers(&[ProviderHealth {
+            provider: "openrouter".to_string(),
+            reason: "credits-exhausted".to_string(),
+            consecutive_failures: 3,
+            retry_in_secs: 240,
+        }]);
     }
 }

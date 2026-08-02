@@ -1,6 +1,7 @@
 use super::*;
 use leviath_runtime::components::WaitReason;
 use leviath_runtime::control_socket::{ControlId, bind_control_listener, control_id};
+use leviath_runtime::pipeline::ProviderCircuitState;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::task::JoinHandle;
 
@@ -372,6 +373,81 @@ fn the_footer_and_the_answer_call_out_coexist() {
     };
     let out = format_runs(&[blocked], &[], &health, 0);
     assert!(out.contains("1 run needs an answer: lev respond"), "{out}");
+    assert!(out.contains("no progress for 2 cycles"), "{out}");
+}
+
+// ── providers out of service (issue #201) ─────────────────────────────────
+
+fn down(provider: &str, reason: leviath_providers::UnavailableReason) -> ProviderCircuitState {
+    ProviderCircuitState {
+        provider: provider.to_string(),
+        reason,
+        consecutive_failures: 3,
+        retry_in_secs: 240,
+    }
+}
+
+#[test]
+fn a_provider_out_of_service_is_named_under_the_table() {
+    // The line that would have answered the issue on sight: ten identical
+    // error rows never said "the OpenRouter account is empty".
+    let health = DaemonHealth {
+        providers_down: vec![down(
+            "openrouter",
+            leviath_providers::UnavailableReason::CreditsExhausted,
+        )],
+        ..healthy_daemon()
+    };
+    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &health, 0);
+    assert!(out.contains("1 provider is out of service:"), "{out}");
+    assert!(
+        out.contains("openrouter (credits-exhausted, 3 failures)"),
+        "{out}"
+    );
+    assert!(out.contains("retrying in 4m"), "{out}");
+}
+
+#[test]
+fn several_providers_out_of_service_are_listed_and_pluralized() {
+    let health = DaemonHealth {
+        providers_down: vec![
+            down(
+                "anthropic",
+                leviath_providers::UnavailableReason::AuthFailed,
+            ),
+            down(
+                "openrouter",
+                leviath_providers::UnavailableReason::CreditsExhausted,
+            ),
+        ],
+        ..healthy_daemon()
+    };
+    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &health, 0);
+    assert!(out.contains("2 providers are out of service:"), "{out}");
+    assert!(out.contains("anthropic (auth-failed"), "{out}");
+    assert!(out.contains("openrouter (credits-exhausted"), "{out}");
+}
+
+#[test]
+fn healthy_providers_add_no_block() {
+    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &healthy_daemon(), 0);
+    assert!(!out.contains("out of service"), "{out}");
+}
+
+#[test]
+fn the_provider_block_and_the_lane_footer_coexist() {
+    // Different questions, and a wedged daemon with a dead provider is exactly
+    // when an operator needs both answers at once.
+    let health = DaemonHealth {
+        dead_cycles: 2,
+        providers_down: vec![down(
+            "openrouter",
+            leviath_providers::UnavailableReason::CreditsExhausted,
+        )],
+        ..healthy_daemon()
+    };
+    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &health, 0);
+    assert!(out.contains("out of service"), "{out}");
     assert!(out.contains("no progress for 2 cycles"), "{out}");
 }
 

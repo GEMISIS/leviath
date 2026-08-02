@@ -9,12 +9,12 @@
 //! parented to the open stage. A daemon crash loses whatever was open;
 //! recovered runs start a fresh trace tagged `leviath.recovered = true`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use leviath_core::config::ObservabilityConfig;
-use leviath_core::telemetry::{LaneHealth, LogKind, TelemetryEvent, TelemetrySink};
+use leviath_core::telemetry::{LaneHealth, LogKind, ProviderHealth, TelemetryEvent, TelemetrySink};
 use opentelemetry::logs::{AnyValue, LogRecord, Logger, LoggerProvider, Severity};
 use opentelemetry::metrics::{Counter, Histogram, Meter, MeterProvider, UpDownCounter};
 use opentelemetry::trace::{
@@ -117,6 +117,7 @@ struct Instruments {
     /// rather than plain counters because these go both ways, and the sink adds
     /// the delta from the previous sample so a scrape reads the current value.
     lane: LaneInstruments,
+    providers: ProviderInstruments,
 }
 
 /// The daemon-wide instruments, kept together because they share the
@@ -191,6 +192,58 @@ impl LaneInstruments {
     }
 }
 
+/// Providers taken out of service by their circuit breaker (issue #201).
+///
+/// Per-provider levels rather than one total, because "which provider is down"
+/// is the whole question an operator has; a bare count answers none of it.
+struct ProviderInstruments {
+    open: UpDownCounter<i64>,
+    opened: Counter<u64>,
+    /// Which providers were reported open last sample, so each can be turned
+    /// into a delta the same way [`LaneInstruments`] does.
+    last: Mutex<HashSet<String>>,
+}
+
+impl ProviderInstruments {
+    fn new(meter: &Meter) -> Self {
+        Self {
+            open: meter
+                .i64_up_down_counter("leviath.provider.circuit.open")
+                .with_description("Providers currently out of service, by provider")
+                .build(),
+            opened: meter
+                .u64_counter("leviath.provider.circuit.opened.total")
+                .with_description("Times a provider's circuit has opened, by provider and reason")
+                .build(),
+            last: Mutex::new(HashSet::new()),
+        }
+    }
+
+    fn record(&self, down: &[ProviderHealth]) {
+        let now: HashSet<String> = down.iter().map(|p| p.provider.clone()).collect();
+        let mut last = self.last.lock().expect("telemetry provider level lock");
+        for p in down {
+            let attrs = [KeyValue::new("leviath.provider", p.provider.clone())];
+            if !last.contains(&p.provider) {
+                self.open.add(1, &attrs);
+                self.opened.add(
+                    1,
+                    &[
+                        KeyValue::new("leviath.provider", p.provider.clone()),
+                        KeyValue::new("leviath.reason", p.reason.clone()),
+                    ],
+                );
+            }
+        }
+        // Anything that was open and is not any more came back.
+        for provider in last.difference(&now) {
+            self.open
+                .add(-1, &[KeyValue::new("leviath.provider", provider.clone())]);
+        }
+        *last = now;
+    }
+}
+
 impl Instruments {
     fn new(meter: &Meter) -> Self {
         Self {
@@ -227,6 +280,7 @@ impl Instruments {
                 )
                 .build(),
             lane: LaneInstruments::new(meter),
+            providers: ProviderInstruments::new(meter),
         }
     }
 }
@@ -650,6 +704,10 @@ impl TelemetrySink for OtelSink {
         self.instruments.lane.record(&health);
     }
 
+    fn observe_providers(&self, down: &[ProviderHealth]) {
+        self.instruments.providers.record(down);
+    }
+
     fn force_flush(&self) {
         let _ = self.tracer_provider.force_flush();
         let _ = self.meter_provider.force_flush();
@@ -1070,6 +1128,68 @@ mod tests {
         ] {
             assert!(names.contains(&expected.to_string()), "{names:?}");
         }
+    }
+
+    fn down(provider: &str, reason: &str) -> ProviderHealth {
+        ProviderHealth {
+            provider: provider.to_string(),
+            reason: reason.to_string(),
+            consecutive_failures: 3,
+            retry_in_secs: 240,
+        }
+    }
+
+    #[test]
+    fn provider_circuit_samples_export() {
+        let h = harness();
+        h.sink
+            .observe_providers(&[down("openrouter", "credits-exhausted")]);
+        h.sink.observe_providers(&[]);
+        h.sink.force_flush();
+
+        let exported = h.metrics.get_finished_metrics().unwrap();
+        let names: Vec<String> = exported
+            .iter()
+            .flat_map(|rm| rm.scope_metrics())
+            .flat_map(|sm| sm.metrics())
+            .map(|m| m.name().to_string())
+            .collect();
+        for expected in [
+            "leviath.provider.circuit.open",
+            "leviath.provider.circuit.opened.total",
+        ] {
+            assert!(names.contains(&expected.to_string()), "{names:?}");
+        }
+    }
+
+    /// The level arithmetic on its own. The gauge must go back down when a
+    /// provider recovers, or a topped-up account reads as still broken.
+    #[test]
+    fn a_provider_that_recovers_brings_the_gauge_back_down() {
+        let meter = SdkMeterProvider::builder().build().meter("test");
+        let providers = ProviderInstruments::new(&meter);
+        let open = |p: &ProviderInstruments| p.last.lock().unwrap().clone();
+
+        providers.record(&[down("openrouter", "credits-exhausted")]);
+        assert_eq!(open(&providers).len(), 1);
+
+        // Still down, plus a second one. Re-reporting the first must not count
+        // it as newly opened.
+        providers.record(&[
+            down("openrouter", "credits-exhausted"),
+            down("anthropic", "auth-failed"),
+        ]);
+        assert_eq!(open(&providers).len(), 2);
+
+        // One recovers.
+        providers.record(&[down("anthropic", "auth-failed")]);
+        let still = open(&providers);
+        assert_eq!(still.len(), 1);
+        assert!(still.contains("anthropic"));
+
+        // Everything recovers.
+        providers.record(&[]);
+        assert!(open(&providers).is_empty());
     }
 
     /// The delta arithmetic on its own, where the numbers are readable.

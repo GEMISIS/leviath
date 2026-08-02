@@ -188,6 +188,12 @@ pub struct DaemonHealth {
     /// How often the daemon re-drives itself, so a client can turn
     /// `dead_cycles` into wall-clock time.
     pub redrive_secs: u64,
+    /// Providers currently out of service, and when each is probed again.
+    ///
+    /// Empty on a healthy daemon. `#[serde(default)]` so an older client still
+    /// parses a newer daemon's response (issue #201).
+    #[serde(default)]
+    pub providers_down: Vec<crate::pipeline::ProviderCircuitState>,
 }
 
 /// The daemon-installed function that turns [`SpawnArgs`] into a live agent:
@@ -845,6 +851,25 @@ impl WorldHost {
                 dead_cycles: self.dead_cycles,
                 relief_granted: relief,
             });
+        // Sampled on the same tick, and unconditionally: a collector needs the
+        // empty sample to see that a provider came *back*, not just that it
+        // went away (issue #201).
+        let down: Vec<leviath_core::telemetry::ProviderHealth> = self
+            .world
+            .open_circuits()
+            .into_iter()
+            .map(|c| leviath_core::telemetry::ProviderHealth {
+                provider: c.provider,
+                reason: c.reason.label().to_string(),
+                consecutive_failures: c.consecutive_failures,
+                retry_in_secs: c.retry_in_secs,
+            })
+            .collect();
+        self.world
+            .world()
+            .resource::<crate::telemetry::Telemetry>()
+            .0
+            .observe_providers(&down);
     }
 
     /// The daemon's own health: lane occupancy plus the dead-cycle count.
@@ -864,6 +889,7 @@ impl WorldHost {
             dead_cycles: self.dead_cycles,
             relief_granted: self.relief_granted,
             redrive_secs: self.redrive.as_secs(),
+            providers_down: self.world.open_circuits(),
         }
     }
 
