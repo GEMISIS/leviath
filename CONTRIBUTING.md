@@ -101,20 +101,28 @@ Releases are triggered by a version bump, not by a schedule. Merging a bump to
 commit rather than something that rides along with a feature.
 
 Everything ships in lockstep — all `leviath-*` crates plus the `lev` binary
-carry one version — so a bump is three edits:
+carry one version — so there is one command:
 
-1. `[workspace.package] version` in the root `Cargo.toml`.
-2. The eleven intra-workspace `version = "…"` pins in `[workspace.dependencies]`
-   just below it. `cargo publish` refuses a path dependency without a version,
-   and refuses one that disagrees with what is on crates.io, so these have to
-   move together with the line above.
-3. `cargo update --workspace` to bring `Cargo.lock` along. CI fails on a
-   lockfile that disagrees with the manifests.
+```bash
+cargo xtask version 0.1.3
+```
 
-Then move `## Unreleased` in `CHANGELOG.md` under a `## X.Y.Z - YYYY-MM-DD`
-heading and open a fresh empty `## Unreleased` above it.
+That writes `[workspace.package] version`, the eleven intra-workspace pins in
+`[workspace.dependencies]` just below it, and `Cargo.lock`, then moves
+`## Unreleased` in `CHANGELOG.md` under a dated `## 0.1.3` heading and opens a
+fresh empty one. The pins exist because `cargo publish` refuses a path
+dependency with no version requirement, and Cargo has no way to make those
+requirements inherit the workspace version — so they are written out, and they
+have to agree. `cargo xtask version --check` is the CI job that fails a
+hand-edit which moved only some of them.
 
-Merging that fires the alpha release for the bump commit; beta promotes it the
+Then write the changelog entries for what you are shipping, and open the PR.
+Because merging a bump publishes, CI requires the **`allow-version-bump`** label
+on any PR that moves the version — the same deliberate sign-off
+`allow-main-rs-change` asks for, with its own label so approving a release never
+doubles as approving an entrypoint change.
+
+Merging fires the alpha release for the bump commit; beta promotes it the
 following Monday and stable the Thursday after. Channels with nothing new to
 publish skip in seconds. See
 [Releases and channels](https://leviath.dev/docs/releases) for the full picture.

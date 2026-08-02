@@ -16,4 +16,4 @@
 - [ ] New code is fully covered — CI gates at 100% lines/regions/functions with no opt-out
 - [ ] Docs updated if user-facing behavior changed (`README.md`, `docs/content/`)
 - [ ] `CHANGELOG.md` updated under `## Unreleased` if this is user-visible
-- [ ] Version bumped only if this PR is meant to ship — merging a bump cuts an alpha release (see [CONTRIBUTING](../CONTRIBUTING.md#cutting-a-release))
+- [ ] Version bumped only if this PR is meant to ship — use `cargo xtask version <X.Y.Z>`, and apply the `allow-version-bump` label (see [CONTRIBUTING](../CONTRIBUTING.md#cutting-a-release))
