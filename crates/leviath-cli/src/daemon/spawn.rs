@@ -2067,6 +2067,49 @@ system = { kind = "pinned", max_tokens = 1000 }
         assert!(meta.unattended);
     }
 
+    /// A stage that kept a human tool through an unattended run has to reach the
+    /// tool state with that tool in hand: the cut takes it out of the advertised
+    /// set, and this set is what puts a call to it back in front of a person
+    /// instead of the auto-answering backend (issue #204).
+    #[tokio::test]
+    async fn build_agent_carries_required_tools_into_the_tool_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"asks\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
+             available_tools = [\"read_file\", \"ask_user_text\"]\n\
+             required_tools = [\"ask_user_text\"]\n",
+        )
+        .unwrap();
+        let (mut world, cli) = test_world();
+        let mut args = spawn_args(&manifest.to_string_lossy());
+        args.yolo = true;
+        let entity = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &Config::default(),
+            Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            &[],
+            &InteractionHub::new(),
+            &args,
+            100,
+            sub_tx(),
+        )
+        .expect("spawn succeeds");
+
+        let state = cli.take(entity).expect("tool state registered");
+        assert!(
+            state
+                .stage_required
+                .lock()
+                .unwrap()
+                .contains("ask_user_text")
+        );
+        assert_eq!(state.stage_required_by_index.len(), 1);
+    }
+
     #[tokio::test]
     async fn build_agent_without_yolo_keeps_prompts_interactive() {
         let dir = tempfile::tempdir().unwrap();

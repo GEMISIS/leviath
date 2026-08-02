@@ -1632,7 +1632,8 @@ mod tests {
         .await;
 
         assert_eq!(out.len(), 1);
-        assert!(out[0].1.contains("unattended run"), "{}", out[0].1);
+        let result = out[0].1.clone();
+        assert!(result.contains("unattended run"), "{result}");
         assert!(hub.pending().is_empty(), "nobody was asked");
     }
 
