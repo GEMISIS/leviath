@@ -395,7 +395,7 @@ pub fn format_runs(
     // READS only appears when some run has `[read_paths]` to report, which is
     // nearly never: an extra column of dashes on every ordinary listing would
     // cost every reader something to buy the rare reader nothing.
-    let show_reads = runs.iter().any(|e| e.read_paths.is_some());
+    let show_reads = runs.iter().chain(finished).any(|e| e.read_paths.is_some());
     let mut headers = vec!["RUN", "STATUS", "STAGE", "ITER", "TOOLS", "AGE"];
     if show_reads {
         headers.push("READS");
