@@ -169,6 +169,16 @@ jobs:
       - name: Verify Cargo.lock is up to date
         run: cargo metadata --locked --format-version 1 > /dev/null
 
+      # The same manifest, one level up: `[workspace.package] version` and the
+      # eleven `[workspace.dependencies]` pins that repeat it have to agree.
+      # A bump that moved only some of them is quiet within a `0.1.x` line -
+      # a stale `version = "0.1.2"` pin is a `^0.1.2` requirement that `0.1.3`
+      # satisfies, so it builds and publishes, just naming the wrong version -
+      # and only turns loud on a bump crossing the caret boundary, in the prod
+      # job, a week after the alpha shipped.
+      - name: Verify the version declarations agree
+        run: cargo xtask version --check
+
   # Rejects broken or private intra-doc links and stray HTML tags in doc
   # comments (`-D warnings` promotes every rustdoc lint to an error). Cheap and
   # OS-independent, so it runs once on ubuntu.
