@@ -44,6 +44,9 @@ async-trait = "0.1"
 [dev-dependencies]
 leviath-testkit = { workspace = true }
 async-trait = "0.1"
+# `start_paused` / `advance`, so the interaction deadline is tested by moving a
+# virtual clock rather than by sleeping through a real hour.
+tokio = { workspace = true, features = ["test-util"] }
 temp-env = { workspace = true, features = ["async_closure"] }
 tempfile = "3"
 
