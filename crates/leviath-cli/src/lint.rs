@@ -138,6 +138,12 @@ pub struct LintEnv {
     /// the check is skipped. Resolution lives with the caller because script
     /// providers are loaded on demand and cannot be enumerated up front.
     pub available_providers: Option<HashSet<String>>,
+
+    /// Which of the blueprint's `[read_paths]` this install's config grants.
+    /// `None` means nobody asked (the daemon's offline lint), in which case the
+    /// check only says that a declaration needs granting. `Some(Err(..))` is a
+    /// grant list of the user's own that will not compile.
+    pub read_paths: Option<Result<crate::read_path_report::GrantReport, String>>,
 }
 
 impl LintEnv {
@@ -173,6 +179,7 @@ impl LintEnv {
             known_tools,
             known_models: crate::commands::models::closed_catalog_models(),
             available_providers: None,
+            read_paths: None,
         }
     }
 
@@ -190,6 +197,22 @@ impl LintEnv {
                 .filter(|p| registry.has(p))
                 .collect(),
         );
+        self
+    }
+
+    /// Add the answer to "does this install's config grant what the blueprint
+    /// declares under `[read_paths]`", per entry.
+    ///
+    /// Separate from [`Self::with_providers`] because it needs a workdir:
+    /// relative entries resolve against the one a run would use, which for a
+    /// command run outside a run is the directory it was invoked from.
+    pub fn with_read_paths(
+        mut self,
+        blueprint: &Blueprint,
+        config: &crate::config::Config,
+        workdir: &Path,
+    ) -> Self {
+        self.read_paths = crate::read_path_report::build(blueprint, config, workdir);
         self
     }
 }
@@ -216,7 +239,7 @@ pub fn lint_manifest(content: &str, blueprint: &Blueprint, env: &LintEnv) -> Vec
     }
 
     findings.extend(lint_command_seeds(blueprint));
-    findings.extend(lint_read_paths(blueprint));
+    findings.extend(lint_read_paths(blueprint, env));
     findings.extend(lint_graph(blueprint));
 
     let agent_permissions = blueprint.agent_tool_permissions();
@@ -569,9 +592,18 @@ fn lint_command_seeds(blueprint: &Blueprint) -> Vec<LintFinding> {
     ]
 }
 
-/// `[read_paths]` declarations, plus a sharper warning for an entry so broad it
-/// amounts to "my whole home directory" or "any absolute path".
-fn lint_read_paths(blueprint: &Blueprint) -> Vec<LintFinding> {
+/// `[read_paths]` declarations: what the agent asks to read beyond its workdir,
+/// whether this machine's config actually grants each entry, and a sharper
+/// warning for an entry so broad it amounts to "my whole home directory" or
+/// "any absolute path".
+///
+/// The grant status is the point (issue #209). A declaration is inert on its
+/// own, and before this it took reading the config schema to find that out: the
+/// blueprint validated, the run spawned, and the first out-of-workdir read was
+/// refused with nothing said earlier. When `env` has no answer - the daemon's
+/// offline lint, which has no user config to consult - the note falls back to
+/// stating the rule.
+fn lint_read_paths(blueprint: &Blueprint, env: &LintEnv) -> Vec<LintFinding> {
     let Some(rp) = blueprint
         .read_paths
         .as_ref()
@@ -579,17 +611,26 @@ fn lint_read_paths(blueprint: &Blueprint) -> Vec<LintFinding> {
     else {
         return Vec::new();
     };
-    let mut findings = vec![
-        LintFinding::new(
-            LintSeverity::Note,
-            "read-paths-declared",
-            format!(
-                "declares [read_paths] (reads outside the run workdir): {}",
-                rp.allow.join(", ")
-            ),
-        )
-        .with_fix("these are refused unless your own config grants them"),
-    ];
+    let mut findings = match &env.read_paths {
+        Some(Ok(report)) => grant_findings(report),
+        // A grant list of the user's own that will not compile is a hard spawn
+        // error; saying so here is where it costs least.
+        Some(Err(e)) => vec![
+            LintFinding::new(LintSeverity::Warning, "read-paths-grant-invalid", e.clone())
+                .with_fix("fix the entry in your config.toml, or remove it"),
+        ],
+        None => vec![
+            LintFinding::new(
+                LintSeverity::Note,
+                "read-paths-declared",
+                format!(
+                    "declares [read_paths] (reads outside the run workdir): {}",
+                    rp.allow.join(", ")
+                ),
+            )
+            .with_fix("these are refused unless your own config grants them"),
+        ],
+    };
     findings.extend(
         rp.allow
             .iter()
@@ -606,6 +647,60 @@ fn lint_read_paths(blueprint: &Blueprint) -> Vec<LintFinding> {
                 .with_fix("name the directory it actually needs")
             }),
     );
+    findings
+}
+
+/// One finding per declared entry, judged against the config: a note for the
+/// ones that are live, a warning naming each one that is not, and the stanza
+/// that would grant them all.
+///
+/// An entry whose pattern admits no representative path is reported as
+/// unchecked rather than as inert - claiming a working grant is broken would be
+/// worse than saying nothing.
+fn grant_findings(report: &crate::read_path_report::GrantReport) -> Vec<LintFinding> {
+    use crate::read_path_report::GrantStatus;
+    let mut findings = vec![
+        LintFinding::new(
+            LintSeverity::Note,
+            "read-paths-declared",
+            format!(
+                "declares [read_paths] (reads outside the run workdir): {}",
+                report.summary()
+            ),
+        )
+        .with_fix(match report.allow_blueprint {
+            true => "all granted by [security] allow_blueprint_read_paths = true".to_string(),
+            false => report
+                .entries
+                .iter()
+                .map(|e| {
+                    let verdict = match e.status {
+                        GrantStatus::Granted => "granted",
+                        GrantStatus::NotGranted => "NOT granted",
+                        GrantStatus::Undetermined => "cannot be checked from the pattern alone",
+                    };
+                    format!("{}: {verdict}", e.raw)
+                })
+                .collect::<Vec<_>>()
+                .join("; "),
+        }),
+    ];
+    if report.has_ungranted() {
+        findings.push(
+            LintFinding::new(
+                LintSeverity::Warning,
+                "read-paths-not-granted",
+                format!(
+                    "your config does not grant {}: reads matching them will be refused",
+                    report.ungranted().join(", ")
+                ),
+            )
+            .with_fix(format!(
+                "add to your config.toml: {}",
+                report.grant_stanza().join(" ")
+            )),
+        );
+    }
     findings
 }
 

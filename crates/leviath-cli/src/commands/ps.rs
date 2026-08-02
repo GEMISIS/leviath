@@ -20,6 +20,12 @@ List agents running in the shared-world daemon.
 Columns: RUN, STATUS, STAGE (with position when the blueprint has several),
 ITER (iterations in the current stage), TOOLS (tool calls so far), and AGE.
 
+READS appears only when some listed run's blueprint declares [read_paths], and
+reads granted/declared. A blueprint declaring paths outside its workdir is not
+the same as being allowed to read them: your config.toml has to grant them too,
+so `0/2` means the run is up and every such read will be refused. `lev validate
+<agent>` names the entries and prints the stanza to add.
+
 AGE is how long since the run last actually moved - a new iteration, a new
 stage, or a change of status. It is not the `updated_at` in meta.json, which
 also advances on a 30-second heartbeat and so stays fresh on a wedged run.
@@ -312,6 +318,19 @@ fn providers_footer(health: &DaemonHealth) -> Option<String> {
     ))
 }
 
+/// The READS cell: how many of the blueprint's `[read_paths]` entries the
+/// config granted, over how many it declared. `-` for a run that declared none,
+/// which is what nearly every agent does.
+///
+/// `0/2` is the shape worth spotting: the run is up and looks healthy, and
+/// every read it was designed to make outside its workdir will be refused.
+fn reads_cell(entry: &RunListEntry) -> String {
+    match entry.read_paths {
+        Some(counts) => format!("{}/{}", counts.granted, counts.declared),
+        None => "-".to_string(),
+    }
+}
+
 /// The daemon-wide footer: what the tool lane is holding, and whether the daemon
 /// as a whole has stopped getting anywhere.
 ///
@@ -373,34 +392,45 @@ pub fn format_runs(
             None => "no agents running".to_string(),
         };
     }
-    let headers = ["RUN", "STATUS", "STAGE", "ITER", "TOOLS", "AGE"];
-    let rows: Vec<[String; 6]> = runs
+    // READS only appears when some run has `[read_paths]` to report, which is
+    // nearly never: an extra column of dashes on every ordinary listing would
+    // cost every reader something to buy the rare reader nothing.
+    let show_reads = runs.iter().any(|e| e.read_paths.is_some());
+    let mut headers = vec!["RUN", "STATUS", "STAGE", "ITER", "TOOLS", "AGE"];
+    if show_reads {
+        headers.push("READS");
+    }
+    let rows: Vec<Vec<String>> = runs
         .iter()
         .chain(finished)
         .map(|e| {
-            [
+            let mut cells = vec![
                 e.run_id.clone(),
                 status_cell(e),
                 stage_cell(e),
                 e.iteration.to_string(),
                 e.tool_calls.to_string(),
                 age_cell(e, now),
-            ]
+            ];
+            if show_reads {
+                cells.push(reads_cell(e));
+            }
+            cells
         })
         .collect();
 
     // Column widths from the header and every cell, so nothing wraps under a
     // long run id or a long wait reason.
-    let mut widths = headers.map(str::len);
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
     for row in &rows {
         for (w, cell) in widths.iter_mut().zip(row) {
             *w = (*w).max(cell.chars().count());
         }
     }
 
-    let render = |cells: &[String; 6]| {
+    let render = |cells: &Vec<String>| {
         let mut line = String::new();
-        for (i, (cell, width)) in cells.iter().zip(widths).enumerate() {
+        for (i, (cell, width)) in cells.iter().zip(&widths).enumerate() {
             if i > 0 {
                 line.push_str("  ");
             }
@@ -413,7 +443,7 @@ pub fn format_runs(
         line
     };
 
-    let header_row = headers.map(str::to_string);
+    let header_row: Vec<String> = headers.iter().map(|h| (*h).to_string()).collect();
     let table = std::iter::once(render(&header_row))
         .chain(rows.iter().map(render))
         .collect::<Vec<_>>()

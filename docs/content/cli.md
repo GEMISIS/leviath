@@ -102,7 +102,9 @@ in three levels: an **error** exits non-zero, a **warning** does not, and a **no
 | warning | `unknown-model` | A model this build has not heard of, checked only against providers with a closed catalog. Ollama, OpenRouter and script providers are never checked. |
 | warning | `no-reachable-provider` | Nothing in the stage's models list is configured here, so it falls through to your default model. |
 | warning | `unreachable-stage`, `cycle-without-max-revisits`, `broad-read-path` | Graph and `[read_paths]` shape. |
-| note | `command-seed`, `read-paths-declared` | What the blueprint will do that you should know about before running it. |
+| warning | `read-paths-not-granted` | The blueprint declares `[read_paths]` your `config.toml` does not grant. Declaring is not granting, so those reads are refused; the fix line carries the stanza to add. |
+| warning | `read-paths-grant-invalid` | A `read_paths` grant in your own config will not compile. It is a hard spawn error, named here first. |
+| note | `command-seed`, `read-paths-declared` | What the blueprint will do that you should know about before running it. `read-paths-declared` carries the granted/declared counts and each entry's status. |
 
 | Flag | Purpose |
 |---|---|
@@ -110,6 +112,12 @@ in three levels: an **error** exits non-zero, a **warning** does not, and a **no
 
 The same findings are written to `daemon.log` when a run spawns, so a blueprint that was never
 validated still says what is wrong with it. Nothing there refuses a spawn.
+
+`[read_paths]` entries are checked against your own `config.toml`, entry by entry, because
+declaring one is not the same as being allowed to read it. Anything your config does not grant is
+named as such, with the stanza that would grant it. The daemon's own lint has no user config to
+consult, so there it stays the plain "these need granting" note - see
+[reading outside the workdir](/docs/security#reading-outside-the-workdir).
 
 ### `lev test [PATH]`
 
@@ -143,7 +151,7 @@ Serve an agent over the [Agent Client Protocol](/docs/agent-client-protocol) as 
 
 | Command | Flags | Purpose |
 |---|---|---|
-| `lev list` | `-f`, `--filter <agents\|blueprints\|all>` (default `all`) | List installed and bundled blueprints |
+| `lev list` | `-f`, `--filter <agents\|blueprints\|all>` (default `all`) | List installed and bundled blueprints. An agent declaring [`[read_paths]`](/docs/security#reading-outside-the-workdir) also shows how many of its entries your config grants |
 | `lev add <PACKAGE>` | | Install a blueprint directory or `.leviath-bundle`. Prints what the package grants itself before installing |
 | `lev remove <NAME>` | | Uninstall a blueprint |
 | `lev pack [PATH]` | `-o`, `--output <FILE>` (default `{name}-{version}.leviath-bundle`) | Bundle a blueprint for [sharing](/docs/packaging) |
@@ -259,6 +267,12 @@ Agents that never had a file-writing tool are never marked this way. A router th
 delegates, or a researcher whose answer is its report, has nothing to be measured against,
 so the run says nothing rather than reporting a failure it cannot have had.
 
+A `READS` column appears when some listed run's blueprint declares
+[`[read_paths]`](/docs/security#reading-outside-the-workdir), reading granted over declared as
+resolved when the run spawned. `0/2` is a run that is up, looks healthy, and will be refused every
+read its author designed it around; `lev validate <agent>` names the entries and prints the config
+block to add. Ordinary listings, where nothing declares any, are unchanged.
+
 ### Runs that have finished
 
 A run keeps its place in the listing for five minutes after it ends, then drops out.
@@ -293,8 +307,9 @@ window is gone from the listing for good.
 ```
 
 Finished runs are their own key rather than mixed into `runs`, so counting what is running
-stays a matter of reading one list. Both carry the `empty_output` field, and the completion
-webhook carries the same key.
+stays a matter of reading one list. Both carry the `empty_output` field, and a `read_paths`
+object with the granted and declared counts when the blueprint declares any. The completion
+webhook carries the `empty_output` key.
 
 ## The daemon and API
 

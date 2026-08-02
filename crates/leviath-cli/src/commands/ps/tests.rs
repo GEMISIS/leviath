@@ -27,6 +27,7 @@ fn entry(run_id: &str, status: AgentStatus) -> RunListEntry {
         last_progress_at: None,
         unattended: false,
         empty_output: false,
+        read_paths: None,
     }
 }
 
@@ -280,6 +281,43 @@ fn format_runs_calls_out_only_the_runs_needing_an_answer() {
 /// id is arbitrary text).
 fn from_column(line: &str, column: usize) -> String {
     line.chars().skip(column).collect()
+}
+
+/// An ordinary listing - nobody declaring `[read_paths]` - is exactly what it
+/// was before the column existed.
+#[test]
+fn the_reads_column_is_absent_when_nothing_declares_read_paths() {
+    let out = format_runs(
+        &[entry("a", AgentStatus::Active)],
+        &[],
+        &healthy_daemon(),
+        0,
+    );
+    assert!(!out.contains("READS"), "{out}");
+}
+
+/// The shape worth spotting: a run that is up and will be refused every read
+/// its blueprint asked for.
+#[test]
+fn the_reads_column_shows_granted_over_declared() {
+    let mut blind = entry("a", AgentStatus::Active);
+    blind.read_paths = Some(leviath_core::run_meta::ReadPathGrantCounts {
+        declared: 2,
+        granted: 0,
+    });
+    let mut partial = entry("b", AgentStatus::Active);
+    partial.read_paths = Some(leviath_core::run_meta::ReadPathGrantCounts {
+        declared: 3,
+        granted: 2,
+    });
+    // A run in the same listing that declares nothing keeps its own answer.
+    let plain = entry("c", AgentStatus::Active);
+    let out = format_runs(&[blind, partial, plain], &[], &healthy_daemon(), 0);
+    let lines: Vec<&str> = out.lines().collect();
+    let col = lines[0].find("READS").expect("header has a READS column");
+    assert_eq!(from_column(lines[1], col).trim_end(), "0/2", "{out}");
+    assert_eq!(from_column(lines[2], col).trim_end(), "2/3", "{out}");
+    assert_eq!(from_column(lines[3], col).trim_end(), "-", "{out}");
 }
 
 /// Columns line up against the header and the widest cell, and no line carries

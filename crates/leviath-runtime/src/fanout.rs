@@ -541,6 +541,7 @@ mod tests {
                         callback_secret: None,
                         title: None,
                         unattended: false,
+                        read_paths: None,
                     },
                 ))
                 .id())

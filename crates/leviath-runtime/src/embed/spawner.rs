@@ -141,6 +141,10 @@ impl EmbedSpawner {
                 callback_secret: None,
                 title: None,
                 unattended: args.yolo,
+                // The embedded spawner has no user config to grant against, so
+                // there is nothing to report; `[read_paths]` enforcement is the
+                // host's, through the tool context it supplies.
+                read_paths: None,
             },
             TokenTotals::default(),
             PersistWatermark::default(),

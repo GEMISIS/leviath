@@ -196,7 +196,13 @@ fn execute_reporting_outcome(
 
     let mut env = LintEnv::offline(&checked.agent_dir);
     if let Some(config) = config {
-        env = env.with_providers(&checked.blueprint, config);
+        // The directory the command was run from is the workdir a `lev run`
+        // would default to, so it is what relative `[read_paths]` entries
+        // resolve against.
+        let workdir = crate::commands::resolve_cwd().unwrap_or_default();
+        env = env
+            .with_providers(&checked.blueprint, config)
+            .with_read_paths(&checked.blueprint, config, &workdir);
     }
     let findings = lint_manifest(&checked.content, &checked.blueprint, &env);
     let (errors, warnings) = print_findings(&findings);

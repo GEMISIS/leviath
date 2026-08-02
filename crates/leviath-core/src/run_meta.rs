@@ -147,6 +147,26 @@ pub struct RunMeta {
     /// retroactively.
     #[serde(default)]
     pub yolo: bool,
+    /// How much of the blueprint's `[read_paths]` the config granted, as
+    /// resolved at spawn. `None` for a blueprint that declared none, and for
+    /// runs written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_paths: Option<ReadPathGrantCounts>,
+}
+
+/// How many `[read_paths]` entries a run's blueprint declared, and how many of
+/// them the user's config actually granted.
+///
+/// Declaring is not granting: an ungranted entry is inert, and the reads it was
+/// meant to allow are refused. Recorded at spawn, because that is when the
+/// policy the run enforces is fixed - editing the config afterwards changes
+/// nothing for a run already in flight.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReadPathGrantCounts {
+    /// Entries the blueprint declares.
+    pub declared: usize,
+    /// Entries the config grants.
+    pub granted: usize,
 }
 
 /// Post-hoc diagnosis of a run's productivity, persisted in `meta.json` so a
@@ -278,6 +298,7 @@ impl RunMeta {
             max_child_depth: 0,
             flags: RunFlags::default(),
             yolo: false,
+            read_paths: None,
         }
     }
 

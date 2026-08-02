@@ -167,9 +167,71 @@ pub fn resolve_spawn_args(
     })
 }
 
+/// Warn, on stderr, when the agent about to run declares `[read_paths]` the
+/// active config does not grant.
+///
+/// The daemon already logs this at spawn, but into its own log, where the
+/// person who just typed `lev run` never sees it - so the first sign of a
+/// missing grant was a refused read partway through a run. Everything needed to
+/// say it here is local: `lev run` resolves the manifest itself, and the config
+/// is the same file the daemon reads.
+///
+/// Best-effort by design. An unreadable manifest or config is the daemon's to
+/// report, and it will: this must never be the reason a run does not start.
+fn warn_ungranted_read_paths(spawn_args: &SpawnArgs) {
+    for line in read_path_warning_for_spawn(spawn_args) {
+        eprintln!("{line}");
+    }
+}
+
+/// The warning for a spawn request, read from the real manifest and config.
+/// Empty when there is nothing to say, and empty when either file cannot be
+/// read: see [`warn_ungranted_read_paths`] for why that is not an error here.
+fn read_path_warning_for_spawn(spawn_args: &SpawnArgs) -> Vec<String> {
+    let Ok(content) = std::fs::read_to_string(&spawn_args.blueprint_path) else {
+        return Vec::new();
+    };
+    let Ok(blueprint) = leviath_core::manifest::parse_manifest(&content) else {
+        return Vec::new();
+    };
+    let Ok(config) = crate::config::Config::load() else {
+        return Vec::new();
+    };
+    spawn_warning_lines(
+        &blueprint,
+        &config,
+        std::path::Path::new(&spawn_args.workdir),
+    )
+}
+
+/// The warning itself: one line saying what is refused, then the stanza that
+/// would grant it. Pure, so the wording is testable without a daemon.
+fn spawn_warning_lines(
+    blueprint: &leviath_core::Blueprint,
+    config: &crate::config::Config,
+    workdir: &std::path::Path,
+) -> Vec<String> {
+    let Some(Ok(report)) = crate::read_path_report::build(blueprint, config, workdir) else {
+        return Vec::new();
+    };
+    let Some(warning) = report.warning_line() else {
+        return Vec::new();
+    };
+    let mut lines = vec![warning];
+    lines.push("  add to your config.toml:".to_string());
+    lines.extend(
+        report
+            .grant_stanza()
+            .into_iter()
+            .map(|l| format!("    {l}")),
+    );
+    lines
+}
+
 /// Send a resolved spawn request to the daemon and report the outcome, printing
 /// the new run id on success.
 pub async fn send_spawn(client: &ControlClient, spawn_args: SpawnArgs) -> anyhow::Result<()> {
+    warn_ungranted_read_paths(&spawn_args);
     match client.spawn(spawn_args).await {
         Ok(ControlResponse::Spawned { run_id }) => {
             println!("spawned {run_id}");
@@ -606,6 +668,147 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         let result = send_spawn(&ControlClient::new(id), SpawnArgs::default()).await;
         server.await.unwrap();
         result
+    }
+
+    // ─── the client-side [read_paths] warning ──────────────────────────
+
+    /// A blueprint declaring one absolute read path, so the same entry
+    /// compiles on every OS.
+    fn read_paths_blueprint() -> leviath_core::Blueprint {
+        leviath_core::manifest::parse_manifest(
+            r#"
+[agent]
+name = "cto"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+mode = "autonomous"
+
+[context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+
+[read_paths]
+allow = ["/data/runs"]
+"#,
+        )
+        .expect("blueprint parses")
+    }
+
+    /// The point of warning here at all: the person who typed `lev run` learns
+    /// the declaration is inert now, not at the first refused read.
+    #[test]
+    fn an_ungranted_declaration_warns_with_the_stanza_to_add() {
+        let lines = spawn_warning_lines(
+            &read_paths_blueprint(),
+            &crate::config::Config::default(),
+            std::path::Path::new("/work"),
+        );
+        let joined = lines.join("\n");
+        assert!(joined.contains("agent 'cto'"), "{joined}");
+        assert!(joined.contains("[agent_read_paths.cto]"), "{joined}");
+        assert!(joined.contains(r#"allow = ["/data/runs"]"#), "{joined}");
+    }
+
+    #[test]
+    fn a_granted_declaration_says_nothing() {
+        let mut config = crate::config::Config::default();
+        config.security.read_paths = vec!["/data/runs".to_string()];
+        assert!(
+            spawn_warning_lines(
+                &read_paths_blueprint(),
+                &config,
+                std::path::Path::new("/work")
+            )
+            .is_empty()
+        );
+    }
+
+    /// No declaration, nothing to say - and a config whose own grant list is
+    /// broken is the daemon's error to report, not a warning to guess at.
+    #[test]
+    fn nothing_to_warn_about_produces_no_lines() {
+        let plain =
+            leviath_core::manifest::parse_manifest(&crate::test_support::inline_coder_manifest())
+                .expect("blueprint parses");
+        assert!(
+            spawn_warning_lines(
+                &plain,
+                &crate::config::Config::default(),
+                std::path::Path::new("/work")
+            )
+            .is_empty()
+        );
+
+        let mut broken = crate::config::Config::default();
+        broken.security.read_paths = vec!["regex:relative/.*".to_string()];
+        assert!(
+            spawn_warning_lines(
+                &read_paths_blueprint(),
+                &broken,
+                std::path::Path::new("/work")
+            )
+            .is_empty()
+        );
+    }
+
+    /// End to end over the real files: a manifest on disk plus an isolated
+    /// config that grants nothing.
+    #[tokio::test]
+    async fn the_warning_reads_the_manifest_and_the_active_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            crate::test_support::inline_coder_manifest()
+                + "\n[read_paths]\nallow = [\"/data/runs\"]\n",
+        )
+        .unwrap();
+        let args = SpawnArgs {
+            blueprint_path: manifest.to_string_lossy().into_owned(),
+            workdir: dir.path().to_string_lossy().into_owned(),
+            ..SpawnArgs::default()
+        };
+        let lines = crate::config::with_isolated_config_path_async(
+            "spawn-warn-read-paths",
+            |_fake| async move {
+                let lines = read_path_warning_for_spawn(&args);
+                warn_ungranted_read_paths(&args);
+                lines
+            },
+        )
+        .await;
+        let joined = lines.join("\n");
+        assert!(joined.contains("1 declared, 0 granted"), "{joined}");
+        assert!(joined.contains("[agent_read_paths.coder]"), "{joined}");
+    }
+
+    /// Every way the warning can decline to run: a manifest that will not
+    /// parse, and a config that will not load. Neither may stop a spawn.
+    #[test]
+    fn the_warning_gives_up_quietly_on_a_broken_manifest_or_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(&manifest, "not valid toml [[[").unwrap();
+        assert!(
+            read_path_warning_for_spawn(&SpawnArgs {
+                blueprint_path: manifest.to_string_lossy().into_owned(),
+                ..SpawnArgs::default()
+            })
+            .is_empty()
+        );
+
+        std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
+        crate::config::with_isolated_config_path("spawn-warn-broken-config", |fake_dir| {
+            std::fs::write(fake_dir.join("config.toml"), "not = valid = toml").unwrap();
+            assert!(
+                read_path_warning_for_spawn(&SpawnArgs {
+                    blueprint_path: manifest.to_string_lossy().into_owned(),
+                    ..SpawnArgs::default()
+                })
+                .is_empty()
+            );
+        });
     }
 
     #[tokio::test]

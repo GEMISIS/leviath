@@ -182,6 +182,22 @@ requests since the previous version.
   `required_tools` as the answer it is asking for. Keeping a tool says the same
   thing `allow_blocking_tools` says, one tool at a time, and says it about the
   run as well as the manifest.
+- A blueprint's `[read_paths]` declaration now says whether your config
+  actually grants it. Declaring a path outside the workdir has never been the
+  same as being allowed to read it, but nothing said so: `lev validate` printed
+  "valid", `lev list` printed the agent, the run spawned, and the first read
+  outside the workdir was refused with no earlier sign that a config grant was
+  the missing piece. That was fine on the machine whose config happened to have
+  the grants and a mystery on every other one. `lev validate` now checks each
+  declared entry against your `config.toml`, names the ones nothing grants, and
+  prints the `[agent_read_paths.<agent>]` block that would fix it. `lev run`
+  repeats that warning where the person running the agent can see it, rather
+  than only in the daemon's log. `lev list` shows the counts per agent, `lev ps`
+  grows a `READS` column reading granted over declared (and only when some run
+  declares any), and `lev add` reports the status of what it just installed.
+  The check compares patterns rather than touching the filesystem, so a grant
+  naming a directory that does not exist yet still counts; an individual read is
+  still matched against the real, symlink-resolved path when it happens.
 - A run is no longer reported as having produced nothing when it never had a
   way to produce anything. `empty_output` in `meta.json` has meant "modified no
   files" since it was added for coding agents, so a router that delegates to
