@@ -15,26 +15,20 @@ permissions:
   contents: read
 
 jobs:
-  # Re-run all CI gates before building alpha
+  # The gate is CI itself, not a restatement of it. This job used to spell out
+  # its own build + test + clippy, and the two definitions drifted: it linted
+  # all three OSes while ci.yml's clippy job linted only ubuntu, so a
+  # `#[cfg(windows)]` lint failure that no PR could ever see took the nightly
+  # down. Calling the workflow means "green here" and "green on main" are the
+  # same statement by construction.
+  #
+  # Two jobs inside ci.yml self-handle being called from here: `guard-main-rs`
+  # is `if: github.event_name == 'pull_request'`, and the badge steps carry a
+  # `github.workflow == 'CI'` guard.
   gate:
-    name: Gate (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: true
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - name: Build
-        run: cargo build --all-targets
-      - name: Test
-        run: cargo test
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+    name: Gate
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
 
   build:
     name: Build (${{ matrix.target }})
