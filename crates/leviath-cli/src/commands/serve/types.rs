@@ -277,6 +277,22 @@ pub(super) struct ValidateResponse {
     pub(super) valid: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) errors: Option<Vec<String>>,
+    /// Lint findings that do not make the blueprint invalid: fields left to a
+    /// default, a stage that can block on a human, a broad `[read_paths]`
+    /// entry. Absent when there are none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) warnings: Option<Vec<String>>,
+}
+
+impl ValidateResponse {
+    /// The response for a manifest that did not parse or did not validate.
+    pub(super) fn invalid(errors: Vec<String>) -> Self {
+        Self {
+            valid: false,
+            errors: Some(errors),
+            warnings: None,
+        }
+    }
 }
 
 // ─── Agent types ────────────────────────────────────────────────────────────
@@ -539,23 +555,39 @@ mod tests {
         let resp = ValidateResponse {
             valid: true,
             errors: None,
+            warnings: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
+        // Neither list appears at all when there is nothing in it.
+        assert_eq!(json, r#"{"valid":true}"#);
         let parsed: ValidateResponse = serde_json::from_str(&json).unwrap();
         assert!(parsed.valid);
         assert!(parsed.errors.is_none());
+        assert!(parsed.warnings.is_none());
     }
 
     #[test]
     fn validate_response_with_errors_roundtrip() {
-        let resp = ValidateResponse {
-            valid: false,
-            errors: Some(vec!["bad field".to_string()]),
-        };
+        let resp = ValidateResponse::invalid(vec!["bad field".to_string()]);
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: ValidateResponse = serde_json::from_str(&json).unwrap();
         assert!(!parsed.valid);
         assert_eq!(parsed.errors.unwrap().len(), 1);
+        assert!(parsed.warnings.is_none());
+    }
+
+    /// A blueprint can be valid and still have something worth saying about it.
+    #[test]
+    fn validate_response_with_warnings_roundtrip() {
+        let resp = ValidateResponse {
+            valid: true,
+            errors: None,
+            warnings: Some(vec!["stage 'main': no max_iterations".to_string()]),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: ValidateResponse = serde_json::from_str(&json).unwrap();
+        assert!(parsed.valid);
+        assert_eq!(parsed.warnings.unwrap().len(), 1);
     }
 
     #[test]

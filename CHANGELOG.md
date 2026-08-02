@@ -130,6 +130,30 @@ requests since the previous version.
   `list_models` reported a rejected API key as a request failure, which reads as
   a transient network fault worth retrying. Ollama also gains the `429` handling
   it never had.
+- `lev validate` now checks the things a blueprint leaves unsaid, not just the
+  ones it gets wrong. A stage with no `[stages.X.model]` block parsed fine and
+  then ran on whatever the user's `default_provider` was; an agent-level
+  `[model]` block was read by nothing at all; a typo in `available_tools`
+  matched nothing, so the stage quietly advertised one tool fewer and the model
+  was told the tool did not exist. Each of those was invisible on inspection and
+  turned up hours later as a run behaving oddly. There are thirteen checks in
+  all, each with a stable code and a suggested fix.
+- Typos are errors and exit non-zero; everything else is a warning that does
+  not, or a note that never can. `lev validate --deny-warnings` makes warnings
+  fatal for CI.
+- The same findings are logged when the daemon spawns a run, so a blueprint
+  nobody validated still says what is wrong with it in `daemon.log`. No finding
+  refuses a spawn.
+- `lev validate` also warns when an autonomous stage grants `ask_user_text`,
+  `present_for_review` or another tool that suspends until a person answers.
+  Unattended, the run parks there until it is killed. New stage key
+  `allow_blocking_tools = true` records that the stage means it; it grants
+  nothing and changes no behaviour.
+- The lint found two defects in the shipped blueprints. `parallel-fixer` set
+  `bash = "ask"` while every stage granted `shell`: policy is matched on the
+  name the model calls, so the entry was never consulted. And
+  `software-engineer`'s review stage had no `max_iterations`.
+- `POST /api/blueprints/validate` returns a `warnings` list alongside `errors`.
 - A run is no longer reported as having produced nothing when it never had a
   way to produce anything. `empty_output` in `meta.json` has meant "modified no
   files" since it was added for coding agents, so a router that delegates to

@@ -746,6 +746,19 @@ pub struct Stage {
     #[serde(default)]
     pub allow_as_worker: bool,
 
+    /// Whether this stage means to offer human-in-the-loop tools (`ask_user_*`,
+    /// `present_for_review`, `edit_document`) while running autonomously.
+    ///
+    /// Grants nothing and changes no runtime behavior: it only records the
+    /// author's intent, so `lev validate` stops flagging a deliberate choice.
+    /// An autonomous stage that calls one of those tools with nobody attached
+    /// parks in `WaitingInput` until someone kills the run, which is almost
+    /// always a mistake and occasionally exactly what was wanted (an agent
+    /// driven from the dashboard, say). Off by default so the flag has to be
+    /// written down.
+    #[serde(default)]
+    pub allow_blocking_tools: bool,
+
     /// Per-stage taint/security override. `None` inherits the agent-level
     /// `Blueprint.security` (which in turn inherits the global config toggle).
     /// Set `taint_tracking = false` here to opt a single stage out, or `true`
@@ -814,6 +827,7 @@ impl Stage {
             accepts_messages: true,
             allow_complete: false,
             allow_as_worker: false,
+            allow_blocking_tools: false,
             security: None,
             batch_tool_hint: None,
             shell_hint: None,

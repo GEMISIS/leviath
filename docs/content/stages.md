@@ -58,6 +58,21 @@ fails at `lev validate` instead of at 2am.
 | `requires_children` | `false` | Holds the stage until every sub-agent it spawned has finished |
 | `allow_as_worker` | `false` | Opts this stage in to being the target of a [fan-out](/docs/sub-agents). Off by default, so you can only fan out into a stage designed for it |
 | `accepts_messages` | `true` | Whether `lev msg` reaches this stage. See [Human-in-the-loop](/docs/interaction) |
+| `allow_blocking_tools` | `false` | Says this autonomous stage means to offer `ask_user_*` / `present_for_review`. It grants nothing and changes no behaviour: it only stops `lev validate` reporting a deliberate choice as an oversight |
+
+An autonomous stage that calls one of the human-in-the-loop tools suspends until somebody answers,
+and on an unattended run that is forever. `lev validate` warns about it for that reason. Set
+`allow_blocking_tools = true` when the stage is driven from the dashboard, or by somebody watching.
+
+### Every stage should name its own model
+
+`model` is per stage. There is no agent-level `[model]` block: writing one parses fine and is then
+read by nothing, so the stages go on using their own defaults with no sign that the block was
+ignored.
+
+A stage that omits `model` entirely does not fail either. It runs on whichever provider your
+`[providers]` config makes the default, which is rarely what the author had in mind and is invisible
+until the run picks the wrong model. `lev validate` reports both cases.
 
 ### Carrying context across an edge
 

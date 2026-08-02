@@ -218,21 +218,40 @@ pub(super) async fn delete_blueprint(
 pub(super) async fn validate_blueprint(
     Json(body): Json<ValidateBlueprintReq>,
 ) -> Json<ValidateResponse> {
-    match parse_manifest(&body.manifest) {
-        Ok(bp) => match bp.validate() {
-            Ok(()) => Json(ValidateResponse {
-                valid: true,
-                errors: None,
-            }),
-            Err(e) => Json(ValidateResponse {
-                valid: false,
-                errors: Some(vec![e.to_string()]),
-            }),
-        },
-        Err(e) => Json(ValidateResponse {
-            valid: false,
-            errors: Some(vec![e.to_string()]),
-        }),
+    Json(validate_manifest_text(&body.manifest))
+}
+
+/// Parse, validate and lint a manifest posted as text.
+///
+/// A lint error is a real defect (a tool name that resolves to nothing, a
+/// permission for a tool the stage never granted), so it makes the response
+/// invalid alongside the structural errors. Warnings and notes are reported
+/// separately and do not.
+///
+/// The manifest arrives as text with no directory behind it, so the lint runs
+/// against the built-in tool set only: an agent's own `tools/*.rhai` cannot be
+/// resolved from a POST body, and an env that claimed otherwise would report
+/// every one of them as unknown.
+fn validate_manifest_text(manifest: &str) -> ValidateResponse {
+    let bp = match parse_manifest(manifest) {
+        Ok(bp) => bp,
+        Err(e) => return ValidateResponse::invalid(vec![e.to_string()]),
+    };
+    if let Err(e) = bp.validate() {
+        return ValidateResponse::invalid(vec![e.to_string()]);
+    }
+
+    let env = crate::lint::LintEnv::offline(std::path::Path::new("."));
+    let findings = crate::lint::lint_manifest(manifest, &bp, &env);
+    let (errors, warnings): (Vec<_>, Vec<_>) = findings
+        .iter()
+        .partition(|f| f.severity == crate::lint::LintSeverity::Error);
+    let render = |f: &&crate::lint::LintFinding| format!("{} [{}]", f.one_line(), f.code);
+
+    ValidateResponse {
+        valid: errors.is_empty(),
+        errors: (!errors.is_empty()).then(|| errors.iter().map(render).collect()),
+        warnings: (!warnings.is_empty()).then(|| warnings.iter().map(render).collect()),
     }
 }
 
@@ -902,6 +921,67 @@ prompt = "Run"
         let result: ValidateResponse = serde_json::from_slice(&bytes).unwrap();
         assert!(result.valid);
         assert!(result.errors.is_none());
+    }
+
+    /// A blueprint the lint objects to but `Blueprint::validate` does not.
+    /// `valid` follows the lint errors, and the warnings ride alongside without
+    /// affecting it.
+    #[tokio::test]
+    async fn validate_blueprint_reports_lint_errors_and_warnings_separately() {
+        // `raed_file` is an error (it resolves to nothing); the missing
+        // `max_iterations` and the unattended `ask_user_text` are warnings.
+        let manifest = r#"
+[agent]
+name = "linty"
+version = "0.1.0"
+
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+available_tools = ["read_file", "raed_file", "ask_user_text"]
+
+[context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+"#;
+        let result = validate_manifest_text(manifest);
+        assert!(!result.valid);
+        let errors = result.errors.expect("the typo is an error");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("unknown-tool"), "{errors:?}");
+        let warnings = result.warnings.expect("the defaults are warnings");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("stage-missing-max-iterations")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("blocking-tool-in-autonomous-stage")),
+            "{warnings:?}"
+        );
+    }
+
+    /// Warnings alone leave the blueprint valid.
+    #[tokio::test]
+    async fn validate_blueprint_with_only_warnings_stays_valid() {
+        let manifest = r#"
+[agent]
+name = "warny"
+version = "0.1.0"
+
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+
+[context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+"#;
+        let result = validate_manifest_text(manifest);
+        assert!(result.valid);
+        assert!(result.errors.is_none());
+        assert_eq!(result.warnings.expect("no max_iterations").len(), 1);
     }
 
     #[tokio::test]

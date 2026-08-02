@@ -642,6 +642,40 @@ pub fn build_agent_for_reload(
     )
 }
 
+/// Log whatever `lev validate` would have reported about this manifest.
+///
+/// The lint env is built from the manifest's own directory so the agent's
+/// `tools/*.rhai` resolve, and deliberately without the provider check: the
+/// stage resolution a few steps later already fails a spawn outright when
+/// nothing in a stage's models list is registered, and re-deriving that here
+/// would cost a provider-registry build per agent to say the same thing more
+/// quietly.
+fn log_blueprint_lint(content: &str, blueprint: &Blueprint, manifest_path: &str) {
+    let agent_dir = std::path::Path::new(manifest_path)
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+    let env = crate::lint::LintEnv::offline(&agent_dir);
+    for finding in crate::lint::lint_manifest(content, blueprint, &env) {
+        // Notes describe things the blueprint means to do; only the checks that
+        // found something questionable are worth a daemon log line.
+        if finding.severity == crate::lint::LintSeverity::Note {
+            continue;
+        }
+        // Built before the macro rather than inside it: `tracing::warn!` only
+        // evaluates its arguments when the level is enabled, so a call in the
+        // argument list is a region that does not run under a subscriber that
+        // filters WARN out.
+        let line = format!(
+            "blueprint '{}': {} [{}]",
+            blueprint.name,
+            finding.one_line(),
+            finding.code
+        );
+        tracing::warn!("{line}");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_agent_inner(
     world: &mut World,
@@ -674,6 +708,12 @@ fn build_agent_inner(
     blueprint
         .validate()
         .map_err(|e| format!("invalid blueprint: {e}"))?;
+    // What `lev validate` would have said, in the daemon log. Nothing here
+    // refuses a spawn: these are authoring mistakes whose cost is a run that
+    // behaves oddly hours later, and the whole point is that they are invisible
+    // until then. Logging them means the answer is already in `daemon.log`
+    // whenever someone goes looking for why a run stalled.
+    log_blueprint_lint(&content, &blueprint, &args.blueprint_path);
     // A request-level `--max-depth` overrides the blueprint's sub-agent depth cap.
     if let Some(md) = args.max_depth {
         blueprint.max_child_depth = Some(md);
@@ -1105,6 +1145,86 @@ mod tests {
     /// A throwaway sub-agent op sender for tests that don't exercise the bridge.
     fn sub_tx() -> UnboundedSender<SubAgentOp> {
         tokio::sync::mpsc::unbounded_channel().0
+    }
+
+    /// What the daemon logs about a blueprint at spawn. A run is never refused
+    /// for a lint finding, so the only way this surfaces is the log line - which
+    /// makes it worth exercising directly rather than through a whole spawn.
+    #[test]
+    fn log_blueprint_lint_warns_about_findings_and_skips_notes() {
+        crate::test_support::with_tracing(|| {});
+        let home = tempfile::tempdir().unwrap();
+        temp_env::with_var("LEVIATH_HOME", Some(home.path().to_str().unwrap()), || {
+            // No `mode`, no `max_iterations`, an unattended `ask_user_text` and
+            // a `[read_paths]` block: three warnings and one note.
+            let manifest = r#"
+[agent]
+name = "noisy"
+version = "0.1.0"
+
+[stages.main]
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+available_tools = ["ask_user_text"]
+
+[read_paths]
+allow = ["~/.leviath/runs"]
+
+[context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+"#;
+            let bp = leviath_core::manifest::parse_manifest(manifest).unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("agent.leviath");
+            std::fs::write(&path, manifest).unwrap();
+
+            // The findings the log walks, so the test asserts what is being
+            // logged rather than only that logging did not panic.
+            let env = crate::lint::LintEnv::offline(dir.path());
+            let findings = crate::lint::lint_manifest(manifest, &bp, &env);
+            assert!(
+                findings
+                    .iter()
+                    .any(|f| f.severity == crate::lint::LintSeverity::Note),
+                "the fixture needs a note for the skip arm to run"
+            );
+            assert!(
+                findings
+                    .iter()
+                    .any(|f| f.severity == crate::lint::LintSeverity::Warning),
+                "the fixture needs a warning for the log arm to run"
+            );
+
+            log_blueprint_lint(manifest, &bp, &path.to_string_lossy());
+        });
+    }
+
+    /// A blueprint with nothing to say produces no log lines at all.
+    #[test]
+    fn log_blueprint_lint_is_silent_for_a_clean_blueprint() {
+        crate::test_support::with_tracing(|| {});
+        let home = tempfile::tempdir().unwrap();
+        temp_env::with_var("LEVIATH_HOME", Some(home.path().to_str().unwrap()), || {
+            let manifest = r#"
+[agent]
+name = "quiet"
+version = "0.1.0"
+
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+
+[context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+"#;
+            let bp = leviath_core::manifest::parse_manifest(manifest).unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("agent.leviath");
+            std::fs::write(&path, manifest).unwrap();
+            let env = crate::lint::LintEnv::offline(dir.path());
+            assert!(crate::lint::lint_manifest(manifest, &bp, &env).is_empty());
+            log_blueprint_lint(manifest, &bp, &path.to_string_lossy());
+        });
     }
 
     #[test]

@@ -222,43 +222,49 @@ mod tests {
         }
     }
 
-    /// Every name in a stage's `available_tools` has to resolve to a tool that
-    /// exists, and every `[stages.X.tool_permissions]` key has to be a tool that
-    /// stage actually grants.
+    /// The lint env for a bundled agent: the built-ins, the sub-agent tools,
+    /// and the agent's own `tools/<name>.rhai`, each of which defines `<name>`.
     ///
-    /// A typo here is invisible on its own: `filter_tools_by_available` silently
-    /// omits a name matching nothing, so the stage just quietly advertises one
-    /// tool fewer. And because dispatch refuses anything a stage did not offer,
-    /// the same typo means the model is told the tool does not exist and the
-    /// stage cannot do its job - a silent omission that is really a silent
-    /// failure, which is worth a test. A permission entry for an ungranted tool is the same drift seen
-    /// from the other side: it reads as a grant and is not one.
-    ///
-    /// An invariant over all discovered agents rather than a list of names -
-    /// naming them would stop testing the property the moment the list drifted.
-    #[test]
-    fn every_stage_tool_name_resolves_and_every_permission_names_a_granted_tool() {
-        // Sub-agent tools are provided by the host, not `BuiltinTools`.
-        const SUBAGENT: &[&str] = &[
-            "spawn_agent",
-            "check_agent",
-            "wait_for_agent",
-            "send_to_agent",
-            "kill_agent",
-        ];
-        let builtin = leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(
-            std::path::PathBuf::from("."),
-        ))
-        .names();
-
-        for agent in BUNDLED_AGENTS {
-            // This agent's own Rhai tools: `tools/<name>.rhai` defines `<name>`.
-            let scripts: Vec<&str> = agent
+    /// Built by hand rather than through `LintEnv::offline`, which discovers
+    /// script tools by reading a directory: a bundled agent's files are
+    /// compiled into the binary and there is no directory to read.
+    fn lint_env_for(agent: &BundledAgent) -> crate::lint::LintEnv {
+        let mut known_tools: std::collections::HashSet<String> = leviath_tools::BuiltinTools::new(
+            leviath_tools::ToolContext::new(std::path::PathBuf::from(".")),
+        )
+        .names()
+        .into_iter()
+        .collect();
+        known_tools.extend(leviath_tools::BuiltinTools::subagent_tool_names());
+        known_tools.extend(
+            agent
                 .files
                 .iter()
                 .filter_map(|(rel, _)| rel.strip_prefix("tools/"))
                 .filter_map(|f| f.strip_suffix(".rhai"))
-                .collect();
+                .map(str::to_string),
+        );
+        crate::lint::LintEnv {
+            known_tools,
+            known_models: crate::commands::models::closed_catalog_models(),
+            available_providers: None,
+        }
+    }
+
+    /// No bundled agent ships a blueprint the linter calls broken.
+    ///
+    /// The errors this catches are the ones that are invisible on inspection: a
+    /// tool name matching nothing is silently dropped from what the stage
+    /// advertises, so the model is told the tool does not exist and the stage
+    /// cannot do its job. A permission for a tool the stage never granted is the
+    /// same drift from the other side, reading as a grant and not being one.
+    ///
+    /// Asserted by running the shipped linter rather than by a parallel copy of
+    /// its rules, and over all discovered agents rather than a list of names -
+    /// either would stop testing the property the moment it drifted.
+    #[test]
+    fn no_bundled_agent_has_a_lint_error() {
+        for agent in BUNDLED_AGENTS {
             let manifest = agent
                 .files
                 .iter()
@@ -272,48 +278,30 @@ mod tests {
                 agent.name
             );
             let blueprint = parsed.expect("asserted Ok just above");
-
-            for stage in &blueprint.stages {
-                for tool in &stage.available_tools {
-                    // `server__tool` is an MCP tool, resolvable only once that
-                    // server is installed - not something a manifest can be
-                    // checked against here.
-                    let known = tool.contains("__")
-                        || builtin.iter().any(|b| b == tool)
-                        || SUBAGENT.contains(&tool.as_str())
-                        || scripts.contains(&tool.as_str());
-                    assert!(
-                        known,
-                        "{}: stage '{}' grants '{}', which is not a built-in,                          a sub-agent tool, or one of this agent's own tools/*.rhai",
-                        agent.name, stage.name, tool
-                    );
-                }
-                for granted in stage.tool_permissions.keys() {
-                    assert!(
-                        stage.available_tools.contains(granted),
-                        "{}: stage '{}' sets a permission for '{}', which it does                          not grant in available_tools",
-                        agent.name,
-                        stage.name,
-                        granted
-                    );
-                }
-            }
+            // Every finding is rendered up front, and the errors are then
+            // *counted* rather than collected. Any per-error work - a `.map`
+            // that formats, a `.collect` into a list of messages - sits in a
+            // closure that only runs when the test is about to fail, which
+            // llvm-cov reads as an uncovered region for as long as the
+            // invariant holds. Counting has no such body.
+            let rendered: Vec<(bool, String)> =
+                crate::lint::lint_manifest(manifest, &blueprint, &lint_env_for(agent))
+                    .iter()
+                    .map(|f| (f.is_error(), format!("{} [{}]", f.one_line(), f.code)))
+                    .collect();
+            let error_count = rendered.iter().filter(|(is_error, _)| *is_error).count();
+            assert_eq!(
+                error_count, 0,
+                "bundled agent {} has lint errors, among {rendered:?}",
+                agent.name
+            );
         }
     }
 
     /// The invariant above can actually fail - a check over shipped data that
     /// happens to pass says nothing about whether it would catch drift.
     #[test]
-    fn the_stage_tool_invariant_rejects_a_typo_and_an_orphan_permission() {
-        let builtin = leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(
-            std::path::PathBuf::from("."),
-        ))
-        .names();
-        assert!(
-            !builtin.iter().any(|b| b == "raed_file"),
-            "a misspelled tool must not resolve"
-        );
-
+    fn the_lint_invariant_catches_a_typo_and_an_orphan_permission() {
         let manifest = r#"
 [agent]
 name = "x"
@@ -321,19 +309,28 @@ version = "0.1.0"
 description = "x"
 
 [stages.only]
-model = { provider = "anthropic", model = "m" }
-available_tools = ["read_file"]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-5" }
+max_iterations = 5
+available_tools = ["read_file", "raed_file"]
 
 [stages.only.tool_permissions]
 write_file = "allow"
 "#;
         let bp = leviath_core::manifest::parse_manifest(manifest)
-            .expect("the fixture parses; it is the invariant that should object");
-        let stage = &bp.stages[0];
-        assert!(
-            !stage.available_tools.contains(&"write_file".to_string()),
-            "the orphan-permission arm has something to catch"
-        );
+            .expect("the fixture parses; it is the lint that should object");
+        // Reuse the same env shape a real bundled agent gets, minus any scripts.
+        let env = lint_env_for(&BundledAgent {
+            name: "x",
+            version: "0.1.0",
+            files: &[],
+        });
+        let codes: Vec<&str> = crate::lint::lint_manifest(manifest, &bp, &env)
+            .iter()
+            .filter(|f| f.is_error())
+            .map(|f| f.code)
+            .collect();
+        assert_eq!(codes, ["unknown-tool", "orphan-stage-permission"]);
     }
 
     #[test]

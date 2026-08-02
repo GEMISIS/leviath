@@ -80,8 +80,33 @@ Scaffold a new [blueprint](/docs/agents) directory.
 
 ### `lev validate [PATH]`
 
-Check a blueprint before running it: graph well-formedness and reachability, seed declarations,
-`[read_paths]` entries, and the tools each stage asks for. `PATH` defaults to `.`.
+Check a blueprint before running it. `PATH` defaults to `.`.
+
+Beyond parsing and structural validation, it reports what the manifest leaves unsaid. Findings come
+in three levels: an **error** exits non-zero, a **warning** does not, and a **note** never does.
+
+| Level | Code | What it means |
+|---|---|---|
+| error | `unknown-tool` | A name in `available_tools` matches no built-in, sub-agent tool, or `tools/*.rhai`. The stage silently advertises one tool fewer, so the model is told it does not exist. MCP names (`server__tool`) are skipped, since they resolve only once that server is installed. |
+| error | `orphan-stage-permission` | A `[stages.X.tool_permissions]` key names a tool the stage never granted. It reads as a grant and is not one. |
+| warning | `stage-missing-model` | No `[stages.X.model]` block, so the stage runs on whatever your `default_provider` is. |
+| warning | `stage-missing-mode` | No `mode`, so the stage runs as `autonomous`. |
+| warning | `stage-missing-max-iterations` | Unbounded unless `[limits] default_max_iterations` is set. Fan-out stages are exempt. |
+| warning | `agent-model-block-ignored` | A top-level `[model]` block. Nothing reads it; model selection is per stage. |
+| warning | `blocking-tool-in-autonomous-stage` | An autonomous stage grants `ask_user_*`, `present_for_review` or `edit_document`. With nobody attached the run parks there until it is killed. Set `allow_blocking_tools = true` on the stage to say you meant it. |
+| warning | `permission-name-mismatch` | The permission is written for an alias of the granted tool (`bash` against a stage that grants `shell`, say). Policy is matched on the name the model calls, so the entry has no effect. |
+| warning | `implicit-shell-policy` | A shell grant with no policy behind it. The default is `ask`, and an unattended run waits on that prompt rather than being denied. |
+| warning | `unknown-model` | A model this build has not heard of, checked only against providers with a closed catalog. Ollama, OpenRouter and script providers are never checked. |
+| warning | `no-reachable-provider` | Nothing in the stage's models list is configured here, so it falls through to your default model. |
+| warning | `unreachable-stage`, `cycle-without-max-revisits`, `broad-read-path` | Graph and `[read_paths]` shape. |
+| note | `command-seed`, `read-paths-declared` | What the blueprint will do that you should know about before running it. |
+
+| Flag | Purpose |
+|---|---|
+| `--deny-warnings` | Exit non-zero on warnings too. Notes still never fail. |
+
+The same findings are written to `daemon.log` when a run spawns, so a blueprint that was never
+validated still says what is wrong with it. Nothing there refuses a spawn.
 
 ### `lev test [PATH]`
 
