@@ -41,6 +41,29 @@ fn resolved_shell_description() -> &'static str {
     DESCRIPTION.get_or_init(|| shell_tool_description(BuiltinTools::detect_shell().0))
 }
 
+/// The tools whose whole job is to block on a person: they open a prompt and the
+/// agent waits until someone answers it.
+///
+/// A run with nobody watching has no business being offered them - the call can
+/// only park the agent for as long as the daemon lives (issue #204). A stage
+/// resolved for an unattended run drops every name in this list that the stage
+/// hasn't explicitly asked to keep (`required_tools`).
+pub const HUMAN_INTERACTION_TOOLS: &[&str] = &[
+    "present_for_review",
+    "ask_user_text",
+    "ask_user_choice",
+    "ask_user_confirm",
+    "edit_document",
+];
+
+/// Whether `name` is a tool that blocks on a person.
+///
+/// Takes the name as written in a blueprint's `available_tools`, so it resolves
+/// aliases the same way the Layer-1 filter does.
+pub fn is_human_interaction_tool(name: &str) -> bool {
+    HUMAN_INTERACTION_TOOLS.contains(&crate::canonical_tool_name(name))
+}
+
 impl BuiltinTools {
     /// All tool definitions to advertise to the LLM, minus any whose required
     /// platform capabilities aren't provided by the current platform.
