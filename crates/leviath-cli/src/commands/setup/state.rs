@@ -959,7 +959,7 @@ fn apply_limits_fields(config: &mut Config, fields: &[Field]) {
                     n.unwrap_or(Config::default().limits.finished_retention_secs)
             }
             // Same rule once more, and here the default is itself 0 (off).
-            (8, FieldValue::Number(n)) => {
+            (9, FieldValue::Number(n)) => {
                 config.limits.wedge_timeout_secs =
                     n.unwrap_or(Config::default().limits.wedge_timeout_secs)
             }
@@ -2225,6 +2225,7 @@ pub(super) mod tests {
         wizard.limits[6].value = FieldValue::Number(Some(11));
         wizard.limits[7].value = FieldValue::Number(Some(22));
         wizard.limits[8].value = FieldValue::Number(Some(33));
+        wizard.limits[9].value = FieldValue::Number(Some(44));
 
         let config = wizard.build_config();
 
@@ -2243,6 +2244,7 @@ pub(super) mod tests {
         assert_eq!(config.limits.stall_timeout_secs, 11);
         assert_eq!(config.limits.dead_cycles_before_relief, 22);
         assert_eq!(config.limits.finished_retention_secs, 33);
+        assert_eq!(config.limits.wedge_timeout_secs, 44);
     }
 
     #[test]
@@ -2290,10 +2292,10 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut wizard = test_wizard(dir.path());
         wizard.enter(Step::Limits);
-        wizard.limits[5].value = FieldValue::Number(Some(0));
         wizard.limits[6].value = FieldValue::Number(Some(0));
         wizard.limits[7].value = FieldValue::Number(Some(0));
-        wizard.limits[8].value = FieldValue::Number(Some(300));
+        wizard.limits[8].value = FieldValue::Number(Some(0));
+        wizard.limits[9].value = FieldValue::Number(Some(300));
 
         let config = wizard.build_config();
 
@@ -2304,10 +2306,10 @@ pub(super) mod tests {
 
         let mut wizard = test_wizard(dir.path());
         wizard.enter(Step::Limits);
-        wizard.limits[5].value = FieldValue::Number(None);
         wizard.limits[6].value = FieldValue::Number(None);
         wizard.limits[7].value = FieldValue::Number(None);
         wizard.limits[8].value = FieldValue::Number(None);
+        wizard.limits[9].value = FieldValue::Number(None);
 
         let config = wizard.build_config();
 
