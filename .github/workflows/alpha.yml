@@ -140,6 +140,10 @@ jobs:
     name: Publish Alpha
     needs: build
     runs-on: ubuntu-latest
+    # Handed to bump-tap so the tap declares what this nightly actually ships.
+    outputs:
+      version: ${{ steps.info.outputs.version }}
+      date: ${{ steps.info.outputs.date }}
     permissions:
       contents: write
       # Required by `actions/attest-build-provenance`, which mints a signed,
@@ -248,3 +252,28 @@ jobs:
       # The same commit the binaries in this run were built from.
       ref: ${{ github.sha }}
     secrets: inherit
+
+  # See prod.yml for why the tap has to be told what shipped.
+  #
+  # Alpha needs a per-build suffix that plain `X.Y.Z-alpha` cannot give it:
+  # nightly rebuilds carry the same Cargo version for days, so a constant
+  # string would leave every alpha user pinned to their first install until
+  # someone bumped Cargo.toml. The date makes it monotonic, and both Homebrew
+  # and Scoop order `0.1.1-alpha.20260802` after `0.1.1-alpha.20260801`.
+  bump-tap:
+    name: Bump tap manifests (alpha)
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch to leviath-dist
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          VERSION: ${{ needs.release.outputs.version }}
+          DATE: ${{ needs.release.outputs.date }}
+        run: |
+          set -euo pipefail
+          jq -nc --arg version "$VERSION-alpha.$DATE" \
+            '{event_type:"release-published",
+              client_payload:{channel:"alpha", version:$version}}' \
+            | gh api repos/GEMISIS/leviath-dist/dispatches --input -
+          echo "Asked leviath-dist to bump the alpha manifests to $VERSION-alpha.$DATE."
