@@ -417,7 +417,17 @@ async fn send_list_prints_runs() {
 
 #[tokio::test]
 async fn send_list_prints_json() {
-    assert!(list(LISTING, &PsArgs { json: true }).await.is_ok());
+    assert!(
+        list(
+            LISTING,
+            &PsArgs {
+                json: true,
+                all: false,
+            }
+        )
+        .await
+        .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -438,4 +448,184 @@ async fn send_list_errors_when_daemon_absent() {
     .await
     .unwrap_err();
     assert!(err.to_string().contains("not reachable"));
+}
+
+// ─── --all: the runs the daemon is not hosting ──────────────────────────────
+
+/// A run persisted on disk, claiming `status`, last moved at `moved_at`.
+fn on_disk(run_id: &str, status: RunStatus, moved_at: i64) -> RunMeta {
+    let mut meta = RunMeta::new(
+        run_id.to_string(),
+        "coder".to_string(),
+        "/agents/coder".to_string(),
+        "t".to_string(),
+        None,
+        "/w".to_string(),
+        1,
+    );
+    meta.status = status;
+    meta.started_at = moved_at;
+    meta.updated_at = moved_at;
+    meta.last_progress_at = Some(moved_at);
+    meta
+}
+
+fn live_set(ids: &[&str]) -> std::collections::HashSet<String> {
+    ids.iter().map(|s| (*s).to_string()).collect()
+}
+
+/// The daemon's own runs are already in the table above, so they must not be
+/// repeated underneath it.
+#[test]
+fn offline_runs_subtracts_the_runs_the_daemon_holds() {
+    let disk = vec![
+        on_disk("held", RunStatus::Running, 1_000),
+        on_disk("done", RunStatus::Complete, 1_000),
+    ];
+    let rows = offline_runs(disk, Some(&live_set(&["held"])), 2_000);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].run_id, "done");
+}
+
+/// The whole reason the flag exists: a run that finished is gone from `lev ps`
+/// within seconds, and this is where a poller finds out what became of it.
+#[test]
+fn offline_runs_reports_how_a_finished_run_ended() {
+    let mut errored = on_disk("boom", RunStatus::Error, 1_000);
+    errored.error = Some("provider exploded".to_string());
+    let rows = offline_runs(vec![errored], Some(&live_set(&[])), 2_000);
+    assert_eq!(rows[0].status, RunStatus::Error);
+    assert_eq!(rows[0].error.as_deref(), Some("provider exploded"));
+    assert!(!rows[0].abandoned, "it ended; it was not abandoned");
+}
+
+#[test]
+fn offline_runs_flags_a_run_nothing_is_driving() {
+    let rows = offline_runs(
+        vec![on_disk("ghost", RunStatus::Running, 1_000)],
+        Some(&live_set(&[])),
+        1_000 + crate::runstate::STALE_AFTER_SECS + 1,
+    );
+    assert!(rows[0].abandoned);
+    assert_eq!(offline_status_cell(&rows[0]), "running (abandoned)");
+}
+
+/// With no answer from the daemon there is no live set to subtract, so every
+/// run on disk is listed - and none is judged, because "the daemon is down"
+/// and "every run died" are indistinguishable from here.
+#[test]
+fn offline_runs_judges_nothing_without_an_answer_from_the_daemon() {
+    let rows = offline_runs(
+        vec![
+            on_disk("a", RunStatus::Running, 1_000),
+            on_disk("b", RunStatus::Complete, 1_000),
+        ],
+        None,
+        1_000 + crate::runstate::STALE_AFTER_SECS * 100,
+    );
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| !r.abandoned));
+}
+
+#[test]
+fn format_offline_is_silent_when_there_is_nothing_to_say() {
+    assert!(format_offline(&[], 2_000).is_none());
+}
+
+#[test]
+fn format_offline_renders_a_table_and_marks_an_empty_run() {
+    let mut disk = on_disk("done", RunStatus::Complete, 1_000);
+    disk.flags.empty_output = true;
+    let rows = offline_runs(vec![disk], Some(&live_set(&[])), 1_060);
+    let out = format_offline(&rows, 1_060).expect("a block");
+    assert!(out.starts_with("NOT RUNNING\n"));
+    assert!(out.contains("RUN"));
+    assert!(out.contains("complete (no output)"));
+    assert!(out.contains("1m"), "the LAST MOVED cell: {out}");
+    assert!(
+        !out.lines().any(|l| l.ends_with(' ')),
+        "no trailing padding: {out:?}"
+    );
+}
+
+/// The table is for a person and a long-lived runs dir holds thousands, so it
+/// truncates and says so. `--json` stays uncapped.
+#[test]
+fn format_offline_caps_the_table_and_counts_the_rest() {
+    let disk: Vec<RunMeta> = (0..OFFLINE_TABLE_LIMIT + 3)
+        .map(|i| on_disk(&format!("r{i}"), RunStatus::Complete, 1_000))
+        .collect();
+    let rows = offline_runs(disk, Some(&live_set(&[])), 2_000);
+    let out = format_offline(&rows, 2_000).expect("a block");
+    // Header line, column header, the capped rows, and the summary.
+    assert_eq!(out.lines().count(), OFFLINE_TABLE_LIMIT + 3);
+    assert!(out.ends_with("+3 older"));
+}
+
+/// A run whose first snapshot never landed has no progress stamp, so the cell
+/// falls back to `updated_at` rather than rendering nothing.
+#[test]
+fn format_offline_falls_back_to_updated_at_without_a_stamp() {
+    let mut disk = on_disk("old", RunStatus::Complete, 1_000);
+    disk.last_progress_at = None;
+    let rows = offline_runs(vec![disk], Some(&live_set(&[])), 1_030);
+    let out = format_offline(&rows, 1_030).expect("a block");
+    assert!(out.contains("30s"), "{out}");
+}
+
+#[tokio::test]
+async fn send_list_all_merges_the_runs_dir() {
+    crate::runstate::with_isolated_runs_dir_async("ps-all-merge", |_d| async {
+        crate::runstate::create_run(&on_disk("finished", RunStatus::Complete, 1_000)).unwrap();
+        assert!(
+            list(
+                LISTING,
+                &PsArgs {
+                    json: false,
+                    all: true,
+                }
+            )
+            .await
+            .is_ok()
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn send_list_all_json_adds_the_two_keys() {
+    crate::runstate::with_isolated_runs_dir_async("ps-all-json", |_d| async {
+        crate::runstate::create_run(&on_disk("finished", RunStatus::Complete, 1_000)).unwrap();
+        assert!(
+            list(
+                LISTING,
+                &PsArgs {
+                    json: true,
+                    all: true,
+                }
+            )
+            .await
+            .is_ok()
+        );
+    })
+    .await;
+}
+
+/// The arm that decides whether a reconciler is safe to run on an interval. A
+/// daemon that is restarting must not read as every run having died, so `--all`
+/// reports it and carries on instead of failing.
+#[tokio::test]
+async fn send_list_all_survives_an_unreachable_daemon() {
+    crate::runstate::with_isolated_runs_dir_async("ps-all-no-daemon", |d| async move {
+        crate::runstate::create_run(&on_disk("stranded", RunStatus::Running, 1_000)).unwrap();
+        for json in [false, true] {
+            let result = send_list(
+                &ControlClient::new(control_id(&d.join("no-daemon"))),
+                &PsArgs { json, all: true },
+            )
+            .await;
+            assert!(result.is_ok(), "--all must not fail on a missing daemon");
+        }
+    })
+    .await;
 }
