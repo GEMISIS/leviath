@@ -105,6 +105,12 @@ temperature = 0.2
 max_tokens  = 8000
 ```
 
+Model selection is per stage, and only per stage. A top-level `[model]` block parses without
+complaint and is then read by nothing, so the stages carry on using their own defaults with no sign
+that the block was ignored. A stage that omits `model` entirely does not fail either: it runs on
+whichever provider your config makes the default, which is rarely what the author had in mind and is
+invisible until the run picks the wrong model. `lev validate` reports both.
+
 ## Context regions
 
 `[context.regions]` defines the memory layout. There are eight region kinds (the default is
@@ -258,6 +264,13 @@ transform   = "summarize"
 ## Validate before you run
 
 ```bash
-lev validate .             # check the graph, print seeds + permissions
-lev test .                 # dry-run the blueprint
+lev validate .                    # check the graph, and what the manifest leaves unsaid
+lev validate . --deny-warnings    # for CI: warnings fail too
+lev test .                        # dry-run the blueprint
 ```
+
+Beyond the graph, `lev validate` reports the fields whose absence quietly changes what a run does: a
+stage with no model block, a tool name that matches nothing, an autonomous stage offering a tool
+that waits for a person. Errors exit non-zero, warnings do not, notes never can. The
+[CLI reference](/docs/cli#lev-validate-path) lists every check. The daemon logs the same findings
+when a run spawns, so a blueprint nobody validated still says what is wrong with it.
