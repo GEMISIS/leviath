@@ -33,6 +33,18 @@ pub enum GrantStatus {
     Undetermined,
 }
 
+impl GrantStatus {
+    /// How this verdict reads in a report. Kept with the type so the wording
+    /// cannot drift from the meaning.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Granted => "granted",
+            Self::NotGranted => "NOT granted",
+            Self::Undetermined => "cannot be checked from the pattern alone",
+        }
+    }
+}
+
 /// One declared entry and its verdict.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryStatus {
@@ -194,38 +206,6 @@ impl GrantReport {
             format!("[agent_read_paths.{}]", self.agent),
             format!("allow = [{listed}]"),
         ]
-    }
-
-    /// The full report block: the counts, then one line per entry, then the
-    /// stanza to paste. Indented by `indent` so each surface can place it, with
-    /// `heading_prefix` (a warning marker, say) opening the first line.
-    pub fn report_lines(&self, indent: &str, heading_prefix: &str) -> Vec<String> {
-        let mut lines = vec![format!(
-            "{indent}{heading_prefix}declares [read_paths] (reads outside the run workdir): {}",
-            self.summary()
-        )];
-        if self.allow_blueprint {
-            lines.push(format!(
-                "{indent}  all granted by [security] allow_blueprint_read_paths = true"
-            ));
-        }
-        for entry in &self.entries {
-            let verdict = match entry.status {
-                GrantStatus::Granted => "granted",
-                GrantStatus::NotGranted => "NOT granted - reads matching it will be refused",
-                GrantStatus::Undetermined => "cannot be checked from the pattern alone",
-            };
-            lines.push(format!("{indent}  {}: {verdict}", entry.raw));
-        }
-        if self.has_ungranted() {
-            lines.push(format!("{indent}Add to your config.toml:"));
-            lines.extend(
-                self.grant_stanza()
-                    .into_iter()
-                    .map(|l| format!("{indent}  {l}")),
-            );
-        }
-        lines
     }
 
     /// The one-line warning for surfaces that only have room for one, `None`

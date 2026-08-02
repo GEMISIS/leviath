@@ -658,7 +658,6 @@ fn lint_read_paths(blueprint: &Blueprint, env: &LintEnv) -> Vec<LintFinding> {
 /// unchecked rather than as inert - claiming a working grant is broken would be
 /// worse than saying nothing.
 fn grant_findings(report: &crate::read_path_report::GrantReport) -> Vec<LintFinding> {
-    use crate::read_path_report::GrantStatus;
     let mut findings = vec![
         LintFinding::new(
             LintSeverity::Note,
@@ -673,14 +672,7 @@ fn grant_findings(report: &crate::read_path_report::GrantReport) -> Vec<LintFind
             false => report
                 .entries
                 .iter()
-                .map(|e| {
-                    let verdict = match e.status {
-                        GrantStatus::Granted => "granted",
-                        GrantStatus::NotGranted => "NOT granted",
-                        GrantStatus::Undetermined => "cannot be checked from the pattern alone",
-                    };
-                    format!("{}: {verdict}", e.raw)
-                })
+                .map(|e| format!("{}: {}", e.raw, e.status.label()))
                 .collect::<Vec<_>>()
                 .join("; "),
         }),
