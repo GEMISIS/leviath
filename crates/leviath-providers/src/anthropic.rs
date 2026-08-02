@@ -587,30 +587,12 @@ impl Provider for AnthropicProvider {
             start.elapsed(),
         );
 
-        let status = response.status();
-
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok());
-            if let Some(limiter) = &self.rate_limiter {
-                limiter.handle_rate_limit(retry_after).await;
-            }
-            return Err(ProviderError::RateLimitExceeded);
-        }
-
-        if !status.is_success() {
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_string());
-            return Err(ProviderError::ApiError(format!(
-                "HTTP {}: {}",
-                status, error_body
-            )));
-        }
+        // Shared with every other HTTP provider so a 402/401/403 (or a 400
+        // whose body says the credit balance is too low) classifies the same
+        // way everywhere - the runtime keys failover and the circuit breaker
+        // off that classification (issue #201).
+        let response =
+            crate::provider::check_http_response(response, self.rate_limiter.as_ref()).await?;
 
         if let Some(limiter) = &self.rate_limiter {
             limiter.reset_backoff().await;
@@ -681,29 +663,9 @@ impl Provider for AnthropicProvider {
             start.elapsed(),
         );
 
-        let status = response.status();
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok());
-            if let Some(limiter) = &self.rate_limiter {
-                limiter.handle_rate_limit(retry_after).await;
-            }
-            return Err(ProviderError::RateLimitExceeded);
-        }
-
-        if !status.is_success() {
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_string());
-            return Err(ProviderError::ApiError(format!(
-                "HTTP {}: {}",
-                status, error_body
-            )));
-        }
+        // Same shared classification as the non-streaming path above.
+        let response =
+            crate::provider::check_http_response(response, self.rate_limiter.as_ref()).await?;
 
         if let Some(limiter) = &self.rate_limiter {
             limiter.reset_backoff().await;
@@ -756,17 +718,10 @@ impl Provider for AnthropicProvider {
             .await
             .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_string());
-            return Err(ProviderError::RequestFailed(format!(
-                "HTTP {}: {}",
-                status, error_body
-            )));
-        }
+        // Shared classification here too. This used to be `RequestFailed`,
+        // which `is_transient` treats as retryable, so a revoked key looked
+        // like a flaky network rather than something only the operator can fix.
+        let response = crate::provider::check_http_response(response, None).await?;
 
         let body: serde_json::Value = response
             .json()
@@ -2717,17 +2672,25 @@ mod tests {
     async fn list_models_non_success_status_returns_error() {
         let url = spawn_mock_server(401, "Unauthorized", b"bad key").await;
         let provider = provider_with_url(url);
-        let msg = provider.list_models().await.unwrap_err().to_string();
-        assert!(msg.contains("401"));
-        assert!(msg.contains("bad key"));
+        let err = provider.list_models().await.unwrap_err();
+        // A rejected key is the provider's problem, not a flaky connection:
+        // it must not classify as transient (issue #201).
+        assert_eq!(
+            err.unavailable_reason(),
+            Some(crate::provider::UnavailableReason::AuthFailed)
+        );
+        assert!(!err.is_transient());
+        let msg = err.to_string();
+        assert!(msg.contains("401"), "{msg}");
+        assert!(msg.contains("bad key"), "{msg}");
     }
 
     #[tokio::test]
-    async fn list_models_non_success_status_body_read_error_falls_back_to_unknown_error() {
+    async fn list_models_non_success_status_body_read_error_still_reports_the_status() {
         let url = spawn_mock_server_truncated_error_body(401, "Unauthorized").await;
         let provider = provider_with_url(url);
         let msg = provider.list_models().await.unwrap_err().to_string();
-        assert!(msg.starts_with("Request failed:"));
+        assert!(msg.contains("401"), "{msg}");
     }
 
     #[tokio::test]

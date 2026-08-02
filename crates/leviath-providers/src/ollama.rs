@@ -316,17 +316,9 @@ impl Provider for OllamaProvider {
             start.elapsed(),
         );
 
-        let status = response.status();
-        if !status.is_success() {
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_string());
-            return Err(ProviderError::ApiError(format!(
-                "HTTP {}: {}",
-                status, error_body
-            )));
-        }
+        // Shared classification, which also gives Ollama the 429 handling it
+        // never had: every non-2xx used to collapse into one `ApiError`.
+        let response = crate::provider::check_http_response(response, None).await?;
 
         let response_body: serde_json::Value = response
             .json()
@@ -380,17 +372,8 @@ impl Provider for OllamaProvider {
             start.elapsed(),
         );
 
-        let status = response.status();
-        if !status.is_success() {
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_string());
-            return Err(ProviderError::ApiError(format!(
-                "HTTP {}: {}",
-                status, error_body
-            )));
-        }
+        // Same shared classification as the non-streaming path above.
+        let response = crate::provider::check_http_response(response, None).await?;
 
         let byte_stream = response.bytes_stream();
         let stream = OllamaNdjsonStream::new(byte_stream);
@@ -426,17 +409,9 @@ impl Provider for OllamaProvider {
             .await
             .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_string());
-            return Err(ProviderError::RequestFailed(format!(
-                "HTTP {}: {}",
-                status, error_body
-            )));
-        }
+        // Shared classification, as above: a non-2xx here used to be
+        // `RequestFailed`, which reads as a retryable network fault.
+        let response = crate::provider::check_http_response(response, None).await?;
 
         let body: serde_json::Value = response
             .json()
@@ -1957,11 +1932,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn infer_non_success_status_body_read_error_falls_back_to_unknown_error() {
+    async fn infer_non_success_status_body_read_error_still_reports_the_status() {
+        // The body never arrives, so the shared helper substitutes the read
+        // error for it. The status is what matters and must survive.
         let url = spawn_mock_server_truncated_error_body(500, "Internal Server Error").await;
         let provider = OllamaProvider::with_base_url(url);
         let err = provider.infer(mock_request()).await.unwrap_err();
-        assert!(err.to_string().contains("unknown error"));
+        assert!(err.to_string().contains("500"), "{err}");
     }
 
     #[tokio::test]
@@ -1982,12 +1959,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn infer_stream_non_success_status_body_read_error_falls_back_to_unknown_error() {
+    async fn infer_stream_non_success_status_body_read_error_still_reports_the_status() {
         let url = spawn_mock_server_truncated_error_body(503, "Service Unavailable").await;
         let provider = OllamaProvider::with_base_url(url);
         let result = provider.infer_stream(mock_request()).await;
-        assert!(result.is_err());
-        assert!(result.err().unwrap().to_string().contains("unknown error"));
+        let err = result.err().expect("a truncated error body is still an error");
+        assert!(err.to_string().contains("503"), "{err}");
     }
 
     #[tokio::test]
@@ -2041,15 +2018,20 @@ mod tests {
         let url = spawn_mock_server(401, "Unauthorized", b"nope").await;
         let provider = OllamaProvider::with_base_url(url);
         let err = provider.list_models().await.unwrap_err();
-        assert!(err.to_string().contains("Request failed:"));
+        // Was `RequestFailed`, which reads as retryable; a rejected key is not.
+        assert_eq!(
+            err.unavailable_reason(),
+            Some(crate::provider::UnavailableReason::AuthFailed)
+        );
+        assert!(!err.is_transient());
     }
 
     #[tokio::test]
-    async fn list_models_non_success_status_body_read_error_falls_back_to_unknown_error() {
+    async fn list_models_non_success_status_body_read_error_still_reports_the_status() {
         let url = spawn_mock_server_truncated_error_body(401, "Unauthorized").await;
         let provider = OllamaProvider::with_base_url(url);
         let err = provider.list_models().await.unwrap_err();
-        assert!(err.to_string().contains("unknown error"));
+        assert!(err.to_string().contains("401"), "{err}");
     }
 
     #[tokio::test]
