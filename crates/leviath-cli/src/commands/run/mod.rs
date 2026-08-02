@@ -27,8 +27,9 @@ pub struct RunArgs {
     #[arg(value_name = "PATH")]
     pub path: Option<String>,
 
-    /// Task prompt for the agent.
-    #[arg(short, long)]
+    /// Task prompt, or the path of a file holding it. Left off, your editor
+    /// opens on a template for you to write it in.
+    #[arg(short, long, value_name = "TEXT|FILE")]
     pub task: Option<String>,
 
     /// Model override (`provider/model` or a bare model name).

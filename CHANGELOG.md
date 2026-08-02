@@ -11,6 +11,20 @@ requests since the previous version.
 
 ## Unreleased
 
+- `lev run <agent>` with no `--task` now opens your editor on a commented
+  template instead of refusing to start, so a task longer than a sentence no
+  longer has to survive shell quoting. Saving an empty file cancels the run.
+  Stdin still has to be a terminal: a script or CI job without `--task` gets an
+  error, now worded to say why the editor cannot be used. The editor is
+  `$VISUAL`, then `$EDITOR`, then the first installed of `vim`, `nano`, `vi`
+  (`edit`, `notepad`, `vim` on Windows).
+- `lev run` with no PATH uses the current directory, which is what the CLI
+  reference has always described. It used to be an error.
+- `--task` reads a file when the value names one. A value that looks like a
+  path but names nothing is now an error rather than being sent to the agent as
+  the prompt, which is what a mistyped filename used to become. Prompt text is
+  unaffected: the check only fires on a value with no whitespace that carries a
+  `/`, a `\`, or a leading `~`.
 - A run stays in `lev ps` for five minutes after it ends instead of vanishing
   when the daemon unloads it. A run that died on its first inference used to
   leave the listing a second or two later, which made it indistinguishable from

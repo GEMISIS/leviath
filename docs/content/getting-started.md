@@ -85,6 +85,10 @@ lev run coder --task "Build a CLI that converts CSV to JSON"
 lev run deep-researcher --task "Survey the state of solid-state batteries"
 ```
 
+Leave `--task` off and your editor opens on a template, which is easier than
+fighting shell quoting for anything longer than a sentence. It also takes a
+file: `lev run coder --task ./brief.md`.
+
 `lev run` doesn't run the agent in your terminal. It hands it to a background
 [daemon](/docs/daemon) that hosts every agent in one shared world:
 

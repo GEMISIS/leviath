@@ -25,7 +25,7 @@ Spawn an agent into the daemon. `PATH` is an installed agent name, a blueprint d
 
 | Flag | Purpose |
 |---|---|
-| `-t`, `--task <TEXT>` | The task prompt |
+| `-t`, `--task <TEXT\|FILE>` | The task prompt, or the path of a file holding it. Left off, your editor opens |
 | `-m`, `--model <MODEL>` | Model override, as `provider/model` or a bare model name |
 | `--workdir <DIR>` | Working directory for the run. Defaults to where you ran the command. File tools are confined to it, and relative `[read_paths]` entries resolve against it |
 | `--yolo` | Run unattended: approve every tool call and auto-answer the agent's own prompts (`ask_user_*`, plan approvals). Cannot lift a `deny` |
@@ -49,6 +49,26 @@ which ones do.
 > `--task` fills the caller-input key `task`. A blueprint receives it only if some region asks for
 > that key, either with `seed = "task_input"` or by being named `task` (which gets the seed
 > implicitly). A blueprint with neither has nowhere to put the prompt, and it is dropped.
+
+#### Writing the task in your editor
+
+Run `lev run <agent>` with no `-t` and Leviath opens your editor on a short commented template.
+Type the task, save, and the run starts. Lines beginning with `#` are stripped, so none of the
+template reaches the agent. Save an empty file and the run is cancelled.
+
+The editor is `$VISUAL`, then `$EDITOR`, then the first of `vim`, `nano`, `vi` that is installed.
+On Windows it is `edit`, then `notepad`, then `vim`. `$VISUAL` and `$EDITOR` are split on
+whitespace, so `code --wait` works, but a program path containing spaces needs a wrapper script on
+your PATH.
+
+Stdin has to be a terminal for any of this. In a script, a pipeline, or CI, pass `-t` and Leviath
+says so rather than blocking.
+
+`-t` reads a file when the value names one that exists. It is an error when the value looks like a
+path (no spaces, and a `/`, a `\`, or a leading `~`) but no such file is there, so a mistyped
+filename fails instead of becoming the prompt. Region flags work the other way round and want an
+explicit `@` before a path, because a region seed is usually a file while a task is usually a
+sentence.
 
 ### `lev create <NAME>`
 
