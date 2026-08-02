@@ -1313,6 +1313,16 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         assert_eq!(mock.max_context_tokens("m"), 100_000);
         assert_eq!(mock.name(), "mock");
         let _ = mock.capabilities("m");
+
+        // Same for the recording fixture, which answers identically and is
+        // registered under the same name.
+        let recorder = Recorder {
+            seen: Arc::new(Mutex::new(Vec::new())),
+        };
+        assert_eq!(recorder.count_tokens("x", "m").await, 1);
+        assert_eq!(recorder.max_context_tokens("m"), 100_000);
+        assert_eq!(recorder.name(), "mock");
+        let _ = recorder.capabilities("m");
         assert!(
             mock.infer(
                 serde_json::from_value(serde_json::json!({
