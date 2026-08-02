@@ -1,6 +1,6 @@
 [agent]
 name = "log-analyzer"
-version = "0.0.1"
+version = "0.0.2"
 description = "Analyzes log files - identifies anomalies, trends, and error patterns via a scripted analyze⇄script loop, maintaining a severity-ranked findings index"
 entry_stage = "ingest"
 
@@ -24,9 +24,11 @@ Ingest the log files named in `task`. Determine:
 3. Available fields/columns
 4. Obvious structural issues (corrupted lines, encoding problems)
 
-Use bash (head/wc/file) to sample rather than reading whole huge files. Write a
-short format/structure summary to `findings` (context_write) so the analyze stage
-starts oriented. Raw sampled content lands in `logs`.
+Use bash to sample rather than reading whole huge files - the first N lines, a
+line count, a file type probe. Reach for whatever your shell actually provides
+(`head`/`wc`/`file` on Unix, `Get-Content -TotalCount` and `Measure-Object` on
+Windows). Write a short format/structure summary to `findings` (context_write) so
+the analyze stage starts oriented. Raw sampled content lands in `logs`.
 """
 
 [stages.ingest.tool_routing]
@@ -106,7 +108,8 @@ Your script has produced results. Decide what happens next:
 - If the results answer the analysis questions, respond with: analyze
 """
 system_prompt = """
-Write scripts (awk/grep/python via bash) to process the logs:
+Write scripts to process the logs, in whatever your shell can run (awk/grep/sed
+or python via bash on Unix, PowerShell or python on Windows):
 - Parse structured fields, filter by time/severity/pattern
 - Aggregate counts, rates, percentiles
 - Detect anomalies via statistical thresholds

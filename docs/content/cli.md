@@ -421,3 +421,16 @@ Manage [taint tracking](/docs/security#taint-tracking-experimental) policy rules
 `LEVIATH_HOME` redirects the whole data root, and `LEVIATH_CONFIG_PATH` points at an exact config
 file. Those two plus the rest are in the
 [configuration reference](/docs/configuration#environment-variables).
+
+Examples on this page use Unix shell syntax. On Windows, set variables the way your shell does:
+
+```powershell
+$env:LEVIATH_HOME = "D:\leviath"          # PowerShell
+```
+
+```bat
+set LEVIATH_HOME=D:\leviath
+```
+
+The per-command Unix prefix form (`LEVIATH_HOME=/tmp/lev lev ps`) has no direct equivalent; set the
+variable first, then run the command.

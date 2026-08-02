@@ -29,6 +29,7 @@ ollama_base_url      = "http://localhost:11434"   # env fallback: OLLAMA_HOST
 request_timeout_secs = 900           # per-request HTTP timeout to a provider
 taint_tracking       = false         # global master switch, see below
 batch_tool_hint      = true          # global master switch, see below
+shell_hint           = true          # global master switch, see below
 ```
 
 | Key | Type | Default | Notes |
@@ -41,6 +42,31 @@ batch_tool_hint      = true          # global master switch, see below
 | `request_timeout_secs` | integer | unset | Unset means the 15 minute ceiling. A stage's `[stages.<name>.model] request_timeout_secs` wins for that stage |
 | `taint_tracking` | bool | `false` | Turns on [taint tracking](/docs/security) for every agent. Off, an agent still opts in through its own `[security]` block |
 | `batch_tool_hint` | bool | `true` | Adds a short system hint telling the model it may batch independent tool calls. An agent or stage can set it either way at the narrower scope |
+| `shell_hint` | bool | `true` | Adds a short system hint describing the shell a stage will actually get. Only says anything where the platform warrants it (today: Windows). An agent or stage can set it either way at the narrower scope |
+
+### System-prompt hints
+
+`batch_tool_hint` and `shell_hint` are the two hints Leviath writes into a stage's system prompt on
+its own. Both are on by default, both cascade stage over agent over this file, and both sit at the
+front of the cacheable prefix so they cost nothing after the first call:
+
+```toml
+# config.toml: off for this machine
+shell_hint = false
+```
+
+```toml
+# a blueprint: back on for this one agent, off for one stage of it
+[agent]
+shell_hint = true
+
+[stages.plan]
+shell_hint = false
+```
+
+`shell_hint` only reaches a stage that advertises the `shell` tool, and only on a platform whose
+shell needs explaining. On Linux and macOS it is inert whatever you set it to. See
+[Built-in tools](/docs/tools#which-shell-you-get) for what it says on Windows.
 
 ## `[providers]`
 

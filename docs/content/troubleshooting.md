@@ -83,6 +83,51 @@ If the runs are failing on the very first request and you are not sure the crede
 problem at all, `lev doctor` checks the provider wiring layer by layer and names the first one that
 breaks.
 
+## `has no usable provider`, but I do have a key
+
+The message names what it tried: `stage 'parallel_fix' has no usable provider (tried: anthropic)`.
+That stage's `models` list simply never mentions the provider you configured. A blueprint only starts
+on a provider it lists, and the [bundled agents](/docs/agent-catalog) list Anthropic, OpenAI, and
+Ollama only, so a Google or OpenRouter key does not qualify.
+
+Pass `--model <provider>/<model>` for the run, add a `[providers] fallback_order` entry, or copy the
+blueprint and name your provider on the stage. Setting `default_model` often will not help: it is
+only consulted when no listed provider is configured at all. See
+[which entry a stage starts on](/docs/providers#which-entry-a-stage-starts-on).
+
+## My run went to Ollama and I never asked for it
+
+Ollama needs no key, so it is registered unconditionally, and every bundled agent lists it as its
+last entry. On an install with no Anthropic or OpenAI key, that is the first entry that matches, and
+the run starts against `http://localhost:11434` whether or not Ollama is installed.
+
+`lev doctor` reports the provider a run would start on before you spawn one, and a run records the
+model it actually used in its `meta.json`. The fixes are the same as the entry above.
+
+## The provider says my model doesn't exist
+
+Model strings are passed to the provider verbatim and are never checked locally, so a typo, a
+missing OpenRouter `vendor/` prefix, or an identifier the provider has retired all surface as an
+API error at the first call rather than at `lev validate` time.
+
+Check the spelling against `lev models list --provider <name> --remote`, which asks the provider
+rather than Leviath's built-in table. Note that a valid dated identifier such as
+`deepseek/deepseek-v4-flash-0731` may be absent from the offline table while still working, so
+absence there is not proof of a bad name. See
+[model identifiers](/docs/providers#model-identifiers).
+
+## A Windows agent keeps trying `cat`, `ls`, and `grep`
+
+The `shell` tool runs through `cmd.exe` on Windows, where those do not exist. Leviath names the
+resolved shell in the tool's description and, on Windows, prepends a short system block giving the
+PowerShell stand-ins, so an up-to-date install should not do this.
+
+If you see it anyway, check that `shell_hint` has not been turned off in `config.toml` or in the
+blueprint's `[agent]` / `[stages.<name>]` block. A blueprint that spells out POSIX commands in its
+own prompt will still ask for them; that text has to change in the blueprint. See
+[which shell you get](/docs/tools#which-shell-you-get).
+>>>>>>> a9de5a9 (Document model identifiers and what Windows actually gets)
+
 ## A run says `running` but never does anything
 
 Check its provider first, with `lev doctor`. If a stage's model list names only providers you
