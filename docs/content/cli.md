@@ -310,6 +310,45 @@ Start the [REST and WebSocket API](/docs/api).
 
 ## Configuration and tools
 
+### `lev doctor`
+
+Check that provider wiring works, end to end. Four checks run in order, the first failure stops the
+rest, and the one that fails is the diagnosis.
+
+| Check | What it proves | A failure means |
+|---|---|---|
+| `config` | `config.toml` parses and a provider registry can be built | The config file is malformed |
+| `resolve` | Your defaults pick a provider that is actually registered | A key is missing or misspelled |
+| `inference` | One real call reaches the model | A bad key, an unknown model id, or a billing problem |
+| `daemon` | A one-stage agent spawns over the control socket, runs, and finishes | The handoff is broken even though the credentials are fine |
+
+```bash
+$ lev doctor
+
+  config     OK  default_provider=openrouter; registered: ollama, openrouter (script providers resolve by name)
+  resolve    OK  openrouter / anthropic/claude-sonnet-4.5
+  inference  OK  12 in / 4 out / 16 total, replied PONG  (1.2s)
+  daemon     OK  run doctor-1785649252-bf7b3d07a265 Complete after 1 iteration(s)  (0.3s)
+
+doctor passed
+```
+
+The fourth check spawns a throwaway one-stage agent with no tools, waits for it, and then deletes
+the run. Nothing is left in `lev ps` or on disk.
+
+| Flag | Purpose |
+|---|---|
+| `-m`, `--model <MODEL>` | Test a specific model. Takes the same forms as `lev run --model`: `provider/model` picks both, a bare model id pairs with your `default_provider` |
+| `--no-daemon` | Stop after the third check. Contacts no daemon, starts none, and creates no run |
+| `--json` | Print the checks as `{"checks": [...], "passed": bool}` |
+
+`--model provider/model` is the way to reach a [Rhai script provider](/docs/rhai-providers), which
+is resolved by name and so cannot be listed. Use it to try a model string before wiring it into a
+blueprint.
+
+`lev doctor` exits non-zero when a check fails, so it works as a CI gate. It bills two inferences
+per run, each capped at 64 output tokens; `--no-daemon` bills one.
+
 ### `lev setup`
 
 The interactive [provider](/docs/providers) wizard. Every value it asks for has a flag, so the

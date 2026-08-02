@@ -70,6 +70,30 @@ requests since the previous version.
   above this is what stops an external scheduler leaking slots to runs that
   have quietly stopped, and there is now a page on doing that reconciliation
   properly in the daemon docs.
+- New `lev doctor`, which checks that provider wiring works without you having
+  to build a throwaway agent to find out. Four checks run in order and each is
+  reported: the config file parses and a registry can be built, your defaults
+  resolve to a provider that is actually registered, one real inference reaches
+  the model, and a one-turn agent spawns over the control socket and finishes.
+  The check that fails is the diagnosis. That last one matters most: config,
+  resolve and inference passing while `daemon` fails is the difference between
+  "my keys are wrong" and "the daemon is wedged", which used to look identical
+  from the outside.
+- `lev doctor` prints the provider and model it actually resolved to, not just
+  "OK". A stage that names no model of its own falls back to `anthropic`, so a
+  machine holding only an OpenRouter key can resolve to a provider it has no
+  credential for, spawn, and sit at iteration 0 — which is how a batch of runs
+  once went nowhere at once. Now it says so, before anything is spawned.
+- A failing provider call is reported verbatim, status line and response body
+  included, so a 402 naming the exhausted credit or a 404 naming the model
+  reads as itself rather than as "inference failed". `--model provider/model`
+  tries a model string before you wire it into a blueprint, and is the only way
+  to reach a Rhai script provider, which is resolved by name and cannot be
+  listed. `--no-daemon` stops after the inference; `--json` prints the checks
+  for scripts; a failure exits non-zero, so it works as a CI gate.
+- The probe cleans up after itself: the throwaway agent is staged in a temp
+  directory and its run is deleted on every path out, including the failing
+  ones, so nothing is left in `lev ps` or on disk.
 - A run is no longer reported as having produced nothing when it never had a
   way to produce anything. `empty_output` in `meta.json` has meant "modified no
   files" since it was added for coding agents, so a router that delegates to

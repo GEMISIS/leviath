@@ -52,6 +52,10 @@ pub enum Commands {
     /// Answer a pending interaction (or list open ones with no request id)
     Respond(commands::ctl::RespondArgs),
 
+    /// Check that provider wiring works, end to end
+    #[command(long_about = commands::doctor::DOCTOR_LONG_ABOUT)]
+    Doctor(commands::doctor::DoctorArgs),
+
     /// List available and installed blueprints
     List(commands::list::ListArgs),
 
@@ -127,6 +131,9 @@ pub trait RiskyExecutors {
     async fn resume(&self, args: commands::ctl::ResumeArgs) -> anyhow::Result<()>;
     /// `lev respond` - resolves the control-socket path and answers/lists interactions.
     async fn respond(&self, args: commands::ctl::RespondArgs) -> anyhow::Result<()>;
+    /// `lev doctor` - makes real billed inference calls, and (unless
+    /// `--no-daemon`) auto-starts the daemon and spawns a throwaway run.
+    async fn doctor(&self, args: commands::doctor::DoctorArgs) -> anyhow::Result<()>;
     /// `lev setup` - interactive (blocking stdin) or `--non-interactive`.
     async fn setup(&self, args: commands::setup::SetupArgs) -> anyhow::Result<()>;
     /// `lev dash` - takes over the real terminal and blocks on real keyboard input.
@@ -174,6 +181,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Pause(args) => ex.pause(args).await,
         Commands::Resume(args) => ex.resume(args).await,
         Commands::Respond(args) => ex.respond(args).await,
+        Commands::Doctor(args) => ex.doctor(args).await,
         Commands::List(args) => commands::list::execute(args).await,
         Commands::Add(args) => commands::add::execute(args).await,
         Commands::Remove(args) => commands::remove::execute(args).await,
@@ -213,6 +221,9 @@ mod tests {
             Ok(())
         }
         async fn respond(&self, _args: commands::ctl::RespondArgs) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn doctor(&self, _args: commands::doctor::DoctorArgs) -> anyhow::Result<()> {
             Ok(())
         }
         async fn cancel(&self, _args: commands::ctl::CancelArgs) -> anyhow::Result<()> {
@@ -330,6 +341,14 @@ mod tests {
             session: false,
         };
         assert!(dispatch(Commands::Respond(args), &MockRisky).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_doctor_variant_is_routed_through_the_executor() {
+        // Routed, not called directly: `lev doctor` bills two inferences and
+        // auto-starts a daemon, so a unit test must never reach the real one.
+        let args = commands::doctor::DoctorArgs::default();
+        assert!(dispatch(Commands::Doctor(args), &MockRisky).await.is_ok());
     }
 
     #[tokio::test]

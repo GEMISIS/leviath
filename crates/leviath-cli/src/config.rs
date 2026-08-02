@@ -1251,8 +1251,14 @@ fn make_fake_config_dir(unique: &str) -> std::path::PathBuf {
 /// `LEVIATH_SKIP_DOTENV`, and clear every provider API key (so no real, billed
 /// inference call can be made). Consumed by [`with_isolated_config_path`] and
 /// its async twin, which hand it to `temp_env` for scoped set-and-restore.
+///
+/// `pub(crate)` because `temp_env` serializes process-wide and holds its lock
+/// across the closure, so a test needing *these* overrides plus others (the
+/// `lev doctor` tests also redirect `LEVIATH_HOME` and `LEVIATH_RUNS_DIR`)
+/// cannot nest a second `temp_env` call inside the wrapper - it has to build
+/// one combined list from this one.
 #[cfg(test)]
-fn config_isolation_vars(
+pub(crate) fn config_isolation_vars(
     fake_dir: &std::path::Path,
 ) -> Vec<(&'static str, Option<std::ffi::OsString>)> {
     let mut vars: Vec<(&'static str, Option<std::ffi::OsString>)> = vec![

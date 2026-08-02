@@ -9,6 +9,13 @@ order: 2
 
 Common snags and how to clear them.
 
+## Start with `lev doctor`
+
+Before reading further, run [`lev doctor`](/docs/cli#lev-doctor). It checks the config file, model
+resolution, one real inference, and the daemon handoff, in that order, and reports each one. The
+check that fails tells you which section below you need — in particular it separates "my keys are
+wrong" from "the daemon is wedged", which look identical from the outside.
+
 ## The console can't reach my server
 
 The browser [console](/app) talks straight to your `lev serve` endpoint, so three things must line
@@ -44,11 +51,16 @@ isn't mounted, so it returns **405 Method Not Allowed** (the read routes still w
 An agent needs at least one [provider](/docs/providers). Run `lev setup`, or point Leviath at a
 local [Ollama](https://ollama.com) for a no-key start.
 
+`lev doctor` says which provider your defaults actually resolve to, and which ones it tried to get
+there. That matters because a stage naming no model of its own falls back to `anthropic` — so a
+machine with only an OpenRouter key can resolve to a provider it has no credential for, spawn, and
+sit at iteration 0.
+
 ## A run says `running` but never does anything
 
-Check its provider first. If a stage's model list names only providers you haven't configured,
-`lev run` refuses the spawn outright and tells you which ones it tried — configure one with
-`lev setup`, or add it to `config.toml` and restart the daemon.
+Check its provider first, with `lev doctor`. If a stage's model list names only providers you
+haven't configured, `lev run` refuses the spawn outright and tells you which ones it tried —
+configure one with `lev setup`, or add it to `config.toml` and restart the daemon.
 
 A run that gets past that and still can't dispatch (say you removed a provider key after it
 started) is failed after `[limits] stall_timeout_secs`, 60 seconds by default. Its `meta.json`

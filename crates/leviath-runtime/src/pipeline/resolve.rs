@@ -117,7 +117,12 @@ pub fn filter_tools_by_available(all: &[Tool], available: &[String]) -> Vec<Tool
 ///
 /// A `--model provider/model` override is the whole list on its own: it names
 /// exactly one provider and skips the blueprint's fallbacks entirely.
-fn providers_tried(
+///
+/// Public because [`resolve_stages`] is not the only place that has to explain
+/// an unusable resolution: `lev doctor` runs the same chain against an empty
+/// [`ModelConfig`] to report what the user's config alone would pick, and it
+/// must name the same providers in the same order rather than reimplement this.
+pub fn providers_tried(
     model_cfg: &ModelConfig,
     model_override: Option<&str>,
     defaults: &ModelDefaults,
