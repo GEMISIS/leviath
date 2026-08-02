@@ -302,3 +302,31 @@ jobs:
       # The promoted beta commit, so stable docs match the stable binaries.
       ref: ${{ needs.check-beta.outputs.sha }}
     secrets: inherit
+
+  # Homebrew and Scoop compare the installed version against the version
+  # *declared* in the manifest to decide whether an upgrade exists; neither
+  # looks at what is behind the rolling channel tag the manifests point at. So
+  # the tap has to be told what just shipped, or `brew upgrade` never fires.
+  # Its own job, not a step on `deploy`: a failure here must be loud without
+  # retroactively failing a release that did publish.
+  bump-tap:
+    name: Bump tap manifests (stable)
+    needs: [deploy, check-beta]
+    if: needs.check-beta.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch to leviath-dist
+        env:
+          # GITHUB_TOKEN is scoped to this repo, so reaching the tap needs a
+          # PAT. RELEASE_TOKEN already exists for the release steps above and
+          # only needs leviath-dist added to its repository access
+          # (Contents: read and write) — no new secret.
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          VERSION: ${{ needs.check-beta.outputs.version }}
+        run: |
+          set -euo pipefail
+          jq -nc --arg version "$VERSION" \
+            '{event_type:"release-published",
+              client_payload:{channel:"stable", version:$version}}' \
+            | gh api repos/GEMISIS/leviath-dist/dispatches --input -
+          echo "Asked leviath-dist to bump the stable manifests to $VERSION."

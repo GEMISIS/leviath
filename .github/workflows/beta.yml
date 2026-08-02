@@ -23,6 +23,8 @@ jobs:
     outputs:
       sha: ${{ steps.alpha.outputs.sha }}
       skip: ${{ steps.alpha.outputs.skip }}
+      # Also handed to bump-tap, so the tap declares what beta actually ships.
+      version: ${{ steps.alpha.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -156,3 +158,23 @@ jobs:
       # The promoted alpha commit, so beta docs match the beta binaries.
       ref: ${{ needs.promote.outputs.sha }}
     secrets: inherit
+
+  # See prod.yml: the tap's declared version is the only upgrade signal, so it
+  # has to be told what beta just published.
+  bump-tap:
+    name: Bump tap manifests (beta)
+    needs: promote
+    if: needs.promote.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch to leviath-dist
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          VERSION: ${{ needs.promote.outputs.version }}
+        run: |
+          set -euo pipefail
+          jq -nc --arg version "$VERSION-beta" \
+            '{event_type:"release-published",
+              client_payload:{channel:"beta", version:$version}}' \
+            | gh api repos/GEMISIS/leviath-dist/dispatches --input -
+          echo "Asked leviath-dist to bump the beta manifests to $VERSION-beta."

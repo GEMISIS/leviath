@@ -1,8 +1,8 @@
 <div align="center">
 
-# Leviath
+<img src="docs/assets/logo.png" alt="Leviath" width="440">
 
-**A structured agent runtime for LLMs**
+**A structured runtime for AI agents**
 
 **Coherent.** Structured context regions mean an agent still knows what it read 50 tool calls ago.<br>
 **Right-sized.** Each phase of a task gets its own model, tools, and context layout, so you aren't paying frontier prices for file reads.<br>
@@ -51,28 +51,41 @@ lev create my-agent              # scaffold your own agent
 
 ### 1. Install
 
-**macOS (Homebrew, recommended):**
+**macOS and Linux:**
 
 ```bash
-brew tap gemisis/leviath https://github.com/GEMISIS/leviath-dist.git
-brew trust gemisis/leviath          # Homebrew 6 requires trusting third-party taps
-brew install leviath                     # stable - or: leviath-beta, leviath-alpha
+curl -fsSL https://leviath.dev/install.sh | sh
 ```
 
-**Linux:**
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/GEMISIS/leviath-dist/main/install.sh | bash -s -- --channel stable
-```
-
-**Windows (PowerShell or Scoop):**
+**Windows** — pastes into either Command Prompt or PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/GEMISIS/leviath-dist/main/install.ps1 | iex
-# or: scoop bucket add leviath https://github.com/GEMISIS/leviath-dist.git && scoop install leviath
+powershell -ExecutionPolicy Bypass -c "irm https://leviath.dev/install.ps1 | iex"
 ```
 
-All of the above install prebuilt binaries; no Rust toolchain needed.
+The script picks the right installer for your platform and takes the stable
+channel by default; set `LEVIATH_CHANNEL` to `beta` or `alpha` to switch. Both
+install prebuilt binaries, so no Rust toolchain is needed.
+
+<details>
+<summary><b>Package managers</b>: Homebrew and Scoop, if you would rather manage it that way</summary>
+
+<br/>
+
+```bash
+# macOS - what install.sh runs for you
+brew tap gemisis/leviath https://github.com/GEMISIS/leviath-dist.git
+brew trust gemisis/leviath          # Homebrew 6 requires trusting third-party taps
+brew install leviath                # stable - or: leviath-beta, leviath-alpha
+```
+
+```powershell
+# Windows
+scoop bucket add leviath https://github.com/GEMISIS/leviath-dist.git
+scoop install leviath
+```
+
+</details>
 
 **Cargo** (any platform, requires [Rust](https://rustup.rs/)):
 
