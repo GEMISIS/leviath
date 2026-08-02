@@ -28,7 +28,7 @@ Spawn an agent into the daemon. `PATH` is an installed agent name, a blueprint d
 | `-t`, `--task <TEXT\|FILE>` | The task prompt, or the path of a file holding it. Left off, your editor opens |
 | `-m`, `--model <MODEL>` | Model override, as `provider/model` or a bare model name |
 | `--workdir <DIR>` | Working directory for the run. Defaults to where you ran the command. File tools are confined to it, and relative `[read_paths]` entries resolve against it |
-| `--yolo` | Run unattended: approve every tool call and auto-answer the agent's own prompts (`ask_user_*`, plan approvals). Cannot lift a `deny` |
+| `--yolo` | Run unattended: approve every tool call, and take away the tools that wait on a person (`ask_user_*`, `present_for_review`, `edit_document`) so the run cannot park on a prompt. Plan approvals resolve themselves. A stage keeps what it lists in [`required_tools`](/docs/tools#these-tools-need-someone-there). Cannot lift a `deny` |
 | `--allow <TOOL>` | Allow one tool outright. Repeatable |
 | `--max-depth <N>` | Override the blueprint's maximum sub-agent tree depth |
 | `--no-seed-commands` | Refuse the blueprint's `seed = { command = "..." }` regions for this run |

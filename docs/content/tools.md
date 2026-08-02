@@ -98,6 +98,31 @@ Present work to the user for approval or direct editing.
 | `present_for_review` | Pause and display a markdown document (plan, design, report) for the user to read and approve. | `title`, `markdown` |
 | `edit_document` | Show a document in an editable field pre-filled with its current text; the returned text is the user's authoritative edit. | `content`, `prompt` (optional) |
 
+### These tools need someone there
+
+Every tool in the two tables above does the same thing: it opens a prompt and waits. That is fine
+when you are watching the run. When nobody is, the wait has no end - the agent sits in
+`WaitingInput`, holding a concurrency slot, until the daemon restarts.
+
+So an unattended run does not get them. A run launched with `--yolo` (and every sub-agent and
+fan-out worker under it) has these five tools removed from the set advertised to the model, per
+stage, before the first inference. The model never sees them and decides for itself instead.
+
+A stage that genuinely needs a person can opt out, tool by tool:
+
+```toml
+[stages.plan]
+available_tools = ["read_file", "ask_user_text", "ask_user_choice"]
+# Kept even when the run is unattended.
+required_tools = ["ask_user_text", "ask_user_choice"]
+```
+
+`required_tools` entries must also appear in `available_tools`; `lev validate` rejects a manifest
+where they do not, and warns about an autonomous stage that offers one of these tools without
+opting out. Pair the opt-out with
+[`interaction_timeout_secs`](/docs/configuration#limits) so a prompt nobody answers still releases
+the run rather than parking it for good.
+
 ## Sub-agents
 
 Spawn and coordinate [child agents](/docs/sub-agents) from within a run. These are advertised to the
@@ -194,7 +219,8 @@ exfiltration-capable call fires.
 > [!WARNING]
 > A tool set to `ask` in a headless context blocks until someone answers. It never auto-denies. For
 > unattended runs, either grant the tools explicitly with `--allow` or use `--yolo`, which cannot
-> override a `deny`.
+> override a `deny`. Set [`interaction_timeout_secs`](/docs/configuration#limits) to put a deadline
+> on any prompt that goes unanswered, whichever way it was raised.
 
 ## Argument validation
 

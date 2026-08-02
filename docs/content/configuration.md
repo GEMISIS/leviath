@@ -108,6 +108,7 @@ finished_retention_secs   = 300  # keep a finished run in `lev ps` this long
 wedge_timeout_secs        = 0    # fail a run nothing can reach any more; 0 is off
 provider_failures_before_open  = 3     # pull a provider after this many failures in a row
 provider_circuit_cooldown_secs = 300   # how long before it is tried again
+interaction_timeout_secs  = 3600 # release a prompt nobody answered
 ```
 
 | Key | Default | Notes |
@@ -123,6 +124,7 @@ provider_circuit_cooldown_secs = 300   # how long before it is tried again
 | `wedge_timeout_secs` | `0` (off) | How long a run may sit in a state no part of the engine can reach before it is failed instead of left reported as running. Never fires on a run that is merely slow: an agent waiting on the model, a tool, its sub-agents, or a person is exempt however long it takes. Off by default because it fails runs; `300` is a sensible value if something outside Leviath tracks your slots. See [reconciling an external work queue](/docs/daemon#reconciling-an-external-work-queue) |
 | `provider_failures_before_open` | `3` | Consecutive failures that only you can fix (out of credits, rejected key) before a provider is taken out of service for every run. Three rather than one because a single payment error can be one oversized request. `0` disables it, leaving per-run failover on its own |
 | `provider_circuit_cooldown_secs` | `300` | How long a provider stays out before one request is let through to see whether it recovered. A success puts it straight back; a failure restarts the wait. See [Providers](/docs/providers#when-a-provider-keeps-failing) |
+| `interaction_timeout_secs` | `3600` | How long any prompt that waits on a person may go unanswered before the daemon resolves it and lets the run continue. Covers `ask_user_*`, tool approvals, taint gates, and interaction points. An expiry denies an approval and tells the model no answer came; it never counts as consent. See [when nobody answers](/docs/interaction#when-nobody-answers). `0` waits indefinitely |
 
 <a id="security"></a>
 
