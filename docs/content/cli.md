@@ -42,8 +42,11 @@ with `@` is read from that file:
 lev run reviewer --task "Review the auth module" --standards @./team-standards.md
 ```
 
-A region only accepts a seed if the blueprint declares it as caller input. `lev validate` lists
-which ones do.
+A region only accepts a seed if the blueprint declares it as caller input: a string
+`seed = "<key>"` in its `[context.regions]` entry, or being named `task`, which asks for the `task`
+key implicitly. A table seed (`seed = { glob = ... }`, `{ command = ... }`, and so on) fills the
+region from somewhere else and takes no caller input, and a `--<name>` naming any other region is
+dropped.
 
 > [!NOTE]
 > `--task` fills the caller-input key `task`. A blueprint receives it only if some region asks for
