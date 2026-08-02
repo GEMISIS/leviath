@@ -1234,6 +1234,9 @@ pub struct ResolvedStage {
     pub model: String,
     /// The effective tool set for this stage (already filtered).
     pub tools: Vec<Tool>,
+    /// Where to go if `provider_name` turns out to be unusable, best first.
+    /// See [`crate::pipeline::resolve_stage_candidates`].
+    pub fallbacks: Vec<leviath_core::blueprint::ModelEntry>,
 }
 
 /// Fallback context window used when a stage's provider isn't registered (so
@@ -1429,6 +1432,7 @@ pub fn spawn_agent_seeded(
             model: rs.model,
             tools: rs.tools,
             tool_filter: None, // tools already resolved to the effective set
+            fallbacks: rs.fallbacks,
         })
         .collect();
     let agent_batch_tool_hint = blueprint.batch_tool_hint;

@@ -69,6 +69,7 @@ fn stage(model: &str, tools: Vec<Tool>, filter: Option<Vec<String>>) -> StageInf
         model: model.to_string(),
         tools,
         tool_filter: filter,
+        fallbacks: Vec::new(),
     }
 }
 
@@ -588,6 +589,162 @@ fn collect_marks_error_on_failure() {
         world.get::<StageOutcome>(e).unwrap(),
         &StageOutcome::Errored("boom".to_string())
     );
+}
+
+// ── provider failover on an unusable provider (issue #201) ──
+
+/// A stage on `dead/model-a` with one place left to go.
+fn stage_with_fallback() -> StageInference {
+    StageInference {
+        provider_name: "dead".to_string(),
+        model: "model-a".to_string(),
+        tools: Vec::new(),
+        tool_filter: None,
+        fallbacks: vec![leviath_core::blueprint::ModelEntry::new(
+            "alive".to_string(),
+            "model-b".to_string(),
+        )],
+    }
+}
+
+fn credits_exhausted() -> leviath_providers::ProviderError {
+    leviath_providers::ProviderError::Unavailable {
+        reason: leviath_providers::UnavailableReason::CreditsExhausted,
+        detail: "HTTP 402 Payment Required".to_string(),
+    }
+}
+
+#[test]
+fn an_unusable_provider_fails_over_instead_of_killing_the_run() {
+    let (mut world, tx) = world_with_results();
+    let e = world
+        .spawn((agent_state(), AwaitingInference, stage_with_fallback()))
+        .id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Err(credits_exhausted()),
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    // The stage now points at the fallback and is ready to be dispatched
+    // again; the run is still alive.
+    let si = world.get::<StageInference>(e).unwrap();
+    assert_eq!(si.provider_name, "alive");
+    assert_eq!(si.model, "model-b");
+    assert!(si.fallbacks.is_empty(), "the candidate was consumed");
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    assert!(world.get::<AwaitingInference>(e).is_none());
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Active
+    );
+    assert!(world.get::<StageOutcome>(e).is_none());
+    assert!(world.get::<ResolveTransition>(e).is_none());
+    // The agent never got a turn, so the iteration must not move.
+    assert_eq!(world.get::<AgentState>(e).unwrap().iteration, 0);
+}
+
+#[test]
+fn failover_is_recorded_in_the_stage_log() {
+    // A silent swap is how a factory ends up on a model nobody chose.
+    let (mut world, tx) = world_with_results();
+    let e = world
+        .spawn((
+            agent_state(),
+            AwaitingInference,
+            stage_with_fallback(),
+            StageIoBuffer::default(),
+        ))
+        .id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Err(credits_exhausted()),
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    let logs = &world.get::<StageIoBuffer>(e).unwrap().logs;
+    let line = logs
+        .iter()
+        .map(|(_, l)| l.as_str())
+        .find(|l| l.starts_with("[failover]"))
+        .expect("the swap is written to the stage log");
+    assert!(line.contains("dead/model-a"), "{line}");
+    assert!(line.contains("alive/model-b"), "{line}");
+}
+
+#[test]
+fn an_exhausted_fallback_list_still_terminates() {
+    // Last provider standing: the run ends, but with the readable message
+    // rather than the raw JSON body the issue reported.
+    let (mut world, tx) = world_with_results();
+    let mut si = stage_with_fallback();
+    si.fallbacks.clear();
+    let e = world.spawn((agent_state(), AwaitingInference, si)).id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Err(credits_exhausted()),
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    assert!(world.get::<ReadyToInfer>(e).is_none());
+    assert!(world.get::<ResolveTransition>(e).is_some());
+    let AgentStatus::Error { message } = &world.get::<AgentState>(e).unwrap().status else {
+        panic!("an exhausted chain is a terminal error");
+    };
+    assert!(message.starts_with("out of credits:"), "{message}");
+}
+
+#[test]
+fn an_ordinary_error_does_not_burn_a_fallback() {
+    // Failing over on a malformed request would waste the one provider that
+    // still works, so only a provider-fatal error may consume a candidate.
+    let (mut world, tx) = world_with_results();
+    let e = world
+        .spawn((agent_state(), AwaitingInference, stage_with_fallback()))
+        .id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Err(leviath_providers::ProviderError::ApiError(
+            "HTTP 400: bad request".to_string(),
+        )),
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    let si = world.get::<StageInference>(e).unwrap();
+    assert_eq!(si.provider_name, "dead", "the provider is untouched");
+    assert_eq!(si.fallbacks.len(), 1, "the candidate is still available");
+    assert!(world.get::<ResolveTransition>(e).is_some());
+}
+
+#[test]
+fn an_unusable_provider_without_a_stage_component_still_terminates() {
+    // `StageInference` is optional on the query, so the failover branch has to
+    // cope with its absence rather than assuming one is attached.
+    let (mut world, tx) = world_with_results();
+    let e = world.spawn((agent_state(), AwaitingInference)).id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Err(credits_exhausted()),
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    assert!(world.get::<ReadyToInfer>(e).is_none());
+    assert!(world.get::<ResolveTransition>(e).is_some());
 }
 
 // ── stage-io persistence (#1) ──
@@ -2146,6 +2303,7 @@ fn stage_inf(tools: &[&str]) -> StageInference {
             })
             .collect(),
         tool_filter: None,
+        fallbacks: Vec::new(),
     }
 }
 
@@ -2610,6 +2768,7 @@ fn offering(names: &[&str]) -> StageInference {
             })
             .collect(),
         tool_filter: None,
+        fallbacks: Vec::new(),
     }
 }
 
@@ -2944,6 +3103,7 @@ fn offering_with_schemas(tools: &[(&str, serde_json::Value)]) -> StageInference 
             })
             .collect(),
         tool_filter: None,
+        fallbacks: Vec::new(),
     }
 }
 
@@ -4150,6 +4310,7 @@ fn si(model: &str) -> StageInference {
         model: model.to_string(),
         tools: vec![],
         tool_filter: None,
+        fallbacks: Vec::new(),
     }
 }
 
@@ -4648,6 +4809,7 @@ fn resolved(model: &str) -> ResolvedStage {
         provider_name: "p".to_string(),
         model: model.to_string(),
         tools: vec![],
+        fallbacks: Vec::new(),
     }
 }
 
@@ -8118,6 +8280,7 @@ fn stage_infs_head() -> StageInference {
         model: "m".to_string(),
         tools: vec![],
         tool_filter: None,
+        fallbacks: Vec::new(),
     }
 }
 
@@ -8228,6 +8391,7 @@ async fn dispatch_choice_stays_when_provider_missing() {
         model: "m".to_string(),
         tools: vec![],
         tool_filter: None,
+        fallbacks: Vec::new(),
     });
 
     let mut schedule = Schedule::default();
@@ -8563,6 +8727,7 @@ fn collect_inference_records_activity_with_provider_and_latency() {
                 model: "m1".to_string(),
                 tools: vec![],
                 tool_filter: None,
+                fallbacks: Vec::new(),
             },
             crate::telemetry::StageActivity::default(),
         ))

@@ -851,7 +851,7 @@ impl Stage {
 }
 
 /// A single model entry within a [`ModelConfig`] models list.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelEntry {
     /// Provider name (e.g., "anthropic", "openai")
     pub provider: String,

@@ -1122,6 +1122,7 @@ mod tests {
                 })
                 .collect(),
             tool_filter: None,
+            fallbacks: Vec::new(),
         }
     }
 
@@ -1748,6 +1749,7 @@ mod tests {
                     provider_name: "script".to_string(),
                     model: "m".to_string(),
                     tools: vec![],
+                    fallbacks: Vec::new(),
                 }],
                 true,
             )
@@ -2254,6 +2256,7 @@ mod tests {
                 provider_name: "script".to_string(),
                 model: "m".to_string(),
                 tools: vec![],
+                fallbacks: Vec::new(),
             }],
             true,
         );

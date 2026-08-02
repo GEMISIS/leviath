@@ -138,10 +138,24 @@ impl AgentWorldBuilder {
     /// The user-default provider/model, the fallback when none of a stage's
     /// listed models has a registered provider.
     pub fn default_model(mut self, provider: impl Into<String>, model: impl Into<String>) -> Self {
-        self.defaults = ModelDefaults {
-            provider: provider.into(),
-            model: Some(model.into()),
-        };
+        self.defaults.provider = provider.into();
+        self.defaults.model = Some(model.into());
+        self
+    }
+
+    /// Append a host-wide failover target, tried after a stage's own entries
+    /// and the default model when the provider in use stops answering.
+    ///
+    /// Call it once per target, best first. This is what keeps a blueprint
+    /// that names exactly one model running when that provider runs out of
+    /// credits (issue #201).
+    pub fn fallback_model(mut self, provider: impl Into<String>, model: impl Into<String>) -> Self {
+        self.defaults
+            .fallback_order
+            .push(leviath_core::blueprint::ModelEntry::new(
+                provider.into(),
+                model.into(),
+            ));
         self
     }
 

@@ -651,6 +651,20 @@ pub struct ProviderConfig {
     /// `None` uses [`leviath_providers::claude_code::DEFAULT_EFFORT`].
     #[serde(default)]
     pub claude_code_effort: Option<String>,
+
+    /// Host-wide failover chain, as `"provider/model"` entries, best first.
+    ///
+    /// Tried after a stage's own `models` list and the default model when the
+    /// provider in use stops answering (out of credits, rejected key). Entries
+    /// naming an unregistered provider are skipped, and a malformed entry is
+    /// ignored with a warning rather than failing the load.
+    ///
+    /// `provider/model` rather than a bare provider name because a failover
+    /// target needs a model to send; there is no sensible default per provider.
+    /// A blueprint that names one model has nowhere to go without this, which
+    /// is exactly how issue #201 took every agent down at once.
+    #[serde(default)]
+    pub fallback_order: Vec<String>,
 }
 
 /// Hand-written so the API keys can never be printed.
@@ -672,6 +686,7 @@ impl std::fmt::Debug for ProviderConfig {
             .field("claude_code_enabled", &self.claude_code_enabled)
             .field("claude_code_binary", &self.claude_code_binary)
             .field("claude_code_effort", &self.claude_code_effort)
+            .field("fallback_order", &self.fallback_order)
             .finish()
     }
 }
@@ -725,6 +740,7 @@ impl Default for Config {
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                fallback_order: Vec::new(),
             },
             agent_paths: Vec::new(),
             openrouter_api_key: None,
@@ -2134,6 +2150,7 @@ google_api_key = "AIza-existing"
             claude_code_enabled: true,
             claude_code_binary: None,
             claude_code_effort: None,
+            fallback_order: Vec::new(),
         };
         let rendered = format!("{providers:?}");
         assert!(!rendered.contains("SECRET-VALUE"), "key leaked: {rendered}");
@@ -2150,6 +2167,7 @@ google_api_key = "AIza-existing"
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                fallback_order: Vec::new(),
             }
         );
         assert!(empty.contains("<unset>"), "{empty}");
@@ -2197,6 +2215,7 @@ google_api_key = "AIza-existing"
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                fallback_order: Vec::new(),
             },
             ..Config::default()
         };
@@ -2213,6 +2232,7 @@ google_api_key = "AIza-existing"
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                fallback_order: Vec::new(),
             },
             ..Config::default()
         };
@@ -2231,6 +2251,7 @@ google_api_key = "AIza-existing"
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                fallback_order: Vec::new(),
             },
             ..Config::default()
         };
@@ -2247,6 +2268,7 @@ google_api_key = "AIza-existing"
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                fallback_order: Vec::new(),
             },
             ..Config::default()
         };
@@ -2515,6 +2537,7 @@ max_output_tokens = 2048
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                fallback_order: Vec::new(),
             },
             ..Config::default()
         };
@@ -2550,6 +2573,7 @@ max_output_tokens = 2048
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                fallback_order: Vec::new(),
             },
             tool_permissions: {
                 let mut m = HashMap::new();
@@ -2584,6 +2608,7 @@ max_output_tokens = 2048
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                fallback_order: Vec::new(),
             },
             ..Config::default()
         };
@@ -2602,6 +2627,7 @@ max_output_tokens = 2048
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                fallback_order: Vec::new(),
             },
             ..Config::default()
         };
@@ -2802,6 +2828,7 @@ enabled = false
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                fallback_order: Vec::new(),
             },
             openrouter_api_key: Some("sk-or-test".to_string()),
             default_model: Some("gpt-5".to_string()),
@@ -2863,6 +2890,7 @@ enabled = false
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                fallback_order: Vec::new(),
             },
             agent_paths: vec![std::path::PathBuf::from("/my/agents")],
             openrouter_api_key: None,

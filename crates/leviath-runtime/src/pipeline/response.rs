@@ -49,7 +49,7 @@ pub fn collect_inference(
             Option<&StageCursor>,
             Option<&mut StageLedger>,
             Option<&mut StageIoBuffer>,
-            Option<&StageInference>,
+            Option<&mut StageInference>,
             Option<&mut crate::telemetry::StageActivity>,
         ),
         With<AwaitingInference>,
@@ -58,7 +58,7 @@ pub fn collect_inference(
 ) {
     crate::tick_scope::clear();
     while let Ok(outcome) = results.0.try_recv() {
-        let Ok((mut state, totals, cursor, mut ledger, buffer, inference, activity)) =
+        let Ok((mut state, totals, cursor, mut ledger, buffer, mut inference, activity)) =
             agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
@@ -75,6 +75,12 @@ pub fn collect_inference(
             continue;
         }
         let idx = cursor.map_or(0, |c| c.index);
+        // Whoever we actually called. Read before the error arm below, which
+        // may swap the component over to the next provider.
+        let (called_provider, called_model) = inference
+            .as_deref()
+            .map(|i| (i.provider_name.clone(), i.model.clone()))
+            .unwrap_or_default();
         // Record the call for the telemetry observer while the provider and
         // timing are still at hand (the observer only sees components).
         if let Some(mut activity) = activity {
@@ -82,10 +88,8 @@ pub fn collect_inference(
             activity
                 .0
                 .push(crate::telemetry::ActivityRecord::Inference {
-                    provider: inference
-                        .map(|i| i.provider_name.clone())
-                        .unwrap_or_default(),
-                    model: inference.map(|i| i.model.clone()).unwrap_or_default(),
+                    provider: called_provider.clone(),
+                    model: called_model.clone(),
                     latency_ms: u64::try_from(outcome.latency.as_millis()).unwrap_or(u64::MAX),
                     prompt_tokens: usage.map_or(0, |u| u.prompt_tokens),
                     completion_tokens: usage.map_or(0, |u| u.completion_tokens),
@@ -128,6 +132,51 @@ pub fn collect_inference(
                     .insert(ProcessResponse);
             }
             Err(err) => {
+                // A provider that is out of credits or holding a rejected key
+                // is not this request's problem: every later request to it
+                // fails the same way. Move the stage to the next candidate and
+                // try again rather than killing the run (issue #201).
+                let next = err.unavailable_reason().and_then(|_| {
+                    let si = inference.as_deref_mut()?;
+                    (!si.fallbacks.is_empty()).then(|| si.fallbacks.remove(0))
+                });
+                if let Some(next) = next {
+                    // Loud on purpose. Silently swapping providers is how a
+                    // factory ends up running on a model nobody chose.
+                    tracing::warn!(
+                        from_provider = %called_provider,
+                        from_model = %called_model,
+                        to_provider = %next.provider,
+                        to_model = %next.model,
+                        error = %err,
+                        "provider unusable; failing over to the next configured model"
+                    );
+                    if let Some(mut buffer) = buffer {
+                        buffer.logs.push((
+                            idx,
+                            format!(
+                                "[failover] {called_provider}/{called_model} is unusable \
+                                 ({err}); retrying on {}/{}",
+                                next.provider, next.model
+                            ),
+                        ));
+                    }
+                    let si = inference
+                        .as_deref_mut()
+                        .expect("the failover branch only runs with a StageInference");
+                    si.provider_name = next.provider;
+                    si.model = next.model;
+                    // Back to ready, not errored: the next tick dispatches it
+                    // against the new provider and takes that model's permit.
+                    // The iteration is deliberately not bumped - the agent has
+                    // still not had a turn.
+                    commands
+                        .entity(outcome.entity)
+                        .remove::<AwaitingInference>()
+                        .remove::<InFlightWork>()
+                        .insert(ReadyToInfer);
+                    continue;
+                }
                 if let Some(mut buffer) = buffer {
                     buffer.logs.push((idx, format!("[error] {err}")));
                 }

@@ -313,6 +313,7 @@ mod tests {
             model: model.to_string(),
             tools: vec![],
             tool_filter: None,
+            fallbacks: Vec::new(),
         }
     }
 
