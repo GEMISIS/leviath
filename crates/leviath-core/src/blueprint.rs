@@ -607,6 +607,23 @@ impl PartialEq for InteractionStyle {
 }
 impl Eq for InteractionStyle {}
 
+/// What an interaction point does when the run is unattended (`--yolo`).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UnattendedPolicy {
+    /// Resolve the point as approved without opening a prompt. The default:
+    /// `--yolo` means nobody is watching, and a checkpoint nobody can answer
+    /// would park the run for as long as the daemon lives.
+    #[default]
+    AutoApprove,
+
+    /// Open the prompt anyway and wait for a person, even under `--yolo`. For a
+    /// checkpoint whose whole purpose is a human decision - a plan the user
+    /// signs off before any code is written. Pair it with `[limits]
+    /// interaction_timeout_secs` so an unanswered gate still releases.
+    Ask,
+}
+
 /// A point where a stage can request user input.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InteractionPoint {
@@ -616,8 +633,16 @@ pub struct InteractionPoint {
     /// Prompt to show the user
     pub prompt: String,
 
-    /// Whether input is required (vs optional)
+    /// Whether input is required (vs optional). A presentation hint carried on
+    /// the prompt - not to be confused with [`InteractionPoint::unattended`],
+    /// which decides whether the prompt is raised at all in a `--yolo` run.
     pub required: bool,
+
+    /// What this point does when nobody is watching. Defaults to
+    /// [`UnattendedPolicy::AutoApprove`]; set `unattended = "ask"` to hold the
+    /// run for a person even under `--yolo`.
+    #[serde(default)]
+    pub unattended: UnattendedPolicy,
 
     /// Style of interaction (free text, multiple choice, confirm)
     #[serde(default)]
@@ -689,6 +714,23 @@ pub struct Stage {
 
     /// Which tools are available in this stage
     pub available_tools: Vec<String>,
+
+    /// Human-in-the-loop tools (`ask_user_*`, `present_for_review`,
+    /// `edit_document`) that survive an unattended run.
+    ///
+    /// An unattended run - `lev run --yolo`, or a child of one - drops every
+    /// blocking human tool from the stage's advertised set, because a call to
+    /// one can only park the agent until the daemon dies (issue #204). Naming a
+    /// tool here says this stage genuinely needs a person and the run should
+    /// wait for one anyway. Pair it with `[limits] interaction_timeout_secs` so
+    /// an unanswered prompt still releases eventually.
+    ///
+    /// Entries must also appear in `available_tools` - listing a tool the stage
+    /// can't call in the first place is a validation error, not a silent no-op.
+    /// Matched verbatim against `available_tools` (this crate has no alias
+    /// table), so write the name the same way in both.
+    #[serde(default)]
+    pub required_tools: Vec<String>,
 
     /// Maximum iterations for this stage
     pub max_iterations: Option<usize>,
@@ -815,6 +857,7 @@ impl Stage {
             description: None,
             model,
             available_tools: Vec::new(),
+            required_tools: Vec::new(),
             max_iterations: None,
             mode: StageMode::Autonomous,
             context_layout: None,
@@ -868,6 +911,23 @@ impl Stage {
                 stage: "(empty)".to_string(),
                 message: "stage name cannot be empty".to_string(),
             });
+        }
+
+        // A `required_tools` entry the stage can't call is dead text: it looks
+        // like it keeps a tool through an unattended run, and keeps nothing.
+        // Rejected rather than ignored so the typo surfaces at `lev validate`
+        // instead of at 3am in a `--yolo` run.
+        for tool in &self.required_tools {
+            if !self.available_tools.contains(tool) {
+                return Err(ValidationError::Stage {
+                    stage: self.name.clone(),
+                    message: format!(
+                        "required_tools entry '{}' is not in available_tools - a tool the \
+                         stage cannot call can't be kept through an unattended run",
+                        tool
+                    ),
+                });
+            }
         }
 
         // Validate stage-specific context layout if present
@@ -1594,6 +1654,7 @@ mod tests {
             name: "plan_approval".to_string(),
             prompt: "Approve?".to_string(),
             required: true,
+            unattended: UnattendedPolicy::AutoApprove,
             style: InteractionStyle::MultipleChoice,
             options: vec!["Approve".to_string(), "Revise".to_string()],
             directives: HashMap::new(),
@@ -1617,6 +1678,7 @@ mod tests {
             name: "plan_approval".to_string(),
             prompt: "Approve?".to_string(),
             required: true,
+            unattended: UnattendedPolicy::Ask,
             style: InteractionStyle::MultipleChoice,
             options: vec!["Approve".to_string(), "Revise".to_string()],
             directives,
@@ -1632,6 +1694,9 @@ mod tests {
         );
         assert_eq!(back.abort_options, vec!["Abort".to_string()]);
         assert_eq!(back.edit_options, vec!["Add detail".to_string()]);
+        // A point that holds for a person under `--yolo` has to survive the
+        // round trip: this is what a restored run re-arms from.
+        assert_eq!(back.unattended, UnattendedPolicy::Ask);
     }
 
     #[test]
@@ -2129,6 +2194,32 @@ mod tests {
             .validate()
             .is_ok()
         );
+    }
+
+    /// `required_tools` keeps a blocking human tool through an unattended run.
+    /// Naming one the stage can't call keeps nothing, so it is rejected rather
+    /// than quietly ignored - the author meant something by writing it.
+    #[test]
+    fn validate_rejects_a_required_tool_the_stage_cannot_call() {
+        let mut stage = Stage::new("plan".to_string(), make_model());
+        stage.available_tools = vec!["read_file".to_string()];
+        stage.required_tools = vec!["ask_user_text".to_string()];
+        let bp = Blueprint::new("t".into(), "".into(), vec![stage], make_layout());
+
+        let err = bp.validate().expect_err("a tool it cannot call");
+        let text = format!("{err:?}");
+        assert!(text.contains("ask_user_text"), "names the tool: {text}");
+        assert!(text.contains("available_tools"), "says why: {text}");
+    }
+
+    #[test]
+    fn validate_accepts_a_required_tool_the_stage_offers() {
+        let mut stage = Stage::new("plan".to_string(), make_model());
+        stage.available_tools = vec!["read_file".to_string(), "ask_user_text".to_string()];
+        stage.required_tools = vec!["ask_user_text".to_string()];
+        let bp = Blueprint::new("t".into(), "".into(), vec![stage], make_layout());
+
+        bp.validate().expect("the tool is on offer");
     }
 
     #[test]
