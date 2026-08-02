@@ -363,7 +363,15 @@ pub fn format_runs(
     now: i64,
 ) -> String {
     if runs.is_empty() && finished.is_empty() {
-        return "no agents running".to_string();
+        // "no agents running" on its own is the most misleading thing this
+        // command can say while a provider is down: it is what an operator sees
+        // once even the finished records have aged out, and it reads as an idle
+        // daemon rather than a factory that cannot start anything (issue #201).
+        // Say why the list is empty.
+        return match providers_footer(health) {
+            Some(footer) => format!("no agents running\n\n{footer}"),
+            None => "no agents running".to_string(),
+        };
     }
     let headers = ["RUN", "STATUS", "STAGE", "ITER", "TOOLS", "AGE"];
     let rows: Vec<[String; 6]> = runs

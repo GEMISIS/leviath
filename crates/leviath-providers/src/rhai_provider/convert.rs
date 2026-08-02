@@ -199,7 +199,20 @@ pub fn map_rhai_err(err: Box<EvalAltResult>) -> ProviderError {
             return match kind.as_deref() {
                 Some("rate_limited") => ProviderError::RateLimitExceeded,
                 Some("transport") | Some("server") => ProviderError::RequestFailed(message),
-                Some("api") => ProviderError::ApiError(message),
+                // A script's `api` error is the same shape a built-in provider
+                // gets back from an HTTP call, so it classifies the same way:
+                // an OpenAI-compatible endpoint answering 402 through a Rhai
+                // provider must fail over and trip the breaker exactly as the
+                // native OpenRouter provider does (issue #201). The script has
+                // no status code to hand us separately, so it is read back out
+                // of the message.
+                Some("api") => match crate::provider::UnavailableReason::from_message(&message) {
+                    Some(reason) => ProviderError::Unavailable {
+                        reason,
+                        detail: message,
+                    },
+                    None => ProviderError::ApiError(message),
+                },
                 Some("invalid_response") => ProviderError::InvalidResponse(message),
                 _ if transient => ProviderError::RequestFailed(message),
                 _ => ProviderError::Other(message),

@@ -142,6 +142,38 @@ fn map_err_kinds() {
     assert!(matches!(map_rhai_err(mk("weird")), ProviderError::Other(_)));
 }
 
+/// A script talking to an OpenAI-compatible endpoint must fail over and trip
+/// the breaker exactly as a built-in provider does (issue #201). It throws one
+/// formatted string, so the classification has to come out of the message.
+#[test]
+fn a_scripts_payment_error_classifies_like_a_built_in_providers() {
+    let api = |message: &str| {
+        let mut m = Map::new();
+        m.insert("kind".into(), "api".into());
+        m.insert("message".into(), message.into());
+        map_rhai_err(Box::new(EvalAltResult::ErrorRuntime(
+            Dynamic::from_map(m),
+            Position::NONE,
+        )))
+    };
+
+    let err = api("HTTP 402 Payment Required: {\"error\":{\"message\":\"no credits\"}}");
+    assert_eq!(
+        err.unavailable_reason(),
+        Some(crate::provider::UnavailableReason::CreditsExhausted)
+    );
+    assert!(!err.is_transient());
+
+    assert_eq!(
+        api("HTTP 401: bad key").unavailable_reason(),
+        Some(crate::provider::UnavailableReason::AuthFailed)
+    );
+    // An ordinary API error is still an ordinary API error.
+    let plain = api("HTTP 400: unknown field `foo`");
+    assert_eq!(plain.unavailable_reason(), None);
+    assert!(matches!(plain, ProviderError::ApiError(_)));
+}
+
 #[test]
 fn map_err_transient_flag_without_kind() {
     let mut m = Map::new();
