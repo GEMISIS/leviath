@@ -7888,12 +7888,17 @@ fn last_progress_at_tracks_progress_and_not_the_heartbeat() {
     let e = spawn_persistable(&mut world);
 
     run_dispatch_persistence(&mut world);
-    let _ = rx.try_recv().expect("first snapshot");
+    let job = snapshot_job(rx.try_recv().expect("first snapshot"));
     let first = world
         .get::<PersistWatermark>(e)
         .unwrap()
         .last_progress_at()
         .expect("the first snapshot is progress");
+    assert_eq!(
+        job.meta.last_progress_at,
+        Some(first),
+        "the stamp reaches meta.json, where a harness can read it"
+    );
 
     // Backdate both stamps past the heartbeat window, then dispatch with the
     // agent unchanged: a beat is written, but nothing moved.
@@ -7903,27 +7908,41 @@ fn last_progress_at_tracks_progress_and_not_the_heartbeat() {
         .unwrap()
         .backdate(stale);
     run_dispatch_persistence(&mut world);
-    let _ = rx
-        .try_recv()
-        .expect("the heartbeat still writes a snapshot");
+    let beat = snapshot_job(
+        rx.try_recv()
+            .expect("the heartbeat still writes a snapshot"),
+    );
     assert_eq!(
         world.get::<PersistWatermark>(e).unwrap().last_progress_at(),
         Some(stale),
         "a heartbeat is not progress"
     );
+    // The two timestamps diverge, which is the whole point: `updated_at` says
+    // the daemon is alive, `last_progress_at` says the run is not moving.
+    assert_eq!(
+        beat.meta.last_progress_at,
+        Some(stale),
+        "a heartbeat-only write must not advance the progress stamp"
+    );
+    assert!(
+        beat.meta.updated_at > stale,
+        "the heartbeat does advance updated_at, which is why it cannot be trusted as progress"
+    );
 
     // A real iteration does move it.
     world.get_mut::<AgentState>(e).unwrap().iteration += 1;
     run_dispatch_persistence(&mut world);
-    let _ = rx.try_recv().expect("snapshot after real progress");
-    assert!(
-        world
-            .get::<PersistWatermark>(e)
-            .unwrap()
-            .last_progress_at()
-            .expect("still stamped")
-            > stale,
-        "a new iteration is progress"
+    let moved = snapshot_job(rx.try_recv().expect("snapshot after real progress"));
+    let progressed = world
+        .get::<PersistWatermark>(e)
+        .unwrap()
+        .last_progress_at()
+        .expect("still stamped");
+    assert!(progressed > stale, "a new iteration is progress");
+    assert_eq!(
+        moved.meta.last_progress_at,
+        Some(moved.meta.updated_at),
+        "a write that carried progress stamps both with the same instant"
     );
 }
 

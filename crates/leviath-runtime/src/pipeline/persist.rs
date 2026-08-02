@@ -254,6 +254,11 @@ pub fn dispatch_persistence(
         let depth = parent_ref.map(|p| p.depth).unwrap_or(0);
         let max_child_depth = children.map(|c| c.max_child_depth).unwrap_or(0);
         let flags = outcome_flags.cloned().unwrap_or_default();
+        // Read the progress stamp *after* the update above, so a write that
+        // carried progress reports `now` and a heartbeat-only write reports
+        // whenever the run last moved. That difference is the whole signal: it is
+        // what lets an observer reading `meta.json` tell a slow run from a wedged
+        // one, which `updated_at` (which is `now` either way) cannot.
         let meta = build_run_meta(
             md,
             state,
@@ -261,6 +266,7 @@ pub fn dispatch_persistence(
             &flags,
             cursor.index,
             now,
+            watermark.last_progress_at(),
             depth,
             max_child_depth,
         );

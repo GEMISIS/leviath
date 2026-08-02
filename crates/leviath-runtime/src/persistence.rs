@@ -245,6 +245,13 @@ pub fn build_context_snapshot(window: &ContextWindow, stage_name: &str) -> Conte
 /// Build the run metadata (`meta.json`) from an agent's live components, stamping
 /// `updated_at` with `now_secs`. `stage_index` is the agent's current stage
 /// position within its blueprint.
+///
+/// `last_progress_at` is the caller's separate record of when the run last
+/// actually moved, which is not the same as `now_secs`: this is called on the
+/// heartbeat too, and a heartbeat write must advance `updated_at` while leaving
+/// the progress stamp where it was. Taken as a plain `Option` rather than the
+/// watermark it comes from so this stays a data mapper with no dependency on the
+/// persistence pipeline.
 #[allow(clippy::too_many_arguments)]
 pub fn build_run_meta(
     md: &RunMetadata,
@@ -253,6 +260,7 @@ pub fn build_run_meta(
     flags: &RunOutcomeFlags,
     stage_index: usize,
     now_secs: i64,
+    last_progress_at: Option<i64>,
     depth: usize,
     max_child_depth: usize,
 ) -> RunMeta {
@@ -265,7 +273,7 @@ pub fn build_run_meta(
         agent_path: md.agent_path.clone(),
         task: md.task.clone(),
         model: md.model.clone(),
-        pid: 0, // no per-run worker process in the shared world
+        pid: 0, // no per-run worker process in the shared world; see RunMeta::pid
         status,
         current_stage: state.current_stage.clone(),
         stage_index,
@@ -279,6 +287,7 @@ pub fn build_run_meta(
         workdir: md.workdir.clone(),
         started_at: md.started_at,
         updated_at: now_secs,
+        last_progress_at,
         error: match &state.status {
             AgentStatus::Error { message } => Some(message.clone()),
             _ => None,
@@ -555,6 +564,7 @@ mod tests {
             &RunOutcomeFlags::default(),
             1,
             2000,
+            Some(1900),
             1,
             4,
         );
@@ -567,6 +577,9 @@ mod tests {
         assert_eq!(meta.prompt_tokens, 100);
         assert_eq!(meta.tool_calls, 7);
         assert_eq!(meta.updated_at, 2000);
+        // The two stamps are independent: this snapshot was written at 2000, and
+        // the run last moved at 1900. A heartbeat write is exactly that shape.
+        assert_eq!(meta.last_progress_at, Some(1900));
         assert_eq!(meta.parent_run_id.as_deref(), Some("parent"));
         assert_eq!(meta.callback_url.as_deref(), Some("http://cb"));
         assert_eq!(meta.callback_secret.as_deref(), Some("sekret"));
@@ -595,6 +608,7 @@ mod tests {
             &RunOutcomeFlags::default(),
             1,
             2000,
+            None,
             1,
             4,
         );
@@ -613,6 +627,7 @@ mod tests {
             &flags,
             0,
             1000,
+            None,
             0,
             0,
         );
@@ -634,6 +649,7 @@ mod tests {
                 &flags,
                 0,
                 1000,
+                None,
                 0,
                 0,
             );
@@ -650,6 +666,7 @@ mod tests {
             &wrote,
             0,
             1000,
+            None,
             0,
             0,
         );
@@ -667,6 +684,7 @@ mod tests {
             &incapable,
             0,
             1000,
+            None,
             0,
             0,
         );
@@ -685,6 +703,7 @@ mod tests {
             &RunOutcomeFlags::default(),
             2,
             3000,
+            None,
             0,
             0,
         );

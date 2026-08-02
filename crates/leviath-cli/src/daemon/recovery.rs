@@ -587,6 +587,7 @@ mod tests {
             workdir: std::env::temp_dir().to_string_lossy().to_string(),
             started_at: 111,
             updated_at: 222,
+            last_progress_at: None,
             error: None,
             title: Some("Resume Me".to_string()),
             metadata: std::collections::HashMap::new(),

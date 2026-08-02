@@ -847,6 +847,37 @@ mod tests {
         assert!(meta.metadata.is_empty());
         assert!(meta.callback_url.is_none());
         assert!(meta.parent_run_id.is_none());
+        // A run written before the progress stamp existed has no answer, which is
+        // why the field is an Option: `Some(0)` would read as "last moved in 1970"
+        // and invite a reconciler to declare it abandoned.
+        assert!(meta.last_progress_at.is_none());
+    }
+
+    /// `pid` is written by every daemon there has ever been, and is always 0 in
+    /// the shared world. A file that omits it entirely must still load, so the
+    /// field can be dropped in a future major without stranding old runs.
+    #[test]
+    fn run_meta_without_a_pid_still_loads() {
+        let json = serde_json::json!({
+            "run_id": "r1",
+            "agent_name": "a",
+            "agent_path": "/p",
+            "task": "t",
+            "model": null,
+            "status": "running",
+            "current_stage": "init",
+            "stage_index": 0,
+            "num_stages": 1,
+            "iteration": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "workdir": "/w",
+            "started_at": 1000,
+            "updated_at": 1000,
+            "error": null
+        });
+        let meta: RunMeta = serde_json::from_value(json).unwrap();
+        assert_eq!(meta.pid, 0);
     }
 
     // ─── StageRecord ────────────────────────────────────────────────────────
