@@ -674,6 +674,13 @@ mod tests {
 
     // ─── resolve_task_with: editor path (stdin is a TTY) - Windows twins ──
 
+    /// Write a `.bat` stand-in editor. CRLF and `@echo off` because `cmd`
+    /// wants both.
+    #[cfg(windows)]
+    fn write_bat(path: &std::path::Path, body: &str) {
+        std::fs::write(path, format!("@echo off\r\n{}\r\n", body)).unwrap();
+    }
+
     #[cfg(windows)]
     #[test]
     fn resolve_task_with_editor_path_happy_case() {

@@ -233,14 +233,28 @@ mod tests {
     /// `lev create` prints as the next step.
     #[test]
     fn resolve_spawn_args_sends_an_absolute_blueprint_path_for_a_relative_input() {
-        let dir = tempfile::tempdir().unwrap();
+        // Rooted in the current directory rather than the system temp dir, so
+        // the relative path is trivially expressible. A temp dir is not
+        // guaranteed to share a drive with the cwd, and on the Windows runner
+        // it does not: the checkout is on D: and TEMP is on C:, between which
+        // no relative path exists at all.
+        let dir = tempfile::Builder::new()
+            .prefix("lev-relpath-")
+            .tempdir_in(".")
+            .unwrap();
         let agent_dir = dir.path().join("my-agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
         write_manifest(&agent_dir);
 
-        // A path relative to this process's cwd, the shape a user types.
-        let cwd = std::env::current_dir().unwrap();
-        let relative = pathdiff_from(&agent_dir, &cwd);
+        // `tempdir_in` hands back an absolute path even for a relative base, so
+        // the relative form is rebuilt from its name.
+        let relative = std::path::Path::new(".")
+            .join(dir.path().file_name().unwrap())
+            .join("my-agent");
+        // A static message on purpose: a `relative.display()` in here is only
+        // evaluated when the assertion fails, which leaves it as a permanently
+        // uncovered region under the 100% gate.
+        assert!(relative.is_relative(), "expected a relative path");
 
         let args = resolve_spawn_args(
             relative.to_str().unwrap(),
@@ -261,27 +275,6 @@ mod tests {
             args.blueprint_path
         );
         assert!(args.blueprint_path.ends_with("agent.leviath"));
-    }
-
-    /// `target` expressed relative to `base`, which is always `../..`-style here
-    /// because the tempdir and the cwd share only the filesystem root on some
-    /// runners. Written out rather than pulled in as a dependency for one test.
-    fn pathdiff_from(target: &std::path::Path, base: &std::path::Path) -> std::path::PathBuf {
-        let target = std::fs::canonicalize(target).unwrap();
-        let base = std::fs::canonicalize(base).unwrap();
-        let shared = target
-            .components()
-            .zip(base.components())
-            .take_while(|(a, b)| a == b)
-            .count();
-        let mut out = std::path::PathBuf::new();
-        for _ in 0..(base.components().count() - shared) {
-            out.push("..");
-        }
-        for c in target.components().skip(shared) {
-            out.push(c);
-        }
-        out
     }
 
     #[test]
