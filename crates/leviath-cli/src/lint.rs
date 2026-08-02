@@ -430,6 +430,10 @@ fn lint_blocking_tools(stage: &leviath_core::Stage) -> Vec<LintFinding> {
         .available_tools
         .iter()
         .filter(|t| BLOCKING_INTERACTION_TOOLS.contains(&canonical_tool_name(t)))
+        // A tool kept in `required_tools` is the same statement of intent
+        // `allow_blocking_tools` makes, made one tool at a time - and it is the
+        // one that also survives an unattended run, so it is worth more.
+        .filter(|t| !stage.required_tools.contains(t))
         .map(|tool| {
             LintFinding::new(
                 LintSeverity::Warning,
@@ -441,7 +445,8 @@ fn lint_blocking_tools(stage: &leviath_core::Stage) -> Vec<LintFinding> {
             )
             .in_stage(&stage.name)
             .with_fix(
-                "drop the tool, switch the stage to an interactive mode, or set \
+                "drop the tool, switch the stage to an interactive mode, list it in \
+                 required_tools so it survives an unattended run too, or set \
                  allow_blocking_tools = true to say you meant it",
             )
         })
