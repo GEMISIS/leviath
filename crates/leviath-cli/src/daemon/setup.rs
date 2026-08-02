@@ -143,6 +143,10 @@ pub fn build_host(
     now_secs: fn() -> i64,
 ) -> WorldHost {
     let hub = InteractionHub::new();
+    // How long a prompt may go unanswered before the hub resolves it itself, so
+    // an operator who walked away costs the run a delay rather than its slot
+    // for as long as the daemon lives (issue #204).
+    hub.set_timeout_secs(config.limits.interaction_timeout_secs);
     let tool_service = Arc::new(CliToolService::new());
     // The configured global fallback bounds concurrent inference for any model
     // without its own per-model pool entry (defaults to a small cap so a fresh

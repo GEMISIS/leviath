@@ -456,6 +456,10 @@ fn default_provider_circuit_cooldown_secs() -> u64 {
     leviath_runtime::pipeline::DEFAULT_CIRCUIT_COOLDOWN_SECS
 }
 
+fn default_interaction_timeout_secs() -> u64 {
+    leviath_runtime::interaction_hub::DEFAULT_INTERACTION_TIMEOUT_SECS
+}
+
 /// Runtime resource limits with safe defaults baked in.
 ///
 /// Both fields default to a bounded value so a fresh install can't accidentally
@@ -587,6 +591,25 @@ pub struct LimitsConfig {
     /// Read once at daemon start, so a change needs a daemon restart.
     #[serde(default = "default_provider_circuit_cooldown_secs")]
     pub provider_circuit_cooldown_secs: u64,
+    /// How long (seconds) a prompt may go unanswered before the daemon resolves
+    /// it itself and lets the run carry on.
+    ///
+    /// Covers every prompt that waits on a person: an agent's `ask_user_*` /
+    /// `present_for_review` call, a tool-approval prompt, a taint gate, and a
+    /// blueprint interaction point. Before this existed, a run whose operator
+    /// had walked away sat in `WaitingInput` holding its slot until the daemon
+    /// restarted - hours, in the report that prompted it (issue #204).
+    ///
+    /// Expiry resolves the prompt exactly as cancelling it would: a tool
+    /// approval and a taint gate **deny**, an `ask_user_*` call is told nobody
+    /// answered, and an interaction point proceeds with no user text. Nothing is
+    /// approved on the strength of a timeout.
+    ///
+    /// Defaults to `3600` (one hour); `0` waits indefinitely.
+    ///
+    /// Read once at daemon start, so a change needs a daemon restart.
+    #[serde(default = "default_interaction_timeout_secs")]
+    pub interaction_timeout_secs: u64,
 }
 
 impl Default for LimitsConfig {
@@ -603,6 +626,7 @@ impl Default for LimitsConfig {
             wedge_timeout_secs: default_wedge_timeout_secs(),
             provider_failures_before_open: default_provider_failures_before_open(),
             provider_circuit_cooldown_secs: default_provider_circuit_cooldown_secs(),
+            interaction_timeout_secs: default_interaction_timeout_secs(),
         }
     }
 }
@@ -1723,8 +1747,35 @@ mod tests {
         // A finished run stays listed for five minutes, so a scheduler polling
         // about once a minute still learns how it ended.
         assert_eq!(limits.finished_retention_secs, 300);
+        // An unanswered prompt releases after an hour rather than holding its
+        // run's slot until the daemon restarts (issue #204).
+        assert_eq!(limits.interaction_timeout_secs, 3600);
         // And the top-level Config carries the same defaults.
         assert_eq!(Config::default().limits.max_concurrent_inferences, Some(8));
+    }
+
+    /// A config written before the field existed still gets the hour, and an
+    /// explicit `0` still means "wait for a person however long it takes".
+    #[test]
+    fn interaction_timeout_defaults_and_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let load = |body: String| {
+            let path = dir.path().join(format!("{}.toml", body.len()));
+            std::fs::write(&path, body).unwrap();
+            with_tracing(|| Config::load_from_path(&path)).unwrap()
+        };
+
+        let old = load(format!(
+            "{}\n[limits]\nmax_concurrent_tools = 4\n",
+            config_toml_without_limits()
+        ));
+        assert_eq!(old.limits.interaction_timeout_secs, 3600);
+
+        let disabled = load(format!(
+            "{}\n[limits]\ninteraction_timeout_secs = 0\n",
+            config_toml_without_limits()
+        ));
+        assert_eq!(disabled.limits.interaction_timeout_secs, 0);
     }
 
     #[test]
@@ -2969,6 +3020,7 @@ enabled = false
                 wedge_timeout_secs: 420,
                 provider_failures_before_open: 5,
                 provider_circuit_cooldown_secs: 120,
+                interaction_timeout_secs: 120,
             },
             batch_tool_hint: true,
             shell_hint: false,

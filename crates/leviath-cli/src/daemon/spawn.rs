@@ -262,6 +262,7 @@ fn build_tool_state(
     entry_stage: &str,
     entry_index: usize,
     stage_perms_by_index: Vec<HashMap<String, String>>,
+    stage_required_by_index: Vec<HashSet<String>>,
     agent_perms: HashMap<String, String>,
     agent_name: &str,
     launch_overrides: HashMap<String, crate::config::ToolPolicy>,
@@ -277,6 +278,10 @@ fn build_tool_state(
         .get(entry_index)
         .cloned()
         .unwrap_or_default();
+    let entry_required = stage_required_by_index
+        .get(entry_index)
+        .cloned()
+        .unwrap_or_default();
     Arc::new(AgentToolState {
         builtins,
         mcp,
@@ -285,6 +290,8 @@ fn build_tool_state(
         session_allows: Arc::new(Mutex::new(HashSet::new())),
         stage_perms: Arc::new(StdMutex::new(entry_perms)),
         stage_perms_by_index: Arc::new(stage_perms_by_index),
+        stage_required: Arc::new(StdMutex::new(entry_required)),
+        stage_required_by_index: Arc::new(stage_required_by_index),
         agent_perms: Arc::new(agent_perms),
         // The ceiling a blueprint may tighten but not loosen: the user's global
         // `[tool_permissions]` plus any `[agent_tool_permissions.<name>]` grant
@@ -898,6 +905,25 @@ fn build_agent_inner(
         .iter()
         .map(|s| s.available_tools.clone())
         .collect();
+    // Alongside it, each stage's `required_tools` - the human tools it keeps even
+    // when nobody is watching - so a refresh re-applies the same unattended cut.
+    let stage_required: Vec<Vec<String>> = blueprint
+        .stages
+        .iter()
+        .map(|s| s.required_tools.clone())
+        .collect();
+    // The same list as a lookup set, canonicalised, for the tool state: an
+    // interaction for a kept tool has to reach a real person rather than the
+    // auto-answering backend, and dispatch tests one name at a time.
+    let stage_required_by_index: Vec<HashSet<String>> = stage_required
+        .iter()
+        .map(|names| {
+            names
+                .iter()
+                .map(|n| leviath_tools::canonical_tool_name(n).to_string())
+                .collect()
+        })
+        .collect();
     let model_label = stages
         .first()
         .map(|s| format!("{}/{}", s.provider_name, s.model));
@@ -1107,6 +1133,8 @@ fn build_agent_inner(
             reserved_names: reserved_tool_names(&builtin_names, mcp_tool_defs),
             static_defs: static_tool_defs,
             stage_available,
+            stage_required,
+            unattended: args.yolo,
             dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     });
@@ -1120,6 +1148,7 @@ fn build_agent_inner(
         &entry_stage,
         entry_index,
         stage_perms_by_index,
+        stage_required_by_index,
         agent_perms,
         &agent_name,
         launch_overrides,

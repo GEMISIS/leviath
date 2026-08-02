@@ -917,6 +917,11 @@ fn limits_fields(config: &Config) -> Vec<Field> {
             help: "Fail a run nothing in the engine can reach any more. 0 is off; 300 is a sensible value.",
             value: FieldValue::Number(Some(config.limits.wedge_timeout_secs)),
         },
+        Field {
+            label: "Interaction timeout (seconds)",
+            help: "Resolve a prompt nobody answered after this long, so the run carries on. 0 waits for ever.",
+            value: FieldValue::Number(Some(config.limits.interaction_timeout_secs)),
+        },
     ]
 }
 
@@ -962,6 +967,12 @@ fn apply_limits_fields(config: &mut Config, fields: &[Field]) {
             (9, FieldValue::Number(n)) => {
                 config.limits.wedge_timeout_secs =
                     n.unwrap_or(Config::default().limits.wedge_timeout_secs)
+            }
+            // Same rule again: unset keeps the default hour, 0 is an explicit
+            // "wait for a person however long it takes".
+            (9, FieldValue::Number(n)) => {
+                config.limits.interaction_timeout_secs =
+                    n.unwrap_or(Config::default().limits.interaction_timeout_secs)
             }
             _ => {}
         }
