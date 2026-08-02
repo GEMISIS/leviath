@@ -458,6 +458,43 @@ fn branching_stages_explain_how_to_choose() {
     }
 }
 
+/// A human tool kept through an unattended run has to be one the stage can
+/// actually call, and it only makes sense where a person is genuinely expected.
+///
+/// `Blueprint::validate` already rejects the first half; this pins the intent
+/// for the shipped catalog: nothing opts out of the unattended cut except a
+/// stage that also declares an interaction point, so no bundled agent can start
+/// parking `--yolo` runs on a prompt by accident (issue #204).
+#[test]
+fn builtin_required_tools_are_offered_and_belong_to_an_interactive_stage() {
+    use leviath_core::blueprint::StageMode;
+
+    for (name, path) in &discover_agent_manifests() {
+        let content = std::fs::read_to_string(path).unwrap();
+        let blueprint = leviath_core::manifest::parse_manifest(&content).unwrap();
+
+        for stage in &blueprint.stages {
+            for tool in &stage.required_tools {
+                assert!(
+                    stage.available_tools.contains(tool),
+                    "agent '{name}' stage '{}' keeps '{tool}' through an unattended run \
+                     but never offers it",
+                    stage.name
+                );
+            }
+            assert!(
+                stage.required_tools.is_empty()
+                    || matches!(stage.mode, StageMode::InteractivePoints { .. }),
+                "agent '{name}' stage '{}' holds {:?} for a person, but declares no \
+                 interaction point - an unattended run would park there with nobody \
+                 watching",
+                stage.name,
+                stage.required_tools
+            );
+        }
+    }
+}
+
 #[test]
 fn at_least_nine_builtin_agents_exist() {
     let manifests = discover_agent_manifests();

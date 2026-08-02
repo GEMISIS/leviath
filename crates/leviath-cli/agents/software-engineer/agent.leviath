@@ -1,6 +1,6 @@
 [agent]
 name = "software-engineer"
-version = "0.0.1"
+version = "0.0.2"
 description = "Plan-then-implement agent - mirrors the Claude Code discover→plan→approve→code→review workflow"
 entry_stage = "discover"
 
@@ -103,6 +103,12 @@ mode = "interactive_points"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Explore the codebase and produce a step-by-step implementation plan"
 available_tools = ["read_file", "list_dir", "ask_user_text", "ask_user_choice", "edit_document"]
+# Planning is the one place this agent genuinely needs its user, so these three
+# survive an unattended run instead of being dropped with the rest of the
+# blocking tools. The plan_approval point below opts out of auto-approval on the
+# same grounds; the revise and add-detail branches are worth nothing without the
+# tools that carry them out.
+required_tools = ["ask_user_text", "ask_user_choice", "edit_document"]
 max_iterations = 20
 max_revisits = 6
 # "Abort" is handled deterministically by the engine (see abort_options on the
@@ -205,6 +211,12 @@ transform = "direct"
 name     = "plan_approval"
 prompt   = "Review the plan above. What would you like to do?"
 required = true
+# Hold this checkpoint for a person even under `--yolo`. Approving a plan
+# unread is the one thing this agent must not do on its own: everything after
+# it writes code. An operator who wants the run to sail through sets
+# `[limits] interaction_timeout_secs`, which releases the gate on its own
+# terms rather than pretending someone approved it.
+unattended = "ask"
 style    = "multiple_choice"
 options  = ["Approve - proceed to implementation", "Revise - I'll describe changes", "Add detail - expand a section", "Abort - cancel this run"]
 
