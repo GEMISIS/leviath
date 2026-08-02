@@ -970,7 +970,7 @@ fn apply_limits_fields(config: &mut Config, fields: &[Field]) {
             }
             // Same rule again: unset keeps the default hour, 0 is an explicit
             // "wait for a person however long it takes".
-            (9, FieldValue::Number(n)) => {
+            (10, FieldValue::Number(n)) => {
                 config.limits.interaction_timeout_secs =
                     n.unwrap_or(Config::default().limits.interaction_timeout_secs)
             }
