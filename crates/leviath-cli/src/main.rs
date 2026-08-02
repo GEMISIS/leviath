@@ -186,18 +186,14 @@ impl RiskyExecutors for RealExecutors {
 /// unit-tested; the cwd/home resolution, process spawn, and socket connect are
 /// the un-unit-testable slivers kept here.
 async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
-    let path = args.path.ok_or_else(|| {
-        anyhow::anyhow!("a blueprint name or path is required (e.g. `lev run coder -t \"task\"`)")
-    })?;
-    let task = args
-        .task
-        .ok_or_else(|| anyhow::anyhow!("a task is required (e.g. `-t \"do the thing\"`)"))?;
-
-    ensure_daemon_running().await?;
+    // No PATH means the current directory, which is what `find_manifest`'s
+    // directory branch already handles and what the docs have always promised.
+    let path = args.path.as_deref().unwrap_or(".");
     let workdir = commands::run::effective_workdir(args.workdir, std::env::current_dir()?)?;
     let spawn_args = leviath_cli::daemon::client::resolve_spawn_args(
-        &path,
-        &task,
+        path,
+        args.task.as_deref(),
+        &|| std::io::IsTerminal::is_terminal(&io::stdin()),
         args.model,
         &workdir,
         args.yolo,
@@ -206,6 +202,12 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
         args.regions,
         args.no_seed_commands,
     )?;
+    // Deliberately after the resolve, not before. No `--task` opens an editor,
+    // and a user can sit in vim for twenty minutes: checking daemon liveness
+    // and build staleness first would mean spawning against a socket last
+    // verified a third of an hour ago. It also stops a run that was never going
+    // to happen (a bad path, a typo'd region) from auto-starting a daemon.
+    ensure_daemon_running().await?;
     leviath_cli::daemon::client::send_spawn(&control_client()?, spawn_args).await
 }
 

@@ -23,7 +23,7 @@ use leviath_runtime::pipeline::{AgentBlueprint, force_transition};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::daemon::client::resolve_spawn_args;
+use crate::daemon::client::{never_interactive, resolve_spawn_args};
 use crate::daemon::spawn::build_agent;
 use crate::daemon::tool_service::CliToolService;
 
@@ -105,7 +105,8 @@ impl FanOutSpawner for DaemonFanOutSpawner {
         let task = format_worker_task(item_id, item_context);
         let mut args = resolve_spawn_args(
             &resolve_path,
-            &task,
+            Some(&task),
+            &never_interactive,
             None,
             &workdir,
             unattended,
