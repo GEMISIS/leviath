@@ -35,7 +35,21 @@ pub struct AgentSource {
 /// manifest that fails here would have failed there, and `parse manifest: <toml
 /// error>` before the daemon is contacted beats a spawn rejection after.
 pub fn load_agent_source(path: &str) -> anyhow::Result<AgentSource> {
-    let manifest = find_manifest(path)?;
+    let found = find_manifest(path)?;
+    // Absolute, because this path is about to be handed to the daemon, which
+    // has its own working directory. `lev run .` and `lev run ./demo` resolve
+    // fine here and then arrive there as `./agent.leviath`, which the daemon
+    // reads relative to wherever it happens to have been started - so the spawn
+    // failed with "read manifest './agent.leviath': No such file or directory".
+    // `lev create` prints `lev run .` as its next step, so this was the first
+    // thing a new user hit.
+    //
+    // Best-effort rather than fallible: `find_manifest` only returns paths it
+    // has already confirmed resolve, so a failure here needs the file to vanish
+    // between the two calls. Falling back to what it found leaves the old
+    // behavior, which is a legible daemon-side error, rather than inventing an
+    // error arm no test can reach.
+    let manifest = std::fs::canonicalize(&found).unwrap_or(found);
     let run_stem = manifest
         .parent()
         .and_then(|p| p.file_name())
@@ -206,8 +220,68 @@ mod tests {
         assert!(args.run_id.contains("my-agent"));
         assert_eq!(args.task, "do it");
         assert_eq!(args.model.as_deref(), Some("m"));
-        assert_eq!(args.blueprint_path, manifest.to_string_lossy());
+        assert_eq!(
+            args.blueprint_path,
+            std::fs::canonicalize(&manifest).unwrap().to_string_lossy()
+        );
         assert_eq!(args.workdir, "/work");
+    }
+
+    /// The daemon has its own working directory, so a relative `PATH` has to be
+    /// resolved before the request leaves. `lev run .` used to reach the daemon
+    /// as `./agent.leviath` and fail there, which is the very command
+    /// `lev create` prints as the next step.
+    #[test]
+    fn resolve_spawn_args_sends_an_absolute_blueprint_path_for_a_relative_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("my-agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        write_manifest(&agent_dir);
+
+        // A path relative to this process's cwd, the shape a user types.
+        let cwd = std::env::current_dir().unwrap();
+        let relative = pathdiff_from(&agent_dir, &cwd);
+
+        let args = resolve_spawn_args(
+            relative.to_str().unwrap(),
+            Some("do it"),
+            &never_interactive,
+            None,
+            "/work",
+            false,
+            Vec::new(),
+            None,
+            HashMap::new(),
+            false,
+        )
+        .unwrap();
+        assert!(
+            std::path::Path::new(&args.blueprint_path).is_absolute(),
+            "got: {}",
+            args.blueprint_path
+        );
+        assert!(args.blueprint_path.ends_with("agent.leviath"));
+    }
+
+    /// `target` expressed relative to `base`, which is always `../..`-style here
+    /// because the tempdir and the cwd share only the filesystem root on some
+    /// runners. Written out rather than pulled in as a dependency for one test.
+    fn pathdiff_from(target: &std::path::Path, base: &std::path::Path) -> std::path::PathBuf {
+        let target = std::fs::canonicalize(target).unwrap();
+        let base = std::fs::canonicalize(base).unwrap();
+        let shared = target
+            .components()
+            .zip(base.components())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let mut out = std::path::PathBuf::new();
+        for _ in 0..(base.components().count() - shared) {
+            out.push("..");
+        }
+        for c in target.components().skip(shared) {
+            out.push(c);
+        }
+        out
     }
 
     #[test]

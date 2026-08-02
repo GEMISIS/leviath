@@ -18,6 +18,11 @@ requests since the previous version.
   error, now worded to say why the editor cannot be used. The editor is
   `$VISUAL`, then `$EDITOR`, then the first installed of `vim`, `nano`, `vi`
   (`edit`, `notepad`, `vim` on Windows).
+- `lev run .` and `lev run ./some-agent` work. The blueprint path was sent to
+  the daemon exactly as typed, and the daemon resolved it against its own
+  working directory, so a relative path failed with "read manifest
+  './agent.leviath': No such file or directory". It is now resolved before the
+  request leaves. This is the command `lev create` prints as your next step.
 - `lev run` with no PATH uses the current directory, which is what the CLI
   reference has always described. It used to be an error.
 - `--task` reads a file when the value names one. A value that looks like a
