@@ -179,6 +179,20 @@ jobs:
           prerelease: true
           files: release/*
 
+      # See alpha.yml: the channel badges are published from the job that knows
+      # what it shipped, because shields.io cannot distinguish two prereleases
+      # on rolling tags.
+      - name: Update the beta channel badge
+        if: steps.alpha.outputs.skip != 'true'
+        uses: schneegans/dynamic-badges-action@28b0fa8bdeb46170ac397105ece0c1fe58f68910 # v1.9.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ vars.COVERAGE_GIST_ID }}
+          filename: leviath-channel-beta.json
+          label: beta
+          message: ${{ steps.alpha.outputs.version }}
+          color: blue
+
   docs:
     name: Publish docs (beta)
     needs: promote

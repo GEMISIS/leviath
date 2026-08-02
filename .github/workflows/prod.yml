@@ -265,6 +265,19 @@ jobs:
           make_latest: false
           files: release/*
 
+      # See alpha.yml: the channel badges are published from the job that knows
+      # what it shipped, because shields.io cannot distinguish two prereleases
+      # on rolling tags.
+      - name: Update the stable channel badge
+        uses: schneegans/dynamic-badges-action@28b0fa8bdeb46170ac397105ece0c1fe58f68910 # v1.9.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ vars.COVERAGE_GIST_ID }}
+          filename: leviath-channel-stable.json
+          label: stable
+          message: ${{ needs.check-beta.outputs.version }}
+          color: brightgreen
+
 
 
   # crates.io tracks the stable channel: same commit as the binaries, so
