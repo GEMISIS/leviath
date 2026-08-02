@@ -85,6 +85,29 @@ impl UnavailableReason {
         .any(|s| b.contains(s))
         .then_some(UnavailableReason::CreditsExhausted)
     }
+
+    /// Classify a formatted error *message*, for the paths that never see the
+    /// status code on its own.
+    ///
+    /// A Rhai script provider throws `#{ kind: "api", message: "HTTP 402 ..." }`
+    /// and hands us the whole thing as one string, so the status has to be read
+    /// back out of it. A script talking to an OpenAI-compatible endpoint must
+    /// fail over and trip the breaker exactly as the built-in providers do
+    /// (issue #201).
+    pub fn from_message(message: &str) -> Option<Self> {
+        Self::classify(leading_http_status(message).unwrap_or(0), message)
+    }
+}
+
+/// The status code in an `HTTP <code>` prefix, if the message carries one.
+///
+/// Anchored on the `HTTP ` marker that every provider in this crate formats,
+/// rather than the first number anywhere in the text: an error body quoting a
+/// token count must not be mistaken for a status.
+fn leading_http_status(message: &str) -> Option<u16> {
+    let rest = message.strip_prefix("HTTP ")?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
 }
 
 /// Errors that can occur during provider operations.
@@ -822,6 +845,45 @@ mod tests {
                 "{body}"
             );
         }
+    }
+
+    #[test]
+    fn from_message_reads_the_status_back_out_of_the_text() {
+        // The Rhai path hands over one formatted string, so the status has to
+        // come from the message or a script provider never fails over.
+        assert_eq!(
+            UnavailableReason::from_message("HTTP 402 Payment Required: {}"),
+            Some(UnavailableReason::CreditsExhausted)
+        );
+        assert_eq!(
+            UnavailableReason::from_message("HTTP 401: bad key"),
+            Some(UnavailableReason::AuthFailed)
+        );
+        assert_eq!(
+            UnavailableReason::from_message("HTTP 403: not allowed"),
+            Some(UnavailableReason::Forbidden)
+        );
+        // No prefix, but the body still says what happened.
+        assert_eq!(
+            UnavailableReason::from_message("your credit balance is too low"),
+            Some(UnavailableReason::CreditsExhausted)
+        );
+        assert_eq!(UnavailableReason::from_message("HTTP 400: bad field"), None);
+        assert_eq!(UnavailableReason::from_message("something broke"), None);
+    }
+
+    #[test]
+    fn a_number_in_the_body_is_not_mistaken_for_a_status() {
+        // "402" appearing in a token count must not read as Payment Required;
+        // only the `HTTP ` prefix every provider formats counts.
+        assert_eq!(leading_http_status("you requested 402 tokens"), None);
+        assert_eq!(leading_http_status("HTTP 402 Payment Required"), Some(402));
+        assert_eq!(leading_http_status("HTTP notanumber"), None);
+        assert_eq!(leading_http_status(""), None);
+        assert_eq!(
+            UnavailableReason::from_message("you requested 402 tokens"),
+            None
+        );
     }
 
     #[test]

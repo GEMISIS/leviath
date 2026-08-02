@@ -179,6 +179,24 @@ fn format_runs_lists_finished_runs_after_the_live_ones() {
     assert!(!out.contains("needs an answer"), "{out}");
 }
 
+/// An empty listing while a provider is down is the reporter's end state:
+/// every run dead and reaped, and `lev ps` saying only "no agents running",
+/// which reads as an idle daemon rather than one that cannot start anything.
+#[test]
+fn an_empty_listing_still_says_why_nothing_is_running() {
+    let health = DaemonHealth {
+        providers_down: vec![down(
+            "openrouter",
+            leviath_providers::UnavailableReason::CreditsExhausted,
+        )],
+        ..healthy_daemon()
+    };
+    let out = format_runs(&[], &[], &health, 0);
+    assert!(out.starts_with("no agents running"), "{out}");
+    assert!(out.contains("1 provider is out of service:"), "{out}");
+    assert!(out.contains("openrouter (credits-exhausted"), "{out}");
+}
+
 /// The whole point of the change: two runs both `Waiting`, telling the operator
 /// which one needs them and which one is fine.
 #[test]
@@ -398,7 +416,7 @@ fn a_provider_out_of_service_is_named_under_the_table() {
         )],
         ..healthy_daemon()
     };
-    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &health, 0);
+    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &[], &health, 0);
     assert!(out.contains("1 provider is out of service:"), "{out}");
     assert!(
         out.contains("openrouter (credits-exhausted, 3 failures)"),
@@ -422,7 +440,7 @@ fn several_providers_out_of_service_are_listed_and_pluralized() {
         ],
         ..healthy_daemon()
     };
-    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &health, 0);
+    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &[], &health, 0);
     assert!(out.contains("2 providers are out of service:"), "{out}");
     assert!(out.contains("anthropic (auth-failed"), "{out}");
     assert!(out.contains("openrouter (credits-exhausted"), "{out}");
@@ -430,7 +448,12 @@ fn several_providers_out_of_service_are_listed_and_pluralized() {
 
 #[test]
 fn healthy_providers_add_no_block() {
-    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &healthy_daemon(), 0);
+    let out = format_runs(
+        &[entry("run-a", AgentStatus::Active)],
+        &[],
+        &healthy_daemon(),
+        0,
+    );
     assert!(!out.contains("out of service"), "{out}");
 }
 
@@ -446,7 +469,7 @@ fn the_provider_block_and_the_lane_footer_coexist() {
         )],
         ..healthy_daemon()
     };
-    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &health, 0);
+    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &[], &health, 0);
     assert!(out.contains("out of service"), "{out}");
     assert!(out.contains("no progress for 2 cycles"), "{out}");
 }
