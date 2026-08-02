@@ -174,6 +174,18 @@ pub fn build_host(
         .insert_resource(leviath_runtime::pipeline::WedgeTimeout(
             config.limits.wedge_timeout_secs,
         ));
+    // Take a provider out of service after it has failed this many times in a
+    // row for a reason only a person can fix, so the next run does not have to
+    // rediscover it (issue #201).
+    world
+        .world_mut()
+        .insert_resource(leviath_runtime::pipeline::CircuitPolicy {
+            failures_before_open: config.limits.provider_failures_before_open,
+            cooldown_secs: config.limits.provider_circuit_cooldown_secs,
+        });
+    world
+        .world_mut()
+        .init_resource::<leviath_runtime::pipeline::ProviderCircuits>();
     // Share the hub with the tick loop so a blocked agent's open prompt is
     // reflected into its status (Active ↔ Waiting) for the dashboard to surface.
     world.insert_interaction_hub(hub.clone());

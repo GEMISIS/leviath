@@ -391,6 +391,76 @@ async fn dispatch_skips_when_provider_missing() {
 }
 
 #[tokio::test]
+async fn dispatch_parks_an_agent_whose_provider_circuit_is_open() {
+    // Reaching dispatch on a tripped provider means rotation found nowhere
+    // else to go, so sending the request would just burn another failure.
+    let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    let policy = CircuitPolicy {
+        failures_before_open: 1,
+        cooldown_secs: 300,
+    };
+    let mut circuits = ProviderCircuits::default();
+    circuits.record_failure(
+        "cfg",
+        leviath_providers::UnavailableReason::CreditsExhausted,
+        chrono::Utc::now().timestamp(),
+        &policy,
+    );
+    world.insert_resource(circuits);
+    world.insert_resource(policy);
+    let e = world
+        .spawn((
+            agent_state(),
+            window(),
+            stage("m", vec![], None),
+            ReadyToInfer,
+        ))
+        .id();
+
+    run(&mut world);
+
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    assert!(world.get::<AwaitingInference>(e).is_none());
+    assert_eq!(
+        world.get::<DispatchStall>(e).map(|s| s.reason),
+        Some(StallReason::ProviderCircuitOpen),
+        "the park reason is what `lev ps` and the watchdog read"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_proceeds_once_the_cooldown_lets_a_probe_through() {
+    // The probe is what closes the circuit again, so it must reach the wire.
+    let (mut world, mut rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    let policy = CircuitPolicy {
+        failures_before_open: 1,
+        cooldown_secs: 60,
+    };
+    let mut circuits = ProviderCircuits::default();
+    circuits.record_failure(
+        "cfg",
+        leviath_providers::UnavailableReason::CreditsExhausted,
+        chrono::Utc::now().timestamp() - 61,
+        &policy,
+    );
+    world.insert_resource(circuits);
+    world.insert_resource(policy);
+    let e = world
+        .spawn((
+            agent_state(),
+            window(),
+            stage("m", vec![], None),
+            ReadyToInfer,
+        ))
+        .id();
+
+    run(&mut world);
+
+    assert!(world.get::<AwaitingInference>(e).is_some());
+    assert!(rx.recv().await.expect("outcome").result.is_ok());
+}
+
+#[tokio::test]
 async fn dispatch_inference_skips_non_active_agent() {
     let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
     let mut st = agent_state();
@@ -726,6 +796,111 @@ fn an_ordinary_error_does_not_burn_a_fallback() {
     assert_eq!(si.provider_name, "dead", "the provider is untouched");
     assert_eq!(si.fallbacks.len(), 1, "the candidate is still available");
     assert!(world.get::<ResolveTransition>(e).is_some());
+}
+
+#[test]
+fn provider_fatal_failures_trip_the_breaker_and_a_success_clears_it() {
+    // Failing over rescues *this* run. The breaker is what stops the next ten
+    // runs each rediscovering the same dead account (issue #201).
+    let (mut world, tx) = world_with_results();
+    let policy = CircuitPolicy {
+        failures_before_open: 2,
+        cooldown_secs: 300,
+    };
+    world.insert_resource(ProviderCircuits::default());
+    world.insert_resource(policy);
+    let now = chrono::Utc::now().timestamp();
+
+    for _ in 0..2 {
+        let e = world
+            .spawn((agent_state(), AwaitingInference, stage_with_fallback()))
+            .id();
+        tx.send(InferenceOutcome {
+            latency: std::time::Duration::ZERO,
+            entity: e,
+            result: Err(credits_exhausted()),
+        })
+        .unwrap();
+        run_collect(&mut world);
+    }
+    assert!(
+        world
+            .resource::<ProviderCircuits>()
+            .is_open("dead", now, &policy),
+        "two strikes at a threshold of two opens the circuit"
+    );
+
+    // A later success on that provider puts it straight back into service.
+    let e = world
+        .spawn((agent_state(), AwaitingInference, stage_with_fallback()))
+        .id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Ok(resp("hi")),
+    })
+    .unwrap();
+    run_collect(&mut world);
+    assert!(
+        !world
+            .resource::<ProviderCircuits>()
+            .is_open("dead", now, &policy)
+    );
+}
+
+#[test]
+fn an_ordinary_error_does_not_count_against_the_provider() {
+    // A malformed request is our fault, not the provider's. Counting it would
+    // take a perfectly healthy provider out of service.
+    let (mut world, tx) = world_with_results();
+    let policy = CircuitPolicy {
+        failures_before_open: 1,
+        cooldown_secs: 300,
+    };
+    world.insert_resource(ProviderCircuits::default());
+    world.insert_resource(policy);
+    let e = world
+        .spawn((agent_state(), AwaitingInference, stage_with_fallback()))
+        .id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Err(leviath_providers::ProviderError::ApiError(
+            "HTTP 400: bad request".to_string(),
+        )),
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    assert!(!world.resource::<ProviderCircuits>().is_open(
+        "dead",
+        chrono::Utc::now().timestamp(),
+        &policy
+    ));
+}
+
+#[test]
+fn collect_works_without_the_breaker_installed() {
+    // The resources are optional, so an embedder that never inserts them keeps
+    // the plain failover behavior.
+    let (mut world, tx) = world_with_results();
+    let e = world
+        .spawn((agent_state(), AwaitingInference, stage_with_fallback()))
+        .id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Err(credits_exhausted()),
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    assert_eq!(
+        world.get::<StageInference>(e).unwrap().provider_name,
+        "alive"
+    );
 }
 
 #[test]

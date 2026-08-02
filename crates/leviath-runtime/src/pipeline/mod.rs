@@ -56,6 +56,8 @@ mod stall;
 pub use stall::*;
 mod wedge;
 pub use wedge::*;
+mod circuit;
+pub use circuit::*;
 
 // ─── Phase marker components (an agent is in exactly one) ────────────────────
 //

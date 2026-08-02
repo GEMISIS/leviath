@@ -54,9 +54,13 @@ pub fn collect_inference(
         ),
         With<AwaitingInference>,
     >,
+    mut circuits: Option<ResMut<ProviderCircuits>>,
+    policy: Option<Res<CircuitPolicy>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
+    let policy = policy.map(|p| *p).unwrap_or_default();
+    let now = chrono::Utc::now().timestamp();
     while let Ok(outcome) = results.0.try_recv() {
         let Ok((mut state, totals, cursor, mut ledger, buffer, mut inference, activity)) =
             agents.get_mut(outcome.entity)
@@ -96,6 +100,37 @@ pub fn collect_inference(
                     cached_tokens: usage.map_or(0, |u| u.cached_tokens),
                     success: outcome.result.is_ok(),
                 });
+        }
+        // Breaker bookkeeping, before the arms below consume the outcome. Any
+        // answer at all proves the provider is serving; a provider-fatal one
+        // counts against it and may take it out of service for everyone.
+        if let Some(circuits) = circuits.as_deref_mut() {
+            match outcome
+                .result
+                .as_ref()
+                .err()
+                .and_then(|e| e.unavailable_reason())
+            {
+                Some(reason) => {
+                    if circuits.record_failure(&called_provider, reason, now, &policy) {
+                        // Loud and once, on the transition only. This is the
+                        // alert issue #201 asked for: without it, ten dead
+                        // runs in a row look like ten unrelated failures.
+                        tracing::error!(
+                            provider = %called_provider,
+                            reason = reason.label(),
+                            failures = policy.failures_before_open,
+                            cooldown_secs = policy.cooldown_secs,
+                            "provider circuit opened; no run will be dispatched to it \
+                             until it recovers"
+                        );
+                    }
+                }
+                None if outcome.result.is_ok() => circuits.record_success(&called_provider),
+                // An ordinary error says nothing about the provider either
+                // way, so it neither counts against it nor clears its record.
+                None => {}
+            }
         }
         match outcome.result {
             Ok(response) => {

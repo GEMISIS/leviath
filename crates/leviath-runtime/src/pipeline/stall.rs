@@ -18,6 +18,15 @@ pub enum StallReason {
     /// resolves itself: every permit is held by a job that the job timeout
     /// bounds, and releasing one wakes the driver.
     PoolFull,
+    /// Every provider this stage could use has an open circuit: they have each
+    /// failed enough consecutive times to be taken out of service, and the
+    /// stage has no candidate left to move to (issue #201).
+    ///
+    /// Unlike `PoolFull` this will not clear on its own within a tick or two -
+    /// somebody has to top up an account or fix a key - so the watchdog fails
+    /// it like `ProviderMissing`. Unlike `ProviderMissing` it *can* recover
+    /// without a restart, which is what the grace period is for.
+    ProviderCircuitOpen,
 }
 
 impl StallReason {
@@ -26,6 +35,37 @@ impl StallReason {
         match self {
             StallReason::ProviderMissing => "provider-missing",
             StallReason::PoolFull => "pool-full",
+            StallReason::ProviderCircuitOpen => "provider-circuit-open",
+        }
+    }
+
+    /// Whether the runtime can resolve this on its own given time.
+    ///
+    /// `PoolFull` clears itself the moment a permit frees, so failing a run for
+    /// it would be failing backpressure. The other two need a person, and a run
+    /// that waits on one for ever reads as healthy while going nowhere.
+    fn needs_a_person(self) -> bool {
+        match self {
+            StallReason::ProviderMissing | StallReason::ProviderCircuitOpen => true,
+            StallReason::PoolFull => false,
+        }
+    }
+
+    /// The operator-facing explanation used when the watchdog gives up.
+    fn give_up_message(self, provider: &str) -> String {
+        match self {
+            StallReason::ProviderCircuitOpen => format!(
+                "every provider this stage can use is out of service (last was \
+                 '{provider}'), so this run has nowhere to go; check the account's \
+                 credits and API key, or add another provider to \
+                 `[providers] fallback_order`"
+            ),
+            // `PoolFull` never reaches the watchdog (see `needs_a_person`), so
+            // the missing-provider wording covers the remaining case.
+            _ => format!(
+                "provider '{provider}' is not configured, so this run has no way to \
+                 go on; add it to config.toml (or run `lev setup`) and restart the daemon"
+            ),
         }
     }
 }
@@ -150,7 +190,7 @@ pub fn fail_stalled_dispatch(
     let now = chrono::Utc::now().timestamp();
     for (entity, stall, si, mut state, buffer) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
-        if state.status != AgentStatus::Active || stall.reason != StallReason::ProviderMissing {
+        if state.status != AgentStatus::Active || !stall.reason.needs_a_person() {
             continue;
         }
         if now.saturating_sub(stall.last_seen) > STALL_FRESHNESS_SECS {
@@ -165,13 +205,10 @@ pub fn fail_stalled_dispatch(
         if now.saturating_sub(stall.since) < limit as i64 {
             continue; // still inside the grace period
         }
-        let message = format!(
-            "provider '{}' is not configured, so this run has no way to go on; \
-             add it to config.toml (or run `lev setup`) and restart the daemon",
-            si.provider_name
-        );
+        let message = stall.reason.give_up_message(&si.provider_name);
         tracing::error!(
             provider = %si.provider_name,
+            reason = stall.reason.label(),
             stalled_secs = now.saturating_sub(stall.since),
             "failing a run whose provider will never resolve"
         );
@@ -435,6 +472,63 @@ mod tests {
     fn stall_reasons_have_labels() {
         assert_eq!(StallReason::ProviderMissing.label(), "provider-missing");
         assert_eq!(StallReason::PoolFull.label(), "pool-full");
+        assert_eq!(
+            StallReason::ProviderCircuitOpen.label(),
+            "provider-circuit-open"
+        );
+    }
+
+    #[test]
+    fn only_the_reasons_a_person_must_fix_are_failed() {
+        // Failing `PoolFull` would be failing backpressure.
+        assert!(StallReason::ProviderMissing.needs_a_person());
+        assert!(StallReason::ProviderCircuitOpen.needs_a_person());
+        assert!(!StallReason::PoolFull.needs_a_person());
+    }
+
+    #[test]
+    fn a_run_with_every_provider_out_of_service_is_failed_not_left_running() {
+        // The end state of issue #201: nothing left to fail over to. Waiting
+        // for ever reads as a healthy run that is going nowhere.
+        let mut world = World::new();
+        world.insert_resource(StallTimeout(60));
+        let e = spawn_stalled(&mut world, StallReason::ProviderCircuitOpen, 61);
+
+        run(&mut world);
+
+        let status = &world.get::<AgentState>(e).unwrap().status;
+        assert!(
+            matches!(status, AgentStatus::Error { message }
+                if message.contains("out of service") && message.contains("fallback_order")),
+            "got: {status:?}"
+        );
+        assert!(world.get::<ReadyToInfer>(e).is_none());
+    }
+
+    #[test]
+    fn an_open_circuit_inside_the_grace_period_gets_its_chance_to_recover() {
+        // Unlike a missing provider, this one can come back on its own once
+        // the cooldown lets a probe through, so the grace period matters.
+        let mut world = World::new();
+        world.insert_resource(StallTimeout(60));
+        let e = spawn_stalled(&mut world, StallReason::ProviderCircuitOpen, 59);
+
+        run(&mut world);
+
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Active
+        );
+    }
+
+    #[test]
+    fn the_give_up_message_names_the_provider() {
+        let missing = StallReason::ProviderMissing.give_up_message("ghost");
+        assert!(missing.contains("ghost") && missing.contains("not configured"));
+        let open = StallReason::ProviderCircuitOpen.give_up_message("openrouter");
+        assert!(open.contains("openrouter") && open.contains("out of service"));
+        // `PoolFull` never reaches the watchdog, but the arm must still answer.
+        assert!(StallReason::PoolFull.give_up_message("x").contains("x"));
     }
 
     #[test]
