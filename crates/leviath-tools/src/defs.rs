@@ -19,6 +19,28 @@ pub fn is_subagent_tool(name: &str) -> bool {
     SUBAGENT_TOOLS.contains(&name)
 }
 
+/// The `shell` tool's description, naming the shell this host actually resolved
+/// instead of listing every platform's and leaving the model to guess which one
+/// it got. Pure over the shell so both wordings are testable on any platform.
+pub(crate) fn shell_tool_description(shell: &str) -> String {
+    format!(
+        "Execute a shell command in the working directory. On this machine commands run \
+         through `{shell}`, so write them in its syntax. Use this for build commands, \
+         running tests, installing dependencies, or other shell operations. Has a \
+         60-second timeout."
+    )
+}
+
+/// [`shell_tool_description`] for the resolved shell, computed once.
+///
+/// `detect_shell` reads `$SHELL` and probes the filesystem on Unix, and
+/// `tool_defs` runs on every request, so the answer is cached. The shell cannot
+/// change under a running process in any way this would need to notice.
+fn resolved_shell_description() -> &'static str {
+    static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DESCRIPTION.get_or_init(|| shell_tool_description(BuiltinTools::detect_shell().0))
+}
+
 impl BuiltinTools {
     /// All tool definitions to advertise to the LLM, minus any whose required
     /// platform capabilities aren't provided by the current platform.
@@ -109,7 +131,7 @@ impl BuiltinTools {
             },
             Tool {
                 name: "shell".to_string(),
-                description: "Execute a shell command in the working directory. Uses the system shell (bash/zsh on Unix, cmd on Windows). Use this for build commands, running tests, installing dependencies, or other shell operations. Has a 60-second timeout.".to_string(),
+                description: resolved_shell_description().to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
