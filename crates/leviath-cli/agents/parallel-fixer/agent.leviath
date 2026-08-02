@@ -10,7 +10,9 @@ list_dir = "allow"
 read_files = "allow"
 write_file = "ask"
 edit_file = "ask"
-bash = "ask"
+# `shell`, not `bash`: every stage here grants the canonical name, and policy is
+# matched on the name the model calls, so a `bash` key would never be consulted.
+shell = "ask"
 
 # ─── Stage 1: Discover ───────────────────────────────────────────────────────
 # Derive the test commands instead of making the caller spell them out in --task.

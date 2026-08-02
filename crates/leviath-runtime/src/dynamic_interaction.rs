@@ -154,6 +154,23 @@ impl InteractionBackend for UnattendedInteraction {
     }
 }
 
+/// The tools that suspend the agent until a person answers.
+///
+/// Every name here is handled by [`dispatch_dynamic_interaction`] below, which
+/// hands the call to the interaction backend and awaits a human response - so a
+/// stage that offers one of these with nobody attached parks there for as long
+/// as the run lives. `all_dynamic_interaction_tool_names_are_handled` iterates
+/// this list, so the two cannot drift.
+///
+/// Blueprint linting reads it to flag an autonomous stage that grants one.
+pub const BLOCKING_INTERACTION_TOOLS: &[&str] = &[
+    "present_for_review",
+    "ask_user_text",
+    "ask_user_choice",
+    "ask_user_confirm",
+    "edit_document",
+];
+
 /// Dispatch a single dynamic-interaction tool call.
 ///
 /// Returns `Some(result_string)` if `tool_name` is one of
@@ -420,14 +437,7 @@ mod tests {
 
     #[tokio::test]
     async fn all_dynamic_interaction_tool_names_are_handled() {
-        let names = [
-            "present_for_review",
-            "ask_user_text",
-            "ask_user_choice",
-            "ask_user_confirm",
-            "edit_document",
-        ];
-        for name in names {
+        for name in BLOCKING_INTERACTION_TOOLS.iter().copied() {
             let backend = MockBackend::with_responses(vec![InteractionResponse::text("", "ok")]);
             let result = dispatch_dynamic_interaction(
                 &backend,

@@ -66,6 +66,26 @@ struct BuiltinEntry {
     caps: ModelCapabilities,
 }
 
+/// Providers whose entry in [`builtin_table`] is complete enough to say "this
+/// model does not exist" about.
+///
+/// Anthropic, OpenAI and Google publish a short list and this table tracks it.
+/// The rest do not: Ollama serves whatever has been pulled locally, OpenRouter
+/// proxies hundreds of models of which the table lists a sample, and a script
+/// provider defines its own catalog at run time. Naming a model those hosts
+/// have and this build has not heard of is normal, so they are never checked.
+const CLOSED_CATALOG_PROVIDERS: &[&str] = &["anthropic", "openai", "google"];
+
+/// The `(provider, model)` rows [`crate::lint`] checks a blueprint's model
+/// references against, limited to the providers with a closed catalog.
+pub fn closed_catalog_models() -> Vec<(String, String)> {
+    builtin_table()
+        .into_iter()
+        .filter(|e| CLOSED_CATALOG_PROVIDERS.contains(&e.provider))
+        .map(|e| (e.provider.to_string(), e.model_id.to_string()))
+        .collect()
+}
+
 /// Hard-coded capability table for well-known models.
 ///
 /// This is used when the provider API is not reachable or `--remote` is not

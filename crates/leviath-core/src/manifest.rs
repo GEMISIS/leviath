@@ -389,6 +389,16 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                 stage.allow_as_worker = aw;
             }
 
+            // Parse allow_blocking_tools flag: says this autonomous stage means
+            // to offer `ask_user_*` / `present_for_review`, so `lev validate`
+            // stops warning about it.
+            if let Some(ab) = stage_value
+                .get("allow_blocking_tools")
+                .and_then(|v| v.as_bool())
+            {
+                stage.allow_blocking_tools = ab;
+            }
+
             // Parse per-stage security override: [stages.<name>.security]
             if let Some(sec_table) = stage_value.get("security").and_then(|v| v.as_table()) {
                 stage.security = Some(parse_security_config(sec_table));
@@ -3058,6 +3068,27 @@ allow_complete = true
         let bp = parse_manifest(toml).unwrap();
         let stage = bp.find_stage("review").unwrap();
         assert!(stage.allow_complete);
+    }
+
+    /// `allow_blocking_tools` is read off the stage table and defaults to false
+    /// for a stage that says nothing about it.
+    #[test]
+    fn parse_manifest_allow_blocking_tools() {
+        let toml = r#"
+[agent]
+name = "blocking-test"
+
+[stages.implement]
+mode = "autonomous"
+available_tools = ["ask_user_confirm"]
+allow_blocking_tools = true
+
+[stages.review]
+mode = "autonomous"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        assert!(bp.find_stage("implement").unwrap().allow_blocking_tools);
+        assert!(!bp.find_stage("review").unwrap().allow_blocking_tools);
     }
 
     #[test]

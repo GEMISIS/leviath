@@ -6,6 +6,7 @@ pub mod config;
 pub mod credentials;
 pub mod daemon;
 pub mod dispatch;
+pub mod lint;
 pub mod logging;
 pub mod render;
 pub mod runstate;

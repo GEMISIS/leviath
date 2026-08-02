@@ -241,6 +241,10 @@ description = "Write code according to the plan, verifying continuously"
 available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash", "context_write", "ask_user_confirm"]
 max_iterations = 50
 max_revisits = 3
+# ask_user_confirm suspends the run until a person answers, which is deliberate
+# here: this stage checks in before doing something it cannot undo. Declared so
+# `lev validate` reports it as a choice rather than an oversight.
+allow_blocking_tools = true
 system_prompt = """
 You are implementing the plan from the `plan` region. Write working,
 production-quality code that matches the project's `conventions`.

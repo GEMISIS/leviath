@@ -516,17 +516,24 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_validate_variant_is_routed() {
-        let dir = tempfile::tempdir().unwrap();
-        let args = commands::validate::ValidateArgs {
-            path: dir
-                .path()
-                .join("does-not-exist")
-                .to_str()
-                .unwrap()
-                .to_string(),
-        };
-        let result = dispatch(Commands::Validate(args), &MockRisky).await;
-        assert!(result.is_err());
+        // `validate` loads the real config to answer "can this install reach
+        // the providers this blueprint names", so it needs the same isolation
+        // every other config-touching test takes.
+        crate::config::with_isolated_config_path_async("dispatch-validate", |_| async {
+            let dir = tempfile::tempdir().unwrap();
+            let args = commands::validate::ValidateArgs {
+                path: dir
+                    .path()
+                    .join("does-not-exist")
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+                deny_warnings: false,
+            };
+            let result = dispatch(Commands::Validate(args), &MockRisky).await;
+            assert!(result.is_err());
+        })
+        .await;
     }
 
     #[tokio::test]
