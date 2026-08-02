@@ -96,7 +96,10 @@ process-wide state once at startup rather than per run:
   `[security] allow_local_network` (the outbound-network policy)
 - `[limits] stall_timeout_secs`, `wedge_timeout_secs` and `dead_cycles_before_relief`, along with
   the other limits the world is built with (`max_concurrent_inferences`, `max_concurrent_tools`,
-  `exact_token_counting`)
+  `exact_token_counting`, `provider_failures_before_open`, `provider_circuit_cooldown_secs`)
+
+`[providers] fallback_order` is per-run policy, so it reloads with everything else in the first
+group. Adding a fallback provider takes effect on the next `lev run`.
 
 ## Control surface
 

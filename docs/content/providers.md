@@ -35,6 +35,65 @@ flowchart LR
 
 This is why a blueprint written against Anthropic still runs for someone who only has OpenAI keys.
 
+The rest of the list is kept, not discarded. If the provider in use stops being usable partway
+through a run, the stage moves to the next entry and carries on rather than failing:
+
+```toml
+[[stages.analyze.model.models]]
+provider = "openrouter"
+model    = "deepseek/deepseek-v4-flash"
+
+[[stages.analyze.model.models]]
+provider = "anthropic"
+model    = "claude-sonnet-5"
+```
+
+"Stops being usable" means the account is out of credits, or the key was rejected or is not allowed
+to use that model. An ordinary bad request is not that, and never spends a fallback.
+
+## A host-wide fallback chain
+
+A stage that names a single model has nowhere to go on its own. Give the whole host somewhere to
+fall back to:
+
+```toml
+[providers]
+fallback_order = ["anthropic/claude-sonnet-5", "openai/gpt-5.6-mini"]
+```
+
+Entries are `provider/model` pairs, best first, and are tried after the stage's own list and your
+default model. A failover target needs a model to send, so a bare provider name is not enough. An
+entry naming a provider you have not configured is skipped, and a malformed one is ignored with a
+warning rather than stopping the daemon.
+
+This is read per run, so editing it takes effect on the next `lev run` with no restart.
+
+## When a provider keeps failing
+
+Failing over saves the run in front of you. It does nothing for the next one, which would start on
+the same dead provider and fail the same way. So Leviath counts consecutive failures per provider,
+and after a few takes it out of service for every run:
+
+```toml
+[limits]
+provider_failures_before_open  = 3    # consecutive failures before it is pulled
+provider_circuit_cooldown_secs = 300  # how long before it is tried again
+```
+
+Three rather than one because a single "payment required" can be one request asking for more output
+tokens than the balance covers, which a smaller request would survive. Three in a row is the
+account.
+
+While a provider is out, runs move to their next candidate. A run with none left is failed with an
+error saying so, rather than left sitting there looking healthy. Once the cooldown passes, the next
+request goes through as a probe: if it works the provider is back immediately, and if it fails the
+wait restarts. Topping up an account needs no restart.
+
+`lev ps` lists anything currently out of service under the table, with why and how long until it is
+retried. `lev ps --json` carries the same under `health.providers_down`, and the
+`leviath.provider.circuit.open` metric reports it per provider. Set `provider_failures_before_open`
+to `0` to switch the whole thing off and keep only per-run failover.
+
 ## Where credentials live
 
 Keys live in `~/.leviath/config.toml` by default, or (to keep them out of a plaintext file) in

@@ -94,6 +94,42 @@ requests since the previous version.
 - The probe cleans up after itself: the throwaway agent is staged in a temp
   directory and its run is deleted on every path out, including the failing
   ones, so nothing is left in `lev ps` or on disk.
+- A provider that runs out of credits no longer takes every agent down with it.
+  A `402` arrived as an opaque API error carrying the raw JSON body, so the
+  runtime had nothing to branch on and each run died at iteration 0 with the
+  blob as its status. Out-of-credits, rejected-key, and not-permitted responses
+  are now told apart from an ordinary bad request, including the ones that
+  arrive under an innocent status (Anthropic reports a drained balance as a
+  `400` saying the credit balance is too low). The message says what to do about
+  it and keeps the provider's response for the logs.
+- A stage now fails over instead of failing. Its ordered `models` list was only
+  ever consulted once, at spawn, to pick the first provider with a key; a
+  provider that was configured but unusable was chosen and then never abandoned.
+  The rest of the list is kept and used. An ordinary error still cannot spend a
+  fallback, and a stage that exhausts its list ends as before, with a readable
+  message.
+- New `[providers] fallback_order`, a host-wide list of `provider/model` pairs
+  tried after a stage's own entries and the default model. A blueprint that
+  names a single model has nowhere to go without it. It is per-run policy, so it
+  reloads with no daemon restart.
+- Providers that keep failing are taken out of service. Failing over rescues one
+  run; the next one would start on the same dead provider and rediscover it.
+  After `[limits] provider_failures_before_open` consecutive failures (default
+  3, since a single payment error can be one oversized request) no run is
+  dispatched there. `provider_circuit_cooldown_secs` (default 300) later lets
+  one request through as a probe, so topping up an account brings the factory
+  back with no restart. Runs with no candidate left are failed with an
+  explanation rather than left running forever.
+- `lev ps` names any provider currently out of service, with the reason and the
+  retry countdown; `lev ps --json` carries it under `health.providers_down`. New
+  `leviath.provider.circuit.open` and `leviath.provider.circuit.opened.total`
+  metrics report the same per provider. Ten runs dying in a row used to produce
+  ten identical error rows and nothing that said the account was empty.
+- Anthropic and Ollama now classify HTTP failures through the same shared path
+  as every other provider. Both had hand-rolled copies; a side effect was that
+  `list_models` reported a rejected API key as a request failure, which reads as
+  a transient network fault worth retrying. Ollama also gains the `429` handling
+  it never had.
 - A run is no longer reported as having produced nothing when it never had a
   way to produce anything. `empty_output` in `meta.json` has meant "modified no
   files" since it was added for coding agents, so a router that delegates to
