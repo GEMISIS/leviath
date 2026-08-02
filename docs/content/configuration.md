@@ -71,6 +71,7 @@ exact_token_counting      = false
 script_shell_timeout_secs = 60
 stall_timeout_secs        = 60   # fail a run that can never dispatch
 dead_cycles_before_relief = 10   # widen the tool lane after this long going nowhere
+finished_retention_secs   = 300  # keep a finished run in `lev ps` this long
 ```
 
 | Key | Default | Notes |
@@ -82,6 +83,7 @@ dead_cycles_before_relief = 10   # widen the tool lane after this long going now
 | `script_shell_timeout_secs` | `60` | Cap on a Rhai script tool's `shell()` host call |
 | `stall_timeout_secs` | `60` | How long a run may sit ready to work but unable to dispatch before it is failed instead of left running. Only fires for something the runtime cannot resolve on its own, today a stage whose provider is not configured. Waiting for a busy model's pool is ordinary backpressure and is never failed. `0` waits forever |
 | `dead_cycles_before_relief` | `10` | How many consecutive 30-second cycles the daemon may spend with a full tool lane and no run moving before it widens the lane. See [the tool lane](/docs/engine#the-tool-lane). `0` never widens it; the count is still reported either way |
+| `finished_retention_secs` | `300` | How long a run stays in [`lev ps`](/docs/cli#runs-that-have-finished) after it ends, so a script polling on an interval can see how it ended instead of finding it gone. `0` drops it as soon as it finishes. Held in memory, so a daemon restart clears it whatever this is set to |
 
 <a id="security"></a>
 

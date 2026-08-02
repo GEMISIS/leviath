@@ -427,6 +427,10 @@ fn default_dead_cycles_before_relief() -> u32 {
     leviath_runtime::host::DEFAULT_DEAD_CYCLES_BEFORE_RELIEF
 }
 
+fn default_finished_retention_secs() -> u64 {
+    leviath_runtime::host::DEFAULT_FINISHED_RETENTION_SECS
+}
+
 /// Runtime resource limits with safe defaults baked in.
 ///
 /// Both fields default to a bounded value so a fresh install can't accidentally
@@ -496,6 +500,23 @@ pub struct LimitsConfig {
     /// Read once at daemon start, so a change needs a daemon restart.
     #[serde(default = "default_dead_cycles_before_relief")]
     pub dead_cycles_before_relief: u32,
+
+    /// How long (seconds) a run keeps its place in `lev ps` after the daemon
+    /// unloads it from memory.
+    ///
+    /// A terminal run used to leave the listing the moment it was unloaded,
+    /// which made a run that died on its first inference look exactly like a run
+    /// that had never been spawned. A scheduler polling the listing could only
+    /// tell the two apart with a stopwatch, and issue #205 is what that cost:
+    /// forty minutes of spawning work, timing out, and spawning it again.
+    ///
+    /// Defaults to `300`. `0` drops a run as soon as it finishes, which is the
+    /// old behaviour. The record lives in memory, so a restart clears it
+    /// whatever this is set to.
+    ///
+    /// Read once at daemon start, so a change needs a daemon restart.
+    #[serde(default = "default_finished_retention_secs")]
+    pub finished_retention_secs: u64,
 }
 
 impl Default for LimitsConfig {
@@ -508,6 +529,7 @@ impl Default for LimitsConfig {
             script_shell_timeout_secs: default_script_shell_timeout_secs(),
             stall_timeout_secs: default_stall_timeout_secs(),
             dead_cycles_before_relief: default_dead_cycles_before_relief(),
+            finished_retention_secs: default_finished_retention_secs(),
         }
     }
 }
@@ -1602,6 +1624,9 @@ mod tests {
         // Relief is on by default: ten 30-second cycles of a full lane going
         // nowhere before the daemon widens it.
         assert_eq!(limits.dead_cycles_before_relief, 10);
+        // A finished run stays listed for five minutes, so a scheduler polling
+        // about once a minute still learns how it ended.
+        assert_eq!(limits.finished_retention_secs, 300);
         // And the top-level Config carries the same defaults.
         assert_eq!(Config::default().limits.max_concurrent_inferences, Some(8));
     }
@@ -1640,6 +1665,7 @@ mod tests {
         assert_eq!(config.limits.max_concurrent_inferences, Some(8));
         assert_eq!(config.limits.default_max_iterations, Some(50));
         assert_eq!(config.limits.dead_cycles_before_relief, 10);
+        assert_eq!(config.limits.finished_retention_secs, 300);
     }
 
     #[test]
@@ -2813,6 +2839,7 @@ enabled = false
                 script_shell_timeout_secs: 45,
                 stall_timeout_secs: 90,
                 dead_cycles_before_relief: 6,
+                finished_retention_secs: 120,
             },
             batch_tool_hint: true,
             nudge: leviath_core::NudgeConfig {
@@ -2870,6 +2897,7 @@ enabled = false
         assert_eq!(deserialized.limits.max_concurrent_tools, 3);
         assert_eq!(deserialized.limits.script_shell_timeout_secs, 45);
         assert_eq!(deserialized.limits.dead_cycles_before_relief, 6);
+        assert_eq!(deserialized.limits.finished_retention_secs, 120);
         assert_eq!(
             deserialized.tool_script_permissions.http_get,
             ScriptPermission::Allow

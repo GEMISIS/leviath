@@ -58,6 +58,33 @@ Waiting for a busy model is *not* this. An agent queued behind other in-flight r
 model is working as intended and is never failed, however long the queue takes — raise
 `[limits] max_concurrent_inferences` if you want more of them running at once.
 
+## A run I spawned is not in `lev ps`
+
+There are three of these, and they need different answers.
+
+**It is still starting.** A spawn is not a start. Loading the blueprint, running any seed
+commands, and getting through the first inference all happen before an agent can call its first
+tool, and a cold model can take several seconds on its own. A run in this state is in `lev ps`
+already, at `iteration 0`. It is there; give it a moment.
+
+**It finished, and you looked within the retention window.** It is still listed, with the
+status it ended on. An `error` row at `ITER 0` and `TOOLS 0` is a run that never got a turn,
+and the message says why. `HTTP 402` there means the provider account is out of credit, not
+that Leviath lost the run.
+
+**It finished longer ago than the window.** Now it really is gone from the listing, and the
+answer is on disk: `~/.leviath/runs/<run-id>/meta.json`, or `GET /api/agents`, which reads the
+same records and does not expire them. Widen `[limits] finished_retention_secs` if you are
+polling less often than the default five minutes.
+
+If it is none of those, the spawn itself failed and no run was ever created. `lev run` reports
+that on the spot, and the daemon logs it at `error` level, so check there rather than in the
+listing.
+
+This matters most to anything that schedules work by spawning agents and watching for them.
+Poll the listing rather than timing how long a run "should" take: a wall-clock deadline that is
+shorter than a cold start will keep giving up on runs that were about to work.
+
 ## Every run looks busy but nothing finishes
 
 Run `lev ps` and read the line under the table. If there isn't one, the daemon thinks it is

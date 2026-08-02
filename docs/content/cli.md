@@ -190,8 +190,42 @@ Agents that never had a file-writing tool are never marked this way. A router th
 delegates, or a researcher whose answer is its report, has nothing to be measured against,
 so the run says nothing rather than reporting a failure it cannot have had.
 
-`lev ps --json` prints the same data unformatted, for scripts, including an `empty_output`
-field. The completion webhook carries the same key.
+### Runs that have finished
+
+A run keeps its place in the listing for five minutes after it ends, then drops out.
+
+Without that, a run left the listing the moment the daemon unloaded it, a second or two after
+it finished. A run that died on its first inference was then indistinguishable from a run that
+had never been spawned, and both read as `no agents running`. That is a hard thing to schedule
+against: the only way to tell a dead spawn from a slow one was to guess how long a healthy
+agent takes to get going, and anything that guessed too low would give up on runs that were
+still starting.
+
+So a run that failed is still there to say so:
+
+```
+RUN                             STATUS                              STAGE  ITER  TOOLS  AGE
+worker-1785616492-6f0d21ab4c11  error: HTTP 402 Payment Required    work   0     0      41s
+```
+
+`ITER 0` and `TOOLS 0` next to an error mean the run never got as far as its first turn. Set
+`[limits] finished_retention_secs` to widen or narrow the window, or `0` to drop a run as soon
+as it finishes. The record is held in memory, so restarting the daemon clears it early; the
+durable copy is the run's `meta.json`, which `GET /api/agents` reads.
+
+Two things this does not cover. A spawn that fails outright never becomes a run, so it is
+reported by `lev run` itself rather than here. And a run that finished longer ago than the
+window is gone from the listing for good.
+
+`lev ps --json` prints the same data unformatted, for scripts:
+
+```json
+{ "runs": [ ... ], "finished": [ ... ], "health": { ... } }
+```
+
+Finished runs are their own key rather than mixed into `runs`, so counting what is running
+stays a matter of reading one list. Both carry the `empty_output` field, and the completion
+webhook carries the same key.
 
 ## The daemon and API
 

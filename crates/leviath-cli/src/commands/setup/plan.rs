@@ -145,6 +145,12 @@ pub fn changes(before: &Config, plan: &SetupPlan) -> Vec<String> {
         Some(&before.limits.dead_cycles_before_relief),
         Some(&after.limits.dead_cycles_before_relief),
     );
+    push_if_changed(
+        &mut out,
+        "finished run retention (seconds)",
+        Some(&before.limits.finished_retention_secs),
+        Some(&after.limits.finished_retention_secs),
+    );
 
     let added = after
         .mcp_servers

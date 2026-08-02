@@ -252,6 +252,12 @@ pub enum ControlResponse {
     List {
         /// One entry per live run.
         runs: Vec<RunListEntry>,
+        /// Runs the daemon unloaded recently enough to still report, oldest
+        /// first. Separate from `runs` so a caller counting hosted agents, or
+        /// asking which runs the daemon still holds, is not answered with runs
+        /// that have finished. Defaulted for the same reason as `health`.
+        #[serde(default)]
+        finished: Vec<RunListEntry>,
         /// How the daemon itself is doing. Defaulted when absent so a listing
         /// from an older daemon still parses.
         #[serde(default)]
@@ -319,8 +325,12 @@ async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> Co
         ControlRequest::List => {
             let (reply, rx) = oneshot::channel();
             let _ = op_tx.send(ControlOp::List { reply });
-            let (runs, health) = rx.await.unwrap_or_default();
-            ControlResponse::List { runs, health }
+            let listing = rx.await.unwrap_or_default();
+            ControlResponse::List {
+                runs: listing.runs,
+                finished: listing.finished,
+                health: listing.health,
+            }
         }
         ControlRequest::Message {
             agent_id,
@@ -921,7 +931,13 @@ mod tests {
                         let _ = reply.send(true);
                     }
                     ControlOp::List { reply } => {
-                        let _ = reply.send((vec![listing_entry()], DaemonHealth::default()));
+                        let mut ended = listing_entry();
+                        ended.run_id = "run-ended".to_string();
+                        let _ = reply.send(crate::host::RunListing {
+                            runs: vec![listing_entry()],
+                            finished: vec![ended],
+                            ..Default::default()
+                        });
                     }
                     ControlOp::ListInteractions { reply } => {
                         let _ = reply.send(vec![]);
@@ -1068,10 +1084,29 @@ mod tests {
     #[tokio::test]
     async fn list_request_round_trips() {
         let resp = round_trip(&ControlRequest::List).await;
+        let mut ended = listing_entry();
+        ended.run_id = "run-ended".to_string();
         assert_eq!(
             resp,
             ControlResponse::List {
                 runs: vec![listing_entry()],
+                finished: vec![ended],
+                health: DaemonHealth::default(),
+            }
+        );
+    }
+
+    /// A client built against a newer daemon still has to read an older one's
+    /// reply, which carries neither the daemon's health nor the runs it has
+    /// finished. Both arrive as empty rather than failing the whole listing.
+    #[test]
+    fn a_listing_without_the_later_fields_still_parses() {
+        let older = r#"{"result":"list","runs":[]}"#;
+        assert_eq!(
+            serde_json::from_str::<ControlResponse>(older).expect("an older listing parses"),
+            ControlResponse::List {
+                runs: vec![],
+                finished: vec![],
                 health: DaemonHealth::default(),
             }
         );
@@ -1435,6 +1470,7 @@ mod tests {
             std::mem::discriminant(&ok),
             std::mem::discriminant(&ControlResponse::List {
                 runs: vec![],
+                finished: vec![],
                 health: DaemonHealth::default(),
             })
         );
@@ -1510,6 +1546,7 @@ mod tests {
             std::mem::discriminant(&list),
             std::mem::discriminant(&ControlResponse::List {
                 runs: vec![],
+                finished: vec![],
                 health: DaemonHealth::default(),
             })
         );
@@ -1723,6 +1760,7 @@ mod tests {
             dispatch(ControlRequest::List, &op_tx).await,
             ControlResponse::List {
                 runs: vec![],
+                finished: vec![],
                 health: DaemonHealth::default(),
             }
         );
