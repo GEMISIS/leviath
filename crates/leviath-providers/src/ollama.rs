@@ -1963,7 +1963,9 @@ mod tests {
         let url = spawn_mock_server_truncated_error_body(503, "Service Unavailable").await;
         let provider = OllamaProvider::with_base_url(url);
         let result = provider.infer_stream(mock_request()).await;
-        let err = result.err().expect("a truncated error body is still an error");
+        let err = result
+            .err()
+            .expect("a truncated error body is still an error");
         assert!(err.to_string().contains("503"), "{err}");
     }
 

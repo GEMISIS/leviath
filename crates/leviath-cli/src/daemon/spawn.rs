@@ -41,7 +41,33 @@ pub(crate) fn model_defaults(config: &Config) -> ModelDefaults {
     ModelDefaults {
         provider: config.default_provider.clone(),
         model: config.default_model.clone(),
+        fallback_order: parse_fallback_order(&config.providers.fallback_order),
     }
+}
+
+/// Parse `[providers] fallback_order` entries (`"provider/model"`) into the
+/// runtime's own form.
+///
+/// A malformed entry is dropped with a warning rather than failing the load: a
+/// typo in a *safety net* should not stop the daemon from starting, and the
+/// warning says which entry went nowhere. Splitting on the first `/` keeps
+/// model ids that contain one (`deepseek/deepseek-v4-flash`) intact.
+fn parse_fallback_order(entries: &[String]) -> Vec<leviath_core::blueprint::ModelEntry> {
+    entries
+        .iter()
+        .filter_map(|raw| match raw.split_once('/') {
+            Some((provider, model)) if !provider.is_empty() && !model.is_empty() => Some(
+                leviath_core::blueprint::ModelEntry::new(provider.to_string(), model.to_string()),
+            ),
+            _ => {
+                tracing::warn!(
+                    entry = %raw,
+                    "ignoring [providers] fallback_order entry: expected \"provider/model\""
+                );
+                None
+            }
+        })
+        .collect()
 }
 
 /// The directories scanned for an agent's Rhai script tools, in precedence order

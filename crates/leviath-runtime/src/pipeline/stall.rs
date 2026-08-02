@@ -208,6 +208,7 @@ mod tests {
             model: "m".to_string(),
             tools: vec![],
             tool_filter: None,
+            fallbacks: Vec::new(),
         }
     }
 

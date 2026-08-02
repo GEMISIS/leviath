@@ -8,7 +8,7 @@
 //! provider/model - arrives as a plain [`ModelDefaults`] value instead.
 
 use leviath_core::Blueprint;
-use leviath_core::blueprint::ModelConfig;
+use leviath_core::blueprint::{ModelConfig, ModelEntry};
 
 use super::ResolvedStage;
 use crate::providers::ProviderRegistry;
@@ -24,6 +24,14 @@ pub struct ModelDefaults {
     pub provider: String,
     /// The default model, if the user configured one.
     pub model: Option<String>,
+    /// The host-wide failover chain, from `[providers] fallback_order`.
+    ///
+    /// Appended after a stage's own entries and the user default, so a
+    /// blueprint that names exactly one model still has somewhere to go when
+    /// that provider stops answering. This is the case issue #201 reported:
+    /// every stage named a single OpenRouter model, so there was nothing to
+    /// fall back to when the account ran out of credits.
+    pub fallback_order: Vec<ModelEntry>,
 }
 
 /// Resolve a stage's [`ModelConfig`] to a concrete `(provider, model)` against
@@ -38,39 +46,112 @@ pub fn resolve_stage_model(
     defaults: &ModelDefaults,
     registry: &ProviderRegistry,
 ) -> (String, String) {
+    let first = resolve_stage_candidates(model_cfg, model_override, defaults, registry)
+        .into_iter()
+        .next()
+        .expect("resolve_stage_candidates always yields at least one entry");
+    (first.provider, first.model)
+}
+
+/// Every provider/model this stage may run on, best first.
+///
+/// [`resolve_stage_model`] is this list's head. The tail is what the runtime
+/// fails over to when a provider turns out to be unusable mid-run: the ordered
+/// list in `ModelConfig.models` was only ever consulted for *registration* at
+/// spawn time, so a provider that was configured but out of credits was picked
+/// and then never abandoned (issue #201).
+///
+/// Order: the stage's own registered entries, then the user default, then the
+/// host-wide `fallback_order`. Deduplicated, because the same pair reaching the
+/// list twice would spend a failover step going nowhere. Never empty: with
+/// nothing registered it yields the blueprint's own first entry, exactly as
+/// before, and `resolve_stages` rejects that unusable case with a clear error.
+pub fn resolve_stage_candidates(
+    model_cfg: &ModelConfig,
+    model_override: Option<&str>,
+    defaults: &ModelDefaults,
+    registry: &ProviderRegistry,
+) -> Vec<ModelEntry> {
     let (override_provider, override_model) = match model_override {
         Some(ov) if ov.contains('/') => {
-            let (p, m) = ov.split_once('/').unwrap();
+            let (p, m) = ov
+                .split_once('/')
+                .expect("the `contains('/')` guard splits");
             (Some(p.to_string()), Some(m.to_string()))
         }
         Some(ov) => (None, Some(ov.to_string())),
         None => (None, None),
     };
 
-    // Full provider/model override wins outright.
+    // A full provider/model override names exactly one pair and deliberately
+    // skips every fallback: the caller asked for that model, not a substitute.
     if let Some(provider) = override_provider {
-        return (provider, override_model.unwrap_or_default());
+        return vec![ModelEntry::new(
+            provider,
+            override_model.unwrap_or_default(),
+        )];
     }
 
-    // First listed model whose provider is registered.
+    let mut candidates: Vec<ModelEntry> = Vec::new();
+    let mut push = |provider: String, model: String| {
+        let entry = ModelEntry::new(provider, model);
+        if !candidates
+            .iter()
+            .any(|c| c.provider == entry.provider && c.model == entry.model)
+        {
+            candidates.push(entry);
+        }
+    };
+
+    // Every listed model whose provider is registered, in blueprint order. A
+    // bare `--model` override renames the model but keeps the provider order.
     for entry in &model_cfg.models {
         if registry.has(&entry.provider) {
             let model = override_model
                 .clone()
                 .unwrap_or_else(|| entry.model.clone());
-            return (entry.provider.clone(), model);
+            push(entry.provider.clone(), model);
         }
     }
 
-    // Fall back to the user's default model, or finally the first listed entry.
-    user_default_model(model_cfg, override_model.as_deref(), defaults, registry).unwrap_or_else(
-        || {
-            (
-                model_cfg.provider().to_string(),
-                model_cfg.model().to_string(),
-            )
-        },
-    )
+    if let Some((provider, model)) =
+        user_default_model(model_cfg, override_model.as_deref(), defaults, registry)
+    {
+        push(provider, model);
+    }
+
+    // The host-wide chain last: it is the safety net for a blueprint that names
+    // one model, not a preference over what the blueprint asked for.
+    for entry in &defaults.fallback_order {
+        if registry.has(&entry.provider) {
+            push(entry.provider.clone(), entry.model.clone());
+        }
+    }
+
+    if candidates.is_empty() {
+        // Nothing registered. Hand back the blueprint's own first entry so the
+        // caller reports "no usable provider" against a name the user wrote,
+        // rather than an empty list.
+        candidates.push(ModelEntry::new(
+            model_cfg.provider().to_string(),
+            model_cfg.model().to_string(),
+        ));
+    }
+
+    // The head keeps whatever `resolve_stage_model` has always produced, up to
+    // and including an unregistered provider that `resolve_stages` then
+    // rejects with a readable error. The *tail* is different: every entry in
+    // it is somewhere the runtime will actually dispatch to, so an
+    // unregistered one is not a fallback but a phantom that parks the run on
+    // `StallReason::ProviderMissing`. `user_default_model` hands one back
+    // whenever a bare `--model` override is in play, so filter here.
+    let tail: Vec<ModelEntry> = candidates
+        .split_off(1)
+        .into_iter()
+        .filter(|e| registry.has(&e.provider))
+        .collect();
+    candidates.extend(tail);
+    candidates
 }
 
 /// The user-default fallback for [`resolve_stage_model`]: `None` when the stage
@@ -170,12 +251,13 @@ pub fn resolve_stages(
         .stages
         .iter()
         .map(|stage| {
-            let (provider_name, model) =
-                resolve_stage_model(&stage.model, model_override, defaults, registry);
+            let mut candidates =
+                resolve_stage_candidates(&stage.model, model_override, defaults, registry);
+            let head = candidates.remove(0);
             // `registry.has` also consults the script layer, so a `.rhai`
             // provider sitting on disk counts as usable and is never
             // false-rejected here.
-            if !registry.has(&provider_name) {
+            if !registry.has(&head.provider) {
                 return Err(format!(
                     "stage '{}' has no usable provider (tried: {}). Configure one \
                      with `lev setup`, or add it to config.toml and restart the daemon.",
@@ -188,9 +270,10 @@ pub fn resolve_stages(
             // MCP tool whose server isn't installed) is simply omitted.
             let tools = filter_tools_by_available(all_tool_defs, &stage.available_tools);
             Ok(ResolvedStage {
-                provider_name,
-                model,
+                provider_name: head.provider,
+                model: head.model,
                 tools,
+                fallbacks: candidates,
             })
         })
         .collect()
@@ -314,6 +397,7 @@ mod tests {
         let defaults = ModelDefaults {
             provider: "anthropic".to_string(),
             model: Some("claude-default".to_string()),
+            fallback_order: Vec::new(),
         };
         let (p, m) = resolve_stage_model(
             &model_cfg(vec![("ghost", "g")]),
@@ -329,6 +413,7 @@ mod tests {
         let defaults = ModelDefaults {
             provider: "anthropic".to_string(),
             model: None,
+            fallback_order: Vec::new(),
         };
         let (p, m) = resolve_stage_model(
             &model_cfg(vec![("ghost", "g")]),
@@ -346,6 +431,7 @@ mod tests {
         let defaults = ModelDefaults {
             provider: "ghost-default".to_string(),
             model: Some("dm".to_string()),
+            fallback_order: Vec::new(),
         };
         let (p, m) = resolve_stage_model(
             &model_cfg(vec![("ghost", "g")]),
@@ -375,6 +461,7 @@ mod tests {
         let defaults = ModelDefaults {
             provider: "anthropic".to_string(),
             model: Some("would-be-default".to_string()),
+            fallback_order: Vec::new(),
         };
         let (p, m) = resolve_stage_model(&cfg, None, &defaults, &registry_with(&["anthropic"]));
         assert_eq!((p.as_str(), m.as_str()), ("ghost", "g"));
@@ -456,6 +543,7 @@ mod tests {
         let defaults = ModelDefaults {
             provider: "fallback".to_string(),
             model: None,
+            fallback_order: Vec::new(),
         };
         let cfg = model_cfg(vec![("one", "m"), ("two", "m")]);
         assert_eq!(providers_tried(&cfg, None, &defaults), "one, two, fallback");
@@ -512,5 +600,159 @@ mod tests {
         // `bash` resolved to `shell`; the unknown MCP name and unlisted
         // `read_file` were both excluded.
         assert_eq!(selected, vec!["shell"]);
+    }
+
+    // ── failover candidates (issue #201) ──────────────────────────────────
+
+    /// `[(provider, model), ...]` for readable assertions.
+    fn pairs(entries: &[ModelEntry]) -> Vec<(&str, &str)> {
+        entries
+            .iter()
+            .map(|e| (e.provider.as_str(), e.model.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn candidates_keep_every_registered_entry_in_blueprint_order() {
+        let cfg = model_cfg(vec![
+            ("openrouter", "deepseek"),
+            ("anthropic", "sonnet"),
+            ("openai", "gpt"),
+        ]);
+        let registry = registry_with(&["openrouter", "anthropic", "openai"]);
+        let got = resolve_stage_candidates(&cfg, None, &ModelDefaults::default(), &registry);
+        // The head is what `resolve_stage_model` picks; the tail is where
+        // failover goes. Before this, the tail was discarded at spawn.
+        assert_eq!(
+            pairs(&got),
+            vec![
+                ("openrouter", "deepseek"),
+                ("anthropic", "sonnet"),
+                ("openai", "gpt"),
+            ]
+        );
+    }
+
+    #[test]
+    fn candidates_skip_providers_that_are_not_registered() {
+        let cfg = model_cfg(vec![("ghost", "nope"), ("anthropic", "sonnet")]);
+        let registry = registry_with(&["anthropic"]);
+        let got = resolve_stage_candidates(&cfg, None, &ModelDefaults::default(), &registry);
+        assert_eq!(pairs(&got), vec![("anthropic", "sonnet")]);
+    }
+
+    #[test]
+    fn the_global_chain_rescues_a_single_model_stage() {
+        // The reported configuration: every stage names one OpenRouter model,
+        // so the blueprint alone offers nowhere to fail over to.
+        let cfg = ModelConfig {
+            allow_user_default: false,
+            ..model_cfg(vec![("openrouter", "deepseek")])
+        };
+        let defaults = ModelDefaults {
+            fallback_order: vec![
+                ModelEntry::new("anthropic".to_string(), "sonnet".to_string()),
+                ModelEntry::new("ghost".to_string(), "nope".to_string()),
+            ],
+            ..Default::default()
+        };
+        let registry = registry_with(&["openrouter", "anthropic"]);
+        let got = resolve_stage_candidates(&cfg, None, &defaults, &registry);
+        assert_eq!(
+            pairs(&got),
+            vec![("openrouter", "deepseek"), ("anthropic", "sonnet")],
+            "the unregistered global entry is skipped"
+        );
+    }
+
+    #[test]
+    fn the_global_chain_comes_after_the_user_default() {
+        let cfg = model_cfg(vec![("openrouter", "deepseek")]);
+        let defaults = ModelDefaults {
+            provider: "anthropic".to_string(),
+            model: Some("sonnet".to_string()),
+            fallback_order: vec![ModelEntry::new("openai".to_string(), "gpt".to_string())],
+        };
+        let registry = registry_with(&["openrouter", "anthropic", "openai"]);
+        let got = resolve_stage_candidates(&cfg, None, &defaults, &registry);
+        assert_eq!(
+            pairs(&got),
+            vec![
+                ("openrouter", "deepseek"),
+                ("anthropic", "sonnet"),
+                ("openai", "gpt"),
+            ]
+        );
+    }
+
+    #[test]
+    fn candidates_are_deduplicated() {
+        // The same pair arriving twice would spend a failover step going
+        // nowhere, which reads to the operator as a swap that did nothing.
+        let cfg = model_cfg(vec![("anthropic", "sonnet"), ("anthropic", "sonnet")]);
+        let defaults = ModelDefaults {
+            provider: "anthropic".to_string(),
+            model: Some("sonnet".to_string()),
+            fallback_order: vec![ModelEntry::new(
+                "anthropic".to_string(),
+                "sonnet".to_string(),
+            )],
+        };
+        let registry = registry_with(&["anthropic"]);
+        let got = resolve_stage_candidates(&cfg, None, &defaults, &registry);
+        assert_eq!(pairs(&got), vec![("anthropic", "sonnet")]);
+    }
+
+    #[test]
+    fn a_full_override_names_exactly_one_candidate() {
+        // `--model provider/model` asked for that model, not a substitute.
+        let cfg = model_cfg(vec![("anthropic", "sonnet"), ("openai", "gpt")]);
+        let defaults = ModelDefaults {
+            fallback_order: vec![ModelEntry::new("openai".to_string(), "gpt".to_string())],
+            ..Default::default()
+        };
+        let registry = registry_with(&["anthropic", "openai", "ollama"]);
+        let got = resolve_stage_candidates(&cfg, Some("ollama/llama"), &defaults, &registry);
+        assert_eq!(pairs(&got), vec![("ollama", "llama")]);
+    }
+
+    #[test]
+    fn a_bare_override_renames_the_model_on_every_candidate() {
+        let cfg = model_cfg(vec![("anthropic", "sonnet"), ("openai", "gpt")]);
+        let registry = registry_with(&["anthropic", "openai"]);
+        let got =
+            resolve_stage_candidates(&cfg, Some("haiku"), &ModelDefaults::default(), &registry);
+        assert_eq!(
+            pairs(&got),
+            vec![("anthropic", "haiku"), ("openai", "haiku")]
+        );
+    }
+
+    #[test]
+    fn candidates_are_never_empty_even_with_nothing_registered() {
+        // `resolve_stages` needs a name the user wrote to report against.
+        let cfg = ModelConfig {
+            allow_user_default: false,
+            ..model_cfg(vec![("ghost", "nope")])
+        };
+        let got =
+            resolve_stage_candidates(&cfg, None, &ModelDefaults::default(), &registry_with(&[]));
+        assert_eq!(pairs(&got), vec![("ghost", "nope")]);
+    }
+
+    #[test]
+    fn resolve_stages_carries_the_tail_onto_the_resolved_stage() {
+        let mut stage = leviath_core::Stage::new(
+            "work".to_string(),
+            model_cfg(vec![("openrouter", "deepseek"), ("anthropic", "sonnet")]),
+        );
+        stage.available_tools = vec![];
+        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
+        let registry = registry_with(&["openrouter", "anthropic"]);
+        let resolved = resolve_stages(&bp, None, &ModelDefaults::default(), &registry, &[])
+            .expect("both providers are registered");
+        assert_eq!(resolved[0].provider_name, "openrouter");
+        assert_eq!(pairs(&resolved[0].fallbacks), vec![("anthropic", "sonnet")]);
     }
 }

@@ -713,10 +713,12 @@ pub async fn check_http_response(
         // An out-of-credits or bad-key response is worth telling apart: the
         // runtime fails over on it and counts it against the provider's
         // circuit breaker, where a plain `ApiError` would just kill the run.
-        return Err(match UnavailableReason::classify(status.as_u16(), &error_body) {
-            Some(reason) => ProviderError::Unavailable { reason, detail },
-            None => ProviderError::ApiError(detail),
-        });
+        return Err(
+            match UnavailableReason::classify(status.as_u16(), &error_body) {
+                Some(reason) => ProviderError::Unavailable { reason, detail },
+                None => ProviderError::ApiError(detail),
+            },
+        );
     }
     Ok(response)
 }
@@ -826,7 +828,10 @@ mod tests {
     fn classify_leaves_an_ordinary_failure_alone() {
         // A plain bad request says nothing about the provider's usability, so
         // it must not trip failover or the circuit breaker.
-        assert_eq!(UnavailableReason::classify(400, "unknown field `foo`"), None);
+        assert_eq!(
+            UnavailableReason::classify(400, "unknown field `foo`"),
+            None
+        );
         assert_eq!(UnavailableReason::classify(404, "no such model"), None);
         assert_eq!(UnavailableReason::classify(500, "boom"), None);
     }
@@ -837,7 +842,10 @@ mod tests {
             reason: UnavailableReason::AuthFailed,
             detail: "HTTP 401: bad key".into(),
         };
-        assert_eq!(err.unavailable_reason(), Some(UnavailableReason::AuthFailed));
+        assert_eq!(
+            err.unavailable_reason(),
+            Some(UnavailableReason::AuthFailed)
+        );
         assert_eq!(
             ProviderError::ApiError("HTTP 400".into()).unavailable_reason(),
             None

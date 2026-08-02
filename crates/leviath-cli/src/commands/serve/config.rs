@@ -169,6 +169,7 @@ mod tests {
                     claude_code_enabled: false,
                     claude_code_binary: None,
                     claude_code_effort: None,
+                    fallback_order: Vec::new(),
                 },
                 openrouter_api_key: Some("sk-or-test".to_string()),
                 ollama_base_url: Some("http://localhost:11434".to_string()),
@@ -454,6 +455,7 @@ mod tests {
                 claude_code_enabled: false,
                 claude_code_binary: None,
                 claude_code_effort: None,
+                fallback_order: Vec::new(),
             },
             ..Default::default()
         };

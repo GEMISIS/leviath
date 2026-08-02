@@ -101,6 +101,10 @@ pub struct StageInference {
     pub tools: Vec<Tool>,
     /// Optional allow-list of tool names (`None`/empty = all `tools`).
     pub tool_filter: Option<Vec<String>>,
+    /// Providers to fail over to, best first, when the current one turns out
+    /// to be unusable. Consumed from the front by `collect_inference`, so an
+    /// exhausted list means "nowhere left to go" (issue #201).
+    pub fallbacks: Vec<leviath_core::blueprint::ModelEntry>,
 }
 
 // ─── World resources for the inference stage ─────────────────────────────────
