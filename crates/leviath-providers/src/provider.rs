@@ -9,6 +9,84 @@ use thiserror::Error;
 /// Result type for provider operations.
 pub type Result<T> = std::result::Result<T, ProviderError>;
 
+/// Why a provider cannot serve requests until someone intervenes.
+///
+/// These are the failures that no amount of retrying, waiting, or falling back
+/// to a smaller request will fix: the account is out of money, or the key is
+/// wrong. Keeping them apart from a generic [`ProviderError::ApiError`] is what
+/// lets the runtime fail over to another provider and trip a circuit breaker
+/// instead of killing every run with a raw JSON blob (issue #201).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnavailableReason {
+    /// The account is out of credits, or the request costs more than is left.
+    CreditsExhausted,
+    /// The API key is missing, malformed, or revoked.
+    AuthFailed,
+    /// The key authenticated but is not allowed to do this.
+    Forbidden,
+}
+
+impl UnavailableReason {
+    /// A short, stable label for logs, metrics attributes, and `lev ps`.
+    pub fn label(self) -> &'static str {
+        match self {
+            UnavailableReason::CreditsExhausted => "credits-exhausted",
+            UnavailableReason::AuthFailed => "auth-failed",
+            UnavailableReason::Forbidden => "forbidden",
+        }
+    }
+
+    /// What the operator should actually do about it.
+    fn remedy(self) -> &'static str {
+        match self {
+            UnavailableReason::CreditsExhausted => {
+                "out of credits: top up the account, or lower max_tokens so the \
+                 request costs less"
+            }
+            UnavailableReason::AuthFailed => {
+                "the API key was rejected: check it with `lev auth status` and \
+                 re-enter it with `lev setup`"
+            }
+            UnavailableReason::Forbidden => {
+                "the API key is not allowed to use this model: check the \
+                 account's plan and model permissions"
+            }
+        }
+    }
+
+    /// Classify an HTTP failure as a provider-fatal one, or `None` if it is an
+    /// ordinary error that says nothing about the provider's usability.
+    ///
+    /// Status alone is not enough. Anthropic reports a drained balance as a
+    /// **400** whose body says "credit balance is too low", so a status-only
+    /// check would read it as a malformed request and kill the run rather than
+    /// failing over. The body scan catches that and its cousins across
+    /// providers; every phrase is specific enough that a prompt quoting it
+    /// verbatim is not a realistic concern (the body here is the provider's own
+    /// error envelope, not the conversation).
+    pub fn classify(status: u16, body: &str) -> Option<Self> {
+        match status {
+            402 => return Some(UnavailableReason::CreditsExhausted),
+            401 => return Some(UnavailableReason::AuthFailed),
+            403 => return Some(UnavailableReason::Forbidden),
+            _ => {}
+        }
+        let b = body.to_ascii_lowercase();
+        [
+            "credit balance is too low",
+            "insufficient credits",
+            "requires more credits",
+            "insufficient_quota",
+            "exceeded your current quota",
+            "billing",
+        ]
+        .iter()
+        .any(|s| b.contains(s))
+        .then_some(UnavailableReason::CreditsExhausted)
+    }
+}
+
 /// Errors that can occur during provider operations.
 #[derive(Error, Debug)]
 pub enum ProviderError {
@@ -19,6 +97,15 @@ pub enum ProviderError {
     /// API returned an error
     #[error("API error: {0}")]
     ApiError(String),
+
+    /// The provider cannot serve any request until someone intervenes - the
+    /// account is out of credits, or the key is bad. `detail` keeps the raw
+    /// provider response for the logs; the message leads with what to do.
+    #[error("{} ({detail})", .reason.remedy())]
+    Unavailable {
+        reason: UnavailableReason,
+        detail: String,
+    },
 
     /// Rate limit exceeded
     #[error("Rate limit exceeded")]
@@ -74,11 +161,26 @@ impl ProviderError {
                 .iter()
                 .any(|s| m.contains(s))
             }
-            // A malformed response, an over-limit request, or an unknown error
-            // won't be fixed by retrying.
+            // A malformed response, an over-limit request, an unusable
+            // provider, or an unknown error won't be fixed by retrying.
             ProviderError::InvalidResponse(_)
             | ProviderError::TokenLimitExceeded { .. }
+            | ProviderError::Unavailable { .. }
             | ProviderError::Other(_) => false,
+        }
+    }
+
+    /// Whether this failure means the *provider itself* is unusable, rather
+    /// than this one request being bad.
+    ///
+    /// The runtime uses this to decide whether to fail over to the next
+    /// configured provider and to count the failure against that provider's
+    /// circuit breaker. A bad request or a malformed response says nothing
+    /// about the provider, so only [`ProviderError::Unavailable`] qualifies.
+    pub fn unavailable_reason(&self) -> Option<UnavailableReason> {
+        match self {
+            ProviderError::Unavailable { reason, .. } => Some(*reason),
+            _ => None,
         }
     }
 }
@@ -583,6 +685,7 @@ pub fn parse_openai_finish_reason(reason: &str) -> FinishReason {
 /// Check an HTTP response for errors and return it on success.
 ///
 /// - On 429 (rate limit): notifies the optional rate limiter and returns `RateLimitExceeded`.
+/// - On a provider-fatal failure (see [`UnavailableReason::classify`]): returns `Unavailable`.
 /// - On any other non-2xx: reads the body and returns `ApiError`.
 /// - On 2xx: returns `Ok(response)` so the caller can read the body.
 ///
@@ -606,10 +709,14 @@ pub async fn check_http_response(
     }
     if !status.is_success() {
         let error_body = response.text().await.unwrap_or_else(|e| e.to_string());
-        return Err(ProviderError::ApiError(format!(
-            "HTTP {}: {}",
-            status, error_body
-        )));
+        let detail = format!("HTTP {}: {}", status, error_body);
+        // An out-of-credits or bad-key response is worth telling apart: the
+        // runtime fails over on it and counts it against the provider's
+        // circuit breaker, where a plain `ApiError` would just kill the run.
+        return Err(match UnavailableReason::classify(status.as_u16(), &error_body) {
+            Some(reason) => ProviderError::Unavailable { reason, detail },
+            None => ProviderError::ApiError(detail),
+        });
     }
     Ok(response)
 }
@@ -659,6 +766,123 @@ mod tests {
         assert!(!ProviderError::InvalidResponse("garbage".into()).is_transient());
         assert!(!ProviderError::TokenLimitExceeded { used: 9, max: 8 }.is_transient());
         assert!(!ProviderError::Other("mystery".into()).is_transient());
+        // An unusable provider is permanent: retrying just burns the job
+        // timeout against an account that has no money in it.
+        assert!(
+            !ProviderError::Unavailable {
+                reason: UnavailableReason::CreditsExhausted,
+                detail: "HTTP 402".into(),
+            }
+            .is_transient()
+        );
+    }
+
+    // ─── Provider-fatal classification (issue #201) ─────────────────────────
+
+    #[test]
+    fn classify_maps_the_provider_fatal_statuses() {
+        assert_eq!(
+            UnavailableReason::classify(402, ""),
+            Some(UnavailableReason::CreditsExhausted)
+        );
+        assert_eq!(
+            UnavailableReason::classify(401, ""),
+            Some(UnavailableReason::AuthFailed)
+        );
+        assert_eq!(
+            UnavailableReason::classify(403, ""),
+            Some(UnavailableReason::Forbidden)
+        );
+    }
+
+    #[test]
+    fn classify_reads_the_body_when_the_status_alone_is_innocent() {
+        // Anthropic reports a drained balance as a 400. Without the body scan
+        // this reads as a malformed request and kills the run instead of
+        // failing over.
+        assert_eq!(
+            UnavailableReason::classify(
+                400,
+                r#"{"error":{"message":"Your credit balance is too low to access the API"}}"#
+            ),
+            Some(UnavailableReason::CreditsExhausted)
+        );
+        for body in [
+            "insufficient credits",
+            "This request requires more credits, or fewer max_tokens",
+            r#"{"error":{"code":"insufficient_quota"}}"#,
+            "You exceeded your current quota",
+            "please check your billing details",
+        ] {
+            assert_eq!(
+                UnavailableReason::classify(400, body),
+                Some(UnavailableReason::CreditsExhausted),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_leaves_an_ordinary_failure_alone() {
+        // A plain bad request says nothing about the provider's usability, so
+        // it must not trip failover or the circuit breaker.
+        assert_eq!(UnavailableReason::classify(400, "unknown field `foo`"), None);
+        assert_eq!(UnavailableReason::classify(404, "no such model"), None);
+        assert_eq!(UnavailableReason::classify(500, "boom"), None);
+    }
+
+    #[test]
+    fn unavailable_reason_is_reported_only_for_unavailable() {
+        let err = ProviderError::Unavailable {
+            reason: UnavailableReason::AuthFailed,
+            detail: "HTTP 401: bad key".into(),
+        };
+        assert_eq!(err.unavailable_reason(), Some(UnavailableReason::AuthFailed));
+        assert_eq!(
+            ProviderError::ApiError("HTTP 400".into()).unavailable_reason(),
+            None
+        );
+    }
+
+    #[test]
+    fn unavailable_display_leads_with_the_remedy_and_keeps_the_detail() {
+        // The whole complaint in issue #201 was a raw JSON blob as the run's
+        // status. The message must say what to do; the blob stays available.
+        let err = ProviderError::Unavailable {
+            reason: UnavailableReason::CreditsExhausted,
+            detail: "HTTP 402 Payment Required: {\"error\":{}}".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.starts_with("out of credits:"), "{msg}");
+        assert!(msg.contains("top up the account"), "{msg}");
+        assert!(msg.contains("HTTP 402 Payment Required"), "{msg}");
+    }
+
+    #[test]
+    fn every_unavailable_reason_has_a_label_and_a_remedy() {
+        for reason in [
+            UnavailableReason::CreditsExhausted,
+            UnavailableReason::AuthFailed,
+            UnavailableReason::Forbidden,
+        ] {
+            assert!(!reason.label().is_empty());
+            assert!(!reason.remedy().is_empty());
+            // The label is a metrics attribute and a `lev ps` cell, so it must
+            // stay a single lowercase token.
+            assert_eq!(reason.label(), reason.label().to_ascii_lowercase());
+            assert!(!reason.label().contains(' '));
+        }
+    }
+
+    #[test]
+    fn unavailable_reason_round_trips_through_serde() {
+        // It rides on `DaemonHealth`, which crosses the control socket.
+        let json = serde_json::to_string(&UnavailableReason::CreditsExhausted)
+            .expect("UnavailableReason serializes");
+        assert_eq!(json, "\"credits_exhausted\"");
+        let back: UnavailableReason =
+            serde_json::from_str(&json).expect("UnavailableReason deserializes");
+        assert_eq!(back, UnavailableReason::CreditsExhausted);
     }
 
     // ─── ProviderError Display ──────────────────────────────────────────────
@@ -1070,6 +1294,44 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("500"));
         assert!(msg.contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn check_http_response_402_becomes_unavailable_not_api_error() {
+        // The exact shape from issue #201: OpenRouter answering 402 with its
+        // credit-balance JSON. Before, this was an `ApiError` whose whole
+        // message was the blob, and one of them killed the run.
+        let body = br#"{"error":{"message":"This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford 28."}}"#;
+        let response = spawn_mock_response(402, "Payment Required", &[], body).await;
+        let err = check_http_response(response, None).await.unwrap_err();
+        assert_eq!(
+            err.unavailable_reason(),
+            Some(UnavailableReason::CreditsExhausted)
+        );
+        assert!(!err.is_transient());
+        let msg = err.to_string();
+        assert!(msg.starts_with("out of credits:"), "{msg}");
+        assert!(msg.contains("402"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn check_http_response_400_with_a_credit_body_is_still_unavailable() {
+        // Anthropic's shape: the status is innocent, the body is not.
+        let body = br#"{"error":{"message":"Your credit balance is too low to access the Anthropic API"}}"#;
+        let response = spawn_mock_response(400, "Bad Request", &[], body).await;
+        let err = check_http_response(response, None).await.unwrap_err();
+        assert_eq!(
+            err.unavailable_reason(),
+            Some(UnavailableReason::CreditsExhausted)
+        );
+    }
+
+    #[tokio::test]
+    async fn check_http_response_ordinary_4xx_stays_an_api_error() {
+        let response = spawn_mock_response(404, "Not Found", &[], b"no such model").await;
+        let err = check_http_response(response, None).await.unwrap_err();
+        assert_eq!(err.unavailable_reason(), None);
+        assert!(err.to_string().starts_with("API error:"), "{err}");
     }
 
     fn assert_contains_500(msg: &str) {
