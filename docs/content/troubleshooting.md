@@ -126,7 +126,6 @@ If you see it anyway, check that `shell_hint` has not been turned off in `config
 blueprint's `[agent]` / `[stages.<name>]` block. A blueprint that spells out POSIX commands in its
 own prompt will still ask for them; that text has to change in the blueprint. See
 [which shell you get](/docs/tools#which-shell-you-get).
->>>>>>> a9de5a9 (Document model identifiers and what Windows actually gets)
 
 ## A run says `running` but never does anything
 
