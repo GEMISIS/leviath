@@ -435,6 +435,14 @@ fn default_wedge_timeout_secs() -> u64 {
     leviath_runtime::pipeline::DEFAULT_WEDGE_TIMEOUT_SECS
 }
 
+fn default_provider_failures_before_open() -> u32 {
+    leviath_runtime::pipeline::DEFAULT_FAILURES_BEFORE_OPEN
+}
+
+fn default_provider_circuit_cooldown_secs() -> u64 {
+    leviath_runtime::pipeline::DEFAULT_CIRCUIT_COOLDOWN_SECS
+}
+
 /// Runtime resource limits with safe defaults baked in.
 ///
 /// Both fields default to a bounded value so a fresh install can't accidentally
@@ -542,6 +550,30 @@ pub struct LimitsConfig {
     /// Read once at daemon start, so a change needs a daemon restart.
     #[serde(default = "default_wedge_timeout_secs")]
     pub wedge_timeout_secs: u64,
+    /// How many consecutive provider-fatal failures (out of credits, rejected
+    /// key) take a provider out of service for every run.
+    ///
+    /// Defaults to `3`. One 402 can just be a request asking for more output
+    /// tokens than the balance covers; three in a row is the account. While a
+    /// provider is out, runs move to their next candidate, and runs with none
+    /// left are failed by the stall watchdog rather than left "running".
+    ///
+    /// `0` disables the breaker, leaving per-run failover on its own.
+    ///
+    /// Read once at daemon start, so a change needs a daemon restart.
+    #[serde(default = "default_provider_failures_before_open")]
+    pub provider_failures_before_open: u32,
+
+    /// How long a provider stays out of service before one request is let
+    /// through to see whether it recovered.
+    ///
+    /// Defaults to `300` (five minutes). That probe either succeeds, which puts
+    /// the provider straight back into service, or fails and restarts the wait,
+    /// so topping up an account brings the factory back with no restart.
+    ///
+    /// Read once at daemon start, so a change needs a daemon restart.
+    #[serde(default = "default_provider_circuit_cooldown_secs")]
+    pub provider_circuit_cooldown_secs: u64,
 }
 
 impl Default for LimitsConfig {
@@ -556,6 +588,8 @@ impl Default for LimitsConfig {
             dead_cycles_before_relief: default_dead_cycles_before_relief(),
             finished_retention_secs: default_finished_retention_secs(),
             wedge_timeout_secs: default_wedge_timeout_secs(),
+            provider_failures_before_open: default_provider_failures_before_open(),
+            provider_circuit_cooldown_secs: default_provider_circuit_cooldown_secs(),
         }
     }
 }
@@ -2919,6 +2953,8 @@ enabled = false
                 dead_cycles_before_relief: 6,
                 finished_retention_secs: 120,
                 wedge_timeout_secs: 420,
+                provider_failures_before_open: 5,
+                provider_circuit_cooldown_secs: 120,
             },
             batch_tool_hint: true,
             nudge: leviath_core::NudgeConfig {

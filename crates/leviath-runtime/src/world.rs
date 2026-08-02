@@ -322,7 +322,12 @@ impl PipelineWorld {
                 // so a newly-discovered tool is visible.
                 poll_dynamic_tool_refresh,
                 refresh_advertised_tools,
-                dispatch_inference,
+                // Move ready agents off any provider whose circuit is open, so
+                // dispatch only ever considers one still in service. Serial,
+                // because it needs `&mut StageInference` and dispatch fans out.
+                // Nested rather than inline: the outer tuple is at bevy's
+                // 20-system limit for `.chain()`.
+                (crate::pipeline::rotate_open_circuits, dispatch_inference).chain(),
                 collect_inference,
                 // Intercept a fan-out stage's split response before normal routing.
                 crate::fanout::fan_out_split,

@@ -174,6 +174,8 @@ pub fn dispatch_inference(
     >,
     stage: Res<InferenceStage>,
     providers: Res<Providers>,
+    circuits: Option<Res<ProviderCircuits>>,
+    policy: Option<Res<CircuitPolicy>>,
     par_commands: ParallelCommands,
 ) {
     // Fan out across ready agents: request assembly (`build_request`) is the
@@ -190,6 +192,8 @@ pub fn dispatch_inference(
     // previous system left recorded.
     crate::tick_scope::clear();
     let now = chrono::Utc::now().timestamp();
+    let circuit_policy = policy.map(|p| *p).unwrap_or_default();
+    let circuits = circuits.as_deref();
     agents.par_iter().for_each(
         |(entity, state, window, config, si, in_flight, progress, stalled)| {
             crate::tick_scope::run_agent_parallel(entity, &par_commands, &mut || {
@@ -205,6 +209,19 @@ pub fn dispatch_inference(
                         commands.entity(entity).insert(noted);
                     });
                 };
+                // The rotation system already moved this agent onto the best
+                // provider still standing. Reaching a tripped one here means
+                // every candidate is out of service, so park rather than send
+                // a request that is going to fail the same way as the last
+                // three (issue #201). The stall watchdog ends the wait.
+                if circuits.is_some_and(|c| c.is_open(&si.provider_name, now, &circuit_policy)) {
+                    tracing::debug!(
+                        provider = %si.provider_name,
+                        "inference waiting: the provider's circuit is open"
+                    );
+                    stall(StallReason::ProviderCircuitOpen);
+                    return;
+                }
                 let Some(provider) = providers.0.get(&si.provider_name) else {
                     // Leave ready and retry later - but say so. A silently
                     // starved agent reads as a wedged run with no error.
