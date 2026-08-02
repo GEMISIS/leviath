@@ -236,49 +236,26 @@ fn a_malformed_config_grant_is_an_error() {
 
 // -- rendering ---------------------------------------------------------
 
+/// The verdict wording lives with the status, so the one renderer cannot
+/// drift from what the status means.
 #[test]
-fn the_report_block_lists_each_entry_and_the_stanza_to_paste() {
-    let config = config(&["/data/runs"], "cto", &[]);
-    let lines = report("cto", &["/data/runs", "glob:/docs/**"], &config).report_lines("  ", "⚠ ");
-    let joined = lines.join("\n");
-    assert!(joined.contains("2 declared, 1 granted"), "{joined}");
-    assert!(joined.contains("/data/runs: granted"), "{joined}");
-    assert!(joined.contains("glob:/docs/**: NOT granted"), "{joined}");
-    assert!(joined.contains("[agent_read_paths.cto]"), "{joined}");
-    assert!(joined.contains(r#"allow = ["glob:/docs/**"]"#), "{joined}");
-    assert!(lines.iter().all(|l| l.starts_with("  ")), "{joined}");
+fn every_status_has_a_label() {
+    assert_eq!(GrantStatus::Granted.label(), "granted");
+    assert_eq!(GrantStatus::NotGranted.label(), "NOT granted");
+    assert!(
+        GrantStatus::Undetermined
+            .label()
+            .contains("cannot be checked")
+    );
 }
 
+/// Nothing refused means nothing to paste and nothing to warn about.
 #[test]
 fn a_fully_granted_report_offers_no_stanza() {
     let config = config(&["/data/runs"], "cto", &[]);
     let report = report("cto", &["/data/runs"], &config);
     assert!(report.grant_stanza().is_empty());
     assert!(report.warning_line().is_none());
-    let joined = report.report_lines("", "").join("\n");
-    assert!(!joined.contains("Add to your config.toml"), "{joined}");
-}
-
-#[test]
-fn the_blanket_override_is_named_in_the_report_block() {
-    let mut config = Config::default();
-    config.security.allow_blueprint_read_paths = true;
-    let joined = report("cto", &["/data/runs"], &config)
-        .report_lines("", "")
-        .join("\n");
-    assert!(
-        joined.contains("allow_blueprint_read_paths = true"),
-        "{joined}"
-    );
-}
-
-#[test]
-fn an_undetermined_entry_says_so_in_the_report_block() {
-    let config = config(&["/data/runs"], "cto", &[]);
-    let joined = report("cto", &["glob:/docs/[ab]/**"], &config)
-        .report_lines("", "")
-        .join("\n");
-    assert!(joined.contains("cannot be checked"), "{joined}");
 }
 
 #[test]

@@ -295,6 +295,11 @@ mod tests {
     /// `lev create` prints as the next step.
     #[test]
     fn resolve_spawn_args_sends_an_absolute_blueprint_path_for_a_relative_input() {
+        // Reading the CWD is enough to race the tests that *move* it: one of
+        // them chdirs into a directory it then deletes, and a relative path
+        // resolved against that instant cannot be found. Take the same lock
+        // they do, so this only ever reads a CWD that is standing still.
+        let _guard = crate::config::isolate_cwd_for_test();
         // Rooted in the current directory rather than the system temp dir, so
         // the relative path is trivially expressible. A temp dir is not
         // guaranteed to share a drive with the cwd, and on the Windows runner
