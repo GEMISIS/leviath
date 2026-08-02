@@ -30,6 +30,7 @@
 mod platform;
 
 pub mod browser;
+pub mod editor;
 pub mod keychain;
 pub mod perms;
 pub mod process;
@@ -37,6 +38,7 @@ pub mod sandbox;
 pub mod tty;
 
 pub use browser::open_url;
+pub use editor::launch as launch_editor;
 pub use perms::{ensure_file_private, secure_dir_perms, secure_file_perms, write_private};
 #[cfg(unix)]
 pub use process::peer_uid;
