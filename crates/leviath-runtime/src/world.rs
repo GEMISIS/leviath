@@ -541,6 +541,25 @@ impl PipelineWorld {
     /// on: agents by status, per-model inference-pool occupancy, and tool-lane
     /// occupancy.
     ///
+    /// Providers currently taken out of service by their circuit breaker.
+    ///
+    /// Empty when the breaker is not installed, so an embedded world that never
+    /// inserted the resource simply reports nothing wrong (issue #201).
+    pub fn open_circuits(&self) -> Vec<crate::pipeline::ProviderCircuitState> {
+        let Some(circuits) = self
+            .world
+            .get_resource::<crate::pipeline::ProviderCircuits>()
+        else {
+            return Vec::new();
+        };
+        let policy = self
+            .world
+            .get_resource::<crate::pipeline::CircuitPolicy>()
+            .copied()
+            .unwrap_or_default();
+        circuits.open_circuits(chrono::Utc::now().timestamp(), &policy)
+    }
+
     /// This is the answer to "the daemon has been quiet for hours - is anything
     /// actually running?", which issue #189 had no way to ask.
     pub fn lane_snapshot(&self) -> LaneSnapshot {
@@ -1192,6 +1211,60 @@ mod tests {
             None,
             Handle::current(),
         )
+    }
+
+    #[tokio::test]
+    async fn open_circuits_reports_nothing_without_the_breaker() {
+        // An embedded world that never installed the resource must report a
+        // clean bill of health rather than panicking on a missing resource.
+        let world = build_world(ProviderRegistry::new());
+        assert!(world.open_circuits().is_empty());
+    }
+
+    #[tokio::test]
+    async fn open_circuits_reports_a_tripped_provider() {
+        let mut world = build_world(ProviderRegistry::new());
+        let policy = crate::pipeline::CircuitPolicy {
+            failures_before_open: 1,
+            cooldown_secs: 300,
+        };
+        let mut circuits = crate::pipeline::ProviderCircuits::default();
+        circuits.record_failure(
+            "openrouter",
+            leviath_providers::UnavailableReason::CreditsExhausted,
+            chrono::Utc::now().timestamp(),
+            &policy,
+        );
+        world.world_mut().insert_resource(circuits);
+        world.world_mut().insert_resource(policy);
+
+        let open = world.open_circuits();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].provider, "openrouter");
+        assert_eq!(
+            open[0].reason,
+            leviath_providers::UnavailableReason::CreditsExhausted
+        );
+    }
+
+    #[tokio::test]
+    async fn open_circuits_falls_back_to_the_default_policy() {
+        // Circuits installed, policy not: the default must apply rather than
+        // the report silently coming back empty.
+        let mut world = build_world(ProviderRegistry::new());
+        let default_policy = crate::pipeline::CircuitPolicy::default();
+        let mut circuits = crate::pipeline::ProviderCircuits::default();
+        for _ in 0..default_policy.failures_before_open {
+            circuits.record_failure(
+                "openrouter",
+                leviath_providers::UnavailableReason::AuthFailed,
+                chrono::Utc::now().timestamp(),
+                &default_policy,
+            );
+        }
+        world.world_mut().insert_resource(circuits);
+
+        assert_eq!(world.open_circuits().len(), 1);
     }
 
     #[tokio::test]

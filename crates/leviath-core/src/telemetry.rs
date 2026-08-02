@@ -175,6 +175,27 @@ pub struct LaneHealth {
     pub relief_granted: usize,
 }
 
+/// One provider the daemon has stopped sending work to, sampled alongside
+/// [`LaneHealth`].
+///
+/// Daemon-wide for the same reason as `LaneHealth`: a provider out of credits
+/// belongs to no single run, and the runs it kills emit nothing useful because
+/// they die before doing anything (issue #201).
+///
+/// `reason` is the label rather than the runtime's own enum: this crate sits
+/// below `leviath-providers`, so the type that names it is not in scope here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderHealth {
+    /// The provider taken out of service.
+    pub provider: String,
+    /// Why, as a stable lowercase label (`credits-exhausted`, `auth-failed`).
+    pub reason: String,
+    /// Consecutive failures accumulated against it.
+    pub consecutive_failures: u32,
+    /// Seconds until it is probed again.
+    pub retry_in_secs: u64,
+}
+
 /// Where telemetry events go.
 ///
 /// Implementations must tolerate being called from the engine's tick loop:
@@ -186,6 +207,11 @@ pub trait TelemetrySink: Send + Sync {
     /// Record one daemon-wide health sample. Default: ignore it, so a sink that
     /// only cares about runs needs no changes.
     fn observe_lanes(&self, _health: LaneHealth) {}
+
+    /// Record which providers are currently out of service, sampled on the same
+    /// re-drive tick as [`TelemetrySink::observe_lanes`]. Default: ignore it,
+    /// so an existing sink keeps compiling unchanged.
+    fn observe_providers(&self, _down: &[ProviderHealth]) {}
 
     /// Flush any buffered export before shutdown. Default: nothing buffered.
     fn force_flush(&self) {}
@@ -203,6 +229,7 @@ impl TelemetrySink for NoopSink {
 pub struct MemorySink {
     events: std::sync::Mutex<Vec<TelemetryEvent>>,
     lanes: std::sync::Mutex<Vec<LaneHealth>>,
+    providers: std::sync::Mutex<Vec<Vec<ProviderHealth>>>,
     flushes: std::sync::atomic::AtomicUsize,
 }
 
@@ -215,6 +242,14 @@ impl MemorySink {
     /// Every lane-health sample recorded so far, in order.
     pub fn lane_samples(&self) -> Vec<LaneHealth> {
         self.lanes.lock().expect("telemetry lane lock").clone()
+    }
+
+    /// Every provider-health sample recorded so far, in order.
+    pub fn provider_samples(&self) -> Vec<Vec<ProviderHealth>> {
+        self.providers
+            .lock()
+            .expect("telemetry provider lock")
+            .clone()
     }
 
     /// How many times `force_flush` was called.
@@ -233,6 +268,13 @@ impl TelemetrySink for MemorySink {
 
     fn observe_lanes(&self, health: LaneHealth) {
         self.lanes.lock().expect("telemetry lane lock").push(health);
+    }
+
+    fn observe_providers(&self, down: &[ProviderHealth]) {
+        self.providers
+            .lock()
+            .expect("telemetry provider lock")
+            .push(down.to_vec());
     }
 
     fn force_flush(&self) {
@@ -285,6 +327,27 @@ mod tests {
 
         // The default trait body: a sink that only cares about runs drops it.
         NoopSink.observe_lanes(LaneHealth::default());
+    }
+
+    #[test]
+    fn memory_sink_records_provider_samples_and_the_noop_ignores_them() {
+        let sink = MemorySink::default();
+        assert!(sink.provider_samples().is_empty());
+        let down = ProviderHealth {
+            provider: "openrouter".to_string(),
+            reason: "credits-exhausted".to_string(),
+            consecutive_failures: 3,
+            retry_in_secs: 240,
+        };
+        sink.observe_providers(std::slice::from_ref(&down));
+        // The empty sample matters too: it is how a collector sees a provider
+        // come back, not just go away.
+        sink.observe_providers(&[]);
+        assert_eq!(sink.provider_samples().len(), 2);
+        assert_eq!(sink.provider_samples()[0], vec![down]);
+        assert!(sink.provider_samples()[1].is_empty());
+
+        NoopSink.observe_providers(&[]);
     }
 
     #[test]
