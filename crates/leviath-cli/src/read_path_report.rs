@@ -197,10 +197,11 @@ impl GrantReport {
     }
 
     /// The full report block: the counts, then one line per entry, then the
-    /// stanza to paste. Indented by `indent` so each surface can place it.
-    pub fn report_lines(&self, indent: &str) -> Vec<String> {
+    /// stanza to paste. Indented by `indent` so each surface can place it, with
+    /// `heading_prefix` (a warning marker, say) opening the first line.
+    pub fn report_lines(&self, indent: &str, heading_prefix: &str) -> Vec<String> {
         let mut lines = vec![format!(
-            "{indent}declares [read_paths] (reads outside the run workdir): {}",
+            "{indent}{heading_prefix}declares [read_paths] (reads outside the run workdir): {}",
             self.summary()
         )];
         if self.allow_blueprint {

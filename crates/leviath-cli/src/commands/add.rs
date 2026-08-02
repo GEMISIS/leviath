@@ -591,7 +591,10 @@ mod capability_tests {
     /// back to stating the rule rather than guessing.
     #[test]
     fn no_grant_report_is_built_without_a_config_or_a_parseable_manifest() {
-        let manifest = "[agent]\nname = \"x\"\n\n[read_paths]\nallow = [\"/data/runs\"]\n";
+        let manifest = "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n\
+                        [stages.main]\nmode = \"autonomous\"\n\n\
+                        [context.regions]\nsystem = { kind = \"pinned\", max_tokens = 1000 }\n\n\
+                        [read_paths]\nallow = [\"/data/runs\"]\n";
         assert!(super::read_path_report(manifest, None).is_none());
         assert!(
             super::read_path_report(
@@ -600,6 +603,22 @@ mod capability_tests {
             )
             .is_none()
         );
+
+        // A package that declares nothing has nothing to report either.
+        let plain = "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n\
+                     [stages.main]\nmode = \"autonomous\"\n\n\
+                     [context.regions]\nsystem = { kind = \"pinned\", max_tokens = 1000 }\n";
+        assert!(super::read_path_report(plain, Some(&crate::config::Config::default())).is_none());
+
+        // Nor does one whose grants cannot be compiled to judge it against.
+        let mut broken = crate::config::Config::default();
+        broken.security.read_paths = vec!["regex:relative/.*".to_string()];
+        assert!(super::read_path_report(manifest, Some(&broken)).is_none());
+
+        // And the ordinary case, so the fallbacks are not the only path tested.
+        let report = super::read_path_report(manifest, Some(&crate::config::Config::default()))
+            .expect("a parseable manifest and a config give a report");
+        assert_eq!(report.declared(), 1);
     }
 
     /// The `tools/` scan that feeds the inventory: only `.rhai` files count, and
