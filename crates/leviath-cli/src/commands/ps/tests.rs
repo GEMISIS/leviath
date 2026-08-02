@@ -133,7 +133,49 @@ fn stage_cell_shows_position_only_for_multi_stage_blueprints() {
 
 #[test]
 fn format_runs_handles_empty() {
-    assert_eq!(format_runs(&[], &healthy_daemon(), 0), "no agents running");
+    assert_eq!(
+        format_runs(&[], &[], &healthy_daemon(), 0),
+        "no agents running"
+    );
+}
+
+/// Issue #205: a scheduler spawns a run, the run dies on its first inference,
+/// and the daemon unloads it. Nothing is running, but "no agents running" is the
+/// answer that cost forty minutes of spawn-and-revert, because it reads exactly
+/// like a run that was never spawned. The row has to be there, with the reason.
+#[test]
+fn format_runs_shows_a_finished_run_when_nothing_is_running() {
+    let mut died = entry(
+        "worker-1785616492",
+        AgentStatus::Error {
+            message: "HTTP 402 Payment Required".to_string(),
+        },
+    );
+    died.last_progress_at = Some(1_140);
+
+    let out = format_runs(&[], &[died], &healthy_daemon(), 1_200);
+    assert_ne!(out, "no agents running");
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].starts_with("RUN"), "header row: {out}");
+    assert!(lines[1].contains("worker-1785616492"), "{out}");
+    assert!(lines[1].contains("HTTP 402"), "the reason it ended: {out}");
+    assert!(lines[1].contains("1m"), "and how long ago: {out}");
+}
+
+/// Finished runs are listed under the live ones, not mixed into them, and a
+/// finished run is never counted as needing an answer.
+#[test]
+fn format_runs_lists_finished_runs_after_the_live_ones() {
+    let out = format_runs(
+        &[entry("run-live", AgentStatus::Active)],
+        &[entry("run-ended", AgentStatus::Complete)],
+        &healthy_daemon(),
+        0,
+    );
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[1].contains("run-live"), "{out}");
+    assert!(lines[2].contains("run-ended"), "{out}");
+    assert!(!out.contains("needs an answer"), "{out}");
 }
 
 /// The whole point of the change: two runs both `Waiting`, telling the operator
@@ -153,7 +195,7 @@ fn format_runs_distinguishes_two_kinds_of_waiting() {
     parked.tool_calls = 1;
     parked.last_progress_at = Some(1_190);
 
-    let out = format_runs(&[blocked, parked], &healthy_daemon(), 1_200);
+    let out = format_runs(&[blocked, parked], &[], &healthy_daemon(), 1_200);
     let lines: Vec<&str> = out.lines().collect();
     assert!(lines[0].starts_with("RUN"), "header row: {out}");
     assert!(lines[0].contains("AGE"), "header row: {out}");
@@ -175,13 +217,18 @@ fn format_runs_calls_out_only_the_runs_needing_an_answer() {
         e
     };
     assert!(
-        !format_runs(std::slice::from_ref(&healthy), &healthy_daemon(), 0)
+        !format_runs(std::slice::from_ref(&healthy), &[], &healthy_daemon(), 0)
             .contains("needs an answer"),
         "a fan-out parent is not blocked on anyone"
     );
     assert!(
-        !format_runs(&[entry("run-b", AgentStatus::Active)], &healthy_daemon(), 0)
-            .contains("needs an answer")
+        !format_runs(
+            &[entry("run-b", AgentStatus::Active)],
+            &[],
+            &healthy_daemon(),
+            0
+        )
+        .contains("needs an answer")
     );
 
     let prompt = |id: &str, reason: WaitReason| {
@@ -191,6 +238,7 @@ fn format_runs_calls_out_only_the_runs_needing_an_answer() {
     };
     let one = format_runs(
         &[prompt("run-c", WaitReason::TaintGate), healthy.clone()],
+        &[],
         &healthy_daemon(),
         0,
     );
@@ -202,6 +250,7 @@ fn format_runs_calls_out_only_the_runs_needing_an_answer() {
             prompt("run-d", WaitReason::InteractionPoint),
             healthy,
         ],
+        &[],
         &healthy_daemon(),
         0,
     );
@@ -221,7 +270,7 @@ fn format_runs_aligns_columns() {
     let short = entry("a", AgentStatus::Active);
     let mut long = entry("a-much-longer-run-id", AgentStatus::Waiting);
     long.wait_reason = Some(WaitReason::UserPrompt);
-    let out = format_runs(&[short, long], &healthy_daemon(), 0);
+    let out = format_runs(&[short, long], &[], &healthy_daemon(), 0);
     let lines: Vec<&str> = out.lines().collect();
 
     let status_col = lines[0]
@@ -247,14 +296,19 @@ fn format_runs_aligns_columns() {
 /// operators to skip the one that matters.
 #[test]
 fn a_healthy_daemon_adds_no_footer() {
-    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &healthy_daemon(), 0);
+    let out = format_runs(
+        &[entry("run-a", AgentStatus::Active)],
+        &[],
+        &healthy_daemon(),
+        0,
+    );
     assert!(!out.contains("lanes:"), "{out}");
     // Parked batches on their own are not a problem: they hold no capacity.
     let parked = DaemonHealth {
         tools_parked: 3,
         ..healthy_daemon()
     };
-    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &parked, 0);
+    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &[], &parked, 0);
     assert!(!out.contains("lanes:"), "{out}");
 }
 
@@ -269,7 +323,7 @@ fn a_saturated_lane_is_reported_under_the_table() {
         tools_parked: 3,
         ..healthy_daemon()
     };
-    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &health, 0);
+    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &[], &health, 0);
     assert!(
         out.ends_with("lanes: tools 8/8 busy, 3 parked, 12 queued"),
         "{out}"
@@ -287,7 +341,7 @@ fn a_dead_cycle_streak_is_reported_in_cycles_and_minutes() {
         dead_cycles: 4,
         ..healthy_daemon()
     };
-    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &health, 0);
+    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &[], &health, 0);
     assert!(
         out.ends_with("lanes: tools 8/8 busy, 12 queued  ·  no progress for 4 cycles (2m)"),
         "{out}"
@@ -299,7 +353,7 @@ fn a_dead_cycle_streak_is_reported_in_cycles_and_minutes() {
         dead_cycles: 1,
         ..healthy_daemon()
     };
-    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &drained, 0);
+    let out = format_runs(&[entry("run-a", AgentStatus::Active)], &[], &drained, 0);
     assert!(
         out.ends_with("lanes: tools 0/8 busy  ·  no progress for 1 cycles (30s)"),
         "{out}"
@@ -316,7 +370,7 @@ fn the_footer_and_the_answer_call_out_coexist() {
         dead_cycles: 2,
         ..healthy_daemon()
     };
-    let out = format_runs(&[blocked], &health, 0);
+    let out = format_runs(&[blocked], &[], &health, 0);
     assert!(out.contains("1 run needs an answer: lev respond"), "{out}");
     assert!(out.contains("no progress for 2 cycles"), "{out}");
 }
@@ -352,7 +406,9 @@ async fn list(response_line: &'static str, args: &PsArgs) -> anyhow::Result<()> 
     result
 }
 
-const LISTING: &str = r#"{"result":"list","runs":[{"run_id":"run-a","status":"Waiting","reason":"tool_approval","stage":"implement","iteration":3,"tool_calls":7,"unattended":true}]}"#;
+/// One run still going and one the daemon has finished with, so both halves of
+/// the reply are exercised by the table and the `--json` paths alike.
+const LISTING: &str = r#"{"result":"list","runs":[{"run_id":"run-a","status":"Waiting","reason":"tool_approval","stage":"implement","iteration":3,"tool_calls":7,"unattended":true}],"finished":[{"run_id":"run-b","status":{"Error":{"message":"HTTP 402 Payment Required"}},"stage":"implement","iteration":0,"tool_calls":0}]}"#;
 
 #[tokio::test]
 async fn send_list_prints_runs() {

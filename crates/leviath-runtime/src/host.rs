@@ -14,7 +14,7 @@
 //! handling a control op and then re-driving to quiescence so its effect (a
 //! resume, a delivered message) is applied immediately.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use bevy_ecs::entity::Entity;
@@ -140,6 +140,24 @@ pub struct RunListEntry {
     /// daemon simply omits it.
     #[serde(default)]
     pub empty_output: bool,
+}
+
+/// Everything one [`ControlOp::List`] answers with: the live runs, the runs that
+/// finished recently enough to still be worth reporting, and the daemon's health.
+///
+/// A named struct rather than a tuple because the reply has now grown twice, and
+/// each time every caller had to be re-read positionally to find out which half
+/// was which.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RunListing {
+    /// One entry per run the daemon is hosting.
+    pub runs: Vec<RunListEntry>,
+    /// Runs the daemon has unloaded within its retention window, oldest first.
+    /// Kept apart from `runs` so a caller asking "what is running" still gets
+    /// only that.
+    pub finished: Vec<RunListEntry>,
+    /// How the daemon itself is doing.
+    pub health: DaemonHealth,
 }
 
 /// The daemon's own health, alongside the run listing.
@@ -316,7 +334,7 @@ pub enum ControlOp {
     /// List every known live run and its status, with the daemon's own health.
     List {
         /// Reply channel.
-        reply: oneshot::Sender<(Vec<RunListEntry>, DaemonHealth)>,
+        reply: oneshot::Sender<RunListing>,
     },
     /// Deliver a message to a running agent (by agent id). Reply is `false` if the
     /// world's message channel is closed.
@@ -584,6 +602,13 @@ pub struct WorldHost {
     /// Dead cycles the daemon tolerates before widening the tool lane. `0`
     /// disables relief. See [`Self::set_dead_cycles_before_relief`].
     dead_cycles_before_relief: u32,
+    /// Runs unloaded recently enough to still be worth reporting, oldest first,
+    /// each paired with the unix second it was unloaded. See
+    /// [`Self::record_finished`].
+    finished: VecDeque<(i64, RunListEntry)>,
+    /// How long an unloaded run stays in [`Self::finished`]. `0` keeps none.
+    /// See [`Self::set_finished_retention_secs`].
+    finished_retention_secs: u64,
 }
 
 /// How often the serve loop re-drives the world on its own.
@@ -606,6 +631,35 @@ const DEFAULT_REDRIVE_INTERVAL: Duration = Duration::from_secs(30);
 /// genuinely wedged daemon is not left overnight. Served from
 /// `[limits] dead_cycles_before_relief`; `0` disables relief.
 pub const DEFAULT_DEAD_CYCLES_BEFORE_RELIEF: u32 = 10;
+
+/// How long a run stays in the listing after the daemon unloads it.
+///
+/// A terminal agent is unloaded a pass or two after it finishes, and until now
+/// it vanished from the listing at that moment. A run that died on its first
+/// inference was therefore indistinguishable from one that had never been
+/// spawned, which is what left the scheduler in issue #205 with nothing to go on
+/// but a stopwatch: it could not tell a dead spawn from a slow one, so it
+/// reverted the work and spawned again, for forty minutes.
+///
+/// Five minutes covers several polls of any scheduler that checks in about once
+/// a minute, so a single missed or slow poll does not lose the evidence. It is
+/// also what the rest of the daemon already means by "long enough that a hiccup
+/// cannot cause it": the dashboard calls a run stale at 300 seconds, and
+/// [`DEFAULT_DEAD_CYCLES_BEFORE_RELIEF`] at the 30-second re-drive works out to
+/// the same five minutes.
+///
+/// Served from `[limits] finished_retention_secs`; `0` keeps nothing and
+/// restores the old behaviour.
+pub const DEFAULT_FINISHED_RETENTION_SECS: u64 = 300;
+
+/// How many unloaded runs [`WorldHost::finished`] holds before the oldest are
+/// dropped, whatever the retention window says.
+///
+/// Not configurable: it is a memory bound, not a tuning knob. A factory that
+/// finishes runs faster than this fills the window keeps the most recent ones,
+/// which are the ones anyone is still asking about. Set the window shorter to
+/// control how much the listing shows; this only stops it growing without end.
+const MAX_RETAINED_FINISHED: usize = 256;
 
 impl WorldHost {
     /// Wrap a world with a fresh interaction hub.
@@ -642,6 +696,8 @@ impl WorldHost {
             last_progress: None,
             relief_granted: 0,
             dead_cycles_before_relief: DEFAULT_DEAD_CYCLES_BEFORE_RELIEF,
+            finished: VecDeque::new(),
+            finished_retention_secs: DEFAULT_FINISHED_RETENTION_SECS,
         }
     }
 
@@ -710,6 +766,54 @@ impl WorldHost {
         // rather than granting again on the very next re-drive.
         self.dead_cycles = 0;
         granted
+    }
+
+    /// How long a run stays in the listing after the daemon unloads it. `0`
+    /// keeps none, which is how the listing behaved before issue #205. Served
+    /// from `[limits] finished_retention_secs`.
+    pub fn set_finished_retention_secs(&mut self, secs: u64) {
+        self.finished_retention_secs = secs;
+    }
+
+    /// Keep `entry` in the listing as a run that finished at `at`.
+    ///
+    /// One row per run: an id already held is replaced rather than duplicated,
+    /// so however often a run is unloaded it is reported once.
+    ///
+    /// `last_progress_at` is filled in from `at` when the run never persisted a
+    /// snapshot. That is not a guess. A run that died on its first inference has
+    /// no watermark to read, and the listing would show its age as `-` - which
+    /// is the one thing an operator or a scheduler most wants to know about a
+    /// run that failed instantly. For a run being unloaded, the unload is the
+    /// last thing that happened to it.
+    fn record_finished(&mut self, mut entry: RunListEntry, at: i64) {
+        if self.finished_retention_secs == 0 {
+            return;
+        }
+        entry.last_progress_at.get_or_insert(at);
+        self.finished
+            .retain(|(_, held)| held.run_id != entry.run_id);
+        self.finished.push_back((at, entry));
+        while self.finished.len() > MAX_RETAINED_FINISHED {
+            self.finished.pop_front();
+        }
+    }
+
+    /// Drop unloaded runs that have outlived the retention window.
+    ///
+    /// `now` is passed in rather than read here so a test can age the buffer
+    /// without sleeping through the window, the same reason `lev ps`'s
+    /// `format_runs` takes it. Called once per [`Self::emit_events`], which the
+    /// serve loop runs before it handles any control op, so a listing never has
+    /// to prune on the way out.
+    fn prune_finished(&mut self, now: i64) {
+        let window = self.finished_retention_secs as i64;
+        while let Some(&(at, _)) = self.finished.front() {
+            if now.saturating_sub(at) <= window {
+                break;
+            }
+            self.finished.pop_front();
+        }
     }
 
     /// How many dead cycles the daemon tolerates before widening the tool lane.
@@ -870,7 +974,12 @@ impl WorldHost {
             .collect();
         // Terminal agents to unload from memory this pass (their disk state is
         // preserved and still viewable). Collected during the loop, reaped after.
-        let mut to_reap: Vec<(String, Entity)> = Vec::new();
+        // The listing row travels with each one: it is built here, while the
+        // entity is untouched, rather than in the reap loop below, where the
+        // daemon's reap hook has already had the world and is free to have taken
+        // the components it reads.
+        let mut to_reap: Vec<(String, Entity, RunListEntry)> = Vec::new();
+        let now = chrono::Utc::now().timestamp();
         for (run_id, entity) in pairs {
             let Some(state) = self.world.world().get::<AgentState>(entity) else {
                 continue; // reaped between registration and now
@@ -991,7 +1100,8 @@ impl WorldHost {
             // prior pass already saw it terminal, so the event went out and the
             // persistence lane captured it) and no live parent still needs it.
             if cur.terminal && was_terminal && self.no_live_parent(entity) {
-                to_reap.push((run_id.clone(), entity));
+                let entry = self.entry_for(&run_id, entity, state);
+                to_reap.push((run_id.clone(), entity, entry));
             }
             // NOTE: non-terminal `Waiting` agents are intentionally NOT unloaded.
             // Every `Waiting` state carries a live, unpersisted continuation - a
@@ -1010,15 +1120,19 @@ impl WorldHost {
         // is safe. The reaper is moved out for the loop to avoid borrowing `self`
         // twice, then restored.
         let mut reaper = self.reaper.take();
-        for (run_id, entity) in to_reap {
+        for (run_id, entity, entry) in to_reap {
             if let Some(reaper) = reaper.as_mut() {
                 reaper(&mut self.world, entity);
             }
             self.world.world_mut().despawn(entity);
             self.by_run_id.remove(&run_id);
             self.emitted.remove(&run_id);
+            // The run leaves memory but not the listing: for a while yet it can
+            // still say how it ended, which is the whole of issue #205.
+            self.record_finished(entry, now);
         }
         self.reaper = reaper;
+        self.prune_finished(now);
 
         for (agent_id, request) in self.interactions.pending() {
             if self.emitted_interactions.insert(request.id.clone()) {
@@ -1408,6 +1522,37 @@ impl WorldHost {
         None
     }
 
+    /// One listing row for a run, read off the live world.
+    ///
+    /// Shared by [`Self::list`] and by the unload path in [`Self::emit_events`],
+    /// so a run's last row is built exactly the way every row before it was.
+    /// Takes the state rather than looking it up because the unload path already
+    /// holds one, and a `None` it could never return would be a branch nothing
+    /// can reach.
+    fn entry_for(&self, run_id: &str, entity: Entity, state: &AgentState) -> RunListEntry {
+        let world = self.world.world();
+        let metadata = world.get::<RunMetadata>(entity);
+        RunListEntry {
+            run_id: run_id.to_string(),
+            status: state.status.clone(),
+            wait_reason: self.wait_reason(entity),
+            stage: state.current_stage.clone(),
+            stage_index: world
+                .get::<crate::pipeline::StageCursor>(entity)
+                .map(|c| c.index),
+            num_stages: metadata.map(|m| m.num_stages),
+            iteration: state.iteration,
+            tool_calls: world.get::<TokenTotals>(entity).map_or(0, |t| t.tool_calls),
+            last_progress_at: world
+                .get::<crate::pipeline::PersistWatermark>(entity)
+                .and_then(|w| w.last_progress_at()),
+            unattended: metadata.is_some_and(|m| m.unattended),
+            empty_output: world
+                .get::<crate::persistence::RunOutcomeFlags>(entity)
+                .is_some_and(|f| crate::persistence::is_empty_output(&state.status, &f.0)),
+        }
+    }
+
     /// List every known live run with the context an operator needs to read its
     /// status: why it is waiting, where it is, and when it last moved.
     fn list(&self) -> Vec<RunListEntry> {
@@ -1416,27 +1561,22 @@ impl WorldHost {
             .iter()
             .filter_map(|(run_id, &entity)| {
                 let state = world.get::<AgentState>(entity)?;
-                let metadata = world.get::<RunMetadata>(entity);
-                Some(RunListEntry {
-                    run_id: run_id.clone(),
-                    status: state.status.clone(),
-                    wait_reason: self.wait_reason(entity),
-                    stage: state.current_stage.clone(),
-                    stage_index: world
-                        .get::<crate::pipeline::StageCursor>(entity)
-                        .map(|c| c.index),
-                    num_stages: metadata.map(|m| m.num_stages),
-                    iteration: state.iteration,
-                    tool_calls: world.get::<TokenTotals>(entity).map_or(0, |t| t.tool_calls),
-                    last_progress_at: world
-                        .get::<crate::pipeline::PersistWatermark>(entity)
-                        .and_then(|w| w.last_progress_at()),
-                    unattended: metadata.is_some_and(|m| m.unattended),
-                    empty_output: world
-                        .get::<crate::persistence::RunOutcomeFlags>(entity)
-                        .is_some_and(|f| crate::persistence::is_empty_output(&state.status, &f.0)),
-                })
+                Some(self.entry_for(run_id, entity, state))
             })
+            .collect()
+    }
+
+    /// The runs unloaded recently enough to still be reported, oldest first.
+    ///
+    /// Kept apart from [`Self::list`] rather than folded into it because
+    /// "running now" and "finished a moment ago" are different questions, and
+    /// two callers already depend on the first one: `lev daemon status` counts
+    /// the hosted agents, and the dashboard uses the listing to decide which
+    /// runs the daemon still holds.
+    fn finished(&self) -> Vec<RunListEntry> {
+        self.finished
+            .iter()
+            .map(|(_, entry)| entry.clone())
             .collect()
     }
 
@@ -1482,9 +1622,18 @@ impl WorldHost {
                 let _ = reply.send(result);
             }
             ControlOp::Status { run_id, reply } => {
+                // A run the daemon has unloaded still has an answer for a
+                // while, so a caller that asks a moment too late learns how the
+                // run ended instead of being told there is no such run.
                 let status = self
                     .live_entity(&run_id)
-                    .and_then(|e| self.world.agent_status(e));
+                    .and_then(|e| self.world.agent_status(e))
+                    .or_else(|| {
+                        self.finished
+                            .iter()
+                            .find(|(_, e)| e.run_id == run_id)
+                            .map(|(_, e)| e.status.clone())
+                    });
                 let _ = reply.send(status);
             }
             ControlOp::Pause { run_id, reply } => {
@@ -1514,7 +1663,11 @@ impl WorldHost {
                 let _ = reply.send(ok);
             }
             ControlOp::List { reply } => {
-                let _ = reply.send((self.list(), self.health()));
+                let _ = reply.send(RunListing {
+                    runs: self.list(),
+                    finished: self.finished(),
+                    health: self.health(),
+                });
             }
             ControlOp::Message {
                 agent_id,
@@ -2518,7 +2671,7 @@ mod tests {
         .await;
         assert_eq!(status, Some(AgentStatus::Active));
 
-        let (list, _health) = ask(&mut host, |reply| ControlOp::List { reply }).await;
+        let list = ask(&mut host, |reply| ControlOp::List { reply }).await.runs;
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].run_id, "run-a");
         assert_eq!(list[0].status, AgentStatus::Active);
@@ -3733,6 +3886,143 @@ mod tests {
         );
     }
 
+    // ─── Runs that finished but are still worth reporting (issue #205) ───────
+
+    /// Unload `run_id` the way the daemon does: an agent that has gone terminal
+    /// with `status`, then the two passes it takes to emit and reap it.
+    fn unload_with(host: &mut WorldHost, run_id: &str, status: AgentStatus) {
+        let mut s = agent_state(run_id);
+        s.status = status;
+        let e = host.world.world_mut().spawn(s).id();
+        host.register(run_id, e);
+        host.emit_events();
+        host.emit_events();
+    }
+
+    /// The failure behind issue #205: a run that died on its first inference was
+    /// unloaded a pass later and vanished, so a scheduler polling the listing
+    /// could not tell it from a run that had never been spawned. It now keeps
+    /// its place, and keeps the whole error rather than the status word - which
+    /// is the reason the row is built from the world and not from `Emitted`,
+    /// whose `status` is a `&'static str`.
+    #[tokio::test]
+    async fn an_unloaded_run_stays_in_the_listing_with_the_reason_it_ended() {
+        let mut host = host_with(vec![]);
+        let died = AgentStatus::Error {
+            message: "HTTP 402 Payment Required".to_string(),
+        };
+        unload_with(&mut host, "worker-1", died.clone());
+
+        assert!(host.live_entity("worker-1").is_none(), "unloaded");
+        let listing = ask(&mut host, |reply| ControlOp::List { reply }).await;
+        assert!(listing.runs.is_empty(), "nothing is running");
+        assert_eq!(listing.finished.len(), 1);
+        assert_eq!(listing.finished[0].run_id, "worker-1");
+        assert_eq!(listing.finished[0].status, died);
+        // A run that never persisted a snapshot still has to show an age, or the
+        // listing answers "when did it die" with a dash.
+        assert!(listing.finished[0].last_progress_at.is_some());
+    }
+
+    /// The window is what keeps the listing from growing without end.
+    #[tokio::test]
+    async fn an_unloaded_run_leaves_the_listing_once_it_is_stale() {
+        let mut host = host_with(vec![]);
+        unload_with(&mut host, "worker-1", AgentStatus::Complete);
+        let window = DEFAULT_FINISHED_RETENTION_SECS as i64;
+        let at = host.finished.front().expect("just unloaded").0;
+
+        // Inside the window it stays...
+        host.prune_finished(at + window);
+        assert_eq!(host.finished().len(), 1);
+        // ...and one second past it, it goes.
+        host.prune_finished(at + window + 1);
+        assert!(host.finished().is_empty());
+    }
+
+    /// `0` is how an operator asks for the old behaviour back.
+    #[tokio::test]
+    async fn a_zero_window_keeps_nothing() {
+        let mut host = host_with(vec![]);
+        host.set_finished_retention_secs(0);
+        unload_with(&mut host, "worker-1", AgentStatus::Complete);
+
+        assert!(host.live_entity("worker-1").is_none(), "still unloaded");
+        assert!(host.finished().is_empty());
+    }
+
+    /// However often a run is recorded, it is one row - the newest.
+    #[tokio::test]
+    async fn a_run_is_listed_once_however_often_it_is_recorded() {
+        let mut host = host_with(vec![]);
+        let entry = |status| RunListEntry {
+            run_id: "worker-1".to_string(),
+            status,
+            wait_reason: None,
+            stage: "work".to_string(),
+            stage_index: None,
+            num_stages: None,
+            iteration: 0,
+            tool_calls: 0,
+            last_progress_at: None,
+            unattended: false,
+            empty_output: false,
+        };
+        host.record_finished(entry(AgentStatus::Cancelled), 100);
+        host.record_finished(entry(AgentStatus::Complete), 200);
+
+        let finished = host.finished();
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0].status, AgentStatus::Complete);
+    }
+
+    /// A factory that finishes runs faster than the window empties keeps the
+    /// most recent ones rather than growing for ever.
+    #[tokio::test]
+    async fn the_listing_of_finished_runs_is_capped() {
+        let mut host = host_with(vec![]);
+        for i in 0..=MAX_RETAINED_FINISHED {
+            host.record_finished(
+                RunListEntry {
+                    run_id: format!("worker-{i}"),
+                    status: AgentStatus::Complete,
+                    wait_reason: None,
+                    stage: "work".to_string(),
+                    stage_index: None,
+                    num_stages: None,
+                    iteration: 0,
+                    tool_calls: 0,
+                    last_progress_at: None,
+                    unattended: false,
+                    empty_output: false,
+                },
+                100,
+            );
+        }
+
+        let finished = host.finished();
+        assert_eq!(finished.len(), MAX_RETAINED_FINISHED);
+        assert_eq!(
+            finished[0].run_id, "worker-1",
+            "the oldest is the one dropped"
+        );
+    }
+
+    /// The status query agrees with the listing rather than reporting no such
+    /// run a moment after the listing still had one.
+    #[tokio::test]
+    async fn the_status_of_an_unloaded_run_is_still_answerable() {
+        let mut host = host_with(vec![]);
+        unload_with(&mut host, "worker-1", AgentStatus::Complete);
+
+        let status = ask(&mut host, |reply| ControlOp::Status {
+            run_id: "worker-1".to_string(),
+            reply,
+        })
+        .await;
+        assert_eq!(status, Some(AgentStatus::Complete));
+    }
+
     /// Spawn a `Waiting` agent (optionally with an extra marker component) and
     /// register it under `run_id`.
     fn register_waiting(host: &mut WorldHost, run_id: &str) -> Entity {
@@ -3938,7 +4228,7 @@ mod tests {
         // Despawn the entity behind the world's back; the run-id map is now stale.
         host.world_mut().world_mut().despawn(e);
 
-        let (list, _health) = ask(&mut host, |reply| ControlOp::List { reply }).await;
+        let list = ask(&mut host, |reply| ControlOp::List { reply }).await.runs;
         assert!(list.is_empty()); // stale mapping filtered out
         let status = ask(&mut host, |reply| ControlOp::Status {
             run_id: "run-a".to_string(),
@@ -4226,7 +4516,7 @@ mod tests {
                 watermark
             },
         ));
-        let (list, _health) = ask(&mut host, |reply| ControlOp::List { reply }).await;
+        let list = ask(&mut host, |reply| ControlOp::List { reply }).await.runs;
         assert_eq!(list[0].num_stages, Some(3));
         assert_eq!(list[0].tool_calls, 9);
         assert!(list[0].unattended);
@@ -4247,14 +4537,14 @@ mod tests {
             .entity_mut(e)
             .insert(crate::persistence::RunOutcomeFlags::default());
         // Still running: nothing to say yet.
-        assert!(!ask(&mut host, |reply| ControlOp::List { reply }).await.0[0].empty_output);
+        assert!(!ask(&mut host, |reply| ControlOp::List { reply }).await.runs[0].empty_output);
 
         host.world_mut()
             .world_mut()
             .get_mut::<AgentState>(e)
             .expect("spawned agent has state")
             .status = AgentStatus::Complete;
-        assert!(ask(&mut host, |reply| ControlOp::List { reply }).await.0[0].empty_output);
+        assert!(ask(&mut host, |reply| ControlOp::List { reply }).await.runs[0].empty_output);
 
         // ...unless it never had a way to write, which is not its failing.
         host.world_mut()
@@ -4263,7 +4553,7 @@ mod tests {
             .expect("just inserted")
             .0
             .no_output_tools = true;
-        assert!(!ask(&mut host, |reply| ControlOp::List { reply }).await.0[0].empty_output);
+        assert!(!ask(&mut host, |reply| ControlOp::List { reply }).await.runs[0].empty_output);
     }
 
     /// The listing carries the reason and the progress context, not just a word.
@@ -4274,7 +4564,7 @@ mod tests {
         waiting_because(&mut host, e, |entity| {
             entity.insert(crate::pipeline::WaitingForChildren);
         });
-        let (list, _health) = ask(&mut host, |reply| ControlOp::List { reply }).await;
+        let list = ask(&mut host, |reply| ControlOp::List { reply }).await.runs;
         assert_eq!(list.len(), 1);
         assert_eq!(
             list[0].wait_reason,

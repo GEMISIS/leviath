@@ -173,6 +173,9 @@ pub fn build_host(
     // How long the daemon may sit with a full tool lane and no run moving before
     // it widens the lane to break the jam (issue #191).
     host.set_dead_cycles_before_relief(config.limits.dead_cycles_before_relief);
+    // How long a finished run keeps its place in the listing, so a scheduler
+    // polling on an interval can see how a run ended (issue #205).
+    host.set_finished_retention_secs(config.limits.finished_retention_secs);
     // Handed to each agent's tool state so its sub-agent tools reach the world
     // through the host.
     let subagent_tx = host.subagent_sender();

@@ -49,6 +49,12 @@ So `waiting: children(3)` alongside busy children is a healthy factory, while
 `waiting: tool approval` is stopped until someone answers. Run with `--yolo` to
 approve automatically, including for sub-agents and fan-out workers.
 
+A run stays listed for a few minutes after it finishes, so a script polling on
+an interval learns how a run ended rather than finding it gone. Set
+`[limits] finished_retention_secs` to change the window, or 0 to drop a run the
+moment it finishes. The record is held in memory, so a daemon restart clears it;
+`meta.json` and the REST API keep the durable copy.
+
 A `lanes:` line under the table means the daemon itself is worth a look. It
 shows the tool lane's occupancy - batches running, parked on a wait, and queued
 behind them - and, if the daemon has stopped getting anywhere, how many re-drive
@@ -56,7 +62,8 @@ cycles it has gone without a single run moving. A run parked on a wait costs the
 lane nothing, so `parked` is not a problem on its own; `queued` with no progress
 is.
 
---json prints {\"runs\": [...], \"health\": {...}} with the same two halves.";
+--json prints {\"runs\": [...], \"finished\": [...], \"health\": {...}}, keeping
+finished runs apart from the ones the daemon is still hosting.";
 
 /// Arguments for `lev ps`.
 #[derive(clap::Args, Debug, Clone, Default)]
@@ -150,15 +157,27 @@ fn health_footer(health: &DaemonHealth) -> Option<String> {
 /// Render a run listing as an aligned table (or a friendly note when empty),
 /// with the daemon's own health underneath when it has something to say.
 ///
+/// `finished` are runs the daemon has unloaded but still remembers. They are
+/// listed after the live ones rather than left out, because "the run I started
+/// died on its first inference" and "there is no such run" are the two answers
+/// issue #205's scheduler could not tell apart, and an empty table said the
+/// second when it meant the first.
+///
 /// `now` is unix seconds, passed in rather than read here so the output is
 /// deterministic under test.
-pub fn format_runs(runs: &[RunListEntry], health: &DaemonHealth, now: i64) -> String {
-    if runs.is_empty() {
+pub fn format_runs(
+    runs: &[RunListEntry],
+    finished: &[RunListEntry],
+    health: &DaemonHealth,
+    now: i64,
+) -> String {
+    if runs.is_empty() && finished.is_empty() {
         return "no agents running".to_string();
     }
     let headers = ["RUN", "STATUS", "STAGE", "ITER", "TOOLS", "AGE"];
     let rows: Vec<[String; 6]> = runs
         .iter()
+        .chain(finished)
         .map(|e| {
             [
                 e.run_id.clone(),
@@ -222,21 +241,28 @@ pub fn format_runs(runs: &[RunListEntry], health: &DaemonHealth, now: i64) -> St
 /// Query the daemon for its runs and print the listing.
 pub async fn send_list(client: &ControlClient, args: &PsArgs) -> anyhow::Result<()> {
     match client.list().await {
-        Ok(ControlResponse::List { runs, health }) => {
+        Ok(ControlResponse::List {
+            runs,
+            finished,
+            health,
+        }) => {
             match args.json {
                 // Plain data with no map keys to reject, so serializing cannot
-                // fail.
+                // fail. `finished` is its own key rather than folded into
+                // `runs` so a script can tell a run that is still going from one
+                // that has ended without guessing from the status.
                 true => println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "runs": runs,
+                        "finished": finished,
                         "health": health,
                     }))
                     .expect("a run listing serializes")
                 ),
                 false => println!(
                     "{}",
-                    format_runs(&runs, &health, chrono::Utc::now().timestamp())
+                    format_runs(&runs, &finished, &health, chrono::Utc::now().timestamp())
                 ),
             }
             Ok(())

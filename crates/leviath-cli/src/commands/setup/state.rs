@@ -902,6 +902,11 @@ fn limits_fields(config: &Config) -> Vec<Field> {
             help: "Widen the tool lane after this many 30s cycles with work queued and nothing moving. 0 never does.",
             value: FieldValue::Number(Some(config.limits.dead_cycles_before_relief as u64)),
         },
+        Field {
+            label: "Finished run retention (seconds)",
+            help: "Keep a run in `lev ps` this long after it ends, so a script polling on an interval sees how it ended. 0 drops it at once.",
+            value: FieldValue::Number(Some(config.limits.finished_retention_secs)),
+        },
     ]
 }
 
@@ -936,6 +941,11 @@ fn apply_limits_fields(config: &mut Config, fields: &[Field]) {
                 config.limits.dead_cycles_before_relief = n
                     .map(|n| n as u32)
                     .unwrap_or(Config::default().limits.dead_cycles_before_relief)
+            }
+            // And again: unset keeps the default, 0 means keep nothing.
+            (7, FieldValue::Number(n)) => {
+                config.limits.finished_retention_secs =
+                    n.unwrap_or(Config::default().limits.finished_retention_secs)
             }
             _ => {}
         }

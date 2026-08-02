@@ -11,6 +11,20 @@ requests since the previous version.
 
 ## Unreleased
 
+- A run stays in `lev ps` for five minutes after it ends instead of vanishing
+  when the daemon unloads it. A run that died on its first inference used to
+  leave the listing a second or two later, which made it indistinguishable from
+  a run that had never been spawned: both read as `no agents running`. Anything
+  scheduling work by spawning agents then had to guess how long a healthy agent
+  takes to get going, and a guess that came in under a cold start would abandon
+  runs that were still starting. The row now carries the status the run ended
+  on, so an `HTTP 402` at iteration 0 says so. Tunable with
+  `[limits] finished_retention_secs`; `0` restores the old behaviour. The record
+  is in memory, so a restart clears it, and `meta.json` and `GET /api/agents`
+  remain the durable copy.
+- `lev ps --json` gained a `finished` key alongside `runs` and `health`.
+  Finished runs are kept apart rather than mixed in, so `lev daemon status` and
+  the dashboard still count only the agents the daemon is hosting.
 - A run is no longer reported as having produced nothing when it never had a
   way to produce anything. `empty_output` in `meta.json` has meant "modified no
   files" since it was added for coding agents, so a router that delegates to
