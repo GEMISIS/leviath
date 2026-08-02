@@ -183,6 +183,28 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                                     .to_string();
                                 let pt_required =
                                     pt.get("required").and_then(|v| v.as_bool()).unwrap_or(true);
+                                // What the point does when nobody is watching.
+                                // Absent means auto-approve, the behaviour every
+                                // `--yolo` run has had; `"ask"` opts a genuine
+                                // human checkpoint out of that. A misspelling
+                                // here would silently un-gate the checkpoint, so
+                                // it is an error rather than a fallback.
+                                let pt_unattended = match pt
+                                    .get("unattended")
+                                    .and_then(|v| v.as_str())
+                                {
+                                    None | Some("auto_approve") => {
+                                        crate::blueprint::UnattendedPolicy::AutoApprove
+                                    }
+                                    Some("ask") => crate::blueprint::UnattendedPolicy::Ask,
+                                    Some(other) => {
+                                        return Err(Error::Other(format!(
+                                            "stage '{stage_name}': interaction point '{pt_name}' \
+                                             has unattended = \"{other}\" - expected \"ask\" or \
+                                             \"auto_approve\""
+                                        )));
+                                    }
+                                };
                                 let pt_style = match pt.get("style").and_then(|v| v.as_str()) {
                                     Some("multiple_choice") => {
                                         crate::blueprint::InteractionStyle::MultipleChoice
@@ -249,6 +271,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                                     name: pt_name,
                                     prompt: pt_prompt,
                                     required: pt_required,
+                                    unattended: pt_unattended,
                                     style: pt_style,
                                     options: pt_options,
                                     directives: pt_directives,
@@ -306,6 +329,15 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                 .and_then(|v| v.as_array())
             {
                 stage.available_tools = tools_arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+            }
+
+            // Human tools this stage keeps even when the run is unattended.
+            // Validated against `available_tools` by `Stage::validate`.
+            if let Some(tools_arr) = stage_value.get("required_tools").and_then(|v| v.as_array()) {
+                stage.required_tools = tools_arr
                     .iter()
                     .filter_map(|v| v.as_str().map(|s| s.to_string()))
                     .collect();
@@ -2667,6 +2699,102 @@ directives = { "Revise" = "Call ask_user_text to find out what to change." }
         assert!(!points[0].directives.contains_key("Approve"));
         assert_eq!(points[0].abort_options, vec!["Abort".to_string()]);
         assert_eq!(points[0].edit_options, vec!["Edit".to_string()]);
+    }
+
+    /// The unattended opt-out (issue #204): absent means the point waves itself
+    /// through under `--yolo`, `"ask"` means it holds for a person.
+    #[test]
+    fn parse_manifest_interaction_point_unattended_policy() {
+        let toml = |line: &str| {
+            format!(
+                r#"
+[agent]
+name = "unattended-test"
+
+[stages.plan]
+mode = "interactive_points"
+
+[[stages.plan.interaction_points]]
+name     = "plan_approval"
+prompt   = "Approve?"
+required = true
+{line}
+"#
+            )
+        };
+        let policy_of = |line: &str| {
+            let bp = parse_manifest(&toml(line)).expect("valid manifest");
+            let stage = bp.find_stage("plan").expect("the plan stage");
+            unwrap_interactive_points(&stage.mode)[0].unattended
+        };
+
+        assert_eq!(
+            policy_of(""),
+            crate::blueprint::UnattendedPolicy::AutoApprove
+        );
+        assert_eq!(
+            policy_of("unattended = \"auto_approve\""),
+            crate::blueprint::UnattendedPolicy::AutoApprove
+        );
+        assert_eq!(
+            policy_of("unattended = \"ask\""),
+            crate::blueprint::UnattendedPolicy::Ask
+        );
+    }
+
+    /// A misspelling here would silently un-gate a checkpoint an author meant to
+    /// hold, so it is an error rather than a fallback to the default.
+    #[test]
+    fn parse_manifest_rejects_an_unknown_unattended_policy() {
+        let toml = r#"
+[agent]
+name = "unattended-typo"
+
+[stages.plan]
+mode = "interactive_points"
+
+[[stages.plan.interaction_points]]
+name     = "plan_approval"
+prompt   = "Approve?"
+required = true
+unattended = "always"
+"#;
+        let err = parse_manifest(toml).expect_err("unknown policy");
+        let text = err.to_string();
+        assert!(text.contains("plan_approval"), "names the point: {text}");
+        assert!(text.contains("always"), "quotes what was written: {text}");
+        assert!(text.contains("\"ask\""), "says what is allowed: {text}");
+    }
+
+    /// `required_tools` names the human tools a stage keeps when nobody is
+    /// watching.
+    #[test]
+    fn parse_manifest_reads_required_tools() {
+        let toml = r#"
+[agent]
+name = "required-tools-test"
+
+[stages.plan]
+mode = "autonomous"
+available_tools = ["read_file", "ask_user_text"]
+required_tools = ["ask_user_text"]
+
+[stages.build]
+mode = "autonomous"
+available_tools = ["read_file"]
+"#;
+        let bp = parse_manifest(toml).expect("valid manifest");
+        assert_eq!(
+            bp.find_stage("plan").expect("plan").required_tools,
+            vec!["ask_user_text".to_string()]
+        );
+        // A stage that says nothing keeps nothing - the default is the cut.
+        assert!(
+            bp.find_stage("build")
+                .expect("build")
+                .required_tools
+                .is_empty()
+        );
     }
 
     #[test]
