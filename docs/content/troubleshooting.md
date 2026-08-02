@@ -110,6 +110,31 @@ The same numbers are exported as `leviath.tool_lane.*` and
 `leviath.scheduler.dead_cycles.total` if you have [observability](/docs/observability) on. A
 healthy daemon sits at zero dead cycles.
 
+## My work queue thinks runs are still running
+
+A scheduler that hands work to Leviath and marks a slot busy has to learn when the run ends, and
+two things get in the way of the obvious approach. `updated_at` in `meta.json` is a 30-second
+heartbeat, so it stays fresh on a run that has stopped dead. `pid` is 0 for every run, live or
+finished, so a sweeper that reverts on `pid == 0` reverts everything.
+
+Poll `lev ps --all --json` instead, and read `last_progress_at` rather than `updated_at`. The
+[reconciliation recipe](/docs/daemon#reconciling-an-external-work-queue) covers the four cases and,
+importantly, what to do when the daemon does not answer, which is nothing.
+
+## A run says `running` but nothing in it is moving at all
+
+Not the stall above, and not a slow one. A run can end up in a state no part of the engine can
+reach: no inference in flight, no tool batch, nothing waiting on it. It has stopped for good and
+still reports `running`.
+
+Set `[limits] wedge_timeout_secs = 300` and the daemon fails such a run instead of leaving it. It
+is off by default because it fails runs. A run it fails logs at `error` level and its `meta.json`
+carries the reason, which begins `[wedged]` in the stage log. Nothing else in Leviath produces that
+line, so it means the engine lost track of a run. Please report it.
+
+It never fires on a run that is merely slow. An agent waiting on the model, on a tool, on its
+sub-agents, or on a person is holding the marker that says so and is exempt however long it takes.
+
 ## An agent seems stuck in a loop
 
 That's what [stuck detection](/docs/stages#graph) is for. Add a `condition = "stuck"` transition

@@ -165,7 +165,28 @@ waiter-1785568852-7895a2209850  waiting: children(1)    delegate 1/2  2      1  
 `AGE` is how long since the run last moved: a new iteration, a new stage, or a change of
 status. It is deliberately not `meta.json`'s `updated_at`, which also advances on a
 30-second heartbeat so that observers can tell a live daemon from a dead one. A fresh
-`updated_at` is therefore not evidence of progress; a fresh `AGE` is.
+`updated_at` is therefore not evidence of progress; a fresh `AGE` is. The same figure is
+written to disk as `last_progress_at`, so a script can read it without the daemon.
+
+`lev ps` lists what the daemon is holding, plus the runs that finished within the
+retention window above. `lev ps --all` adds a second block read from the runs dir instead,
+so runs older than that window, and runs from before the last daemon restart, are still
+accounted for:
+
+```
+NOT RUNNING
+RUN                             STATUS               LAST MOVED
+coder-1785568100-a1b2c3d4e5f6   complete             4m
+coder-1785567000-c3d4e5f6a1b2   error                1h
+router-1785560000-e5f6a1b2c3d4  running (abandoned)  2h
+```
+
+`(abandoned)` means the run claims on disk to be running, the daemon is not holding it,
+and it has not moved in five minutes. Clear it with `lev cancel <run-id>`. With `--all` a
+daemon that is down is reported rather than fatal, and nothing is marked abandoned in that
+case, because an unreachable daemon looks exactly like every run dying at once. See
+[reconciling an external work queue](/docs/daemon#reconciling-an-external-work-queue) if
+you are driving Leviath from a scheduler.
 
 | Status | Meaning |
 |---|---|

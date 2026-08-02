@@ -44,6 +44,32 @@ requests since the previous version.
 - `lev ps --json` gained a `finished` key alongside `runs` and `health`.
   Finished runs are kept apart rather than mixed in, so `lev daemon status` and
   the dashboard still count only the agents the daemon is hosting.
+- `meta.json` now records `last_progress_at`, the moment a run last actually
+  moved. `updated_at` cannot answer that and never could: it advances on a
+  30-second heartbeat whether or not anything happened, so that a stale
+  timestamp means the daemon stopped rather than the run. Anything outside the
+  daemon that aged a run on `updated_at` was reading a signal that stays fresh
+  on a run which has stopped dead.
+- `RunMeta.pid` is documented as what it has always been: 0 for every run, live
+  or finished. There is no process per run, so nothing can be concluded from
+  it, and a sweeper that reverted work on `pid == 0` reverted all of it. Left
+  in place for compatibility; it is a candidate for removal in the next major.
+- New `lev ps --all`, listing the runs on disk that the daemon is not hosting,
+  read from the runs dir rather than the daemon's memory. The retention window
+  above covers the minutes after a run ends; this covers the rest of time, and
+  survives a restart, which is what a scheduler reconciling its own queue needs.
+  Rows that claim on disk to be running while nothing drives them are marked
+  `(abandoned)`. With `--all`, a daemon that is down is reported rather than
+  fatal, and marks nothing abandoned, because a restarting daemon looks exactly
+  like every run dying at once.
+- New `[limits] wedge_timeout_secs`: fail a run that has ended up in a state no
+  part of the engine can reach, rather than leaving it reported as running for
+  the life of the daemon. It never fires on a run that is merely slow; an agent
+  waiting on the model, on a tool, on its sub-agents, or on a person is exempt
+  however long it takes. Off by default, since it fails runs. Together with the
+  above this is what stops an external scheduler leaking slots to runs that
+  have quietly stopped, and there is now a page on doing that reconciliation
+  properly in the daemon docs.
 - A run is no longer reported as having produced nothing when it never had a
   way to produce anything. `empty_output` in `meta.json` has meant "modified no
   files" since it was added for coding agents, so a router that delegates to
