@@ -2259,14 +2259,15 @@ pub(super) mod tests {
         let seeded = limits_fields(&before);
         assert_eq!(seeded.len(), count, "the form is built from the config");
 
-        // Flip every boolean and bump every number, then read the form back
-        // out of the config it produced: a field that no arm writes comes back
-        // with its original value.
-        for field in &mut wizard.limits {
+        // Flip every toggle and give every number a distinct non-default
+        // value, then read the form back out of the config it produced: a
+        // field that no arm writes comes back with its original value. The
+        // limits form is toggles and numbers only, so the second arm is the
+        // number case rather than an unexercised catch-all.
+        for (i, field) in wizard.limits.iter_mut().enumerate() {
             field.value = match &field.value {
                 FieldValue::Bool(b) => FieldValue::Bool(!b),
-                FieldValue::Number(n) => FieldValue::Number(Some(n.unwrap_or(0) + 7)),
-                other => other.clone(),
+                _ => FieldValue::Number(Some(i as u64 + 11)),
             };
         }
         let expected: Vec<FieldValue> = wizard.limits.iter().map(|f| f.value.clone()).collect();
