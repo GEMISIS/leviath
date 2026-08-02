@@ -13,6 +13,8 @@ same list.
 
 ## Unreleased
 
+## 0.1.2 - 2026-08-02
+
 - `lev run <agent>` with no `--task` now opens your editor on a commented
   template instead of refusing to start, so a task longer than a sentence no
   longer has to survive shell quoting. Saving an empty file cancels the run.
@@ -315,6 +317,13 @@ same list.
   interrupted result the model is told to verify first.
 - Completion webhooks now carry a stable delivery id, so a receiver can
   deduplicate retries of the same delivery.
+- Releases are cut by a version bump rather than by a schedule. Alpha now
+  publishes as soon as a commit bumping `[workspace.package] version` lands on
+  `main`, and beta and stable promote it on their usual weekly cadence; a
+  channel with nothing new finishes in seconds having published nothing. That
+  ends the nightly churn of rebuilding identical source and re-promoting an
+  already-promoted build, and with it the `vX.Y.Z+date` tags that existed only
+  to avoid colliding with a version already released.
 
 ## 0.1.1 - 2026-07-31
 
