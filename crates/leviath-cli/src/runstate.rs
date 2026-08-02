@@ -301,6 +301,45 @@ pub fn is_terminal_status(status: &RunStatus) -> bool {
     )
 }
 
+/// How long a run may claim to be live on disk, while the daemon is not holding
+/// it, before anything treats it as abandoned.
+///
+/// Comfortably longer than the persistence heartbeat, so a live-but-slow run (a
+/// long inference writes nothing else) is never mistaken for a dead one.
+pub const STALE_AFTER_SECS: i64 = 300;
+
+/// Whether a run that claims to be live on disk has nothing driving it: the
+/// daemon is not holding it *and* it has not moved in [`STALE_AFTER_SECS`].
+///
+/// `live` is the set of run ids the daemon reports hosting, or `None` when it
+/// gave no answer this poll. Both halves are needed and each is wrong on its
+/// own. An unreachable daemon reports an empty set, so the id check alone would
+/// condemn every healthy run the moment the daemon restarted. And a run parked
+/// on a long inference legitimately does not move for minutes, so the clock
+/// alone would condemn a run that is working. `None` therefore answers `false`
+/// for everything: no answer is not evidence.
+///
+/// Ages against `last_progress_at`, falling back to `updated_at` for runs
+/// written before that field existed. The fallback preserves the older, weaker
+/// behavior for old runs rather than declaring them all stale at once.
+///
+/// One definition, shared by the dashboard's STALE badge and by `lev ps --all`,
+/// so what an operator sees and what a harness reconciles against cannot drift.
+pub fn looks_abandoned(
+    meta: &RunMeta,
+    live: Option<&std::collections::HashSet<String>>,
+    now: i64,
+) -> bool {
+    let Some(live) = live else {
+        return false; // no answer from the daemon; assume nothing
+    };
+    if is_terminal_status(&meta.status) || live.contains(&meta.run_id) {
+        return false;
+    }
+    let moved_at = meta.last_progress_at.unwrap_or(meta.updated_at);
+    now.saturating_sub(moved_at) > STALE_AFTER_SECS
+}
+
 /// The outcome of forcing a run to a terminal state on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForceCancelOutcome {
@@ -674,6 +713,129 @@ mod tests {
             // An ordinary id is untouched.
             assert!(run_dir("run-abc123").ends_with("run-abc123"));
         });
+    }
+
+    // ─── looks_abandoned ────────────────────────────────────────────────────
+
+    /// A run claiming to be live on disk, last moved at 1000.
+    fn live_on_disk(run_id: &str) -> RunMeta {
+        let mut meta = RunMeta::new(
+            run_id.to_string(),
+            "coder".to_string(),
+            "/agents/coder".to_string(),
+            "t".to_string(),
+            None,
+            "/w".to_string(),
+            1,
+        );
+        meta.status = RunStatus::Running;
+        meta.updated_at = 1_000;
+        meta.last_progress_at = Some(1_000);
+        meta
+    }
+
+    fn held(ids: &[&str]) -> std::collections::HashSet<String> {
+        ids.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// The shape issue #202 reported: disk says running, the daemon is not
+    /// hosting it, and it has not moved in a long time.
+    #[test]
+    fn a_run_nothing_is_driving_looks_abandoned() {
+        let meta = live_on_disk("r1");
+        assert!(looks_abandoned(
+            &meta,
+            Some(&held(&["other"])),
+            1_000 + STALE_AFTER_SECS + 1
+        ));
+    }
+
+    /// The arm that decides whether a reconciler is safe to run at all. A daemon
+    /// that is restarting gives no answer, which looks exactly like every run
+    /// dying at once; anything that acted on it would cancel a whole factory.
+    #[test]
+    fn no_answer_from_the_daemon_condemns_nothing() {
+        let meta = live_on_disk("r1");
+        assert!(!looks_abandoned(
+            &meta,
+            None,
+            1_000 + STALE_AFTER_SECS * 100
+        ));
+    }
+
+    #[test]
+    fn a_run_the_daemon_is_hosting_is_never_abandoned() {
+        let meta = live_on_disk("r1");
+        assert!(!looks_abandoned(
+            &meta,
+            Some(&held(&["r1"])),
+            1_000 + STALE_AFTER_SECS * 100
+        ));
+    }
+
+    /// A run parked on a long inference has not moved and is still working, so
+    /// the window has to be wider than the persistence heartbeat.
+    #[test]
+    fn a_slow_run_inside_the_window_is_left_alone() {
+        let meta = live_on_disk("r1");
+        assert!(!looks_abandoned(
+            &meta,
+            Some(&held(&[])),
+            1_000 + STALE_AFTER_SECS - 1
+        ));
+    }
+
+    /// A finished run is not abandoned, it is done. The daemon unloads it within
+    /// seconds of it going terminal, so it is absent from the live set for the
+    /// rest of time and would otherwise trip every other check here.
+    #[test]
+    fn a_finished_run_is_not_abandoned() {
+        for status in [
+            RunStatus::Complete,
+            RunStatus::CompleteInteractive,
+            RunStatus::Error,
+            RunStatus::Cancelled,
+        ] {
+            let mut meta = live_on_disk("r1");
+            meta.status = status.clone();
+            assert!(
+                !looks_abandoned(&meta, Some(&held(&[])), 1_000 + STALE_AFTER_SECS * 100),
+                "{status} is finished, not abandoned"
+            );
+        }
+    }
+
+    /// The progress stamp wins over the heartbeat. A wedged run keeps rewriting
+    /// `updated_at` every 30 seconds, so judging on it would never age anything
+    /// out, which is the reason issue #202 could not be fixed from meta.json
+    /// before the stamp existed.
+    #[test]
+    fn a_fresh_heartbeat_does_not_rescue_a_run_that_stopped_moving() {
+        let mut meta = live_on_disk("r1");
+        let now = 1_000 + STALE_AFTER_SECS * 10;
+        meta.updated_at = now; // the heartbeat, still beating
+        meta.last_progress_at = Some(1_000); // but nothing has moved since 1000
+        assert!(looks_abandoned(&meta, Some(&held(&[])), now));
+    }
+
+    /// A run written before the stamp existed falls back to `updated_at`, so old
+    /// runs keep the older, weaker behavior instead of all reading as stale.
+    #[test]
+    fn a_run_without_the_stamp_falls_back_to_updated_at() {
+        let mut meta = live_on_disk("r1");
+        meta.last_progress_at = None;
+        meta.updated_at = 1_000;
+        assert!(looks_abandoned(
+            &meta,
+            Some(&held(&[])),
+            1_000 + STALE_AFTER_SECS + 1
+        ));
+        meta.updated_at = 1_000 + STALE_AFTER_SECS;
+        assert!(!looks_abandoned(
+            &meta,
+            Some(&held(&[])),
+            1_000 + STALE_AFTER_SECS + 1
+        ));
     }
 
     #[test]
