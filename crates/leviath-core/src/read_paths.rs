@@ -941,12 +941,19 @@ mod tests {
     // -- sample paths ------------------------------------------------------
 
     /// The one sample an entry stands for, or `None` when none could be built.
-    fn sample(entry: &str, workdir: &str, home: Option<&str>) -> Option<String> {
-        set(&[entry], workdir, home, false).entries()[0]
-            .sample_path()
-            .map(|p| p.to_string_lossy().into_owned())
+    fn sample_path_of(entry: &str, workdir: &str, home: Option<&str>) -> Option<PathBuf> {
+        set(&[entry], workdir, home, false).entries()[0].sample_path()
     }
 
+    /// The same, as a string, for the pattern entries whose samples are built
+    /// from `/`-separated text on every platform.
+    fn sample(entry: &str, workdir: &str, home: Option<&str>) -> Option<String> {
+        sample_path_of(entry, workdir, home).map(|p| p.to_string_lossy().into_owned())
+    }
+
+    /// An exact entry compiles to a `PathBuf`, so a tilde or relative entry is
+    /// joined with the platform separator. Compared as paths rather than as
+    /// strings for that reason: `/home/me\docs` on Windows is the same answer.
     #[test]
     fn an_exact_entry_samples_as_its_own_root() {
         assert_eq!(
@@ -954,13 +961,13 @@ mod tests {
             Some("/data/runs")
         );
         assert_eq!(
-            sample("~/docs", "/w", Some("/home/me")).as_deref(),
-            Some("/home/me/docs")
+            sample_path_of("~/docs", "/w", Some("/home/me")),
+            Some(Path::new("/home/me").join("docs"))
         );
         // A relative entry samples as the workdir-resolved path it compiled to.
         assert_eq!(
-            sample("../shared", "/w/run", None).as_deref(),
-            Some("/w/run/../shared")
+            sample_path_of("../shared", "/w/run", None),
+            Some(Path::new("/w/run").join("../shared"))
         );
     }
 
