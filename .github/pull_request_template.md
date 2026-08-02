@@ -15,3 +15,5 @@
 - [ ] `cargo test --workspace` and `cargo clippy --workspace` pass locally (the pre-commit hook enforces this)
 - [ ] New code is fully covered — CI gates at 100% lines/regions/functions with no opt-out
 - [ ] Docs updated if user-facing behavior changed (`README.md`, `docs/content/`)
+- [ ] `CHANGELOG.md` updated under `## Unreleased` if this is user-visible
+- [ ] Version bumped only if this PR is meant to ship — merging a bump cuts an alpha release (see [CONTRIBUTING](../CONTRIBUTING.md#cutting-a-release))

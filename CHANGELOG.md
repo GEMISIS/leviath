@@ -7,7 +7,9 @@ and the `lev` binary.
 Release binaries ship through the alpha, beta, and stable channels described
 in [the release docs](https://leviath.dev/docs/releases); each versioned
 GitHub release also carries auto-generated notes listing the merged pull
-requests since the previous version.
+requests since the previous version. A channel publishes only when the version
+below it has moved, so the headings here and the releases on GitHub are the
+same list.
 
 ## Unreleased
 

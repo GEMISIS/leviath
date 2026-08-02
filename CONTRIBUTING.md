@@ -94,6 +94,31 @@ cargo llvm-cov --package <crate> --lib --html --open   # browsable per-crate rep
 
 > Branch coverage isn't collected: `cargo llvm-cov --branch` reliably SIGSEGVs inside LLVM's own coverage-mapping code ([open upstream bug](https://github.com/llvm/llvm-project/issues/119558)). See the doc comment atop `xtask/src/coverage.rs` for the full investigation.
 
+## Cutting a release
+
+Releases are triggered by a version bump, not by a schedule. Merging a bump to
+`main` is what puts a build in front of users, so it is a deliberate, separate
+commit rather than something that rides along with a feature.
+
+Everything ships in lockstep — all `leviath-*` crates plus the `lev` binary
+carry one version — so a bump is three edits:
+
+1. `[workspace.package] version` in the root `Cargo.toml`.
+2. The eleven intra-workspace `version = "…"` pins in `[workspace.dependencies]`
+   just below it. `cargo publish` refuses a path dependency without a version,
+   and refuses one that disagrees with what is on crates.io, so these have to
+   move together with the line above.
+3. `cargo update --workspace` to bring `Cargo.lock` along. CI fails on a
+   lockfile that disagrees with the manifests.
+
+Then move `## Unreleased` in `CHANGELOG.md` under a `## X.Y.Z - YYYY-MM-DD`
+heading and open a fresh empty `## Unreleased` above it.
+
+Merging that fires the alpha release for the bump commit; beta promotes it the
+following Monday and stable the Thursday after. Channels with nothing new to
+publish skip in seconds. See
+[Releases and channels](https://leviath.dev/docs/releases) for the full picture.
+
 ## Regenerating the workflow diagrams
 
 The agent workflow SVGs in `docs/assets/agents/` are rendered from the Mermaid sources in `docs/assets/agents/src/`. See `docs/assets/agents/src/README.md` for the render command and theme configs. If you change an agent's stage graph in `crates/leviath-cli/agents/<name>/agent.leviath`, update its `.mmd` source and re-render both the light and dark variants.

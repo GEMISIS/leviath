@@ -15,16 +15,37 @@ through both earlier channels.
 
 | Channel | Cadence | GitHub release tag | What it is |
 |---|---|---|---|
-| alpha | nightly | `alpha` (rolling) | Last night's `main`, fresh from CI |
-| beta | weekly (Monday) | `beta` (rolling) | The alpha build that survived a week of nightlies |
+| alpha | on a version bump, checked nightly | `alpha` (rolling) | The commit that bumped the version, fresh from CI |
+| beta | weekly (Monday) | `beta` (rolling) | The alpha build that survived a week |
 | stable | weekly (Thursday, approval-gated) | `latest` (rolling) + `vX.Y.Z` (immutable) | The promoted beta |
+
+## What starts a release
+
+A version bump does. Nothing else. Bumping `[workspace.package] version` in
+the root `Cargo.toml` and merging that to `main` is the decision to ship, and
+the commit carrying the bump is the one that gets built.
+
+Alpha picks it up as soon as the merge lands, and re-checks every night in case
+it missed one. Beta and stable stay on their weekly cadence, but each one asks
+the same question before it does anything: is the version at the build I would
+publish different from the version at the build I last published? When the
+answer is no, the run finishes in seconds having touched nothing. A quiet
+Monday means there was nothing new to promote, not that something failed.
+
+So a bump merged on Tuesday is an alpha that day, a beta the following Monday,
+and stable the Thursday after that. A week with no bump publishes nothing on
+any channel.
 
 Rolling tags (`alpha`, `beta`, `latest`) are recreated on every publish and
 always point at the current build for that channel. Each stable deploy also
-cuts an immutable versioned release; if the version was not bumped since the
-last deploy, the tag gets a date suffix (`v0.1.0+20260731`) so history is
-never overwritten. Release titles follow the same scheme: `Leviath
-v0.1.0-Alpha`, `Leviath v0.1.0-Beta`, and `Leviath v0.1.0` for stable.
+cuts an immutable versioned release. Release titles follow the same scheme:
+`Leviath v0.1.2-Alpha`, `Leviath v0.1.2-Beta`, and `Leviath v0.1.2` for stable.
+
+Maintainers can re-cut a channel without a bump - to recover from an
+infrastructure failure, say - by running the workflow by hand with its `force`
+input. That is the only path that can land on a version already released, and
+the versioned tag gets a date suffix (`v0.1.2+20260802`) when it does, so an
+immutable tag is never moved.
 
 ## Installing a specific channel
 
