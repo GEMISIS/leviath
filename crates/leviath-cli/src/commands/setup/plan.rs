@@ -151,6 +151,12 @@ pub fn changes(before: &Config, plan: &SetupPlan) -> Vec<String> {
         Some(&before.limits.finished_retention_secs),
         Some(&after.limits.finished_retention_secs),
     );
+    push_if_changed(
+        &mut out,
+        "wedge timeout (seconds)",
+        Some(&before.limits.wedge_timeout_secs),
+        Some(&after.limits.wedge_timeout_secs),
+    );
 
     let added = after
         .mcp_servers

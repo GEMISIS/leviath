@@ -166,6 +166,14 @@ pub fn build_host(
         .insert_resource(leviath_runtime::pipeline::StallTimeout(
             config.limits.stall_timeout_secs,
         ));
+    // How long a run may sit in a state nothing can reach at all before the
+    // watchdog fails it and releases what it was holding (issue #202). Off
+    // unless the operator sets it.
+    world
+        .world_mut()
+        .insert_resource(leviath_runtime::pipeline::WedgeTimeout(
+            config.limits.wedge_timeout_secs,
+        ));
     // Share the hub with the tick loop so a blocked agent's open prompt is
     // reflected into its status (Active ↔ Waiting) for the dashboard to surface.
     world.insert_interaction_hub(hub.clone());

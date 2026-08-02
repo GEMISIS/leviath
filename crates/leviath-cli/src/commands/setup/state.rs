@@ -907,6 +907,11 @@ fn limits_fields(config: &Config) -> Vec<Field> {
             help: "Keep a run in `lev ps` this long after it ends, so a script polling on an interval sees how it ended. 0 drops it at once.",
             value: FieldValue::Number(Some(config.limits.finished_retention_secs)),
         },
+        Field {
+            label: "Wedge timeout (seconds)",
+            help: "Fail a run nothing in the engine can reach any more. 0 is off; 300 is a sensible value.",
+            value: FieldValue::Number(Some(config.limits.wedge_timeout_secs)),
+        },
     ]
 }
 
@@ -946,6 +951,11 @@ fn apply_limits_fields(config: &mut Config, fields: &[Field]) {
             (7, FieldValue::Number(n)) => {
                 config.limits.finished_retention_secs =
                     n.unwrap_or(Config::default().limits.finished_retention_secs)
+            }
+            // Same rule once more, and here the default is itself 0 (off).
+            (8, FieldValue::Number(n)) => {
+                config.limits.wedge_timeout_secs =
+                    n.unwrap_or(Config::default().limits.wedge_timeout_secs)
             }
             _ => {}
         }
@@ -2216,6 +2226,54 @@ pub(super) mod tests {
         assert!(config.limits.default_max_iterations.is_none());
         assert!(config.limits.exact_token_counting);
         assert!(!config.batch_tool_hint);
+    }
+
+    /// The four timing limits share one rule: an explicit number is stored,
+    /// including `0` (which means "never" for each of them), while leaving a
+    /// field blank keeps the shipped default rather than disabling anything.
+    #[test]
+    fn the_watchdog_limits_store_zero_and_keep_the_default_when_blank() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = test_wizard(dir.path());
+        wizard.enter(Step::Limits);
+        wizard.limits[5].value = FieldValue::Number(Some(0));
+        wizard.limits[6].value = FieldValue::Number(Some(0));
+        wizard.limits[7].value = FieldValue::Number(Some(0));
+        wizard.limits[8].value = FieldValue::Number(Some(300));
+
+        let config = wizard.build_config();
+
+        assert_eq!(config.limits.stall_timeout_secs, 0);
+        assert_eq!(config.limits.dead_cycles_before_relief, 0);
+        assert_eq!(config.limits.finished_retention_secs, 0);
+        assert_eq!(config.limits.wedge_timeout_secs, 300);
+
+        let mut wizard = test_wizard(dir.path());
+        wizard.enter(Step::Limits);
+        wizard.limits[5].value = FieldValue::Number(None);
+        wizard.limits[6].value = FieldValue::Number(None);
+        wizard.limits[7].value = FieldValue::Number(None);
+        wizard.limits[8].value = FieldValue::Number(None);
+
+        let config = wizard.build_config();
+
+        let default = Config::default();
+        assert_eq!(
+            config.limits.stall_timeout_secs,
+            default.limits.stall_timeout_secs
+        );
+        assert_eq!(
+            config.limits.dead_cycles_before_relief,
+            default.limits.dead_cycles_before_relief
+        );
+        assert_eq!(
+            config.limits.finished_retention_secs,
+            default.limits.finished_retention_secs
+        );
+        assert_eq!(
+            config.limits.wedge_timeout_secs,
+            default.limits.wedge_timeout_secs
+        );
     }
 
     #[test]

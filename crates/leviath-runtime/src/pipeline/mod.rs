@@ -54,8 +54,15 @@ mod resolve;
 pub use resolve::*;
 mod stall;
 pub use stall::*;
+mod wedge;
+pub use wedge::*;
 
 // ─── Phase marker components (an agent is in exactly one) ────────────────────
+//
+// A marker's presence is a claim that some system has this agent queued, which
+// is what keeps it reachable. Anything new here must also be added to
+// [`Unreachable`], or the wedge watchdog will read an agent resting on it as one
+// nothing can drive.
 
 /// The agent is active and ready to build a request and (permits allowing)
 /// dispatch inference.
