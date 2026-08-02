@@ -29,6 +29,7 @@ model = { models = [
   { provider = "openai",    model = "gpt-5.4-mini" },
 ] }
 available_tools = ["read_file", "list_dir"]
+required_tools = []                # human-in-the-loop tools kept in an unattended run
 max_iterations = 15
 system_prompt = """Understand the task and produce a short implementation plan."""
 
@@ -110,6 +111,10 @@ complaint and is then read by nothing, so the stages carry on using their own de
 that the block was ignored. A stage that omits `model` entirely does not fail either: it runs on
 whichever provider your config makes the default, which is rarely what the author had in mind and is
 invisible until the run picks the wrong model. `lev validate` reports both.
+`available_tools` is what the stage may call. `required_tools` is the small exception to the
+unattended cut: a `--yolo` run drops every tool that blocks on a person, and a stage names here the
+ones it wants kept anyway. Every entry must also be in `available_tools`. See
+[human-in-the-loop tools](/docs/tools#these-tools-need-someone-there).
 
 ## Context regions
 

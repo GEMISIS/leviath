@@ -51,14 +51,35 @@ call until the answer comes back, then continues with it:
 - `present_for_review`: shows a markdown document (`title` + `markdown`) for review and collects optional feedback.
 
 > [!NOTE]
-> Under an unattended run (`--yolo`) nobody is watching, so these answer themselves rather than
-> parking the run forever: a confirmation is approved, an edit submits the document unchanged, a
-> review is acknowledged, and a free-text or choice question is told no one answered so the model
-> decides for itself; a choice is never picked blind.
+> Under an unattended run (`--yolo`) nobody is watching, so these five tools are not advertised to
+> the model at all. It never sees them and decides for itself, instead of spending a round trip to
+> be told no one is there. A call that arrives anyway (a model repeating itself out of its own
+> context) is refused the way any unoffered tool is.
+>
+> A stage that genuinely needs a person keeps the tools it names in
+> [`required_tools`](/docs/tools#these-tools-need-someone-there).
 >
 > Unattended applies to the whole run tree, not just the agent you launched: sub-agents and
 > fan-out workers inherit it, and it survives a daemon restart. Otherwise a child could stop
 > on a prompt nobody was watching for and take its parent down with it.
+
+## When nobody answers
+
+Every prompt on this page waits on a person, and until Leviath 0.1.2 it waited indefinitely - a run
+whose operator had gone home sat in `WaitingInput` holding its slot until the daemon restarted.
+
+`[limits] interaction_timeout_secs` puts a deadline on that wait (one hour by default; `0` waits
+indefinitely, the old behaviour). When it passes, the prompt resolves exactly as cancelling it
+would:
+
+| Prompt | What an expiry means |
+|---|---|
+| Tool approval | Denied. A timeout is never read as consent. |
+| Taint gate | Denied. |
+| `ask_user_*` | The model is told no answer came, and carries on. |
+| Interaction point | Proceeds with no user text, as a cancelled checkpoint does. |
+
+The deadline is read once when the daemon starts, so changing it needs a daemon restart.
 
 ## Tool approval
 
@@ -98,6 +119,7 @@ mode = "interactive_points"
 name     = "plan_approval"
 prompt   = "Approve the plan?"
 required = true
+unattended = "ask"                    # ask | auto_approve (default)
 style    = "multiple_choice"          # free_text | multiple_choice | confirm
 options  = ["Approve", "Revise", "Edit", "Abort"]
 abort_options = ["Abort"]
@@ -123,6 +145,14 @@ exactly first, then with dash/whitespace normalization:
 point's authoritative document. Each time the point is presented, the current text (the produced
 output, or the user's direct edit) replaces that region, so revisions and downstream stages build
 on the current version rather than regenerating from the task.
+
+`unattended` decides what the point does in a `--yolo` run. The default, `auto_approve`, resolves it
+as approved without opening a prompt: nobody is watching, and a checkpoint that waited would park
+the run. Set it to `ask` for a gate whose whole purpose is a human decision - a plan signed off
+before any code is written - and the prompt opens even under `--yolo`. The shipped
+`software-engineer` agent does exactly that for its plan approval. Give a run like that an
+[`interaction_timeout_secs`](/docs/configuration#limits), so an unanswered gate releases on its own
+terms instead of waiting for ever.
 
 > [!WARNING]
 > The revise and edit loops are bounded: after 4 revision rounds at a single point (`MAX_REVISION_ROUNDS`),

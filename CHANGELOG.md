@@ -154,6 +154,33 @@ requests since the previous version.
   name the model calls, so the entry was never consulted. And
   `software-engineer`'s review stage had no `max_iterations`.
 - `POST /api/blueprints/validate` returns a `warnings` list alongside `errors`.
+- An unattended run no longer gets the tools that wait on a person.
+  `ask_user_text`, `ask_user_choice`, `ask_user_confirm`, `present_for_review`,
+  and `edit_document` do one thing: open a prompt and block. Under `--yolo`
+  nobody answers, so a call to one used to park the agent in `WaitingInput`
+  until the daemon restarted; six production runs sat there for three to five
+  hours each, holding their slots. They are now dropped from the tool set the
+  model is offered, per stage, before the first inference. The model never sees
+  them and decides for itself instead of spending a round trip to be told nobody
+  is there.
+- A stage that genuinely needs a person opts out with `required_tools`, listing
+  the human tools it keeps even when the run is unattended. Entries must also
+  appear in `available_tools`, and a manifest where one does not is rejected
+  rather than quietly ignored.
+- Interaction points gained the same escape hatch. `unattended = "ask"` on a
+  point holds the run for a real answer under `--yolo` instead of approving
+  itself. The bundled `software-engineer` uses it for plan approval: everything
+  after that gate writes code, so waving it through unread is the one thing that
+  agent should not do on its own.
+- New `[limits] interaction_timeout_secs`, one hour by default, puts a deadline
+  on any prompt that waits on a person: `ask_user_*`, tool approvals, taint
+  gates, and interaction points alike. There had never been one. Expiry resolves
+  the prompt exactly as cancelling it does, so an approval and a taint gate both
+  deny, the model is told no answer came, and a checkpoint proceeds with no user
+  text. A timeout is never read as consent. Set it to `0` to wait indefinitely.
+- `lev validate` warns when an autonomous stage offers one of these tools
+  without opting out, naming the stage and the tools, since that combination is
+  the shape the whole problem took.
 - A run is no longer reported as having produced nothing when it never had a
   way to produce anything. `empty_output` in `meta.json` has meant "modified no
   files" since it was added for coding agents, so a router that delegates to
