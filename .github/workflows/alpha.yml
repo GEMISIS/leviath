@@ -266,18 +266,35 @@ jobs:
           # For the release title. Same line-anchored extraction prod.yml uses.
           echo "version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')" >> $GITHUB_OUTPUT
 
-      - name: Download all artifacts
+      # Only the platform archives the `build` matrix uploaded. Unfiltered,
+      # this pulls every artifact in the run - and since the gate became a call
+      # to ci.yml, that includes the 33 `coverage-html-*` reports the coverage
+      # matrix uploads. `Prepare release files` below expects each directory to
+      # hold one file named after it, so a coverage directory made it fail.
+      - name: Download the platform archives
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts/
+          pattern: leviath-*
 
       - name: Prepare release files
         run: |
+          set -euo pipefail
           mkdir -p release/
           for dir in artifacts/*/; do
             name=$(basename "$dir")
             cp "$dir/$name" "release/$name"
           done
+          # A pattern that matches nothing leaves an empty release/, and a
+          # channel release carrying no binaries is worse than no release at
+          # all - the install script and both taps would resolve it and find
+          # nothing to download. Count what arrived against the build matrix.
+          found=$(find release -type f | wc -l)
+          if [ "$found" -ne 5 ]; then
+            echo "::error::expected 5 platform archives, found $found:"
+            ls -la release/
+            exit 1
+          fi
           # Generate checksums
           cd release && sha256sum * > SHA256SUMS
           # Write the commit SHA for downstream promotion
