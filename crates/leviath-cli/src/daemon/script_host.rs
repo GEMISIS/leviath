@@ -745,6 +745,11 @@ impl ScriptIo for RealScriptIo {
 }
 
 /// The system shell + command flag for the current platform.
+///
+/// Deliberately `/bin/sh` on Unix rather than the user's `$SHELL`, unlike the
+/// `shell` tool's `BuiltinTools::detect_shell`: a Rhai tool script is authored
+/// once and run on every machine, so it gets the POSIX shell it can count on
+/// instead of whatever interactive shell the operator happens to prefer.
 pub(crate) fn default_shell() -> (&'static str, &'static str) {
     #[cfg(windows)]
     {

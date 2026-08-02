@@ -90,6 +90,29 @@ mod tests {
     }
 
     #[test]
+    fn the_shell_tool_advertises_the_shell_this_host_resolved() {
+        // Whichever shell the host has, the description has to name *it*: a
+        // model that reads "cmd" and gets zsh (or the reverse) writes the wrong
+        // commands, which is exactly the failure this replaced.
+        let dir = tempfile::tempdir().unwrap();
+        let defs = make_tools(dir.path()).tool_defs();
+        let shell = defs
+            .iter()
+            .find(|t| t.name == "shell")
+            .expect("shell is advertised on a desktop capability set");
+        let (resolved, _) = BuiltinTools::detect_shell();
+        assert!(
+            shell.description.contains(resolved),
+            "description {:?} does not name the resolved shell {resolved:?}",
+            shell.description
+        );
+
+        // Both platforms' wordings, without needing to run on both.
+        assert!(crate::defs::shell_tool_description("cmd.exe").contains("`cmd.exe`"));
+        assert!(crate::defs::shell_tool_description("/bin/zsh").contains("`/bin/zsh`"));
+    }
+
+    #[test]
     fn subagent_predicate_covers_the_five_names_and_nothing_else() {
         for name in SUBAGENT_TOOLS {
             assert!(is_subagent_tool(name));

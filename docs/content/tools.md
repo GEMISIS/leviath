@@ -34,10 +34,33 @@ Read and modify files relative to the agent's working directory.
 
 | Tool | Purpose | Arguments |
 | --- | --- | --- |
-| `shell` | Run a shell command in the working directory using the system shell (bash/zsh on Unix, cmd on Windows). Has a 60-second timeout. | `command` |
+| `shell` | Run a shell command in the working directory using the system shell. Has a 60-second timeout. | `command` |
 
 `bash` is an accepted alias for `shell`: a stage's `available_tools` may name either, and both
 resolve to the same tool advertised to the model.
+
+### Which shell you get
+
+Leviath resolves the shell per platform, and tells the model which one it resolved instead of
+leaving it to guess:
+
+| Platform | Shell |
+| --- | --- |
+| Windows | `cmd.exe /C` |
+| Unix | `$SHELL` when it exists and is a `sh`/`bash`/`zsh`, else the first of `/bin/bash`, `/usr/bin/bash`, `/bin/zsh`, `/usr/bin/zsh`, `/bin/sh` |
+
+The resolved shell is named in the `shell` tool's own description, so a model on Windows reads
+`cmd.exe` rather than a list of every platform's shell. On top of that, a stage that advertises the
+shell tool carries a short system block when the platform warrants one. Today only Windows does:
+it says commands run through `cmd.exe` rather than a POSIX shell, and gives the PowerShell stand-ins
+for `cat`, `grep`, `ls`, and `wc -l`. On Linux and macOS nothing is added.
+
+Turn it off with `shell_hint = false`, globally in `config.toml` or per agent or stage in a
+blueprint. See [Configuration](/docs/configuration#system-prompt-hints).
+
+> [!NOTE]
+> [Rhai tool scripts](/docs/rhai-tools) are a separate path: their `shell()` host function always
+> uses `/bin/sh` on Unix, never `$SHELL`, because a script is authored once and runs everywhere.
 
 > [!WARNING]
 > `shell` requires the platform's process-spawn capability. On platforms that don't provide it, the
