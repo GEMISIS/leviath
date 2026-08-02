@@ -193,6 +193,36 @@ pub fn filter_tools_by_available(all: &[Tool], available: &[String]) -> Vec<Tool
         .collect()
 }
 
+/// The stage's Layer-1 tool set for a run that may have nobody watching.
+///
+/// Same filter as [`filter_tools_by_available`], then - for an unattended run -
+/// minus every tool whose only outcome is a prompt for a person
+/// ([`leviath_tools::HUMAN_INTERACTION_TOOLS`]), unless the stage named it in
+/// `required_tools`.
+///
+/// Dropping the definition rather than auto-answering the call is what makes the
+/// difference visible to the model: it never sees the tool, so it decides for
+/// itself instead of spending a round trip to be told nobody is there. A call
+/// that arrives anyway (a model repeating itself from context) meets the ordinary
+/// unoffered-tool refusal.
+pub fn filter_tools_for_stage(
+    all: &[Tool],
+    available: &[String],
+    required: &[String],
+    unattended: bool,
+) -> Vec<Tool> {
+    let mut tools = filter_tools_by_available(all, available);
+    if unattended {
+        tools.retain(|t| {
+            !leviath_tools::is_human_interaction_tool(&t.name)
+                || required
+                    .iter()
+                    .any(|n| leviath_tools::canonical_tool_name(n) == t.name)
+        });
+    }
+    tools
+}
+
 /// Every provider a stage could have used, in the order they were tried, for
 /// the error message when none of them is configured.
 ///
@@ -240,12 +270,17 @@ pub fn providers_tried(
 /// spawned anyway: `Active`, iteration 0, and unable to take a single turn for
 /// as long as the host lived (issue #190). Catching it here turns a silently
 /// wedged run into an error the caller sees.
+///
+/// `unattended` is the run's `--yolo` setting: it decides whether a stage's
+/// human-in-the-loop tools are advertised at all (see
+/// [`filter_tools_for_stage`]).
 pub fn resolve_stages(
     blueprint: &Blueprint,
     model_override: Option<&str>,
     defaults: &ModelDefaults,
     registry: &ProviderRegistry,
     all_tool_defs: &[Tool],
+    unattended: bool,
 ) -> Result<Vec<ResolvedStage>, String> {
     blueprint
         .stages
@@ -267,8 +302,14 @@ pub fn resolve_stages(
             }
             // Empty `available_tools` exposes no tools; otherwise filter the full
             // set by name (alias-resolved). A name matching nothing (a typo, or an
-            // MCP tool whose server isn't installed) is simply omitted.
-            let tools = filter_tools_by_available(all_tool_defs, &stage.available_tools);
+            // MCP tool whose server isn't installed) is simply omitted. An
+            // unattended run also loses the tools that block on a person.
+            let tools = filter_tools_for_stage(
+                all_tool_defs,
+                &stage.available_tools,
+                &stage.required_tools,
+                unattended,
+            );
             Ok(ResolvedStage {
                 provider_name: head.provider,
                 model: head.model,
@@ -485,6 +526,7 @@ mod tests {
             &ModelDefaults::default(),
             &registry_with(&["anthropic"]),
             &tools,
+            false,
         )
         .expect("anthropic is registered");
         assert!(resolved[0].tools.is_empty());
@@ -505,6 +547,7 @@ mod tests {
             &ModelDefaults::default(),
             &registry_with(&[]),
             &[],
+            false,
         )
         .expect_err("no provider is configured");
 
@@ -528,6 +571,7 @@ mod tests {
             &ModelDefaults::default(),
             &registry_with(&["anthropic"]),
             &[],
+            false,
         )
         .expect_err("the override names a provider that isn't registered");
 
@@ -594,6 +638,7 @@ mod tests {
             &ModelDefaults::default(),
             &registry_with(&["anthropic"]),
             &tools,
+            false,
         )
         .expect("anthropic is registered");
         let selected: Vec<&str> = resolved[0].tools.iter().map(|t| t.name.as_str()).collect();
@@ -630,6 +675,38 @@ mod tests {
                 ("anthropic", "sonnet"),
                 ("openai", "gpt"),
             ]
+        );
+    }
+
+    // ─── the unattended cut (issue #204) ─────────────────────────────────────
+
+    /// A stage's tool defs for the three tools every one of these tests uses.
+    fn ask_and_read_defs() -> Vec<Tool> {
+        ["read_file", "ask_user_text", "ask_user_choice"]
+            .iter()
+            .map(|n| Tool {
+                name: n.to_string(),
+                description: String::new(),
+                parameters: serde_json::Value::Null,
+            })
+            .collect()
+    }
+
+    fn names(tools: &[Tool]) -> Vec<&str> {
+        tools.iter().map(|t| t.name.as_str()).collect()
+    }
+
+    #[test]
+    fn an_attended_run_keeps_every_tool_the_stage_lists() {
+        let available = vec![
+            "read_file".to_string(),
+            "ask_user_text".to_string(),
+            "ask_user_choice".to_string(),
+        ];
+        let tools = filter_tools_for_stage(&ask_and_read_defs(), &available, &[], false);
+        assert_eq!(
+            names(&tools),
+            vec!["read_file", "ask_user_text", "ask_user_choice"]
         );
     }
 
@@ -750,9 +827,95 @@ mod tests {
         let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
         let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
         let registry = registry_with(&["openrouter", "anthropic"]);
-        let resolved = resolve_stages(&bp, None, &ModelDefaults::default(), &registry, &[])
+        let resolved = resolve_stages(&bp, None, &ModelDefaults::default(), &registry, &[], false)
             .expect("both providers are registered");
         assert_eq!(resolved[0].provider_name, "openrouter");
         assert_eq!(pairs(&resolved[0].fallbacks), vec![("anthropic", "sonnet")]);
+    }
+
+    #[test]
+    fn an_unattended_run_loses_the_tools_that_wait_on_a_person() {
+        // The whole point of issue #204: with nobody watching, a call to
+        // `ask_user_text` can only park the agent, so the model never sees it.
+        let available = vec![
+            "read_file".to_string(),
+            "ask_user_text".to_string(),
+            "ask_user_choice".to_string(),
+        ];
+        let tools = filter_tools_for_stage(&ask_and_read_defs(), &available, &[], true);
+        assert_eq!(names(&tools), vec!["read_file"]);
+    }
+
+    #[test]
+    fn required_tools_survive_an_unattended_run() {
+        // The opt-out: a stage that says it genuinely needs a person keeps the
+        // named tool, and only that one.
+        let available = vec![
+            "read_file".to_string(),
+            "ask_user_text".to_string(),
+            "ask_user_choice".to_string(),
+        ];
+        let required = vec!["ask_user_text".to_string()];
+        let tools = filter_tools_for_stage(&ask_and_read_defs(), &available, &required, true);
+        assert_eq!(names(&tools), vec!["read_file", "ask_user_text"]);
+    }
+
+    #[test]
+    fn a_required_tool_the_stage_never_offered_adds_nothing() {
+        // `required_tools` narrows the unattended cut; it is not a second way to
+        // grant a tool. (`Stage::validate` rejects this combination outright -
+        // this is the belt to that pair of braces.)
+        let available = vec!["read_file".to_string()];
+        let required = vec!["ask_user_text".to_string()];
+        let tools = filter_tools_for_stage(&ask_and_read_defs(), &available, &required, true);
+        assert_eq!(names(&tools), vec!["read_file"]);
+    }
+
+    #[test]
+    fn resolve_stages_applies_the_unattended_cut_per_stage() {
+        // Two stages, one opting out, resolved in a single unattended run: the
+        // cut is per stage, not per run.
+        let mut plan =
+            leviath_core::Stage::new("plan".to_string(), model_cfg(vec![("anthropic", "m")]));
+        plan.available_tools = vec!["read_file".to_string(), "ask_user_text".to_string()];
+        plan.required_tools = vec!["ask_user_text".to_string()];
+        let mut build =
+            leviath_core::Stage::new("build".to_string(), model_cfg(vec![("anthropic", "m")]));
+        build.available_tools = vec!["read_file".to_string(), "ask_user_text".to_string()];
+        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![plan, build], layout);
+
+        let resolved = resolve_stages(
+            &bp,
+            None,
+            &ModelDefaults::default(),
+            &registry_with(&["anthropic"]),
+            &ask_and_read_defs(),
+            true,
+        )
+        .expect("anthropic is registered");
+
+        assert_eq!(
+            names(&resolved[0].tools),
+            vec!["read_file", "ask_user_text"]
+        );
+        assert_eq!(names(&resolved[1].tools), vec!["read_file"]);
+    }
+
+    #[test]
+    fn the_unattended_cut_resolves_aliases_on_both_sides() {
+        // `edit_document` under an alias would be a hole in the cut, and a
+        // `required_tools` entry written as an alias would be a hole in the
+        // opt-out. Neither is: both sides canonicalise. `bash`/`shell` is the
+        // only alias pair that exists, so it stands in for the mechanism - a
+        // non-human tool is never cut whatever it is called.
+        let defs = vec![Tool {
+            name: "shell".to_string(),
+            description: String::new(),
+            parameters: serde_json::Value::Null,
+        }];
+        let available = vec!["bash".to_string()];
+        let tools = filter_tools_for_stage(&defs, &available, &[], true);
+        assert_eq!(names(&tools), vec!["shell"]);
     }
 }

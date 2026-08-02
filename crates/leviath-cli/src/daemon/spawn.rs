@@ -834,6 +834,7 @@ fn build_agent_inner(
             &model_defaults(config),
             registry,
             &all_tool_defs,
+            args.yolo,
         )?
     };
 

@@ -95,6 +95,7 @@ impl EmbedSpawner {
                 &self.defaults,
                 registry,
                 &all_tool_defs,
+                args.yolo,
             )?
         };
 

@@ -2144,6 +2144,7 @@ fn nudge_bp(reviewed: bool) -> AgentBlueprint {
             name: "plan_approval".to_string(),
             prompt: "Review the plan above.".to_string(),
             required: true,
+            unattended: leviath_core::blueprint::UnattendedPolicy::AutoApprove,
             style: leviath_core::blueprint::InteractionStyle::MultipleChoice,
             options: vec!["Approve".to_string()],
             directives: std::collections::HashMap::new(),

@@ -2011,6 +2011,7 @@ mod tests {
                 name: "plan_approval".to_string(),
                 prompt: "Approve?".to_string(),
                 required: true,
+                unattended: leviath_core::blueprint::UnattendedPolicy::AutoApprove,
                 style: InteractionStyle::MultipleChoice,
                 options: vec!["Approve".to_string(), "Abort".to_string()],
                 directives: std::collections::HashMap::new(),

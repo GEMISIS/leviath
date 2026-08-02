@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bevy_ecs::prelude::*;
-use leviath_core::blueprint::{InteractionPoint, InteractionStyle, StageMode};
+use leviath_core::blueprint::{InteractionPoint, InteractionStyle, StageMode, UnattendedPolicy};
 use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
@@ -493,7 +493,13 @@ pub fn dispatch_interaction_point(
         // An unattended run (`--yolo`) approves the checkpoint instead of
         // opening a prompt nobody will answer. The document was published to its
         // region above, so what was approved is still on the record.
-        if auto_approve.is_some() {
+        //
+        // Unless the point declares `unattended = "ask"`: some checkpoints exist
+        // precisely because a person has to look - a plan signed off before any
+        // code is written - and their author would rather the run wait than have
+        // it wave itself through. `[limits] interaction_timeout_secs` is what
+        // keeps that wait from lasting for ever.
+        if auto_approve.is_some() && point.unattended == UnattendedPolicy::AutoApprove {
             tracing::info!(
                 agent = %state.agent_id,
                 point = %point.name,
@@ -709,6 +715,7 @@ mod tests {
             name: name.to_string(),
             prompt: "Choose".to_string(),
             required: true,
+            unattended: UnattendedPolicy::AutoApprove,
             style,
             options: options.iter().map(|s| s.to_string()).collect(),
             directives: HashMap::new(),
@@ -1145,6 +1152,48 @@ mod tests {
             .get_region("plan")
             .unwrap();
         assert_eq!(plan.content[0].content, "the plan");
+    }
+
+    #[tokio::test]
+    async fn dispatch_asks_an_unattended_run_when_the_point_opts_out() {
+        // `unattended = "ask"` is the escape hatch for a checkpoint that exists
+        // precisely because a person has to look - approving a plan unread is
+        // worse than waiting for one. The prompt opens even under `--yolo`.
+        let hub = InteractionHub::new();
+        let (tx, mut rx) = unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(hub.clone());
+        world.insert_resource(InteractionPointStage {
+            outcomes: tx,
+            wake: Arc::new(Notify::new()),
+            runtime: Handle::current(),
+        });
+        let mut point = plan_point();
+        point.unattended = UnattendedPolicy::Ask;
+        let e = world
+            .spawn((
+                agent_state(AgentStatus::Active),
+                blueprint_with(vec![point]),
+                window_with_plan(),
+                StageCursor { index: 0 },
+                infer("the plan"),
+                ReadyForInteractionPoint,
+                crate::components::InteractionAutoApprove,
+            ))
+            .id();
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_interaction_point);
+        s.run(&mut world);
+
+        assert!(world.get::<AwaitingInteractionPoint>(e).is_some());
+        // Nothing was waved through: the run waits on a real prompt.
+        assert!(rx.try_recv().is_err(), "no outcome was published");
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        let pending = hub.pending();
+        assert_eq!(pending.len(), 1, "a person is being asked");
+        assert_eq!(pending[0].1.stage_name, "plan_approval");
     }
 
     #[tokio::test]
