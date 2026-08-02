@@ -9,6 +9,7 @@ pub mod ctl;
 pub mod daemon;
 pub mod daemon_service;
 pub mod dashboard;
+pub mod doctor;
 pub mod list;
 pub mod mcp;
 pub mod models;

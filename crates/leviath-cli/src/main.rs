@@ -94,6 +94,10 @@ impl RiskyExecutors for RealExecutors {
         commands::ctl::respond(&control_client()?, &args).await
     }
 
+    async fn doctor(&self, args: commands::doctor::DoctorArgs) -> anyhow::Result<()> {
+        real_doctor(args).await
+    }
+
     async fn setup(&self, args: commands::setup::SetupArgs) -> anyhow::Result<()> {
         real_setup(args).await
     }
@@ -209,6 +213,30 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
     // to happen (a bad path, a typo'd region) from auto-starting a daemon.
     ensure_daemon_running().await?;
     leviath_cli::daemon::client::send_spawn(&control_client()?, spawn_args).await
+}
+
+/// `lev doctor`: run the wiring checks, starting the daemon first so the fourth
+/// one has something to hand off to.
+///
+/// A daemon that will not start is reported *as* the fourth check failing, not
+/// propagated: the whole point of the command is to say whether the credentials
+/// or the daemon is at fault, and aborting here would answer neither.
+/// `--no-daemon` skips both the auto-start and the check, so a caller who only
+/// wants to test credentials never causes a daemon to exist. The checks
+/// themselves are the tested `commands::doctor::run_checks`; the auto-start and
+/// socket connect are the un-unit-testable slivers kept here.
+async fn real_doctor(args: commands::doctor::DoctorArgs) -> anyhow::Result<()> {
+    use commands::doctor::DaemonTarget;
+    if args.no_daemon {
+        return commands::doctor::execute(args, DaemonTarget::Skip).await;
+    }
+    let started = ensure_daemon_running()
+        .await
+        .and_then(|()| control_client());
+    match started {
+        Ok(client) => commands::doctor::execute(args, DaemonTarget::Client(&client)).await,
+        Err(e) => commands::doctor::execute(args, DaemonTarget::Unavailable(e.to_string())).await,
+    }
 }
 
 /// Ensure a daemon is listening on the control port, auto-starting a detached
