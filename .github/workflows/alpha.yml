@@ -359,6 +359,21 @@ jobs:
           prerelease: true
           files: release/*
 
+      # What the README badge reports for this channel. Published from here
+      # rather than read off the release by shields.io: shields can only ask for
+      # "newest release" or "newest prerelease", and alpha and beta are both
+      # prereleases on rolling tags, so it cannot tell them apart. This job
+      # already knows exactly what it just published.
+      - name: Update the alpha channel badge
+        uses: schneegans/dynamic-badges-action@28b0fa8bdeb46170ac397105ece0c1fe58f68910 # v1.9.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ vars.COVERAGE_GIST_ID }}
+          filename: leviath-channel-alpha.json
+          label: alpha
+          message: ${{ steps.info.outputs.version }}
+          color: orange
+
   docs:
     name: Publish docs (alpha)
     needs: release
@@ -374,11 +389,17 @@ jobs:
 
   # See prod.yml for why the tap has to be told what shipped.
   #
-  # Alpha needs a per-build suffix that plain `X.Y.Z-alpha` cannot give it:
-  # nightly rebuilds carry the same Cargo version for days, so a constant
-  # string would leave every alpha user pinned to their first install until
-  # someone bumped Cargo.toml. The date makes it monotonic, and both Homebrew
-  # and Scoop order `0.1.1-alpha.20260802` after `0.1.1-alpha.20260801`.
+  # This used to append the build date - `0.1.1-alpha.20260802` - because alpha
+  # rebuilt the same source every night, so a constant `0.1.1-alpha` would have
+  # left every alpha user pinned to their first install until someone bumped
+  # Cargo.toml. `check-version` ended that: alpha only republishes when the
+  # workspace version moves, so plain `X.Y.Z-alpha` is already monotonic and
+  # both Homebrew and Scoop order `0.1.2-alpha` before `0.1.3-alpha`.
+  #
+  # The one thing lost with the date: a `force=true` republish of an unchanged
+  # version now writes an identical string and offers no upgrade. That is the
+  # right answer for the case force exists to serve - recovering from an
+  # infrastructure failure, where the source is the same either way.
   bump-tap:
     name: Bump tap manifests (alpha)
     needs: release
@@ -388,11 +409,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           VERSION: ${{ needs.release.outputs.version }}
-          DATE: ${{ needs.release.outputs.date }}
         run: |
           set -euo pipefail
-          jq -nc --arg version "$VERSION-alpha.$DATE" \
+          jq -nc --arg version "$VERSION-alpha" \
             '{event_type:"release-published",
               client_payload:{channel:"alpha", version:$version}}' \
             | gh api repos/GEMISIS/leviath-dist/dispatches --input -
-          echo "Asked leviath-dist to bump the alpha manifests to $VERSION-alpha.$DATE."
+          echo "Asked leviath-dist to bump the alpha manifests to $VERSION-alpha."

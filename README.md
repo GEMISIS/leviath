@@ -13,6 +13,10 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/GEMISIS/leviath/blob/main/LICENSE)
 [![Docs](https://img.shields.io/badge/docs-leviath.dev-8b5cf6)](https://leviath.dev)
 
+[![stable](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-channel-stable.json)](https://github.com/GEMISIS/leviath/releases/latest)
+[![beta](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-channel-beta.json)](https://github.com/GEMISIS/leviath/releases/tag/beta)
+[![alpha](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-channel-alpha.json)](https://github.com/GEMISIS/leviath/releases/tag/alpha)
+
 **[Quick Start](#quick-start) · [Agents](#pre-built-agents) · [Features](#features) · [Dashboard](#dashboard) · [API](#api-server) · [Agent Client Protocol](#agent-client-protocol) · [Comparison](#how-it-compares) · [Why not Leviath](#why-you-might-not-want-leviath) · [Contributing](#contributing)**
 
 </div>
