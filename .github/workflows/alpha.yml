@@ -1,20 +1,122 @@
 name: Alpha (Nightly)
 
 on:
+  # A release is something a maintainer decides, not something a clock
+  # decides. Bumping `[workspace.package] version` and merging that is the
+  # decision; this trigger is how it reaches the channel without waiting for
+  # the next cron. The path filter is only a prefilter - the workspace version
+  # lives nowhere but the root manifest, and `check-version` below is what
+  # actually rules on whether anything ships.
+  push:
+    branches: [main]
+    paths: ['Cargo.toml']
   schedule:
-    # Every day at 2am PST (9am UTC)
+    # Every day at 2am PST (9am UTC). Kept as a backstop: a bump that landed
+    # while Actions was down, or one whose push run was cancelled, still gets
+    # picked up the following morning.
     - cron: '0 9 * * *'
-  workflow_dispatch: # Manual trigger
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Publish even if the version was not bumped
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+
+# A bump merged shortly before 09:00 UTC can put the push run and the cron run
+# in flight at once, and both would read the same pre-bump version off the
+# published alpha and both would publish. Serialising them fixes that without
+# a lock: the queued run starts fresh after the first finishes, re-reads the
+# now-updated alpha release, and skips itself.
+concurrency:
+  group: alpha-release
+  cancel-in-progress: false
 
 # Default to read-only; the release job elevates itself explicitly.
 permissions:
   contents: read
 
 jobs:
+  # Nothing below this job runs unless the workspace version at HEAD differs
+  # from the version the current alpha release was built at. That is the whole
+  # release trigger: a maintainer bumps `[workspace.package] version`, and the
+  # commit carrying that bump is the one that ships.
+  #
+  # The comparison reads the version out of a COMMIT, not out of a stored
+  # string, because every one of these workflows already does exactly that
+  # (beta and prod read `git show <sha>:Cargo.toml` to title their releases)
+  # and the `COMMIT_SHA` asset that names the commit is already published with
+  # every channel. Nothing new to write, nothing new to keep in sync.
+  #
+  # It fails OPEN. A missing release, a missing COMMIT_SHA, a commit that no
+  # longer resolves: any of those means "we cannot prove this was already
+  # released", and the safe answer to that is to publish, not to go quiet.
+  check-version:
+    name: Check for a version bump
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # `git show <alpha sha>:Cargo.toml` needs that commit present, and it
+          # can be many commits behind main by the time this runs.
+          fetch-depth: 0
+      - name: Compare HEAD's version against the published alpha
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/' || true)
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$version' in Cargo.toml is not a valid semver version."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          # One assignment, one write at the end: `skip` appearing twice in
+          # $GITHUB_OUTPUT would leave which value wins up to the runner.
+          skip=false
+
+          if [ "$FORCE" = "true" ]; then
+            echo "force=true: publishing $version regardless of the current alpha."
+          elif ! gh release view alpha --json tagName >/dev/null 2>&1; then
+            echo "No alpha release yet - publishing $version."
+          else
+            gh release download alpha --pattern COMMIT_SHA --dir /tmp/alpha/ 2>/dev/null || true
+            if [ ! -f /tmp/alpha/COMMIT_SHA ]; then
+              echo "The current alpha carries no COMMIT_SHA - cannot compare, publishing $version."
+            else
+              sha=$(cat /tmp/alpha/COMMIT_SHA)
+              # A release asset is writable by anyone who can write a release,
+              # and this value goes straight into `git show`. Pin its shape
+              # first, the same way beta.yml and prod.yml do.
+              if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+                echo "::error::COMMIT_SHA in the alpha release is not a 40-hex commit id."
+                exit 1
+              fi
+              prev=$(git show "$sha:Cargo.toml" 2>/dev/null | grep '^version' | head -1 | sed 's/.*"\(.*\)"/\1/' || true)
+              if [ -z "$prev" ]; then
+                echo "No readable version at $sha - publishing $version."
+              elif [ "$version" = "$prev" ]; then
+                skip=true
+                echo "Alpha already shipped $version. Bump [workspace.package] version to"
+                echo "release again, or re-run this workflow manually with force=true."
+              else
+                echo "Version moved $prev -> $version. Publishing."
+              fi
+            fi
+          fi
+
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+
   # The gate is CI itself, not a restatement of it. This job used to spell out
   # its own build + test + clippy, and the two definitions drifted: it linted
   # all three OSes while ci.yml's clippy job linted only ubuntu, so a
@@ -25,8 +127,14 @@ jobs:
   # Two jobs inside ci.yml self-handle being called from here: `guard-main-rs`
   # is `if: github.event_name == 'pull_request'`, and the badge steps carry a
   # `github.workflow == 'CI'` guard.
+  #
+  # Only `gate` needs the skip condition spelled out: `build` needs `gate`,
+  # `release` needs `build`, and `docs`/`bump-tap` need `release`, so a skipped
+  # gate takes the whole chain with it.
   gate:
     name: Gate
+    needs: check-version
+    if: needs.check-version.outputs.skip != 'true'
     uses: ./.github/workflows/ci.yml
     secrets: inherit
 

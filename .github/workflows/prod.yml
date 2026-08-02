@@ -4,7 +4,12 @@ on:
   schedule:
     # Every Thursday at 9am PST (4pm UTC)
     - cron: '0 16 * * 4'
-  workflow_dispatch: # Manual trigger
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Deploy even if the version was not bumped
+        type: boolean
+        default: false
 
 # Default to read-only; only the deploy job needs to write releases.
 permissions:
@@ -28,6 +33,7 @@ jobs:
         id: beta
         env:
           GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
         run: |
           # Get the beta release
           beta_info=$(gh release view beta --json tagName 2>/dev/null || echo "")
@@ -57,6 +63,13 @@ jobs:
             exit 0
           fi
 
+          if [ "$FORCE" = "true" ]; then
+            echo "force=true: deploying $sha regardless of what stable carries."
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "date=$(date -u +%Y%m%d)" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
           # Check if this SHA was already released as prod
           current_prod_sha=""
           gh release download latest --pattern "COMMIT_SHA" --dir /tmp/prod/ 2>/dev/null || true
@@ -68,6 +81,28 @@ jobs:
             echo "Beta SHA matches current prod. Nothing new to deploy."
             echo "skip=true" >> $GITHUB_OUTPUT
             exit 0
+          fi
+
+          # A different commit is not by itself a release. What makes a build
+          # worth cutting a permanent `vX.Y.Z` tag for is a deliberate version
+          # bump, and both channels record theirs the same way: in the
+          # Cargo.toml of the commit their COMMIT_SHA names. Without this,
+          # every Thursday shipped whatever beta happened to hold and fell back
+          # to a `+date` tag suffix to avoid colliding with a version that had
+          # already been released.
+          if [ -n "$current_prod_sha" ]; then
+            if ! printf '%s' "$current_prod_sha" | grep -Eq '^[0-9a-f]{40}$'; then
+              echo "ERROR: COMMIT_SHA in the stable release is not a 40-hex commit id."
+              exit 1
+            fi
+            beta_version=$(git show "$sha:Cargo.toml" 2>/dev/null | grep '^version' | head -1 | sed 's/.*"\(.*\)"/\1/' || true)
+            prod_version=$(git show "$current_prod_sha:Cargo.toml" 2>/dev/null | grep '^version' | head -1 | sed 's/.*"\(.*\)"/\1/' || true)
+            if [ -n "$prod_version" ] && [ "$beta_version" = "$prod_version" ]; then
+              echo "Stable already shipped $prod_version. Nothing new to deploy."
+              echo "skip=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "Version moves $prod_version -> $beta_version. Deploying."
           fi
 
           echo "skip=false" >> $GITHUB_OUTPUT
@@ -141,9 +176,11 @@ jobs:
             exit 1
           fi
           VERSION="v$BETA_VERSION"
-          # If the tag was already released (version not bumped since the
-          # last prod deploy), disambiguate with the date rather than
-          # moving the existing tag.
+          # `check-beta` now skips an un-bumped promotion outright, so in normal
+          # operation the tag cannot already exist. This is the fallback for the
+          # one case that still reaches here - a `force=true` re-deploy of a
+          # version already released - and it disambiguates with the date rather
+          # than moving an immutable tag.
           if gh api "repos/$REPO/git/refs/tags/$VERSION" >/dev/null 2>&1; then
             VERSION="${VERSION}+$(date -u +%Y%m%d)"
           fi

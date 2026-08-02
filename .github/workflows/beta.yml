@@ -4,7 +4,12 @@ on:
   schedule:
     # Every Monday at 9am PST (4pm UTC)
     - cron: '0 16 * * 1'
-  workflow_dispatch: # Manual trigger
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Promote even if the version was not bumped
+        type: boolean
+        default: false
 
 # Read-only by default; only the job that publishes a release elevates, matching
 # alpha.yml and prod.yml. A workflow-level `contents: write` grants it to every
@@ -34,6 +39,7 @@ jobs:
         id: alpha
         env:
           GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
         run: |
           # Get the alpha release
           alpha_info=$(gh release view alpha --json tagName,assets,body 2>/dev/null || echo "")
@@ -58,11 +64,41 @@ jobs:
             echo "sha_short=${sha:0:7}" >> $GITHUB_OUTPUT
             # Version at the promoted commit, for the release title. Same
             # extraction prod.yml applies to the beta SHA.
-            echo "version=$(git show "$sha:Cargo.toml" | grep '^version' | head -1 | sed 's/.*"\(.*\)"/\1/')" >> $GITHUB_OUTPUT
+            version=$(git show "$sha:Cargo.toml" | grep '^version' | head -1 | sed 's/.*"\(.*\)"/\1/')
+            echo "version=$version" >> $GITHUB_OUTPUT
           else
             echo "No COMMIT_SHA in alpha release. Skipping."
             echo "skip=true" >> $GITHUB_OUTPUT
             exit 0
+          fi
+
+          # A promotion has to have something to promote. Alpha is a rolling
+          # tag that gets republished whenever the version moves, so "is this
+          # alpha newer than what beta already carries" is the same question as
+          # "did the version change" - and the answer lives in the same place
+          # for both channels: the Cargo.toml of the commit each one names.
+          # Without this, every Monday republished beta from an alpha it had
+          # already promoted, churning the tag and the tap for nothing.
+          if [ "$FORCE" != "true" ]; then
+            gh release download beta --pattern "COMMIT_SHA" --dir /tmp/beta/ 2>/dev/null || true
+            if [ -f /tmp/beta/COMMIT_SHA ]; then
+              beta_sha=$(cat /tmp/beta/COMMIT_SHA)
+              if ! printf '%s' "$beta_sha" | grep -Eq '^[0-9a-f]{40}$'; then
+                echo "ERROR: COMMIT_SHA in the beta release is not a 40-hex commit id."
+                exit 1
+              fi
+              beta_version=$(git show "$beta_sha:Cargo.toml" 2>/dev/null | grep '^version' | head -1 | sed 's/.*"\(.*\)"/\1/' || true)
+              if [ "$version" = "$beta_version" ]; then
+                echo "Beta already carries $version. Nothing to promote."
+                echo "skip=true" >> $GITHUB_OUTPUT
+                exit 0
+              fi
+              echo "Version moves $beta_version -> $version. Promoting."
+            else
+              echo "No comparable beta release - promoting $version."
+            fi
+          else
+            echo "force=true: promoting $version regardless of what beta carries."
           fi
 
           echo "date=$(date -u +%Y%m%d)" >> $GITHUB_OUTPUT
