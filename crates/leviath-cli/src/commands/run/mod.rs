@@ -8,6 +8,7 @@
 
 pub mod manifest;
 pub mod session;
+pub mod task;
 
 use std::collections::HashMap;
 

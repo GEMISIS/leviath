@@ -11,7 +11,7 @@ use leviath_runtime::control_socket::{ControlClient, ControlResponse};
 use leviath_runtime::host::SpawnArgs;
 
 use crate::commands::run::manifest::find_manifest;
-use crate::commands::run::session::read_region_value;
+use crate::commands::run::task::read_region_value;
 use crate::runstate::new_run_id;
 
 /// Resolve the local inputs of a spawn request: find the manifest, mint a run id
