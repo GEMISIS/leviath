@@ -401,6 +401,12 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                 stage.batch_tool_hint = Some(bth);
             }
 
+            // Parse per-stage shell_hint override: opt an individual stage
+            // in/out of the platform shell hint. Absent ⇒ inherit agent/global.
+            if let Some(sh) = stage_value.get("shell_hint").and_then(|v| v.as_bool()) {
+                stage.shell_hint = Some(sh);
+            }
+
             // Parse per-stage nudge settings: [stages.<name>.nudge]. Absent ⇒
             // each field inherits agent/global.
             if let Some(nudge_table) = stage_value.get("nudge").and_then(|v| v.as_table()) {
@@ -684,6 +690,12 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
     // Absent ⇒ inherit the global config toggle; a per-stage value overrides it.
     if let Some(bth) = agent.get("batch_tool_hint").and_then(|v| v.as_bool()) {
         blueprint.batch_tool_hint = Some(bth);
+    }
+
+    // Parse agent-level shell_hint override: `[agent] shell_hint`. Absent ⇒
+    // inherit the global config toggle; a per-stage value overrides it.
+    if let Some(sh) = agent.get("shell_hint").and_then(|v| v.as_bool()) {
+        blueprint.shell_hint = Some(sh);
     }
 
     // Parse agent-level nudge defaults: [agent.nudge]. Absent ⇒ each field
@@ -2834,6 +2846,60 @@ mode = "autonomous"
         let bp = parse_manifest(toml).unwrap();
         assert_eq!(bp.batch_tool_hint, None);
         assert_eq!(bp.find_stage("main").unwrap().batch_tool_hint, None);
+    }
+
+    #[test]
+    fn parse_manifest_agent_and_stage_shell_hint() {
+        let toml = r#"
+[agent]
+name = "shell-test"
+shell_hint = false
+
+[stages.plan]
+mode = "autonomous"
+shell_hint = true
+
+[stages.build]
+mode = "autonomous"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        // Agent-level `[agent] shell_hint` parsed, and independent of the
+        // batch hint sharing the cascade shape.
+        assert_eq!(bp.shell_hint, Some(false));
+        assert_eq!(bp.batch_tool_hint, None);
+        // Stage-level override opts this one stage back in.
+        assert_eq!(bp.find_stage("plan").unwrap().shell_hint, Some(true));
+        // A stage with no override inherits (None).
+        assert_eq!(bp.find_stage("build").unwrap().shell_hint, None);
+        // End-to-end cascade: plan resolves on despite the agent and global
+        // both being off, build follows the agent's off despite the global on.
+        assert!(crate::taint::resolve_shell_hint(
+            false,
+            bp.shell_hint,
+            bp.find_stage("plan").unwrap().shell_hint,
+        ));
+        assert!(!crate::taint::resolve_shell_hint(
+            true,
+            bp.shell_hint,
+            bp.find_stage("build").unwrap().shell_hint,
+        ));
+    }
+
+    #[test]
+    fn parse_manifest_no_shell_hint_is_none() {
+        // No `shell_hint` anywhere ⇒ both levels None ⇒ inherit global.
+        let toml = r#"
+[agent]
+name = "no-shell-hint"
+
+[stages.main]
+mode = "autonomous"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        assert_eq!(bp.shell_hint, None);
+        assert_eq!(bp.find_stage("main").unwrap().shell_hint, None);
+        assert!(crate::taint::resolve_shell_hint(true, None, None));
+        assert!(!crate::taint::resolve_shell_hint(false, None, None));
     }
 
     #[test]

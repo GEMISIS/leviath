@@ -102,9 +102,83 @@ impl TelemetryExporterKind {
     }
 }
 
+/// The machine-wide toggles for the framework-authored system-prompt hints,
+/// carried from the CLI's config into a spawn.
+///
+/// Each field is the *global* end of a stage → agent → global cascade
+/// ([`crate::taint::resolve_batch_tool_hint`],
+/// [`crate::taint::resolve_shell_hint`]): a blueprint's `[agent]` or
+/// `[stages.<name>]` block overrides it per agent or per stage. They travel
+/// together as one value so adding a hint doesn't grow the arity of every spawn
+/// entry point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptHints {
+    /// Global default for the batch-tool-calls hint.
+    pub batch_tool: bool,
+    /// Global default for the platform shell hint.
+    pub shell: bool,
+}
+
+impl Default for PromptHints {
+    /// Both hints on, matching the CLI config's `default_true` for each.
+    fn default() -> Self {
+        Self {
+            batch_tool: true,
+            shell: true,
+        }
+    }
+}
+
+/// One narrower scope's overrides of [`PromptHints`], as a blueprint's `[agent]`
+/// or `[stages.<name>]` block writes them. `None` inherits the broader scope.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PromptHintOverrides {
+    /// Override for the batch-tool-calls hint.
+    pub batch_tool: Option<bool>,
+    /// Override for the platform shell hint.
+    pub shell: Option<bool>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_hints_default_on_and_overrides_default_inherit() {
+        // The default has to match the CLI config's `default_true` for each
+        // field, or an embedder and the daemon would disagree about the same
+        // unset config.
+        let hints = PromptHints::default();
+        assert!(hints.batch_tool);
+        assert!(hints.shell);
+        assert_eq!(
+            hints,
+            PromptHints {
+                batch_tool: true,
+                shell: true
+            }
+        );
+        assert_ne!(
+            hints,
+            PromptHints {
+                batch_tool: true,
+                shell: false
+            }
+        );
+
+        // An override that names nothing inherits everything.
+        let overrides = PromptHintOverrides::default();
+        assert_eq!(overrides.batch_tool, None);
+        assert_eq!(overrides.shell, None);
+        assert_eq!(
+            overrides,
+            PromptHintOverrides {
+                batch_tool: None,
+                shell: None
+            }
+        );
+        assert!(format!("{hints:?} {overrides:?}").contains("batch_tool"));
+    }
 
     #[test]
     fn test_title_config_default() {

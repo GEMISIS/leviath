@@ -333,13 +333,30 @@ pub fn resolve_security(
     resolved
 }
 
-/// Resolve whether the batch-tool-calls system-prompt hint is enabled for a
-/// stage, cascading stage → agent → global. A `Some(_)` at a narrower level
-/// overrides broader levels; when neither the stage nor the agent sets it, the
-/// global toggle (on by default) applies. (Same shape as
-/// [`resolve_taint_enabled`], but the global default is on rather than off.)
-pub fn resolve_batch_tool_hint(global: bool, agent: Option<bool>, stage: Option<bool>) -> bool {
+/// The shared stage → agent → global cascade behind the system-prompt hint
+/// toggles. A `Some(_)` at a narrower level overrides broader levels; when
+/// neither the stage nor the agent sets it, the global toggle applies. (Same
+/// shape as [`resolve_taint_enabled`], but the global default is on rather than
+/// off, and a manifest may turn a hint off - these are UX knobs, not security.)
+fn resolve_hint(global: bool, agent: Option<bool>, stage: Option<bool>) -> bool {
     stage.or(agent).unwrap_or(global)
+}
+
+/// Resolve whether the batch-tool-calls system-prompt hint is enabled for a
+/// stage, cascading stage → agent → global: a `Some(_)` at a narrower level
+/// wins, and an unset pair falls through to the global toggle.
+pub fn resolve_batch_tool_hint(global: bool, agent: Option<bool>, stage: Option<bool>) -> bool {
+    resolve_hint(global, agent, stage)
+}
+
+/// Resolve whether the platform shell hint is enabled for a stage, cascading
+/// stage → agent → global on the same terms as [`resolve_batch_tool_hint`].
+///
+/// Enabled only decides whether the hint is *eligible*. It is emitted only when
+/// the host platform has something worth saying about its shell and the stage
+/// actually advertises the shell tool, both checked at request-build time.
+pub fn resolve_shell_hint(global: bool, agent: Option<bool>, stage: Option<bool>) -> bool {
+    resolve_hint(global, agent, stage)
 }
 
 /// Result of a gate check - whether a tool invocation is allowed.

@@ -50,3 +50,14 @@ impl Drop for SilentPanics {
         std::panic::set_hook(previous);
     }
 }
+
+/// The global end of the system-prompt hint cascade for a spawn under test,
+/// where only the batch-tool hint is ever varied. The shell hint follows it so
+/// the two never disagree in a test that only cares about one of them; a test
+/// that does care builds the struct itself.
+pub(crate) fn hints(on: bool) -> leviath_core::config::PromptHints {
+    leviath_core::config::PromptHints {
+        batch_tool: on,
+        shell: on,
+    }
+}

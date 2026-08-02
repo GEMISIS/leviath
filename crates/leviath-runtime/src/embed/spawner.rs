@@ -29,6 +29,9 @@ pub(crate) struct EmbedSpawner {
     /// (which then sees agents through `exec_for` on its own terms).
     pub basic_tools: Option<Arc<BasicToolService>>,
     pub defaults: ModelDefaults,
+    /// Global end of the system-prompt hint cascade, from
+    /// [`AgentWorldBuilder::prompt_hints`](crate::embed::AgentWorldBuilder::prompt_hints).
+    pub hints: leviath_core::config::PromptHints,
     pub staged: StagedBlueprints,
 }
 
@@ -110,7 +113,7 @@ impl EmbedSpawner {
             blueprint,
             &seeds,
             stages,
-            false,
+            self.hints,
             // The default nudge policy; blueprints override per stage/agent.
             leviath_core::NudgeConfig::default(),
             HashMap::new(),
@@ -498,6 +501,7 @@ mod tests {
         EmbedSpawner {
             basic_tools: None,
             defaults: ModelDefaults::default(),
+            hints: leviath_core::config::PromptHints::default(),
             staged: Arc::new(Mutex::new(HashMap::new())),
         }
     }

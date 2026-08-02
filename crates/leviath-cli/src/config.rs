@@ -202,6 +202,19 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub batch_tool_hint: bool,
 
+    /// Global master switch for the platform shell hint.
+    ///
+    /// **On by default (opt-out).** When `true`, a stage that advertises the
+    /// `shell` tool carries a short system block describing the shell it will
+    /// actually get, so the model doesn't spend iterations discovering it. The
+    /// hint is emitted only where the platform warrants one (today: Windows,
+    /// where commands run through `cmd.exe /C` rather than a POSIX shell), so
+    /// on Linux and macOS this toggle costs nothing either way. Individual
+    /// agents or stages override it with `shell_hint` in their `[agent]` /
+    /// `[stages.<name>]` blocks.
+    #[serde(default = "default_true")]
+    pub shell_hint: bool,
+
     /// Machine-wide defaults for the empty-response nudge (`[nudge]`): the
     /// `[System]` message injected when a stage's model replies with text
     /// before making any tool call. All three keys (`enabled`, `max`, `text`)
@@ -791,6 +804,7 @@ impl Default for Config {
             taint_tracking: false,
             limits: LimitsConfig::default(),
             batch_tool_hint: true,
+            shell_hint: true,
             nudge: leviath_core::NudgeConfig::default(),
             webhook: WebhookConfig::default(),
             observability: ObservabilityConfig::default(),
@@ -2957,6 +2971,7 @@ enabled = false
                 provider_circuit_cooldown_secs: 120,
             },
             batch_tool_hint: true,
+            shell_hint: false,
             nudge: leviath_core::NudgeConfig {
                 enabled: Some(true),
                 max: Some(2),
@@ -3025,6 +3040,10 @@ enabled = false
             deserialized.tool_script_permissions.write_file,
             ScriptPermission::Deny
         );
+        // `shell_hint` defaults to true, so a `false` surviving the round trip
+        // is what proves the field is actually written and read back.
+        assert!(deserialized.batch_tool_hint);
+        assert!(!deserialized.shell_hint);
         assert!(!deserialized.security.allow_seed_commands);
         assert!(deserialized.security.allow_blueprint_read_paths);
         assert_eq!(deserialized.security.read_paths, vec!["~/.leviath/runs"]);

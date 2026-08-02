@@ -254,6 +254,12 @@ pub struct InferenceConfig {
     /// (see [`leviath_core::taint::resolve_batch_tool_hint`]); `false` by default
     /// so an unset config is a no-op.
     pub batch_tool_hint: bool,
+    /// Whether this stage is eligible for the platform shell hint. Resolved from
+    /// the global config → agent → stage cascade at spawn (see
+    /// [`leviath_core::taint::resolve_shell_hint`]); `false` by default so an
+    /// unset config is a no-op. Eligibility is not emission: the hint also needs
+    /// a platform worth describing and a stage that advertises the shell tool.
+    pub shell_hint: bool,
     /// Per-stage cap on the wall-clock time (in seconds) one inference for this
     /// stage may run (the whole call including retries). Sourced from
     /// `[stages.<name>.model] request_timeout_secs`. When `Some`, it overrides the
