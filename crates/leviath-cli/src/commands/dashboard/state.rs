@@ -519,27 +519,14 @@ impl Dashboard {
         (self.clock)()
     }
 
-    /// How long a run's metadata may go untouched, while the daemon does not
-    /// hold it, before the dashboard stops calling it ACTIVE.
-    ///
-    /// Comfortably longer than the persistence heartbeat, so a live-but-slow run
-    /// (a long inference writes nothing else) is never mistaken for a dead one.
-    pub(super) const STALE_AFTER_SECS: i64 = 300;
-
     /// Whether a run that claims to be live on disk actually has nothing driving
-    /// it: the daemon does not hold it *and* its metadata has not been touched
-    /// in [`STALE_AFTER_SECS`].
+    /// it, and so should read STALE rather than ACTIVE.
     ///
-    /// Both halves are needed. The daemon's list alone is not enough - it is
-    /// empty whenever the daemon is unreachable, which would flip every healthy
-    /// run to STALE. The timestamp alone is not enough either - a run mid-request
-    /// legitimately writes nothing for a while.
+    /// The rule itself lives in [`runstate::looks_abandoned`], because `lev ps
+    /// --all` has to answer the same question for an external harness and the
+    /// two must not drift apart.
     fn looks_stale(&self, run: &runstate::RunMeta) -> bool {
-        let Some(live) = &self.daemon_run_ids else {
-            return false; // no answer from the daemon this tick; assume nothing
-        };
-        !live.contains(&run.run_id)
-            && self.now_secs().saturating_sub(run.updated_at) > Self::STALE_AFTER_SECS
+        runstate::looks_abandoned(run, self.daemon_run_ids.as_ref(), self.now_secs())
     }
 
     /// Sync agent list from on-disk run-state dir (background workers).
@@ -2003,12 +1990,12 @@ mod tests {
     /// untouched. Shared by every staleness test, including the ones whose
     /// checks short-circuit before reading the clock.
     fn stale_clock() -> i64 {
-        1_000 + Dashboard::STALE_AFTER_SECS * 100
+        1_000 + crate::runstate::STALE_AFTER_SECS * 100
     }
 
     /// A clock still inside the staleness window.
     fn fresh_clock() -> i64 {
-        1_000 + Dashboard::STALE_AFTER_SECS - 1
+        1_000 + crate::runstate::STALE_AFTER_SECS - 1
     }
 
     /// The reported bug's shape: a run whose `meta.json` claims `starting` /
