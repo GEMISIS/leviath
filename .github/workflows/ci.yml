@@ -11,6 +11,13 @@ on:
   # The merge queue runs required checks against a temporary `merge_group` ref.
   # Without this trigger those checks never run, so queued PRs block forever.
   merge_group:
+  # The release workflows call this file instead of restating a gate of their
+  # own. alpha.yml used to hand-roll build + test + clippy, which drifted: its
+  # clippy ran on all three OSes while the `clippy` job below ran only on
+  # ubuntu, so a `#[cfg(windows)]` lint failure took down two nightly alphas
+  # while every PR stayed green. One definition, called from both places, is
+  # the only way that stays fixed.
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
@@ -49,8 +56,16 @@ jobs:
       # below: `job.status` reflects the real accumulated pass/fail state of
       # this job's steps so far, checked with `if: always()` so it runs
       # (and reports failure) even when the Test step above failed.
+      #
+      # `github.workflow == 'CI'` is what keeps a release run out of the
+      # badges. A called workflow inherits the CALLER's `github` context, so
+      # when alpha.yml runs this file off a push to main both `event_name`
+      # and `ref` still match and the badges would be republished from a
+      # release run. `github.workflow` resolves to the caller's name
+      # ("Alpha (Nightly)"), so it is the one thing that tells them apart.
+      # Same guard on every badge step below.
       - name: Publish test status badge
-        if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.workflow == 'CI'
         uses: schneegans/dynamic-badges-action@28b0fa8bdeb46170ac397105ece0c1fe58f68910 # v1.9.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}
@@ -66,7 +81,7 @@ jobs:
   test-badge:
     name: Publish combined test badge
     needs: [test]
-    if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.workflow == 'CI'
     runs-on: ubuntu-latest
     steps:
       - name: Publish combined test status badge
@@ -79,9 +94,24 @@ jobs:
           message: ${{ needs.test.result == 'success' && 'passing' || 'failing' }}
           color: ${{ needs.test.result == 'success' && 'brightgreen' || 'red' }}
 
+  # Every OS, because a lint can only be reported for code the compiler
+  # actually builds. `#[cfg(windows)]` bodies, the `#[cfg(target_os =
+  # "macos")]` launchd plumbing, and the `#[cfg(not(any(macos, linux)))]`
+  # arms are each invisible to at least one of the three legs; running only
+  # ubuntu meant nothing outside the Linux configuration was ever linted.
+  #
+  # `--all-features` for the same reason one level up: `debug-http` code is
+  # off by default, so `--all-targets` alone never compiles it. The coverage
+  # jobs already build with `--all-features` (xtask/src/coverage.rs), and so
+  # does the pre-commit hook, so this only aligns CI with what was already
+  # being tested locally and measured.
   clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
+    name: Clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -90,7 +120,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
   fmt:
     name: Format
@@ -236,7 +266,7 @@ jobs:
       - name: Confirm every package gated 100%
         run: echo "All packages gated at a hard 100% in the per-package coverage jobs."
       - name: Update lines coverage badge
-        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.workflow == 'CI'
         uses: schneegans/dynamic-badges-action@28b0fa8bdeb46170ac397105ece0c1fe58f68910 # v1.9.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}
@@ -246,7 +276,7 @@ jobs:
           message: 100%
           color: brightgreen
       - name: Update regions coverage badge
-        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.workflow == 'CI'
         uses: schneegans/dynamic-badges-action@28b0fa8bdeb46170ac397105ece0c1fe58f68910 # v1.9.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}
@@ -256,7 +286,7 @@ jobs:
           message: 100%
           color: brightgreen
       - name: Update functions coverage badge
-        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.workflow == 'CI'
         uses: schneegans/dynamic-badges-action@28b0fa8bdeb46170ac397105ece0c1fe58f68910 # v1.9.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}
