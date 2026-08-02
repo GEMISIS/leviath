@@ -431,6 +431,10 @@ fn default_finished_retention_secs() -> u64 {
     leviath_runtime::host::DEFAULT_FINISHED_RETENTION_SECS
 }
 
+fn default_wedge_timeout_secs() -> u64 {
+    leviath_runtime::pipeline::DEFAULT_WEDGE_TIMEOUT_SECS
+}
+
 /// Runtime resource limits with safe defaults baked in.
 ///
 /// Both fields default to a bounded value so a fresh install can't accidentally
@@ -517,6 +521,27 @@ pub struct LimitsConfig {
     /// Read once at daemon start, so a change needs a daemon restart.
     #[serde(default = "default_finished_retention_secs")]
     pub finished_retention_secs: u64,
+    /// How long (seconds) a run may sit in a state no part of the engine can
+    /// reach before it is failed instead of left reported as running.
+    ///
+    /// Not a general "this run looks slow" timeout, and never fires on one. An
+    /// agent waiting on the model, on a tool, on its sub-agents, or on a person
+    /// is holding the marker that says so, and is exempt however long it takes.
+    /// This only catches an agent holding *no* marker at all, which the engine's
+    /// own invariants say cannot happen and which nothing will ever look at
+    /// again. Such a run stays `running` in `meta.json` for the life of the
+    /// daemon and keeps whatever capacity an external scheduler assigned it,
+    /// which is issue #202.
+    ///
+    /// Defaults to `0`, which is off: this fails runs, and an upgrade that
+    /// starts killing work nobody asked it to kill is worse than the leak. `300`
+    /// is a reasonable value to set. Turning it on is also a way to find out
+    /// whether it is happening to you, since it says so in the log and in the
+    /// run's error.
+    ///
+    /// Read once at daemon start, so a change needs a daemon restart.
+    #[serde(default = "default_wedge_timeout_secs")]
+    pub wedge_timeout_secs: u64,
 }
 
 impl Default for LimitsConfig {
@@ -530,6 +555,7 @@ impl Default for LimitsConfig {
             stall_timeout_secs: default_stall_timeout_secs(),
             dead_cycles_before_relief: default_dead_cycles_before_relief(),
             finished_retention_secs: default_finished_retention_secs(),
+            wedge_timeout_secs: default_wedge_timeout_secs(),
         }
     }
 }
@@ -1666,6 +1692,24 @@ mod tests {
         assert_eq!(config.limits.default_max_iterations, Some(50));
         assert_eq!(config.limits.dead_cycles_before_relief, 10);
         assert_eq!(config.limits.finished_retention_secs, 300);
+        // Off unless asked for: the wedge watchdog fails runs, so an upgrade
+        // must not switch it on behind the operator's back.
+        assert_eq!(config.limits.wedge_timeout_secs, 0);
+    }
+
+    #[test]
+    fn the_wedge_watchdog_is_off_until_it_is_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let body = format!(
+            "{}\n[limits]\nwedge_timeout_secs = 300\n",
+            config_toml_without_limits()
+        );
+        std::fs::write(&path, body).unwrap();
+        let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
+        assert_eq!(config.limits.wedge_timeout_secs, 300);
+        // And the rest of the section keeps its own defaults.
+        assert_eq!(config.limits.stall_timeout_secs, 60);
     }
 
     #[test]
@@ -2840,6 +2884,7 @@ enabled = false
                 stall_timeout_secs: 90,
                 dead_cycles_before_relief: 6,
                 finished_retention_secs: 120,
+                wedge_timeout_secs: 420,
             },
             batch_tool_hint: true,
             nudge: leviath_core::NudgeConfig {

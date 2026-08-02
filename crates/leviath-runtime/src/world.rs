@@ -43,9 +43,9 @@ use crate::pipeline::{
     collect_tools, collect_transition_choice, deliver_messages, detect_stuck_stage,
     dispatch_compaction, dispatch_edge_compact, dispatch_inference, dispatch_persistence,
     dispatch_tools, dispatch_transition_choice, enforce_max_iterations, fail_stalled_dispatch,
-    gate_requires_children, handle_empty_response, poll_dynamic_tool_refresh, process_response,
-    reflect_interaction_status, refresh_advertised_tools, require_context_regions,
-    resolve_transition, sync_tool_stages,
+    fail_wedged_runs, gate_requires_children, handle_empty_response, poll_dynamic_tool_refresh,
+    process_response, reflect_interaction_status, refresh_advertised_tools,
+    require_context_regions, resolve_transition, sync_tool_stages,
 };
 use crate::providers::ProviderRegistry;
 use crate::tool_bridge::ToolLane;
@@ -376,6 +376,13 @@ impl PipelineWorld {
                 // (Active ↔ Waiting) so the dashboard surfaces blocked prompts;
                 // must run before persistence so the status change is written.
                 reflect_interaction_status,
+                // Fail a run nothing can drive at all. After every dispatch and
+                // collect system, so a marker set anywhere on this tick counts;
+                // after the interaction reflection, so an agent that just parked
+                // on a prompt is already wearing its marker and is exempt; and
+                // before persistence, so the failure reaches meta.json on the
+                // same tick rather than waiting for the next one.
+                fail_wedged_runs,
                 dispatch_persistence,
             )
                 .chain()
@@ -1367,6 +1374,56 @@ mod tests {
         assert!(
             world.world().get::<ReadyToInfer>(e).is_none(),
             "and it is out of the dispatch systems"
+        );
+    }
+
+    /// Issue #202, end to end through the real schedule: an agent stripped of
+    /// every phase marker is unreachable, and the watchdog registered in the
+    /// chain above fails it rather than leaving it `running` for ever.
+    ///
+    /// This also proves the fixed-point loop still converges with the new system
+    /// in it. The watchdog writes a `Wedged` record on its first pass, so a tick
+    /// does change the world; if that record fed the fingerprint the loop would
+    /// spin instead of parking, which is why it deliberately does not.
+    #[tokio::test]
+    async fn a_run_nothing_can_drive_is_failed_rather_than_left_running() {
+        let mut world = build_world(registry_with(vec![]));
+        world
+            .world_mut()
+            .insert_resource(crate::pipeline::WedgeTimeout(60));
+        let e = spawn(&mut world);
+
+        // Strip the agent of the marker it spawned with. Nothing in the engine
+        // does this; a panicking system that dropped a marker without landing a
+        // successor is what it stands in for.
+        world.world_mut().entity_mut(e).remove::<ReadyToInfer>();
+        world.run_to_fixed_point();
+
+        // First pass records it. Inside the grace period it is still just a wait.
+        assert_eq!(
+            world.agent_status(e),
+            Some(AgentStatus::Active),
+            "not failed while it is still inside the grace period"
+        );
+        let since = world
+            .world()
+            .get::<crate::pipeline::Wedged>(e)
+            .expect("the wedge is recorded")
+            .since;
+
+        // Backdate past the grace period, as the host's redrive would find it.
+        world
+            .world_mut()
+            .get_mut::<crate::pipeline::Wedged>(e)
+            .expect("the wedge record")
+            .since = since - 61;
+        world.run_to_fixed_point();
+
+        let status = world.agent_status(e);
+        assert!(
+            matches!(status, Some(AgentStatus::Error { ref message })
+                if message.contains("never move again")),
+            "got: {status:?}"
         );
     }
 
