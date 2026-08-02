@@ -2653,6 +2653,27 @@ system = { kind = "pinned", max_tokens = 1000 }
         bp
     }
 
+    /// The counts recorded on the run for `lev ps`. A blueprint that declares
+    /// nothing has nothing to count, and a grant list that will not compile is
+    /// a hard spawn error a line earlier - neither leaves a half-answer behind.
+    #[test]
+    fn read_path_grant_counts_are_recorded_for_a_declaring_blueprint() {
+        let bp = blueprint_declaring(&["/data/runs", "/data/docs"]);
+        let mut config = Config::default();
+        config.security.read_paths = vec!["/data/runs".to_string()];
+        let counts = read_path_grant_counts(&bp, &config, Path::new("/w")).expect("declares paths");
+        assert_eq!(counts.declared, 2);
+        assert_eq!(counts.granted, 1);
+
+        assert!(
+            read_path_grant_counts(&blueprint_declaring(&[]), &config, Path::new("/w")).is_none()
+        );
+
+        let mut broken = Config::default();
+        broken.security.read_paths = vec!["regex:relative/.*".to_string()];
+        assert!(read_path_grant_counts(&bp, &broken, Path::new("/w")).is_none());
+    }
+
     #[test]
     fn read_path_policy_is_inactive_without_declarations() {
         let bp = blueprint_declaring(&[]);

@@ -781,6 +781,28 @@ system = { kind = "pinned", max_tokens = 1000 }
         assert!(result.is_ok());
     }
 
+    /// The listing prints the `[read_paths]` line for an agent that has one,
+    /// which is the second line `print_agent` can emit.
+    #[test]
+    fn print_agent_listing_carries_the_read_paths_line() {
+        let agents_dir = tempfile::tempdir().unwrap();
+        let agent = agents_dir.path().join("cto");
+        fs::create_dir_all(&agent).unwrap();
+        write_read_paths_manifest(&agent, "cto");
+        let cwd = tempfile::tempdir().unwrap();
+
+        let result = print_agent_listing(agents_dir.path(), cwd.path(), None, &Config::default());
+
+        assert!(result.is_ok());
+        // The line itself is asserted where it is built, without capturing
+        // stdout; this is the path that reaches the printer with one to print.
+        assert!(
+            info_with_config(&agent, &Config::default())
+                .read_paths
+                .is_some()
+        );
+    }
+
     #[test]
     fn print_agent_listing_does_not_list_a_bundled_agent_twice() {
         // Running from a git checkout puts the *same* blueprints both in the

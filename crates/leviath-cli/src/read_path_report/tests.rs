@@ -239,7 +239,7 @@ fn a_malformed_config_grant_is_an_error() {
 #[test]
 fn the_report_block_lists_each_entry_and_the_stanza_to_paste() {
     let config = config(&["/data/runs"], "cto", &[]);
-    let lines = report("cto", &["/data/runs", "glob:/docs/**"], &config).report_lines("  ");
+    let lines = report("cto", &["/data/runs", "glob:/docs/**"], &config).report_lines("  ", "⚠ ");
     let joined = lines.join("\n");
     assert!(joined.contains("2 declared, 1 granted"), "{joined}");
     assert!(joined.contains("/data/runs: granted"), "{joined}");
@@ -255,7 +255,7 @@ fn a_fully_granted_report_offers_no_stanza() {
     let report = report("cto", &["/data/runs"], &config);
     assert!(report.grant_stanza().is_empty());
     assert!(report.warning_line().is_none());
-    let joined = report.report_lines("").join("\n");
+    let joined = report.report_lines("", "").join("\n");
     assert!(!joined.contains("Add to your config.toml"), "{joined}");
 }
 
@@ -264,7 +264,7 @@ fn the_blanket_override_is_named_in_the_report_block() {
     let mut config = Config::default();
     config.security.allow_blueprint_read_paths = true;
     let joined = report("cto", &["/data/runs"], &config)
-        .report_lines("")
+        .report_lines("", "")
         .join("\n");
     assert!(
         joined.contains("allow_blueprint_read_paths = true"),
@@ -276,7 +276,7 @@ fn the_blanket_override_is_named_in_the_report_block() {
 fn an_undetermined_entry_says_so_in_the_report_block() {
     let config = config(&["/data/runs"], "cto", &[]);
     let joined = report("cto", &["glob:/docs/[ab]/**"], &config)
-        .report_lines("")
+        .report_lines("", "")
         .join("\n");
     assert!(joined.contains("cannot be checked"), "{joined}");
 }
