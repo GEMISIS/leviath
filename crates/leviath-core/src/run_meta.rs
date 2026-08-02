@@ -52,7 +52,16 @@ pub struct RunMeta {
     pub agent_path: String,
     pub task: String,
     pub model: Option<String>,
-    /// PID of the worker process
+    /// Always 0. There is no worker process per run: the daemon hosts every run
+    /// as an entity in one shared world, so no run has a pid of its own.
+    ///
+    /// Kept because it is written into every `meta.json` there has ever been,
+    /// and served from `GET /api/agents`. Do not key liveness on it. `pid == 0`
+    /// is true of a run that is working, a run that has finished, and a run
+    /// nothing is driving, so a sweeper that reverts on it reverts everything.
+    /// Ask the daemon (`lev ps`) whether it is still hosting the run, and read
+    /// `status` and `last_progress_at` off disk for what became of it.
+    #[serde(default)]
     pub pid: u32,
     pub status: RunStatus,
     pub current_stage: String,
@@ -76,6 +85,18 @@ pub struct RunMeta {
     pub started_at: i64,
     /// Unix timestamp (seconds)
     pub updated_at: i64,
+    /// Unix seconds when this run last actually moved: a new iteration, a new
+    /// stage, or a change of status. `None` before the first snapshot lands, and
+    /// on runs written by a daemon older than this field.
+    ///
+    /// Distinct from `updated_at`, which also advances on the 30-second
+    /// persistence heartbeat and so stays fresh on a run that is wedged. A fresh
+    /// `updated_at` is evidence the daemon is alive, and no evidence at all about
+    /// the run. Anything that ages a run must read this instead. Note that a
+    /// daemon restart resets it: a reloaded run really is re-driven from its
+    /// saved context, so it really has just moved.
+    #[serde(default)]
+    pub last_progress_at: Option<i64>,
     pub error: Option<String>,
     /// Short human-readable title generated from the task prompt (None until generated).
     #[serde(default)]
@@ -245,6 +266,7 @@ impl RunMeta {
             workdir,
             started_at: now,
             updated_at: now,
+            last_progress_at: None,
             error: None,
             title: None,
             metadata: HashMap::new(),
