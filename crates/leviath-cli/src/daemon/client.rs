@@ -11,21 +11,112 @@ use leviath_runtime::control_socket::{ControlClient, ControlResponse};
 use leviath_runtime::host::SpawnArgs;
 
 use crate::commands::run::manifest::find_manifest;
-use crate::commands::run::task::read_region_value;
+use crate::commands::run::task::{read_region_value, resolve_task};
 use crate::runstate::new_run_id;
 
-/// Resolve the local inputs of a spawn request: find the manifest, mint a run id
-/// from the agent's directory name, record the working directory, and resolve
-/// any dynamic `--<region>` flags (raw values, `@path` or literal) against the
+/// Everything a spawn request needs from the agent's own files.
+pub struct AgentSource {
+    /// The resolved `agent.leviath` path.
+    pub manifest: std::path::PathBuf,
+    /// The manifest's parent directory name, which the run id is minted from.
+    /// Deliberately not `blueprint.name`: the run id is what `lev ps` shows and
+    /// what identifies the checkout on disk, while the blueprint's own name is
+    /// what the agent calls itself.
+    pub run_stem: String,
+    pub blueprint: leviath_core::Blueprint,
+}
+
+/// Find the agent's manifest and parse it, once.
+///
+/// The parse is unconditional. It used to happen only when there were region
+/// flags to validate, but the blueprint's name and description are now needed
+/// for the editor template too, and parsing here is strictly better regardless:
+/// it is the same parser the daemon runs on the same file moments later, so a
+/// manifest that fails here would have failed there, and `parse manifest: <toml
+/// error>` before the daemon is contacted beats a spawn rejection after.
+pub fn load_agent_source(path: &str) -> anyhow::Result<AgentSource> {
+    let manifest = find_manifest(path)?;
+    let run_stem = manifest
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("agent")
+        .to_string();
+    let content = std::fs::read_to_string(&manifest)
+        .map_err(|e| anyhow::anyhow!("read manifest '{}': {e}", manifest.display()))?;
+    let blueprint = leviath_core::manifest::parse_manifest(&content)
+        .map_err(|e| anyhow::anyhow!("parse manifest: {e}"))?;
+    Ok(AgentSource {
+        manifest,
+        run_stem,
+        blueprint,
+    })
+}
+
+/// Validate and resolve the dynamic `--<region>` flag values against the
 /// blueprint's declared caller-input regions.
 ///
-/// `regions` maps a flag name to its raw value. An unknown region name (one the
-/// blueprint doesn't read as caller input) is a hard error here - fast, local
-/// typo protection before the daemon is contacted.
+/// An unknown region name (one the blueprint doesn't read as caller input) is a
+/// hard error - fast, local typo protection before the daemon is contacted.
+fn resolve_regions(
+    blueprint: &leviath_core::Blueprint,
+    regions: HashMap<String, String>,
+) -> anyhow::Result<HashMap<String, String>> {
+    let declared: Vec<String> = blueprint
+        .context_layout
+        .regions
+        .iter()
+        .filter_map(|r| match &r.seed {
+            Some(RegionSeed::CallerInput { name }) => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut out = HashMap::new();
+    for (name, raw) in regions {
+        if !declared.contains(&name) {
+            bail!(
+                "unknown region '--{name}'; this agent's caller-input regions are: {}",
+                if declared.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    declared.join(", ")
+                }
+            );
+        }
+        out.insert(name, read_region_value(&raw)?);
+    }
+    Ok(out)
+}
+
+/// The stdin probe for callers that build a spawn request from inside the
+/// daemon: fan-out workers and sub-agents. There is no terminal there, and an
+/// editor launched from a background process would block it forever with
+/// nobody to close the window.
+///
+/// Those callers always have a task in hand, so the probe is never actually
+/// consulted; passing this rather than a bare `|| false` states the reason at
+/// each call site.
+pub fn never_interactive() -> bool {
+    false
+}
+
+/// Resolve the local inputs of a spawn request: find and parse the manifest,
+/// resolve the `--<region>` flags, resolve the task, and mint a run id from the
+/// agent's directory name.
+///
+/// `task` is what `--task` was given, if anything. Left off, [`resolve_task`]
+/// opens the user's editor, which is why `stdin_is_terminal` is threaded
+/// through: the probe itself is real I/O and belongs to the binary, so callers
+/// inject it (tests pass a `fn` that always says no).
+///
+/// Regions are resolved *before* the task on purpose. A typo'd `--foo` has to
+/// fail before the user is dropped into an editor and types a paragraph they
+/// are about to lose.
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_spawn_args(
     path: &str,
-    task: &str,
+    task: Option<&str>,
+    stdin_is_terminal: &dyn Fn() -> bool,
     model: Option<String>,
     workdir: &str,
     yolo: bool,
@@ -34,51 +125,19 @@ pub fn resolve_spawn_args(
     regions: HashMap<String, String>,
     no_seed_commands: bool,
 ) -> anyhow::Result<SpawnArgs> {
-    let manifest = find_manifest(path)?;
-    let agent_name = manifest
-        .parent()
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
-        .unwrap_or("agent");
-
-    // Validate + resolve region flags against the blueprint's caller-input regions.
-    let resolved_regions = if regions.is_empty() {
-        HashMap::new()
-    } else {
-        let content = std::fs::read_to_string(&manifest)
-            .map_err(|e| anyhow::anyhow!("read manifest '{}': {e}", manifest.display()))?;
-        let blueprint = leviath_core::manifest::parse_manifest(&content)
-            .map_err(|e| anyhow::anyhow!("parse manifest: {e}"))?;
-        let declared: Vec<String> = blueprint
-            .context_layout
-            .regions
-            .iter()
-            .filter_map(|r| match &r.seed {
-                Some(RegionSeed::CallerInput { name }) => Some(name.clone()),
-                _ => None,
-            })
-            .collect();
-        let mut out = HashMap::new();
-        for (name, raw) in regions {
-            if !declared.contains(&name) {
-                bail!(
-                    "unknown region '--{name}'; this agent's caller-input regions are: {}",
-                    if declared.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        declared.join(", ")
-                    }
-                );
-            }
-            out.insert(name, read_region_value(&raw)?);
-        }
-        out
-    };
+    let source = load_agent_source(path)?;
+    let resolved_regions = resolve_regions(&source.blueprint, regions)?;
+    let task = resolve_task(
+        task,
+        &source.blueprint.name,
+        &source.blueprint.description,
+        stdin_is_terminal,
+    )?;
 
     Ok(SpawnArgs {
-        run_id: new_run_id(agent_name),
-        blueprint_path: manifest.to_string_lossy().to_string(),
-        task: task.to_string(),
+        run_id: new_run_id(&source.run_stem),
+        blueprint_path: source.manifest.to_string_lossy().to_string(),
+        task,
         regions: resolved_regions,
         model,
         workdir: workdir.to_string(),
@@ -133,7 +192,8 @@ mod tests {
 
         let args = resolve_spawn_args(
             manifest.to_str().unwrap(),
-            "do it",
+            Some("do it"),
+            &never_interactive,
             Some("m".to_string()),
             "/work",
             false,
@@ -155,7 +215,8 @@ mod tests {
         assert!(
             resolve_spawn_args(
                 "/no/such/agent",
-                "t",
+                Some("t"),
+                &never_interactive,
                 None,
                 "/work",
                 false,
@@ -166,6 +227,82 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// `--task <file>` end to end through the real wiring, not just through
+    /// `resolve_task` in isolation.
+    #[test]
+    fn resolve_spawn_args_reads_the_task_from_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("my-agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let manifest = write_manifest(&agent_dir);
+        let task_file = dir.path().join("task.md");
+        std::fs::write(&task_file, "  summarize the README  \n").unwrap();
+
+        let args = resolve_spawn_args(
+            manifest.to_str().unwrap(),
+            Some(task_file.to_str().unwrap()),
+            &never_interactive,
+            None,
+            "/work",
+            false,
+            Vec::new(),
+            None,
+            HashMap::new(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(args.task, "summarize the README");
+    }
+
+    /// No `--task` and no terminal to open an editor on: the run is refused
+    /// here, before the daemon is contacted.
+    #[test]
+    fn resolve_spawn_args_without_a_task_errors_when_stdin_is_not_a_tty() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("my-agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let manifest = write_manifest(&agent_dir);
+
+        let err = resolve_spawn_args(
+            manifest.to_str().unwrap(),
+            None,
+            &never_interactive,
+            None,
+            "/work",
+            false,
+            Vec::new(),
+            None,
+            HashMap::new(),
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("No task provided"), "got: {err}");
+    }
+
+    /// Pins the ordering: a typo'd region flag must fail *before* the user is
+    /// dropped into an editor, or they type a paragraph and then lose it.
+    #[test]
+    fn resolve_spawn_args_rejects_a_bad_region_before_it_looks_at_the_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write_region_manifest(&dir.path().join("reviewer"));
+        let regions = HashMap::from([("bogus".to_string(), "x".to_string())]);
+
+        let err = resolve_spawn_args(
+            manifest.to_str().unwrap(),
+            None,
+            &never_interactive,
+            None,
+            "/work",
+            false,
+            Vec::new(),
+            None,
+            regions,
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown region"), "got: {err}");
     }
 
     /// Write a manifest declaring a `criteria` caller-input region, returning its
@@ -208,7 +345,8 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         )]);
         let args = resolve_spawn_args(
             manifest.to_str().unwrap(),
-            "review it",
+            Some("review it"),
+            &never_interactive,
             None,
             "/work",
             false,
@@ -254,7 +392,8 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         let regions = HashMap::from([("foo".to_string(), "x".to_string())]);
         let err = resolve_spawn_args(
             manifest.to_str().unwrap(),
-            "t",
+            Some("t"),
+            &never_interactive,
             None,
             "/work",
             false,
@@ -277,7 +416,8 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         let regions = HashMap::from([("x".to_string(), "y".to_string())]);
         let err = resolve_spawn_args(
             agent_dir.to_str().unwrap(),
-            "t",
+            Some("t"),
+            &never_interactive,
             None,
             "/work",
             false,
@@ -303,7 +443,8 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         let regions = HashMap::from([("x".to_string(), "y".to_string())]);
         let err = resolve_spawn_args(
             agent_dir.join("agent.leviath").to_str().unwrap(),
-            "t",
+            Some("t"),
+            &never_interactive,
             None,
             "/work",
             false,
@@ -325,7 +466,8 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         let regions = HashMap::from([("criteria".to_string(), "@/no/such/file.md".to_string())]);
         let err = resolve_spawn_args(
             manifest.to_str().unwrap(),
-            "review it",
+            Some("review it"),
+            &never_interactive,
             None,
             "/work",
             false,
@@ -348,7 +490,8 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         let regions = HashMap::from([("bogus".to_string(), "x".to_string())]);
         let err = resolve_spawn_args(
             manifest.to_str().unwrap(),
-            "review it",
+            Some("review it"),
+            &never_interactive,
             None,
             "/work",
             false,

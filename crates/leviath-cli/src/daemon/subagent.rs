@@ -12,7 +12,7 @@ use leviath_runtime::host::SubAgentOp;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
-use crate::daemon::client::resolve_spawn_args;
+use crate::daemon::client::{never_interactive, resolve_spawn_args};
 
 /// Per-agent state needed to service the sub-agent tools: a sender into the
 /// host's [`SubAgentOp`] channel plus the spawning agent's identity and the
@@ -124,7 +124,8 @@ async fn spawn(h: &SubAgentHandle, args: &serde_json::Value) -> String {
 
     let spawn_args = match resolve_spawn_args(
         blueprint,
-        &full_task,
+        Some(&full_task),
+        &never_interactive,
         None,
         &h.workdir,
         h.unattended,
