@@ -954,7 +954,7 @@ fn apply_limits_fields(config: &mut Config, fields: &[Field]) {
                     .unwrap_or(Config::default().limits.dead_cycles_before_relief)
             }
             // And again: unset keeps the default, 0 means keep nothing.
-            (7, FieldValue::Number(n)) => {
+            (8, FieldValue::Number(n)) => {
                 config.limits.finished_retention_secs =
                     n.unwrap_or(Config::default().limits.finished_retention_secs)
             }
@@ -2222,6 +2222,9 @@ pub(super) mod tests {
         wizard.limits[3].value = FieldValue::Bool(true);
         wizard.limits[4].value = FieldValue::Bool(false);
         wizard.limits[5].value = FieldValue::Bool(false);
+        wizard.limits[6].value = FieldValue::Number(Some(11));
+        wizard.limits[7].value = FieldValue::Number(Some(22));
+        wizard.limits[8].value = FieldValue::Number(Some(33));
 
         let config = wizard.build_config();
 
@@ -2234,6 +2237,48 @@ pub(super) mod tests {
         assert!(config.limits.exact_token_counting);
         assert!(!config.batch_tool_hint);
         assert!(!config.shell_hint);
+        // Every remaining field gets a distinct value, so a form that grows a
+        // row without renumbering `apply_limits_fields` fails here rather than
+        // silently dropping whichever field the duplicated index shadowed.
+        assert_eq!(config.limits.stall_timeout_secs, 11);
+        assert_eq!(config.limits.dead_cycles_before_relief, 22);
+        assert_eq!(config.limits.finished_retention_secs, 33);
+    }
+
+    #[test]
+    fn every_limits_field_is_written_back() {
+        // The index in `apply_limits_fields` is positional and hand-written, so
+        // an inserted row shifts every arm below it. Round-tripping the form
+        // through itself catches a gap or a duplicate without naming indices.
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = test_wizard(dir.path());
+        wizard.enter(Step::Limits);
+        let count = wizard.limits.len();
+
+        let before = wizard.build_config();
+        let seeded = limits_fields(&before);
+        assert_eq!(seeded.len(), count, "the form is built from the config");
+
+        // Flip every boolean and bump every number, then read the form back
+        // out of the config it produced: a field that no arm writes comes back
+        // with its original value.
+        for field in &mut wizard.limits {
+            field.value = match &field.value {
+                FieldValue::Bool(b) => FieldValue::Bool(!b),
+                FieldValue::Number(n) => FieldValue::Number(Some(n.unwrap_or(0) + 7)),
+                other => other.clone(),
+            };
+        }
+        let expected: Vec<FieldValue> = wizard.limits.iter().map(|f| f.value.clone()).collect();
+        let after = limits_fields(&wizard.build_config());
+
+        for (i, (got, want)) in after.iter().zip(&expected).enumerate() {
+            assert_eq!(
+                &got.value, want,
+                "field {i} ({}) did not survive the round trip",
+                got.label
+            );
+        }
     }
 
     /// The four timing limits share one rule: an explicit number is stored,
