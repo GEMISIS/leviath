@@ -57,7 +57,7 @@ Base path `/api`; all JSON unless noted.
 
 | Method · Path | Purpose |
 |---|---|
-| `GET /api/agents` · `POST /api/agents` | List runs · spawn an agent |
+| `GET /api/agents` · `POST /api/agents` | List runs · spawn an agent. Reads the persisted records, so unlike `lev ps` it keeps finished runs |
 | `GET /api/agents/{id}` · `DELETE …` | Get one · cancel |
 | `GET /api/agents/{id}/result` · `/logs` · `/context` · `/context/history` | Run output, logs, context |
 | `GET /api/agents/tree` · `/{id}/tree-status` · `/{id}/children` | Sub-agent tree + token roll-ups |
@@ -69,6 +69,13 @@ Base path `/api`; all JSON unless noted.
 | `GET /api/models` | Enumerate models |
 | `GET /api/mcp/servers` · `/{name}/status` · `/login` · `/test` | MCP servers (add/remove need admin) |
 | `GET /ws` · `GET /ws/agents/{id}` | Live event stream (all agents / one run) |
+
+> [!NOTE]
+> A run object carries both `updated_at` and `last_progress_at`. The first advances on a 30-second
+> heartbeat and stays fresh on a run that has stopped; the second moves only when the run does. Age
+> a run against `last_progress_at`. `pid` is always 0 and means nothing: the daemon hosts every run
+> in one shared world, so there is no process per run. If you are tracking slots from outside, read
+> [reconciling an external work queue](/docs/daemon#reconciling-an-external-work-queue) first.
 
 ## Live updates over WebSocket
 
