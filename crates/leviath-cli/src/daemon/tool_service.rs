@@ -56,15 +56,25 @@ pub struct AgentToolState {
     /// Every stage's `tool_permissions`, indexed by stage index; `sync_stage`
     /// copies the entered stage's map into `stage_perms`.
     pub stage_perms_by_index: Arc<Vec<HashMap<String, String>>>,
+    /// The current stage's `required_tools` - the human-in-the-loop tools it
+    /// keeps through an unattended run. Re-synced by `sync_stage`, and read on
+    /// every interaction so a kept tool reaches a real person instead of
+    /// [`UnattendedInteraction`]. Empty for an attended run, where nothing is
+    /// dropped and nothing needs keeping.
+    pub stage_required: Arc<StdMutex<HashSet<String>>>,
+    /// Every stage's `required_tools`, indexed by stage index.
+    pub stage_required_by_index: Arc<Vec<HashSet<String>>>,
     /// Blueprint-level `[tool_permissions]`.
     pub agent_perms: Arc<HashMap<String, String>>,
     /// Config-level tool permissions.
     pub global_perms: Arc<HashMap<String, ToolPolicy>>,
     /// The agent's interaction backend (ask_user + tool approvals).
     pub interaction: HubInteractionBackend,
-    /// `--yolo`: nobody is watching this run, so `ask_user_*` /
-    /// `present_for_review` / `edit_document` are answered by
-    /// [`UnattendedInteraction`] rather than parked on the hub forever.
+    /// `--yolo`: nobody is watching this run, so the tools that block on a
+    /// person are not advertised at all. Should one be called anyway, it is
+    /// answered by [`UnattendedInteraction`] rather than parked on the hub for
+    /// ever - unless the stage kept it in `required_tools`, in which case a real
+    /// prompt is exactly what the blueprint asked for.
     pub unattended: bool,
     /// The current stage name, for tagging interactions (re-synced on stage change).
     pub stage_name: Arc<StdMutex<String>>,
@@ -102,6 +112,12 @@ pub struct DynamicToolCtx {
     pub static_defs: Vec<leviath_providers::Tool>,
     /// Each stage's `available_tools` (Layer-1 allowlist), by stage index.
     pub stage_available: Vec<Vec<String>>,
+    /// Each stage's `required_tools` (human tools kept through an unattended
+    /// run), by stage index. Paired with `unattended` so a re-scan can't hand a
+    /// `--yolo` agent back the prompting tools spawn resolution took away.
+    pub stage_required: Vec<Vec<String>>,
+    /// Whether this run is unattended (`--yolo`).
+    pub unattended: bool,
     /// Set when the agent writes a tool file; drained by `wants_refresh`.
     pub dirty: Arc<AtomicBool>,
 }
@@ -237,7 +253,16 @@ pub async fn dispatch_tools(
         // ask_user_* / present_for_review are handled by the interaction backend -
         // the hub (a real person answers) or, for an unattended `--yolo` run,
         // the auto-answering one.
-        let interaction: &dyn InteractionBackend = match state.unattended {
+        //
+        // A tool the stage kept in `required_tools` goes to the hub even in an
+        // unattended run. Keeping it was the blueprint saying this stage needs a
+        // person; auto-answering it here would make the opt-out mean nothing.
+        let kept_for_a_person = state
+            .stage_required
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(leviath_tools::canonical_tool_name(&tc.name));
+        let interaction: &dyn InteractionBackend = match state.unattended && !kept_for_a_person {
             true => &UnattendedInteraction,
             false => &state.interaction,
         };
@@ -422,6 +447,12 @@ impl ToolService for CliToolService {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner) = perms.clone();
         }
+        if let Some(required) = state.stage_required_by_index.get(stage_index) {
+            *state
+                .stage_required
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = required.clone();
+        }
         *state
             .stage_name
             .lock()
@@ -502,10 +533,20 @@ impl ToolService for CliToolService {
             .unwrap_or_else(PoisonError::into_inner) = names;
         // Re-filter this stage's advertised tools = static defs + fresh script defs.
         let available = ctx.stage_available.get(stage_index)?;
+        // A stage that named no `required_tools` keeps none through an
+        // unattended run - the absence is an empty list, not a missing stage,
+        // so it must not turn the whole refresh into a no-op.
+        let required = ctx
+            .stage_required
+            .get(stage_index)
+            .map_or(&[][..], |r| r.as_slice());
         let mut all = ctx.static_defs.clone();
         all.extend(script_defs);
-        Some(leviath_runtime::pipeline::filter_tools_by_available(
-            &all, available,
+        Some(leviath_runtime::pipeline::filter_tools_for_stage(
+            &all,
+            available,
+            required,
+            ctx.unattended,
         ))
     }
 }
@@ -565,6 +606,8 @@ mod tests {
             session_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_perms: Arc::new(StdMutex::new(HashMap::new())),
             stage_perms_by_index: Arc::new(Vec::new()),
+            stage_required: Arc::new(StdMutex::new(HashSet::new())),
+            stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(global),
             interaction: hub.backend_for("agent-a"),
@@ -640,6 +683,8 @@ mod tests {
             session_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_perms: Arc::new(StdMutex::new(HashMap::new())),
             stage_perms_by_index: Arc::new(Vec::new()),
+            stage_required: Arc::new(StdMutex::new(HashSet::new())),
+            stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(global),
             interaction: hub.backend_for("agent-a"),
@@ -688,12 +733,33 @@ mod tests {
         }
     }
 
-    /// A state with a `DynamicToolCtx` scanning `scan_dir`, over `workdir`.
+    /// A state with a `DynamicToolCtx` scanning `scan_dir`, over `workdir`,
+    /// attended (a refresh keeps whatever `stage_available` names).
     fn dynamic_state(
         workdir: PathBuf,
         scan_dir: PathBuf,
         static_defs: Vec<leviath_providers::Tool>,
         stage_available: Vec<Vec<String>>,
+    ) -> Arc<AgentToolState> {
+        dynamic_state_unattended(
+            workdir,
+            scan_dir,
+            static_defs,
+            stage_available,
+            Vec::new(),
+            false,
+        )
+    }
+
+    /// The same, with the unattended cut in play: `stage_required` names the
+    /// human tools each stage keeps anyway.
+    fn dynamic_state_unattended(
+        workdir: PathBuf,
+        scan_dir: PathBuf,
+        static_defs: Vec<leviath_providers::Tool>,
+        stage_available: Vec<Vec<String>>,
+        stage_required: Vec<Vec<String>>,
+        unattended: bool,
     ) -> Arc<AgentToolState> {
         let hub = InteractionHub::new();
         let builtins = Arc::new(leviath_tools::BuiltinTools::new(
@@ -713,6 +779,8 @@ mod tests {
             session_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_perms: Arc::new(StdMutex::new(HashMap::new())),
             stage_perms_by_index: Arc::new(Vec::new()),
+            stage_required: Arc::new(StdMutex::new(HashSet::new())),
+            stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(allow),
             interaction: hub.backend_for("a"),
@@ -728,6 +796,8 @@ mod tests {
                 reserved_names: HashSet::new(),
                 static_defs,
                 stage_available,
+                stage_required,
+                unattended,
                 dirty: Arc::new(AtomicBool::new(false)),
             })),
         })
@@ -755,6 +825,41 @@ mod tests {
         // The live script set + names now include the freshly discovered tool.
         assert!(state.script_tool_names.lock().unwrap().contains("echo"));
         assert!(state.script_tools.lock().unwrap().contains("echo"));
+    }
+
+    /// A `dynamic_tools` agent re-filters its advertised set mid-run. That
+    /// refresh has to apply the same unattended cut spawn resolution did, or a
+    /// `--yolo` run would quietly get its prompting tools back on the first
+    /// re-scan (issue #204).
+    #[test]
+    fn refresh_tools_keeps_the_unattended_cut() {
+        let workdir = tempfile::tempdir().unwrap();
+        let tools = tempfile::tempdir().unwrap();
+        let state = dynamic_state_unattended(
+            workdir.path().to_path_buf(),
+            tools.path().to_path_buf(),
+            vec![
+                tool_def("read_file"),
+                tool_def("ask_user_text"),
+                tool_def("ask_user_choice"),
+            ],
+            vec![vec![
+                "read_file".to_string(),
+                "ask_user_text".to_string(),
+                "ask_user_choice".to_string(),
+            ]],
+            vec![vec!["ask_user_choice".to_string()]],
+            true,
+        );
+        let svc = CliToolService::new();
+        let e = Entity::from_raw_u32(2).expect("a small literal index is always a valid entity id");
+        svc.register(e, state);
+
+        let defs = svc.refresh_tools(e, 0).unwrap();
+        let mut names: Vec<&str> = defs.iter().map(|t| t.name.as_str()).collect();
+        names.sort();
+        // `ask_user_text` is gone; the stage's opted-out `ask_user_choice` stays.
+        assert_eq!(names, vec!["ask_user_choice", "read_file"]);
     }
 
     #[test]
@@ -925,6 +1030,8 @@ mod tests {
             session_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_perms: Arc::new(StdMutex::new(HashMap::new())),
             stage_perms_by_index: Arc::new(Vec::new()),
+            stage_required: Arc::new(StdMutex::new(HashSet::new())),
+            stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(allow),
             interaction: hub.backend_for("a"),
@@ -1118,6 +1225,8 @@ mod tests {
             session_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_perms: Arc::new(StdMutex::new(HashMap::new())),
             stage_perms_by_index: Arc::new(Vec::new()),
+            stage_required: Arc::new(StdMutex::new(HashSet::new())),
+            stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(global),
             interaction: hub.backend_for("agent-a"),
@@ -1210,6 +1319,11 @@ mod tests {
             session_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_perms: Arc::new(StdMutex::new(HashMap::new())),
             stage_perms_by_index: Arc::new(vec![HashMap::new(), deny.clone()]),
+            stage_required: Arc::new(StdMutex::new(HashSet::new())),
+            stage_required_by_index: Arc::new(vec![
+                HashSet::new(),
+                HashSet::from(["ask_user_text".to_string()]),
+            ]),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(HashMap::new()),
             interaction: hub.backend_for("a"),
@@ -1228,6 +1342,12 @@ mod tests {
         service.sync_stage(e, 1, "review");
         assert_eq!(*state.stage_perms.lock().unwrap(), deny);
         assert_eq!(*state.stage_name.lock().unwrap(), "review");
+        // And that stage's kept human tools, so an unattended run asks a person
+        // only where the stage it is actually in said to.
+        assert_eq!(
+            *state.stage_required.lock().unwrap(),
+            HashSet::from(["ask_user_text".to_string()])
+        );
 
         // An out-of-range index leaves perms as-is but still updates the name.
         service.sync_stage(e, 99, "ghost");
@@ -1489,6 +1609,63 @@ mod tests {
         assert!(!result.contains("[denied]"), "{result}");
     }
 
+    /// An unattended run answers a stray `ask_user_*` inline rather than
+    /// opening a prompt nobody would see. The tool is not advertised in the
+    /// first place, so this is the belt to that brace.
+    #[tokio::test]
+    async fn an_unattended_run_answers_a_stray_ask_itself() {
+        let hub = InteractionHub::new();
+        let mut state = state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new());
+        Arc::get_mut(&mut state)
+            .expect("sole owner before dispatch")
+            .unattended = true;
+
+        let out = dispatch_tools(
+            state,
+            vec![call(
+                "c1",
+                "ask_user_text",
+                serde_json::json!({"prompt": "which way?"}),
+            )],
+            noop_progress(),
+        )
+        .await;
+
+        assert_eq!(out.len(), 1);
+        assert!(out[0].1.contains("unattended run"), "{}", out[0].1);
+        assert!(hub.pending().is_empty(), "nobody was asked");
+    }
+
+    /// A tool the stage kept in `required_tools` reaches a real person even
+    /// under `--yolo`. Without this the opt-out would advertise the tool and
+    /// then answer it on the user's behalf, which is no opt-out at all.
+    #[tokio::test]
+    async fn a_required_tool_reaches_a_person_even_when_unattended() {
+        let hub = InteractionHub::new();
+        let mut state = state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new());
+        {
+            let s = Arc::get_mut(&mut state).expect("sole owner before dispatch");
+            s.unattended = true;
+            s.stage_required =
+                Arc::new(StdMutex::new(HashSet::from(["ask_user_text".to_string()])));
+        }
+
+        let out = dispatch_answering(
+            state,
+            vec![call(
+                "c1",
+                "ask_user_text",
+                serde_json::json!({"prompt": "which way?"}),
+            )],
+            |req| InteractionResponse::text(&req.id, "go left"),
+            hub,
+        )
+        .await;
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].1, "go left");
+    }
+
     #[tokio::test]
     async fn subagent_tool_without_a_handle_reports_unavailable() {
         let hub = InteractionHub::new();
@@ -1539,6 +1716,8 @@ mod tests {
             session_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_perms: Arc::new(StdMutex::new(HashMap::new())),
             stage_perms_by_index: Arc::new(Vec::new()),
+            stage_required: Arc::new(StdMutex::new(HashSet::new())),
+            stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(HashMap::new()),
             interaction: hub.backend_for("agent-a"),
