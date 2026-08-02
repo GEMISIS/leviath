@@ -12,9 +12,16 @@
 //! a person at a keyboard can be a very long time. When the caller is a tool
 //! batch it waits [`off_lane`](crate::tool_bridge::off_lane), so a prompt nobody
 //! has answered yet costs the tool lane no capacity.
+//!
+//! "A very long time" used to mean "for ever": a run whose operator had walked
+//! away sat in `WaitingInput` until the daemon died, holding its slot the whole
+//! time (issue #204). [`InteractionHub::set_timeout_secs`] puts a deadline on
+//! that wait.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::Duration;
 
 use bevy_ecs::prelude::Resource;
 use leviath_core::interaction::{InteractionRequest, InteractionResponse};
@@ -44,7 +51,18 @@ pub struct InteractionHub {
     /// Opening, answering, or cancelling a request nudges it so the loop ticks
     /// (while otherwise parked) and reflects the change into agent status.
     wake: Arc<OnceLock<Arc<Notify>>>,
+    /// How long an open request may go unanswered before the hub resolves it
+    /// itself, in seconds. `0` (the default) waits indefinitely. Set once at
+    /// daemon start from `[limits] interaction_timeout_secs`.
+    timeout_secs: Arc<AtomicU64>,
 }
+
+/// The default deadline on an unanswered prompt, in seconds.
+///
+/// An hour is long enough that a person who is actually there answers well
+/// inside it, and short enough that a run whose operator has gone home releases
+/// its slot the same day rather than holding it until the daemon restarts.
+pub const DEFAULT_INTERACTION_TIMEOUT_SECS: u64 = 3600;
 
 impl InteractionHub {
     /// A fresh, empty hub.
@@ -58,6 +76,23 @@ impl InteractionHub {
         let _ = self.wake.set(wake);
     }
 
+    /// Set how long an open request may go unanswered before the hub resolves it
+    /// itself. `0` waits indefinitely - the behaviour before issue #204.
+    ///
+    /// Applies to requests opened from here on; a request already parked keeps
+    /// the deadline it was opened with.
+    pub fn set_timeout_secs(&self, secs: u64) {
+        self.timeout_secs.store(secs, Ordering::Relaxed);
+    }
+
+    /// The current deadline, or `None` when the hub waits indefinitely.
+    fn timeout(&self) -> Option<Duration> {
+        match self.timeout_secs.load(Ordering::Relaxed) {
+            0 => None,
+            secs => Some(Duration::from_secs(secs)),
+        }
+    }
+
     /// Wake the tick loop if a handle is attached (no-op otherwise).
     fn nudge(&self) {
         if let Some(wake) = self.wake.get() {
@@ -66,7 +101,14 @@ impl InteractionHub {
     }
 
     /// Register a request from `agent_id` and await its answer. Returns a neutral
-    /// (empty-text) response if the request is cancelled before it is answered.
+    /// (empty-text) response if the request is cancelled before it is answered,
+    /// or if it goes unanswered past [`set_timeout_secs`](Self::set_timeout_secs).
+    ///
+    /// The timeout deliberately produces the *same* neutral response a cancel
+    /// does, so nothing downstream has to learn a third outcome: an approval or
+    /// a taint gate reads it as not-approved and denies, an `ask_user_*` tool
+    /// reports that no answer came, and an interaction point proceeds with empty
+    /// user text - each exactly as it already behaves for a cancelled request.
     async fn submit(&self, agent_id: &str, request: InteractionRequest) -> InteractionResponse {
         let id = request.id.clone();
         let (responder, rx) = oneshot::channel();
@@ -91,9 +133,50 @@ impl InteractionHub {
         // no other agent's tools could use (issue #191). Callers that are not
         // tool batches - the gate-prompt and interaction-point lanes - have no
         // ticket, and for them this is a plain await.
-        crate::tool_bridge::off_lane(rx)
-            .await
-            .unwrap_or_else(|_| InteractionResponse::text(id, ""))
+        let Some(deadline) = self.timeout() else {
+            return crate::tool_bridge::off_lane(rx)
+                .await
+                .unwrap_or_else(|_| InteractionResponse::text(id, ""));
+        };
+        // `&mut rx` rather than `rx`, so the receiver outlives an elapsed
+        // deadline and a reply that landed in that same instant can still be
+        // collected instead of thrown away.
+        let mut rx = rx;
+        match crate::tool_bridge::off_lane(tokio::time::timeout(deadline, &mut rx)).await {
+            Ok(answered) => answered.unwrap_or_else(|_| InteractionResponse::text(id, "")),
+            Err(_elapsed) => self.expire(agent_id, &id, &mut rx),
+        }
+    }
+
+    /// Resolve a request nobody answered in time: drop it from the open set so
+    /// the tick loop takes the agent out of `Waiting`, and hand its caller the
+    /// neutral response.
+    ///
+    /// A real answer that arrived as the deadline passed still wins. It is
+    /// already sitting in the channel, and handing back the neutral response
+    /// instead would throw away what a person actually said.
+    fn expire(
+        &self,
+        agent_id: &str,
+        id: &str,
+        rx: &mut oneshot::Receiver<InteractionResponse>,
+    ) -> InteractionResponse {
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(id);
+        if let Ok(answered) = rx.try_recv() {
+            return answered;
+        }
+        tracing::warn!(
+            agent = %agent_id,
+            request = %id,
+            "no answer within the interaction timeout - resolving it as unanswered"
+        );
+        // Wake the driver so `reflect_interaction_status` moves the agent from
+        // Waiting back to Active now, rather than at the next re-drive.
+        self.nudge();
+        InteractionResponse::text(id, "")
     }
 
     /// Every open request, as `(agent_id, request)` pairs, for surfacing to
@@ -403,5 +486,107 @@ mod tests {
 
         // Cancelling again ⇒ nothing to cancel.
         assert!(!hub.cancel("q2"));
+    }
+
+    // ─── the deadline on an unanswered prompt (issue #204) ───────────────────
+
+    #[tokio::test(start_paused = true)]
+    async fn a_prompt_nobody_answers_is_released_when_the_deadline_passes() {
+        // The zombie in issue #204: six runs sat in `WaitingInput` for hours
+        // because nothing ever aged the request out. Now the hub resolves it
+        // itself and the agent goes back to work.
+        let hub = InteractionHub::new();
+        hub.set_timeout_secs(60);
+        let backend = hub.backend_for("agent-a");
+        let asking = tokio::spawn(async move { backend.ask(req("q1")).await });
+
+        settle().await;
+        assert_eq!(hub.pending().len(), 1, "the prompt is open while it waits");
+
+        // The paused clock jumps to the deadline once nothing else can run.
+        let response = asking.await.unwrap();
+        assert_eq!(response.request_id, "q1");
+        // The same neutral answer a cancel produces: not approved, no text.
+        assert_eq!(response.value.as_deref(), Some(""));
+        assert_eq!(response.approved, None);
+        assert!(
+            hub.pending().is_empty(),
+            "the expired request is off the open list, so the agent leaves Waiting"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_deadline_changes_nothing_for_a_prompt_that_is_answered() {
+        // Setting a deadline must not alter the ordinary paths. Both of them run
+        // here: one prompt answered by a person, one cancelled under it.
+        let hub = InteractionHub::new();
+        hub.set_timeout_secs(3600);
+
+        let answered_backend = hub.backend_for("agent-a");
+        let answered = tokio::spawn(async move { answered_backend.ask(req("q1")).await });
+        let cancelled_backend = hub.backend_for("agent-b");
+        let cancelled = tokio::spawn(async move { cancelled_backend.ask(req("q2")).await });
+        settle().await;
+
+        assert!(hub.answer(InteractionResponse::text("q1", "yes, go on")));
+        assert_eq!(answered.await.unwrap().value.as_deref(), Some("yes, go on"));
+
+        assert!(hub.cancel("q2"));
+        assert_eq!(cancelled.await.unwrap().value.as_deref(), Some(""));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_zero_deadline_waits_for_a_person_however_long_it_takes() {
+        // `0` is the explicit "I will be here" setting, and it has to keep the
+        // old behaviour exactly: the prompt stays open until answered.
+        let hub = InteractionHub::new();
+        hub.set_timeout_secs(0);
+        let backend = hub.backend_for("agent-a");
+        let asking = tokio::spawn(async move { backend.ask(req("q1")).await });
+
+        settle().await;
+        tokio::time::advance(Duration::from_secs(86_400)).await;
+        assert_eq!(hub.pending().len(), 1, "a day later, still waiting");
+
+        assert!(hub.answer(InteractionResponse::text("q1", "here I am")));
+        assert_eq!(asking.await.unwrap().value.as_deref(), Some("here I am"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_deadline_denies_rather_than_approves() {
+        // A timeout must never be read as consent: an approval prompt and a
+        // taint gate both go through `response_approved`, which reads the
+        // neutral response as "no".
+        let hub = InteractionHub::new();
+        hub.set_timeout_secs(30);
+        let backend = hub.backend_for("agent-a");
+        let asking = tokio::spawn(async move {
+            backend
+                .ask(InteractionRequest::tool_approval(
+                    "t1",
+                    "shell",
+                    serde_json::json!({"command": "rm -rf /"}),
+                    "implement",
+                ))
+                .await
+        });
+
+        let response = asking.await.unwrap();
+        assert!(!leviath_core::interaction::response_approved(&response));
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_lands_as_the_deadline_passes_still_wins() {
+        // The race: `answer` took the entry out of the registry and sent its
+        // response an instant before the timer fired. Handing back the neutral
+        // response here would throw away what a person actually said.
+        let hub = InteractionHub::new();
+        let (responder, mut rx) = oneshot::channel();
+        responder
+            .send(InteractionResponse::text("q1", "approved by hand"))
+            .expect("the receiver is still alive");
+
+        let response = hub.expire("agent-a", "q1", &mut rx);
+        assert_eq!(response.value.as_deref(), Some("approved by hand"));
     }
 }
