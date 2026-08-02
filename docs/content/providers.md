@@ -19,6 +19,47 @@ the [API](/docs/api).
 | Ollama | none (local) | [ollama.com/download](https://ollama.com/download) |
 | Claude Code | none (subscription) | see below |
 
+## Model identifiers
+
+A model is always named by a `provider` and a `model` together. The `model` string is passed to that
+provider verbatim, so it has to be spelled the way the provider spells it:
+
+| Provider | Shape | Example |
+|---|---|---|
+| Anthropic | the bare model name | `claude-sonnet-5` |
+| OpenAI | the bare model name | `gpt-5.4-mini` |
+| Google | the bare model name | `gemini-2.5-pro` |
+| OpenRouter | `vendor/model` | `deepseek/deepseek-v4-flash` |
+| Ollama | `model:tag` | `qwen3.5:9b` |
+
+OpenRouter is the one that trips people up: its identifiers carry a vendor prefix, and the prefix is
+part of the name. `deepseek-v4-flash` is not a valid OpenRouter model; `deepseek/deepseek-v4-flash`
+is. Browse the full catalog at [openrouter.ai/models](https://openrouter.ai/models), or ask your
+install:
+
+```bash
+lev models list --provider openrouter        # what Leviath knows offline
+lev models list --provider openrouter --remote   # live from the provider's API
+lev models list --all                        # every provider, even unconfigured ones
+```
+
+> [!NOTE]
+> Without `--remote`, `lev models list` prints a built-in table of well-known models. It is a
+> convenience, not the catalog. A model absent from it is not necessarily invalid, and Leviath does
+> not check model strings against it: `lev validate` never looks at them, and an unrecognized string
+> gets a conservative 128K context / 8192 output assumption locally and is then sent to the provider
+> as written.
+
+### Dated and rotating identifiers
+
+Providers publish dated aliases (`deepseek/deepseek-v4-flash-0731`,
+`deepseek/deepseek-r1-0528`) alongside undated ones. A dated alias can be perfectly valid upstream
+while being absent from `lev models list`, and it can also stop resolving later when the provider
+retires it. Nothing local will warn you: the first sign is a model-not-found error from the API.
+
+If you pin a dated identifier, treat it as something to revisit. If you would rather not, pin the
+undated one and accept that the provider may move it under you.
+
 ## Per-stage model selection with fallback
 
 Each [stage](/docs/stages) names an ordered list of provider/model pairs. The runtime picks the
@@ -93,6 +134,60 @@ wait restarts. Topping up an account needs no restart.
 retried. `lev ps --json` carries the same under `health.providers_down`, and the
 `leviath.provider.circuit.open` metric reports it per provider. Set `provider_failures_before_open`
 to `0` to switch the whole thing off and keep only per-run failover.
+
+## Which entry a stage starts on
+
+Failover decides where a run *goes*; this decides where it *begins*. The starting choice is made
+once, at spawn, and keys on whether the **provider** is configured, never on whether the model
+exists. In order:
+
+1. `lev run --model <provider>/<model>`, which overrides everything and skips the check entirely. A
+   bare `--model <model>` replaces only the model name and keeps the provider resolved below.
+2. The first entry in `models` whose provider is configured.
+3. Your `default_provider` / `default_model` from `config.toml`, if `default_model` is set, its
+   provider is configured, and the stage did not set `allow_user_default = false`.
+4. The first entry in the list, whether or not its provider exists. If it does not, the run fails at
+   spawn with `stage '<name>' has no usable provider`.
+
+> [!IMPORTANT]
+> Step 3 is only reached when **no** listed provider is configured. Ollama needs no key and is
+> therefore registered unconditionally, so any stage listing Ollama matches at step 2 whether or not
+> Ollama is actually installed, and your `default_model` is never consulted for that stage.
+
+### Running the bundled agents on another provider
+
+The [bundled agents](/docs/agent-catalog) list Anthropic, OpenAI, and Ollama, in that order. None of
+them lists OpenRouter, Google, or a custom Rhai provider, so a key for one of those does not make
+them use it. On an install whose only key is an OpenRouter one:
+
+- Almost every stage matches Ollama at step 2 and runs against `http://localhost:11434`. If Ollama
+  is not installed, the run spawns fine and then fails at its first call.
+- `parallel-fixer`'s `parallel_fix` and `fix_worker` stages list only Anthropic and OpenAI, so they
+  fail at spawn: `stage 'parallel_fix' has no usable provider (tried: anthropic)`.
+
+Setting `default_provider` and `default_model` does **not** fix this, for the reason in the note
+above. Three things do. A full override, per run:
+
+```bash
+lev run coder -t "fix the failing test" --model openrouter/deepseek/deepseek-v4-flash
+```
+
+A host-wide `fallback_order`, which catches a stage once its own entries are exhausted:
+
+```toml
+[providers]
+fallback_order = ["openrouter/deepseek/deepseek-v4-flash"]
+```
+
+Or, for something permanent, copying the blueprint and naming your provider on the stages you care
+about:
+
+```toml
+model = { models = [
+  { provider = "openrouter", model = "deepseek/deepseek-v4-flash" },
+  { provider = "anthropic",  model = "claude-sonnet-5" },
+] }
+```
 
 ## Where credentials live
 
