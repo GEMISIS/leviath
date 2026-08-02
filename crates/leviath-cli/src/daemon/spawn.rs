@@ -899,7 +899,10 @@ fn build_agent_inner(
         blueprint,
         &seeds,
         stages,
-        config.batch_tool_hint,
+        leviath_core::config::PromptHints {
+            batch_tool: config.batch_tool_hint,
+            shell: config.shell_hint,
+        },
         config.nudge.clone(),
         region_scripts,
     )?;

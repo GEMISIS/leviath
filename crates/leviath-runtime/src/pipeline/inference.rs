@@ -14,6 +14,65 @@ writing a file then running a command that doesn't need its output), batch them 
 one response to cut round trips. Do NOT batch when a call depends on a previous \
 call's result, or when you must see a command's output before deciding the next step.";
 
+/// What the `shell` tool actually runs on Windows, and the PowerShell commands
+/// that stand in for the POSIX ones a model reaches for by reflex. Prepended to
+/// a shell-granting stage's system blocks when [`shell_guidance_for`] returns
+/// it; see [`InferenceConfig::shell_hint`](crate::components::InferenceConfig).
+pub(crate) const WINDOWS_SHELL_HINT: &str = "The shell tool runs on Windows through `cmd.exe /C`, \
+not a POSIX shell. GNU coreutils are not available: use `type` or PowerShell's `Get-Content` \
+instead of `cat`, `findstr` or `Select-String` instead of `grep`, `dir` or `Get-ChildItem` \
+instead of `ls`, and `Measure-Object -Line` instead of `wc -l`. Run a PowerShell command as \
+`powershell -Command \"...\"`. Paths use backslashes and drive letters, and `%VAR%` (cmd) or \
+`$env:VAR` (PowerShell) expands environment variables.";
+
+/// The shell guidance for `os`, or `None` when the platform's shell needs no
+/// explanation (a POSIX shell is what the model already assumes).
+///
+/// Pure over the OS string rather than `#[cfg]`-switched, following
+/// `leviath_sys::browser::open_command_for`, so every branch is reachable under
+/// test on a single platform. Callers pass [`std::env::consts::OS`].
+pub(crate) fn shell_guidance_for(os: &str) -> Option<&'static str> {
+    match os {
+        "windows" => Some(WINDOWS_SHELL_HINT),
+        _ => None,
+    }
+}
+
+/// The framework-authored system blocks a stage carries ahead of its own
+/// context, in the order they are prepended.
+///
+/// Both hints read the same on every agent, stage, and run of a given host, so
+/// they lead the `Always`-tier prefix (which `assemble` already sorts first) and
+/// leave prefix caching intact. `os` is the host OS string
+/// ([`std::env::consts::OS`] in production) and `tools` the stage's advertised
+/// tools: telling a stage that cannot run commands which shell it would have
+/// gotten is pure overhead, so the shell hint is gated on the tool being there.
+///
+/// Note this is a `build_request` concern, so the request paths that assemble
+/// their own [`InferenceRequest`] - `lev test`, title generation, compaction -
+/// carry no hints. That was already true of the batch hint.
+pub(crate) fn hint_blocks(
+    config: Option<&InferenceConfig>,
+    tools: &[Tool],
+    os: &str,
+) -> Vec<leviath_providers::SystemBlock> {
+    let always = |text: &str| leviath_providers::SystemBlock {
+        text: text.to_string(),
+        cache_hint: leviath_core::CacheHint::Always,
+    };
+    let mut blocks = Vec::new();
+    if config.map(|c| c.batch_tool_hint).unwrap_or(false) {
+        blocks.push(always(BATCH_TOOL_HINT));
+    }
+    if config.map(|c| c.shell_hint).unwrap_or(false)
+        && tools.iter().any(|t| t.name == "shell")
+        && let Some(text) = shell_guidance_for(os)
+    {
+        blocks.push(always(text));
+    }
+    blocks
+}
+
 /// Build the [`InferenceRequest`] for an agent from its context window + stage
 /// data. Pure; no `.await` - a custom region's render hook is a bounded,
 /// synchronous Rhai eval. (Ported from `AgentEngine::build_inference_request`,
@@ -64,20 +123,8 @@ pub(crate) fn build_request(
         _ => serde_json::Value::Null,
     };
 
-    // Prepend the batch-tool-calls hint as a stable, always-cacheable system
-    // block when this stage opts in. Prepending keeps it at the front of the
-    // `Always`-tier prefix (which `assemble` already sorts first), maximizing
-    // prefix-cache hits since the text never varies across agents/stages/runs.
-    let mut system = assembled.system_blocks;
-    if config.map(|c| c.batch_tool_hint).unwrap_or(false) {
-        system.insert(
-            0,
-            leviath_providers::SystemBlock {
-                text: BATCH_TOOL_HINT.to_string(),
-                cache_hint: leviath_core::CacheHint::Always,
-            },
-        );
-    }
+    let mut system = hint_blocks(config, &filtered_tools, std::env::consts::OS);
+    system.extend(assembled.system_blocks);
 
     InferenceRequest {
         system,

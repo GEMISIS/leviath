@@ -99,6 +99,7 @@ pub struct AgentWorldBuilder {
     tool_concurrency: usize,
     state_dir: Option<PathBuf>,
     defaults: ModelDefaults,
+    hints: leviath_core::config::PromptHints,
     runtime: Option<Handle>,
 }
 
@@ -112,6 +113,12 @@ impl AgentWorldBuilder {
             tool_concurrency: 4,
             state_dir: None,
             defaults: ModelDefaults::default(),
+            // Off unless asked for: an embedder owns its prompts, and the
+            // daemon's `config.toml` defaults do not reach this path.
+            hints: leviath_core::config::PromptHints {
+                batch_tool: false,
+                shell: false,
+            },
             runtime: None,
         }
     }
@@ -187,6 +194,16 @@ impl AgentWorldBuilder {
         self
     }
 
+    /// Opt in to the framework-authored system-prompt hints, off by default on
+    /// this path. `shell` is worth turning on for a blueprint that grants the
+    /// shell tool and may run on Windows: it tells the model that commands go
+    /// through `cmd.exe` rather than a POSIX shell. A blueprint's `[agent]` or
+    /// `[stages.<name>]` `batch_tool_hint` / `shell_hint` still overrides this.
+    pub fn prompt_hints(mut self, hints: leviath_core::config::PromptHints) -> Self {
+        self.hints = hints;
+        self
+    }
+
     /// Run the world on `handle` instead of the ambient Tokio runtime.
     pub fn runtime(mut self, handle: Handle) -> Self {
         self.runtime = Some(handle);
@@ -233,6 +250,7 @@ impl AgentWorldBuilder {
         let spawner = EmbedSpawner {
             basic_tools: basic_tools.clone(),
             defaults: self.defaults,
+            hints: self.hints,
             staged: staged.clone(),
         };
         host.set_spawner(Box::new(move |world, args| spawner.spawn(world, args)));
@@ -497,6 +515,35 @@ mod tests {
             thought_signature: None,
         });
         r
+    }
+
+    /// A provider that records the system blocks of every request it is handed,
+    /// then answers "done". For asserting what the framework prepends.
+    struct Recorder {
+        seen: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for Recorder {
+        async fn infer(&self, r: InferenceRequest) -> Result<InferenceResponse, ProviderError> {
+            self.seen
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(r.system.iter().map(|b| b.text.clone()).collect());
+            Ok(text("done"))
+        }
+        async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+            1
+        }
+        fn max_context_tokens(&self, _m: &str) -> usize {
+            100_000
+        }
+        fn name(&self) -> &str {
+            "mock"
+        }
+        fn capabilities(&self, _m: &str) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
     }
 
     fn mock_world(responses: Vec<InferenceResponse>) -> AgentWorld {
@@ -987,6 +1034,98 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         let run_dir = state.path().join("runs").join(run_id.as_ref());
         assert!(run_dir.join("meta.json").exists());
         assert!(state.path().join("machine-id").exists());
+    }
+
+    /// The single-stage blueprint the hint tests drive, with a shell tool so the
+    /// shell hint's tool guard is satisfied.
+    const SHELL_STAGE: &str = r#"[agent]
+name = "shelly"
+version = "0.0.0"
+description = "One stage that can run commands."
+entry_stage = "work"
+
+[stages.work]
+mode = "autonomous"
+model = { provider = "mock", model = "m" }
+description = "Do the work"
+available_tools = ["shell"]
+allow_complete = true
+system_prompt = "Work."
+
+[context.regions]
+instructions = { kind = "pinned", max_tokens = 2000 }
+conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
+"#;
+
+    /// Run `SHELL_STAGE` once against a [`Recorder`] and hand back the system
+    /// blocks of the first request, with `hints` as the world's global toggles.
+    async fn system_blocks_with(hints: leviath_core::config::PromptHints) -> Vec<String> {
+        let dir = tempfile::tempdir().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let world = AgentWorld::builder()
+            .register_provider(
+                "mock",
+                Arc::new(Recorder {
+                    seen: Arc::clone(&seen),
+                }),
+            )
+            .prompt_hints(hints)
+            .build()
+            .expect("world builds inside the test runtime");
+        let mut events = world.events();
+        world
+            .spawn(SpawnSpec::new(
+                BlueprintSource::Toml(SHELL_STAGE.to_string()),
+                "go",
+                dir.path(),
+            ))
+            .await
+            .expect("spawns");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            events_until(&mut events, |e| matches!(e, WorldEvent::Completed { .. })),
+        )
+        .await
+        .expect("completes");
+        world.shutdown().await;
+        let seen = seen.lock().unwrap_or_else(PoisonError::into_inner);
+        seen.first().cloned().expect("one inference happened")
+    }
+
+    #[tokio::test]
+    async fn prompt_hints_reach_the_request_and_are_off_by_default() {
+        // Off unless asked for: an embedder that never calls `prompt_hints`
+        // gets exactly the blueprint's own prompt.
+        let default_blocks = system_blocks_with(leviath_core::config::PromptHints {
+            batch_tool: false,
+            shell: false,
+        })
+        .await;
+        assert!(
+            default_blocks
+                .iter()
+                .all(|b| b != crate::pipeline::BATCH_TOOL_HINT),
+        );
+        assert!(default_blocks.iter().any(|b| b.contains("Work.")));
+
+        // Turned on, the hint leads the prefix. The shell hint rides the same
+        // path but only says anything on Windows, so this asserts on the batch
+        // hint, which is the platform-independent half of the plumbing.
+        let hinted = system_blocks_with(leviath_core::config::PromptHints {
+            batch_tool: true,
+            shell: true,
+        })
+        .await;
+        assert_eq!(
+            hinted.first().map(String::as_str),
+            Some(crate::pipeline::BATCH_TOOL_HINT)
+        );
+        // Whatever the host OS says about its shell is what the run carries.
+        let shell_hint = crate::pipeline::shell_guidance_for(std::env::consts::OS);
+        assert_eq!(
+            hinted.iter().any(|b| Some(b.as_str()) == shell_hint),
+            shell_hint.is_some(),
+        );
     }
 
     #[tokio::test]

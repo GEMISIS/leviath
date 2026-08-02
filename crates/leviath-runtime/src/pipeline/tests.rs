@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::inference_pool::{InferencePoolConfig, InferencePools};
+use crate::test_support::hints;
 use leviath_core::{Region, RegionKind};
 use tokio::sync::mpsc;
 
@@ -122,6 +123,7 @@ fn build_request_filters_tools_and_uses_config_overrides() {
         max_output_tokens: Some(42),
         extra_params: Default::default(),
         batch_tool_hint: false,
+        shell_hint: false,
         request_timeout_secs: None,
     };
     let si = stage(
@@ -177,6 +179,7 @@ fn build_request_passes_through_extra_params() {
         max_output_tokens: None,
         extra_params,
         batch_tool_hint: false,
+        shell_hint: false,
         request_timeout_secs: None,
     };
     let si = stage("m", vec![], None);
@@ -208,6 +211,7 @@ fn build_request_prepends_batch_hint_when_enabled() {
         max_output_tokens: None,
         extra_params: Default::default(),
         batch_tool_hint: true,
+        shell_hint: false,
         request_timeout_secs: None,
     };
     let si = stage("m", vec![], None);
@@ -242,6 +246,7 @@ fn build_request_omits_batch_hint_when_disabled_or_absent() {
         max_output_tokens: None,
         extra_params: Default::default(),
         batch_tool_hint: false,
+        shell_hint: false,
         request_timeout_secs: None,
     };
     let req = build_request(
@@ -265,6 +270,102 @@ fn build_request_omits_batch_hint_when_disabled_or_absent() {
     );
     assert!(!req_none.system.is_empty());
     assert!(req_none.system.iter().all(|b| b.text != BATCH_TOOL_HINT));
+}
+
+/// An [`InferenceConfig`] with just the two hint toggles set, everything else
+/// at its inert default.
+fn hint_config(batch_tool_hint: bool, shell_hint: bool) -> InferenceConfig {
+    InferenceConfig {
+        temperature: None,
+        max_output_tokens: None,
+        extra_params: Default::default(),
+        batch_tool_hint,
+        shell_hint,
+        request_timeout_secs: None,
+    }
+}
+
+#[test]
+fn shell_guidance_is_windows_only() {
+    // The one platform whose shell isn't what a model assumes.
+    assert_eq!(shell_guidance_for("windows"), Some(WINDOWS_SHELL_HINT));
+    assert!(WINDOWS_SHELL_HINT.contains("cmd.exe"));
+    // Everywhere else a POSIX shell is the default assumption, so nothing to
+    // say - including for an OS string this build has never heard of.
+    assert_eq!(shell_guidance_for("linux"), None);
+    assert_eq!(shell_guidance_for("macos"), None);
+    assert_eq!(shell_guidance_for("freebsd"), None);
+    assert_eq!(shell_guidance_for("haiku"), None);
+}
+
+#[test]
+fn the_shell_hint_needs_the_toggle_the_platform_and_the_tool() {
+    let shell = vec![tool("shell")];
+    let cases = [
+        // (shell_hint, os, tools, expected)
+        (true, "windows", &shell, true),
+        // Opted out at some level of the cascade.
+        (false, "windows", &shell, false),
+        // A platform whose shell needs no explanation.
+        (true, "linux", &shell, false),
+        // A stage that cannot run commands doesn't pay for the hint.
+        (true, "windows", &vec![tool("read_file")], false),
+        (true, "windows", &vec![], false),
+    ];
+    for (shell_hint, os, tools, expected) in cases {
+        let cfg = hint_config(false, shell_hint);
+        let blocks = hint_blocks(Some(&cfg), tools, os);
+        assert_eq!(
+            blocks.iter().any(|b| b.text == WINDOWS_SHELL_HINT),
+            expected,
+            "shell_hint={shell_hint} os={os} tools={:?}",
+            tools.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
+    }
+    // No config at all is the same as both toggles off.
+    assert!(hint_blocks(None, &shell, "windows").is_empty());
+}
+
+#[test]
+fn both_hints_lead_the_prefix_with_the_batch_hint_first() {
+    // Order matters: these are the stable head of the `Always` cache prefix, so
+    // it has to be the same head on every request the host makes.
+    let cfg = hint_config(true, true);
+    let blocks = hint_blocks(Some(&cfg), &[tool("shell")], "windows");
+    let texts: Vec<&str> = blocks.iter().map(|b| b.text.as_str()).collect();
+    assert_eq!(texts, vec![BATCH_TOOL_HINT, WINDOWS_SHELL_HINT]);
+    assert!(
+        blocks
+            .iter()
+            .all(|b| b.cache_hint == leviath_core::CacheHint::Always)
+    );
+}
+
+#[test]
+fn build_request_puts_the_hints_ahead_of_the_stage_context() {
+    // `build_request` reads the *host* OS, so the shell hint's presence is not
+    // assertable portably here; what is assertable is that whatever hints apply
+    // come first and the stage's own blocks survive behind them.
+    let cfg = hint_config(true, true);
+    let si = stage("m", vec![tool("shell")], None);
+    let req = build_request(
+        &window_with_sys(),
+        Some(&cfg),
+        &si,
+        &provider(true, 500),
+        "test-stage",
+        0,
+    );
+    let hints = hint_blocks(Some(&cfg), &si.tools, std::env::consts::OS);
+    for (i, hint) in hints.iter().enumerate() {
+        assert_eq!(req.system[i].text, hint.text);
+    }
+    assert!(
+        req.system[hints.len()..]
+            .iter()
+            .any(|b| b.text.contains("base system")),
+        "the stage's own system block is preserved after the hints"
+    );
 }
 
 #[test]
@@ -1630,7 +1731,7 @@ fn spawn_agent_seeds_the_stage_ledger_with_names() {
         bp,
         "task",
         vec![resolved("m"), resolved("m")],
-        true,
+        hints(true),
     )
     .expect("spawn");
     let led = world.get::<StageLedger>(e).expect("ledger seeded");
@@ -1684,7 +1785,7 @@ fn spawn_agent_seeded_resolves_percent_region_against_provider_window() {
         percent_region_blueprint(0.35),
         "task",
         vec![resolved("m")],
-        true,
+        hints(true),
     )
     .expect("spawn");
     let w = world.get::<ContextWindow>(e).expect("window");
@@ -1704,7 +1805,7 @@ fn spawn_agent_seeded_falls_back_when_provider_missing() {
             percent_region_blueprint(0.35),
             "task",
             vec![resolved("m")],
-            true,
+            hints(true),
         )
         .expect("spawn");
         let w = world.get::<ContextWindow>(e).expect("window");
@@ -1729,7 +1830,7 @@ fn spawn_agent_seeded_absolute_blueprint_is_unchanged() {
         bp,
         "task",
         vec![resolved("m")],
-        true,
+        hints(true),
     )
     .expect("spawn");
     let w = world.get::<ContextWindow>(e).expect("window");
@@ -1774,7 +1875,7 @@ fn spawn_agent_seeded_resolves_per_stage_layout() {
         bp,
         "task",
         vec![resolved("m")],
-        true,
+        hints(true),
     )
     .expect("spawn");
     let w = world.get::<ContextWindow>(e).expect("window");
@@ -1794,7 +1895,7 @@ fn spawn_agent_seeded_errors_when_resolved_global_layout_is_invalid() {
         percent_region_blueprint(0.95),
         "task",
         vec![resolved("m")],
-        true,
+        hints(true),
     )
     .expect_err("resolved layout should fail validation");
     assert!(err.contains("working tokens"), "{err}");
@@ -1835,7 +1936,7 @@ fn spawn_agent_seeded_errors_when_resolved_per_stage_layout_is_invalid() {
         bp,
         "task",
         vec![resolved("m")],
-        true,
+        hints(true),
     )
     .expect_err("per-stage layout should fail validation");
     assert!(err.contains("working tokens"), "{err}");
@@ -4497,6 +4598,7 @@ fn setup() -> StageSetup {
             max_output_tokens: None,
             extra_params: Default::default(),
             batch_tool_hint: false,
+            shell_hint: false,
             request_timeout_secs: None,
         },
         routing: None,
@@ -4837,6 +4939,7 @@ fn enter_stage_injects_system_prompt_and_config() {
         max_output_tokens: Some(99),
         extra_params: Default::default(),
         batch_tool_hint: false,
+        shell_hint: false,
         request_timeout_secs: None,
     };
     s.accepts_messages = false;
@@ -5027,7 +5130,7 @@ fn spawn_agent_builds_stage0_ready_with_config_and_routing() {
         bp,
         "the task",
         vec![resolved("m")],
-        true,
+        hints(true),
     )
     .unwrap();
 
@@ -5074,7 +5177,7 @@ fn spawn_agent_defaults_config_and_no_routing() {
         bp,
         "t",
         vec![resolved("m")],
-        true,
+        hints(true),
     )
     .unwrap();
 
@@ -5110,21 +5213,62 @@ fn stage_setup_from_folds_fanout_split_prompt() {
         "system_prompt".to_string(),
         serde_json::Value::String("base instructions".to_string()),
     );
-    let sp = stage_setup_from(&s, true, None).system_prompt.unwrap();
+    let sp = stage_setup_from(&s, hints(true), Default::default())
+        .system_prompt
+        .unwrap();
     assert!(sp.contains("base instructions") && sp.contains("SPLIT NOW"));
 
     // Fan-out stage with no base prompt: the split prompt alone.
     let mut s2 = stage_named("fan", None, false, None);
     s2.mode = fanout("ONLY SPLIT");
     assert_eq!(
-        stage_setup_from(&s2, true, None).system_prompt,
+        stage_setup_from(&s2, hints(true), Default::default()).system_prompt,
         Some("ONLY SPLIT".to_string())
     );
 
     // Fan-out stage with an empty split prompt: base prompt is left as-is.
     let mut s3 = stage_named("fan", None, false, None);
     s3.mode = fanout("   ");
-    assert_eq!(stage_setup_from(&s3, true, None).system_prompt, None);
+    assert_eq!(
+        stage_setup_from(&s3, hints(true), Default::default()).system_prompt,
+        None
+    );
+}
+
+#[test]
+fn stage_setup_from_cascades_each_hint_independently() {
+    use leviath_core::config::{PromptHintOverrides, PromptHints};
+
+    // Globals on, agent silent, stage silent → both inherit on.
+    let s = stage_named("plan", None, false, None);
+    let cfg = stage_setup_from(&s, hints(true), PromptHintOverrides::default()).inference_config;
+    assert!(cfg.batch_tool_hint);
+    assert!(cfg.shell_hint);
+
+    // The agent level opts out of one hint without touching the other.
+    let agent_off_shell = PromptHintOverrides {
+        batch_tool: None,
+        shell: Some(false),
+    };
+    let cfg = stage_setup_from(&s, hints(true), agent_off_shell).inference_config;
+    assert!(cfg.batch_tool_hint);
+    assert!(!cfg.shell_hint);
+
+    // The stage level wins over the agent, in both directions at once.
+    let mut s2 = stage_named("plan", None, false, None);
+    s2.shell_hint = Some(true);
+    s2.batch_tool_hint = Some(false);
+    let cfg = stage_setup_from(
+        &s2,
+        PromptHints {
+            batch_tool: true,
+            shell: false,
+        },
+        agent_off_shell,
+    )
+    .inference_config;
+    assert!(!cfg.batch_tool_hint);
+    assert!(cfg.shell_hint);
 }
 
 #[test]
@@ -5145,7 +5289,7 @@ fn stage_setup_from_collects_extra_model_parameters() {
         .parameters
         .insert("seed".to_string(), serde_json::json!(11));
 
-    let setup = stage_setup_from(&s, true, None);
+    let setup = stage_setup_from(&s, hints(true), Default::default());
     assert_eq!(setup.inference_config.temperature, Some(0.3));
     assert_eq!(setup.inference_config.max_output_tokens, Some(256));
     let extra = &setup.inference_config.extra_params;
@@ -5160,7 +5304,7 @@ fn stage_setup_from_threads_request_timeout() {
     // Unset on the stage → None on the inference config.
     let s = stage_named("plan", None, false, None);
     assert_eq!(
-        stage_setup_from(&s, true, None)
+        stage_setup_from(&s, hints(true), Default::default())
             .inference_config
             .request_timeout_secs,
         None
@@ -5170,7 +5314,7 @@ fn stage_setup_from_threads_request_timeout() {
     let mut s2 = stage_named("plan", None, false, None);
     s2.model.request_timeout_secs = Some(300);
     assert_eq!(
-        stage_setup_from(&s2, true, None)
+        stage_setup_from(&s2, hints(true), Default::default())
             .inference_config
             .request_timeout_secs,
         Some(300)
@@ -5233,7 +5377,7 @@ fn spawn_agent_errors_on_oversized_system_prompt() {
         bp,
         "t",
         vec![resolved("m")],
-        true,
+        hints(true),
     );
     assert!(err.is_err());
 }

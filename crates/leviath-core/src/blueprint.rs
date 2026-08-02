@@ -58,6 +58,12 @@ pub struct Blueprint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_tool_hint: Option<bool>,
 
+    /// Agent-level override for the platform shell hint. `None` inherits the
+    /// global config toggle; a per-stage `shell_hint` overrides this. See
+    /// [`crate::taint::resolve_shell_hint`] for the cascade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_hint: Option<bool>,
+
     /// Agent-level default for the empty-response nudge. `None` inherits the
     /// global config's `[nudge]` section; a per-stage `[stages.<name>.nudge]`
     /// overrides this. See [`resolve_nudge`] for the cascade.
@@ -134,6 +140,7 @@ impl Blueprint {
             metadata: HashMap::new(),
             security: None,
             batch_tool_hint: None,
+            shell_hint: None,
             nudge: None,
             repetition_detection: None,
             file_tracking: None,
@@ -753,6 +760,13 @@ pub struct Stage {
     #[serde(default)]
     pub batch_tool_hint: Option<bool>,
 
+    /// Per-stage override for the platform shell hint. `None` inherits the
+    /// agent-level `Blueprint.shell_hint` (which in turn inherits the global
+    /// config toggle). A stage that grants no shell tool never emits the hint
+    /// regardless, so this is for opting a shell-granting stage out.
+    #[serde(default)]
+    pub shell_hint: Option<bool>,
+
     /// Per-stage empty-response nudge settings. Each field independently
     /// inherits the agent-level `Blueprint.nudge` (which in turn inherits the
     /// global config's `[nudge]` section). A stage whose deliverable is text -
@@ -802,6 +816,7 @@ impl Stage {
             allow_as_worker: false,
             security: None,
             batch_tool_hint: None,
+            shell_hint: None,
             nudge: None,
             sandbox: None,
             tool_result_routing: None,

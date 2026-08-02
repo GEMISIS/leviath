@@ -1268,10 +1268,14 @@ pub(crate) fn context_window_tokens(world: &World, provider_name: &str, model: &
 /// Build a stage's [`StageSetup`] from its blueprint definition: inference config
 /// (from the model parameters), tool-result routing, accepts-messages, layout,
 /// and system prompt.
+///
+/// `global_hints` is the caller's config-level toggle for each system-prompt
+/// hint; `agent_hints` the blueprint's agent-level override of the same. Each
+/// one cascades stage → agent → global here.
 pub(crate) fn stage_setup_from(
     stage: &leviath_core::Stage,
-    global_batch_tool_hint: bool,
-    agent_batch_tool_hint: Option<bool>,
+    global_hints: leviath_core::config::PromptHints,
+    agent_hints: leviath_core::config::PromptHintOverrides,
 ) -> StageSetup {
     let temperature = stage
         .model
@@ -1314,11 +1318,16 @@ pub(crate) fn stage_setup_from(
         }
         _ => base_prompt,
     };
-    // Cascade the batch-tool-hint toggle: stage > agent > global (default on).
+    // Cascade each hint toggle: stage > agent > global (both default on).
     let batch_tool_hint = leviath_core::taint::resolve_batch_tool_hint(
-        global_batch_tool_hint,
-        agent_batch_tool_hint,
+        global_hints.batch_tool,
+        agent_hints.batch_tool,
         stage.batch_tool_hint,
+    );
+    let shell_hint = leviath_core::taint::resolve_shell_hint(
+        global_hints.shell,
+        agent_hints.shell,
+        stage.shell_hint,
     );
     StageSetup {
         inference_config: InferenceConfig {
@@ -1326,6 +1335,7 @@ pub(crate) fn stage_setup_from(
             max_output_tokens,
             extra_params,
             batch_tool_hint,
+            shell_hint,
             request_timeout_secs: stage.model.request_timeout_secs,
         },
         routing: stage.tool_result_routing.clone(),
@@ -1345,16 +1355,16 @@ pub(crate) fn stage_setup_from(
 ///
 /// `stages` must be aligned with `blueprint.stages` (one [`ResolvedStage`] each).
 ///
-/// `global_batch_tool_hint` is the caller's global config toggle for the
-/// batch-tool-calls system-prompt hint; it is resolved per stage against the
-/// blueprint's agent-level and each stage's `batch_tool_hint`.
+/// `global_hints` is the caller's global config toggle for each system-prompt
+/// hint; each is resolved per stage against the blueprint's agent-level and
+/// per-stage override of the same name.
 pub fn spawn_agent(
     world: &mut World,
     agent_id: String,
     blueprint: leviath_core::Blueprint,
     task: &str,
     stages: Vec<ResolvedStage>,
-    global_batch_tool_hint: bool,
+    global_hints: leviath_core::config::PromptHints,
 ) -> Result<Entity, String> {
     let seeds = std::collections::HashMap::from([("task".to_string(), task.to_string())]);
     // No compiled custom-region scripts on this path: script-backed regions
@@ -1369,7 +1379,7 @@ pub fn spawn_agent(
         blueprint,
         &seeds,
         stages,
-        global_batch_tool_hint,
+        global_hints,
         leviath_core::NudgeConfig::default(),
         std::collections::HashMap::new(),
     )
@@ -1391,7 +1401,7 @@ pub fn spawn_agent_seeded(
     mut blueprint: leviath_core::Blueprint,
     seeds: &std::collections::HashMap<String, String>,
     stages: Vec<ResolvedStage>,
-    global_batch_tool_hint: bool,
+    global_hints: leviath_core::config::PromptHints,
     global_nudge: leviath_core::NudgeConfig,
     region_scripts: std::collections::HashMap<
         String,
@@ -1435,11 +1445,14 @@ pub fn spawn_agent_seeded(
             fallbacks: rs.fallbacks,
         })
         .collect();
-    let agent_batch_tool_hint = blueprint.batch_tool_hint;
+    let agent_hints = leviath_core::config::PromptHintOverrides {
+        batch_tool: blueprint.batch_tool_hint,
+        shell: blueprint.shell_hint,
+    };
     let setups: Vec<StageSetup> = blueprint
         .stages
         .iter()
-        .map(|s| stage_setup_from(s, global_batch_tool_hint, agent_batch_tool_hint))
+        .map(|s| stage_setup_from(s, global_hints, agent_hints))
         .collect();
 
     // Seed the window from the blueprint layout + task, then apply stage 0's

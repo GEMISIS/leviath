@@ -135,6 +135,12 @@ pub fn changes(before: &Config, plan: &SetupPlan) -> Vec<String> {
     );
     push_if_changed(
         &mut out,
+        "platform shell hint",
+        Some(&before.shell_hint),
+        Some(&after.shell_hint),
+    );
+    push_if_changed(
+        &mut out,
         "stall timeout (seconds)",
         Some(&before.limits.stall_timeout_secs),
         Some(&after.limits.stall_timeout_secs),
@@ -352,6 +358,7 @@ mod tests {
         after.limits.default_max_iterations = None;
         after.limits.exact_token_counting = true;
         after.batch_tool_hint = false;
+        after.shell_hint = false;
 
         let lines = changes(&before, &plan_of(after));
 
@@ -362,6 +369,7 @@ mod tests {
         assert!(lines.contains(&"default max iterations: 50 → (unset)".to_string()));
         assert!(lines.contains(&"exact token counting: false → true".to_string()));
         assert!(lines.contains(&"batch tool hint: true → false".to_string()));
+        assert!(lines.contains(&"platform shell hint: true → false".to_string()));
     }
 
     #[test]

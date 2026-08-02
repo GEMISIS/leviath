@@ -893,6 +893,11 @@ fn limits_fields(config: &Config) -> Vec<Field> {
             value: FieldValue::Bool(config.batch_tool_hint),
         },
         Field {
+            label: "Platform shell hint",
+            help: "Tell models what shell they get. Only says anything on Windows (cmd.exe).",
+            value: FieldValue::Bool(config.shell_hint),
+        },
+        Field {
             label: "Stall timeout (seconds)",
             help: "Fail a run that can never dispatch (unconfigured provider). 0 waits forever.",
             value: FieldValue::Number(Some(config.limits.stall_timeout_secs)),
@@ -935,14 +940,15 @@ fn apply_limits_fields(config: &mut Config, fields: &[Field]) {
             }
             (3, FieldValue::Bool(b)) => config.limits.exact_token_counting = *b,
             (4, FieldValue::Bool(b)) => config.batch_tool_hint = *b,
+            (5, FieldValue::Bool(b)) => config.shell_hint = *b,
             // Unset means "leave the watchdog at its default", not "disable it";
             // disabling is an explicit 0.
-            (5, FieldValue::Number(n)) => {
+            (6, FieldValue::Number(n)) => {
                 config.limits.stall_timeout_secs =
                     n.unwrap_or(Config::default().limits.stall_timeout_secs)
             }
             // Same rule: unset keeps the default, 0 is an explicit "never".
-            (6, FieldValue::Number(n)) => {
+            (7, FieldValue::Number(n)) => {
                 config.limits.dead_cycles_before_relief = n
                     .map(|n| n as u32)
                     .unwrap_or(Config::default().limits.dead_cycles_before_relief)
@@ -2215,6 +2221,7 @@ pub(super) mod tests {
         wizard.limits[2].value = FieldValue::Number(None);
         wizard.limits[3].value = FieldValue::Bool(true);
         wizard.limits[4].value = FieldValue::Bool(false);
+        wizard.limits[5].value = FieldValue::Bool(false);
 
         let config = wizard.build_config();
 
@@ -2226,6 +2233,7 @@ pub(super) mod tests {
         assert!(config.limits.default_max_iterations.is_none());
         assert!(config.limits.exact_token_counting);
         assert!(!config.batch_tool_hint);
+        assert!(!config.shell_hint);
     }
 
     /// The four timing limits share one rule: an explicit number is stored,

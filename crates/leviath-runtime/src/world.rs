@@ -461,7 +461,7 @@ impl PipelineWorld {
         blueprint: leviath_core::Blueprint,
         task: &str,
         stages: Vec<crate::pipeline::ResolvedStage>,
-        global_batch_tool_hint: bool,
+        global_hints: leviath_core::config::PromptHints,
     ) -> Result<Entity, String> {
         let e = crate::pipeline::spawn_agent(
             &mut self.world,
@@ -469,7 +469,7 @@ impl PipelineWorld {
             blueprint,
             task,
             stages,
-            global_batch_tool_hint,
+            global_hints,
         )?;
         self.wake.notify_one();
         Ok(e)
@@ -947,7 +947,7 @@ mod tests {
 
     /// Serializes every test in this binary that swaps the **process-global**
     /// panic hook - see the definition for why they can't run concurrently.
-    use crate::test_support::PANIC_HOOK_LOCK;
+    use crate::test_support::{PANIC_HOOK_LOCK, hints};
 
     /// Run `f` with the process panic hook silenced (the panic is expected), and
     /// serialized against the other hook-swapping tests.
@@ -1157,6 +1157,7 @@ mod tests {
                 max_output_tokens: None,
                 extra_params: Default::default(),
                 batch_tool_hint: false,
+                shell_hint: false,
                 request_timeout_secs: None,
             },
             routing: None,
@@ -1829,7 +1830,7 @@ mod tests {
                     tools: vec![],
                     fallbacks: Vec::new(),
                 }],
-                true,
+                hints(true),
             )
             .unwrap();
 
@@ -2336,7 +2337,7 @@ mod tests {
                 tools: vec![],
                 fallbacks: Vec::new(),
             }],
-            true,
+            hints(true),
         );
         assert!(err.is_err());
     }
