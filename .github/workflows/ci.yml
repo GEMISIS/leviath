@@ -360,7 +360,13 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          if git diff --name-only "$BASE" "$HEAD" | grep -qx 'crates/leviath-cli/src/main.rs'; then
+          # Three dots, so this asks "what did the PR change" rather than "how
+          # do these two trees differ". With two dots the diff also contains
+          # everything main gained since the branch point, so any PR would fail
+          # this the moment someone else's main.rs change landed on main first -
+          # and the fix looked like applying the override label to a PR that
+          # never touched the file.
+          if git diff --name-only "$BASE...$HEAD" | grep -qx 'crates/leviath-cli/src/main.rs'; then
             case ",$LABELS," in
               *,allow-main-rs-change,*)
                 echo "main.rs change approved via 'allow-main-rs-change' label." ;;
@@ -371,6 +377,52 @@ jobs:
           else
             echo "main.rs unchanged."
           fi
+
+  # Merging a version bump to main publishes an alpha within seconds, and a week
+  # later that same commit is a permanent `vX.Y.Z` tag and an immutable set of
+  # crates.io releases. That is a release decision, not a code change, so it gets
+  # the same deliberate sign-off main.rs does - via its own label, so approving a
+  # release never doubles as approving an entrypoint change.
+  #
+  # It compares the declared version rather than whether Cargo.toml was touched:
+  # dependency edits land in that file constantly and none of them ship anything.
+  guard-version-bump:
+    name: Guard release version bump
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Require maintainer override to bump the release version
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # The merge base, not the base branch tip: comparing against the tip
+          # would report a bump for every PR opened after someone else's release
+          # landed on main.
+          base=$(git merge-base "$BASE" "$HEAD")
+          read_version() {
+            git show "$1:Cargo.toml" | grep '^version' | head -1 | sed 's/.*"\(.*\)"/\1/' || true
+          }
+          before=$(read_version "$base")
+          after=$(read_version "$HEAD")
+
+          if [ "$before" = "$after" ]; then
+            echo "Workspace version unchanged at $after."
+            exit 0
+          fi
+
+          case ",$LABELS," in
+            *,allow-version-bump,*)
+              echo "Release bump $before -> $after approved via 'allow-version-bump' label." ;;
+            *)
+              echo "::error file=Cargo.toml::This PR moves the workspace version $before -> $after, which cuts an alpha release the moment it merges and a permanent vX.Y.Z tag plus crates.io publishes on the following prod run. Apply the 'allow-version-bump' label to confirm that is intended."
+              exit 1 ;;
+          esac
 
   # `crates/leviath` is the re-export-only crates.io facade. It is exempt from
   # the 100% coverage gate because llvm-cov has no executable regions to count
