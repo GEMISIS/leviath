@@ -25,9 +25,15 @@ lev serve --port 3000 --token "$(openssl rand -hex 16)" --cors https://leviath.d
   to allow a browser to call it cross-origin.
 - **Binds to `127.0.0.1`** by default. `--host 0.0.0.0` exposes it on your network.
 - **`--allow-admin`** mounts the mutating admin routes. `GET /api/config` and
-  `GET /api/mcp/servers` are always available; the writes (`PUT /api/config`,
-  `POST`/`DELETE /api/mcp/servers`) are only mounted with `--allow-admin` and return **405 Method
-  Not Allowed** otherwise. The route isn't there, rather than gated by an in-handler check.
+  `GET /api/mcp/servers` are always available. The writes are only mounted with `--allow-admin`, and
+  the route is genuinely absent without it rather than gated by a check inside the handler. What you
+  get back depends on whether the path exists at all for another method:
+
+  | Without `--allow-admin` | Response |
+  |---|---|
+  | `PUT /api/config` | 405, because `GET /api/config` is mounted |
+  | `POST /api/mcp/servers` | 405, because `GET /api/mcp/servers` is mounted |
+  | `DELETE /api/mcp/servers/{name}` | 404, because nothing else is mounted on that path |
 - **`--workdir-root`** confines agent workdirs; **`--no-remote-yolo`** forbids `"yolo": true` on spawn.
 
 > [!CAUTION]
@@ -67,7 +73,7 @@ Base path `/api`; all JSON unless noted.
 | `GET/POST/PUT/DELETE /api/blueprints[/{name}]` · `/validate` | Blueprint CRUD + validation |
 | `GET /api/config` · `PUT /api/config` *(admin)* · `POST /api/config/validate` | Read redacted config · write keys · validate a key |
 | `GET /api/models` | Enumerate models |
-| `GET /api/mcp/servers` · `/{name}/status` · `/login` · `/test` | MCP servers (add/remove need admin) |
+| `GET /api/mcp/servers` · `GET /{name}/status` · `POST /{name}/login` · `POST /{name}/test` | MCP servers (add/remove need admin) |
 | `GET /ws` · `GET /ws/agents/{id}` | Live event stream (all agents / one run) |
 
 > [!NOTE]

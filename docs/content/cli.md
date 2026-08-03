@@ -160,7 +160,7 @@ Serve an agent over the [Agent Client Protocol](/docs/agent-client-protocol) as 
 
 | Command | Flags | Purpose |
 |---|---|---|
-| `lev ps` | `--json` | List runs in the daemon with their status. See [below](#reading-lev-ps) |
+| `lev ps` | `--json`, `--all` | List runs in the daemon with their status. `--all` adds runs on disk the daemon is not hosting, finished ones included. See [below](#reading-lev-ps) |
 | `lev dash` | | Full-screen TUI [dashboard](/docs/dashboard) |
 | `lev msg <AGENT_ID> <CONTENT>` | | Deliver a message into a running agent's context |
 | `lev pause <RUN_ID>` | | Pause a run. It finishes its in-flight step, then holds |
