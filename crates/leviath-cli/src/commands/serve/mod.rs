@@ -7,6 +7,7 @@ mod agents;
 mod auth;
 mod blueprints;
 mod config;
+mod doctor;
 mod interactions;
 mod mcp;
 mod polling;
@@ -87,6 +88,7 @@ fn api_router() -> Router<AppState> {
             "/api/agents/{id}/context/history",
             get(agents::agent_context_history),
         )
+        .route("/api/agents/{id}/files", get(agents::agent_file))
         .route("/api/agents/{id}/logs", get(agents::agent_logs))
         .route("/api/agents/{id}/result", get(agents::agent_result))
         .route("/api/agents/{id}/tree-status", get(tree::agent_tree_status))
@@ -105,6 +107,8 @@ fn api_router() -> Router<AppState> {
         .route("/api/mcp/servers/{name}/status", get(mcp::status))
         .route("/api/mcp/servers/{name}/login", post(mcp::login))
         .route("/api/mcp/servers/{name}/test", post(mcp::test_server))
+        // Doctor - the same checks `lev doctor` runs, returned as data.
+        .route("/api/doctor", get(doctor::run_doctor))
         // Config
         .route("/api/config", get(config::get_config))
         .route("/api/config/validate", post(config::validate_config_key))
@@ -448,6 +452,21 @@ mod tests {
             let resp = app.oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         }
+    }
+
+    #[tokio::test]
+    async fn test_agent_files_route_is_mounted() {
+        // Without its required `path` query the handler's Query extractor
+        // rejects with 400 - an unmounted route would 404 at the router, so
+        // the 400 is what proves the route exists in the shared table. (The
+        // handler's own behavior is covered in agents.rs.)
+        let app = test_app();
+        let req = Request::builder()
+            .uri("/api/agents/some-run/files")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

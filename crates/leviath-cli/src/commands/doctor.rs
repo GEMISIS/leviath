@@ -634,9 +634,13 @@ pub enum DaemonTarget<'a> {
 }
 
 /// Run the checks in order, stopping at the first failure.
+///
+/// `+ Sync` on the builder so the returned future is `Send`: `lev serve`'s
+/// `GET /api/doctor` awaits these same checks inside an axum handler, which
+/// requires it. Every caller passes a plain `fn` item, which always is.
 pub async fn run_checks(
     args: &DoctorArgs,
-    build_registry: &dyn Fn(&Config) -> ProviderRegistry,
+    build_registry: &(dyn Fn(&Config) -> ProviderRegistry + Sync),
     daemon: DaemonTarget<'_>,
 ) -> Vec<Check> {
     let mut checks = Vec::new();
@@ -699,7 +703,7 @@ pub async fn run_checks(
 /// process exits non-zero and `lev doctor` works as a CI gate.
 async fn execute_with_registry(
     args: DoctorArgs,
-    build_registry: &dyn Fn(&Config) -> ProviderRegistry,
+    build_registry: &(dyn Fn(&Config) -> ProviderRegistry + Sync),
     daemon: DaemonTarget<'_>,
 ) -> anyhow::Result<()> {
     let checks = run_checks(&args, build_registry, daemon).await;
