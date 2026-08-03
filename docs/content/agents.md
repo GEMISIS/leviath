@@ -106,15 +106,20 @@ temperature = 0.2
 max_tokens  = 8000
 ```
 
-Model selection is per stage, and only per stage. A top-level `[model]` block parses without
-complaint and is then read by nothing, so the stages carry on using their own defaults with no sign
-that the block was ignored. A stage that omits `model` entirely does not fail either: it runs on
-whichever provider your config makes the default, which is rarely what the author had in mind and is
-invisible until the run picks the wrong model. `lev validate` reports both.
-`available_tools` is what the stage may call. `required_tools` is the small exception to the
-unattended cut: a `--yolo` run drops every tool that blocks on a person, and a stage names here the
-ones it wants kept anyway. Every entry must also be in `available_tools`, and naming one also
-settles the `blocking-tool-in-autonomous-stage` lint for it. See
+Model selection is per stage, and only per stage. There are two ways to get this wrong quietly, and
+`lev validate` reports both. See
+[every stage should name its own model](/docs/stages#every-stage-should-name-its-own-model).
+
+### Which tools a stage gets
+
+`available_tools` lists what the stage may call.
+
+`required_tools` is the exception to the unattended cut. A `--yolo` run drops every tool that waits
+on a person, and this is where a stage names the ones it wants kept anyway. Every entry must also
+appear in `available_tools`.
+
+Naming a tool here also settles the `blocking-tool-in-autonomous-stage` lint for it, since listing
+it is how you say you meant it. See
 [human-in-the-loop tools](/docs/tools#these-tools-need-someone-there).
 
 ## Context regions

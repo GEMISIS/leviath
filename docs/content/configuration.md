@@ -170,7 +170,7 @@ An agent's declarations mean nothing until one of these grants lands, so `lev va
 checks each declared entry against this file and prints the block above, filled in, for whatever it
 does not find. `lev list` and `lev ps` carry the same counts. If you wrote blueprints against a
 build where the manifest allowlist stood on its own, read the
-[upgrade note](/docs/security#coming-from-a-build-where-the-blueprint-allowlist-stood-alone).
+[upgrade note](/docs/security#upgrading-from-011).
 
 ## Tool permissions
 
