@@ -386,7 +386,7 @@ Leviath reads a `.env` file from the working directory unless `LEVIATH_SKIP_DOTE
 | `OLLAMA_HOST` | Fallback for `ollama_base_url` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME` | Fallbacks for `[observability]` |
 | `EDITOR`, `VISUAL` | Editor used when a prompt opens one |
-| `XDG_CONFIG_HOME` | Where `policy.toml` and scripted rules are looked up |
+| `XDG_CONFIG_HOME` | Where `policy.toml` and scripted rules are looked up. Linux only |
 
 > [!WARNING]
 > A variable whose name looks like a credential is not readable by Rhai scripts through `env_var()`
@@ -411,8 +411,14 @@ The daemon's control socket, its token, its pid file, and a build marker live he
 
 ## `policy.toml`
 
-Taint-gate policy is a separate file at `~/.config/leviath/policy.toml` (under `XDG_CONFIG_HOME`
-when set), managed with [`lev policy`](/docs/cli).
+Taint-gate policy lives in its own file, not in `config.toml`. It sits in your platform's config
+directory, managed with [`lev policy`](/docs/cli):
+
+| Platform | Path |
+|---|---|
+| macOS | `~/Library/Application Support/leviath/policy.toml` |
+| Linux | `~/.config/leviath/policy.toml`, or `$XDG_CONFIG_HOME/leviath/policy.toml` when set |
+| Windows | `%APPDATA%\leviath\policy.toml` |
 
 ```toml
 [[allowlist]]
@@ -426,5 +432,6 @@ direction   = "outbound"
 clearance   = "internal"
 ```
 
-Scripted rules live in `~/.config/leviath/rules/` as `.rhai` files. See
+Scripted rules live as `.rhai` files in a `rules/` directory beside `policy.toml`, so
+`~/Library/Application Support/leviath/rules/` on macOS and `~/.config/leviath/rules/` on Linux. See
 [Rhai tools](/docs/rhai-tools#policy-rules) and [Security](/docs/security#taint-tracking-experimental).
