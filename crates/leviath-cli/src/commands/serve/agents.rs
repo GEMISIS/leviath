@@ -202,6 +202,101 @@ pub(super) async fn agent_logs(
     Ok(log)
 }
 
+/// How much of a file `GET /api/agents/{id}/files` returns: 1 MiB, enough for
+/// any report a browser would render, small enough to hand out in one JSON body.
+pub(super) const MAX_FILE_READ_BYTES: u64 = 1024 * 1024;
+
+/// `GET /api/agents/{id}/files?path=<path>`: read a file the run wrote, so the
+/// browser can render an agent's report without shell access to the host.
+///
+/// `path` may be relative (resolved against the run's workdir) or absolute;
+/// either way the *resolved* path must still land inside the workdir, under the
+/// same symlink-aware containment the file tools use
+/// ([`leviath_core::resolves_within`]) - so this endpoint can read exactly what
+/// the run was already allowed to write, and nothing else. Reads are capped at
+/// [`MAX_FILE_READ_BYTES`]; a larger file comes back truncated and says so.
+/// Purely a filesystem read: it works with the daemon down, like the other
+/// read endpoints.
+pub(super) async fn agent_file(
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<FileQuery>,
+) -> Result<Json<FileContentResp>, (StatusCode, Json<ErrorResponse>)> {
+    let meta = runstate::read_meta(&id)
+        .map_err(|_| err(StatusCode::NOT_FOUND, format!("Agent run '{id}' not found")))?;
+
+    let workdir = PathBuf::from(&meta.workdir);
+    let requested = PathBuf::from(&query.path);
+    let resolved = match requested.is_absolute() {
+        true => requested,
+        false => workdir.join(&requested),
+    };
+    if !leviath_core::resolves_within(&resolved, &workdir) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            format!(
+                "path '{}' is outside the run's working directory",
+                query.path
+            ),
+        ));
+    }
+
+    let size = match std::fs::metadata(&resolved) {
+        Ok(m) if m.is_dir() => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                format!("'{}' is a directory, not a file", query.path),
+            ));
+        }
+        Ok(m) => m.len(),
+        Err(_) => {
+            return Err(err(
+                StatusCode::NOT_FOUND,
+                format!("file '{}' not found", query.path),
+            ));
+        }
+    };
+
+    let mut bytes = Vec::new();
+    if let Err(e) = std::fs::File::open(&resolved)
+        .map(|f| std::io::Read::take(f, MAX_FILE_READ_BYTES))
+        .and_then(|mut f| std::io::Read::read_to_end(&mut f, &mut bytes))
+    {
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            format!("could not read '{}': {e}", query.path),
+        ));
+    }
+    let truncated = size > MAX_FILE_READ_BYTES;
+    let read_len = bytes.len();
+    let content = match String::from_utf8(bytes) {
+        Ok(s) => s,
+        // The 1 MiB cap can land mid-character in a file that is otherwise
+        // valid UTF-8. That is the cap's doing, not the file's: drop the
+        // split character's leading bytes rather than calling a text file
+        // binary. (`valid_up_to` is at most 3 bytes short of the cap when
+        // the only problem is the cut.)
+        Err(e) if truncated && e.utf8_error().valid_up_to() + 4 > read_len => {
+            let valid = e.utf8_error().valid_up_to();
+            let mut prefix = e.into_bytes();
+            prefix.truncate(valid);
+            String::from_utf8_lossy(&prefix).into_owned()
+        }
+        Err(_) => {
+            return Err(err(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                format!("'{}' is not a text file", query.path),
+            ));
+        }
+    };
+
+    Ok(Json(FileContentResp {
+        path: resolved.to_string_lossy().into_owned(),
+        size,
+        content,
+        truncated,
+    }))
+}
+
 pub(super) async fn agent_result(
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<AgentResultResp>, (StatusCode, Json<ErrorResponse>)> {
@@ -1201,6 +1296,326 @@ prompt = "Plan the work"
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    // ─── agent_file ───────────────────────────────────────────────────────────
+
+    fn files_app() -> Router {
+        Router::new()
+            .route("/api/agents/{id}/files", get(agent_file))
+            .with_state(test_state())
+    }
+
+    /// A run whose workdir is `workdir`, persisted so `read_meta` finds it.
+    fn create_run_in(id: &str, workdir: &std::path::Path) -> RunMeta {
+        let mut meta = make_run(id);
+        meta.workdir = workdir.to_string_lossy().to_string();
+        create_run(&meta).unwrap();
+        meta
+    }
+
+    /// GET `/api/agents/{id}/files?path=<path>`, returning status and body.
+    /// (`path` goes into the query string verbatim - every path these tests
+    /// use is query-safe as-is.)
+    async fn get_file(id: &str, path: &str) -> (StatusCode, Vec<u8>) {
+        let uri = format!("/api/agents/{id}/files?path={path}");
+        let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        let resp = files_app().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, body.to_vec())
+    }
+
+    fn error_of(body: &[u8]) -> String {
+        serde_json::from_slice::<serde_json::Value>(body).unwrap()["error"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn agent_file_unknown_run_returns_404() {
+        let (status, body) = get_file("nonexistent-run-xyz-files", "report.md").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            error_of(&body),
+            "Agent run 'nonexistent-run-xyz-files' not found"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_file_reads_a_relative_path_within_the_workdir() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_file_reads_a_relative_path_within_the_workdir",
+            |_d| async move {
+                let workdir = tempfile::tempdir().unwrap();
+                std::fs::create_dir_all(workdir.path().join("notes")).unwrap();
+                std::fs::write(workdir.path().join("notes/report.md"), "# Report\n").unwrap();
+                let run_id = unique_run_id("file-rel");
+                create_run_in(&run_id, workdir.path());
+
+                let (status, body) = get_file(&run_id, "notes/report.md").await;
+                assert_eq!(status, StatusCode::OK);
+                let got: FileContentResp = serde_json::from_slice(&body).unwrap();
+                assert_eq!(got.content, "# Report\n");
+                assert_eq!(got.size, 9);
+                assert!(!got.truncated);
+                // The reported path is the resolved absolute one.
+                assert!(std::path::Path::new(&got.path).is_absolute());
+                assert!(got.path.ends_with("report.md"));
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn agent_file_reads_an_absolute_path_within_the_workdir() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_file_reads_an_absolute_path_within_the_workdir",
+            |_d| async move {
+                let workdir = tempfile::tempdir().unwrap();
+                let file = workdir.path().join("out.txt");
+                std::fs::write(&file, "done").unwrap();
+                let run_id = unique_run_id("file-abs");
+                create_run_in(&run_id, workdir.path());
+
+                let (status, body) = get_file(&run_id, &file.to_string_lossy()).await;
+                assert_eq!(status, StatusCode::OK);
+                let got: FileContentResp = serde_json::from_slice(&body).unwrap();
+                assert_eq!(got.content, "done");
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
+    }
+
+    /// `..` traversal and an unrelated absolute path both resolve outside the
+    /// run's workdir, and both are refused before any read happens.
+    #[tokio::test]
+    async fn agent_file_refuses_a_path_outside_the_workdir() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_file_refuses_a_path_outside_the_workdir",
+            |_d| async move {
+                let workdir = tempfile::tempdir().unwrap();
+                let run_id = unique_run_id("file-outside");
+                create_run_in(&run_id, workdir.path());
+
+                for outside in ["../escape.txt", "/etc/hosts"] {
+                    let (status, body) = get_file(&run_id, outside).await;
+                    assert_eq!(status, StatusCode::FORBIDDEN, "{outside}");
+                    assert_eq!(
+                        error_of(&body),
+                        format!("path '{outside}' is outside the run's working directory")
+                    );
+                }
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
+    }
+
+    /// The containment is symlink-aware: a link planted under the workdir
+    /// cannot be used to read outside it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_file_is_not_fooled_by_a_symlink() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_file_is_not_fooled_by_a_symlink",
+            |_d| async move {
+                let workdir = tempfile::tempdir().unwrap();
+                let outside = tempfile::tempdir().unwrap();
+                std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+                std::os::unix::fs::symlink(outside.path(), workdir.path().join("escape")).unwrap();
+                let run_id = unique_run_id("file-symlink");
+                create_run_in(&run_id, workdir.path());
+
+                let (status, _body) = get_file(&run_id, "escape/secret.txt").await;
+                assert_eq!(status, StatusCode::FORBIDDEN);
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn agent_file_missing_file_returns_404() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_file_missing_file_returns_404",
+            |_d| async move {
+                let workdir = tempfile::tempdir().unwrap();
+                let run_id = unique_run_id("file-missing");
+                create_run_in(&run_id, workdir.path());
+
+                let (status, body) = get_file(&run_id, "no-such.md").await;
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(error_of(&body), "file 'no-such.md' not found");
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
+    }
+
+    /// A run whose workdir has since been deleted answers with a plain client
+    /// error (the containment or the read refuses), never a 500.
+    #[tokio::test]
+    async fn agent_file_deleted_workdir_is_a_client_error() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_file_deleted_workdir_is_a_client_error",
+            |_d| async move {
+                let workdir = tempfile::tempdir().unwrap();
+                let run_id = unique_run_id("file-gone-workdir");
+                create_run_in(&run_id, workdir.path());
+                drop(workdir); // the tempdir is removed here
+
+                let (status, _body) = get_file(&run_id, "report.md").await;
+                assert!(status.is_client_error(), "got {status}");
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn agent_file_directory_returns_400() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_file_directory_returns_400",
+            |_d| async move {
+                let workdir = tempfile::tempdir().unwrap();
+                std::fs::create_dir(workdir.path().join("sub")).unwrap();
+                let run_id = unique_run_id("file-dir");
+                create_run_in(&run_id, workdir.path());
+
+                let (status, body) = get_file(&run_id, "sub").await;
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(error_of(&body), "'sub' is a directory, not a file");
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
+    }
+
+    /// A file the server cannot open (here: no read permission) is reported,
+    /// not a 500.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_file_unreadable_file_is_reported() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_file_unreadable_file_is_reported",
+            |_d| async move {
+                use std::os::unix::fs::PermissionsExt;
+                let workdir = tempfile::tempdir().unwrap();
+                let file = workdir.path().join("locked.txt");
+                std::fs::write(&file, "sealed").unwrap();
+                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+                let run_id = unique_run_id("file-locked");
+                create_run_in(&run_id, workdir.path());
+
+                let (status, body) = get_file(&run_id, "locked.txt").await;
+                // Root ignores mode bits; everywhere else the open fails.
+                if status != StatusCode::OK {
+                    assert_eq!(status, StatusCode::NOT_FOUND);
+                    assert!(
+                        error_of(&body).starts_with("could not read 'locked.txt'"),
+                        "{}",
+                        error_of(&body)
+                    );
+                }
+
+                let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn agent_file_caps_the_read_at_one_mib() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_file_caps_the_read_at_one_mib",
+            |_d| async move {
+                let workdir = tempfile::tempdir().unwrap();
+                let full = MAX_FILE_READ_BYTES as usize + 100;
+                std::fs::write(workdir.path().join("big.log"), vec![b'a'; full]).unwrap();
+                let run_id = unique_run_id("file-big");
+                create_run_in(&run_id, workdir.path());
+
+                let (status, body) = get_file(&run_id, "big.log").await;
+                assert_eq!(status, StatusCode::OK);
+                let got: FileContentResp = serde_json::from_slice(&body).unwrap();
+                assert!(got.truncated);
+                assert_eq!(got.size, full as u64);
+                assert_eq!(got.content.len(), MAX_FILE_READ_BYTES as usize);
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
+    }
+
+    /// The cap landing mid-character does not make a text file "not text": the
+    /// split character's leading bytes are dropped instead.
+    #[tokio::test]
+    async fn agent_file_truncation_mid_character_stays_text() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_file_truncation_mid_character_stays_text",
+            |_d| async move {
+                let workdir = tempfile::tempdir().unwrap();
+                // 'a' up to one byte short of the cap, then a 3-byte '€'
+                // straddling it, then more text past it.
+                let mut bytes = vec![b'a'; MAX_FILE_READ_BYTES as usize - 1];
+                bytes.extend_from_slice("€ and more".as_bytes());
+                std::fs::write(workdir.path().join("split.md"), &bytes).unwrap();
+                let run_id = unique_run_id("file-split");
+                create_run_in(&run_id, workdir.path());
+
+                let (status, body) = get_file(&run_id, "split.md").await;
+                assert_eq!(status, StatusCode::OK);
+                let got: FileContentResp = serde_json::from_slice(&body).unwrap();
+                assert!(got.truncated);
+                assert_eq!(got.content.len(), MAX_FILE_READ_BYTES as usize - 1);
+                assert!(got.content.ends_with('a'));
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn agent_file_binary_returns_415() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_file_binary_returns_415",
+            |_d| async move {
+                let workdir = tempfile::tempdir().unwrap();
+                std::fs::write(workdir.path().join("blob.bin"), [0xff, 0xfe, 0x00, 0x01]).unwrap();
+                // Invalid from early on AND larger than the cap: proves a big
+                // binary is still called binary, not "truncated text".
+                let mut big = vec![0xffu8; 16];
+                big.resize(MAX_FILE_READ_BYTES as usize + 16, 0xff);
+                std::fs::write(workdir.path().join("big.bin"), &big).unwrap();
+                let run_id = unique_run_id("file-binary");
+                create_run_in(&run_id, workdir.path());
+
+                for name in ["blob.bin", "big.bin"] {
+                    let (status, body) = get_file(&run_id, name).await;
+                    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{name}");
+                    assert_eq!(error_of(&body), format!("'{name}' is not a text file"));
+                }
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     // ─── agent_result ─────────────────────────────────────────────────────────
