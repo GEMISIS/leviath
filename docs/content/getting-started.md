@@ -7,9 +7,9 @@ order: 1
 
 # Getting Started
 
-Leviath is a structured agent runtime for LLMs. It gives an agent **structure**: context
-that stays coherent across hundreds of tool calls, the right model for each phase of a task,
-and hundreds of agents running at once in a single process.
+Leviath runs LLM agents. What it adds over asking a model directly is **structure**: context that
+stays coherent across hundreds of tool calls, a different model for each phase of a task, and
+hundreds of agents running at once in one process.
 
 You'll go from nothing to a running agent in four steps:
 
@@ -31,17 +31,25 @@ brew trust gemisis/leviath # Homebrew 6 requires trusting third-party taps
 brew install leviath            # or: leviath-beta, leviath-alpha
 ```
 
-**Linux**
+**macOS and Linux (one-liner)**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/GEMISIS/leviath-dist/main/install.sh \
-  | bash -s -- --channel stable
+curl -fsSL https://leviath.dev/install.sh | sh
 ```
+
+That takes the stable channel. Set `LEVIATH_CHANNEL` to `beta` or `alpha` to switch:
+
+```bash
+LEVIATH_CHANNEL=beta curl -fsSL https://leviath.dev/install.sh | sh
+```
+
+On macOS it uses Homebrew if you have it. On Linux it downloads a prebuilt binary. Either way no
+Rust toolchain is needed.
 
 **Windows (PowerShell)**
 
 ```powershell
-irm https://raw.githubusercontent.com/GEMISIS/leviath-dist/main/install.ps1 | iex
+powershell -ExecutionPolicy Bypass -c "irm https://leviath.dev/install.ps1 | iex"
 ```
 
 Or with Scoop:
@@ -54,8 +62,6 @@ scoop install leviath           # or: leviath-beta, leviath-alpha
 Every install method offers three channels. `stable` is the default and is what you want unless you
 have a reason to be ahead of it. See [Releases and channels](/docs/releases) for what `beta` and
 `alpha` mean and how often each moves.
-
-The three options above install prebuilt binaries; no Rust toolchain needed.
 
 **Cargo** (any platform, needs [Rust](https://rustup.rs/)):
 
