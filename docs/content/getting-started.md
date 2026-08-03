@@ -166,3 +166,7 @@ and the context regions. See [Agents](/docs/agents) to go deeper.
   them for you.
 - [Glossary](/docs/glossary) defines every term these docs use in a particular way. Worth a skim if
   a page starts using a word you have not met.
+- [Where Leviath sits](/docs/comparison) is for deciding whether you want Leviath at all, and what
+  to run alongside it.
+- [Where Leviath fits](/docs/integrations) covers driving Leviath from a tool you already use, like
+  Gas City, Smithy, or a CI job.

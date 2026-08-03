@@ -312,43 +312,22 @@ Methodology and raw data will be published alongside the benchmark results.
 
 ## How it compares
 
-These four tools sit at different layers of the agent stack and make different architectural bets. Claude Code is a polished coding agent with an SDK to embed its harness, CrewAI and LangGraph are frameworks you build agents *in*, and Leviath is a standalone runtime agents run *on*. None is a drop-in replacement for another, so this table compares models, not merit; competitor descriptions come from each project's own documentation.
+Leviath is a runtime that agents run *on*. Claude Code is a polished coding agent you work with,
+CrewAI and LangGraph are frameworks you build agents *in*, and Gas Town, Gas City and Smithy are
+orchestrators that decide which work happens. Several of those are worth running alongside Leviath
+rather than instead of it.
 
-| | **Leviath** | **Claude Code + Agent SDK** | **CrewAI** | **LangGraph** |
-|---|---|---|---|---|
-| **Primary layer** | Standalone agent runtime, single binary | Coding agent CLI + SDK harness | Python multi-agent framework | Low-level orchestration framework (Python/JS) |
-| **Process model for N agents** | N agents as entities in one bevy_ecs daemon | One `claude` subprocess per session; "N sessions = N subprocesses" | Runs inside your Python app; async kickoff variants | Runs in your app process; hosted server optional |
-| **Context-window management** | Typed regions, deterministic eviction, per-stage budgets | Auto-compaction summarizes history near the limit | Auto-summarizes on overflow (`respect_context_window`) | Developer-controlled graph state, durable via checkpointers |
-| **Multi-agent orchestration** | Multi-stage workflow graphs; in-process sub-agent fan-out | Subagents within a session; agent teams (experimental) | Crews (role-based teams) coordinated by Flows | Explicit graphs mixing deterministic and agentic steps |
-| **How agents are defined** | TOML blueprints + Rhai script tools | Markdown + YAML frontmatter; code via SDK | JSONC/YAML config or Python `Agent` classes | Python or TypeScript code |
-| **Runtime dependencies** | Single native binary; no Node/Python/Docker | Native CLI; SDKs need Node 18+ or Python 3.10+ | Python 3.10-3.13, uv-managed | Python or Node.js application runtime |
-| **Headless / API surface** | REST + WebSocket daemon; Agent Client Protocol stdio | `claude -p` with JSON/stream output; Python/TS SDK | `kickoff()` in-process; REST via CrewAI AMP | Library calls; REST via LangSmith Deployment |
-| **Human-in-the-loop mid-run** | Mid-run message injection; forced checkpoints; ask-user tools | Interactive steering, interrupts, permission prompts | `human_input` flag pauses a task for feedback | First-class `interrupt()`: pause indefinitely, resume with `Command` |
-| **Sandboxing / isolation** | Opt-in per agent or stage: containers or Linux namespaces | Opt-in OS sandbox for Bash (Seatbelt / bubblewrap) | Docs recommend external sandbox services (E2B, Modal) | Sandbox backends via LangChain's Deep Agents |
-| **Managed / hosted option** | None; single machine | Managed Agents (Anthropic-hosted) | CrewAI AMP | LangSmith Deployment cloud |
-
-And here is Leviath scored against [12-Factor Agents](https://github.com/humanlayer/12-factor-agents), including where it falls short today:
-
-| # | Factor | Status | Notes |
-|---|---|---|---|
-| 1 | Natural language to tool calls | ✓ | Provider tool calls map 1:1 into the runtime; a text-protocol fallback exists only for the Claude Code transport |
-| 2 | Own your prompts | ✓ | Stage, system, and transition prompts live in your blueprint TOML; a few small framework nudges are fixed text |
-| 3 | Own your context window | ✓ | Region kinds, per-stage layouts, per-tool routing, percentage budgets |
-| 4 | Tools are structured outputs | ✓ | Tools declare JSON Schemas, and every call is validated against its schema at dispatch before it runs, built-in, script, and MCP alike |
-| 5 | Unify execution and business state | ✓ | One append-only run journal, replayable with `lev context` |
-| 6 | Launch / pause / resume | ✓ | Launch via CLI, REST, or ACP; `lev pause` / `lev resume`, `POST /api/agents/{id}/pause` and `/resume`, dashboard `p` / `r`; a paused run shows as paused everywhere and survives a daemon restart |
-| 7 | Contact humans with tool calls | ✓ | `ask_user_*` tools plus blueprint `interaction_points`, answered from CLI, REST, or ACP |
-| 8 | Own your control flow | ✓ | Graph transitions with error, max-iterations, stuck, and LLM-choice conditions |
-| 9 | Compact errors into context | ✓ | Tool errors, inference errors, and iteration caps all land in context; a blueprint routes them to a pinned `error_report` or `stuck_report` region so the recovery stage starts out knowing what went wrong |
-| 10 | Small, focused agents | ✓ | Per-stage models, tools, and prompts; sub-agents; bounded fan-out |
-| 11 | Trigger from anywhere | partial | CLI, REST + WebSocket, ACP stdio, signed webhooks out; no built-in scheduler, so use system cron |
-| 12 | Stateless reducer | ✗ | The engine is a stateful ECS world; the run journal's fold is a true reducer, but the loop itself isn't |
+The full breakdown, including what each design buys and costs, when to reach for something else,
+where Leviath falls short of [12-Factor Agents](https://github.com/humanlayer/12-factor-agents),
+and why you might not want Leviath at all, is on the docs site:
+[Where Leviath sits →](https://leviath.dev/docs/comparison)
 
 ## Why you might not want Leviath
 
-- **It's not a replacement for Claude Code, Codex, or your favorite coding agent.** Leviath is a runtime for building and orchestrating agents. Those are polished interactive products at a different layer, and Leviath can even run on top of Claude Code as a transport.
-- **Agents are config, not code.** A Leviath agent is a TOML blueprint plus optional Rhai script tools. If you want to write agent logic as Python or TypeScript against an SDK, that model isn't here; other languages drive Leviath through the REST API instead.
+- **It's not a replacement for Claude Code, Codex, or your favorite coding agent.** Those are polished interactive products at a different layer, and Leviath can even run on top of Claude Code as a transport.
+- **Agents are config, not code.** A Leviath agent is a TOML blueprint plus optional Rhai script tools. If you want to write agent logic in Python or TypeScript against an SDK, other languages drive Leviath through the REST API instead.
 - **It runs on one machine.** The daemon hosts every agent in a single process on a single box. There is no hosted service and no multi-machine orchestration.
+- **Agents share a process.** That is what makes them cheap, and it means you don't get the isolation a process-per-agent design gives you for free. [Sandboxing](https://leviath.dev/docs/security) is opt-in.
 - **You need a model provider**: an API key, a local Ollama, or the Claude Code transport (with its terms-of-service caveat).
 
 ## CLI
