@@ -177,7 +177,11 @@ impl Provider for OpenRouterProvider {
             &url,
             &[
                 ("Authorization", format!("Bearer {}", self.api_key)),
+                // OpenRouter attributes a request to an app by this pair, and
+                // sending only the referer left every Leviath call unnamed on
+                // the account's activity page.
                 ("HTTP-Referer", "https://leviath.dev".to_string()),
+                ("X-Title", "Leviath".to_string()),
                 ("Content-Type", "application/json".to_string()),
             ],
             &body,
@@ -220,7 +224,11 @@ impl Provider for OpenRouterProvider {
             &url,
             &[
                 ("Authorization", format!("Bearer {}", self.api_key)),
+                // OpenRouter attributes a request to an app by this pair, and
+                // sending only the referer left every Leviath call unnamed on
+                // the account's activity page.
                 ("HTTP-Referer", "https://leviath.dev".to_string()),
+                ("X-Title", "Leviath".to_string()),
                 ("Content-Type", "application/json".to_string()),
             ],
             &body,

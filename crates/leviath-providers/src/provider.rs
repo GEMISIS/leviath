@@ -25,6 +25,14 @@ pub enum UnavailableReason {
     AuthFailed,
     /// The key authenticated but is not allowed to do this.
     Forbidden,
+    /// The provider could not be reached at all: connection refused, DNS
+    /// failure, TLS failure, or a timeout that outlived every retry.
+    ///
+    /// Unlike the three above, this is not something the provider told us - it
+    /// is the absence of the provider. It still belongs here because the
+    /// consequence is identical: the next request will fail the same way, so
+    /// the run should move to a different provider rather than die.
+    Unreachable,
 }
 
 impl UnavailableReason {
@@ -34,6 +42,7 @@ impl UnavailableReason {
             UnavailableReason::CreditsExhausted => "credits-exhausted",
             UnavailableReason::AuthFailed => "auth-failed",
             UnavailableReason::Forbidden => "forbidden",
+            UnavailableReason::Unreachable => "unreachable",
         }
     }
 
@@ -51,6 +60,10 @@ impl UnavailableReason {
             UnavailableReason::Forbidden => {
                 "the API key is not allowed to use this model: check the \
                  account's plan and model permissions"
+            }
+            UnavailableReason::Unreachable => {
+                "the provider could not be reached: check the network and the \
+                 base URL, and whether a local server (ollama) is running"
             }
         }
     }
@@ -199,10 +212,22 @@ impl ProviderError {
     /// The runtime uses this to decide whether to fail over to the next
     /// configured provider and to count the failure against that provider's
     /// circuit breaker. A bad request or a malformed response says nothing
-    /// about the provider, so only [`ProviderError::Unavailable`] qualifies.
+    /// about the provider, so [`ProviderError::Unavailable`] and a transport
+    /// failure are the only two that qualify.
     pub fn unavailable_reason(&self) -> Option<UnavailableReason> {
         match self {
             ProviderError::Unavailable { reason, .. } => Some(*reason),
+            // A provider we could not open a connection to has told us nothing
+            // about this request and everything about itself. The retry policy
+            // has already tried four times with backoff by the time one of
+            // these surfaces, so the next attempt belongs somewhere else.
+            //
+            // This is what broke an OpenRouter-only install: `ollama` is
+            // registered whether or not a server is running, every bundled
+            // blueprint lists it, and a refused connection to localhost:11434
+            // counted as an ordinary error - so the run died at iteration 0
+            // with a usable OpenRouter fallback sitting untouched behind it.
+            ProviderError::RequestFailed(_) => Some(UnavailableReason::Unreachable),
             _ => None,
         }
     }
@@ -915,6 +940,31 @@ mod tests {
     }
 
     #[test]
+    fn a_transport_failure_counts_as_an_unreachable_provider() {
+        // A refused connection says nothing about the request and everything
+        // about the provider, and the retry policy has already spent four
+        // attempts on it. Leaving it as an ordinary error is what made an
+        // OpenRouter-only install die at iteration 0: `ollama` registers with
+        // no key, every bundled blueprint lists it, and a dead localhost:11434
+        // killed the run instead of falling over to the model behind it.
+        assert_eq!(
+            ProviderError::RequestFailed("error sending request".into()).unavailable_reason(),
+            Some(UnavailableReason::Unreachable)
+        );
+        // Still worth retrying first - the two questions are separate.
+        assert!(ProviderError::RequestFailed("error sending request".into()).is_transient());
+        // Everything that is genuinely about the request stays put.
+        for err in [
+            ProviderError::InvalidResponse("garbage".into()),
+            ProviderError::TokenLimitExceeded { used: 9, max: 8 },
+            ProviderError::RateLimitExceeded,
+            ProviderError::Other("mystery".into()),
+        ] {
+            assert_eq!(err.unavailable_reason(), None, "{err}");
+        }
+    }
+
+    #[test]
     fn unavailable_display_leads_with_the_remedy_and_keeps_the_detail() {
         // The whole complaint in issue #201 was a raw JSON blob as the run's
         // status. The message must say what to do; the blob stays available.
@@ -934,6 +984,7 @@ mod tests {
             UnavailableReason::CreditsExhausted,
             UnavailableReason::AuthFailed,
             UnavailableReason::Forbidden,
+            UnavailableReason::Unreachable,
         ] {
             assert!(!reason.label().is_empty());
             assert!(!reason.remedy().is_empty());

@@ -13,6 +13,44 @@ same list.
 
 ## Unreleased
 
+- OpenRouter works end to end. Several separate faults added up to an install
+  that was configured correctly and still did nothing useful:
+  - `default_provider` is now honoured. It was only consulted after every
+    registered entry a blueprint listed, and the bundled agents all list
+    Anthropic, OpenAI and Ollama, so setting it to `openrouter` changed
+    nothing. Registered candidates on your default provider now head the
+    stage's list, with the blueprint's own entries kept behind them as
+    fallbacks. A stage pins its own provider with `allow_user_default = false`,
+    which suppresses this as it always did.
+  - A provider that cannot be reached at all now counts as unavailable, so the
+    run fails over instead of dying. Ollama registers with no key whether or
+    not a server is running, so a refused connection to `localhost:11434` used
+    to kill runs at iteration 0 with a working provider sitting unused behind
+    it in the same list.
+  - Reasoning models no longer answer with nothing. They return `content: null`
+    and put their text under `reasoning`, which reached the runtime as an empty
+    response: the agent was nudged to use its tools, looped, and the run
+    finished having said nothing. The field is read when the message carries no
+    content and no tool calls, so it never displaces real output.
+  - An error a gateway delivers with a 200 status is reported. OpenRouter
+    answers `{"error":{...}}` with a success status when an upstream provider
+    rejects a request it had already accepted, and that read as
+    "No choices in response", throwing away the only text that said why. The
+    envelope's own status code is classified as a real one, so a 402 arriving
+    this way fails over and trips the circuit breaker like any other.
+  - Errors delivered mid-stream surface instead of silently truncating the
+    stream.
+  - Requests carry the `X-Title` header OpenRouter pairs with `HTTP-Referer`,
+    so calls are attributed to Leviath on the account's activity page.
+- A hand-written `config.toml` parses. Every field on the top-level config was
+  required, so the three lines that point Leviath at OpenRouter failed with
+  ``missing field `providers` `` - a table the user has no reason to know
+  about, in a message that says nothing about what to add.
+- `lev doctor`'s `resolve` check says when your configured `default_provider`
+  is being passed over, and why. `default_provider` with no `default_model` is
+  a half-configuration that silently does nothing, and the check used to report
+  `OK` next to a provider you never asked for.
+
 ## 0.1.2 - 2026-08-02
 
 - `lev run <agent>` with no `--task` now opens your editor on a commented

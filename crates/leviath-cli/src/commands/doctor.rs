@@ -268,7 +268,13 @@ fn resolve_check(
 
     match registry.get(&provider_name) {
         Some(provider) => (
-            Check::ok("resolve", format!("{provider_name} / {model}")),
+            Check::ok(
+                "resolve",
+                format!(
+                    "{provider_name} / {model}{}",
+                    default_provider_note(config, &provider_name, model_override, registry)
+                ),
+            ),
             Some(Resolved {
                 provider_name,
                 model,
@@ -287,6 +293,44 @@ fn resolve_check(
             None,
         ),
     }
+}
+
+/// The note appended when the resolved provider is not the one the user named
+/// as their default.
+///
+/// `default_provider` without a `default_model` is a half-configuration that
+/// silently does nothing: the resolver needs a model to send and has none, so
+/// it falls through to the hard-coded last resort. Someone who set
+/// `default_provider = "openrouter"`, pasted their key, and watched every run
+/// go to Anthropic (or, with no Anthropic key either, to a localhost Ollama
+/// that was not running) had no way to see that from here - the check said
+/// `resolve OK` and printed a provider they never asked for.
+///
+/// Not a failure: the resolution is legitimate and the run will work. It is
+/// only worth saying because it is not what the config appears to ask for.
+/// Silent while `--model` is in play, which is the caller overriding on purpose.
+fn default_provider_note(
+    config: &Config,
+    resolved: &str,
+    model_override: Option<&str>,
+    registry: &ProviderRegistry,
+) -> String {
+    if model_override.is_some() || resolved == config.default_provider {
+        return String::new();
+    }
+    // The missing model is the only reason a registered default provider loses
+    // from here: this check resolves an empty `ModelConfig`, so one with a
+    // model set has no competition to lose to. An *unregistered* default
+    // provider is a different complaint, and one the `config` line already
+    // makes by listing what is registered.
+    if config.default_model.is_some() || !registry.has(&config.default_provider) {
+        return String::new();
+    }
+    let named = &config.default_provider;
+    format!(
+        "  (note: default_provider is '{named}' but no default_model is set, \
+         so it is never chosen - add `default_model` to config.toml)"
+    )
 }
 
 // ─── Check 3: inference ───────────────────────────────────────────────────────

@@ -317,7 +317,76 @@ pub fn merge_extra_params(
 }
 
 /// Parse a Chat Completions response body into an `InferenceResponse`.
+/// Turn an OpenAI-style `error` envelope into the right [`ProviderError`].
+///
+/// Split out because it is reached from three places that never see a status
+/// code: a 200 response whose body is an error, an SSE chunk carrying one, and
+/// the truncated-stream case. The code inside the envelope is the status the
+/// upstream provider used, so it feeds [`UnavailableReason::classify`] exactly
+/// as a real status line would - which is what lets a 402 delivered this way
+/// still fail over and trip the circuit breaker instead of killing the run.
+pub(crate) fn openai_error_envelope(err: &serde_json::Value) -> ProviderError {
+    let message = err
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    // OpenRouter sends `code` as a number; other gateways send the string form.
+    let code = err
+        .get("code")
+        .and_then(|c| {
+            c.as_u64()
+                .or_else(|| c.as_str().and_then(|s| s.parse::<u64>().ok()))
+        })
+        .and_then(|c| u16::try_from(c).ok())
+        .unwrap_or(0);
+
+    let detail = match (code, message) {
+        (0, "") => err.to_string(),
+        (0, m) => m.to_string(),
+        (c, "") => format!("HTTP {c}: {err}"),
+        (c, m) => format!("HTTP {c}: {m}"),
+    };
+
+    // `classify` reads the body when the code alone is innocent, so a 0 here
+    // still catches a credits message the gateway reported as a 200.
+    match crate::provider::UnavailableReason::classify(code, message) {
+        Some(reason) => ProviderError::Unavailable { reason, detail },
+        None => ProviderError::ApiError(detail),
+    }
+}
+
+/// The reasoning text of a message, when it carries any.
+///
+/// Two shapes are in the wild: a flat `reasoning` string, and the
+/// `reasoning_details` array OpenRouter uses to preserve per-block structure.
+/// Prefers the flat field and falls back to joining the array's text blocks.
+fn reasoning_text(message: &serde_json::Value) -> Option<String> {
+    if let Some(text) = message.get("reasoning").and_then(|v| v.as_str())
+        && !text.trim().is_empty()
+    {
+        return Some(text.to_string());
+    }
+    let joined: String = message
+        .get("reasoning_details")?
+        .as_array()?
+        .iter()
+        .filter_map(|d| d.get("text").and_then(|v| v.as_str()))
+        .collect::<Vec<_>>()
+        .join("");
+    (!joined.trim().is_empty()).then_some(joined)
+}
+
 pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceResponse> {
+    // A gateway does not always use the status line to report a failure.
+    // OpenRouter answers 200 with `{"error":{"code":…,"message":…}}` when an
+    // upstream provider rejects a request it had already accepted, and reading
+    // that as "No choices in response" threw away the one field that says what
+    // actually went wrong. Unpack it before looking for choices.
+    if let Some(err) = body.get("error").filter(|e| !e.is_null()) {
+        return Err(openai_error_envelope(err));
+    }
+
     let choice = body
         .get("choices")
         .and_then(|c| c.as_array())
@@ -328,7 +397,7 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceRespon
         .get("message")
         .ok_or_else(|| ProviderError::InvalidResponse("No message in choice".to_string()))?;
 
-    let content = message
+    let mut content = message
         .get("content")
         .and_then(|c| c.as_str())
         .unwrap_or("")
@@ -370,6 +439,16 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceRespon
                 thought_signature,
             });
         }
+    }
+
+    // Reasoning models answer with `content: null` and put their text under
+    // `reasoning`, so reading `content` alone handed the runtime an empty
+    // response: the agent got nudged to use its tools, looped, and the run
+    // finished having said nothing. Only used when the message is otherwise
+    // empty - a response carrying tool calls is not empty, and its reasoning
+    // is working-out rather than output.
+    if content.trim().is_empty() && tool_calls.is_empty() {
+        content = reasoning_text(message).unwrap_or_default();
     }
 
     let usage = body.get("usage");
@@ -447,7 +526,7 @@ impl Stream for OpenAiSseStream {
         loop {
             // Check for complete SSE events
             if let Some(chunk) = parse_openai_sse_event(&mut this.buffer) {
-                return std::task::Poll::Ready(chunk.map(Ok));
+                return std::task::Poll::Ready(chunk);
             }
 
             match this.inner.as_mut().poll_next(cx) {
@@ -463,7 +542,7 @@ impl Stream for OpenAiSseStream {
                 }
                 std::task::Poll::Ready(None) => {
                     if let Some(chunk) = parse_openai_sse_event(&mut this.buffer) {
-                        return std::task::Poll::Ready(chunk.map(Ok));
+                        return std::task::Poll::Ready(chunk);
                     }
                     return std::task::Poll::Ready(None);
                 }
@@ -474,13 +553,23 @@ impl Stream for OpenAiSseStream {
 }
 
 /// Parse a single SSE event from the buffer.
-/// Returns `Some(Some(chunk))` for data, `Some(None)` for stream end, `None` for incomplete.
+///
+/// Returns `Some(Some(Ok(chunk)))` for data, `Some(Some(Err(..)))` for an error
+/// the gateway delivered inside the stream, `Some(None)` for stream end, and
+/// `None` when the buffer does not yet hold a complete event.
+///
+/// The error case exists because a stream is where OpenRouter reports a failure
+/// it only discovered after committing to a 200: the upstream provider goes
+/// down mid-generation, or the account runs out of credits between chunks. That
+/// arrives as a `data:` line whose object is `{"error":{…}}` and no `choices`,
+/// which used to fall through the usage-only branch and simply end the stream -
+/// a truncated answer with nothing anywhere saying why.
 #[expect(
     clippy::string_slice,
     reason = "`event_end` is a `find` hit for the ASCII \"\\n\\n\" terminator, so it and \
               `event_end + 2` are char boundaries"
 )]
-pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<StreamChunk>> {
+pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<StreamChunk>>> {
     let event_end = buffer.find("\n\n")?;
     let event_text = buffer[..event_end].to_string();
     *buffer = buffer[event_end + 2..].to_string();
@@ -496,6 +585,10 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<StreamChunk>
                 Ok(j) => j,
                 Err(_) => continue,
             };
+
+            if let Some(err) = json.get("error").filter(|e| !e.is_null()) {
+                return Some(Some(Err(openai_error_envelope(err))));
+            }
 
             let choice = json
                 .get("choices")
@@ -518,7 +611,7 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<StreamChunk>
                         .and_then(|d| d.get("cached_tokens"))
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0) as usize;
-                    return Some(Some(StreamChunk {
+                    return Some(Some(Ok(StreamChunk {
                         delta: String::new(),
                         tool_calls: Vec::new(),
                         tokens: Some(TokenUsage {
@@ -529,7 +622,7 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<StreamChunk>
                             cache_write_tokens: 0,
                         }),
                         finish_reason: None,
-                    }));
+                    })));
                 }
                 continue;
             }
@@ -595,12 +688,12 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<StreamChunk>
                 }
             });
 
-            return Some(Some(StreamChunk {
+            return Some(Some(Ok(StreamChunk {
                 delta: content,
                 tool_calls: tool_call_deltas,
                 tokens,
                 finish_reason,
-            }));
+            })));
         }
     }
 
@@ -760,6 +853,185 @@ mod tests {
         assert!(err.to_string().contains("No choices"));
     }
 
+    // ─── reasoning-only responses ──────────────────────────────────────────
+
+    #[test]
+    fn reasoning_fills_in_for_a_null_content() {
+        // What a reasoning model on OpenRouter actually sends: `content: null`
+        // and the answer under `reasoning`. Reading `content` alone handed the
+        // runtime an empty response, so the agent was nudged, looped, and the
+        // run finished having said nothing.
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": serde_json::Value::Null,
+                    "reasoning": "2 + 2 is 4.",
+                },
+                "finish_reason": "length"
+            }]
+        });
+        let resp = parse_openai_response(&body).unwrap();
+        assert_eq!(resp.content, "2 + 2 is 4.");
+    }
+
+    #[test]
+    fn reasoning_details_are_joined_when_the_flat_field_is_absent() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "text": "first " },
+                        { "type": "reasoning.text", "text": "second" },
+                        { "type": "reasoning.encrypted" },
+                    ],
+                }
+            }]
+        });
+        let resp = parse_openai_response(&body).unwrap();
+        assert_eq!(resp.content, "first second");
+    }
+
+    #[test]
+    fn reasoning_never_displaces_real_content_or_a_tool_call() {
+        // Reasoning is working-out, not output. A message that has either of
+        // the two things the runtime acts on is not empty, and appending the
+        // model's scratchpad to it would put the scratchpad in the transcript.
+        let with_content = serde_json::json!({
+            "choices": [{
+                "message": { "content": "the answer", "reasoning": "scratchpad" }
+            }]
+        });
+        assert_eq!(
+            parse_openai_response(&with_content).unwrap().content,
+            "the answer"
+        );
+
+        let with_tool_call = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": serde_json::Value::Null,
+                    "reasoning": "scratchpad",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": { "name": "read_file", "arguments": "{}" }
+                    }]
+                }
+            }]
+        });
+        let resp = parse_openai_response(&with_tool_call).unwrap();
+        assert_eq!(resp.content, "");
+        assert_eq!(resp.tool_calls.len(), 1);
+    }
+
+    #[test]
+    fn blank_reasoning_is_not_treated_as_content() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": { "content": serde_json::Value::Null, "reasoning": "   " }
+            }]
+        });
+        assert_eq!(parse_openai_response(&body).unwrap().content, "");
+
+        let empty_details = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": serde_json::Value::Null,
+                    "reasoning_details": [{ "type": "reasoning.encrypted" }]
+                }
+            }]
+        });
+        assert_eq!(parse_openai_response(&empty_details).unwrap().content, "");
+
+        // A `reasoning_details` that is not an array at all. Nothing sends this
+        // today; the point is that a shape change upstream degrades to an empty
+        // answer rather than a panic in the middle of a run.
+        let not_an_array = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": serde_json::Value::Null,
+                    "reasoning_details": "unexpected"
+                }
+            }]
+        });
+        assert_eq!(parse_openai_response(&not_an_array).unwrap().content, "");
+    }
+
+    // ─── error envelopes delivered with a success status ───────────────────
+
+    #[test]
+    fn an_error_envelope_beats_the_missing_choices_message() {
+        // OpenRouter answers 200 with this shape when an upstream provider
+        // rejects a request it had already accepted. "No choices in response"
+        // threw away the only text that said why.
+        let body = serde_json::json!({
+            "error": { "code": 400, "message": "nonexistent/model-xyz is not a valid model ID" }
+        });
+        let err = parse_openai_response(&body).unwrap_err();
+        assert!(err.to_string().contains("not a valid model ID"), "{err}");
+        assert!(err.to_string().contains("400"), "{err}");
+        // A bad model id is this request's problem, not the provider's, so it
+        // must not fail over or count against the circuit breaker.
+        assert!(err.unavailable_reason().is_none(), "{err}");
+    }
+
+    #[test]
+    fn a_402_envelope_still_fails_over() {
+        // The whole point of reading the envelope: a drained account reported
+        // this way has to reach the same failover path a 402 status does.
+        let body = serde_json::json!({
+            "error": { "code": 402, "message": "Insufficient credits" }
+        });
+        let err = parse_openai_response(&body).unwrap_err();
+        assert_eq!(
+            err.unavailable_reason(),
+            Some(crate::provider::UnavailableReason::CreditsExhausted)
+        );
+    }
+
+    #[test]
+    fn an_envelope_without_a_code_falls_back_to_its_message() {
+        let body = serde_json::json!({ "error": { "message": "upstream timed out" } });
+        let err = parse_openai_response(&body).unwrap_err();
+        assert_eq!(err.to_string(), "API error: upstream timed out");
+
+        // A string code is read too - not every gateway sends a number.
+        let stringly = serde_json::json!({
+            "error": { "code": "401", "message": "no auth" }
+        });
+        assert_eq!(
+            parse_openai_response(&stringly)
+                .unwrap_err()
+                .unavailable_reason(),
+            Some(crate::provider::UnavailableReason::AuthFailed)
+        );
+    }
+
+    #[test]
+    fn an_envelope_with_no_readable_fields_still_reports_something() {
+        let body = serde_json::json!({ "error": { "kind": "weird" } });
+        let err = parse_openai_response(&body).unwrap_err();
+        assert!(err.to_string().contains("weird"), "{err}");
+
+        let coded_only = serde_json::json!({ "error": { "code": 503 } });
+        let err = parse_openai_response(&coded_only).unwrap_err();
+        assert!(err.to_string().contains("503"), "{err}");
+    }
+
+    #[test]
+    fn a_null_error_field_is_not_an_error() {
+        // Every successful OpenAI-compatible response from some gateways
+        // carries `"error": null`; treating that as a failure would reject
+        // every good response.
+        let body = serde_json::json!({
+            "error": serde_json::Value::Null,
+            "choices": [{ "message": { "content": "fine" } }]
+        });
+        assert_eq!(parse_openai_response(&body).unwrap().content, "fine");
+    }
+
     #[test]
     fn parse_response_no_message_returns_error() {
         let body = serde_json::json!({
@@ -872,7 +1144,7 @@ mod tests {
             })
         );
         let result = parse_openai_sse_event(&mut buf);
-        let chunk = result.unwrap().unwrap();
+        let chunk = result.unwrap().unwrap().unwrap();
         assert_eq!(chunk.delta, "Hello");
         assert!(chunk.finish_reason.is_none());
         assert!(chunk.tool_calls.is_empty());
@@ -889,7 +1161,7 @@ mod tests {
                 }]
             })
         );
-        let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap();
+        let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap().unwrap();
         assert_eq!(
             chunk.finish_reason,
             Some(crate::provider::FinishReason::Complete)
@@ -915,7 +1187,7 @@ mod tests {
                 }]
             })
         );
-        let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap();
+        let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap().unwrap();
         assert_eq!(chunk.tool_calls.len(), 1);
         assert_eq!(chunk.tool_calls[0].index, 0);
         assert_eq!(chunk.tool_calls[0].id.as_deref(), Some("call_abc"));
@@ -935,7 +1207,7 @@ mod tests {
                 }
             })
         );
-        let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap();
+        let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap().unwrap();
         assert_eq!(chunk.delta, "");
         let tokens = chunk.tokens.unwrap();
         assert_eq!(tokens.prompt_tokens, 50);
@@ -950,10 +1222,10 @@ mod tests {
             serde_json::json!({"choices": [{"delta": {"content": "A"}}]}),
             serde_json::json!({"choices": [{"delta": {"content": "B"}}]})
         );
-        let chunk1 = parse_openai_sse_event(&mut buf).unwrap().unwrap();
+        let chunk1 = parse_openai_sse_event(&mut buf).unwrap().unwrap().unwrap();
         assert_eq!(chunk1.delta, "A");
 
-        let chunk2 = parse_openai_sse_event(&mut buf).unwrap().unwrap();
+        let chunk2 = parse_openai_sse_event(&mut buf).unwrap().unwrap().unwrap();
         assert_eq!(chunk2.delta, "B");
     }
 
@@ -970,7 +1242,7 @@ mod tests {
                 }
             })
         );
-        let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap();
+        let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap().unwrap();
         assert_eq!(chunk.delta, "X");
         let tokens = chunk.tokens.unwrap();
         assert_eq!(tokens.prompt_tokens, 100);
@@ -1062,7 +1334,7 @@ mod tests {
             "data: {}\n\ndata: [DONE]\n\n",
             serde_json::json!({"choices": [{"delta": {"content": "X"}}]})
         );
-        let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap();
+        let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap().unwrap();
         assert_eq!(chunk.delta, "X");
         // Buffer should still have the [DONE] event
         assert!(buf.contains("[DONE]"));
@@ -1092,11 +1364,48 @@ mod tests {
                 }]
             })
         );
-        let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap();
+        let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap().unwrap();
         assert_eq!(chunk.tool_calls.len(), 1);
         assert_eq!(chunk.tool_calls[0].index, 1);
         assert!(chunk.tool_calls[0].id.is_none());
         assert!(chunk.tool_calls[0].name.is_none());
+    }
+
+    #[test]
+    fn sse_event_error_chunk_surfaces_as_an_error() {
+        // A stream is where OpenRouter reports a failure it only found after
+        // committing to a 200 - the upstream provider going down, or the
+        // account draining between chunks. It has no `choices` and no `usage`,
+        // so it used to fall through to `continue` and simply end the stream:
+        // a truncated answer with nothing anywhere saying why.
+        let mut buf = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "error": { "code": 402, "message": "Insufficient credits" }
+            })
+        );
+        let err = parse_openai_sse_event(&mut buf)
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            err.unavailable_reason(),
+            Some(crate::provider::UnavailableReason::CreditsExhausted),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn sse_event_null_error_field_is_ignored() {
+        let mut buf = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "error": serde_json::Value::Null,
+                "choices": [{ "delta": { "content": "hi" } }]
+            })
+        );
+        let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap().unwrap();
+        assert_eq!(chunk.delta, "hi");
     }
 
     #[test]
