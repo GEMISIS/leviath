@@ -85,7 +85,7 @@ pub(super) async fn list_dirs(
     let mut dirs = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
+        if !query.hidden && name.starts_with('.') {
             continue;
         }
         let path = entry.path();
@@ -261,6 +261,25 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let names: Vec<String> = listing_of(&body).dirs.into_iter().map(|d| d.name).collect();
         assert_eq!(names, ["visible"]);
+    }
+
+    #[tokio::test]
+    async fn list_dirs_hidden_true_includes_dotted_names() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::create_dir(dir.path().join("visible")).unwrap();
+        let uri = format!(
+            "/api/fs/dirs?path={}&hidden=true",
+            dir.path().to_string_lossy()
+        );
+        let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        let resp = app_with_root(None).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let names: Vec<String> = listing_of(&body).dirs.into_iter().map(|d| d.name).collect();
+        assert_eq!(names, [".git", "visible"]);
     }
 
     #[tokio::test]
