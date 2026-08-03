@@ -76,7 +76,7 @@ returning.
 | `runtime(handle)` | Run on a specific Tokio runtime instead of the ambient one. |
 
 Blueprints come from three places: `BlueprintSource::Path` (a `.leviath`
-manifest file), `BlueprintSource::Toml` (manifest text in memory), or
+blueprint file), `BlueprintSource::Toml` (blueprint text in memory), or
 `BlueprintSource::Inline` (a constructed `Blueprint` value). Region seeds of
 kind `caller_input` fill from `SpawnSpec::regions` (and the task prompt fills
 the `task` key), `literal` seeds resolve as written; the file, glob, rhai, and

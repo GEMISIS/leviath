@@ -40,9 +40,11 @@ shell_hint           = true          # global master switch, see below
 | `openrouter_api_key` | string | unset | Falls back to `OPENROUTER_API_KEY` |
 | `ollama_base_url` | string | unset | Falls back to `OLLAMA_HOST`, then `http://localhost:11434` |
 | `request_timeout_secs` | integer | unset | Unset means the 15 minute ceiling. A stage's `[stages.<name>.model] request_timeout_secs` wins for that stage |
-| `taint_tracking` | bool | `false` | Turns on [taint tracking](/docs/security) for every agent. Off, an agent still opts in through its own `[security]` block |
-| `batch_tool_hint` | bool | `true` | Adds a short system hint telling the model it may batch independent tool calls. An agent or stage can set it either way at the narrower scope |
-| `shell_hint` | bool | `true` | Adds a short system hint describing the shell a stage will actually get. Only says anything where the platform warrants it (today: Windows). An agent or stage can set it either way at the narrower scope |
+| `taint_tracking` | bool | `false` | Turns on [taint tracking](/docs/security) for every agent. With it off, an agent can still opt in itself |
+| `batch_tool_hint` | bool | `true` | Adds a short hint telling the model it may batch independent tool calls |
+| `shell_hint` | bool | `true` | Adds a short hint describing the shell a stage will get. Only says anything on platforms that need it, today just Windows |
+
+All three of those cascade: a stage setting beats an agent setting, which beats this file.
 
 ### System-prompt hints
 
@@ -113,18 +115,50 @@ interaction_timeout_secs  = 3600 # release a prompt nobody answered
 
 | Key | Default | Notes |
 |---|---|---|
-| `max_concurrent_inferences` | `8` | The [inference pool](/docs/engine#inference-pools) cap. Omit or set a large number to effectively unbound it |
+| `max_concurrent_inferences` | `8` | The [inference pool](/docs/engine#inference-pools) cap, per model |
 | `max_concurrent_tools` | `8` | Size of the shared tool worker pool. Clamped to at least 1 |
-| `default_max_iterations` | `50` | A stage's explicit `max_iterations` always wins |
-| `exact_token_counting` | `false` | Counts each assembled request exactly before sending and rejects one that would overflow the window. Costs a network round trip per inference on providers with a remote count endpoint |
+| `default_max_iterations` | `50` | A stage's own `max_iterations` always wins |
+| `exact_token_counting` | `false` | Count each request exactly before sending it. See below |
 | `script_shell_timeout_secs` | `60` | Cap on a Rhai script tool's `shell()` host call |
-| `stall_timeout_secs` | `60` | How long a run may sit ready to work but unable to dispatch before it is failed instead of left running. Only fires for something the runtime cannot resolve on its own, today a stage whose provider is not configured. Waiting for a busy model's pool is ordinary backpressure and is never failed. `0` waits forever |
-| `dead_cycles_before_relief` | `10` | How many consecutive 30-second cycles the daemon may spend with a full tool lane and no run moving before it widens the lane. See [the tool lane](/docs/engine#the-tool-lane). `0` never widens it; the count is still reported either way |
-| `finished_retention_secs` | `300` | How long a run stays in [`lev ps`](/docs/cli#runs-that-have-finished) after it ends, so a script polling on an interval can see how it ended instead of finding it gone. `0` drops it as soon as it finishes. Held in memory, so a daemon restart clears it whatever this is set to |
-| `wedge_timeout_secs` | `0` (off) | How long a run may sit in a state no part of the engine can reach before it is failed instead of left reported as running. Never fires on a run that is merely slow: an agent waiting on the model, a tool, its sub-agents, or a person is exempt however long it takes. Off by default because it fails runs; `300` is a sensible value if something outside Leviath tracks your slots. See [reconciling an external work queue](/docs/work-queues) |
-| `provider_failures_before_open` | `3` | Consecutive failures that only you can fix (out of credits, rejected key) before a provider is taken out of service for every run. Three rather than one because a single payment error can be one oversized request. `0` disables it, leaving per-run failover on its own |
-| `provider_circuit_cooldown_secs` | `300` | How long a provider stays out before one request is let through to see whether it recovered. A success puts it straight back; a failure restarts the wait. See [Providers](/docs/providers#when-a-provider-keeps-failing) |
-| `interaction_timeout_secs` | `3600` | How long any prompt that waits on a person may go unanswered before the daemon resolves it and lets the run continue. Covers `ask_user_*`, tool approvals, taint gates, and interaction points. An expiry denies an approval and tells the model no answer came; it never counts as consent. See [when nobody answers](/docs/interaction#when-nobody-answers). `0` waits indefinitely |
+| `stall_timeout_secs` | `60` | Fail a run that can never dispatch. See below |
+| `dead_cycles_before_relief` | `10` | 30-second cycles with a full [tool lane](/docs/engine#the-tool-lane) and nothing moving before the lane widens. `0` never widens it |
+| `finished_retention_secs` | `300` | How long a finished run stays in [`lev ps`](/docs/cli#runs-that-have-finished). See below |
+| `wedge_timeout_secs` | `0` (off) | Fail a run nothing can reach any more. See below |
+| `provider_failures_before_open` | `3` | Failures in a row before a provider is pulled. See below |
+| `provider_circuit_cooldown_secs` | `300` | How long a pulled provider waits before one request tests it. A success restores it, a failure restarts the wait |
+| `interaction_timeout_secs` | `3600` | How long a prompt may go unanswered. See below |
+
+Six of those need more than a table cell.
+
+**`exact_token_counting`** measures each assembled request before sending it and refuses one that
+would overflow the window. On providers with a remote counting endpoint that costs a network round
+trip per inference, so it is off by default.
+
+**`stall_timeout_secs`** only fires for something the runtime cannot resolve on its own. Today that
+means a stage whose provider is not configured: the run is ready to work and has nowhere to send the
+request. Waiting for a busy model's pool is ordinary backpressure and is never failed, however long
+it takes. `0` waits forever.
+
+**`finished_retention_secs`** keeps a run visible after it ends, so a script polling on an interval
+can see *how* it ended rather than finding it gone. `0` drops it immediately. The record is held in
+memory, so a daemon restart clears it whatever you set.
+
+**`wedge_timeout_secs`** fails a run that is sitting in a state no part of the engine can reach,
+rather than leaving it reported as running. It never fires on a run that is merely slow: an agent
+waiting on the model, a tool, its sub-agents, or a person is exempt however long it takes. It is off
+by default because it fails runs, and that should be your decision. `300` is sensible if something
+outside Leviath is tracking your slots. See [External work queues](/docs/work-queues).
+
+**`provider_failures_before_open`** counts failures only you can fix, such as an exhausted account
+or a rejected key, before that provider is taken out of service for every run. Three rather than one,
+because a single payment error can just be one oversized request. `0` disables it and leaves per-run
+failover to cope alone.
+
+**`interaction_timeout_secs`** puts a deadline on any prompt that waits on a person: `ask_user_*`,
+tool approvals, taint gates, and interaction points. When it expires the daemon resolves the prompt
+and lets the run continue. An expiry *denies* an approval and tells the model no answer came. It
+never counts as consent. `0` waits indefinitely. See
+[when nobody answers](/docs/interaction#when-nobody-answers).
 
 <a id="security"></a>
 
@@ -169,7 +203,7 @@ allow = ["~/.leviath/runs", "glob:~/design-docs/**"]
 An agent's declarations mean nothing until one of these grants lands, so `lev validate <agent>`
 checks each declared entry against this file and prints the block above, filled in, for whatever it
 does not find. `lev list` and `lev ps` carry the same counts. If you wrote blueprints against a
-build where the manifest allowlist stood on its own, read the
+build where the blueprint allowlist stood on its own, read the
 [upgrade note](/docs/security#upgrading-from-011).
 
 ## Tool permissions
