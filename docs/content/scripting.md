@@ -22,7 +22,7 @@ right.
 | [**Model providers**](/docs/rhai-providers) | `~/.leviath/providers/<name>.rhai` | How to map a request onto some HTTP API, and the response back |
 | [**Context regions**](/docs/rhai-regions) | beside the agent, referenced by `script =` | How one region renders, accepts writes, and sheds content under pressure |
 | [**Global tools**](/docs/rhai-tools) | `~/.leviath/tools/*.rhai`, or an agent's own `tools/` | A new tool, its schema, and what it does |
-| [**Policy rules**](/docs/rhai-tools#policy-rules) | `~/.config/leviath/rules/*.rhai` | Whether a given tool call is allowed to fire |
+| [**Policy rules**](/docs/rhai-tools#policy-rules) | `rules/*.rhai` in your OS config dir, see [configuration](/docs/configuration#policytoml) | Whether a given tool call is allowed to fire |
 
 Each page walks its point end to end with a complete, copy-pasteable example.
 

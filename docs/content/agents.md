@@ -219,9 +219,14 @@ max_file_tokens = 4000       # cap on how much of one file is tracked
 
 ## Catching an agent going in circles
 
-`[repetition_detection]` fails a stage that keeps making the same call or reading without ever
-writing. This is separate from the `stuck` edge in [stages](/docs/stages#stuck-detection): a stuck
-edge routes somewhere useful, this one stops the loop.
+`[repetition_detection]` watches for an agent making the same call over and over, or reading without
+ever writing. When it sees one, it writes a `[System]` note into the agent's conversation telling it
+what it is doing and to try something else.
+
+It nudges, it does not intervene. The run keeps going either way, the stage does not fail, and no
+transition fires. If you want a loop like this to actually route somewhere, use a `stuck` edge in
+[stages](/docs/stages#stuck-detection). The two work well together: the nudge gives the agent a
+chance to correct itself, and the edge catches it if it does not.
 
 ```toml
 [repetition_detection]

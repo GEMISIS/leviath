@@ -197,7 +197,7 @@ your OS keychain. `lev auth` manages the backend:
 ```bash
 lev auth status                 # which backend holds your secrets
 lev auth migrate                # move keys into the OS keychain
-lev auth migrate --reverse      # move them back to config.toml
+lev auth migrate --to-file      # move them back to config.toml
 lev auth migrate --dry-run      # preview without moving anything
 ```
 

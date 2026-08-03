@@ -25,7 +25,7 @@ flowchart LR
 ```bash
 lev mcp add filesystem --command npx \
   --arg -y --arg @modelcontextprotocol/server-filesystem --arg /path
-lev mcp add remote --url https://mcp.example.com --header "Authorization: Bearer $TOK"
+lev mcp add remote --url https://mcp.example.com --header "Authorization=Bearer $TOK"
 lev mcp list
 lev mcp login <name>        # OAuth servers: opens your browser
 lev mcp logout <name>       # drop the stored OAuth tokens
@@ -35,6 +35,10 @@ lev mcp remove <name>
 
 `lev mcp add <name>` takes `--command` + repeatable `--arg` for a stdio server, or `--url`
 (with optional `--header`/`--env`) for an HTTP one; `--no-login` skips the OAuth handshake.
+
+`--header` and `--env` both want `KEY=VALUE`, split on the first `=`. Note that this is not the
+`Name: value` form an HTTP header is usually written in, so `Authorization: Bearer ...` is rejected
+with `--header must be KEY=VALUE`.
 
 Or configure in `~/.leviath/config.toml`:
 
