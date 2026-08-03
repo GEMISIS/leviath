@@ -77,22 +77,17 @@ capabilities (Gas City sends none) cannot answer such a request, so instead of d
 approvals are surfaced as output and the run **parks**. Use `--yolo` (or scoped `--allow` flags) to run
 unattended against such a host.
 
-## Connecting from Gas City
+## Connecting a host
 
-Gas City launches the agent as a subprocess and talks JSON-RPC to it over stdio. Because it sends no
-client capabilities, run with `--yolo` so tool approvals don't park the run. Point Gas City's agent
-command at:
+Point the host's agent command at `lev agent-client`, then open a session and prompt it. Output
+streams back as the run progresses.
 
 ```bash
 lev agent-client --agent coder --yolo
 ```
 
-Then open a session in Gas City and prompt the agent; its output streams back as the run progresses.
-If you'd rather whitelist specific tools than approve everything, drop `--yolo` and list them:
-
-```bash
-lev agent-client --agent coder --allow read_file --allow list_dir --allow shell
-```
+[Gas City](/docs/gas-city) has a page of its own, with the `city.toml` stanza and the timeouts worth
+adjusting.
 
 > [!NOTE]
 > Editor integration is a thin front end over the daemon, exactly like `lev run` and `lev serve`. It
