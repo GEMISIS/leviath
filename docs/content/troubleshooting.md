@@ -203,7 +203,7 @@ heartbeat, so it stays fresh on a run that has stopped dead. `pid` is 0 for ever
 finished, so a sweeper that reverts on `pid == 0` reverts everything.
 
 Poll `lev ps --all --json` instead, and read `last_progress_at` rather than `updated_at`. The
-[reconciliation recipe](/docs/daemon#reconciling-an-external-work-queue) covers the four cases and,
+[reconciliation recipe](/docs/work-queues) covers the four cases and,
 importantly, what to do when the daemon does not answer, which is nothing.
 
 ## A run says `running` but nothing in it is moving at all

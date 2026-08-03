@@ -221,7 +221,7 @@ router-1785560000-e5f6a1b2c3d4  running (abandoned)  2h
 and it has not moved in five minutes. Clear it with `lev cancel <run-id>`. With `--all` a
 daemon that is down is reported rather than fatal, and nothing is marked abandoned in that
 case, because an unreachable daemon looks exactly like every run dying at once. See
-[reconciling an external work queue](/docs/daemon#reconciling-an-external-work-queue) if
+[reconciling an external work queue](/docs/work-queues) if
 you are driving Leviath from a scheduler.
 
 | Status | Meaning |

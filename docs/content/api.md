@@ -81,7 +81,7 @@ Base path `/api`; all JSON unless noted.
 > heartbeat and stays fresh on a run that has stopped; the second moves only when the run does. Age
 > a run against `last_progress_at`. `pid` is always 0 and means nothing: the daemon hosts every run
 > in one shared world, so there is no process per run. If you are tracking slots from outside, read
-> [reconciling an external work queue](/docs/daemon#reconciling-an-external-work-queue) first.
+> [reconciling an external work queue](/docs/work-queues) first.
 
 ## Live updates over WebSocket
 
