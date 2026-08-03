@@ -31,7 +31,7 @@ pub(super) async fn list_dirs(
     Query(query): Query<DirsQuery>,
 ) -> Result<Json<DirsResp>, (StatusCode, Json<ErrorResponse>)> {
     let root = state.limits.workdir_root.as_deref();
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    let cwd = known_dir_or_fs_root(std::env::current_dir().ok());
 
     let listed = match &query.path {
         Some(p) => {
@@ -122,14 +122,19 @@ pub(super) async fn list_dirs(
     Ok(Json(DirsResp {
         path: listed.to_string_lossy().into_owned(),
         parent,
-        home: dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("/"))
+        home: known_dir_or_fs_root(dirs::home_dir())
             .to_string_lossy()
             .into_owned(),
         cwd: cwd.to_string_lossy().into_owned(),
         root: root.map(|r| r.to_string_lossy().into_owned()),
         dirs,
     }))
+}
+
+/// The filesystem root when a well-known directory (cwd, home) cannot be
+/// determined - the picker always has *somewhere* real to stand.
+fn known_dir_or_fs_root(dir: Option<PathBuf>) -> PathBuf {
+    dir.unwrap_or_else(|| PathBuf::from("/"))
 }
 
 /// Whether two paths name the same directory, symlinks resolved - so the
@@ -400,6 +405,51 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let names: Vec<String> = listing_of(&body).dirs.into_iter().map(|d| d.name).collect();
         assert_eq!(names, ["escape", "inside"]);
+    }
+
+    /// A directory that exists but cannot be read (no read permission) is
+    /// reported, not a 500.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn list_dirs_unreadable_directory_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let (status, body) = get_dirs(app_with_root(None), Some(&locked.to_string_lossy())).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let msg = error_of(&body);
+        let expected = format!("could not read '{}'", locked.display());
+        assert!(msg.starts_with(&expected), "{msg}");
+
+        let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+    }
+
+    /// The cwd/home fallback: a known directory passes through untouched, an
+    /// unknowable one becomes the filesystem root.
+    #[test]
+    fn known_dir_or_fs_root_falls_back_to_the_fs_root() {
+        assert_eq!(
+            known_dir_or_fs_root(Some(PathBuf::from("/somewhere"))),
+            PathBuf::from("/somewhere")
+        );
+        assert_eq!(known_dir_or_fs_root(None), PathBuf::from("/"));
+    }
+
+    /// `same_dir` falls back to literal comparison when a path cannot be
+    /// canonicalized (it does not exist).
+    #[test]
+    fn same_dir_compares_noncanonicalizable_paths_literally() {
+        assert!(same_dir(
+            Path::new("/no/such/dir/anywhere"),
+            Path::new("/no/such/dir/anywhere")
+        ));
+        assert!(!same_dir(
+            Path::new("/no/such/dir/anywhere"),
+            Path::new("/no/such/dir/elsewhere")
+        ));
     }
 
     /// A child that cannot be stat'd (here: a dangling symlink) is skipped,

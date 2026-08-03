@@ -113,14 +113,16 @@ mod tests {
             let report: DoctorResp = serde_json::from_slice(&body).unwrap();
 
             assert_eq!(report.checks.len(), 2, "config ok, resolve fail, stop");
-            assert_eq!(report.checks[0].name, "config");
-            assert!(report.checks[0].ok, "{}", report.checks[0].detail);
-            assert_eq!(report.checks[1].name, "resolve");
-            assert!(!report.checks[1].ok);
+            let config_check = &report.checks[0];
+            assert_eq!(config_check.name, "config");
+            assert!(config_check.ok, "{}", config_check.detail);
+            let resolve_check = &report.checks[1];
+            assert_eq!(resolve_check.name, "resolve");
+            assert!(!resolve_check.ok);
             assert!(
-                report.checks[1].detail.contains("not configured"),
+                resolve_check.detail.contains("not configured"),
                 "{}",
-                report.checks[1].detail
+                resolve_check.detail
             );
             // The offline checks carry no timing.
             assert!(report.checks.iter().all(|c| c.elapsed_ms.is_none()));
