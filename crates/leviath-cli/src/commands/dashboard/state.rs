@@ -51,6 +51,16 @@ pub(crate) struct Dashboard {
     /// The log panel's viewport height as of the last draw, so key scrolling
     /// pages by what is actually visible.
     pub(super) log_viewport: usize,
+    /// The full-screen stage explorer, when open (`g` in the detail view).
+    pub(super) stage_explorer: Option<ExplorerState>,
+    /// Cursor + expansion state of the structured Context view.
+    pub(super) context_tree: ContextTreeState,
+    /// Cached archive of the selected run (points + visit timeline).
+    pub(super) history: Option<super::history::RunHistoryCache>,
+    /// Loads a run's archived points. Injected (mirroring `clock`/`yank_fn`)
+    /// so tests can count loads and prove `,`/`.` no longer re-read the
+    /// archive per keypress.
+    pub(super) history_loader: fn(&str) -> Vec<leviath_core::run_archive::RunPoint>,
     /// Scroll offset for detail view content: 0 = bottom (auto-scroll), >0 = scrolled up
     pub(super) detail_scroll: usize,
     /// Selected option index for MultipleChoice/ToolApproval/Confirm input
@@ -59,12 +69,9 @@ pub(crate) struct Dashboard {
     pub(super) selected_stage: usize,
     /// Whether the content pane shows Output or Logs - global across all stage tabs.
     pub(super) stage_content_mode: StageContentMode,
-    /// The selected run's context-window history (from its `run.lvr` archive),
-    /// loaded lazily when the user starts browsing it in the Context view. Empty
-    /// until then, and cleared when the browsed run changes.
-    pub(super) context_history: Vec<leviath_core::run_archive::RunPoint>,
     /// Which historical context point is being viewed: `None` = the live current
-    /// window (the default), `Some(i)` = archived point `i` in `context_history`.
+    /// window (the default), `Some(i)` = archived point `i` in the cached
+    /// history (see `history`).
     pub(super) context_history_idx: Option<usize>,
     /// True after the first sync completes; suppresses startup toasts for pre-existing state.
     pub(super) initial_sync_done: bool,
@@ -221,11 +228,14 @@ impl Dashboard {
             log_scroll: crate::tui::widgets::scroll::ScrollState::default(),
             pane_rects: Vec::new(),
             log_viewport: 0,
+            stage_explorer: None,
+            context_tree: ContextTreeState::default(),
+            history: None,
+            history_loader: runstate::context_history,
             detail_scroll: 0,
             choice_selected: 0,
             selected_stage: 0,
             stage_content_mode: StageContentMode::Output,
-            context_history: Vec::new(),
             context_history_idx: None,
             initial_sync_done: false,
             tick_count: 0,
@@ -454,26 +464,58 @@ impl Dashboard {
     }
 
     /// Leave context-history browsing and go back to the live current window.
+    /// The cached archive is kept: it invalidates by run id and TTL, not here.
     pub(super) fn reset_context_history(&mut self) {
-        self.context_history.clear();
         self.context_history_idx = None;
+    }
+
+    /// Make sure the cached archive covers `run_id` and is not older than the
+    /// TTL. This is the ONLY place the archive is loaded: `,`/`.` used to
+    /// re-read and re-replay the whole `run.lvr` on every keypress.
+    pub(super) fn ensure_history(&mut self, run_id: &str) {
+        use super::history::{HISTORY_TTL_TICKS, RunHistoryCache};
+        let fresh = self.history.as_ref().is_some_and(|h| {
+            h.run_id == run_id
+                && self.tick_count.saturating_sub(h.loaded_at_tick) < HISTORY_TTL_TICKS
+        });
+        if fresh {
+            return;
+        }
+        // A run switch drops any browsed position along with the old archive.
+        if self.history.as_ref().is_some_and(|h| h.run_id != run_id) {
+            self.context_history_idx = None;
+        }
+        let points = (self.history_loader)(run_id);
+        let visits = super::history::derive_visits(&points);
+        self.history = Some(RunHistoryCache {
+            run_id: run_id.to_string(),
+            points,
+            visits,
+            loaded_at_tick: self.tick_count,
+        });
+    }
+
+    /// The cached history, if it belongs to the selected run.
+    pub(super) fn selected_history(&self) -> Option<&super::history::RunHistoryCache> {
+        let id = self.selected_agent().map(|a| a.id.as_str())?;
+        self.history.as_ref().filter(|h| h.run_id == id)
     }
 
     /// Step through the selected run's archived context-window history in the
     /// Context view: `delta > 0` moves to a later point, `delta < 0` to an
-    /// earlier one. The history is (re)loaded from the run's `run.lvr` archive
-    /// on each step; stepping past the newest point returns to the live window.
-    /// No-op if the run has no archived history.
+    /// earlier one. Reads the cached archive; stepping past the newest point
+    /// returns to the live window. No-op if the run has no archived history.
     pub(super) fn step_context_history(&mut self, delta: isize) {
         let Some(run_id) = self.selected_agent().map(|a| a.id.clone()) else {
             return;
         };
-        let history = runstate::context_history(&run_id);
-        if history.is_empty() {
+        self.ensure_history(&run_id);
+        let len = self.selected_history().map(|h| h.points.len()).unwrap_or(0);
+        if len == 0 {
             self.reset_context_history();
             return;
         }
-        let last = (history.len() - 1) as isize;
+        let last = (len - 1) as isize;
         let new_idx = match self.context_history_idx {
             // From the live window, a backward step enters at the newest point;
             // a forward step stays live.
@@ -489,18 +531,53 @@ impl Dashboard {
                 }
             }
         };
-        self.context_history = history;
         self.context_history_idx = new_idx.map(|i| i as usize);
         self.stage_content_mode = StageContentMode::Context;
-        self.detail_scroll = 0;
+        // The scroll position deliberately survives the step: comparing the
+        // same spot across two points is the whole reason to browse history.
+    }
+
+    /// Jump the Context view straight to archived point `idx` (the timeline's
+    /// Enter). Clamped; assumes `ensure_history` ran for the selected run.
+    pub(super) fn jump_to_history_point(&mut self, idx: usize) {
+        let len = self.selected_history().map(|h| h.points.len()).unwrap_or(0);
+        if len == 0 {
+            return;
+        }
+        self.context_history_idx = Some(idx.min(len - 1));
+        self.stage_content_mode = StageContentMode::Context;
+    }
+
+    /// The snapshot the Context view is showing right now: the browsed
+    /// archived point, else the selected stage's on-disk snapshot, else the
+    /// run's live snapshot - the same fallback chain the renderer uses, so
+    /// the key handler and the drawn tree can never disagree.
+    pub(super) fn current_context_snapshot(&self) -> Option<runstate::ContextSnapshot> {
+        let agent = self.selected_agent()?;
+        self.browsed_context_point()
+            .map(|p| p.context.clone())
+            .or_else(|| runstate::read_stage_context(&agent.id, self.selected_stage))
+            .or_else(|| agent.context_snapshot.clone())
+    }
+
+    /// The Context view's interactive rows under the current fold state.
+    pub(super) fn context_tree_rows(&self) -> Vec<super::context_tree::TreeRow> {
+        let searching = self.search_mode || !self.search_query.is_empty();
+        self.current_context_snapshot()
+            .map(|snap| super::context_tree::rows(&snap, &self.context_tree, searching))
+            .unwrap_or_default()
     }
 
     /// The context snapshot to render in the Context view: the selected archived
     /// history point when browsing, else `None` (callers fall back to the live
     /// current window).
     pub(super) fn browsed_context_point(&self) -> Option<&leviath_core::run_archive::RunPoint> {
-        self.context_history_idx
-            .and_then(|i| self.context_history.get(i))
+        let idx = self.context_history_idx?;
+        let id = self.selected_agent().map(|a| a.id.as_str())?;
+        self.history
+            .as_ref()
+            .filter(|h| h.run_id == id)
+            .and_then(|h| h.points.get(idx))
     }
 
     pub(super) fn add_log(&mut self, msg: String) {
@@ -1328,11 +1405,12 @@ mod tests {
             dash.step_context_history(1);
             assert_eq!(dash.context_history_idx, None);
 
-            // reset clears the cache + index.
+            // reset returns to live; the cache is kept (it invalidates by
+            // run id and TTL, not by leaving the browse).
             dash.step_context_history(-1);
             dash.reset_context_history();
             assert_eq!(dash.context_history_idx, None);
-            assert!(dash.context_history.is_empty());
+            assert!(dash.history.is_some());
         });
     }
 
@@ -1351,7 +1429,158 @@ mod tests {
             dash.selected = 0;
             dash.step_context_history(-1);
             assert_eq!(dash.context_history_idx, None);
-            assert!(dash.context_history.is_empty());
+        });
+    }
+
+    /// The whole point of the cache: repeated `,`/`.` steps read the archive
+    /// once, not once per keypress.
+    #[test]
+    fn stepping_history_loads_the_archive_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static LOADS: AtomicUsize = AtomicUsize::new(0);
+        fn counting_loader(_run_id: &str) -> Vec<leviath_core::run_archive::RunPoint> {
+            LOADS.fetch_add(1, Ordering::SeqCst);
+            let mut meta = leviath_core::run_meta::RunMeta::new(
+                "run-1".to_string(),
+                "a".to_string(),
+                "/p".to_string(),
+                "t".to_string(),
+                None,
+                "/w".to_string(),
+                1,
+            );
+            meta.current_stage = "main".to_string();
+            let point = |at: i64| leviath_core::run_archive::RunPoint {
+                meta: meta.clone(),
+                context: leviath_core::run_meta::ContextSnapshot {
+                    stage_name: "main".to_string(),
+                    total_tokens: 0,
+                    max_tokens: 100,
+                    regions: vec![],
+                },
+                at,
+            };
+            vec![point(1), point(2), point(3)]
+        }
+
+        LOADS.store(0, Ordering::SeqCst);
+        let mut dash = make_test_dashboard();
+        dash.history_loader = counting_loader;
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+
+        dash.step_context_history(-1);
+        dash.step_context_history(-1);
+        dash.step_context_history(1);
+        dash.step_context_history(-1);
+        assert_eq!(
+            LOADS.load(Ordering::SeqCst),
+            1,
+            "four steps, one archive read"
+        );
+        assert_eq!(dash.context_history_idx, Some(1));
+
+        // The visit timeline came along for free.
+        assert_eq!(dash.selected_history().unwrap().visits.len(), 1);
+
+        // Past the TTL the cache refreshes (a live run keeps growing).
+        dash.tick_count += super::super::history::HISTORY_TTL_TICKS;
+        dash.step_context_history(-1);
+        assert_eq!(LOADS.load(Ordering::SeqCst), 2);
+    }
+
+    /// Switching runs drops the browsed position with the stale cache, and
+    /// a cache for another run never serves the browsed point.
+    #[test]
+    fn a_run_switch_invalidates_the_cache_and_the_browsed_point() {
+        fn one_point_loader(_run_id: &str) -> Vec<leviath_core::run_archive::RunPoint> {
+            let meta = leviath_core::run_meta::RunMeta::new(
+                "x".to_string(),
+                "a".to_string(),
+                "/p".to_string(),
+                "t".to_string(),
+                None,
+                "/w".to_string(),
+                1,
+            );
+            vec![leviath_core::run_archive::RunPoint {
+                meta,
+                context: leviath_core::run_meta::ContextSnapshot {
+                    stage_name: "s".to_string(),
+                    total_tokens: 0,
+                    max_tokens: 100,
+                    regions: vec![],
+                },
+                at: 1,
+            }]
+        }
+        let mut dash = make_test_dashboard();
+        dash.history_loader = one_point_loader;
+        dash.agents
+            .push(make_test_agent("run-a", AgentDisplayStatus::Active));
+        dash.agents
+            .push(make_test_agent("run-b", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+
+        dash.ensure_history("run-a");
+        dash.context_history_idx = Some(0);
+        // The cache belongs to run-a; with run-b selected the point is withheld.
+        dash.selected = dash
+            .display_indices
+            .iter()
+            .position(|&i| dash.agents[i].id == "run-b")
+            .unwrap();
+        assert!(dash.browsed_context_point().is_none());
+
+        // Loading run-b's history resets the browsed index too.
+        dash.ensure_history("run-b");
+        assert_eq!(dash.context_history_idx, None);
+        assert_eq!(dash.selected_history().unwrap().run_id, "run-b");
+    }
+
+    /// The Context tree reads the browsed point's snapshot while browsing,
+    /// and a browsed index with no selected agent serves nothing.
+    #[test]
+    fn current_context_snapshot_prefers_the_browsed_point() {
+        crate::runstate::with_isolated_runs_dir("dash-ctx-browsed-snap", |_d| {
+            write_history_archive("run-b", 2);
+            let mut dash = make_test_dashboard();
+            dash.agents
+                .push(make_test_agent("run-b", AgentDisplayStatus::Active));
+            dash.update_display_indices();
+            dash.step_context_history(-1);
+
+            let snap = dash.current_context_snapshot().expect("browsed snapshot");
+            assert_eq!(snap.stage_name, "stage1", "the archived point's window");
+
+            // With no agent selected, a stale browsed index yields nothing.
+            dash.display_indices.clear();
+            assert!(dash.browsed_context_point().is_none());
+            assert!(dash.current_context_snapshot().is_none());
+        });
+    }
+
+    /// Jumping from the timeline lands on the requested (clamped) point.
+    #[test]
+    fn jump_to_history_point_clamps_and_switches_to_context() {
+        crate::runstate::with_isolated_runs_dir("dash-ctx-hist-jump", |_d| {
+            write_history_archive("run-j", 3);
+            let mut dash = make_test_dashboard();
+            dash.agents
+                .push(make_test_agent("run-j", AgentDisplayStatus::Active));
+            dash.update_display_indices();
+
+            // Without history loaded, the jump is a no-op.
+            dash.jump_to_history_point(1);
+            assert_eq!(dash.context_history_idx, None);
+
+            dash.ensure_history("run-j");
+            dash.jump_to_history_point(1);
+            assert_eq!(dash.context_history_idx, Some(1));
+            assert_eq!(dash.stage_content_mode, StageContentMode::Context);
+            dash.jump_to_history_point(99);
+            assert_eq!(dash.context_history_idx, Some(2), "clamped to the last");
         });
     }
 

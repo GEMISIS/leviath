@@ -47,10 +47,32 @@ impl Dashboard {
             .or_else(|| runstate::read_stage_context(&agent.id, self.selected_stage))
             .or_else(|| agent.context_snapshot.clone());
 
-        // The card title shows the browsed history position (or a plain " ctx ").
-        let title = match self.context_history_idx {
-            Some(i) => format!(" ctx {}/{} ", i + 1, self.context_history.len()),
-            None => " ctx ".to_string(),
+        // The card title shows the browsed history position - which point, of
+        // how many, in which stage, recorded when - or a plain " ctx ".
+        let title = match (self.context_history_idx, self.selected_history()) {
+            (Some(i), Some(h)) => {
+                let total = h.points.len();
+                match h.points.get(i) {
+                    Some(p) => {
+                        let when = chrono::DateTime::from_timestamp(p.at, 0)
+                            .map(|t| {
+                                t.with_timezone(&chrono::Local)
+                                    .format("%H:%M:%S")
+                                    .to_string()
+                            })
+                            .unwrap_or_default();
+                        format!(
+                            " ⏪ point {}/{} · {} · {} ",
+                            i + 1,
+                            total,
+                            p.meta.current_stage,
+                            when
+                        )
+                    }
+                    None => format!(" ⏪ point {}/{} ", i + 1, total),
+                }
+            }
+            _ => " ctx ".to_string(),
         };
 
         // Constrain context card to at most 60 cols, left-aligned
@@ -184,10 +206,13 @@ impl Dashboard {
         let is_output = self.stage_content_mode == StageContentMode::Output;
 
         // Build content lines
-        let all_lines: Vec<Line> = if is_context {
+        let (all_lines, context_cursor_line): (Vec<Line>, Option<usize>) = if is_context {
             self.build_context_lines(agent, render_width)
         } else {
-            self.build_output_lines(agent, is_output, render_width)
+            (
+                self.build_output_lines(agent, is_output, render_width),
+                None,
+            )
         };
 
         // ── Error / Cancelled banner ─────────────────────────────────────
@@ -253,6 +278,16 @@ impl Dashboard {
             self.search_match_idx = self.search_match_idx.min(match_indices.len() - 1);
             let match_line = match_indices[self.search_match_idx];
             let rows_before = wrapped_rows(&all_lines[..match_line], render_width);
+            self.detail_scroll = total_rows.saturating_sub(rows_before + inner_h / 2);
+        } else if self.context_tree.follow_cursor
+            && let Some(cursor_line) = context_cursor_line
+        {
+            // A tree-cursor move scrolls the view to the cursor once - the
+            // same centering the search jump uses - then releases it so plain
+            // scrolling still works.
+            self.context_tree.follow_cursor = false;
+            let rows_before =
+                wrapped_rows(&all_lines[..cursor_line.min(all_lines.len())], render_width);
             self.detail_scroll = total_rows.saturating_sub(rows_before + inner_h / 2);
         }
 
@@ -430,7 +465,13 @@ impl Dashboard {
         }
     }
 
-    fn build_context_lines(&self, agent: &DashboardAgent, render_width: u16) -> Vec<Line<'static>> {
+    /// The Context view's lines, plus the line index of the tree cursor's row
+    /// (for scroll-follow), when a snapshot exists.
+    fn build_context_lines(
+        &self,
+        agent: &DashboardAgent,
+        render_width: u16,
+    ) -> (Vec<Line<'static>>, Option<usize>) {
         // When browsing the run's archived context history, show that point's
         // window; otherwise the live current window for the selected stage.
         let snap_opt = self
@@ -589,89 +630,30 @@ impl Dashboard {
             }
 
             lines.push(Line::from(""));
-            for region in &snap.regions {
-                let pct = (region.current_tokens * 100)
-                    .checked_div(region.max_tokens)
-                    .unwrap_or(0)
-                    .min(100);
-                let bar_w = 16usize;
-                let filled = bar_w * pct / 100;
-                let bar = format!("{}{}", "█".repeat(filled), "░".repeat(bar_w - filled));
-                let bar_color = if pct >= 90 {
-                    C_ERROR
-                } else if pct >= 70 {
-                    C_WARN
-                } else if pct > 0 {
-                    C_SUCCESS
-                } else {
-                    C_DIM
-                };
-                let kind_color = match region.kind.as_str() {
-                    "pinned" => C_ACCENT,
-                    "sliding" => C_SUCCESS,
-                    "compacting" | "history" => C_WARN,
-                    "temporary" | "clearable" => C_MUTED,
-                    "custom" => C_SCRIPT,
-                    _ => C_DIM,
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "▌ ",
-                        Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!("{:<16}", region.name),
-                        Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!("{:<12}", region.kind),
-                        Style::default().fg(kind_color),
-                    ),
-                    Span::styled(bar, Style::default().fg(bar_color)),
-                    Span::styled(
-                        format!(
-                            "  {}/{}",
-                            format_tokens(region.current_tokens),
-                            format_tokens(region.max_tokens)
-                        ),
-                        Style::default().fg(C_DIM),
-                    ),
-                ]));
-                if region.entries.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        "  (empty)",
-                        Style::default().fg(C_DIM),
-                    )));
-                } else {
-                    for (idx, entry) in region.entries.iter().enumerate() {
-                        lines.push(Line::from(vec![
-                            Span::styled(
-                                format!("  ┄ entry {}  ", idx + 1),
-                                Style::default().fg(C_DIM),
-                            ),
-                            Span::styled(
-                                format!("{} tokens", entry.tokens),
-                                Style::default().fg(C_DIM),
-                            ),
-                        ]));
-                        let rendered = crate::render::markdown_to_text(
-                            &entry.content,
-                            render_width.saturating_sub(2),
-                        );
-                        for mut l in rendered.lines {
-                            l.spans.insert(0, Span::raw("  "));
-                            lines.push(l);
-                        }
-                    }
-                }
-                lines.push(Line::from(""));
-            }
-            lines
+            // The collapsible region → entry tree. An active search forces
+            // everything visible so matches inside entries stay reachable.
+            let searching = self.search_mode || !self.search_query.is_empty();
+            let flat = crate::commands::dashboard::context_tree::flatten(
+                &snap,
+                &self.context_tree,
+                self.context_tree.cursor,
+                searching,
+                render_width,
+            );
+            let cursor_line = flat
+                .cursor_lines
+                .get(self.context_tree.cursor)
+                .map(|line| lines.len() + line);
+            lines.extend(flat.lines);
+            (lines, cursor_line)
         } else {
-            vec![Line::from(Span::styled(
-                " no context snapshot available for this stage",
-                Style::default().fg(C_DIM),
-            ))]
+            (
+                vec![Line::from(Span::styled(
+                    " no context snapshot available for this stage",
+                    Style::default().fg(C_DIM),
+                ))],
+                None,
+            )
         }
     }
 
@@ -1331,7 +1313,7 @@ mod tests {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-bcl", AgentDisplayStatus::Active);
         agent.context_snapshot = Some(make_context_snapshot(4000, 8000));
-        let lines = dash.build_context_lines(&agent, 80);
+        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
         assert!(!lines.is_empty());
     }
 
@@ -1339,7 +1321,7 @@ mod tests {
     fn build_context_lines_without_snapshot() {
         let dash = make_test_dashboard();
         let agent = make_test_agent("run-bcl2", AgentDisplayStatus::Active);
-        let lines = dash.build_context_lines(&agent, 80);
+        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
         assert!(!lines.is_empty()); // should show "no context snapshot" message
     }
 
@@ -1373,7 +1355,7 @@ mod tests {
             started_at: Some(chrono::Utc::now().timestamp() - 30),
             ended_at: None,
         }];
-        let lines = dash.build_context_lines(&agent, 80);
+        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -1396,7 +1378,7 @@ mod tests {
         });
         agent.stages = vec![]; // no stage records at all -> .get(0) is None
 
-        let lines = dash.build_context_lines(&agent, 80);
+        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -1427,7 +1409,7 @@ mod tests {
         };
         agent.stages = vec![rec.clone(), rec];
 
-        let lines = dash.build_context_lines(&agent, 80);
+        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -1466,7 +1448,7 @@ mod tests {
             ended_at: None,
         }];
 
-        let lines = dash.build_context_lines(&agent, 80);
+        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -1506,7 +1488,7 @@ mod tests {
                 }],
             }],
         });
-        let lines = dash.build_context_lines(&agent, 80);
+        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -1531,7 +1513,7 @@ mod tests {
                 entries: vec![],
             }],
         });
-        let lines = dash.build_context_lines(&agent, 80);
+        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -1574,7 +1556,7 @@ mod tests {
             ended_at: None,
         }];
         // selected_stage = 0, so we look up index 0 in stages which is "implement"
-        let lines = dash.build_context_lines(&agent, 80);
+        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -1608,7 +1590,7 @@ mod tests {
             started_at: Some(chrono::Utc::now().timestamp() - 60),
             ended_at: Some(chrono::Utc::now().timestamp() - 10),
         }];
-        let lines = dash.build_context_lines(&agent, 80);
+        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -1638,7 +1620,7 @@ mod tests {
             started_at: Some(chrono::Utc::now().timestamp() - 30),
             ended_at: None,
         }];
-        let lines = dash.build_context_lines(&agent, 80);
+        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -1708,7 +1690,7 @@ mod tests {
                 },
             ],
         });
-        let lines = dash.build_context_lines(&agent, 80);
+        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
         assert!(!lines.is_empty());
     }
 
@@ -1730,7 +1712,7 @@ mod tests {
                 entries: vec![],
             }],
         });
-        let lines = dash.build_context_lines(&agent, 80);
+        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
         assert!(!lines.is_empty());
     }
 
@@ -1752,7 +1734,7 @@ mod tests {
                 entries: vec![],
             }],
         });
-        let lines = dash.build_context_lines(&agent, 80);
+        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
         assert!(!lines.is_empty());
     }
 
@@ -1774,7 +1756,7 @@ mod tests {
                 entries: vec![],
             }],
         });
-        let lines = dash.build_context_lines(&agent, 80);
+        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
         assert!(!lines.is_empty());
     }
 
@@ -2066,6 +2048,22 @@ mod tests {
             .unwrap();
     }
 
+    /// Seed the cached history for `run_id` so browsing tests can render an
+    /// archived point (`browsed_context_point` reads the cache, keyed by the
+    /// selected run).
+    fn seed_history(
+        dash: &mut crate::commands::dashboard::state::Dashboard,
+        run_id: &str,
+        points: Vec<leviath_core::run_archive::RunPoint>,
+    ) {
+        dash.history = Some(crate::commands::dashboard::history::RunHistoryCache {
+            run_id: run_id.to_string(),
+            visits: crate::commands::dashboard::history::derive_visits(&points),
+            points,
+            loaded_at_tick: u64::MAX, // never considered stale by the TTL
+        });
+    }
+
     /// A one-point context history for the browsing render tests.
     fn one_point_history(
         context: runstate::ContextSnapshot,
@@ -2086,12 +2084,75 @@ mod tests {
     }
 
     #[test]
+    fn render_context_bar_titles_cover_the_fallback_arms() {
+        // An index past the cached points still titles with the position;
+        // an unrepresentable timestamp renders a blank clock.
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let agent = make_test_agent("run-hist-fallback", AgentDisplayStatus::Active);
+        dash.agents.push(agent.clone());
+        dash.update_display_indices();
+        let mut points = one_point_history(make_context_snapshot(1000, 8000));
+        points[0].at = i64::MIN;
+        seed_history(&mut dash, "run-hist-fallback", points);
+
+        dash.context_history_idx = Some(0);
+        terminal
+            .draw(|f| dash.render_context_bar(f, Rect::new(0, 0, 80, 5), &agent))
+            .unwrap();
+
+        dash.context_history_idx = Some(9);
+        terminal
+            .draw(|f| dash.render_context_bar(f, Rect::new(0, 0, 80, 5), &agent))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("point 10/1"), "{text}");
+    }
+
+    #[test]
+    fn a_tree_cursor_move_scrolls_the_context_view_once() {
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-follow", AgentDisplayStatus::Active);
+        agent.context_snapshot = Some(make_context_snapshot(1000, 8000));
+        dash.agents.push(agent.clone());
+        dash.update_display_indices();
+        dash.stage_content_mode = StageContentMode::Context;
+        dash.context_tree.follow_cursor = true;
+
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 100, 20);
+                dash.render_content_pane(f, area, &agent, 100);
+            })
+            .unwrap();
+        assert!(
+            !dash.context_tree.follow_cursor,
+            "the one-shot follow flag is consumed by the draw"
+        );
+    }
+
+    #[test]
     fn render_context_bar_shows_history_position_when_browsing() {
         let backend = TestBackend::new(120, 10);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
         let agent = make_test_agent("run-hist-bar", AgentDisplayStatus::Active);
-        dash.context_history = one_point_history(make_context_snapshot(1000, 8000));
+        dash.agents.push(agent.clone());
+        dash.update_display_indices();
+        seed_history(
+            &mut dash,
+            "run-hist-bar",
+            one_point_history(make_context_snapshot(1000, 8000)),
+        );
         dash.context_history_idx = Some(0);
         terminal
             .draw(|f| {
@@ -2107,7 +2168,7 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(
-            text.contains("ctx 1/1"),
+            text.contains("point 1/1"),
             "history position in title: {text}"
         );
     }
@@ -2117,21 +2178,27 @@ mod tests {
         let mut dash = make_test_dashboard();
         // No live snapshot on the agent → the browsed point is the only source.
         let agent = make_test_agent("run-hist-lines-xyzzy", AgentDisplayStatus::Active);
-        dash.context_history = one_point_history(runstate::ContextSnapshot {
-            stage_name: "browsed-stage".to_string(),
-            total_tokens: 42,
-            max_tokens: 100,
-            regions: vec![runstate::RegionSnapshot {
-                name: "hist-region".to_string(),
-                kind: "pinned".to_string(),
-                current_tokens: 42,
+        dash.agents.push(agent.clone());
+        dash.update_display_indices();
+        seed_history(
+            &mut dash,
+            "run-hist-lines-xyzzy",
+            one_point_history(runstate::ContextSnapshot {
+                stage_name: "browsed-stage".to_string(),
+                total_tokens: 42,
                 max_tokens: 100,
-                entries: vec![],
-            }],
-        });
+                regions: vec![runstate::RegionSnapshot {
+                    name: "hist-region".to_string(),
+                    kind: "pinned".to_string(),
+                    current_tokens: 42,
+                    max_tokens: 100,
+                    entries: vec![],
+                }],
+            }),
+        );
         dash.context_history_idx = Some(0);
-        let lines = dash.build_context_lines(&agent, 80);
-        let text: String = lines.iter().map(|l| format!("{l:?}")).collect();
+        let (lines, _cursor) = dash.build_context_lines(&agent, 80);
+        let text: String = lines.iter().map(|l| format!("{l:?}")).collect::<String>();
         assert!(text.contains("hist-region"), "browsed region rendered");
     }
 
