@@ -46,10 +46,11 @@ lev add ./my-agent                    # install from a directory
 - `PACKAGE` (required positional): a path to a `.leviath-bundle` file or to an agent
   directory. Anything else is rejected; `lev add` never reaches out to a network.
 
-Installing under a name that already exists replaces the previous install. When a blueprint asks
-for anything unusual (pre-approved tools, script host access, a disabled sandbox, or a command
-that runs at startup), `lev add` prints an inventory of exactly what it requests so you can
-review it before running.
+Installing under a name that already exists replaces the previous install.
+
+When a blueprint asks for anything unusual, `lev add` prints an inventory of exactly what it wants
+so you can look before running it. Unusual means pre-approved tools, script host access, a disabled
+sandbox, or a command that runs at startup.
 
 > [!WARNING]
 > A blueprint can carry executable `.rhai` tool scripts, grant its own tool permissions, and

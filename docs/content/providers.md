@@ -233,9 +233,9 @@ relay.
 > accept responsibility for compliance with Anthropic's terms. For unambiguous compliance, use a
 > direct Anthropic API key instead.
 
-Measured caveats: the CLI adds ~130 tokens of its own context to **every** call (including your
-account email address and the current date) with no flag to disable it; no prompt caching; a
-subprocess per call; Anthropic models only.
+Four measured caveats. The CLI adds about 130 tokens of its own context to **every** call, your
+account email address and the current date included, and there is no flag to turn that off. There is
+no prompt caching. Each call is a separate subprocess. And it serves Anthropic models only.
 
 Enable it through `lev setup`, or directly:
 

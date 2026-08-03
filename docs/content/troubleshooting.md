@@ -81,9 +81,8 @@ next `lev run` without a restart, and so does topping the original account back 
 A run that has nowhere left to go is failed after `[limits] stall_timeout_secs` with a message
 saying every provider it could use is out of service, rather than being left to sit there.
 
-If the runs are failing on the very first request and you are not sure the credential is the
-problem at all, `lev doctor` checks the provider wiring layer by layer and names the first one that
-breaks.
+Not sure the credential is the problem at all? `lev doctor` checks the provider wiring layer by
+layer and names the first one that breaks.
 
 ## `has no usable provider`, but I do have a key
 
@@ -108,9 +107,9 @@ model it actually used in its `meta.json`. The fixes are the same as the entry a
 
 ## The provider says my model doesn't exist
 
-Model strings are passed to the provider verbatim and are never checked locally, so a typo, a
-missing OpenRouter `vendor/` prefix, or an identifier the provider has retired all surface as an
-API error at the first call rather than at `lev validate` time.
+Model strings are passed to the provider exactly as written and are never checked locally. So a
+typo, a missing OpenRouter `vendor/` prefix, or an identifier the provider has retired all show up
+the same way: an API error on the first call, not a `lev validate` failure.
 
 Check the spelling against `lev models list --provider <name> --remote`, which asks the provider
 rather than Leviath's built-in table. Note that a valid dated identifier such as
@@ -187,9 +186,11 @@ and not one run moved. `parked` is not part of the problem: a batch waiting on a
 another run holds no capacity. `busy` with a `queued` figure that never falls is.
 
 The usual cause is too little tool capacity for the shape of the workload. Raise
-`[limits] max_concurrent_tools` and restart the daemon. Left alone, the daemon widens the lane
-itself after `[limits] dead_cycles_before_relief` cycles (10 by default) and says so in the log at
-`error` level; it never cancels anything, and it stops after one extra lane's worth.
+`[limits] max_concurrent_tools` and restart the daemon.
+
+Left alone, the daemon widens the lane itself after `[limits] dead_cycles_before_relief` cycles, 10
+by default, and logs it at `error` level. It never cancels anything, and it stops after granting one
+extra lane's worth.
 
 The same numbers are exported as `leviath.tool_lane.*` and
 `leviath.scheduler.dead_cycles.total` if you have [observability](/docs/observability) on. A

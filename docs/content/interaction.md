@@ -7,9 +7,9 @@ order: 7
 
 # Human-in-the-loop
 
-Sometimes you do not want the agent deciding on its own. It should check the plan with you before
-writing code, or ask which API version to target rather than guessing, or let you redirect it
-halfway through when you realise it is heading the wrong way.
+Sometimes you do not want the agent deciding on its own. It should check the plan with you before writing
+code. It should ask which API version to target rather than guessing. And you should be able to
+redirect it halfway through, when you realise it is going the wrong way.
 
 A Leviath run does not have to be autonomous. There are three ways a person gets involved:
 
@@ -78,8 +78,8 @@ call until the answer comes back, then continues with it:
 
 ## When nobody answers
 
-Every prompt on this page waits on a person, and until Leviath 0.1.2 it waited indefinitely - a run
-whose operator had gone home sat in `WaitingInput` holding its slot until the daemon restarted.
+Every prompt on this page waits on a person. Until Leviath 0.1.2 it waited forever, so a run whose
+operator had gone home sat in `WaitingInput` holding its slot until the daemon restarted.
 
 `[limits] interaction_timeout_secs` puts a deadline on that wait (one hour by default; `0` waits
 indefinitely, the old behaviour). When it passes, the prompt resolves exactly as cancelling it
