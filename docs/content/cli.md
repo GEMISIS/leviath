@@ -31,11 +31,19 @@ Spawn an agent into the daemon. `PATH` is an installed agent name, a blueprint d
 | `-t`, `--task <TEXT\|FILE>` | The task prompt, or the path of a file holding it. Left off, your editor opens |
 | `-m`, `--model <MODEL>` | Model override, as `provider/model` or a bare model name |
 | `--workdir <DIR>` | Working directory for the run. Defaults to where you ran the command. File tools are confined to it, and relative `[read_paths]` entries resolve against it |
-| `--yolo` | Run unattended: approve every tool call, and take away the tools that wait on a person (`ask_user_*`, `present_for_review`, `edit_document`) so the run cannot park on a prompt. Plan approvals resolve themselves. A stage keeps what it lists in [`required_tools`](/docs/tools#these-tools-need-someone-there). Cannot lift a `deny` |
+| `--yolo` | Run unattended. See below |
 | `--allow <TOOL>` | Allow one tool outright. Repeatable |
 | `--max-depth <N>` | Override the blueprint's maximum sub-agent tree depth |
 | `--no-seed-commands` | Refuse the blueprint's `seed = { command = "..." }` regions for this run |
 | `--<region> <TEXT\|@FILE>` | Seed a named context region. See below |
+
+**`--yolo`** does two things. It approves every tool call, and it takes away the tools that wait on
+a person (`ask_user_*`, `present_for_review`, `edit_document`) so the run cannot stop and wait for
+somebody who is not there. Plan approvals resolve themselves.
+
+A stage keeps whatever it lists in [`required_tools`](/docs/tools#these-tools-need-someone-there),
+so a stage that genuinely needs to ask still can. And `--yolo` can turn an `ask` into an `allow`,
+but it can never lift a `deny`.
 
 Region seed flags are dynamic, because region names come from the blueprint. Any `--<name>` that is
 not one of the flags above is read as a seed for the region called `<name>`, and a value starting
@@ -88,7 +96,7 @@ Scaffold a new [blueprint](/docs/agents) directory.
 
 Check a blueprint before running it. `PATH` defaults to `.`.
 
-Beyond parsing and structural validation, it reports what the manifest leaves unsaid. Findings come
+Beyond parsing and structural validation, it reports what the blueprint leaves unsaid. Findings come
 in three levels: an **error** exits non-zero, a **warning** does not, and a **note** never does.
 
 | Level | Code | What it means |
@@ -254,40 +262,44 @@ These resolve on their own, and are a normal part of a healthy multi-agent run:
 | `workers(n)` | A [fan-out](/docs/stages) parent, `n` workers still to finish |
 | `children(n)` | A stage holding for `n` spawned [sub-agents](/docs/sub-agents) |
 
-So `waiting: children(3)` next to busy children is a factory working as designed, while
-`waiting: tool approval` at ten minutes is a run nobody has answered. Launch with `--yolo`
-to approve automatically; sub-agents and fan-out workers inherit it, and it survives a
-daemon restart.
+That distinction is the useful one. `waiting: children(3)` next to three busy children is a healthy
+run doing exactly what it should. `waiting: tool approval` at ten minutes is a run nobody answered.
 
-A finished run can also read `complete (no output)`, `cancelled (no output)` or
-`error (no output)`. That means the run changed no files, though its agent had a tool to
-change them with. Almost always the edits went through the shell, which the framework
-cannot see: `sed -i`, `tee` and redirects leave no record, so nothing downstream knows the
-work happened. Re-apply those edits with `write_file` or `edit_file`, or name the tool you
-do write with in a transition [gate](/docs/stages) so it counts.
+Launch with `--yolo` to approve automatically. Sub-agents and fan-out workers inherit it, and it
+survives a daemon restart.
 
-Agents that never had a file-writing tool are never marked this way. A router that
-delegates, or a researcher whose answer is its report, has nothing to be measured against,
-so the run says nothing rather than reporting a failure it cannot have had.
+#### `(no output)`
 
-A `READS` column appears when some listed run's blueprint declares
-[`[read_paths]`](/docs/security#reading-outside-the-workdir), reading granted over declared as
-resolved when the run spawned. `0/2` is a run that is up, looks healthy, and will be refused every
-read its author designed it around; `lev validate <agent>` names the entries and prints the config
-block to add. Ordinary listings, where nothing declares any, are unchanged.
+A finished run can read `complete (no output)`, and likewise for `cancelled` and `error`. It means
+the run changed no files, even though its agent had a tool for changing them.
+
+Almost always the edits went through the shell, which Leviath cannot see. `sed -i`, `tee`, and
+redirects leave no trace, so nothing downstream knows the work happened. Either re-apply those edits
+with `write_file` or `edit_file`, or name the tool you do write with in a transition
+[gate](/docs/stages#what-counts-as-output) so that it counts.
+
+Agents that never had a file-writing tool are never marked this way. A router that delegates, or a
+researcher whose answer is its report, has no file changes to be missing.
+
+#### The `READS` column
+
+This column only appears when one of the listed runs declares
+[`[read_paths]`](/docs/security#reading-outside-the-workdir). It reads granted over declared, as
+resolved when the run spawned.
+
+`0/2` is the one to watch for. That run is up and looks healthy, and every read its author designed
+it around will be refused. Run `lev validate <agent>` to see which entries, and the config block
+that grants them.
 
 ### Runs that have finished
 
 A run keeps its place in the listing for five minutes after it ends, then drops out.
 
-Without that, a run left the listing the moment the daemon unloaded it, a second or two after
-it finished. A run that died on its first inference was then indistinguishable from a run that
-had never been spawned, and both read as `no agents running`. That is a hard thing to schedule
-against: the only way to tell a dead spawn from a slow one was to guess how long a healthy
-agent takes to get going, and anything that guessed too low would give up on runs that were
-still starting.
+That window exists so a run that failed is still there to say so. Without it, a run that died on its
+first model call would leave the listing within seconds, and read exactly like a run that was never
+spawned at all.
 
-So a run that failed is still there to say so:
+So you get this instead of an empty listing:
 
 ```
 RUN                             STATUS                              STAGE  ITER  TOOLS  AGE

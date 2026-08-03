@@ -69,7 +69,7 @@ allow = [
 ]
 ```
 
-Declaring is not granting. The manifest travels with the agent package, and a package can only
+Declaring is not granting. The blueprint travels with the agent package, and a package can only
 tighten what your config allows. Declared paths stay inert until your `config.toml` grants them:
 
 ```toml

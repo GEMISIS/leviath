@@ -119,7 +119,7 @@ available_tools = ["read_file", "ask_user_text", "ask_user_choice"]
 required_tools = ["ask_user_text", "ask_user_choice"]
 ```
 
-`required_tools` entries must also appear in `available_tools`; `lev validate` rejects a manifest
+`required_tools` entries must also appear in `available_tools`. `lev validate` rejects a blueprint
 where they do not. It also warns (`blocking-tool-in-autonomous-stage`) about an autonomous stage
 that grants one of these tools without saying it meant to. Naming the tool in `required_tools`
 settles that, and keeps the tool through an unattended run; `allow_blocking_tools = true` on the

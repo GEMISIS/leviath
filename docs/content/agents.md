@@ -140,14 +140,13 @@ kind = "pinned"
 max_tokens = 2000          # bare max_tokens alone = fixed absolute budget
 ```
 
-Percentages are **ceilings, not allocations** - they may sum past 100% because regions rarely all
-run full at once. With a percentage, `max_tokens` caps and `min_tokens` floors the resolved value;
+Percentages are **ceilings, not allocations**. They may sum past 100%, because regions rarely all
+fill at once. With a percentage, `max_tokens` caps and `min_tokens` floors the resolved value;
 without one, `max_tokens` is simply the fixed budget. Compacting regions also take
 `threshold_tokens`, the fill level that triggers compaction.
 
-A stage can override the whole layout for just itself with
-`[stages.<name>.context.regions]` - the per-stage layout applies when the stage is entered and
-uses the same syntax:
+A stage can override the whole layout for just itself with `[stages.<name>.context.regions]`. The
+per-stage layout applies when the stage is entered, and uses the same syntax:
 
 ```toml
 [stages.plan.context.regions.constraints]
@@ -175,8 +174,8 @@ entry stage's sandbox, time- and size-capped.
 
 ## Read paths
 
-An agent that needs to *read* beyond its workdir - run archives, design docs, sibling
-directories - declares them:
+An agent that needs to *read* beyond its workdir, for run archives, design docs, or sibling
+directories, declares them:
 
 ```toml
 [read_paths]
@@ -190,8 +189,8 @@ read-only, and every access is checked against the symlink-resolved real path. R
 
 ## How the coding agents verify their work
 
-The bundled coding agents (`software-engineer`, `coder`) treat verification as workflow, not
-vibes. Their entry stage is `discover`: before planning anything, the agent classifies the
+The bundled coding agents (`software-engineer`, `coder`) decide what "done" means before they
+start, rather than judging it at the end. Their entry stage is `discover`: before planning anything, the agent classifies the
 project's testing story and writes a `workflow` region ending in three literal lines that later
 stages execute verbatim:
 
@@ -203,7 +202,7 @@ DONE WHEN: <the completion bar, including "no regressions vs baseline">
 
 The baseline is captured before the first edit, so "a test that was already failing" and "a test
 I broke" are distinguishable. Each change re-runs VERIFY and compares against the baseline, and
-the run is only done when DONE WHEN holds - not when "most tests pass". Regions that carry this
+the run is only done when DONE WHEN holds, not when "most tests pass". Regions that carry this
 state are marked `required = true`; if one is empty when a stage needs it, the workflow routes
 back through discovery instead of guessing. Projects with no tests at all are handled explicitly:
 the plan must include *building* verification (a smoke test to write and run), stated plainly
@@ -281,7 +280,7 @@ transform   = "summarize"
 ## Validate before you run
 
 ```bash
-lev validate .                    # check the graph, and what the manifest leaves unsaid
+lev validate .                    # check the graph, and what the blueprint leaves unsaid
 lev validate . --deny-warnings    # for CI: warnings fail too
 lev test .                        # dry-run the blueprint
 ```
