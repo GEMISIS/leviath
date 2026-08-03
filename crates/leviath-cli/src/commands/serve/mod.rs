@@ -8,6 +8,7 @@ mod auth;
 mod blueprints;
 mod config;
 mod doctor;
+mod fs;
 mod interactions;
 mod mcp;
 mod polling;
@@ -109,6 +110,8 @@ fn api_router() -> Router<AppState> {
         .route("/api/mcp/servers/{name}/test", post(mcp::test_server))
         // Doctor - the same checks `lev doctor` runs, returned as data.
         .route("/api/doctor", get(doctor::run_doctor))
+        // Filesystem - directory browsing for the console's folder picker.
+        .route("/api/fs/dirs", get(fs::list_dirs))
         // Config
         .route("/api/config", get(config::get_config))
         .route("/api/config/validate", post(config::validate_config_key))
@@ -463,6 +466,21 @@ mod tests {
         let app = test_app();
         let req = Request::builder()
             .uri("/api/agents/some-run/files")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_fs_dirs_route_is_mounted() {
+        // A relative `path` is the one request whose answer never touches the
+        // filesystem: a mounted route rejects it with the handler's 400, an
+        // unmounted one 404s at the router. (The handler's own behavior is
+        // covered in fs.rs.)
+        let app = test_app();
+        let req = Request::builder()
+            .uri("/api/fs/dirs?path=not/absolute")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();

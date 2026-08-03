@@ -398,6 +398,43 @@ pub(super) struct DoctorCheck {
     pub(super) elapsed_ms: Option<u64>,
 }
 
+// ─── Filesystem types ───────────────────────────────────────────────────────
+
+/// Query for `GET /api/fs/dirs`: the directory to list. Must be absolute when
+/// given; absent means the server's own working directory (clamped to
+/// `--workdir-root` when the cwd falls outside it).
+#[derive(Deserialize)]
+pub(super) struct DirsQuery {
+    pub(super) path: Option<String>,
+}
+
+/// Response of `GET /api/fs/dirs`: one directory level of the host filesystem,
+/// enough for the browser's folder picker to walk without shell access.
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct DirsResp {
+    /// The absolute directory that was listed.
+    pub(super) path: String,
+    /// Where "up one level" goes. `null` at the filesystem root, and also when
+    /// `path` *is* the workdir-root - the picker is never led above the fence.
+    pub(super) parent: Option<String>,
+    /// The user's home directory, for the picker's "home" shortcut.
+    pub(super) home: String,
+    /// The serve process's working directory, for the picker's "here" shortcut.
+    pub(super) cwd: String,
+    /// The configured `--workdir-root`, or `null` when the server has none.
+    pub(super) root: Option<String>,
+    /// The immediate subdirectories, name-sorted. Dotted names are excluded,
+    /// and with a root set, so is any symlink that resolves outside it.
+    pub(super) dirs: Vec<DirEntry>,
+}
+
+/// One subdirectory in a [`DirsResp`] listing.
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct DirEntry {
+    pub(super) name: String,
+    pub(super) path: String,
+}
+
 // ─── Tree types ─────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -678,6 +715,32 @@ mod tests {
         assert_eq!(parsed.size, 9);
         assert_eq!(parsed.content, "# Report\n");
         assert!(!parsed.truncated);
+    }
+
+    #[test]
+    fn dirs_resp_serde_roundtrip() {
+        let resp = DirsResp {
+            path: "/work".to_string(),
+            parent: None,
+            home: "/Users/someone".to_string(),
+            cwd: "/work/project".to_string(),
+            root: Some("/work".to_string()),
+            dirs: vec![DirEntry {
+                name: "src".to_string(),
+                path: "/work/src".to_string(),
+            }],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        // An absent parent/root is an explicit `null`, never an omitted field -
+        // the TypeScript client reads both unconditionally.
+        assert!(json.contains("\"parent\":null"));
+        assert!(json.contains(r#"{"name":"src","path":"/work/src"}"#));
+        let parsed: DirsResp = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.path, "/work");
+        assert!(parsed.parent.is_none());
+        assert_eq!(parsed.root.as_deref(), Some("/work"));
+        assert_eq!(parsed.dirs.len(), 1);
+        assert_eq!(parsed.dirs[0].name, "src");
     }
 
     #[test]
