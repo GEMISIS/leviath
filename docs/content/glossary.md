@@ -27,7 +27,7 @@ The vocabulary Leviath's docs use, in one place.
 **conditional** transition fires automatically on a runtime signal.
 
 **Stuck**: a *measured* runtime condition (too many iterations, repeated edits, …) that escapes a
-non-progressing stage. See [stuck detection](/docs/stages#graph).
+non-progressing stage. See [stuck detection](/docs/stages#stuck-detection).
 
 **Seed command**: a shell command that pre-fills a context region before the run starts.
 

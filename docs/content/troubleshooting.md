@@ -13,8 +13,8 @@ Common snags and how to clear them.
 
 Before reading further, run [`lev doctor`](/docs/cli#lev-doctor). It checks the config file, model
 resolution, one real inference, and the daemon handoff, in that order, and reports each one. The
-check that fails tells you which section below you need — in particular it separates "my keys are
-wrong" from "the daemon is wedged", which look identical from the outside.
+check that fails tells you which section below you need. In particular it separates "my keys are
+wrong" from "the daemon is stuck", which look identical from the outside.
 
 ## The console can't reach my server
 
@@ -54,7 +54,7 @@ An agent needs at least one [provider](/docs/providers). Run `lev setup`, or poi
 local [Ollama](https://ollama.com) for a no-key start.
 
 `lev doctor` says which provider your defaults actually resolve to, and which ones it tried to get
-there. That matters because a stage naming no model of its own falls back to `anthropic` — so a
+there. That matters because a stage naming no model of its own falls back to `anthropic`. So a
 machine with only an OpenRouter key can resolve to a provider it has no credential for, spawn, and
 sit at iteration 0.
 
@@ -132,15 +132,15 @@ own prompt will still ask for them; that text has to change in the blueprint. Se
 ## A run says `running` but never does anything
 
 Check its provider first, with `lev doctor`. If a stage's model list names only providers you
-haven't configured, `lev run` refuses the spawn outright and tells you which ones it tried —
-configure one with `lev setup`, or add it to `config.toml` and restart the daemon.
+haven't configured, `lev run` refuses the spawn outright and tells you which ones it tried.
+Configure one with `lev setup`, or add it to `config.toml` and restart the daemon.
 
 A run that gets past that and still can't dispatch (say you removed a provider key after it
 started) is failed after `[limits] stall_timeout_secs`, 60 seconds by default. Its `meta.json`
 records the reason. Set the limit to `0` to wait indefinitely instead.
 
 Waiting for a busy model is *not* this. An agent queued behind other in-flight requests to the same
-model is working as intended and is never failed, however long the queue takes — raise
+model is working as intended and is never failed, however long the queue takes. Raise
 `[limits] max_concurrent_inferences` if you want more of them running at once.
 
 ## A run I spawned is not in `lev ps`
@@ -222,7 +222,7 @@ sub-agents, or on a person is holding the marker that says so and is exempt howe
 
 ## An agent seems stuck in a loop
 
-That's what [stuck detection](/docs/stages#graph) is for. Add a `condition = "stuck"` transition
+That's what [stuck detection](/docs/stages#stuck-detection) is for. Add a `condition = "stuck"` transition
 with thresholds (`stuck_after_iterations`, `stuck_after_same_file_edits`, …) so the runtime escapes
 the stage automatically instead of burning tokens.
 

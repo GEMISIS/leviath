@@ -7,8 +7,21 @@ order: 5
 
 # Multi-stage workflows
 
-A blueprint is a **graph of stages**. Each stage has its own model, tools, and context layout. Run
-them linearly, or branch with conditional transitions, LLM-driven routing, and error recovery.
+Asking one model, with one prompt and one set of tools, to plan a change and write it and review it
+usually goes badly. The tools that help it write are a distraction while it is planning, and by
+review time its context is full of the work it is supposed to be judging.
+
+So a Leviath agent is split into **stages**. Each stage is one job, with its own model, its own
+tools, and its own context. When a stage is done, an edge decides which stage runs next.
+
+> [!NOTE]
+> **Before this page:** [Agent blueprints](/docs/agents).
+> **In one line:** stages are the boxes, transitions are the arrows, and this page is about the
+> arrows.
+
+## Graph
+
+Here is a small workflow with all four kinds of arrow in it:
 
 ```mermaid
 flowchart LR
@@ -20,7 +33,27 @@ flowchart LR
   review --> done["done"]
 ```
 
-Every blueprint's graph is checkable before you run it:
+And the blueprint that produces it. This is the whole shape, so you can see how the pieces fit
+before meeting them one at a time:
+
+```toml
+[stages.analyze.transitions.implement]
+hint = "The plan is ready"
+
+[stages.implement.transitions.review]
+hint = "Implementation complete, ready for review"
+
+[stages.implement.transitions.reassess]
+condition = "stuck"
+
+[stages.review.transitions.implement]
+condition = "error"
+
+[stages.reassess.transitions.implement]
+hint = "Replanned, try again"
+```
+
+Check any graph before you run it:
 
 ```bash
 lev validate .             # verifies the graph is well-formed and reachable
@@ -28,55 +61,63 @@ lev validate .             # verifies the graph is well-formed and reachable
 
 ## Transitions
 
-Each edge is one of two kinds:
+Every edge is one of two kinds:
 
-- **hint** transitions are chosen by the agent (LLM-routed) when it decides the stage's goal is met.
-- **conditional** transitions fire automatically on a runtime signal rather than the agent's
-  choice: `error`, `stuck`, `max_iterations` (the stage's iteration cap is hit), or `always` (an
-  unconditional edge).
+- A **hint** edge is chosen by the agent. When it decides the stage's goal is met, it picks the edge
+  whose hint best matches what it just did.
+- A **conditional** edge fires on its own, on a signal from the runtime rather than the agent's
+  choice. The signals are `error`, `stuck`, `max_iterations` (the stage hit its iteration cap), and
+  `always` (an unconditional edge).
 
 ```toml
 [stages.implement.transitions.review]
 hint = "Implementation complete, ready for review"
 
 [stages.implement.transitions.reassess]
-condition = "stuck"          # a runtime condition, not the agent's choice
+condition = "stuck"          # a runtime signal, not the agent's choice
 ```
 
-An edge with a `hint` and no `condition` is `condition = "llm_choice"`; writing it out explicitly
-is equivalent. The full set of values is `always`, `llm_choice`, `error`, `max_iterations`, and
-`stuck`. An unrecognized value is a hard parse error rather than a silently ignored edge, so a typo
-fails at `lev validate` instead of at 2am.
+An edge with a `hint` and no `condition` is routed by the model, exactly as though you had written
+`condition = "llm_choice"`. The full set of values is `always`, `llm_choice`, `error`,
+`max_iterations`, and `stuck`. Anything else is a parse error rather than an edge that quietly does
+nothing, so a typo fails at `lev validate` instead of at 2am.
 
 ### Stage keys that shape routing
 
 | Key | Default | Effect |
 |---|---|---|
-| `max_revisits` | unlimited | How many times this stage may be re-entered, not counting the first visit. An edge whose target is out of budget is dropped from the choices |
-| `transition_prompt` | built-in | Overrides the prompt used to ask the model which edge to take |
-| `allow_complete` | `false` | Offers the model an explicit `DONE` answer that ends the run, instead of forcing it down the single available edge |
+| `max_revisits` | unlimited | How many times this stage may be re-entered, not counting the first visit. An edge pointing at a stage that is out of budget is dropped from the choices |
+| `transition_prompt` | built-in | Replaces the prompt used to ask the model which edge to take |
+| `allow_complete` | `false` | Offers the model an explicit `DONE` answer that ends the run, rather than forcing it down the one available edge |
 | `requires_children` | `false` | Holds the stage until every sub-agent it spawned has finished |
-| `allow_as_worker` | `false` | Opts this stage in to being the target of a [fan-out](/docs/sub-agents). Off by default, so you can only fan out into a stage designed for it |
+| `allow_as_worker` | `false` | Lets this stage be the target of a [fan-out](/docs/sub-agents) |
 | `accepts_messages` | `true` | Whether `lev msg` reaches this stage. See [Human-in-the-loop](/docs/interaction) |
-| `allow_blocking_tools` | `false` | Says this autonomous stage means to offer `ask_user_*` / `present_for_review`. It grants nothing and changes no behaviour: it only stops `lev validate` reporting a deliberate choice as an oversight |
+| `allow_blocking_tools` | `false` | Marks an autonomous stage as deliberately offering the tools that wait on a person |
 
-An autonomous stage that calls one of the human-in-the-loop tools suspends until somebody answers,
-and on an unattended run that is forever. `lev validate` warns about it for that reason. Set
-`allow_blocking_tools = true` when the stage is driven from the dashboard, or by somebody watching.
+Two of those need a sentence more.
+
+`allow_as_worker` is off by default so that you can only fan out into a stage that was designed for
+it, rather than into any stage that happens to look suitable.
+
+`allow_blocking_tools` grants nothing and changes no behaviour. An autonomous stage that calls a
+human-in-the-loop tool waits until somebody answers, and on an unattended run that is forever, which
+is why `lev validate` warns about it. Setting this key tells the linter you meant it, so it stops
+reporting a deliberate choice as an oversight. Use it when the stage is driven from the dashboard,
+or by somebody watching.
 
 ### Every stage should name its own model
 
-`model` is per stage. There is no agent-level `[model]` block: writing one parses fine and is then
-read by nothing, so the stages go on using their own defaults with no sign that the block was
+`model` is per stage. There is no agent-level `[model]` block. Writing one parses fine and is then
+read by nothing, so your stages carry on using their own defaults with no sign that the block was
 ignored.
 
-A stage that omits `model` entirely does not fail either. It runs on whichever provider your
-`[providers]` config makes the default, which is rarely what the author had in mind and is invisible
-until the run picks the wrong model. `lev validate` reports both cases.
+A stage that omits `model` does not fail either. It runs on whichever provider your `[providers]`
+config makes the default. That is rarely what the author intended, and you will not find out until
+the run picks the wrong model. `lev validate` reports both cases.
 
 ### Carrying context across an edge
 
-Each edge decides what the next stage inherits, with `transform`:
+Each edge decides what the next stage inherits, using `transform`:
 
 ```toml
 [stages.implement.transitions.review]
@@ -84,11 +125,11 @@ hint      = "Ready for review"
 transform = "compact"        # direct | clear | compact | summarize | custom
 ```
 
-- `direct` (the default) carries everything as-is.
+- `direct` is the default and carries everything as-is.
 - `clear` drops stage-specific regions and keeps pinned ones.
-- `compact`, and its alias `summarize`, sends the stage's content through an LLM summarization pass
+- `compact`, and its alias `summarize`, sends the stage's content through a summarization pass
   before the next stage starts.
-- `custom` takes a `transform_config` naming regions individually:
+- `custom` takes a `transform_config` that names regions one at a time:
 
 ```toml
 [stages.implement.transitions.review]
@@ -101,13 +142,13 @@ clear          = ["scratch"]             # drop entirely
 compact_prompt = "Summarize what changed and why"
 ```
 
-Regions declared `pinned` are immune to edge transforms, which is why the error and stuck reports
-below are worth pinning.
+A region declared `pinned` is never touched by an edge transform. That is why the error and stuck
+reports described below are worth pinning: you want them to survive the edge that carries them.
 
 ### Gating an edge on actual work
 
-A stage that was supposed to change files can announce it is done without having changed any. An
-edge `gate` refuses the transition until the stage has something to show for itself:
+A stage that was meant to change files can announce it is finished without having changed any. An
+edge `gate` refuses the transition until the stage has something to show:
 
 ```toml
 [stages.implement.transitions.review]
@@ -118,39 +159,43 @@ gate = { require_modifications = true, max_attempts = 3 }
 | Field | Default | Meaning |
 |---|---|---|
 | `require_modifications` | `false` | Require at least one successful file-modifying tool call in the stage being left |
-| `message` | generated | The nudge injected when the gate blocks |
-| `region` | unset | A region whose non-emptiness also satisfies the gate |
-| `tools` | `[]` | Extra tool names counted as modifying, beyond the built-in `write_file` and `edit_file` |
-| `max_attempts` | `3` | How many times the stage is re-run before the gate gives up and lets the transition through with a warning |
+| `message` | generated | The nudge shown when the gate blocks |
+| `region` | unset | A region that also satisfies the gate by being non-empty |
+| `tools` | `[]` | Extra tool names to count as modifying, beyond `write_file` and `edit_file` |
+| `max_attempts` | `3` | How many times the stage re-runs before the gate gives up and lets the transition through with a warning |
 
-Per-stage tool counters reset on stage entry and are not restored when a run resumes after a daemon
-restart, but context regions are. Pointing `region` at whatever the write tools are routed into
-keeps a resumed run honest. Set `tools` when an agent's writes go through MCP or
-[script tools](/docs/rhai-tools) rather than the built-ins.
+Per-stage tool counters reset when a stage is entered, and they are not restored when a run resumes
+after a daemon restart. Context regions are. So pointing `region` at whatever your write tools are
+routed into keeps a resumed run honest.
+
+Set `tools` when an agent's writes go through MCP or [script tools](/docs/rhai-tools) instead of the
+built-ins.
 
 ### What counts as output
 
-A gate and the run's own `empty_output` verdict ask the same question, at different scopes, and
-answer it from the same evidence: a successful call to `write_file`, `edit_file`, or a tool named
-in a gate's `tools` list. Nothing else counts. `shell` in particular does not, because an agent
-can edit with `sed -i` and leave the framework no way to know it happened.
+Exactly three things count as an agent having produced something: a successful `write_file`, a
+successful `edit_file`, or a successful call to a tool you named in a gate's `tools` list.
 
-That is a question about coding agents, so it is only asked of them. If no stage of a blueprint
-advertises a file-modifying tool, the run is never reported as having produced nothing - a router
-that delegates and a researcher that writes a report have no file changes to be missing, and
-saying otherwise would be an accusation with no evidence behind it. The consequence for an agent
-that does write through MCP is that it looks the same way, so name the tool in a gate's `tools`
-list to be counted.
+Nothing else counts, and `shell` in particular does not. An agent can edit a file with `sed -i`, and
+Leviath has no way to see that it happened.
 
-`lev ps` marks such a run `complete (no output)`, and the flag rides along in `meta.json`, the
+Both an edge gate and the run's own `empty_output` verdict use that same rule. They differ only in
+scope: the gate asks about one stage, the verdict asks about the whole run.
+
+The verdict is only ever applied to agents that could plausibly write files. If no stage of a
+blueprint advertises a file-modifying tool, the run is never marked as having produced nothing. A
+router that delegates and a researcher that writes a report have no file changes to be missing, so
+flagging them would be wrong. The side effect is that an agent writing through MCP looks the same
+way, so name that tool in a gate's `tools` list to have it counted.
+
+`lev ps` marks such a run `complete (no output)`, and the flag travels with it into `meta.json`, the
 completion webhook, and the `leviath.runs.total` metric.
-
-<a id="graph"></a>
 
 ## Stuck detection
 
-`stuck` escapes a stage that is making no progress. Crucially, stuckness is **measured, not
-self-reported**. An agent can't loop forever insisting it's almost done:
+A `stuck` edge gets a stage out of a loop it is not going to escape on its own. The important part
+is that stuckness is **measured, not self-reported**. An agent cannot keep insisting it is nearly
+done:
 
 ```toml
 [stages.implement.transitions.reassess]
@@ -161,48 +206,52 @@ stuck_after_tool_calls      = 100
 stuck_after_minutes         = 30
 ```
 
-Any subset applies; the first threshold to trip fires the edge.
+Use any subset you like. The first threshold to trip fires the edge.
 
 > [!TIP]
 > When a `stuck` or `error` edge fires, the runtime writes *why* into the target stage's
 > [context](/docs/context), so the recovery stage starts out knowing what went wrong instead of
-> rediscovering it. The same happens when a stage hits its iteration cap: whatever stage runs
-> next is told the work was cut off, not finished. Stuck reasons go to a `stuck_report` region
-> when the blueprint declares one; error and iteration-cap notes prefer an `error_report` region.
-> Declare them `pinned` (a small budget like 2000 tokens is plenty) so the note survives edge
-> transforms; without them, notes land in `conversation`.
+> working it out again. The same happens when a stage hits its iteration cap: whatever runs next is
+> told the work was cut off rather than finished.
+>
+> Stuck reasons go to a `stuck_report` region when the blueprint declares one. Error and
+> iteration-cap notes prefer an `error_report` region. Declare both `pinned`, with a small budget
+> like 2000 tokens, so the note survives the edge transform that carries it. Without them, the
+> notes land in `conversation`.
 
 ## Nudging
 
-When a stage's model replies with plain text before it has made a single tool call, the runtime
-normally injects a `[System]` nudge ("You have tools available...") and re-runs the stage, up to
-three times. That is the right reflex for a coding stage that stalls, and the wrong one for a stage
-whose deliverable *is* text: a planner told to "use your tools" goes hunting for a write tool it
-does not have.
+When a stage's model replies with plain text before making a single tool call, the runtime normally
+adds a `[System]` nudge saying "You have tools available" and re-runs the stage, up to three times.
 
-Each stage can say what should happen instead:
+That is the right reflex for a coding stage that has stalled. It is the wrong one for a stage whose
+deliverable *is* text. A planner told to use its tools goes looking for a write tool it was never
+given.
+
+So each stage can say what should happen instead:
 
 ```toml
 [agent.nudge]                # agent-wide default for every stage
 max = 2
 
 [stages.plan.nudge]
-enabled = false              # this stage's deliverable is text; never nudge
+enabled = false              # this stage's deliverable is text, never nudge it
 
 [stages.implement.nudge]
 max = 2
 text = "You have edit tools. Make the change described in {regions} rather than describing it again."
 ```
 
-All three keys are optional and cascade independently: a stage block wins over `[agent.nudge]`,
-which wins over the `[nudge]` section of your `config.toml`, which falls back to the built-in
-defaults. This is a UX knob, not a permission, so a manifest may raise `max` above the global
+All three keys are optional and cascade independently. A stage block beats `[agent.nudge]`, which
+beats the `[nudge]` section of your `config.toml`, which falls back to the built-in defaults.
+
+This is a usability setting, not a permission, so a blueprint may raise `max` above your global
 setting as freely as it lowers it.
 
-The `text` may name `{stage}` (the stage's name) and `{regions}` (the comma-separated names of the
-stage's required context regions). The same substitution applies to a required region's
-`required_message`, where `{region}` names the region being demanded.
+The `text` can use `{stage}` for the stage's name and `{regions}` for the comma-separated names of
+the stage's required context regions. The same substitution works in a required region's
+`required_message`, where `{region}` names the region being asked for.
 
-With nothing configured, one stage shape is already exempt: a stage with interaction points
-presents its text for review, so it is never nudged for producing exactly that text. Setting
-`enabled` explicitly at any level overrides this in either direction.
+One stage shape is already exempt with nothing configured: a stage with interaction points presents
+its text for review, so it is never nudged for producing exactly that text. Setting `enabled`
+explicitly at any level overrides this in either direction.
