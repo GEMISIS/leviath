@@ -193,6 +193,8 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Check docs
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+      - name: Check docs/content links and frontmatter
+        run: cargo xtask docs
 
   # Coverage runs on all three OSes and enforces a hard 100% on regions, lines,
   # and functions. Each (os × package) runner GATES one package with llvm-cov's

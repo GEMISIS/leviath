@@ -7,8 +7,10 @@
 //!   `coverage --package <pkg>`  Gate just one package (the CI per-package fan-out).
 //!   `version <X.Y.Z>`           Move the workspace version and roll the changelog.
 //!   `version --check`           Verify the version declarations agree (CI runs this).
+//!   `docs`                      Check `docs/content/` for dead links and bad frontmatter.
 
 mod coverage;
+mod docs;
 mod version;
 
 use anyhow::Result;
@@ -22,17 +24,18 @@ fn main() -> Result<()> {
 ///
 /// Extracted from `main` so it can be unit-tested without spawning processes.
 pub fn dispatch(args: &[String]) -> Result<()> {
-    dispatch_with(args, coverage::run, version::run)
+    dispatch_with(args, coverage::run, version::run, docs::run)
 }
 
 /// Route the CLI arguments to the provided handler closures.
 ///
-/// `run_cov` and `run_ver` replace the real handlers in unit tests, making
-/// every match arm reachable without invoking external tooling.
+/// `run_cov`, `run_ver`, and `run_docs` replace the real handlers in unit
+/// tests, making every match arm reachable without invoking external tooling.
 pub fn dispatch_with(
     args: &[String],
     run_cov: impl FnOnce(coverage::CoverageMode) -> Result<()>,
     run_ver: impl FnOnce(version::VersionMode) -> Result<()>,
+    run_docs: impl FnOnce(docs::DocsMode) -> Result<()>,
 ) -> Result<()> {
     let subcommand = args.first().map(String::as_str).unwrap_or("help");
     match subcommand {
@@ -44,6 +47,10 @@ pub fn dispatch_with(
             let mode = version::VersionMode::parse(&args[1..])?;
             run_ver(mode)
         }
+        "docs" => {
+            let mode = docs::DocsMode::parse(&args[1..])?;
+            run_docs(mode)
+        }
         "help" | "--help" | "-h" => {
             println!("Usage: cargo xtask <subcommand>");
             println!();
@@ -52,6 +59,7 @@ pub fn dispatch_with(
             println!("  coverage --package <pkg>  Gate one package (CI per-package fan-out)");
             println!("  version <X.Y.Z>           Move the workspace version, roll the changelog");
             println!("  version --check           Verify the version declarations agree");
+            println!("  docs                      Check docs/content for dead links + frontmatter");
             Ok(())
         }
         other => anyhow::bail!("Unknown subcommand: '{other}'. Run `cargo xtask help` for usage."),
@@ -81,12 +89,18 @@ mod tests {
         Ok(())
     }
 
+    /// A `run_docs` stub matching `impl FnOnce(DocsMode) -> Result<()>`.
+    fn docs_ok(_mode: docs::DocsMode) -> Result<()> {
+        Ok(())
+    }
+
     /// Covers the stub body so tests that pass it without calling it still get
     /// this single coverage hit.
     #[test]
     fn stub_returns_ok() {
         assert!(cov_ok(CoverageMode::All).is_ok());
         assert!(ver_ok(VersionMode::Check).is_ok());
+        assert!(docs_ok(docs::DocsMode::Check).is_ok());
     }
 
     /// Build an owned-args slice from string literals (dispatch takes `&[String]`).
@@ -147,6 +161,7 @@ mod tests {
                 Ok(())
             },
             ver_ok,
+            docs_ok,
         )
         .unwrap();
         assert_eq!(got, Some(CoverageMode::All));
@@ -162,6 +177,7 @@ mod tests {
                 Ok(())
             },
             ver_ok,
+            docs_ok,
         )
         .unwrap();
         assert_eq!(got, Some(CoverageMode::Package("leviath-core".to_owned())));
@@ -174,6 +190,7 @@ mod tests {
             &args(&["coverage", "--bogus"]),
             cov_ok, // never called; covered by stub_returns_ok
             ver_ok,
+            docs_ok,
         );
         assert!(
             result.is_err(),
@@ -187,6 +204,7 @@ mod tests {
             &args(&["coverage"]),
             |_mode| anyhow::bail!("simulated coverage failure"),
             ver_ok,
+            docs_ok,
         );
         assert!(result.is_err());
         assert!(
@@ -197,15 +215,42 @@ mod tests {
         );
     }
 
+    // ── docs arm: mode parsing + dispatch ────────────────────────────────────
+
+    #[test]
+    fn dispatch_with_docs_parses_check() {
+        let mut got = None;
+        dispatch_with(&args(&["docs"]), cov_ok, ver_ok, |mode| {
+            got = Some(mode);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(got, Some(docs::DocsMode::Check));
+    }
+
+    #[test]
+    fn dispatch_with_docs_bad_arg_returns_err_without_calling_run_docs() {
+        let result = dispatch_with(&args(&["docs", "--fix"]), cov_ok, ver_ok, docs_ok);
+        assert!(
+            result.is_err(),
+            "an unknown docs flag must error: {result:?}"
+        );
+    }
+
     // ── version arm: mode parsing + dispatch ──────────────────────────────────
 
     #[test]
     fn dispatch_with_version_parses_the_target_version() {
         let mut got = None;
-        dispatch_with(&args(&["version", "1.2.3"]), cov_ok, |mode| {
-            got = Some(mode);
-            Ok(())
-        })
+        dispatch_with(
+            &args(&["version", "1.2.3"]),
+            cov_ok,
+            |mode| {
+                got = Some(mode);
+                Ok(())
+            },
+            docs_ok,
+        )
         .unwrap();
         assert_eq!(got, Some(VersionMode::Set("1.2.3".to_owned())));
     }
@@ -213,17 +258,27 @@ mod tests {
     #[test]
     fn dispatch_with_version_check_parses_check() {
         let mut got = None;
-        dispatch_with(&args(&["version", "--check"]), cov_ok, |mode| {
-            got = Some(mode);
-            Ok(())
-        })
+        dispatch_with(
+            &args(&["version", "--check"]),
+            cov_ok,
+            |mode| {
+                got = Some(mode);
+                Ok(())
+            },
+            docs_ok,
+        )
         .unwrap();
         assert_eq!(got, Some(VersionMode::Check));
     }
 
     #[test]
     fn dispatch_with_version_bad_arg_returns_err_without_calling_run_ver() {
-        let result = dispatch_with(&args(&["version", "not-a-version"]), cov_ok, ver_ok);
+        let result = dispatch_with(
+            &args(&["version", "not-a-version"]),
+            cov_ok,
+            ver_ok,
+            docs_ok,
+        );
         assert!(
             result.is_err(),
             "a malformed version must error: {result:?}"
@@ -232,9 +287,12 @@ mod tests {
 
     #[test]
     fn dispatch_with_version_propagates_error() {
-        let result = dispatch_with(&args(&["version", "1.2.3"]), cov_ok, |_mode| {
-            anyhow::bail!("simulated version failure")
-        });
+        let result = dispatch_with(
+            &args(&["version", "1.2.3"]),
+            cov_ok,
+            |_mode| anyhow::bail!("simulated version failure"),
+            docs_ok,
+        );
         assert!(
             result
                 .unwrap_err()
