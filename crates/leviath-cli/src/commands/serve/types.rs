@@ -352,6 +352,52 @@ pub(super) struct LogsQuery {
     pub(super) tail: Option<u64>,
 }
 
+/// Query for `GET /api/agents/{id}/files`: the file to read. Relative paths
+/// resolve against the run's workdir; absolute paths are accepted but must
+/// still land inside it.
+#[derive(Deserialize)]
+pub(super) struct FileQuery {
+    pub(super) path: String,
+}
+
+/// Response of `GET /api/agents/{id}/files`: one file the run wrote, as text.
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct FileContentResp {
+    /// The resolved absolute path that was read.
+    pub(super) path: String,
+    /// The file's full size in bytes - larger than `content` when `truncated`.
+    pub(super) size: u64,
+    /// The file's bytes as UTF-8, capped at
+    /// [`MAX_FILE_READ_BYTES`](super::agents::MAX_FILE_READ_BYTES).
+    pub(super) content: String,
+    /// Whether `content` is only the first
+    /// [`MAX_FILE_READ_BYTES`](super::agents::MAX_FILE_READ_BYTES) of the file.
+    pub(super) truncated: bool,
+}
+
+// ─── Doctor types ───────────────────────────────────────────────────────────
+
+/// Response of `GET /api/doctor`: the `lev doctor` checks, as data.
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct DoctorResp {
+    pub(super) checks: Vec<DoctorCheck>,
+}
+
+/// One `lev doctor` layer's verdict, reshaped for the browser: the enum
+/// status becomes a plain `ok` bool so the client never parses labels.
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct DoctorCheck {
+    /// The layer's short name: `config`, `resolve`, `inference`, or `daemon`.
+    pub(super) name: String,
+    /// Whether the layer works. A failure is reported here, never as an
+    /// HTTP error - the endpoint answering at all is not what is diagnosed.
+    pub(super) ok: bool,
+    pub(super) detail: String,
+    /// Wall-clock cost, present for the checks that make a network call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) elapsed_ms: Option<u64>,
+}
+
 // ─── Tree types ─────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -616,6 +662,54 @@ mod tests {
         };
         let json = serde_json::to_string(&err).unwrap();
         assert!(json.contains("\"error\":\"not found\""));
+    }
+
+    #[test]
+    fn file_content_resp_serde_roundtrip() {
+        let resp = FileContentResp {
+            path: "/work/report.md".to_string(),
+            size: 9,
+            content: "# Report\n".to_string(),
+            truncated: false,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: FileContentResp = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.path, "/work/report.md");
+        assert_eq!(parsed.size, 9);
+        assert_eq!(parsed.content, "# Report\n");
+        assert!(!parsed.truncated);
+    }
+
+    #[test]
+    fn doctor_resp_serde_roundtrip() {
+        let resp = DoctorResp {
+            checks: vec![
+                DoctorCheck {
+                    name: "config".to_string(),
+                    ok: true,
+                    detail: "default_provider=anthropic".to_string(),
+                    elapsed_ms: None,
+                },
+                DoctorCheck {
+                    name: "inference".to_string(),
+                    ok: false,
+                    detail: "HTTP 401: bad key".to_string(),
+                    elapsed_ms: Some(1200),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        // An untimed check omits the field entirely rather than sending null.
+        assert!(
+            json.contains(r#"{"name":"config","ok":true,"detail":"default_provider=anthropic"}"#)
+        );
+        assert!(json.contains("\"elapsed_ms\":1200"));
+        let parsed: DoctorResp = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.checks.len(), 2);
+        assert!(parsed.checks[0].ok);
+        assert!(parsed.checks[0].elapsed_ms.is_none());
+        assert!(!parsed.checks[1].ok);
+        assert_eq!(parsed.checks[1].elapsed_ms, Some(1200));
     }
 
     #[test]
