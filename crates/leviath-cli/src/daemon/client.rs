@@ -228,13 +228,57 @@ fn spawn_warning_lines(
     lines
 }
 
+/// What `lev run --json` prints on a successful spawn.
+///
+/// `lev run` hands the agent to the daemon and returns, so the run id is the
+/// only handle a caller gets on the work it just started. Parsing it back out of
+/// `spawned <id>` meant a caller had to match on prose; this is the same
+/// information in a shape that does not change when the sentence does.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SpawnedRun {
+    /// The run id to poll with `lev ps --json` and stop with `lev cancel`.
+    pub run_id: String,
+    /// The manifest the run was resolved from.
+    pub blueprint_path: String,
+    /// The directory the agent's file tools are confined to.
+    pub workdir: String,
+    /// Whether the run was started unattended.
+    pub yolo: bool,
+}
+
+/// Render a spawn outcome for printing: JSON when `json`, else the sentence.
+///
+/// Split from [`send_spawn`] so both shapes are testable without a daemon.
+pub fn spawn_report(spawned: &SpawnedRun, json: bool) -> String {
+    match json {
+        // Four owned scalars with no map keys to reject, so this cannot fail.
+        true => serde_json::to_string_pretty(spawned).expect("a spawn report serializes"),
+        false => format!("spawned {}", spawned.run_id),
+    }
+}
+
 /// Send a resolved spawn request to the daemon and report the outcome, printing
 /// the new run id on success.
-pub async fn send_spawn(client: &ControlClient, spawn_args: SpawnArgs) -> anyhow::Result<()> {
+///
+/// Warnings go to stderr, so `--json` leaves stdout parseable on its own.
+pub async fn send_spawn(
+    client: &ControlClient,
+    spawn_args: SpawnArgs,
+    json: bool,
+) -> anyhow::Result<()> {
     warn_ungranted_read_paths(&spawn_args);
+    let blueprint_path = spawn_args.blueprint_path.clone();
+    let workdir = spawn_args.workdir.clone();
+    let yolo = spawn_args.yolo;
     match client.spawn(spawn_args).await {
         Ok(ControlResponse::Spawned { run_id }) => {
-            println!("spawned {run_id}");
+            let spawned = SpawnedRun {
+                run_id,
+                blueprint_path,
+                workdir,
+                yolo,
+            };
+            println!("{}", spawn_report(&spawned, json));
             Ok(())
         }
         Ok(ControlResponse::Error { message }) => bail!("spawn failed: {message}"),
@@ -670,9 +714,32 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
     async fn send(response_line: &'static str) -> anyhow::Result<()> {
         let dir = tempfile::tempdir().unwrap();
         let (id, server) = fake_daemon(dir.path(), response_line);
-        let result = send_spawn(&ControlClient::new(id), SpawnArgs::default()).await;
+        let result = send_spawn(&ControlClient::new(id), SpawnArgs::default(), false).await;
         server.await.unwrap();
         result
+    }
+
+    fn spawned() -> SpawnedRun {
+        SpawnedRun {
+            run_id: "run-abc".to_string(),
+            blueprint_path: "/agents/coder/agent.leviath".to_string(),
+            workdir: "/work".to_string(),
+            yolo: true,
+        }
+    }
+
+    #[test]
+    fn spawn_report_without_json_is_the_sentence() {
+        assert_eq!(spawn_report(&spawned(), false), "spawned run-abc");
+    }
+
+    #[test]
+    fn spawn_report_with_json_round_trips_every_field() {
+        // Parsing it back is the assertion that matters: a caller reads this to
+        // learn the id it has to poll, so the keys are the contract.
+        let parsed: SpawnedRun =
+            serde_json::from_str(&spawn_report(&spawned(), true)).expect("valid JSON");
+        assert_eq!(parsed, spawned());
     }
 
     // ─── the client-side [read_paths] warning ──────────────────────────
@@ -844,7 +911,7 @@ allow = ["/data/runs"]
         let dir = tempfile::tempdir().unwrap();
         // A control id with no daemon bound to it.
         let id = control_id(&dir.path().join("no-daemon"));
-        let err = send_spawn(&ControlClient::new(id), SpawnArgs::default())
+        let err = send_spawn(&ControlClient::new(id), SpawnArgs::default(), false)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not reachable"));

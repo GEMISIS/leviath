@@ -68,6 +68,23 @@ pub struct RespondArgs {
     /// With `--approve`, allow the tool for the rest of the session.
     #[arg(long)]
     pub session: bool,
+    /// Report open interactions (or the outcome of answering one) as JSON.
+    /// This is how an unattended caller finds the questions it has to answer.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// One open interaction in `lev respond --json`.
+///
+/// The whole request rather than the four fields the prose listing has room
+/// for: `tool_arguments` and `body` are exactly what a caller deciding whether
+/// to approve needs, and neither appears in the human listing.
+#[derive(serde::Serialize)]
+struct OpenInteraction<'a> {
+    /// The agent holding the question, for a caller polling several runs.
+    agent_id: &'a str,
+    #[serde(flatten)]
+    request: &'a InteractionRequest,
 }
 
 /// Send `request` and report the boolean outcome: `ok` prints `applied_msg`, a
@@ -252,9 +269,22 @@ fn build_response(request_id: &str, args: &RespondArgs) -> InteractionResponse {
 }
 
 /// List the interactions the daemon is currently holding.
-async fn list_interactions(client: &ControlClient) -> anyhow::Result<()> {
+async fn list_interactions(client: &ControlClient, json: bool) -> anyhow::Result<()> {
     match client.request(&ControlRequest::ListInteractions).await {
         Ok(ControlResponse::Interactions { interactions }) => {
+            if json {
+                let open: Vec<OpenInteraction<'_>> = interactions
+                    .iter()
+                    .map(|(agent_id, request)| OpenInteraction { agent_id, request })
+                    .collect();
+                // Nothing open is an empty array, not a sentence: a caller
+                // polling this branches on length, not on prose.
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&open).expect("an interaction listing serializes")
+                );
+                return Ok(());
+            }
             if interactions.is_empty() {
                 println!("no open interactions");
             } else {
@@ -273,14 +303,24 @@ async fn list_interactions(client: &ControlClient) -> anyhow::Result<()> {
 /// `request_id` is given.
 pub async fn respond(client: &ControlClient, args: &RespondArgs) -> anyhow::Result<()> {
     match &args.request_id {
-        None => list_interactions(client).await,
+        None => list_interactions(client, args.json).await,
         Some(request_id) => {
+            // A failed answer stays an error (non-zero exit plus the message on
+            // stderr), so `--json` only changes the success line.
+            let applied = match args.json {
+                // Serialized, not interpolated: a request id carrying a quote
+                // would otherwise emit JSON that does not parse.
+                true => {
+                    serde_json::json!({ "answered": true, "request_id": request_id }).to_string()
+                }
+                false => "answered".to_string(),
+            };
             send_bool(
                 client,
                 ControlRequest::AnswerInteraction {
                     response: build_response(request_id, args),
                 },
-                "answered",
+                &applied,
                 "no such open interaction",
             )
             .await
@@ -655,6 +695,7 @@ mod tests {
             approve: false,
             deny: false,
             session: false,
+            json: false,
         }
     }
 
@@ -705,6 +746,7 @@ mod tests {
             &RespondArgs {
                 approve: true,
                 session: true,
+                json: false,
                 ..respond_args()
             },
         );
@@ -771,6 +813,92 @@ mod tests {
         })
         .await;
         assert!(r.unwrap_err().to_string().contains("no such open"));
+    }
+
+    // ─── --json ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn open_interaction_serializes_the_agent_id_alongside_the_request() {
+        // `#[serde(flatten)]` is what puts `id` and `prompt` at the top level
+        // next to `agent_id`. Losing it would nest the request under a key no
+        // caller expects.
+        let mut request = InteractionRequest::multiple_choice(
+            "q1",
+            "Pick",
+            vec!["a".to_string(), "b".to_string()],
+            "plan",
+        );
+        request.tool_name = Some("bash".to_string());
+        let open = OpenInteraction {
+            agent_id: "agent-x",
+            request: &request,
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&open).unwrap()).unwrap();
+        assert_eq!(value["agent_id"], serde_json::json!("agent-x"));
+        assert_eq!(value["id"], serde_json::json!("q1"));
+        assert_eq!(value["stage_name"], serde_json::json!("plan"));
+        assert_eq!(value["options"], serde_json::json!(["a", "b"]));
+        assert_eq!(value["tool_name"], serde_json::json!("bash"));
+    }
+
+    #[tokio::test]
+    async fn respond_lists_open_interactions_as_json() {
+        let req = InteractionRequest::free_text("q1", "What now?", "plan", true);
+        let line = serde_json::to_string(&ControlResponse::Interactions {
+            interactions: vec![("agent-a".to_string(), req)],
+        })
+        .unwrap();
+        let r = with_daemon(line, |c| async move {
+            respond(
+                &c,
+                &RespondArgs {
+                    request_id: None,
+                    json: true,
+                    ..respond_args()
+                },
+            )
+            .await
+        })
+        .await;
+        assert!(r.is_ok());
+    }
+
+    #[tokio::test]
+    async fn respond_lists_nothing_open_as_json() {
+        let line = serde_json::to_string(&ControlResponse::Interactions {
+            interactions: Vec::new(),
+        })
+        .unwrap();
+        let r = with_daemon(line, |c| async move {
+            respond(
+                &c,
+                &RespondArgs {
+                    request_id: None,
+                    json: true,
+                    ..respond_args()
+                },
+            )
+            .await
+        })
+        .await;
+        assert!(r.is_ok());
+    }
+
+    #[tokio::test]
+    async fn respond_answers_an_interaction_as_json() {
+        let r = with_daemon(r#"{"result":"ok","ok":true}"#, |c| async move {
+            respond(
+                &c,
+                &RespondArgs {
+                    json: true,
+                    ..respond_args()
+                },
+            )
+            .await
+        })
+        .await;
+        assert!(r.is_ok());
     }
 
     #[tokio::test]

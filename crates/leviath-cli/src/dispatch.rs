@@ -339,6 +339,7 @@ mod tests {
             approve: false,
             deny: false,
             session: false,
+            json: false,
         };
         assert!(dispatch(Commands::Respond(args), &MockRisky).await.is_ok());
     }
@@ -450,6 +451,7 @@ mod tests {
         crate::config::with_isolated_config_path_async("dispatch-list", |_fake_dir| async move {
             let args = commands::list::ListArgs {
                 filter: "all".to_string(),
+                json: false,
             };
             let result = dispatch(Commands::List(args), &MockRisky).await;
             assert!(result.is_ok());
@@ -512,6 +514,7 @@ mod tests {
                     provider: None,
                     remote: false,
                     all: false,
+                    json: false,
                 }),
             };
             let result = dispatch(Commands::Models(args), &MockRisky).await;
@@ -535,6 +538,7 @@ mod tests {
                     .unwrap()
                     .to_string(),
                 deny_warnings: false,
+                json: false,
             };
             let result = dispatch(Commands::Validate(args), &MockRisky).await;
             assert!(result.is_err());

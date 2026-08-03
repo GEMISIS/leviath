@@ -33,6 +33,26 @@ pub struct ListArgs {
     /// Include models from providers this install has no credential for
     #[arg(short = 'a', long)]
     pub all: bool,
+    /// Report the table as JSON, one object per model.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// One model in `lev models list --json`.
+///
+/// Carries the full capability set rather than the six columns the table has
+/// room for, and turns the table's `*` marker into a field, since a caller
+/// choosing a model needs to know a capability came from config rather than
+/// from the provider.
+#[derive(serde::Serialize)]
+struct ModelRow {
+    id: String,
+    provider: String,
+    display_name: Option<String>,
+    capabilities: ModelCapabilities,
+    /// True when `[model_capabilities]` in config.toml replaced what Leviath
+    /// knows about this model.
+    capabilities_overridden: bool,
 }
 
 #[derive(Args)]
@@ -521,6 +541,27 @@ async fn list_with_registry(
         }
     }
 
+    // JSON before the emptiness guard: an empty catalog is an empty array, not
+    // an error, and a caller polling this should not have to parse a nudge.
+    if args.json {
+        let rows: Vec<ModelRow> = entries
+            .into_iter()
+            .map(|e| ModelRow {
+                capabilities_overridden: overridden.contains(&e.id),
+                id: e.id,
+                provider: e.provider,
+                display_name: e.display_name,
+                capabilities: e.capabilities,
+            })
+            .collect();
+        // Owned scalars with no map keys to reject, so this cannot fail.
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rows).expect("a model listing serializes")
+        );
+        return Ok(());
+    }
+
     if entries.is_empty() {
         // Reachable two ways now: a `--provider` filter that matches nothing,
         // or no configured provider at all (a fresh install). Both want the
@@ -986,6 +1027,7 @@ mod tests {
                         provider: None,
                         remote: false,
                         all: false,
+                        json: false,
                     }),
                 };
                 // Should succeed: prints the builtin table
@@ -1006,6 +1048,7 @@ mod tests {
                         provider: Some("anthropic".to_string()),
                         remote: false,
                         all: false,
+                        json: false,
                     }),
                 };
                 let result = execute(args).await;
@@ -1025,6 +1068,7 @@ mod tests {
                         provider: Some("nonexistent_provider".to_string()),
                         remote: false,
                         all: false,
+                        json: false,
                     }),
                 };
                 // Should succeed but print "No models found."
@@ -1134,6 +1178,7 @@ mod tests {
                         provider: Some("openrouter".to_string()),
                         remote: false,
                         all: false,
+                        json: false,
                     }),
                 };
                 let result = execute(args).await;
@@ -1155,6 +1200,7 @@ mod tests {
                         provider: Some("openai".to_string()),
                         remote: false,
                         all: false,
+                        json: false,
                     }),
                 };
                 let result = execute(args).await;
@@ -1319,12 +1365,70 @@ mod tests {
                     remote: false,
                     provider: None,
                     all: false,
+                    json: false,
                 };
                 let result = list_with_registry(args, &build_provider_registry_from_config).await;
                 assert!(result.is_ok());
             },
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn list_json_with_no_configured_provider_is_an_empty_array() {
+        // The prose report prints a nudge here. JSON must not: a caller reading
+        // this branches on the array's length, and a sentence would not parse.
+        crate::config::with_isolated_config_path_async(
+            "models-list_json_empty",
+            |_fake_dir| async move {
+                let args = ListArgs {
+                    remote: false,
+                    provider: Some("no-such-provider".to_string()),
+                    all: false,
+                    json: true,
+                };
+                let result = list_with_registry(args, &build_provider_registry_from_config).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn list_json_with_all_succeeds() {
+        crate::config::with_isolated_config_path_async(
+            "models-list_json_all",
+            |_fake_dir| async move {
+                let args = ListArgs {
+                    remote: false,
+                    provider: None,
+                    all: true,
+                    json: true,
+                };
+                let result = list_with_registry(args, &build_provider_registry_from_config).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
+    }
+
+    #[test]
+    fn model_row_serializes_capabilities_and_the_override_flag() {
+        // The table shows an override as a `*` prefix on the provider column.
+        // JSON has to say so in a field, or a caller cannot tell a capability
+        // Leviath knows from one config asserted.
+        let row = ModelRow {
+            id: "m".to_string(),
+            provider: "p".to_string(),
+            display_name: Some("M".to_string()),
+            capabilities: ModelCapabilities::default(),
+            capabilities_overridden: true,
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&row).unwrap()).unwrap();
+        assert_eq!(value["id"], serde_json::json!("m"));
+        assert_eq!(value["capabilities_overridden"], serde_json::json!(true));
+        assert!(value["capabilities"]["supports_tools"].is_boolean());
     }
 
     #[tokio::test]
@@ -1336,6 +1440,7 @@ mod tests {
                     remote: false,
                     provider: Some("anthropic".to_string()),
                     all: false,
+                    json: false,
                 };
                 let result = list_with_registry(args, &build_provider_registry_from_config).await;
                 assert!(result.is_ok());
@@ -1353,6 +1458,7 @@ mod tests {
                     remote: false,
                     provider: Some("no-such-provider".to_string()),
                     all: false,
+                    json: false,
                 };
                 // Should print "No models found." and still succeed, not error.
                 let result = list_with_registry(args, &build_provider_registry_from_config).await;
@@ -1506,6 +1612,7 @@ mod tests {
                     remote: true,
                     provider: Some("mock".to_string()),
                     all: false,
+                    json: false,
                 };
                 let new_model = ModelInfo {
                     id: "mock-brand-new-model".to_string(),
@@ -1534,6 +1641,7 @@ mod tests {
                     remote: true,
                     provider: None,
                     all: false,
+                    json: false,
                 };
                 let new_model = ModelInfo {
                     id: "mock-brand-new-model".to_string(),
@@ -1559,6 +1667,7 @@ mod tests {
                     remote: true,
                     provider: Some("mock".to_string()),
                     all: false,
+                    json: false,
                 };
                 let overriding_model = ModelInfo {
                     id: known_id,
@@ -1588,6 +1697,7 @@ mod tests {
                     remote: false,
                     provider: None,
                     all: false,
+                    json: false,
                 };
                 // A registry with exactly one provider that the builtin table
                 // also knows: its rows survive, everything else is filtered.
@@ -1617,6 +1727,7 @@ mod tests {
                     remote: true,
                     provider: None,
                     all: false,
+                    json: false,
                 };
                 let result =
                     list_with_registry(args, &mock_registry("anthropic", remote, false)).await;
@@ -1637,6 +1748,7 @@ mod tests {
                     remote: false,
                     provider: None,
                     all: true,
+                    json: false,
                 };
                 let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
                 assert!(result.is_ok());
@@ -1664,6 +1776,7 @@ mod tests {
                     remote: false,
                     provider: None,
                     all: false,
+                    json: false,
                 };
                 let result =
                     list_with_registry(args, &mock_registry("anthropic", vec![], false)).await;
@@ -1682,6 +1795,7 @@ mod tests {
                     remote: true,
                     provider: Some("mock".to_string()),
                     all: false,
+                    json: false,
                 };
                 let result = list_with_registry(args, &mock_registry("mock", vec![], true)).await;
                 assert!(result.is_ok());
@@ -1702,6 +1816,7 @@ mod tests {
                     remote: true,
                     provider: Some("mock-other".to_string()),
                     all: false,
+                    json: false,
                 };
                 let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
                 assert!(result.is_ok());
@@ -1825,6 +1940,7 @@ mod tests {
                     remote: false,
                     provider: None,
                     all: false,
+                    json: false,
                 };
                 let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
                 assert!(result.is_ok());
@@ -1914,6 +2030,7 @@ mod tests {
                     remote: false,
                     provider: None,
                     all: false,
+                    json: false,
                 };
                 let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
                 assert!(result.is_err());
@@ -1980,6 +2097,7 @@ mod tests {
             provider: None,
             remote: false,
             all: false,
+            json: false,
         }));
     }
 
