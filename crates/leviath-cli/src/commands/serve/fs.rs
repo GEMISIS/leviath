@@ -466,4 +466,88 @@ mod tests {
         let names: Vec<String> = listing_of(&body).dirs.into_iter().map(|d| d.name).collect();
         assert_eq!(names, ["fine"]);
     }
+
+    /// Windows twin of `list_dirs_symlinks_out_of_the_root_are_excluded`.
+    /// Windows spells a directory link `symlink_dir`; the fence behaves the
+    /// same, because `resolves_within` canonicalizes before comparing.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn list_dirs_symlinks_out_of_the_root_are_excluded_windows() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("inside")).unwrap();
+        std::os::windows::fs::symlink_dir(outside.path(), root.path().join("escape")).unwrap();
+
+        let app = app_with_root(Some(root.path().to_path_buf()));
+        let (status, body) = get_dirs(app, Some(&root.path().to_string_lossy())).await;
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<String> = listing_of(&body).dirs.into_iter().map(|d| d.name).collect();
+        assert_eq!(names, ["inside"]);
+
+        let (status, body) =
+            get_dirs(app_with_root(None), Some(&root.path().to_string_lossy())).await;
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<String> = listing_of(&body).dirs.into_iter().map(|d| d.name).collect();
+        assert_eq!(names, ["escape", "inside"]);
+    }
+
+    /// Windows twin of `list_dirs_unreadable_directory_is_reported`.
+    ///
+    /// There is no `0o000` for a directory on Windows, but a sharing
+    /// violation refuses a read the same way: an exclusive (no-share) handle
+    /// on the directory leaves `metadata` working - it asks for no access,
+    /// and falls back to `FindFirstFileEx` on a sharing violation anyway - so
+    /// the request gets past the is-a-directory check and fails where the
+    /// Unix one does, in `read_dir`.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn list_dirs_unreadable_directory_is_reported_windows() {
+        use std::fs::OpenOptions;
+        use std::os::windows::fs::OpenOptionsExt;
+
+        // `GENERIC_READ` - opening for anything less than a read would not
+        // conflict with the listing `read_dir` is about to attempt.
+        const GENERIC_READ: u32 = 0x8000_0000;
+        // `FILE_FLAG_BACKUP_SEMANTICS`, without which a directory cannot be
+        // opened as a handle at all.
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        let handle = OpenOptions::new()
+            .access_mode(GENERIC_READ)
+            .share_mode(0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&locked)
+            .unwrap();
+
+        let (status, body) = get_dirs(app_with_root(None), Some(&locked.to_string_lossy())).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let msg = error_of(&body);
+        let expected = format!("could not read '{}'", locked.display());
+        assert!(msg.starts_with(&expected), "{msg}");
+
+        // Released before the tempdir's own cleanup runs against it.
+        drop(handle);
+    }
+
+    /// Windows twin of `list_dirs_skips_unreadable_children`: a directory
+    /// link whose target does not exist. `metadata` follows the link, finds
+    /// nothing, and reports a plain not-found - the one Windows failure it
+    /// does not paper over with a `FindFirstFileEx` fallback - so the child
+    /// is skipped rather than listed or raised.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn list_dirs_skips_unreadable_children_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("fine")).unwrap();
+        std::os::windows::fs::symlink_dir(dir.path().join("gone"), dir.path().join("dangling"))
+            .unwrap();
+        let (status, body) =
+            get_dirs(app_with_root(None), Some(&dir.path().to_string_lossy())).await;
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<String> = listing_of(&body).dirs.into_iter().map(|d| d.name).collect();
+        assert_eq!(names, ["fine"]);
+    }
 }

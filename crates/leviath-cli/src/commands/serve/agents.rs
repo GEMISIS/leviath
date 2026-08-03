@@ -1532,6 +1532,52 @@ prompt = "Plan the work"
         .await;
     }
 
+    /// Windows twin of `agent_file_unreadable_file_is_reported`.
+    ///
+    /// Windows has no "no read permission" bit `std::fs::Permissions` can
+    /// set: a read-only file is still readable. A sharing violation is the
+    /// equivalent split. Holding an exclusive (no-share) handle open leaves
+    /// `std::fs::metadata` working - it opens with zero desired access and
+    /// falls back to `FindFirstFileEx` on a sharing violation anyway - while
+    /// `File::open`, which wants read access, is refused. That is the same
+    /// metadata-succeeds/open-fails shape `0o000` gives the Unix test.
+    /// Creating the file THROUGH the exclusive handle leaves no closed-file
+    /// window for Defender or the indexer to grab it first, which is what
+    /// `blueprints.rs`'s Windows twin found the hard way.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn agent_file_unreadable_file_is_reported_windows() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_file_unreadable_file_is_reported_windows",
+            |_d| async move {
+                use std::fs::OpenOptions;
+                use std::os::windows::fs::OpenOptionsExt;
+
+                let workdir = tempfile::tempdir().unwrap();
+                let file = workdir.path().join("locked.txt");
+                let mut locked = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .share_mode(0)
+                    .open(&file)
+                    .unwrap();
+                std::io::Write::write_all(&mut locked, b"sealed").unwrap();
+                let run_id = unique_run_id("file-locked-win");
+                create_run_in(&run_id, workdir.path());
+
+                let (status, body) = get_file(&run_id, "locked.txt").await;
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                let msg = error_of(&body);
+                assert!(msg.starts_with("could not read 'locked.txt'"), "{msg}");
+
+                drop(locked);
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn agent_file_caps_the_read_at_one_mib() {
         crate::runstate::with_isolated_runs_dir_async(
