@@ -406,6 +406,10 @@ pub(super) struct DoctorCheck {
 #[derive(Deserialize)]
 pub(super) struct DirsQuery {
     pub(super) path: Option<String>,
+    /// Include dot-prefixed directories (hidden on Unix). Off by default so a
+    /// first-run picker isn't a wall of config noise.
+    #[serde(default)]
+    pub(super) hidden: bool,
 }
 
 /// Response of `GET /api/fs/dirs`: one directory level of the host filesystem,
