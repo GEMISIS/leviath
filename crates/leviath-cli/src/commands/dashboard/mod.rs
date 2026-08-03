@@ -637,6 +637,7 @@ mod tests {
             parent_id: None,
             depth: 0,
             started_at: 0,
+            last_progress_at: None,
             active_until: None,
             waiting_secs: 0,
             graph_info: None,
@@ -663,12 +664,12 @@ mod tests {
     use crossterm::event::KeyCode;
 
     #[tokio::test]
-    async fn run_dashboard_loop_quits_on_esc_from_main_list() {
+    async fn run_dashboard_loop_quits_on_q_from_main_list() {
         let mut dashboard = make_test_dashboard();
         let control = no_daemon_control();
         let mut terminal = test_terminal();
         // A no-op Resize tick, then both wheel directions, a full
-        // press-drag-release selection over the log panel, and the Esc that
+        // press-drag-release selection over the log panel, and the q that
         // triggers quit - covers every arm of the event match, including the
         // mouse one that carries scrolling and selection.
         let mouse = |kind, column, row| {
@@ -690,7 +691,7 @@ mod tests {
             mouse(MouseEventKind::Down(MouseButton::Left), 3, 15),
             mouse(MouseEventKind::Drag(MouseButton::Left), 20, 16),
             mouse(MouseEventKind::Up(MouseButton::Left), 20, 16),
-            key(KeyCode::Esc),
+            key(KeyCode::Char('q')),
         ]);
 
         let result = run_dashboard_loop(
@@ -709,14 +710,14 @@ mod tests {
     #[tokio::test]
     async fn run_dashboard_loop_no_event_tick_then_quits() {
         // Tick 1: `poll_event` returns `None` (simulated poll-timeout - no input
-        // pending); tick 2: Esc quits.  The `None` entry exercises the
+        // pending); tick 2: q quits.  The `None` entry exercises the
         // `if let Some(event)` fallthrough path (line 127 in mod.rs).
         let mut dashboard = make_test_dashboard();
         let control = no_daemon_control();
         let mut terminal = test_terminal();
         // `None` entry → poll returns Ok(None) on tick 1 (no-event path);
-        // `Some(Esc)` → poll returns Ok(Some(Esc)) on tick 2 → quit.
-        let mut events = TestEventSource::new_with_nones(vec![None, Some(key(KeyCode::Esc))]);
+        // `Some(q)` → poll returns Ok(Some(q)) on tick 2 → quit.
+        let mut events = TestEventSource::new_with_nones(vec![None, Some(key(KeyCode::Char('q')))]);
 
         let result = run_dashboard_loop(
             &mut dashboard,
@@ -734,7 +735,7 @@ mod tests {
     #[tokio::test]
     async fn run_dashboard_loop_ignores_non_press_and_other_events() {
         // A key release (not Press) and a mouse-like "other" event are both
-        // ignored by the `_ => {}` arm; only the trailing Esc actually quits.
+        // ignored by the `_ => {}` arm; only the trailing q actually quits.
         let mut dashboard = make_test_dashboard();
         let control = no_daemon_control();
         let mut terminal = test_terminal();
@@ -743,7 +744,8 @@ mod tests {
             crossterm::event::KeyModifiers::empty(),
             crossterm::event::KeyEventKind::Release,
         ));
-        let mut events = TestEventSource::new(vec![release, Event::FocusGained, key(KeyCode::Esc)]);
+        let mut events =
+            TestEventSource::new(vec![release, Event::FocusGained, key(KeyCode::Char('q'))]);
 
         let result = run_dashboard_loop(
             &mut dashboard,
@@ -849,7 +851,7 @@ mod tests {
                 let control = no_daemon_control();
                 let mut dashboard = init_dashboard(control.clone(), |_| false);
                 let mut setup = TestSetup::new();
-                let mut events = TestEventSource::new(vec![key(KeyCode::Esc)]);
+                let mut events = TestEventSource::new(vec![key(KeyCode::Char('q'))]);
                 let result = execute_core(&mut dashboard, &control, &mut setup, &mut events).await;
                 assert!(result.is_ok());
                 assert!(dashboard.should_quit);
@@ -871,7 +873,7 @@ mod tests {
                     "execute_with_dashboard",
                     |_d| async move {
                         let mut setup = TestSetup::new();
-                        let mut events = TestEventSource::new(vec![key(KeyCode::Esc)]);
+                        let mut events = TestEventSource::new(vec![key(KeyCode::Char('q'))]);
                         let result =
                             execute_with(no_daemon_control(), &mut setup, &mut events, |_| false)
                                 .await;

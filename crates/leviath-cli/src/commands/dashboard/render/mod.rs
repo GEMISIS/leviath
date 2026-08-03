@@ -24,11 +24,21 @@ impl Dashboard {
         // scroll) drops the selection.
         self.selection_regions.clear();
         self.selection_regions.push(frame.area());
+        // Wheel hit-testing rects are also per-frame: each pane's renderer
+        // registers where it actually drew.
+        self.pane_rects.clear();
 
         if self.mcp_screen {
             self.draw_mcp_screen(frame, frame.area());
             self.apply_selection_overlay(frame);
             self.draw_toasts(frame);
+            if self.show_help {
+                self.draw_help_overlay(frame);
+            }
+            // The remove confirmation can be open over the MCP screen.
+            if let Some((_, dialog)) = &self.pending_confirm {
+                dialog.draw(frame, frame.area());
+            }
             return;
         }
         if self.detail_view {
@@ -65,9 +75,9 @@ impl Dashboard {
             self.draw_help_overlay(frame);
         }
 
-        // Delete confirmation popup
-        if self.confirm_delete {
-            self.draw_confirm_popup(frame);
+        // Kill / delete / remove confirmation dialog
+        if let Some((_, dialog)) = &self.pending_confirm {
+            dialog.draw(frame, frame.area());
         }
     }
 
@@ -277,6 +287,7 @@ mod tests {
             parent_id: None,
             depth: 0,
             started_at: chrono::Utc::now().timestamp() - 60,
+            last_progress_at: None,
             active_until: None,
             waiting_secs: 0,
             graph_info: None,
@@ -611,8 +622,37 @@ mod tests {
         dash.agents
             .push(make_test_agent("run-del", AgentDisplayStatus::Complete));
         dash.update_display_indices();
-        dash.confirm_delete = true;
+        dash.request_delete();
         terminal.draw(|f| dash.draw(f)).unwrap();
+    }
+
+    #[test]
+    fn draw_mcp_screen_with_help_and_confirm_overlays() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.mcp_screen = true;
+        dash.show_help = true;
+        dash.pending_confirm = Some((
+            crate::commands::dashboard::types::ConfirmAction::McpRemove {
+                name: "srv".to_string(),
+            },
+            crate::tui::widgets::confirm::Confirm::new(
+                "Remove MCP server?",
+                vec![ratatui::text::Line::from("Remove 'srv'?")],
+                "Remove",
+                "Cancel",
+            ),
+        ));
+        terminal.draw(|f| dash.draw(f)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("Remove MCP server?"));
     }
 
     #[test]

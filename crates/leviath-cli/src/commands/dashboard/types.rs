@@ -22,6 +22,67 @@ pub(super) enum StageContentMode {
     Context,
 }
 
+/// How the main run list is ordered. Whatever the mode, the order is a total
+/// one (unique tie-break by id), so a status change alone never reshuffles
+/// rows within a mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SortMode {
+    /// Newest run first, and a run keeps its row for its whole life. The
+    /// default: predictable, nothing ever jumps.
+    StartedAt,
+    /// Most recently progressed run first: whatever just did something is on
+    /// top. Rows move only on real progress, never on a status flip alone.
+    RecentActivity,
+    /// The old grouping: active first, finished below, stable within a group.
+    StatusGrouped,
+}
+
+impl SortMode {
+    pub(super) fn next(self) -> Self {
+        match self {
+            Self::StartedAt => Self::RecentActivity,
+            Self::RecentActivity => Self::StatusGrouped,
+            Self::StatusGrouped => Self::StartedAt,
+        }
+    }
+
+    /// Short label for the table title.
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::StartedAt => "started",
+            Self::RecentActivity => "activity",
+            Self::StatusGrouped => "status",
+        }
+    }
+}
+
+/// Which pane of the main screen holds keyboard focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MainPane {
+    RunList,
+    LogPane,
+}
+
+/// A pane with its own wheel-scroll behavior, hit-tested against the rects
+/// each renderer registers per frame. Panes not listed here (detail content,
+/// review) share the keyboard's scroll target via `scroll_by`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PaneId {
+    RunTable,
+    LogPanel,
+}
+
+/// A destructive action waiting on its confirmation dialog.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum ConfirmAction {
+    /// Cancel the run via the daemon (the row stays, marked cancelled).
+    Kill { run_id: String },
+    /// Cancel and permanently delete the run's on-disk state.
+    Delete { run_id: String },
+    /// Remove an MCP server from the config.
+    McpRemove { name: String },
+}
+
 /// Display status for agents in the dashboard.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentDisplayStatus {
@@ -132,6 +193,9 @@ pub struct DashboardAgent {
     pub depth: usize,
     /// Unix timestamp when the run started (for elapsed display)
     pub started_at: i64,
+    /// Unix timestamp of the run's last recorded progress (`None` before the
+    /// first progress mark). Drives the recent-activity sort.
+    pub last_progress_at: Option<i64>,
     /// Frozen wall-clock time (Unix seconds) when the agent entered a waiting state.
     /// Used to prevent the elapsed timer from incrementing while waiting for input.
     pub active_until: Option<i64>,
@@ -369,6 +433,7 @@ mod tests {
             parent_id: None,
             depth: 0,
             started_at: 1000,
+            last_progress_at: None,
             active_until: None,
             waiting_secs: 0,
             graph_info: None,

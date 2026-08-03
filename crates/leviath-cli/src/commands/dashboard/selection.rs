@@ -132,13 +132,13 @@ fn highlight_in_buffer(buf: &mut Buffer, region: Rect, a: (u16, u16), b: (u16, u
 
 impl Dashboard {
     /// Single entry point for every mouse event, so the wheel and selection
-    /// cannot disagree about state. The wheel arms are the pre-selection
-    /// behavior, unchanged: three lines per notch into whichever pane the
-    /// keyboard would scroll.
+    /// cannot disagree about state. The wheel scrolls the pane under the
+    /// cursor, hit-tested against the rects each renderer registered this
+    /// frame - not whichever pane the keyboard last touched.
     pub(super) fn handle_mouse(&mut self, event: MouseEvent) {
         match event.kind {
-            MouseEventKind::ScrollUp => self.scroll_by(3),
-            MouseEventKind::ScrollDown => self.scroll_by(-3),
+            MouseEventKind::ScrollUp => self.wheel_scroll(event.column, event.row, 3),
+            MouseEventKind::ScrollDown => self.wheel_scroll(event.column, event.row, -3),
             MouseEventKind::Down(MouseButton::Left) => {
                 self.selection_begin(event.column, event.row);
             }
@@ -149,6 +149,44 @@ impl Dashboard {
                 self.selection_release(event.column, event.row);
             }
             _ => {}
+        }
+    }
+
+    /// Route a wheel notch to the pane under the cursor. `lines > 0` scrolls
+    /// back through history (up), matching the keyboard convention.
+    fn wheel_scroll(&mut self, column: u16, row: u16, lines: i32) {
+        let hit = self
+            .pane_rects
+            .iter()
+            .find(|(_, rect)| {
+                column >= rect.x
+                    && column < rect.x + rect.width
+                    && row >= rect.y
+                    && row < rect.y + rect.height
+            })
+            .map(|(id, _)| *id);
+        match hit {
+            Some(super::types::PaneId::LogPanel) => {
+                let (len, viewport) = (self.log.len(), self.log_viewport.max(1));
+                if lines >= 0 {
+                    self.log_scroll
+                        .scroll_up(lines.unsigned_abs() as usize, len, viewport);
+                } else {
+                    self.log_scroll.scroll_down(lines.unsigned_abs() as usize);
+                }
+                self.selection = None;
+            }
+            Some(super::types::PaneId::RunTable) => {
+                // The wheel moves the selection through the run list.
+                let delta = if lines >= 0 { -1isize } else { 1isize };
+                if !self.display_indices.is_empty() {
+                    let max = self.display_indices.len() - 1;
+                    self.selected = self.selected.saturating_add_signed(delta).min(max);
+                    self.table_state.select(Some(self.selected));
+                }
+            }
+            // Detail content, or anywhere unregistered: the keyboard's target.
+            _ => self.scroll_by(lines),
         }
     }
 
@@ -249,6 +287,92 @@ impl Dashboard {
 #[cfg(test)]
 mod tests {
     use super::super::test_support::make_test_dashboard;
+    use super::super::types::{AgentDisplayStatus, DashboardAgent, LogEntry, PaneId};
+
+    fn wheel(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    fn plain_agent(id: &str) -> DashboardAgent {
+        DashboardAgent {
+            id: id.to_string(),
+            blueprint_name: "test-agent".to_string(),
+            stage: "main".to_string(),
+            stage_index: 0,
+            num_stages: 1,
+            status: AgentDisplayStatus::Active,
+            tokens_in: 0,
+            tokens_out: 0,
+            cached_tokens: 0,
+            iteration: 0,
+            waiting_prompt: None,
+            pending_request: None,
+            last_answered_request_id: None,
+            context_snapshot: None,
+            stages: vec![],
+            workdir: "/tmp".to_string(),
+            task: "task".to_string(),
+            title: None,
+            model: None,
+            parent_id: None,
+            depth: 0,
+            started_at: 1000,
+            last_progress_at: None,
+            active_until: None,
+            waiting_secs: 0,
+            graph_info: None,
+            accepts_messages: true,
+            taint_summary: vec![],
+        }
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_pane_under_the_cursor() {
+        let mut dash = make_test_dashboard();
+        dash.log.clear();
+        for i in 0..50 {
+            dash.log.push(LogEntry {
+                timestamp: "t".to_string(),
+                message: format!("line {i}"),
+            });
+        }
+        dash.log_viewport = 10;
+        let mut second = plain_agent("run-2");
+        second.started_at = 900;
+        dash.agents.push(plain_agent("run-1"));
+        dash.agents.push(second);
+        dash.update_display_indices();
+        dash.pane_rects = vec![
+            (PaneId::RunTable, Rect::new(0, 0, 80, 20)),
+            (PaneId::LogPanel, Rect::new(0, 20, 80, 15)),
+        ];
+
+        // Over the log: wheel up scrolls history, wheel down returns.
+        dash.handle_mouse(wheel(MouseEventKind::ScrollUp, 5, 25));
+        assert_eq!(dash.log_scroll.offset_from_tail, 3);
+        dash.handle_mouse(wheel(MouseEventKind::ScrollDown, 5, 25));
+        assert!(dash.log_scroll.is_tailing());
+
+        // Over the run table: the wheel moves the selection.
+        dash.handle_mouse(wheel(MouseEventKind::ScrollDown, 5, 5));
+        assert_eq!(dash.selected, 1);
+        dash.handle_mouse(wheel(MouseEventKind::ScrollUp, 5, 5));
+        assert_eq!(dash.selected, 0);
+        // …and clamps at both ends.
+        dash.handle_mouse(wheel(MouseEventKind::ScrollUp, 5, 5));
+        assert_eq!(dash.selected, 0);
+
+        // Outside both rects: falls back to the keyboard target.
+        dash.detail_view = true;
+        dash.handle_mouse(wheel(MouseEventKind::ScrollUp, 100, 38));
+        assert_eq!(dash.detail_scroll, 3);
+    }
+
     use super::*;
     use crossterm::event::KeyModifiers;
     use ratatui::Terminal;

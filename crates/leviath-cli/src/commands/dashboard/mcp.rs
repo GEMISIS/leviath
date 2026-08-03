@@ -10,7 +10,7 @@
 use tokio::sync::mpsc;
 
 use super::state::Dashboard;
-use super::types::{McpCommand, McpContext, McpOutcome, McpRow, ToastLevel};
+use super::types::{ConfirmAction, McpCommand, McpContext, McpOutcome, McpRow, ToastLevel};
 use crate::config::Config;
 use leviath_mcp::{AuthStore, MCPClient, MCPServerConfig, OAuthClient};
 
@@ -74,12 +74,30 @@ impl Dashboard {
         true
     }
 
-    /// Remove the selected server and any stored credentials.
-    pub(super) fn mcp_remove_selected(&mut self) {
+    /// Open the remove confirmation for the selected server.
+    pub(super) fn mcp_request_remove(&mut self) {
+        use crate::tui::widgets::confirm::Confirm;
+        use ratatui::text::Line;
         let Some(row) = self.mcp_rows.get(self.mcp_selected) else {
             return;
         };
         let name = row.name.clone();
+        let dialog = Confirm::new(
+            "Remove MCP server?",
+            vec![Line::from(format!(
+                "Remove '{name}' from the config (and forget its login)?"
+            ))],
+            "Remove",
+            "Cancel",
+        )
+        .danger();
+        self.pending_confirm = Some((ConfirmAction::McpRemove { name }, dialog));
+    }
+
+    /// Remove `name` from the config and the auth store. Runs after its
+    /// confirmation dialog; keyed by name, not the current selection.
+    pub(super) fn mcp_remove_named(&mut self, name: &str) {
+        let name = name.to_string();
         let ctx = &self.mcp_ctx;
         let mut config = match Config::load_from_path_public(&ctx.config_path) {
             Ok(config) => config,
@@ -424,7 +442,7 @@ mod tests {
         assert_eq!(dash.mcp_rows[0].auth, "none");
 
         dash.mcp_selected = 0;
-        dash.mcp_remove_selected();
+        dash.mcp_remove_named("remote");
         assert!(dash.mcp_rows.is_empty());
     }
 
@@ -473,8 +491,9 @@ mod tests {
     fn remove_with_no_selection_is_a_noop() {
         let dir = tempfile::tempdir().unwrap();
         let mut dash = dash_at(dir.path());
-        // No rows loaded; removing selection 0 does nothing.
-        dash.mcp_remove_selected();
+        // No rows loaded; requesting a removal opens nothing.
+        dash.mcp_request_remove();
+        assert!(dash.pending_confirm.is_none());
         assert!(dash.mcp_rows.is_empty());
     }
 
@@ -489,7 +508,7 @@ mod tests {
         dash.refresh_mcp_rows();
 
         dash.mcp_selected = 0;
-        dash.mcp_remove_selected();
+        dash.mcp_remove_named("remote");
         assert!(
             AuthStore::load(&dash.mcp_ctx.store_path)
                 .unwrap()
@@ -508,7 +527,7 @@ mod tests {
         std::fs::remove_file(&dash.mcp_ctx.config_path).unwrap();
         std::fs::create_dir(&dash.mcp_ctx.config_path).unwrap();
         dash.mcp_selected = 0;
-        dash.mcp_remove_selected();
+        dash.mcp_remove_named("x");
         // Rows unchanged (still the pre-remove snapshot is fine); the point is
         // it did not panic and toasted an error.
     }
@@ -525,7 +544,7 @@ mod tests {
         perms.set_readonly(true);
         std::fs::set_permissions(&dash.mcp_ctx.config_path, perms).unwrap();
         dash.mcp_selected = 0;
-        dash.mcp_remove_selected();
+        dash.mcp_remove_named("x");
     }
 
     #[test]

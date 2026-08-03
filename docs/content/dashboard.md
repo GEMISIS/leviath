@@ -45,14 +45,21 @@ same list in the app.
 
 | Key | Action |
 |---|---|
-| `↑` / `↓` | Select an agent. Active runs sort first |
+| `↑` / `↓` (or `k` / `j`) | Select a run |
+| `Home` / `End` (or `g` / `G`) | Jump to the first / last run |
 | `Enter` | Open detail view |
-| `/` | Filter agents by name or status |
-| `c` / `k` | Cancel the selected run |
+| `Tab` | Focus the log panel. Arrows scroll it, `End` resumes tailing, `Esc` comes back |
+| `/` | Filter runs by name or status |
+| `s` | Cycle the sort: start time (default), recent activity, or status groups |
+| `x` | Kill the selected run. Asks first |
+| `d` | Delete the run. Permanent, and asks first |
 | `p` / `r` | Pause / resume the selected run |
-| `d` | Delete the run. Permanent, and asks `y` to confirm |
 | `m` | Manage MCP servers |
-| `Esc` | Clear the filter, or quit |
+| `Esc` | Clear the filter |
+| `q` / `Ctrl-C` | Quit |
+
+By default runs are listed newest first and keep their row for their whole life, so nothing jumps
+around when a run finishes. The sort indicator sits in the table's top-right corner.
 
 ### Detail view
 
@@ -60,22 +67,21 @@ same list in the app.
 |---|---|
 | `←` / `→` | Switch stage tab |
 | `1`–`9` | Jump to that stage tab |
-| `↑` / `↓` | Scroll the pane |
-| `b` / `e` | Jump to the beginning / end |
+| `↑` / `↓` (or `k` / `j`) | Scroll the pane |
+| `Home` / `End` (or `b` / `e`) | Jump to the beginning / end |
 | `l` / `o` / `c` | Switch the pane to Logs / Output / Context |
 | `,` / `.` | Step back and forward through context history |
 | `/` , then `n` / `N` | Search, then next / previous match |
 | `y` | Copy the pane to the clipboard |
 | `i` | Respond to or message the agent |
-| `k` | Kill the run |
+| `x` | Kill the run. Asks first |
 | `p` / `r` | Pause / resume the run |
 | `Esc` | Clear the search, or go back to the list |
 
 While you are typing a response, `Enter` sends it, `Alt+Enter` inserts a newline, and `Esc` cancels.
 
-> [!WARNING]
-> `c` does two different things depending on where you are. In the main list it cancels the run. In
-> detail view it switches the pane to Context. `k` kills the run on both screens.
+Destructive keys always confirm on a dialog with real buttons: `←`/`→` pick an answer, `Enter`
+activates it, and a stray keypress does nothing. The safe answer holds focus to start.
 
 > [!TIP]
 > Prefer a browser, or want to drive Leviath from another machine? The [agent console](/app)

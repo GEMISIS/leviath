@@ -36,8 +36,21 @@ pub(crate) struct Dashboard {
     pub(super) pending_interactions: HashMap<String, interaction::InteractionRequest>,
     pub(super) table_state: TableState,
     pub(super) should_quit: bool,
-    /// True when the delete-agent confirmation popup is open
-    pub(super) confirm_delete: bool,
+    /// A destructive action (kill / delete / MCP remove) waiting on its
+    /// confirmation dialog. While open, the dialog owns the keys.
+    pub(super) pending_confirm: Option<(ConfirmAction, crate::tui::widgets::confirm::Confirm)>,
+    /// How the run list is ordered; `s` cycles it.
+    pub(super) sort_mode: SortMode,
+    /// Which main-screen pane holds keyboard focus (Tab toggles).
+    pub(super) main_focus: MainPane,
+    /// Scroll position of the log panel (tail-anchored; End resumes tailing).
+    pub(super) log_scroll: crate::tui::widgets::scroll::ScrollState,
+    /// Wheel-scroll hit-testing rects, re-registered by each pane's renderer
+    /// every frame so the wheel always moves the pane under the cursor.
+    pub(super) pane_rects: Vec<(PaneId, ratatui::layout::Rect)>,
+    /// The log panel's viewport height as of the last draw, so key scrolling
+    /// pages by what is actually visible.
+    pub(super) log_viewport: usize,
     /// Scroll offset for detail view content: 0 = bottom (auto-scroll), >0 = scrolled up
     pub(super) detail_scroll: usize,
     /// Selected option index for MultipleChoice/ToolApproval/Confirm input
@@ -202,7 +215,12 @@ impl Dashboard {
             pending_interactions: HashMap::new(),
             table_state,
             should_quit: false,
-            confirm_delete: false,
+            pending_confirm: None,
+            sort_mode: SortMode::StartedAt,
+            main_focus: MainPane::RunList,
+            log_scroll: crate::tui::widgets::scroll::ScrollState::default(),
+            pane_rects: Vec::new(),
+            log_viewport: 0,
             detail_scroll: 0,
             choice_selected: 0,
             selected_stage: 0,
@@ -312,7 +330,9 @@ impl Dashboard {
         entries
     }
 
-    /// Recompute display_indices: sorted by status priority then recency, filtered by list_search_query.
+    /// Recompute display_indices: ordered by [`SortMode`], filtered by
+    /// list_search_query. Every mode's order is total (id tie-break), so a
+    /// status change alone never reshuffles rows.
     pub(super) fn update_display_indices(&mut self) {
         let query = self.list_search_query.to_lowercase();
         let status_priority = |s: &AgentDisplayStatus| -> u8 {
@@ -348,11 +368,28 @@ impl Dashboard {
                     || a.status.to_string().to_lowercase().contains(&query)
             })
             .collect();
+        let sort_mode = self.sort_mode;
         indices.sort_by(|&a, &b| {
-            let pa = status_priority(&self.agents[a].status);
-            let pb = status_priority(&self.agents[b].status);
-            pa.cmp(&pb)
-                .then(self.agents[b].started_at.cmp(&self.agents[a].started_at))
+            let (a, b) = (&self.agents[a], &self.agents[b]);
+            let newest_first = b
+                .started_at
+                .cmp(&a.started_at)
+                .then_with(|| a.id.cmp(&b.id));
+            match sort_mode {
+                // A run keeps its row for its whole life: nothing about this
+                // key ever changes after start.
+                SortMode::StartedAt => newest_first,
+                // Most recent progress first; a run that never progressed
+                // sorts by its start time. Rows move only when work happens.
+                SortMode::RecentActivity => {
+                    let ka = a.last_progress_at.unwrap_or(a.started_at);
+                    let kb = b.last_progress_at.unwrap_or(b.started_at);
+                    kb.cmp(&ka).then(newest_first)
+                }
+                SortMode::StatusGrouped => status_priority(&a.status)
+                    .cmp(&status_priority(&b.status))
+                    .then(newest_first),
+            }
         });
         // With no filter, re-order into a parent → child tree so sub-agents and
         // fan-out workers nest under their parent (roots keep their recency order);
@@ -658,6 +695,7 @@ impl Dashboard {
                 agent.workdir = run.workdir.clone();
                 agent.context_snapshot = runstate::read_context_snapshot(&run.run_id);
                 agent.stages = stages;
+                agent.last_progress_at = run.last_progress_at;
 
                 if now_needs_input {
                     if waiting_prompt.is_some() {
@@ -747,6 +785,7 @@ impl Dashboard {
                     parent_id: run.parent_run_id.clone(),
                     depth: 0,
                     started_at: run.started_at,
+                    last_progress_at: run.last_progress_at,
                     // Freeze the elapsed timer for agents that are already waiting
                     // or terminal when first observed; only genuinely-running
                     // agents tick against the wall clock.
@@ -801,13 +840,87 @@ impl Dashboard {
         };
     }
 
-    /// Cancel (via the daemon) then delete all on-disk state for the selected
-    /// agent.
-    pub(super) fn delete_selected_agent(&mut self) {
-        let (raw_idx, id) = match self.selected_agent_raw_idx() {
-            Some(i) => (i, self.agents[i].id.clone()),
-            None => return,
+    /// Cycle the run-list sort mode and say so in the log.
+    pub(super) fn cycle_sort_mode(&mut self) {
+        self.sort_mode = self.sort_mode.next();
+        self.add_log(format!("Sort: {}", self.sort_mode.label()));
+        self.update_display_indices();
+    }
+
+    /// Open the kill confirmation for the selected agent, if it is killable.
+    pub(super) fn request_kill(&mut self) {
+        use crate::tui::widgets::confirm::Confirm;
+        use ratatui::text::Line;
+        let Some(agent) = self.selected_agent() else {
+            return;
         };
+        if !agent.status.is_killable() {
+            return;
+        }
+        let run_id = agent.id.clone();
+        let name = agent
+            .title
+            .clone()
+            .unwrap_or_else(|| truncate(&agent.blueprint_name, 24));
+        let dialog = Confirm::new(
+            "Kill run?",
+            vec![Line::from(format!(
+                "Cancel '{name}' ({})? Its state stays on disk.",
+                truncate(&run_id, 20)
+            ))],
+            "Kill",
+            "Cancel",
+        )
+        .danger();
+        self.pending_confirm = Some((ConfirmAction::Kill { run_id }, dialog));
+    }
+
+    /// Open the delete confirmation for the selected agent.
+    pub(super) fn request_delete(&mut self) {
+        use crate::tui::widgets::confirm::Confirm;
+        use ratatui::text::Line;
+        let Some(agent) = self.selected_agent() else {
+            return;
+        };
+        let run_id = agent.id.clone();
+        let dialog = Confirm::new(
+            "Delete run?",
+            vec![Line::from(format!(
+                "Delete '{}' and all of its on-disk state? This is permanent.",
+                truncate(&run_id, 24)
+            ))],
+            "Delete",
+            "Cancel",
+        )
+        .danger();
+        self.pending_confirm = Some((ConfirmAction::Delete { run_id }, dialog));
+    }
+
+    /// Ask the daemon to cancel `run_id` and mark the row cancelled. The one
+    /// implementation behind the list's and the detail view's kill key.
+    pub(super) fn perform_kill(&mut self, run_id: &str) {
+        let _ = self.cmd_tx.send(DaemonCommand::Cancel {
+            run_id: run_id.to_string(),
+        });
+        if let Some(a) = self.agents.iter_mut().find(|a| a.id == run_id) {
+            a.status = AgentDisplayStatus::Cancelled;
+            a.waiting_prompt = None;
+            a.pending_request = None;
+        }
+        // Any half-typed response to the killed run is moot.
+        self.input_mode = false;
+        self.input_textarea = TextArea::default();
+        self.add_log(format!("{run_id}: kill requested"));
+    }
+
+    /// Cancel (via the daemon) then delete all on-disk state for `run_id`.
+    /// Keyed by id rather than the current selection so the action confirmed
+    /// in the dialog is the one that runs, whatever the list did since.
+    pub(super) fn perform_delete(&mut self, run_id: &str) {
+        let Some(raw_idx) = self.agents.iter().position(|a| a.id == run_id) else {
+            return;
+        };
+        let id = run_id.to_string();
         // Record the run terminal on disk *before* removing it, and ask the
         // daemon to cancel it too.
         //
@@ -972,6 +1085,7 @@ mod tests {
             parent_id: None,
             depth: 0,
             started_at: 1000,
+            last_progress_at: None,
             active_until: None,
             waiting_secs: 0,
             graph_info: None,
@@ -988,7 +1102,7 @@ mod tests {
         assert!(!dash.input_mode);
         assert!(!dash.detail_view);
         assert!(!dash.should_quit);
-        assert!(!dash.confirm_delete);
+        assert!(dash.pending_confirm.is_none());
         assert_eq!(dash.detail_scroll, 0);
         assert_eq!(dash.choice_selected, 0);
         assert_eq!(dash.selected_stage, 0);
@@ -1022,7 +1136,10 @@ mod tests {
 
     #[test]
     fn update_display_indices_with_agents() {
+        // The status-grouped mode is opt-in; the default (StartedAt) is tested
+        // separately for stability.
         let mut dash = make_test_dashboard();
+        dash.sort_mode = SortMode::StatusGrouped;
         dash.agents
             .push(make_test_agent("run-1", AgentDisplayStatus::Complete));
         dash.agents
@@ -1038,11 +1155,87 @@ mod tests {
         assert_eq!(dash.agents[dash.display_indices[2]].id, "run-1"); // Complete
     }
 
+    /// The default order: newest start first, and a run keeps its row when its
+    /// status changes - finishing must not move it.
+    #[test]
+    fn the_default_sort_is_stable_across_status_changes() {
+        let mut dash = make_test_dashboard();
+        let mut old = make_test_agent("run-old", AgentDisplayStatus::Active);
+        old.started_at = 1_000;
+        let mut new = make_test_agent("run-new", AgentDisplayStatus::Active);
+        new.started_at = 2_000;
+        dash.agents.push(old);
+        dash.agents.push(new);
+        dash.update_display_indices();
+        let before: Vec<String> = dash
+            .display_indices
+            .iter()
+            .map(|&i| dash.agents[i].id.clone())
+            .collect();
+        assert_eq!(before, ["run-new", "run-old"]);
+
+        // The newest run finishes; in the old bucket sort it would leap below
+        // the still-active one. Here it stays exactly where it was.
+        dash.agents[1].status = AgentDisplayStatus::Complete;
+        dash.update_display_indices();
+        let after: Vec<String> = dash
+            .display_indices
+            .iter()
+            .map(|&i| dash.agents[i].id.clone())
+            .collect();
+        assert_eq!(after, before, "a status change must not reshuffle rows");
+    }
+
+    /// Recent-activity mode: the run that progressed most recently leads;
+    /// one that never progressed falls back to its start time.
+    #[test]
+    fn recent_activity_sorts_by_last_progress() {
+        let mut dash = make_test_dashboard();
+        dash.sort_mode = SortMode::RecentActivity;
+        let mut a = make_test_agent("run-a", AgentDisplayStatus::Active);
+        a.started_at = 1_000;
+        a.last_progress_at = Some(5_000);
+        let mut b = make_test_agent("run-b", AgentDisplayStatus::Active);
+        b.started_at = 2_000;
+        b.last_progress_at = Some(3_000);
+        let mut c = make_test_agent("run-c", AgentDisplayStatus::Active);
+        c.started_at = 4_000;
+        c.last_progress_at = None;
+        dash.agents.push(a);
+        dash.agents.push(b);
+        dash.agents.push(c);
+        dash.update_display_indices();
+
+        let ids: Vec<&str> = dash
+            .display_indices
+            .iter()
+            .map(|&i| dash.agents[i].id.as_str())
+            .collect();
+        assert_eq!(ids, ["run-a", "run-c", "run-b"]);
+    }
+
+    #[test]
+    fn cycle_sort_mode_walks_all_three_and_logs() {
+        let mut dash = make_test_dashboard();
+        assert_eq!(dash.sort_mode, SortMode::StartedAt);
+        dash.cycle_sort_mode();
+        assert_eq!(dash.sort_mode, SortMode::RecentActivity);
+        dash.cycle_sort_mode();
+        assert_eq!(dash.sort_mode, SortMode::StatusGrouped);
+        dash.cycle_sort_mode();
+        assert_eq!(dash.sort_mode, SortMode::StartedAt);
+        assert!(dash.log.iter().any(|l| l.message.contains("Sort:")));
+        assert_eq!(SortMode::StartedAt.label(), "started");
+        assert_eq!(SortMode::RecentActivity.label(), "activity");
+        assert_eq!(SortMode::StatusGrouped.label(), "status");
+    }
+
     /// Paused sorts with Stale: above the finished states (it is the user's
     /// deliberately parked unfinished business), below Active/Waiting.
     #[test]
     fn update_display_indices_ranks_paused_above_finished_runs() {
         let mut dash = make_test_dashboard();
+        dash.sort_mode = SortMode::StatusGrouped;
         dash.agents
             .push(make_test_agent("run-done", AgentDisplayStatus::Complete));
         dash.agents
@@ -1606,9 +1799,9 @@ mod tests {
     // ─── delete_selected_agent: no agent selected ─────────────────────────
 
     #[test]
-    fn delete_selected_agent_empty_list_is_noop() {
+    fn delete_of_an_unknown_run_id_is_a_noop() {
         let mut dash = make_test_dashboard();
-        dash.delete_selected_agent();
+        dash.perform_delete("no-such-run");
         // Should not panic, just no-op
     }
 
@@ -1617,6 +1810,7 @@ mod tests {
     #[test]
     fn update_display_indices_sort_order_comprehensive() {
         let mut dash = make_test_dashboard();
+        dash.sort_mode = SortMode::StatusGrouped;
         dash.agents
             .push(make_test_agent("cancelled", AgentDisplayStatus::Cancelled));
         dash.agents
@@ -1631,9 +1825,14 @@ mod tests {
         ));
         dash.agents
             .push(make_test_agent("complete", AgentDisplayStatus::Complete));
+        dash.agents.push(make_test_agent(
+            "interactive",
+            AgentDisplayStatus::CompleteInteractive,
+        ));
         dash.update_display_indices();
 
-        // Expected priority: Active(0) < Waiting(1) < Complete(3) < Error(4) < Idle(5) < Cancelled(6)
+        // Expected priority: Active(0) < Waiting(1) < CompleteInteractive(2)
+        // < Complete(3) < Error(4) < Idle(5) < Cancelled(6)
         let ids: Vec<&str> = dash
             .display_indices
             .iter()
@@ -1641,10 +1840,24 @@ mod tests {
             .collect();
         assert_eq!(ids[0], "active");
         assert_eq!(ids[1], "waiting");
-        assert_eq!(ids[2], "complete");
-        assert_eq!(ids[3], "error");
-        assert_eq!(ids[4], "idle");
-        assert_eq!(ids[5], "cancelled");
+        assert_eq!(ids[2], "interactive");
+        assert_eq!(ids[3], "complete");
+        assert_eq!(ids[4], "error");
+        assert_eq!(ids[5], "idle");
+        assert_eq!(ids[6], "cancelled");
+    }
+
+    #[test]
+    fn perform_kill_of_an_unknown_run_id_still_sends_and_logs() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        dash.perform_kill("no-such-run");
+        assert!(cmd_rx.try_recv().is_ok(), "the daemon is still asked");
+        assert!(
+            dash.log
+                .iter()
+                .any(|l| l.message.contains("kill requested"))
+        );
     }
 
     // ─── selected_stage_can_respond: stage_name matching ──────────────────
@@ -1876,7 +2089,7 @@ mod tests {
                 dash.agents.push(agent);
                 dash.update_display_indices();
 
-                dash.delete_selected_agent();
+                dash.perform_delete(&tmp_id);
 
                 // Agent should have been removed from the list
                 assert!(dash.agents.is_empty());
@@ -1898,7 +2111,7 @@ mod tests {
             dash.agents.push(agent);
             dash.update_display_indices();
 
-            dash.delete_selected_agent();
+            dash.perform_delete("test-run-missing");
 
             assert!(dash.log.iter().any(|l| l.message.contains("Delete failed")));
         });
@@ -2157,6 +2370,7 @@ mod tests {
             .push(make_test_agent("stale", AgentDisplayStatus::Stale));
         dash.agents
             .push(make_test_agent("live", AgentDisplayStatus::Active));
+        dash.sort_mode = SortMode::StatusGrouped;
         dash.update_display_indices();
 
         let order: Vec<&str> = dash
