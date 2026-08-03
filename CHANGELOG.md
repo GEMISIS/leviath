@@ -46,6 +46,24 @@ same list.
   required, so the three lines that point Leviath at OpenRouter failed with
   ``missing field `providers` `` - a table the user has no reason to know
   about, in a message that says nothing about what to add.
+- `lev serve` gained three read-only routes, so a browser front end can show
+  what a run produced without shell access to the host. All three work with the
+  daemon down.
+  - `GET /api/agents/{id}/files?path=` returns one file the run wrote. The path
+    may be relative to the run's working directory or absolute, but either way
+    the resolved path has to land inside that directory, under the same
+    symlink-aware containment the file tools use, so the endpoint reads exactly
+    what the run was allowed to write. Reads stop at 1 MiB and say so; a cap
+    that lands mid-character drops the split character rather than calling a
+    text file binary.
+  - `GET /api/doctor` runs the checks `lev doctor` runs and returns them as
+    data. A failing check is an `ok: false` entry in a 200, never an HTTP error.
+  - `GET /api/fs/dirs?path=` lists one directory level of subdirectory names,
+    so a folder picker can offer a working directory instead of asking someone
+    to type one blind. Paths must be absolute, `--workdir-root` fences it the
+    same way it fences spawning, and `parent` is null at the fence so the
+    picker is never offered a step above it. Add `hidden=true` for
+    dot-prefixed names.
 - `lev doctor`'s `resolve` check says when your configured `default_provider`
   is being passed over, and why. `default_provider` with no `default_model` is
   a half-configuration that silently does nothing, and the check used to report
