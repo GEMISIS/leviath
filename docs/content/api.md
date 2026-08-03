@@ -66,6 +66,7 @@ Base path `/api`; all JSON unless noted.
 | `GET /api/agents` · `POST /api/agents` | List runs · spawn an agent. Reads the persisted records, so unlike `lev ps` it keeps finished runs |
 | `GET /api/agents/{id}` · `DELETE …` | Get one · cancel |
 | `GET /api/agents/{id}/result` · `/logs` · `/context` · `/context/history` | Run output, logs, context |
+| `GET /api/agents/{id}/files?path=` | Read one file the run wrote. The resolved path must land inside the run's working directory, so this reads what the run itself was allowed to write. Capped at 1 MiB |
 | `GET /api/agents/tree` · `/{id}/tree-status` · `/{id}/children` | Sub-agent tree + token roll-ups |
 | `POST /api/agents/{id}/pause` · `/resume` | Pause a run · resume it |
 | `POST /api/agents/{id}/message` | Steer a running agent |
@@ -74,6 +75,8 @@ Base path `/api`; all JSON unless noted.
 | `GET /api/config` · `PUT /api/config` *(admin)* · `POST /api/config/validate` | Read redacted config · write keys · validate a key |
 | `GET /api/models` | Enumerate models |
 | `GET /api/mcp/servers` · `GET /{name}/status` · `POST /{name}/login` · `POST /{name}/test` | MCP servers (add/remove need admin) |
+| `GET /api/doctor` | The checks `lev doctor` runs, as data. A failing check is `ok: false` inside a 200, never an HTTP error |
+| `GET /api/fs/dirs?path=&hidden=` | One directory level of subdirectory names, for a folder picker. Absolute paths only, fenced by `--workdir-root`; `hidden=true` includes dot-prefixed names |
 | `GET /ws` · `GET /ws/agents/{id}` | Live event stream (all agents / one run) |
 
 > [!NOTE]
