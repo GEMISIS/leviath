@@ -7,11 +7,24 @@ order: 7
 
 # Human-in-the-loop
 
-A run doesn't have to be fully autonomous. An agent can raise a question and block until someone
-answers it, a stage can declare an approval gate the framework always fires, and you can inject a
-message into a running conversation at any time. This page covers how a person supervises and
-steers a live agent, from the [dashboard](/docs/dashboard), the browser [console](/app), the
-CLI, or the [HTTP API](/docs/api).
+Sometimes you do not want the agent deciding on its own. It should check the plan with you before
+writing code, or ask which API version to target rather than guessing, or let you redirect it
+halfway through when you realise it is heading the wrong way.
+
+A Leviath run does not have to be autonomous. There are three ways a person gets involved:
+
+| You want | Use | Who starts it |
+|---|---|---|
+| The agent to ask when it is unsure | The `ask_user_*` tools | The agent, if it chooses to |
+| A checkpoint that always happens | An [interaction point](#interaction-points) | The runtime, every time |
+| To redirect a run already going | `lev msg` | You, whenever you like |
+
+You can answer from the [dashboard](/docs/dashboard), the browser [console](/app), the CLI, or the
+[HTTP API](/docs/api).
+
+> [!NOTE]
+> **Before this page:** [Multi-stage workflows](/docs/stages).
+> **In one line:** the agent can ask, the blueprint can insist, and you can interrupt.
 
 ```mermaid
 sequenceDiagram
@@ -106,10 +119,14 @@ this session** maps to always-allow and **Deny** blocks it.
 
 ## Interaction points
 
-An interaction point is an approval gate declared **statically** on a stage. Unlike the `ask_user`
-tools (which fire only if the model chooses to call them), the framework fires an interaction point
-at the stage boundary *always*, before the stage may transition. Set the stage's mode to
-`interactive_points` and list one or more points:
+An interaction point is a checkpoint you write into the blueprint rather than one the agent chooses
+to raise.
+
+That is the whole difference from the `ask_user` tools. Those only fire if the model decides to call
+them, so an agent that is confident and wrong sails past. An interaction point fires at the stage
+boundary every time, before the stage is allowed to move on.
+
+Set the stage's mode to `interactive_points` and list one or more:
 
 ```toml
 [stages.plan]
@@ -128,23 +145,29 @@ directives = { "Revise" = "Call ask_user_text to find out what to change, then r
 document_region = "plan"
 ```
 
-The selected option is routed deterministically (in code) by which list it falls in, matched
-exactly first, then with dash/whitespace normalization:
+### What each answer does
 
-- **Approve**: any plain option not listed below. Completes the point; when every point is
-  satisfied the stage transitions.
-- **Directive** (a key in `directives`): injects the mapped directive text into the conversation
-  and **re-runs inference in-stage**, then re-presents the point. Use it to revise.
-- **Edit** (an option in `edit_options`): opens the stage's most recent output in an editable
-  field; the edited text is injected and adopted as the authoritative document, and the point is
-  re-presented.
-- **Abort** (an option in `abort_options`): cancels the run immediately, with no further inference
-  or transition.
+Which list you put an option in decides what picking it does. Nothing is left to the model here:
 
-`document_region` names a pinned [context](/docs/context) region (e.g. `"plan"`) that holds the
-point's authoritative document. Each time the point is presented, the current text (the produced
-output, or the user's direct edit) replaces that region, so revisions and downstream stages build
-on the current version rather than regenerating from the task.
+| Answer | Where you put it | What happens |
+|---|---|---|
+| Approve | Any option not in the lists below | The point is satisfied. Once every point is satisfied, the stage moves on |
+| Revise | A key in `directives` | The directive text is added to the conversation, the stage runs again, and you are asked once more |
+| Edit | An option in `edit_options` | The stage's latest output opens for you to edit. Your version is adopted, and you are asked once more |
+| Abort | An option in `abort_options` | The run is cancelled immediately. No further model calls, no transition |
+
+Options are matched exactly first, then again ignoring dashes and whitespace, so "Auto approve" and
+"auto-approve" both land.
+
+### Keeping the document current
+
+`document_region` names a pinned [context](/docs/context) region, `"plan"` in the example above,
+that holds whatever the point is about.
+
+Every time the point is presented, that region is replaced with the current text, whether that came
+from the model or from your own edit. So when you revise three times, the third pass builds on your
+second round of edits rather than starting over from the original task. Without this, a revision
+loop keeps regenerating from scratch and your edits are lost each time.
 
 `unattended` decides what the point does in a `--yolo` run. The default, `auto_approve`, resolves it
 as approved without opening a prompt: nobody is watching, and a checkpoint that waited would park

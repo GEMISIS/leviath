@@ -7,8 +7,24 @@ order: 8
 
 # Security: sandboxed execution and taint tracking
 
-By default an agent's shell commands run directly on your machine. When you want isolation, opt in
-per agent or per stage.
+An agent runs shell commands and edits files. By default it does that directly on your machine, as
+you, with your permissions. That is the right default for an agent working on your own project in a
+directory you chose, and the wrong one for a blueprint somebody sent you.
+
+Leviath gives you three separate controls, and you can use as few or as many as you need:
+
+| Control | Question it answers | Section |
+|---|---|---|
+| Sandboxing | Where do commands run? | [Sandboxes](#sandboxes) |
+| Read paths | Which files can it see? | [Reading outside the workdir](#reading-outside-the-workdir) |
+| Taint tracking | Can it send what it read somewhere? | [Taint tracking](#taint-tracking-experimental) |
+
+Tool permissions are a fourth, and they live in [Built-in tools](/docs/tools).
+
+> [!NOTE]
+> **Before this page:** [Agent blueprints](/docs/agents).
+> **In one line:** everything here is opt-in, and an installed blueprint can tighten these settings
+> but never loosen them.
 
 ## Sandboxes
 
@@ -23,12 +39,15 @@ network = false
 kind = "none"             # run discovery on the host…
 ```
 
-- **Containers** (Docker/Podman): the daemon keeps a warm container per agent and tears it down at
-  reap. Every capability is dropped, privilege regain is forbidden, processes and memory are bounded,
-  and file tools keep working over the bind-mounted workdir.
-- **Namespaces**: a lighter option with no container runtime; isolates PIDs and (with
-  `network = false`) connectivity. It shares the host filesystem, so reach for a container when you
-  want real containment.
+**Containers**, using Docker or Podman, give you the real thing. The daemon keeps one warm container
+per agent and tears it down when the agent finishes. Inside it, every Linux capability is dropped
+and the process cannot regain privileges, and both process count and memory are capped. Your file
+tools keep working, because the workdir is mounted in.
+
+**Namespaces** are lighter and need no container runtime. They isolate process IDs, and with
+`network = false` they cut off connectivity. They do *not* isolate the filesystem, which is the
+important limitation: a namespace shares the host's. Use one when you want cheap process and network
+isolation, and a container when you want the agent genuinely fenced off.
 
 > [!IMPORTANT]
 > An *installed* agent can only ever **tighten** its sandbox: it can raise the walls, never lower
@@ -84,10 +103,14 @@ $ lev validate cto
        ~/.leviath/runs: granted; glob:~/design-docs/**: NOT granted
 ```
 
-`lev list` prints the same counts under each agent, `lev run` repeats the warning and the stanza
-when you start one, and `lev ps` grows a `READS` column reading granted over declared - `0/2` is a
-run that is up and will be refused every read outside its workdir. `lev add` reports the status of
-what you just installed.
+Four other commands surface the same thing, so this is hard to miss:
+
+| Command | Shows |
+|---|---|
+| `lev list` | The same granted-over-declared counts under each agent |
+| `lev add` | The status of what you just installed |
+| `lev run` | Repeats the warning and the stanza to add when you start the agent |
+| `lev ps` | A `READS` column, granted over declared. `0/2` is a run that is up and will have every read outside its workdir refused |
 
 Those checks compare patterns, not paths on disk, so treat them as the first answer rather than the
 last: an individual read is still matched against the real, symlink-resolved path at run time.
@@ -118,31 +141,18 @@ The rules that keep this safe:
 Pick the run's workdir itself with `lev run <agent> --workdir <dir>` (defaults to the directory
 you ran the command from).
 
-### Coming from a build where the blueprint allowlist stood alone
-
-`[read_paths]` reached its current shape after 0.1.1, and the change is worth knowing about if you
-wrote blueprints against an earlier build of it:
-
-- **A blueprint's `[read_paths]` is now a declaration, not a grant.** An agent that used to read
-  outside its workdir on the strength of its manifest alone reads nothing outside it now, until
-  your `config.toml` grants the same paths. Add the `[agent_read_paths.<name>]` block above, or
-  set `allow_blueprint_read_paths = true` if you would rather trust your blueprints wholesale.
-- **`regex:` entries must be absolute.** They have to start with `/`, a drive letter, or `~/`, and
-  they are anchored end to end. A catch-all like `regex:.*` is refused when the manifest is parsed,
-  so `lev validate` fails rather than the agent quietly losing access. Write the subtree you mean -
-  `regex:~/design-docs/.*` - or use `glob:` for anything workdir-relative.
-- **Glob patterns cannot contain `.` or `..` components** anywhere but a relative entry's leading
-  run, which is folded into the workdir at compile time.
-
-Run `lev validate <agent>` against each of your blueprints after upgrading. It names every entry
-that is inert and prints the config block that would fix it.
-
 ## Taint tracking (experimental)
 
-A deterministic sensitivity model (**Public / Internal / Private**) tags every
-[context region](/docs/context), set by the runtime and never by model output. Any tool that can
-carry bytes off the machine is gated: before it fires, the runtime checks the tool's clearance
-against the sensitivity of the data in play.
+Sandboxes and read paths control what an agent can *reach*. Taint tracking controls what it can do
+with what it found.
+
+Every [context region](/docs/context) carries a sensitivity label: **Public**, **Internal**, or
+**Private**, in that order of increasing sensitivity. The runtime assigns it. Model output never
+can, which matters, because otherwise an agent could relabel its own data.
+
+Every tool that could send bytes off the machine has a **clearance**, the highest sensitivity it is
+trusted with. Before such a tool runs, Leviath compares the two. If the data is more sensitive than
+the tool's clearance, the call does not simply proceed.
 
 ```mermaid
 flowchart TD
@@ -173,3 +183,24 @@ lev policy test bash --target example.com
 `lev serve` runs LLM-driven tools, so treat it as trusted-network only unless hardened. See
 [SECURITY.md](https://github.com/GEMISIS/leviath/blob/main/SECURITY.md) for the full threat
 model, what Leviath defends against, and how to report a vulnerability (GitHub private advisories).
+
+## Upgrading from 0.1.1
+
+`[read_paths]` changed shape after 0.1.1. Skip this unless you wrote blueprints against an earlier
+build.
+
+**A blueprint's `[read_paths]` is now a declaration, not a grant.** An agent that used to read
+outside its workdir on the strength of its own blueprint now reads nothing outside it, until your
+`config.toml` grants the same paths. Add the `[agent_read_paths.<name>]` block shown above, or set
+`allow_blueprint_read_paths = true` if you would rather trust your blueprints wholesale.
+
+**`regex:` entries must be absolute.** They have to start with `/`, a drive letter, or `~/`, and
+they are anchored end to end. A catch-all like `regex:.*` is refused when the blueprint is parsed,
+so `lev validate` fails rather than the agent quietly losing access. Write the subtree you mean,
+such as `regex:~/design-docs/.*`, or use `glob:` for anything relative to the workdir.
+
+**Glob patterns cannot contain `.` or `..`**, except in a relative entry's leading run, which is
+folded into the workdir when the pattern is compiled.
+
+Run `lev validate <agent>` against each of your blueprints after upgrading. It names every entry
+that is now inert and prints the config block that would fix it.
