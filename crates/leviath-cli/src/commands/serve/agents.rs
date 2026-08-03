@@ -1521,15 +1521,9 @@ prompt = "Plan the work"
                 create_run_in(&run_id, workdir.path());
 
                 let (status, body) = get_file(&run_id, "locked.txt").await;
-                // Root ignores mode bits; everywhere else the open fails.
-                if status != StatusCode::OK {
-                    assert_eq!(status, StatusCode::NOT_FOUND);
-                    assert!(
-                        error_of(&body).starts_with("could not read 'locked.txt'"),
-                        "{}",
-                        error_of(&body)
-                    );
-                }
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                let msg = error_of(&body);
+                assert!(msg.starts_with("could not read 'locked.txt'"), "{msg}");
 
                 let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644));
                 let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
