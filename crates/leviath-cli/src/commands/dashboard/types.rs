@@ -72,6 +72,56 @@ pub(super) enum PaneId {
     LogPanel,
 }
 
+/// Which tab of the full-screen stage explorer is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExplorerTab {
+    Graph,
+    Timeline,
+}
+
+/// The full-screen stage explorer (`g` in the detail view of a graph agent):
+/// a real layered rendering of the stage DAG, and the visit timeline the old
+/// one-row strip could not show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ExplorerState {
+    pub(super) tab: ExplorerTab,
+    /// Show stages never visited (dimmed); `u` toggles them off.
+    pub(super) show_unvisited: bool,
+    /// Vertical scroll of the graph canvas, in rows.
+    pub(super) scroll: usize,
+    /// Selected row on the timeline tab.
+    pub(super) timeline_selected: usize,
+}
+
+impl ExplorerState {
+    pub(super) fn new() -> Self {
+        Self {
+            tab: ExplorerTab::Graph,
+            show_unvisited: true,
+            scroll: 0,
+            timeline_selected: 0,
+        }
+    }
+}
+
+/// Cursor + expansion state of the structured Context view.
+///
+/// Regions default to expanded (header + one-line entry stubs); entries
+/// default to collapsed. The state survives ticks and history steps, and
+/// resets only when the selected run changes.
+#[derive(Debug, Clone, Default)]
+pub(super) struct ContextTreeState {
+    /// Regions whose entry list is folded away.
+    pub(super) collapsed_regions: std::collections::HashSet<String>,
+    /// `(region, entry_index)` pairs expanded to their full content.
+    pub(super) expanded_entries: std::collections::HashSet<(String, usize)>,
+    /// Cursor over the tree's interactive rows (headers + stubs).
+    pub(super) cursor: usize,
+    /// Set when a key moved the cursor, so the renderer scrolls to it once
+    /// rather than pinning the view to the cursor forever.
+    pub(super) follow_cursor: bool,
+}
+
 /// A destructive action waiting on its confirmation dialog.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum ConfirmAction {

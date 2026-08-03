@@ -371,6 +371,11 @@ mod tests {
         dash.detail_view = true;
         dash.handle_mouse(wheel(MouseEventKind::ScrollUp, 100, 38));
         assert_eq!(dash.detail_scroll, 3);
+
+        // Over the table with nothing listed: a safe no-op.
+        dash.display_indices.clear();
+        dash.handle_mouse(wheel(MouseEventKind::ScrollDown, 5, 5));
+        assert_eq!(dash.selected, 0);
     }
 
     use super::*;

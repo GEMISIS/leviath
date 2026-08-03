@@ -317,7 +317,110 @@ impl Dashboard {
         }
     }
 
+    /// Keys while the full-screen stage explorer is open.
+    fn handle_explorer_key(&mut self, key_code: KeyCode) {
+        let visits = self.selected_history().map(|h| h.visits.len()).unwrap_or(0);
+        let Some(explorer) = self.stage_explorer.as_mut() else {
+            return;
+        };
+        match key_code {
+            KeyCode::Esc | KeyCode::Char('g') => self.stage_explorer = None,
+            KeyCode::Tab | KeyCode::BackTab => {
+                explorer.tab = match explorer.tab {
+                    ExplorerTab::Graph => ExplorerTab::Timeline,
+                    ExplorerTab::Timeline => ExplorerTab::Graph,
+                };
+            }
+            KeyCode::Char('u') => explorer.show_unvisited = !explorer.show_unvisited,
+            KeyCode::Up | KeyCode::Char('k') => match explorer.tab {
+                ExplorerTab::Graph => explorer.scroll = explorer.scroll.saturating_sub(1),
+                ExplorerTab::Timeline => {
+                    explorer.timeline_selected = explorer.timeline_selected.saturating_sub(1);
+                }
+            },
+            KeyCode::Down | KeyCode::Char('j') => match explorer.tab {
+                ExplorerTab::Graph => explorer.scroll = explorer.scroll.saturating_add(1),
+                ExplorerTab::Timeline => {
+                    if visits > 0 && explorer.timeline_selected + 1 < visits {
+                        explorer.timeline_selected += 1;
+                    }
+                }
+            },
+            KeyCode::Enter => {
+                if explorer.tab == ExplorerTab::Timeline {
+                    let selected = explorer.timeline_selected;
+                    let point = self
+                        .selected_history()
+                        .and_then(|h| h.visits.get(selected))
+                        .map(|v| v.first_point);
+                    if let Some(point) = point {
+                        self.stage_explorer = None;
+                        self.jump_to_history_point(point);
+                    }
+                }
+            }
+            KeyCode::Char('?') => self.show_help = true,
+            _ => {}
+        }
+    }
+
+    /// Enter/Space in the Context view: fold or unfold the row under the
+    /// tree cursor.
+    fn toggle_context_row(&mut self) {
+        use super::context_tree::TreeRow;
+        let rows = self.context_tree_rows();
+        match rows.get(self.context_tree.cursor) {
+            Some(TreeRow::RegionHeader { region }) => {
+                let region = region.clone();
+                if !self.context_tree.collapsed_regions.remove(&region) {
+                    self.context_tree.collapsed_regions.insert(region);
+                }
+                // The cursor stays on the header it just folded; a stale
+                // cursor from a shrunken snapshot resolves through
+                // `rows.get()` returning `None` on the next keypress.
+            }
+            Some(TreeRow::EntryStub { region, index }) => {
+                let key = (region.clone(), *index);
+                if !self.context_tree.expanded_entries.remove(&key) {
+                    self.context_tree.expanded_entries.insert(key);
+                }
+            }
+            None => {}
+        }
+        self.context_tree.follow_cursor = true;
+    }
+
+    /// Move the Context view's tree cursor, clamped, and scroll to it.
+    fn move_context_cursor(&mut self, delta: isize) {
+        let len = self.context_tree_rows().len();
+        if len == 0 {
+            return;
+        }
+        self.context_tree.cursor = self
+            .context_tree
+            .cursor
+            .saturating_add_signed(delta)
+            .min(len - 1);
+        self.context_tree.follow_cursor = true;
+    }
+
+    /// Jump the tree cursor to the previous/next region header.
+    fn jump_context_region(&mut self, forward: bool) {
+        let rows = self.context_tree_rows();
+        if let Some(target) =
+            super::context_tree::nearest_region_row(&rows, self.context_tree.cursor, forward)
+        {
+            self.context_tree.cursor = target;
+            self.context_tree.follow_cursor = true;
+        }
+    }
+
     fn handle_detail_view_key(&mut self, key_code: KeyCode) {
+        if self.stage_explorer.is_some() {
+            self.handle_explorer_key(key_code);
+            return;
+        }
+        let in_context = self.stage_content_mode == StageContentMode::Context;
         match key_code {
             KeyCode::Esc => {
                 if !self.search_query.is_empty() {
@@ -400,14 +503,44 @@ impl Dashboard {
                     self.seed_input_textarea();
                 }
             }
-            // All four go through `scroll_by`, which is the one place that
-            // decides which pane a gesture moves. Each carrying its own copy of
-            // that decision is how the keyboard and the renderer come to
-            // disagree about where the document is.
+            // In the Context view the up/down keys drive the tree cursor
+            // (the view scrolls to follow it); elsewhere they scroll, through
+            // `scroll_by` - the one place that decides which pane a gesture
+            // moves.
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') if in_context => {
+                let delta = if matches!(key_code, KeyCode::Up | KeyCode::Char('k')) {
+                    -1
+                } else {
+                    1
+                };
+                self.move_context_cursor(delta);
+            }
             KeyCode::Up | KeyCode::Char('k') => self.scroll_by(1),
             KeyCode::Down | KeyCode::Char('j') => self.scroll_by(-1),
             KeyCode::PageUp => self.scroll_by(10),
             KeyCode::PageDown => self.scroll_by(-10),
+            // Fold / unfold the row under the Context tree's cursor.
+            KeyCode::Enter | KeyCode::Char(' ') if in_context => self.toggle_context_row(),
+            // Jump between region headers.
+            KeyCode::Char('[') if in_context => self.jump_context_region(false),
+            KeyCode::Char(']') if in_context => self.jump_context_region(true),
+            // The full-screen stage explorer, for graph agents.
+            KeyCode::Char('g') => {
+                let target = self
+                    .selected_agent()
+                    .filter(|a| a.graph_info.is_some())
+                    .map(|a| a.id.clone());
+                match target {
+                    Some(run_id) => {
+                        self.ensure_history(&run_id);
+                        self.stage_explorer = Some(ExplorerState::new());
+                    }
+                    None => self.toast(
+                        "This agent is linear; there is no stage graph to explore",
+                        ToastLevel::Info,
+                    ),
+                }
+            }
             // Home/End are the documented jumps; b/e stay as the historical
             // aliases. (`detail_scroll` counts up from the bottom, so "top of
             // the document" is the maximum offset.)
@@ -602,6 +735,9 @@ impl Dashboard {
                     self.detail_scroll = 0;
                     // Default to the currently active stage when opening detail view
                     self.selected_stage = self.selected_agent().map(|a| a.stage_index).unwrap_or(0);
+                    // Fresh run, fresh exploration state.
+                    self.context_tree = ContextTreeState::default();
+                    self.stage_explorer = None;
                 }
             }
             KeyCode::Char('/') => {
@@ -2014,6 +2150,338 @@ mod tests {
         assert!(dash.show_help);
     }
 
+    fn graph_agent(id: &str) -> DashboardAgent {
+        use crate::commands::dashboard::graph::{GraphEdge, GraphTransitionInfo};
+        let mut agent = make_test_agent(id, AgentDisplayStatus::Active);
+        let mut edges = std::collections::HashMap::new();
+        edges.insert(
+            "plan".to_string(),
+            vec![GraphEdge {
+                target: "implement".to_string(),
+                hint: Some("ready".to_string()),
+                condition: "always".to_string(),
+                transform: "direct".to_string(),
+            }],
+        );
+        edges.insert(
+            "review".to_string(),
+            vec![GraphEdge {
+                target: "implement".to_string(),
+                hint: None,
+                condition: "llm_choice".to_string(),
+                transform: "direct".to_string(),
+            }],
+        );
+        edges.insert(
+            "implement".to_string(),
+            vec![GraphEdge {
+                target: "review".to_string(),
+                hint: None,
+                condition: "always".to_string(),
+                transform: "direct".to_string(),
+            }],
+        );
+        agent.graph_info = Some(GraphTransitionInfo {
+            edges,
+            entry_stage: "plan".to_string(),
+            stage_names: vec![
+                "plan".to_string(),
+                "implement".to_string(),
+                "review".to_string(),
+            ],
+        });
+        agent.stage = "implement".to_string();
+        agent
+    }
+
+    fn seeded_points(stages: &[(&str, i64)]) -> Vec<leviath_core::run_archive::RunPoint> {
+        stages
+            .iter()
+            .map(|(stage, at)| {
+                let mut meta = leviath_core::run_meta::RunMeta::new(
+                    "run-1".to_string(),
+                    "a".to_string(),
+                    "/p".to_string(),
+                    "t".to_string(),
+                    None,
+                    "/w".to_string(),
+                    3,
+                );
+                meta.current_stage = stage.to_string();
+                meta.iteration = 1;
+                leviath_core::run_archive::RunPoint {
+                    meta,
+                    context: leviath_core::run_meta::ContextSnapshot {
+                        stage_name: stage.to_string(),
+                        total_tokens: 0,
+                        max_tokens: 100,
+                        regions: vec![],
+                    },
+                    at: *at,
+                }
+            })
+            .collect()
+    }
+
+    fn seed_cache(dash: &mut Dashboard, points: Vec<leviath_core::run_archive::RunPoint>) {
+        dash.history = Some(crate::commands::dashboard::history::RunHistoryCache {
+            run_id: "run-1".to_string(),
+            visits: crate::commands::dashboard::history::derive_visits(&points),
+            points,
+            loaded_at_tick: u64::MAX,
+        });
+    }
+
+    #[test]
+    fn g_opens_the_explorer_for_graph_agents_and_toasts_for_linear() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-linear", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.handle_key(key(KeyCode::Char('g')));
+        assert!(dash.stage_explorer.is_none());
+        assert!(dash.toasts.iter().any(|t| t.message.contains("linear")));
+
+        let mut dash = make_test_dashboard();
+        dash.agents.push(graph_agent("run-1"));
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.handle_key(key(KeyCode::Char('g')));
+        assert!(dash.stage_explorer.is_some());
+        // g again closes it.
+        dash.handle_key(key(KeyCode::Char('g')));
+        assert!(dash.stage_explorer.is_none());
+    }
+
+    #[test]
+    fn the_explorer_tabs_scrolls_toggles_and_jumps_to_a_visit() {
+        let mut dash = make_test_dashboard();
+        dash.agents.push(graph_agent("run-1"));
+        dash.update_display_indices();
+        dash.detail_view = true;
+        seed_cache(
+            &mut dash,
+            seeded_points(&[
+                ("plan", 10),
+                ("implement", 20),
+                ("review", 30),
+                ("implement", 40),
+            ]),
+        );
+        dash.handle_key(key(KeyCode::Char('g')));
+        assert!(dash.stage_explorer.is_some());
+
+        // Graph tab: scroll down/up, toggle unvisited, help opens.
+        dash.handle_key(key(KeyCode::Down));
+        dash.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(dash.stage_explorer.as_ref().unwrap().scroll, 2);
+        dash.handle_key(key(KeyCode::Up));
+        dash.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(dash.stage_explorer.as_ref().unwrap().scroll, 0);
+        dash.handle_key(key(KeyCode::Char('u')));
+        assert!(!dash.stage_explorer.as_ref().unwrap().show_unvisited);
+        dash.handle_key(key(KeyCode::Char('?')));
+        assert!(dash.show_help);
+        dash.handle_key(key(KeyCode::Esc));
+
+        // Enter on the graph tab does nothing; on the timeline it jumps.
+        dash.handle_key(key(KeyCode::Enter));
+        assert!(dash.stage_explorer.is_some());
+        dash.handle_key(key(KeyCode::Tab));
+        assert_eq!(
+            dash.stage_explorer.as_ref().unwrap().tab,
+            ExplorerTab::Timeline
+        );
+        // Move to the last visit (the implement revisit) and jump.
+        dash.handle_key(key(KeyCode::Down));
+        dash.handle_key(key(KeyCode::Down));
+        dash.handle_key(key(KeyCode::Down));
+        dash.handle_key(key(KeyCode::Down)); // clamped at the last visit
+        assert_eq!(dash.stage_explorer.as_ref().unwrap().timeline_selected, 3);
+        dash.handle_key(key(KeyCode::Enter));
+        assert!(
+            dash.stage_explorer.is_none(),
+            "the jump closes the explorer"
+        );
+        assert_eq!(
+            dash.context_history_idx,
+            Some(3),
+            "jumped to the revisit's first point"
+        );
+        assert_eq!(dash.stage_content_mode, StageContentMode::Context);
+
+        // Esc closes from either tab; Tab cycles back to the graph; the
+        // timeline's Up key and `?` work; unmapped keys are ignored.
+        dash.handle_key(key(KeyCode::Char('g')));
+        dash.handle_key(key(KeyCode::Tab));
+        dash.handle_key(key(KeyCode::Down));
+        dash.handle_key(key(KeyCode::Up));
+        dash.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(dash.stage_explorer.as_ref().unwrap().timeline_selected, 0);
+        dash.handle_key(key(KeyCode::Char('?')));
+        assert!(dash.show_help);
+        dash.handle_key(key(KeyCode::Esc)); // closes help
+        dash.handle_key(key(KeyCode::Char('z'))); // ignored
+        dash.handle_key(key(KeyCode::Tab));
+        assert_eq!(
+            dash.stage_explorer.as_ref().unwrap().tab,
+            ExplorerTab::Graph
+        );
+        dash.handle_key(key(KeyCode::Esc));
+        assert!(dash.stage_explorer.is_none());
+    }
+
+    #[test]
+    fn explorer_guards_hold_when_driven_directly_or_without_visits() {
+        let mut dash = make_test_dashboard();
+        // No explorer open: the handler declines to act.
+        dash.handle_explorer_key(KeyCode::Enter);
+        assert!(dash.stage_explorer.is_none());
+
+        // Timeline Enter with no archived visits is a no-op.
+        dash.agents.push(graph_agent("run-1"));
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.handle_key(key(KeyCode::Char('g')));
+        dash.handle_key(key(KeyCode::Tab));
+        dash.handle_key(key(KeyCode::Enter));
+        assert!(dash.stage_explorer.is_some(), "nothing to jump to");
+        assert_eq!(dash.context_history_idx, None);
+    }
+
+    #[test]
+    fn g_with_no_agent_selected_toasts_instead_of_opening() {
+        let mut dash = make_test_dashboard();
+        dash.detail_view = true;
+        dash.handle_key(key(KeyCode::Char('g')));
+        assert!(dash.stage_explorer.is_none());
+        assert!(dash.toasts.iter().any(|t| t.message.contains("linear")));
+    }
+
+    fn context_agent(id: &str) -> DashboardAgent {
+        let mut agent = make_test_agent(id, AgentDisplayStatus::Active);
+        let entry = |content: &str| leviath_core::run_meta::RegionEntrySnapshot {
+            content: content.to_string(),
+            tokens: 5,
+            kind: Default::default(),
+            metadata: None,
+            key: None,
+            taint: Default::default(),
+        };
+        agent.context_snapshot = Some(crate::runstate::ContextSnapshot {
+            stage_name: "main".to_string(),
+            total_tokens: 20,
+            max_tokens: 100,
+            regions: vec![
+                crate::runstate::RegionSnapshot {
+                    name: "system".to_string(),
+                    kind: "pinned".to_string(),
+                    current_tokens: 10,
+                    max_tokens: 50,
+                    entries: vec![entry("alpha"), entry("beta")],
+                },
+                crate::runstate::RegionSnapshot {
+                    name: "conversation".to_string(),
+                    kind: "sliding".to_string(),
+                    current_tokens: 10,
+                    max_tokens: 50,
+                    entries: vec![entry("gamma")],
+                },
+            ],
+        });
+        agent
+    }
+
+    #[test]
+    fn the_context_tree_cursor_folds_and_jumps() {
+        use crate::commands::dashboard::context_tree::TreeRow;
+        let mut dash = make_test_dashboard();
+        dash.agents.push(context_agent("run-ctx"));
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.handle_key(key(KeyCode::Char('c')));
+        assert_eq!(dash.stage_content_mode, StageContentMode::Context);
+
+        // 5 rows: system, its 2 stubs, conversation, its stub.
+        assert_eq!(dash.context_tree_rows().len(), 5);
+
+        // j/k move the cursor and clamp.
+        dash.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(dash.context_tree.cursor, 1);
+        dash.handle_key(key(KeyCode::Up));
+        dash.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(dash.context_tree.cursor, 0);
+
+        // ] and [ jump between region headers.
+        dash.handle_key(key(KeyCode::Char(']')));
+        assert_eq!(
+            dash.context_tree_rows()[dash.context_tree.cursor],
+            TreeRow::RegionHeader {
+                region: "conversation".to_string()
+            }
+        );
+        assert_eq!(dash.context_tree.cursor, 3);
+        dash.handle_key(key(KeyCode::Char('[')));
+        assert_eq!(dash.context_tree.cursor, 0);
+
+        // Space on an entry stub expands it; again collapses.
+        dash.handle_key(key(KeyCode::Char('j')));
+        dash.handle_key(key(KeyCode::Char(' ')));
+        assert!(
+            dash.context_tree
+                .expanded_entries
+                .contains(&("system".to_string(), 0))
+        );
+        dash.handle_key(key(KeyCode::Enter));
+        assert!(dash.context_tree.expanded_entries.is_empty());
+
+        // Enter on a header folds the region: its stubs leave the row list.
+        dash.handle_key(key(KeyCode::Char('k')));
+        dash.handle_key(key(KeyCode::Enter));
+        assert!(dash.context_tree.collapsed_regions.contains("system"));
+        assert_eq!(dash.context_tree_rows().len(), 3);
+        // …and unfolds.
+        dash.handle_key(key(KeyCode::Enter));
+        assert_eq!(dash.context_tree_rows().len(), 5);
+
+        // A cursor stranded past the end after a fold gets clamped.
+        dash.handle_key(key(KeyCode::Char(']')));
+        dash.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(dash.context_tree.cursor, 4);
+        dash.handle_key(key(KeyCode::Char('[')));
+        dash.handle_key(key(KeyCode::Enter)); // fold conversation? no - cursor on header 0?
+    }
+
+    #[test]
+    fn context_keys_are_inert_outside_context_mode_and_without_rows() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-plain", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.detail_view = true;
+
+        // Output mode: j/k scroll, Enter/Space/brackets do nothing.
+        dash.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(dash.detail_scroll, 1);
+        dash.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(dash.detail_scroll, 0, "j scrolls back down outside context");
+        dash.handle_key(key(KeyCode::Up));
+        dash.handle_key(key(KeyCode::Down));
+        assert_eq!(dash.detail_scroll, 0);
+        dash.handle_key(key(KeyCode::Enter));
+        dash.handle_key(key(KeyCode::Char(' ')));
+        assert!(dash.context_tree.expanded_entries.is_empty());
+
+        // Context mode with no snapshot: cursor keys are safe no-ops.
+        dash.handle_key(key(KeyCode::Char('c')));
+        dash.handle_key(key(KeyCode::Char('j')));
+        dash.handle_key(key(KeyCode::Enter));
+        dash.handle_key(key(KeyCode::Char('[')));
+        dash.handle_key(key(KeyCode::Char(']')));
+        assert_eq!(dash.context_tree.cursor, 0);
+    }
+
     #[test]
     fn main_list_unhandled_key_is_noop() {
         let mut dash = make_test_dashboard();
@@ -2911,7 +3379,7 @@ mod tests {
             .push(make_test_agent("run-1", AgentDisplayStatus::Active));
         dash.update_display_indices();
         dash.detail_view = true;
-        dash.context_history = vec![leviath_core::run_archive::RunPoint {
+        let points = vec![leviath_core::run_archive::RunPoint {
             meta: leviath_core::run_meta::RunMeta::new(
                 "run-1".to_string(),
                 "a".to_string(),
@@ -2929,6 +3397,12 @@ mod tests {
             },
             at: 0,
         }];
+        dash.history = Some(crate::commands::dashboard::history::RunHistoryCache {
+            run_id: "run-1".to_string(),
+            visits: crate::commands::dashboard::history::derive_visits(&points),
+            points,
+            loaded_at_tick: u64::MAX,
+        });
         dash.context_history_idx = Some(0);
         dash
     }
@@ -2955,7 +3429,6 @@ mod tests {
         dash.handle_key(key(KeyCode::Char('c')));
         assert_eq!(dash.stage_content_mode, StageContentMode::Context);
         assert_eq!(dash.context_history_idx, None); // back to live
-        assert!(dash.context_history.is_empty());
     }
 
     #[test]
@@ -2964,7 +3437,6 @@ mod tests {
         dash.handle_key(key(KeyCode::Esc));
         assert!(!dash.detail_view);
         assert_eq!(dash.context_history_idx, None);
-        assert!(dash.context_history.is_empty());
     }
 
     #[test]

@@ -21,10 +21,17 @@ pub(super) struct GraphEdge {
     pub(super) transform: String,
 }
 
-/// Load graph transition info from an agent manifest directory.
+/// Load graph transition info from an agent manifest directory (or the
+/// manifest file itself - the daemon records `agent_path` as the file, which
+/// used to make every daemon-spawned graph agent read as linear here).
 /// Returns `None` for linear agents or if the manifest can't be read/parsed.
 pub(super) fn load_graph_info(agent_path: &str) -> Option<GraphTransitionInfo> {
-    let manifest_path = std::path::Path::new(agent_path).join("agent.leviath");
+    let path = std::path::Path::new(agent_path);
+    let manifest_path = if path.file_name().is_some_and(|f| f == "agent.leviath") {
+        path.to_path_buf()
+    } else {
+        path.join("agent.leviath")
+    };
     let content = std::fs::read_to_string(&manifest_path).ok()?;
     let blueprint = leviath_core::manifest::parse_manifest(&content).ok()?;
 
@@ -280,6 +287,40 @@ mod tests {
     #[test]
     fn load_graph_info_missing_directory_returns_none() {
         assert!(load_graph_info("/nonexistent/path/to/agent").is_none());
+    }
+
+    #[test]
+    fn load_graph_info_accepts_the_manifest_file_path_itself() {
+        // The daemon records `agent_path` as the manifest FILE. Joining
+        // another `agent.leviath` onto it made every daemon-spawned graph
+        // agent read as linear - the live pty run caught it.
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write_test_agent(
+            dir.path(),
+            r#"
+[agent]
+name = "g"
+version = "0.0.1"
+description = "d"
+entry_stage = "a"
+
+[stages.a]
+mode = "autonomous"
+system_prompt = "x"
+
+[stages.a.transitions.b]
+transform = "direct"
+
+[stages.b]
+mode = "autonomous"
+system_prompt = "y"
+"#,
+        );
+        let via_file = load_graph_info(manifest.to_str().unwrap());
+        let via_dir = load_graph_info(dir.path().to_str().unwrap());
+        assert!(via_file.is_some(), "file path form works");
+        assert!(via_dir.is_some(), "directory form still works");
+        assert_eq!(via_file.unwrap().entry_stage, via_dir.unwrap().entry_stage);
     }
 
     #[test]

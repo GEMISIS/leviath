@@ -1,7 +1,10 @@
 //! `lev dash` - Interactive terminal UI for managing concurrent agents.
 
+mod context_tree;
 mod graph;
+mod graph_layout;
 mod helpers;
+mod history;
 mod input;
 mod mcp;
 mod render;

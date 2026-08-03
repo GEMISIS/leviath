@@ -3,6 +3,7 @@
 //! The main `draw()` method dispatches to sub-modules for each region of the UI.
 
 mod content;
+mod graph_view;
 mod header;
 mod input;
 mod mcp;
@@ -103,6 +104,18 @@ impl Dashboard {
             self.selected_stage = max_tab;
         }
 
+        // The full-screen stage explorer replaces the whole detail stack
+        // below the breadcrumb while it is open.
+        if self.stage_explorer.is_some() {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(4)])
+                .split(area);
+            self.render_header_breadcrumb(frame, chunks[0], &agent);
+            self.draw_stage_explorer(frame, chunks[1], &agent);
+            return;
+        }
+
         // ── Layout: header + tabs + context bar + content + [input] ──────────
         let is_waiting = matches!(
             agent.status,
@@ -126,8 +139,10 @@ impl Dashboard {
 
         let header_h: u16 = 1; // compact breadcrumb line
         let info_h: u16 = 4; // task + workdir/stats strip (2 content + 2 border lines)
-        let is_graph_view = agent.graph_info.is_some();
-        let tabs_h: u16 = if is_graph_view { 7 } else { 3 }; // graph needs more height
+        // Graph agents get the same 3-row tab strip as linear ones; the real
+        // graph lives in the full-screen explorer (`g`), which no longer
+        // costs every other pane four rows.
+        let tabs_h: u16 = 3;
         let context_h: u16 = if agent.context_snapshot.is_some() || !agent.stages.is_empty() {
             5
         } else {
@@ -653,6 +668,42 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(text.contains("Remove MCP server?"));
+    }
+
+    #[test]
+    fn draw_detail_view_with_the_explorer_open() {
+        let backend = TestBackend::new(140, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-exp", AgentDisplayStatus::Active);
+        let mut edges = std::collections::HashMap::new();
+        edges.insert(
+            "a".to_string(),
+            vec![crate::commands::dashboard::graph::GraphEdge {
+                target: "b".to_string(),
+                hint: None,
+                condition: "always".to_string(),
+                transform: "direct".to_string(),
+            }],
+        );
+        agent.graph_info = Some(crate::commands::dashboard::graph::GraphTransitionInfo {
+            edges,
+            entry_stage: "a".to_string(),
+            stage_names: vec!["a".to_string(), "b".to_string()],
+        });
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.stage_explorer = Some(crate::commands::dashboard::types::ExplorerState::new());
+        terminal.draw(|f| dash.draw(f)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("Stage explorer"), "{text}");
     }
 
     #[test]
