@@ -137,9 +137,13 @@ to `0` to switch the whole thing off and keep only per-run failover.
 
 ## Which entry a stage starts on
 
-Failover decides where a run *goes*; this decides where it *begins*. The starting choice is made
-once, at spawn, and keys on whether the **provider** is configured, never on whether the model
-exists. In order:
+Failover decides where a run *goes* when something breaks. This decides where it *begins*.
+
+The choice is made once, at spawn. The one thing to hold on to: it depends on whether the
+**provider** is configured, never on whether the model exists. A typo in a model name is not caught
+here, it fails at the first request.
+
+In order:
 
 1. `lev run --model <provider>/<model>`, which overrides everything and skips the check entirely. A
    bare `--model <model>` replaces only the model name and keeps the provider resolved below.

@@ -75,13 +75,18 @@ returning.
 | `tool_concurrency(n)` | How many tool batches may execute at once (default 4). |
 | `runtime(handle)` | Run on a specific Tokio runtime instead of the ambient one. |
 
-Blueprints come from three places: `BlueprintSource::Path` (a `.leviath`
-blueprint file), `BlueprintSource::Toml` (blueprint text in memory), or
-`BlueprintSource::Inline` (a constructed `Blueprint` value). Region seeds of
-kind `caller_input` fill from `SpawnSpec::regions` (and the task prompt fills
-the `task` key), `literal` seeds resolve as written; the file, glob, rhai, and
-command seed kinds are daemon behavior and only error when the region is
-`required`.
+Blueprints come from three places: `BlueprintSource::Path` for a `.leviath` file,
+`BlueprintSource::Toml` for blueprint text you already have in memory, and
+`BlueprintSource::Inline` for a `Blueprint` value you built yourself.
+
+Not every [seed kind](/docs/context) works when embedded, because some of them are daemon
+behaviour:
+
+| Seed kind | Embedded |
+|---|---|
+| `caller_input` | Filled from `SpawnSpec::regions`. The task prompt fills the `task` key |
+| `literal` | Resolves as written |
+| `file`, `glob`, `rhai`, `command` | Not run. They only produce an error when the region is `required` |
 
 ## Events
 
@@ -138,15 +143,21 @@ prompts. The embedder is code, and code that wants richer behavior implements
 the `ToolService` trait and passes it to `tool_service()`; the trait is one
 method plus optional per-stage hooks.
 
-## Stability layers
+## How much can break under you
 
-- `AgentWorld` and the other embed types are the stable surface.
-- `WorldHost` and `PipelineWorld` are the semi-stable machinery underneath,
-  for hosts that need their own assembly (custom spawners, hooks, manual tick
-  control).
-- The raw ECS behind `PipelineWorld::world_mut()` is the unstable escape
-  hatch. It tracks the runtime's `bevy_ecs` version, re-exported as
-  `leviath::runtime::ecs` so downstream code stays version-aligned.
+The API comes in three layers, and how careful you need to be depends on which one you reach for:
+
+| Layer | What it is | Stability |
+|---|---|---|
+| `AgentWorld` and the other embed types | The normal way in. Everything above uses it | Stable. Breaking changes get a major version |
+| `WorldHost` and `PipelineWorld` | The machinery underneath, for hosts that assemble their own spawners, hooks, or tick loop | Semi-stable. May change between minor versions |
+| `PipelineWorld::world_mut()` | The raw [ECS world](/docs/engine), for anything the layers above cannot express | Unstable. No guarantees at all |
+
+Stay on the first row unless you have a reason not to.
+
+If you do use `world_mut()`, note that it hands you `bevy_ecs` types directly, so your code is
+coupled to whichever version Leviath uses. It is re-exported as `leviath::runtime::ecs` for exactly
+that reason: import it from there and your types stay aligned with the runtime's.
 
 The daemon's control-socket transport is compiled out of library builds by
 default. If you are writing a client for a running `lev` daemon rather than
