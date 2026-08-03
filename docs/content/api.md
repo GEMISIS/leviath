@@ -111,13 +111,18 @@ curl -X POST http://localhost:3000/api/agents \
        "callback_url":"https://example.com/hook","callback_secret":"whsec_…"}'
 ```
 
-Completion webhooks are signed with `callback_secret`: verify the `X-Leviath-Signature: sha256=<hex>`
-header. Each delivery also carries a `delivery_id` (in the signed body and in the
-`X-Leviath-Delivery` header) of the form `agent_completed:<run_id>`. It is deliberately stable:
-a retried attempt and a completion re-fired after a daemon restart send the same id, so your
-receiver can dedupe with a plain key check and process each completion exactly once. Transient
-failures (network errors, timeouts, 5xx, 429, 408) are retried with exponential backoff, tunable
-in config - every field has a safe default, so the block can be omitted entirely:
+Three things to know about the delivery.
+
+**It is signed.** Verify the `X-Leviath-Signature: sha256=<hex>` header against your
+`callback_secret` before trusting the body.
+
+**It carries a stable `delivery_id`**, of the form `agent_completed:<run_id>`, in both the signed
+body and the `X-Leviath-Delivery` header. Stable is the important word: a retried attempt, and a
+completion re-fired after a daemon restart, both send the same id. So your receiver can deduplicate
+with a plain key check and handle each completion exactly once.
+
+**It retries on transient failures**, meaning network errors, timeouts, 5xx, 429, and 408, with
+exponential backoff. Every field below has a safe default, so you can leave the block out entirely:
 
 ```toml
 [webhook]

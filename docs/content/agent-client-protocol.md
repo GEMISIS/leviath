@@ -7,16 +7,22 @@ order: 11
 
 # Agent Client Protocol (editor integration)
 
-`lev agent-client` serves a Leviath agent over the **Agent Client Protocol** (JSON-RPC 2.0,
-newline-delimited, spoken over **stdio**) so an editor host can drive a headless [agent](/docs/agents)
-as a child process instead of you steering it from a terminal. It is a thin front end over the
-shared-world [daemon](/docs/daemon): the host talks protocol, and the command translates that into
-daemon runs and streams the output back.
+Editors and orchestrators want to drive an agent themselves rather than have you type at a terminal.
+The **Agent Client Protocol** is the common language for that: the host launches the agent as a
+child process and talks to it over that process's stdin and stdout.
+
+`lev agent-client` is Leviath speaking it. The host sends protocol messages, and the command turns
+those into runs on the shared-world [daemon](/docs/daemon), streaming output back as it happens.
 
 > [!NOTE]
-> "ACP" is deliberately never used unqualified in Leviath. The acronym is claimed by two unrelated
-> protocols. This command implements the Agent **Client** Protocol (JSON-RPC over stdio). It does
-> **not** implement the Agent *Communication* Protocol (a REST + SSE API from the BeeAI project).
+> **Before this page:** [Agent blueprints](/docs/agents).
+> **In one line:** the host launches `lev agent-client`, sends prompts as JSON on stdin, and reads
+> results as JSON on stdout.
+
+> [!WARNING]
+> "ACP" means two unrelated things, so Leviath never writes it unqualified. This is the Agent
+> **Client** Protocol, JSON-RPC over stdio. It is not the Agent *Communication* Protocol, a REST
+> and SSE API from the BeeAI project.
 
 ## What it is
 
