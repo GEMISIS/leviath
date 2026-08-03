@@ -1,5 +1,6 @@
 ---
 title: Glossary
+description: Every term the Leviath docs use in a particular way, defined in one place.
 group: Guides
 group_order: 4
 order: 3

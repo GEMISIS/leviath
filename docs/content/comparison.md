@@ -1,5 +1,6 @@
 ---
 title: Where Leviath sits
+description: Where Leviath sits among other agent tools, and which are worth running alongside it rather than instead of it.
 group: Get started
 group_order: 1
 order: 3

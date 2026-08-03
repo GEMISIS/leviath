@@ -1,5 +1,6 @@
 ---
 title: Where Leviath fits
+description: The four ways to drive Leviath from a tool you already use, and how to choose between them.
 group: Integrations
 group_order: 5
 order: 1

@@ -1,5 +1,6 @@
 ---
 title: ECS engine
+description: The ECS engine that keeps each agent as a row of data, so an agent that is waiting costs almost nothing.
 group: Concepts
 group_order: 2
 order: 2

@@ -1,5 +1,6 @@
 ---
 title: Sub-agents & fan-out
+description: Start child agents and fan work out across them, so many small jobs run at once.
 group: Concepts
 group_order: 2
 order: 6

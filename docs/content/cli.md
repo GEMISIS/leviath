@@ -1,5 +1,6 @@
 ---
 title: CLI reference
+description: Every `lev` command and flag, what each does, and when you need it.
 group: Reference
 group_order: 3
 order: 3

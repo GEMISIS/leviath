@@ -1,5 +1,6 @@
 ---
 title: External work queues
+description: How an external work queue should ask whether a run is still going, without leaking slots or cancelling live work.
 group: Integrations
 group_order: 5
 order: 4

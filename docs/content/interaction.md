@@ -1,5 +1,6 @@
 ---
 title: Human-in-the-loop
+description: The three ways a person gets involved in a run: agent-raised questions, tool approvals, and blueprint interaction points.
 group: Concepts
 group_order: 2
 order: 7
