@@ -126,14 +126,24 @@ impl Dashboard {
             " Agents ".to_string()
         };
 
+        // Register for wheel hit-testing and show which pane holds focus.
+        self.pane_rects.push((PaneId::RunTable, area));
+        let focused = self.main_focus == MainPane::RunList;
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(C_BORDER))
+            .border_style(Style::default().fg(if focused { C_BORDER_FOCUS } else { C_BORDER }))
             .title(Span::styled(
                 list_title,
                 Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
-            ));
+            ))
+            .title_top(
+                Line::from(Span::styled(
+                    format!(" sort: {} ▾ ", self.sort_mode.label()),
+                    Style::default().fg(C_DIM),
+                ))
+                .right_aligned(),
+            );
 
         if let Some(msg) = empty_state_msg {
             let widget = Paragraph::new(Line::from(Span::styled(msg, Style::default().fg(C_DIM))))
@@ -164,13 +174,15 @@ impl Dashboard {
         frame.render_stateful_widget(table, area, &mut self.table_state);
     }
 
-    pub(in crate::commands::dashboard) fn draw_log_panel(&self, frame: &mut Frame, area: Rect) {
-        let log_lines: Vec<Line> = self
-            .log
+    pub(in crate::commands::dashboard) fn draw_log_panel(&mut self, frame: &mut Frame, area: Rect) {
+        self.pane_rects.push((PaneId::LogPanel, area));
+        let viewport = area.height.saturating_sub(2) as usize;
+        self.log_viewport = viewport;
+        let window = self.log_scroll.window(self.log.len(), viewport);
+        let scrolled_back = !self.log_scroll.is_tailing();
+
+        let log_lines: Vec<Line> = self.log[window.clone()]
             .iter()
-            .rev()
-            .take(area.height.saturating_sub(2) as usize)
-            .rev()
             .map(|entry| {
                 Line::from(vec![
                     Span::styled(format!(" {} ", entry.timestamp), Style::default().fg(C_DIM)),
@@ -179,28 +191,81 @@ impl Dashboard {
             })
             .collect();
 
+        let focused = self.main_focus == MainPane::LogPane;
+        let title = if scrolled_back {
+            format!(" Log  ↑{} (End resumes) ", self.log_scroll.offset_from_tail)
+        } else {
+            " Log ".to_string()
+        };
         let log = Paragraph::new(log_lines).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(C_BORDER))
-                .title(Span::styled(" Log ", Style::default().fg(C_DIM))),
+                .border_style(Style::default().fg(if focused { C_BORDER_FOCUS } else { C_BORDER }))
+                .title(Span::styled(
+                    title,
+                    Style::default().fg(if scrolled_back { C_WARN } else { C_DIM }),
+                )),
         );
         frame.render_widget(log, area);
+
+        // A scrollbar whenever there is history beyond the window.
+        if self.log.len() > viewport && viewport > 0 {
+            let mut sb_state =
+                ratatui::widgets::ScrollbarState::new(self.log.len().saturating_sub(viewport))
+                    .position(window.start);
+            frame.render_stateful_widget(
+                ratatui::widgets::Scrollbar::new(
+                    ratatui::widgets::ScrollbarOrientation::VerticalRight,
+                ),
+                area.inner(ratatui::layout::Margin {
+                    vertical: 1,
+                    horizontal: 0,
+                }),
+                &mut sb_state,
+            );
+        }
     }
 
     pub(in crate::commands::dashboard) fn draw_help_bar(&self, frame: &mut Frame, area: Rect) {
         use interaction::InteractionKind;
 
-        let help = if self.confirm_delete {
+        let help = if self.pending_confirm.is_some() {
             Line::from(vec![
                 Span::styled(
-                    "[y]",
-                    Style::default().fg(C_ERROR).add_modifier(Modifier::BOLD),
+                    "[←/→]",
+                    Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(" confirm delete  "),
-                Span::styled("[any key]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" choose  "),
+                Span::styled(
+                    "[Enter]",
+                    Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" confirm  "),
+                Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" cancel"),
+            ])
+        } else if self.main_focus == MainPane::LogPane && !self.detail_view && !self.mcp_screen {
+            Line::from(vec![
+                Span::styled(
+                    "[↑↓]",
+                    Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" scroll log  "),
+                Span::styled("[End]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" newest  "),
+                Span::styled("[Home]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" oldest  "),
+                Span::styled(
+                    "[Tab/Esc]",
+                    Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" back to list  "),
+                Span::styled(
+                    "[q]",
+                    Style::default().fg(C_DIM).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" quit"),
             ])
         } else if self.detail_view && self.input_mode {
             let kind = self
@@ -360,7 +425,7 @@ impl Dashboard {
         }
         if can_kill {
             spans.push(Span::styled(
-                "[k]",
+                "[x]",
                 Style::default().fg(C_ERROR).add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::raw(" kill  "));
@@ -425,21 +490,23 @@ impl Dashboard {
             ),
             Span::raw(" detail  "),
             Span::styled(
+                "[Tab]",
+                Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" log  "),
+            Span::styled(
                 "[/]",
                 Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
             ),
             Span::raw(" filter  "),
+            Span::styled("[s]", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" sort  "),
             Span::styled("[d]", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" delete  "),
         ];
         if can_kill {
             spans.push(Span::styled(
-                "[c]",
-                Style::default().add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::raw(" cancel  "));
-            spans.push(Span::styled(
-                "[k]",
+                "[x]",
                 Style::default().fg(C_ERROR).add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::raw(" kill  "));
@@ -451,7 +518,7 @@ impl Dashboard {
         ));
         spans.push(Span::raw(" help  "));
         spans.push(Span::styled(
-            "[Esc]",
+            "[q]",
             Style::default().add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::raw(" quit"));
@@ -490,6 +557,7 @@ mod tests {
             parent_id: None,
             depth: 0,
             started_at: chrono::Utc::now().timestamp() - 60,
+            last_progress_at: None,
             active_until: None,
             waiting_secs: 0,
             graph_info: None,
@@ -670,6 +738,67 @@ mod tests {
                 dash.draw_log_panel(f, area);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn draw_log_panel_scrolled_back_shows_position_and_scrollbar() {
+        let backend = TestBackend::new(120, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.log.clear();
+        for i in 0..50 {
+            dash.log.push(LogEntry {
+                timestamp: "12:00:00".to_string(),
+                message: format!("line {i}"),
+            });
+        }
+        dash.main_focus = MainPane::LogPane;
+        dash.log_scroll.scroll_up(7, 50, 10);
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_log_panel(f, area);
+            })
+            .unwrap();
+        let text = rendered_buffer(&terminal);
+        assert!(text.contains("↑7"), "{text}");
+        assert!(text.contains("End resumes"), "{text}");
+        assert!(!dash.pane_rects.is_empty(), "the pane registered its rect");
+    }
+
+    #[test]
+    fn draw_help_bar_log_pane_focused() {
+        let backend = TestBackend::new(200, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.main_focus = MainPane::LogPane;
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 200, 1);
+                dash.draw_help_bar(f, area);
+            })
+            .unwrap();
+        let text = rendered_buffer(&terminal);
+        assert!(text.contains("scroll log"), "{text}");
+        assert!(text.contains("back to list"), "{text}");
+    }
+
+    #[test]
+    fn draw_agent_table_unfocused_when_log_holds_focus() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.main_focus = MainPane::LogPane;
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_agent_table(f, area);
+            })
+            .unwrap();
+        assert!(rendered_buffer(&terminal).contains("sort: started"));
     }
 
     #[test]
@@ -856,7 +985,10 @@ mod tests {
         let backend = TestBackend::new(120, 2);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
-        dash.confirm_delete = true;
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.request_delete();
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, 120, 1);
@@ -951,8 +1083,8 @@ mod tests {
         dash.update_display_indices();
         let line = dash.build_main_list_help_bar();
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("[x]"));
         assert!(text.contains("kill"));
-        assert!(text.contains("cancel"));
     }
 
     #[test]

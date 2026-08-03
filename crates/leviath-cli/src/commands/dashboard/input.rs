@@ -11,30 +11,35 @@ use leviath_core::interaction;
 impl Dashboard {
     pub(super) fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
         let key_code = key.code;
-        // Help overlay takes priority
+        // Ctrl-C quits from anywhere - dialogs, text inputs, every screen. It
+        // is the one binding a user reaches for expecting it to always work.
+        if key
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::CONTROL)
+            && key_code == KeyCode::Char('c')
+        {
+            self.should_quit = true;
+            return;
+        }
+
+        // Help overlay: closed deliberately (Esc/q/?/Enter), never by a key
+        // that would also act underneath.
         if self.show_help {
-            self.show_help = false;
+            if crate::tui::widgets::help::dismisses_help(&key) {
+                self.show_help = false;
+            }
+            return;
+        }
+
+        // A confirmation dialog owns the keys until answered.
+        if self.pending_confirm.is_some() {
+            self.handle_confirm_key(&key);
             return;
         }
 
         // MCP management screen is modal: it owns all keys while open.
         if self.mcp_screen {
             self.handle_mcp_screen_key(key_code);
-            return;
-        }
-
-        // Delete confirmation popup has highest priority
-        if self.confirm_delete {
-            match key_code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.confirm_delete = false;
-                    self.delete_selected_agent();
-                }
-                _ => {
-                    self.confirm_delete = false;
-                    self.add_log("Delete cancelled".to_string());
-                }
-            }
             return;
         }
 
@@ -101,7 +106,50 @@ impl Dashboard {
             return;
         }
 
+        if self.main_focus == MainPane::LogPane {
+            self.handle_log_pane_key(key_code);
+            return;
+        }
         self.handle_main_list_key(key_code);
+    }
+
+    /// Keys while a confirmation dialog is open: the dialog decides, then the
+    /// confirmed action runs against the run id it was opened for.
+    fn handle_confirm_key(&mut self, key: &crossterm::event::KeyEvent) {
+        use crate::tui::widgets::confirm::ConfirmOutcome;
+        let Some((action, mut dialog)) = self.pending_confirm.take() else {
+            return;
+        };
+        match dialog.handle(key) {
+            ConfirmOutcome::Pending => self.pending_confirm = Some((action, dialog)),
+            ConfirmOutcome::No => self.add_log("Cancelled".to_string()),
+            ConfirmOutcome::Yes => match action {
+                ConfirmAction::Kill { run_id } => self.perform_kill(&run_id),
+                ConfirmAction::Delete { run_id } => self.perform_delete(&run_id),
+                ConfirmAction::McpRemove { name } => self.mcp_remove_named(&name),
+            },
+        }
+    }
+
+    /// Keys while the log panel holds focus: scroll history, End/G resumes
+    /// tailing, Tab/Esc hand focus back to the run list.
+    fn handle_log_pane_key(&mut self, key_code: KeyCode) {
+        let len = self.log.len();
+        let viewport = self.log_viewport.max(1);
+        match key_code {
+            KeyCode::Up | KeyCode::Char('k') => self.log_scroll.scroll_up(1, len, viewport),
+            KeyCode::Down | KeyCode::Char('j') => self.log_scroll.scroll_down(1),
+            KeyCode::PageUp => self.log_scroll.scroll_up(viewport, len, viewport),
+            KeyCode::PageDown => self.log_scroll.scroll_down(viewport),
+            KeyCode::Home | KeyCode::Char('g') => self.log_scroll.jump_to_top(len, viewport),
+            KeyCode::End | KeyCode::Char('G') => self.log_scroll.jump_to_tail(),
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Esc => {
+                self.main_focus = MainPane::RunList;
+            }
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('?') => self.show_help = true,
+            _ => {}
+        }
     }
 
     /// Seed the input textarea when entering input mode. For an `EditText`
@@ -356,15 +404,18 @@ impl Dashboard {
             // decides which pane a gesture moves. Each carrying its own copy of
             // that decision is how the keyboard and the renderer come to
             // disagree about where the document is.
-            KeyCode::Up => self.scroll_by(1),
-            KeyCode::Down => self.scroll_by(-1),
+            KeyCode::Up | KeyCode::Char('k') => self.scroll_by(1),
+            KeyCode::Down | KeyCode::Char('j') => self.scroll_by(-1),
             KeyCode::PageUp => self.scroll_by(10),
             KeyCode::PageDown => self.scroll_by(-10),
-            KeyCode::Char('b') => {
+            // Home/End are the documented jumps; b/e stay as the historical
+            // aliases. (`detail_scroll` counts up from the bottom, so "top of
+            // the document" is the maximum offset.)
+            KeyCode::Char('b') | KeyCode::Home => {
                 self.detail_scroll = usize::MAX;
                 self.review_scroll = usize::MAX;
             }
-            KeyCode::Char('e') => {
+            KeyCode::Char('e') | KeyCode::End => {
                 self.detail_scroll = 0;
                 self.review_scroll = 0;
             }
@@ -391,9 +442,10 @@ impl Dashboard {
             KeyCode::Char('y') => {
                 self.handle_yank();
             }
-            KeyCode::Char('k') => {
-                self.handle_kill_from_detail();
-            }
+            // `x` kills, behind a real confirmation (`k` is unbound here: in a
+            // view whose neighbors are l/o/c, a vim-reflex `k` killing the run
+            // is exactly the accident this replaces).
+            KeyCode::Char('x') => self.request_kill(),
             KeyCode::Char('p') => {
                 self.handle_pause();
             }
@@ -446,36 +498,6 @@ impl Dashboard {
                     level: ToastLevel::Error,
                 });
             }
-        }
-    }
-
-    fn handle_kill_from_detail(&mut self) {
-        if let Some(agent) = self.selected_agent()
-            && agent.status.is_killable()
-        {
-            let agent_id = agent.id.clone();
-            let _ = self.cmd_tx.send(DaemonCommand::Cancel {
-                run_id: agent_id.clone(),
-            });
-            // The index came from `display_indices`/`agents` just above, via the
-            // `self.selected_agent()` lookup that got us into this branch, and
-            // the `cmd_tx.send` in between does not mutate either collection or
-            // `self.selected` - so it's always still valid. An `if let` guard
-            // here would add an "index went stale" branch that can never
-            // actually be exercised.
-            let idx = self
-                .selected_agent_raw_idx()
-                .expect("selected_agent() returned Some above");
-            let a = self
-                .agents
-                .get_mut(idx)
-                .expect("index snapshotted from the still-unchanged display_indices/agents above");
-            a.status = AgentDisplayStatus::Cancelled;
-            a.waiting_prompt = None;
-            a.pending_request = None;
-            self.input_mode = false;
-            self.input_textarea = ratatui_textarea::TextArea::default();
-            self.add_log(format!("{}: kill requested", agent_id));
         }
     }
 
@@ -535,29 +557,44 @@ impl Dashboard {
 
     fn handle_main_list_key(&mut self, key_code: KeyCode) {
         match key_code {
+            // Esc dismisses (the filter); it does not quit - `q` quits, the
+            // same as every other Leviath TUI.
             KeyCode::Esc => {
                 if !self.list_search_query.is_empty() {
-                    // First Esc clears the filter; second exits (quit)
                     self.list_search_query.clear();
                     self.selected = 0;
                     self.update_display_indices();
-                } else {
-                    self.should_quit = true;
                 }
             }
-            KeyCode::Up => {
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Up | KeyCode::Char('k') => {
                 if !self.display_indices.is_empty() && self.selected > 0 {
                     self.selected -= 1;
                     self.table_state.select(Some(self.selected));
                 }
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 if !self.display_indices.is_empty()
                     && self.selected < self.display_indices.len() - 1
                 {
                     self.selected += 1;
                     self.table_state.select(Some(self.selected));
                 }
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                if !self.display_indices.is_empty() {
+                    self.selected = 0;
+                    self.table_state.select(Some(0));
+                }
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                if !self.display_indices.is_empty() {
+                    self.selected = self.display_indices.len() - 1;
+                    self.table_state.select(Some(self.selected));
+                }
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.main_focus = MainPane::LogPane;
             }
             KeyCode::Enter => {
                 if !self.display_indices.is_empty() {
@@ -573,21 +610,11 @@ impl Dashboard {
                 self.selected = 0;
                 self.update_display_indices();
             }
-            KeyCode::Char('d') => {
-                if let Some(id) = self.selected_agent().map(|a| a.id.clone()) {
-                    self.confirm_delete = true;
-                    self.add_log(format!(
-                        "Delete run '{}'? This cancels it and is PERMANENT. (y/n)",
-                        id
-                    ));
-                }
-            }
-            KeyCode::Char('c') => {
-                self.handle_cancel_from_list();
-            }
-            KeyCode::Char('k') => {
-                self.handle_kill_from_list();
-            }
+            KeyCode::Char('s') => self.cycle_sort_mode(),
+            KeyCode::Char('d') => self.request_delete(),
+            // `x` kills, behind a real confirmation. `k` deliberately does
+            // not: it is list navigation here, like everywhere else.
+            KeyCode::Char('x') => self.request_kill(),
             KeyCode::Char('p') => {
                 self.handle_pause();
             }
@@ -635,13 +662,17 @@ impl Dashboard {
         }
 
         match key_code {
-            KeyCode::Esc | KeyCode::Char('q') => {
+            // Esc closes the screen (back); `q` quits the app, the same as
+            // everywhere else.
+            KeyCode::Esc => {
                 self.mcp_screen = false;
             }
-            KeyCode::Up => {
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('?') => self.show_help = true,
+            KeyCode::Up | KeyCode::Char('k') => {
                 self.mcp_selected = self.mcp_selected.saturating_sub(1);
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 if !self.mcp_rows.is_empty() && self.mcp_selected + 1 < self.mcp_rows.len() {
                     self.mcp_selected += 1;
                 }
@@ -651,7 +682,7 @@ impl Dashboard {
                 self.mcp_add_input.clear();
             }
             KeyCode::Char('d') => {
-                self.mcp_remove_selected();
+                self.mcp_request_remove();
             }
             KeyCode::Char('l') => {
                 self.mcp_login_selected();
@@ -663,56 +694,6 @@ impl Dashboard {
                 self.refresh_mcp_rows();
             }
             _ => {}
-        }
-    }
-
-    fn handle_cancel_from_list(&mut self) {
-        if let Some(agent) = self.selected_agent()
-            && agent.status.is_killable()
-        {
-            let agent_id = agent.id.clone();
-            let _ = self.cmd_tx.send(DaemonCommand::Cancel {
-                run_id: agent_id.clone(),
-            });
-            // See the comment in `handle_kill_from_detail` - the index is still
-            // valid because the `cmd_tx.send` above does not touch
-            // `display_indices`/`agents`/`selected`.
-            let idx = self
-                .selected_agent_raw_idx()
-                .expect("selected_agent() returned Some above");
-            let a = self
-                .agents
-                .get_mut(idx)
-                .expect("index snapshotted from the still-unchanged display_indices/agents above");
-            a.status = AgentDisplayStatus::Cancelled;
-            a.waiting_prompt = None;
-            a.pending_request = None;
-            self.add_log(format!("{}: Cancel requested", agent_id));
-        }
-    }
-
-    fn handle_kill_from_list(&mut self) {
-        if let Some(agent) = self.selected_agent()
-            && agent.status.is_killable()
-        {
-            let agent_id = agent.id.clone();
-            let _ = self.cmd_tx.send(DaemonCommand::Cancel {
-                run_id: agent_id.clone(),
-            });
-            // See the comment in `handle_kill_from_detail` - the index is still
-            // valid because the `cmd_tx.send` above does not touch
-            // `display_indices`/`agents`/`selected`.
-            let idx = self
-                .selected_agent_raw_idx()
-                .expect("selected_agent() returned Some above");
-            let a = self
-                .agents
-                .get_mut(idx)
-                .expect("index snapshotted from the still-unchanged display_indices/agents above");
-            a.status = AgentDisplayStatus::Cancelled;
-            a.waiting_prompt = None;
-            a.pending_request = None;
-            self.add_log(format!("{}: kill requested", agent_id));
         }
     }
 
@@ -877,6 +858,7 @@ mod tests {
             parent_id: None,
             depth: 0,
             started_at: 1000,
+            last_progress_at: None,
             active_until: None,
             waiting_secs: 0,
             graph_info: None,
@@ -916,10 +898,25 @@ mod tests {
     }
 
     #[test]
-    fn key_esc_quits_from_main_list() {
+    fn q_quits_from_the_main_list_and_esc_does_not() {
         let mut dash = make_test_dashboard();
         dash.handle_key(key(KeyCode::Esc));
+        assert!(!dash.should_quit, "Esc dismisses; it never quits");
+        dash.handle_key(key(KeyCode::Char('q')));
         assert!(dash.should_quit);
+    }
+
+    #[test]
+    fn ctrl_c_quits_from_anywhere() {
+        for setup in [false, true] {
+            let mut dash = make_test_dashboard();
+            dash.detail_view = setup;
+            dash.handle_key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('c'),
+                crossterm::event::KeyModifiers::CONTROL,
+            ));
+            assert!(dash.should_quit, "detail={setup}");
+        }
     }
 
     #[test]
@@ -988,10 +985,14 @@ mod tests {
     }
 
     #[test]
-    fn help_overlay_dismissed_by_any_key() {
+    fn help_overlay_dismissed_only_deliberately() {
         let mut dash = make_test_dashboard();
         dash.show_help = true;
+        // A stray key is ignored: it neither closes help nor acts underneath.
         dash.handle_key(key(KeyCode::Char('x')));
+        assert!(dash.show_help);
+        assert!(dash.pending_confirm.is_none(), "x did not open a dialog");
+        dash.handle_key(key(KeyCode::Esc));
         assert!(!dash.show_help);
     }
 
@@ -1133,20 +1134,38 @@ mod tests {
     }
 
     #[test]
-    fn confirm_delete_y_confirms() {
+    fn the_delete_dialog_confirms_with_y_and_deletes() {
         let mut dash = make_test_dashboard();
-        dash.confirm_delete = true;
-        // No agent to actually delete, but the flag should clear
+        dash.agents
+            .push(make_test_agent("run-del", AgentDisplayStatus::Complete));
+        dash.update_display_indices();
+        dash.handle_key(key(KeyCode::Char('d')));
+        assert!(dash.pending_confirm.is_some(), "d opens the dialog");
+
         dash.handle_key(key(KeyCode::Char('y')));
-        assert!(!dash.confirm_delete);
+        assert!(dash.pending_confirm.is_none());
+        assert!(
+            dash.agents.is_empty(),
+            "confirming removes the run from the list"
+        );
     }
 
     #[test]
-    fn confirm_delete_any_key_cancels() {
+    fn the_delete_dialog_ignores_stray_keys_and_enter_declines() {
         let mut dash = make_test_dashboard();
-        dash.confirm_delete = true;
-        dash.handle_key(key(KeyCode::Char('x')));
-        assert!(!dash.confirm_delete);
+        dash.agents
+            .push(make_test_agent("run-keep", AgentDisplayStatus::Complete));
+        dash.update_display_indices();
+        dash.handle_key(key(KeyCode::Char('d')));
+
+        // A stray key neither confirms nor dismisses.
+        dash.handle_key(key(KeyCode::Char('z')));
+        assert!(dash.pending_confirm.is_some());
+
+        // Enter activates the focused button, which defaults to No.
+        dash.handle_key(key(KeyCode::Enter));
+        assert!(dash.pending_confirm.is_none());
+        assert_eq!(dash.agents.len(), 1, "declining deletes nothing");
     }
 
     #[test]
@@ -1732,61 +1751,75 @@ mod tests {
         assert_eq!(dash.agents[0].status, AgentDisplayStatus::Active);
     }
 
-    // ─── handle_cancel_from_list ──────────────────────────────────────────
+    // ─── kill via x + confirmation ────────────────────────────────────────
 
+    /// `c` no longer cancels from the list (it was an unconfirmed kill by
+    /// another name); it is simply unbound there.
     #[test]
-    fn cancel_from_list_active_agent() {
-        let mut dash = make_test_dashboard();
+    fn c_in_the_main_list_does_nothing() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
         dash.agents
             .push(make_test_agent("run-1", AgentDisplayStatus::Active));
         dash.update_display_indices();
         dash.handle_key(key(KeyCode::Char('c')));
-        // Agent should be cancelled (is_run_state = true, pid = 0)
-        assert_cancelled(&dash.agents[0].status);
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Active);
+        assert!(cmd_rx.try_recv().is_err());
     }
 
+    /// `k` navigates; it must never kill. The kill key is `x`, behind a
+    /// confirmation.
     #[test]
-    fn cancel_from_list_complete_agent_no_op() {
-        let mut dash = make_test_dashboard();
+    fn k_in_the_main_list_moves_the_cursor_not_the_daemon() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
         dash.agents
-            .push(make_test_agent("run-1", AgentDisplayStatus::Complete));
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.agents
+            .push(make_test_agent("run-2", AgentDisplayStatus::Active));
         dash.update_display_indices();
-        dash.handle_key(key(KeyCode::Char('c')));
-        // Should remain Complete
-        assert_complete(&dash.agents[0].status);
+        dash.selected = 1;
+        dash.table_state.select(Some(1));
+        dash.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(dash.selected, 0, "k moves up");
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Active);
+        assert!(cmd_rx.try_recv().is_err(), "nothing was killed");
     }
 
     /// Every state that is not a finished one can be killed. A gate of only
     /// `Active | Waiting` would make a run showing IDLE or STALE - exactly the
     /// states a user reaches for the kill key in - unkillable.
     #[test]
-    fn every_unfinished_state_can_be_killed() {
+    fn every_unfinished_state_can_be_killed_after_confirming() {
         for status in [
             AgentDisplayStatus::Active,
             AgentDisplayStatus::Waiting,
             AgentDisplayStatus::Idle,
             AgentDisplayStatus::Stale,
         ] {
-            for key_code in ['c', 'k'] {
-                let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
-                let mut dash = Dashboard::new(cmd_tx);
-                dash.agents.push(make_test_agent("run-1", status.clone()));
-                dash.update_display_indices();
-                dash.handle_key(key(KeyCode::Char(key_code)));
+            let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+            let mut dash = Dashboard::new(cmd_tx);
+            dash.agents.push(make_test_agent("run-1", status.clone()));
+            dash.update_display_indices();
+            dash.handle_key(key(KeyCode::Char('x')));
+            assert!(
+                dash.pending_confirm.is_some(),
+                "{status:?} must open the kill dialog"
+            );
+            dash.handle_key(key(KeyCode::Char('y')));
 
-                assert_eq!(
-                    cmd_rx.try_recv().unwrap(),
-                    DaemonCommand::Cancel {
-                        run_id: "run-1".to_string()
-                    },
-                    "{status:?} must be killable via '{key_code}'"
-                );
-            }
+            assert_eq!(
+                cmd_rx.try_recv().unwrap(),
+                DaemonCommand::Cancel {
+                    run_id: "run-1".to_string()
+                },
+                "{status:?} must be killable via x + confirm"
+            );
         }
     }
 
-    /// …and a finished run is left alone: there is nothing to kill, and asking
-    /// the daemon would just produce a spurious failure toast.
+    /// …and a finished run is left alone: `x` does not even open the dialog,
+    /// so there is nothing to mis-confirm.
     #[test]
     fn a_finished_run_is_not_killed() {
         for status in [
@@ -1799,8 +1832,9 @@ mod tests {
             let mut dash = Dashboard::new(cmd_tx);
             dash.agents.push(make_test_agent("run-1", status.clone()));
             dash.update_display_indices();
-            dash.handle_key(key(KeyCode::Char('k')));
+            dash.handle_key(key(KeyCode::Char('x')));
 
+            assert!(dash.pending_confirm.is_none(), "{status:?}: no dialog");
             assert!(
                 cmd_rx.try_recv().is_err(),
                 "{status:?} must not be re-killed"
@@ -1808,8 +1842,24 @@ mod tests {
         }
     }
 
+    /// Declining the kill dialog leaves the run exactly as it was.
     #[test]
-    fn cancel_from_list_waiting_agent_clears_local_state_and_cancels() {
+    fn declining_the_kill_dialog_kills_nothing() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.handle_key(key(KeyCode::Char('x')));
+        dash.handle_key(key(KeyCode::Esc));
+
+        assert!(dash.pending_confirm.is_none());
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Active);
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn confirmed_kill_clears_local_waiting_state_and_cancels() {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         let mut dash = Dashboard::new(cmd_tx);
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
@@ -1819,10 +1869,12 @@ mod tests {
         ));
         dash.agents.push(agent);
         dash.update_display_indices();
-        dash.handle_key(key(KeyCode::Char('c')));
+        dash.handle_key(key(KeyCode::Char('x')));
+        dash.handle_key(key(KeyCode::Char('y')));
 
         assert_cancelled(&dash.agents[0].status);
         assert!(dash.agents[0].pending_request.is_none());
+        assert!(dash.agents[0].waiting_prompt.is_none());
         assert_eq!(
             cmd_rx.try_recv().unwrap(),
             DaemonCommand::Cancel {
@@ -1832,92 +1884,134 @@ mod tests {
     }
 
     #[test]
-    fn cancel_from_list_with_pid_sends_signal() {
-        // See kill_from_detail_with_pid_sends_signal for why this PID value
-        // is safe: implausibly large, guaranteed ESRCH no-op.
-        let mut dash = make_test_dashboard();
-        let agent = make_test_agent("run-1", AgentDisplayStatus::Active);
-        dash.agents.push(agent);
-        dash.update_display_indices();
-        dash.handle_key(key(KeyCode::Char('c')));
-        assert_cancelled(&dash.agents[0].status);
-    }
-
-    // ─── handle_kill_from_list ─────────────────────────────────────────────
-
-    #[test]
-    fn kill_from_list_active_agent() {
-        let mut dash = make_test_dashboard();
-        dash.agents
-            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
-        dash.update_display_indices();
-        dash.handle_key(key(KeyCode::Char('k')));
-        assert_cancelled(&dash.agents[0].status);
-    }
-
-    #[test]
-    fn kill_from_list_waiting_agent() {
-        let mut dash = make_test_dashboard();
-        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.waiting_prompt = Some("prompt".to_string());
-        dash.agents.push(agent);
-        dash.update_display_indices();
-        dash.handle_key(key(KeyCode::Char('k')));
-        assert_cancelled(&dash.agents[0].status);
-        assert!(dash.agents[0].waiting_prompt.is_none());
-    }
-
-    #[test]
-    fn kill_from_list_complete_agent_no_op() {
-        let mut dash = make_test_dashboard();
-        dash.agents
-            .push(make_test_agent("run-1", AgentDisplayStatus::Complete));
-        dash.update_display_indices();
-        dash.handle_key(key(KeyCode::Char('k')));
-        assert_complete(&dash.agents[0].status);
-    }
-
-    #[test]
-    fn kill_from_list_with_pid_sends_signal() {
-        // See kill_from_detail_with_pid_sends_signal for why this PID value
-        // is safe: implausibly large, guaranteed ESRCH no-op.
-        let mut dash = make_test_dashboard();
-        let agent = make_test_agent("run-1", AgentDisplayStatus::Active);
-        dash.agents.push(agent);
-        dash.update_display_indices();
-        dash.handle_key(key(KeyCode::Char('k')));
-        assert_cancelled(&dash.agents[0].status);
-    }
-
-    #[test]
     fn main_list_d_no_agent_selected_is_noop() {
         let mut dash = make_test_dashboard();
         dash.handle_key(key(KeyCode::Char('d')));
-        assert!(!dash.confirm_delete);
+        assert!(dash.pending_confirm.is_none());
         assert!(dash.agents.is_empty());
     }
 
     #[test]
-    fn cancel_from_list_no_agent_selected_is_noop() {
+    fn x_with_no_agent_selected_is_a_noop() {
         let mut dash = make_test_dashboard();
-        // No agents at all - selected_agent() is None.
-        dash.handle_key(key(KeyCode::Char('c')));
-        assert!(dash.agents.is_empty());
-    }
+        dash.handle_key(key(KeyCode::Char('x')));
+        assert!(dash.pending_confirm.is_none());
 
-    #[test]
-    fn kill_from_list_no_agent_selected_is_noop() {
-        let mut dash = make_test_dashboard();
-        dash.handle_key(key(KeyCode::Char('k')));
-        assert!(dash.agents.is_empty());
-    }
-
-    #[test]
-    fn kill_from_detail_no_agent_selected_is_noop() {
-        let mut dash = make_test_dashboard();
         dash.detail_view = true;
+        dash.handle_key(key(KeyCode::Char('x')));
+        assert!(dash.pending_confirm.is_none());
+    }
+
+    #[test]
+    fn tab_focuses_the_log_pane_and_its_keys_scroll() {
+        let mut dash = make_test_dashboard();
+        // The seeded log tail is shared test state; a known length makes the
+        // scroll arithmetic below deterministic.
+        dash.log.clear();
+        for i in 0..50 {
+            dash.log.push(LogEntry {
+                timestamp: "12:00:00".to_string(),
+                message: format!("line {i}"),
+            });
+        }
+        dash.log_viewport = 10;
+        dash.handle_key(key(KeyCode::Tab));
+        assert_eq!(dash.main_focus, MainPane::LogPane);
+
+        dash.handle_key(key(KeyCode::Up));
         dash.handle_key(key(KeyCode::Char('k')));
-        assert!(dash.agents.is_empty());
+        assert_eq!(dash.log_scroll.offset_from_tail, 2);
+        dash.handle_key(key(KeyCode::PageUp));
+        assert_eq!(dash.log_scroll.offset_from_tail, 12);
+        dash.handle_key(key(KeyCode::Down));
+        dash.handle_key(key(KeyCode::Char('j')));
+        dash.handle_key(key(KeyCode::PageDown));
+        assert_eq!(dash.log_scroll.offset_from_tail, 0);
+
+        dash.handle_key(key(KeyCode::Home));
+        assert_eq!(dash.log_scroll.offset_from_tail, 40);
+        dash.handle_key(key(KeyCode::End));
+        assert!(dash.log_scroll.is_tailing());
+        dash.handle_key(key(KeyCode::Char('g')));
+        assert!(!dash.log_scroll.is_tailing());
+        dash.handle_key(key(KeyCode::Char('G')));
+        assert!(dash.log_scroll.is_tailing());
+
+        // ? opens help from the log pane; a stray key is ignored.
+        dash.handle_key(key(KeyCode::Char('?')));
+        assert!(dash.show_help);
+        dash.handle_key(key(KeyCode::Esc));
+        assert!(!dash.show_help);
+        dash.handle_key(key(KeyCode::Char('z')));
+
+        // Esc hands focus back to the list; q quits from the pane.
+        dash.handle_key(key(KeyCode::Esc));
+        assert_eq!(dash.main_focus, MainPane::RunList);
+        dash.handle_key(key(KeyCode::Tab));
+        dash.handle_key(key(KeyCode::Char('q')));
+        assert!(dash.should_quit);
+    }
+
+    #[test]
+    fn home_end_and_enter_navigate_the_main_list() {
+        let mut dash = make_test_dashboard();
+        let mut a = make_test_agent("run-1", AgentDisplayStatus::Active);
+        a.stage_index = 1;
+        a.num_stages = 3;
+        dash.agents.push(a);
+        dash.agents
+            .push(make_test_agent("run-2", AgentDisplayStatus::Active));
+        dash.agents
+            .push(make_test_agent("run-3", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+
+        dash.handle_key(key(KeyCode::End));
+        assert_eq!(dash.selected, 2);
+        dash.handle_key(key(KeyCode::Home));
+        assert_eq!(dash.selected, 0);
+        dash.handle_key(key(KeyCode::Char('G')));
+        assert_eq!(dash.selected, 2);
+        dash.handle_key(key(KeyCode::Char('g')));
+        assert_eq!(dash.selected, 0);
+
+        // Enter opens the detail view at the selected run's current stage.
+        dash.handle_key(key(KeyCode::Enter));
+        assert!(dash.detail_view);
+        assert_eq!(dash.selected_stage, 1);
+
+        // With no rows at all, the same keys are no-ops.
+        let mut empty = make_test_dashboard();
+        for code in [KeyCode::Home, KeyCode::End, KeyCode::Enter] {
+            empty.handle_key(key(code));
+        }
+        assert!(!empty.detail_view);
+    }
+
+    #[test]
+    fn s_cycles_the_sort_mode_from_the_keyboard() {
+        let mut dash = make_test_dashboard();
+        assert_eq!(dash.sort_mode, SortMode::StartedAt);
+        dash.handle_key(key(KeyCode::Char('s')));
+        assert_eq!(dash.sort_mode, SortMode::RecentActivity);
+    }
+
+    #[test]
+    fn the_confirm_handler_declines_to_act_without_a_dialog() {
+        let mut dash = make_test_dashboard();
+        dash.handle_confirm_key(&crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        assert!(dash.pending_confirm.is_none());
+        assert!(!dash.should_quit);
+    }
+
+    #[test]
+    fn question_mark_opens_help_on_the_mcp_screen() {
+        let mut dash = make_test_dashboard();
+        dash.mcp_screen = true;
+        dash.handle_key(key(KeyCode::Char('?')));
+        assert!(dash.show_help);
     }
 
     #[test]
@@ -1940,7 +2034,7 @@ mod tests {
         assert!(dash.agents.is_empty());
     }
 
-    // ─── handle_kill_from_detail ──────────────────────────────────────────
+    // ─── kill from the detail view ────────────────────────────────────────
 
     #[test]
     fn kill_from_detail_active_agent() {
@@ -1949,7 +2043,8 @@ mod tests {
             .push(make_test_agent("run-1", AgentDisplayStatus::Active));
         dash.update_display_indices();
         dash.detail_view = true;
-        dash.handle_key(key(KeyCode::Char('k')));
+        dash.handle_key(key(KeyCode::Char('x')));
+        dash.handle_key(key(KeyCode::Char('y')));
         assert_cancelled(&dash.agents[0].status);
     }
 
@@ -1960,28 +2055,13 @@ mod tests {
             .push(make_test_agent("run-1", AgentDisplayStatus::Complete));
         dash.update_display_indices();
         dash.detail_view = true;
-        dash.handle_key(key(KeyCode::Char('k')));
-        // Should remain complete
+        dash.handle_key(key(KeyCode::Char('x')));
+        assert!(dash.pending_confirm.is_none());
         assert_complete(&dash.agents[0].status);
     }
 
     #[test]
-    fn kill_from_detail_with_pid_sends_signal() {
-        // Exercise the `pid > 0` unix-kill branch. Use an implausibly large
-        // PID (near i32::MAX, far beyond any real PID_MAX) so `libc::kill`
-        // is guaranteed to be a harmless no-op (ESRCH) rather than risking
-        // sending SIGTERM to a real, unrelated process.
-        let mut dash = make_test_dashboard();
-        let agent = make_test_agent("run-1", AgentDisplayStatus::Active);
-        dash.agents.push(agent);
-        dash.update_display_indices();
-        dash.detail_view = true;
-        dash.handle_key(key(KeyCode::Char('k')));
-        assert_cancelled(&dash.agents[0].status);
-    }
-
-    #[test]
-    fn kill_from_detail_waiting_agent_clears_local_state_and_cancels() {
+    fn confirmed_kill_from_detail_resets_input_state() {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         let mut dash = Dashboard::new(cmd_tx);
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
@@ -1992,10 +2072,12 @@ mod tests {
         dash.agents.push(agent);
         dash.update_display_indices();
         dash.detail_view = true;
-        dash.handle_key(key(KeyCode::Char('k')));
+        dash.handle_key(key(KeyCode::Char('x')));
+        dash.handle_key(key(KeyCode::Char('y')));
 
         assert_cancelled(&dash.agents[0].status);
         assert!(dash.agents[0].pending_request.is_none());
+        assert!(!dash.input_mode);
         assert_eq!(
             cmd_rx.try_recv().unwrap(),
             DaemonCommand::Cancel {
@@ -2118,7 +2200,7 @@ mod tests {
             .push(make_test_agent("run-1", AgentDisplayStatus::Active));
         dash.update_display_indices();
         dash.handle_key(key(KeyCode::Char('d')));
-        assert!(dash.confirm_delete);
+        assert!(dash.pending_confirm.is_some());
     }
 
     // ─── detail view: review scroll ───────────────────────────────────────
@@ -2500,7 +2582,8 @@ mod tests {
         dash.update_display_indices();
         dash.detail_view = true;
 
-        dash.handle_key(key(KeyCode::Char('k')));
+        dash.handle_key(key(KeyCode::Char('x')));
+        dash.handle_key(key(KeyCode::Char('y')));
 
         assert_eq!(dash.agents[0].status, AgentDisplayStatus::Cancelled);
 
@@ -2509,24 +2592,7 @@ mod tests {
         assert!(cmd.is_ok());
     }
 
-    // ─── handle_cancel_from_list for in-process agent ─────────────────────
-
-    #[test]
-    fn cancel_from_list_in_process_agent_sends_command() {
-        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
-        let mut dash = Dashboard::new(cmd_tx);
-        let agent = make_test_agent("run-1", AgentDisplayStatus::Active);
-        dash.agents.push(agent);
-        dash.update_display_indices();
-
-        dash.handle_key(key(KeyCode::Char('c')));
-
-        // Should have sent CancelAgent command (no status change for in-process cancel)
-        let cmd = cmd_rx.try_recv();
-        assert!(cmd.is_ok());
-    }
-
-    // ─── handle_kill_from_list for in-process agent ───────────────────────
+    // ─── x + confirm from the list for in-process agent ───────────────────
 
     #[test]
     fn kill_from_list_in_process_agent_sends_command() {
@@ -2536,7 +2602,8 @@ mod tests {
         dash.agents.push(agent);
         dash.update_display_indices();
 
-        dash.handle_key(key(KeyCode::Char('k')));
+        dash.handle_key(key(KeyCode::Char('x')));
+        dash.handle_key(key(KeyCode::Char('y')));
 
         assert_eq!(dash.agents[0].status, AgentDisplayStatus::Cancelled);
 
@@ -2974,30 +3041,10 @@ mod tests {
         assert_eq!(dash.selected, 2);
     }
 
-    // ─── handle_cancel_from_list: pending_request cleared for run-state ───
-
-    #[test]
-    fn cancel_from_list_run_state_agent_clears_pending_request() {
-        // Exercises line 493: `a.pending_request = None;` in handle_cancel_from_list.
-        let mut dash = make_test_dashboard();
-        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
-        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::free_text(
-            "r1", "?", "main", true,
-        ));
-        dash.agents.push(agent);
-        dash.update_display_indices();
-
-        dash.handle_key(key(KeyCode::Char('c')));
-
-        assert!(dash.agents[0].pending_request.is_none());
-        assert_cancelled(&dash.agents[0].status);
-    }
-
-    // ─── handle_kill_from_list: pending_request cleared ───────────────────
+    // ─── confirmed kill clears pending_request (list and detail) ──────────
 
     #[test]
     fn kill_from_list_run_state_agent_clears_pending_request() {
-        // Exercises line 531: `a.pending_request = None;` in handle_kill_from_list.
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
         agent.pending_request = Some(leviath_core::interaction::InteractionRequest::free_text(
@@ -3006,17 +3053,15 @@ mod tests {
         dash.agents.push(agent);
         dash.update_display_indices();
 
-        dash.handle_key(key(KeyCode::Char('k')));
+        dash.handle_key(key(KeyCode::Char('x')));
+        dash.handle_key(key(KeyCode::Char('y')));
 
         assert!(dash.agents[0].pending_request.is_none());
         assert_cancelled(&dash.agents[0].status);
     }
 
-    // ─── handle_kill_from_detail: pending_request cleared ─────────────────
-
     #[test]
     fn kill_from_detail_run_state_agent_clears_pending_request() {
-        // Exercises line 392: `a.pending_request = None;` in handle_kill_from_detail.
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
         agent.pending_request = Some(leviath_core::interaction::InteractionRequest::free_text(
@@ -3026,7 +3071,8 @@ mod tests {
         dash.update_display_indices();
         dash.detail_view = true;
 
-        dash.handle_key(key(KeyCode::Char('k')));
+        dash.handle_key(key(KeyCode::Char('x')));
+        dash.handle_key(key(KeyCode::Char('y')));
 
         assert!(dash.agents[0].pending_request.is_none());
         assert_cancelled(&dash.agents[0].status);
@@ -3085,16 +3131,17 @@ mod tests {
     }
 
     #[test]
-    fn q_and_esc_close_the_mcp_screen() {
+    fn esc_closes_the_mcp_screen_and_q_quits_the_app() {
         let dir = tempfile::tempdir().unwrap();
         let mut dash = mcp_dash(dir.path());
         dash.mcp_screen = true;
-        dash.handle_key(key(KeyCode::Char('q')));
-        assert!(!dash.mcp_screen);
-
-        dash.mcp_screen = true;
         dash.handle_key(key(KeyCode::Esc));
         assert!(!dash.mcp_screen);
+        assert!(!dash.should_quit);
+
+        dash.mcp_screen = true;
+        dash.handle_key(key(KeyCode::Char('q')));
+        assert!(dash.should_quit, "q means quit here like everywhere else");
     }
 
     #[test]
@@ -3166,7 +3213,7 @@ mod tests {
     }
 
     #[test]
-    fn d_deletes_the_selected_server() {
+    fn d_removes_the_selected_server_after_confirming() {
         let dir = tempfile::tempdir().unwrap();
         let mut dash = mcp_dash(dir.path());
         dash.mcp_add_from_line("gone npx");
@@ -3174,6 +3221,9 @@ mod tests {
         dash.mcp_screen = true;
         dash.mcp_selected = 0;
         dash.handle_key(key(KeyCode::Char('d')));
+        assert!(dash.pending_confirm.is_some(), "d asks first");
+        assert_eq!(dash.mcp_rows.len(), 1, "nothing removed yet");
+        dash.handle_key(key(KeyCode::Char('y')));
         assert!(dash.mcp_rows.is_empty());
     }
 

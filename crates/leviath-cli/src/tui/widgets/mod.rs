@@ -10,3 +10,4 @@ pub(crate) mod footer;
 pub(crate) mod help;
 pub(crate) mod line_edit;
 pub(crate) mod popup;
+pub(crate) mod scroll;

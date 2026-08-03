@@ -775,6 +775,7 @@ mod tests {
             parent_id: None,
             depth: 0,
             started_at: chrono::Utc::now().timestamp() - 60,
+            last_progress_at: None,
             active_until: None,
             waiting_secs: 0,
             graph_info: None,
