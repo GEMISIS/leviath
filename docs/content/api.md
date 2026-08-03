@@ -1,5 +1,6 @@
 ---
 title: HTTP API
+description: Every REST route and WebSocket stream `lev serve` exposes, with its auth model and payload shapes.
 group: Reference
 group_order: 3
 order: 2

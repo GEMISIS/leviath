@@ -1,5 +1,6 @@
 ---
 title: Dashboard
+description: The `lev dash` terminal UI for watching a fleet of runs, answering their questions, and steering them.
 group: Guides
 group_order: 4
 order: 1

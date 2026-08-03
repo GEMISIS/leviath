@@ -1,5 +1,6 @@
 ---
 title: Releases and channels
+description: How the alpha, beta, and stable channels work, and why stable ships the byte-for-byte alpha build.
 group: Guides
 group_order: 4
 order: 5

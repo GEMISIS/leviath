@@ -1,5 +1,6 @@
 ---
 title: Agent catalog
+description: The ten pre-built agents Leviath ships, what each one is for, and the command to run it.
 group: Get started
 group_order: 1
 order: 2

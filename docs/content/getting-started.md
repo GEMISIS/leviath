@@ -1,5 +1,6 @@
 ---
 title: Getting Started
+description: Install Leviath, configure a provider, and run your first agent, in four steps.
 group: Get started
 group_order: 1
 order: 1

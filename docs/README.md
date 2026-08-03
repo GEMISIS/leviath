@@ -36,6 +36,7 @@ look. You do not run a build here; you write Markdown, and it ships on the next 
    ```markdown
    ---
    title: My Feature
+   description: What a reader gets from this page, in one sentence.
    group: Concepts
    group_order: 2
    order: 9
@@ -46,6 +47,10 @@ look. You do not run a build here; you write Markdown, and it ships on the next 
      number for every page in a section. Current sections: `Get started` (1), `Concepts` (2),
      `Reference` (3), `Guides` (4), `Integrations` (5).
    - `order` is the page's position within its section.
+   - `description` is one sentence, under 160 characters. It is the line beside this page's link in
+     [`llms.txt`](https://leviath.dev/llms.txt), which is how a coding agent decides whether to fetch
+     the page at all. Say what the reader gets, not what the page is called. A description that
+     restates the title costs the agent a wasted round trip.
 
 3. Write the page. You can use:
    - Fenced code blocks with a language for highlighting (```bash, ```toml, ```rhai).

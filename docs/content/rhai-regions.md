@@ -1,5 +1,6 @@
 ---
 title: Rhai regions
+description: Write a context region's behaviour in Rhai when none of the built-in kinds does what you want.
 group: Reference
 group_order: 3
 order: 9

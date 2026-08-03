@@ -1,5 +1,6 @@
 ---
 title: Gas City
+description: Wiring Leviath into Gas City as the agent backend behind its orchestration.
 group: Integrations
 group_order: 5
 order: 2

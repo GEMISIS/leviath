@@ -1,5 +1,6 @@
 ---
 title: MCP tool servers
+description: Connect Leviath to Model Context Protocol servers over stdio or HTTP, giving agents tools beyond the built-ins.
 group: Reference
 group_order: 3
 order: 5

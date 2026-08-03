@@ -1,5 +1,6 @@
 ---
 title: Agent blueprints
+description: The agent.leviath blueprint format: the TOML defining an agent's stages, models, tools, and context layout.
 group: Concepts
 group_order: 2
 order: 3

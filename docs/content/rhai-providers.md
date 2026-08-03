@@ -1,5 +1,6 @@
 ---
 title: Rhai providers
+description: Teach Leviath any HTTP model API with a Rhai script, without waiting for it to be added upstream.
 group: Reference
 group_order: 3
 order: 8

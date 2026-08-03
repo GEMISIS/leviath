@@ -1,5 +1,6 @@
 ---
 title: The daemon
+description: The background daemon that owns every run, so agents survive a closed terminal and share one process.
 group: Concepts
 group_order: 2
 order: 1

@@ -1,5 +1,6 @@
 ---
 title: Smithy
+description: How Leviath relates to Smithy, and why Smithy has no documented agent-backend seam today.
 group: Integrations
 group_order: 5
 order: 3

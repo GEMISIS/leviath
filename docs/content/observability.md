@@ -1,5 +1,6 @@
 ---
 title: Observability
+description: Export traces, metrics, and logs over OpenTelemetry so your dashboards can answer which run is stuck.
 group: Reference
 group_order: 3
 order: 12

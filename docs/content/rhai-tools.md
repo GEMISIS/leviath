@@ -1,5 +1,6 @@
 ---
 title: Rhai tools & policy rules
+description: Declare new agent tools in Rhai, and write policy rules deciding whether a tool call may fire.
 group: Reference
 group_order: 3
 order: 10

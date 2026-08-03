@@ -1,5 +1,6 @@
 ---
 title: Rhai scripting
+description: Why Leviath embeds the Rhai scripting language, and what you can extend with it.
 group: Reference
 group_order: 3
 order: 7

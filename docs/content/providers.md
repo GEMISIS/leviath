@@ -1,5 +1,6 @@
 ---
 title: Providers
+description: Configure Anthropic, OpenAI, Google, OpenRouter, or a local Ollama, and choose which model each stage uses.
 group: Reference
 group_order: 3
 order: 6

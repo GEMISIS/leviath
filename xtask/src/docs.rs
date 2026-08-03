@@ -41,6 +41,10 @@ pub struct Page {
     pub title: Option<String>,
     /// Frontmatter `group_order`, if present.
     pub group_order: Option<String>,
+    /// Frontmatter `description`, if present. One sentence, and the only thing
+    /// an agent reading `llms.txt` sees before it decides whether to fetch the
+    /// page, so a missing or padded one costs it a wasted round trip.
+    pub description: Option<String>,
     /// Anchors this page offers: heading slugs plus any `<a id="...">`.
     pub anchors: HashSet<String>,
     /// `/docs/<slug>` links found in the body, as `(slug, Option<anchor>)`.
@@ -148,6 +152,7 @@ fn record_frontmatter(page: &mut Page, line: &str) {
         "group" => page.group = Some(value),
         "group_order" => page.group_order = Some(value),
         "order" => page.order = Some(value),
+        "description" => page.description = Some(value),
         _ => {}
     }
 }
@@ -205,17 +210,37 @@ pub fn check_all(pages: &[Page]) -> Vec<String> {
     problems
 }
 
-/// Every page needs all four frontmatter keys.
+/// The ceiling on a `description`, in characters.
+///
+/// `llms.txt` renders one per page as a single line. Past roughly this length a
+/// description stops being a routing hint and becomes the page, which is the
+/// failure this bound exists to prevent.
+pub const MAX_DESCRIPTION_CHARS: usize = 160;
+
+/// Every page needs all five frontmatter keys, and `description` has to stay
+/// short enough to be a one-line routing hint.
 fn check_frontmatter(page: &Page, problems: &mut Vec<String>) {
     let missing = [
         ("title", page.title.is_none()),
         ("group", page.group.is_none()),
         ("group_order", page.group_order.is_none()),
         ("order", page.order.is_none()),
+        ("description", page.description.is_none()),
     ];
     for (key, absent) in missing {
         if absent {
             problems.push(format!("{}.md: frontmatter is missing `{key}`", page.slug));
+        }
+    }
+    // Counted in chars, not bytes: the workspace denies `clippy::string_slice`
+    // for the same reason, and a description may hold non-ASCII.
+    if let Some(description) = &page.description {
+        let length = description.chars().count();
+        if length > MAX_DESCRIPTION_CHARS {
+            problems.push(format!(
+                "{}.md: description is {length} chars, over the {MAX_DESCRIPTION_CHARS} limit",
+                page.slug
+            ));
         }
     }
 }

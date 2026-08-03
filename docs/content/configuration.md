@@ -1,5 +1,6 @@
 ---
 title: Configuration
+description: Every key in ~/.leviath/config.toml, with its type and default.
 group: Reference
 group_order: 3
 order: 1

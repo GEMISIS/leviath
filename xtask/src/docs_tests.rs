@@ -7,8 +7,9 @@ use super::*;
 
 /// A well-formed page with an explicit `order`.
 fn page_with(slug: &str, order: usize, body: &str) -> Page {
-    let source =
-        format!("---\ntitle: T\ngroup: Concepts\ngroup_order: 2\norder: {order}\n---\n\n{body}\n");
+    let source = format!(
+        "---\ntitle: T\ndescription: D\ngroup: Concepts\ngroup_order: 2\norder: {order}\n---\n\n{body}\n"
+    );
     parse_page(slug, &source)
 }
 
@@ -73,9 +74,54 @@ fn heading_text_strips_inline_markup() {
 fn frontmatter_keys_are_read() {
     let p = page_with("api", 1, "# API");
     assert_eq!(p.title.as_deref(), Some("T"));
+    assert_eq!(p.description.as_deref(), Some("D"));
     assert_eq!(p.group.as_deref(), Some("Concepts"));
     assert_eq!(p.group_order.as_deref(), Some("2"));
     assert_eq!(p.order.as_deref(), Some("1"));
+}
+
+#[test]
+fn a_missing_description_is_reported() {
+    // The one frontmatter key an agent reads before deciding whether to fetch
+    // the page. Without it `llms.txt` is a bare link list again.
+    let src = "---\ntitle: T\ngroup: G\ngroup_order: 1\norder: 1\n---\n\n# Hi\n";
+    let problems = check_all(&[parse_page("x", src)]);
+    assert!(problems.iter().any(|p| p.contains("missing `description`")));
+}
+
+#[test]
+fn a_description_at_the_limit_is_accepted() {
+    let description = "d".repeat(MAX_DESCRIPTION_CHARS);
+    let src = format!(
+        "---\ntitle: T\ndescription: {description}\ngroup: G\ngroup_order: 1\norder: 1\n---\n\n# Hi\n"
+    );
+    let problems = check_all(&[parse_page("x", &src)]);
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[test]
+fn an_over_long_description_is_reported() {
+    let description = "d".repeat(MAX_DESCRIPTION_CHARS + 1);
+    let src = format!(
+        "---\ntitle: T\ndescription: {description}\ngroup: G\ngroup_order: 1\norder: 1\n---\n\n# Hi\n"
+    );
+    let problems = check_all(&[parse_page("x", &src)]);
+    assert!(
+        problems.iter().any(|p| p.contains("over the")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn a_description_is_measured_in_chars_not_bytes() {
+    // Every char here is 4 bytes, so a byte-counting check would reject a
+    // description well inside the limit.
+    let description = "🌊".repeat(MAX_DESCRIPTION_CHARS);
+    let src = format!(
+        "---\ntitle: T\ndescription: {description}\ngroup: G\ngroup_order: 1\norder: 1\n---\n\n# Hi\n"
+    );
+    let problems = check_all(&[parse_page("x", &src)]);
+    assert!(problems.is_empty(), "{problems:?}");
 }
 
 #[test]
@@ -232,7 +278,8 @@ fn two_pages_claiming_one_order_are_reported() {
 #[test]
 fn pages_in_different_groups_may_share_an_order() {
     let a = page_with("a", 1, "text");
-    let src = "---\ntitle: T\ngroup: Guides\ngroup_order: 4\norder: 1\n---\n\ntext\n";
+    let src =
+        "---\ntitle: T\ndescription: D\ngroup: Guides\ngroup_order: 4\norder: 1\n---\n\ntext\n";
     assert!(check_all(&[a, parse_page("b", src)]).is_empty());
 }
 
