@@ -1,6 +1,6 @@
 [agent]
 name = "parallel-fixer"
-version = "0.0.1"
+version = "0.0.2"
 description = "Fixes failing tests in parallel: discover → validate → fan out one worker per failure → merge → verify (re-round until the suite is green)"
 entry_stage = "discover"
 
@@ -20,7 +20,7 @@ shell = "ask"
 # call). This agent has no error_recovery stage, so there is no error edge.
 [stages.discover]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Work out how this project runs its tests"
 available_tools = ["read_file", "read_files", "list_dir", "shell", "context_write"]
 max_iterations = 6
@@ -62,7 +62,7 @@ transform = "direct"
 # Run the test suite and record the set of failing tests + their diagnoses.
 [stages.validate]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Run the tests and diagnose each failure"
 available_tools = ["read_file", "read_files", "list_dir", "shell", "context_write"]
 max_iterations = 20
@@ -97,7 +97,7 @@ transform = "direct"
 # locking prevents concurrent writes to the same file from clobbering.
 [stages.parallel_fix]
 mode = "fan_out"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Fix each failing test in parallel"
 worker_stage = "fix_worker"
 merge_stage = "merge_fixes"
@@ -123,7 +123,7 @@ If `diagnosis` is exactly "NO FAILURES" (or lists none), output exactly: []
 # ─── Worker stage: fix one failing test ──────────────────────────────────────
 [stages.fix_worker]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Fix a single failing test"
 available_tools = ["read_file", "read_files", "edit_file", "shell"]
 max_iterations = 50
@@ -146,7 +146,7 @@ files in parallel.
 # ─── Stage 4: Merge ──────────────────────────────────────────────────────────
 [stages.merge_fixes]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Reconcile the workers' fixes and resolve conflicts"
 available_tools = ["read_file", "read_files", "edit_file", "shell", "context_append"]
 max_iterations = 30
@@ -175,7 +175,7 @@ transform = "compact"
 # residual/interacting failures remain (bounded by validate's max_revisits).
 [stages.verify]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Run the full suite and decide: done, or another fix round"
 available_tools = ["read_file", "read_files", "shell"]
 max_iterations = 10

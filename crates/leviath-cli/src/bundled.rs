@@ -222,6 +222,59 @@ mod tests {
         }
     }
 
+    /// Every provider `lev setup` can configure. Claude Code is a transport
+    /// rather than a provider a stage names, so it is not in this list.
+    const SETUP_PROVIDERS: &[&str] = &["anthropic", "openai", "google", "openrouter", "ollama"];
+
+    #[test]
+    fn every_bundled_stage_offers_every_provider_setup_can_configure() {
+        // Getting Started promises that one provider is all you need. That is
+        // only true if each stage lists them all: a stage naming a subset fails
+        // at spawn on a machine holding a key for a provider it left out.
+        //
+        // Discovered from BUNDLED_AGENTS rather than enumerated, so a new
+        // blueprint is covered the day it lands.
+        for agent in BUNDLED_AGENTS {
+            let manifest = agent
+                .files
+                .iter()
+                .find(|(rel, _)| *rel == "agent.leviath")
+                .map(|(_, c)| *c)
+                .expect("every bundled agent has a manifest");
+            let blueprint =
+                leviath_core::manifest::parse_manifest(manifest).expect("manifest parses");
+
+            for stage in &blueprint.stages {
+                let stage_name = &stage.name;
+                let listed: Vec<&str> = stage
+                    .model
+                    .models
+                    .iter()
+                    .map(|entry| entry.provider.as_str())
+                    .collect();
+                for provider in SETUP_PROVIDERS {
+                    assert!(
+                        listed.contains(provider),
+                        "{}/{} omits provider {}",
+                        agent.name,
+                        stage_name,
+                        provider
+                    );
+                }
+                // Ollama needs no API key, so it registers on every machine. Any
+                // position but last makes it beat a provider the user actually
+                // configured, and the run then dies on its first inference.
+                assert_eq!(
+                    listed.last().copied(),
+                    Some("ollama"),
+                    "{}/{} must list ollama last",
+                    agent.name,
+                    stage_name
+                );
+            }
+        }
+    }
+
     /// The lint env for a bundled agent: the built-ins, the sub-agent tools,
     /// and the agent's own `tools/<name>.rhai`, each of which defines `<name>`.
     ///
