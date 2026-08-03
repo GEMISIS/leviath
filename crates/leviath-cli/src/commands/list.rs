@@ -13,9 +13,15 @@ pub struct ListArgs {
     /// Filter by type (agents, blueprints, all)
     #[arg(short, long, default_value = "all")]
     pub filter: String,
+
+    /// Report the catalog as JSON instead of prose, with each agent's source
+    /// named rather than implied by a heading.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Info parsed from an agent manifest for display.
+#[derive(serde::Serialize)]
 struct AgentInfo {
     name: String,
     version: String,
@@ -25,6 +31,33 @@ struct AgentInfo {
     /// the listing is where someone looks before running an agent they just
     /// installed or copied over from another machine.
     read_paths: Option<String>,
+}
+
+/// One agent in `lev list --json`, with the source the prose report puts in a
+/// heading and the path `lev run` would resolve.
+#[derive(serde::Serialize)]
+struct ListedAgent {
+    #[serde(flatten)]
+    info: AgentInfo,
+    /// `installed`, `configured`, or `local`.
+    source: &'static str,
+    path: String,
+}
+
+/// What `lev list --json` prints.
+#[derive(serde::Serialize)]
+struct ListReport {
+    /// Every agent that can be run by name or path right now.
+    agents: Vec<ListedAgent>,
+    /// The catalog embedded in this binary, which `lev setup` installs from.
+    /// Not runnable until installed, which is why it is a separate key.
+    bundled: Vec<BundledEntry>,
+}
+
+#[derive(serde::Serialize)]
+struct BundledEntry {
+    name: String,
+    version: String,
 }
 
 fn read_agent_info(manifest_path: &Path, config: &Config, cwd: &Path) -> Option<AgentInfo> {
@@ -103,7 +136,7 @@ fn print_agent(info: &AgentInfo) {
     }
 }
 
-pub async fn execute(_args: ListArgs) -> anyhow::Result<()> {
+pub async fn execute(args: ListArgs) -> anyhow::Result<()> {
     // Propagate, don't default: a config that exists but doesn't parse would
     // silently list from the default `agent_paths`, hiding the user's own
     // agent directories with no hint why (a missing file loads as defaults).
@@ -114,7 +147,67 @@ pub async fn execute(_args: ListArgs) -> anyhow::Result<()> {
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()));
 
-    print_agent_listing(&agents_dir, &cwd, exe_dir.as_deref(), &config)
+    match args.json {
+        true => json_agent_listing(&agents_dir, &cwd, &config),
+        false => print_agent_listing(&agents_dir, &cwd, exe_dir.as_deref(), &config),
+    }
+}
+
+/// `lev list --json`: the same three runnable sources the prose report walks,
+/// each agent tagged with where it came from and the path `lev run` resolves.
+///
+/// The on-disk `<exe_dir>/agents` scan the prose report folds into its bundled
+/// line is left out: those entries are not installed, and merging them into a
+/// name-and-version list loses which of the two a name came from.
+fn json_agent_listing(agents_dir: &Path, cwd: &Path, config: &Config) -> anyhow::Result<()> {
+    let report = build_list_report(agents_dir, cwd, config);
+    // Owned strings with no map keys to reject, so this cannot fail.
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report).expect("an agent listing serializes")
+    );
+    Ok(())
+}
+
+/// The report [`json_agent_listing`] prints. Split out so its contents are
+/// assertable without capturing stdout.
+fn build_list_report(agents_dir: &Path, cwd: &Path, config: &Config) -> ListReport {
+    let installed = scan_directory_for_agents(agents_dir, config, cwd);
+    let local = read_agent_info(&cwd.join("agent.leviath"), config, cwd);
+    let configured: Vec<(PathBuf, AgentInfo)> = config
+        .agent_paths
+        .iter()
+        .flat_map(|dir| scan_directory_for_agents(dir, config, cwd))
+        .collect();
+
+    let from = |entries: Vec<(PathBuf, AgentInfo)>, source| {
+        entries.into_iter().map(move |(path, info)| ListedAgent {
+            info,
+            source,
+            path: path.display().to_string(),
+        })
+    };
+    let mut agents: Vec<ListedAgent> = from(installed, "installed")
+        .chain(from(configured, "configured"))
+        .collect();
+    if let Some(info) = local {
+        agents.push(ListedAgent {
+            info,
+            source: "local",
+            path: cwd.join("agent.leviath").display().to_string(),
+        });
+    }
+
+    ListReport {
+        agents,
+        bundled: crate::bundled::BUNDLED_AGENTS
+            .iter()
+            .map(|a| BundledEntry {
+                name: a.name.to_string(),
+                version: a.version.to_string(),
+            })
+            .collect(),
+    }
 }
 
 /// Core `lev list` logic, parameterized by every real-environment source it
@@ -464,6 +557,7 @@ allow = ["/data/runs"]
     fn list_args_default_filter() {
         let args = ListArgs {
             filter: "all".to_string(),
+            json: false,
         };
         assert_eq!(args.filter, "all");
     }
@@ -580,6 +674,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             // config) but must always succeed regardless of what it finds.
             let args = ListArgs {
                 filter: "all".to_string(),
+                json: false,
             };
             let result = execute(args).await;
             assert!(result.is_ok());
@@ -599,6 +694,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             FORCE_AGENTS_DIR_ERROR.with(|f| f.set(true));
             let args = ListArgs {
                 filter: "all".to_string(),
+                json: false,
             };
             let result = execute(args).await;
             FORCE_AGENTS_DIR_ERROR.with(|f| f.set(false));
@@ -639,6 +735,7 @@ system = { kind = "pinned", max_tokens = 1000 }
 
             let args = ListArgs {
                 filter: "all".to_string(),
+                json: false,
             };
             let result = execute(args).await;
 
@@ -660,6 +757,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             crate::commands::force_cwd_error(true);
             let args = ListArgs {
                 filter: "all".to_string(),
+                json: false,
             };
             let result = execute(args).await;
             crate::commands::force_cwd_error(false);
@@ -681,6 +779,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 std::fs::write(fake_dir.join("config.toml"), "not = valid = toml").unwrap();
                 let args = ListArgs {
                     filter: "all".to_string(),
+                    json: false,
                 };
                 let err = execute(args).await.expect_err("broken config must error");
                 assert!(err.to_string().contains("parse"), "{err}");
@@ -690,6 +789,78 @@ system = { kind = "pinned", max_tokens = 1000 }
     }
 
     // ─── print_agent_listing (fully injectable) ─────────────────────────
+
+    // ─── --json ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn json_listing_tags_each_agent_with_where_it_came_from() {
+        let agents_dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let configured = tempfile::tempdir().unwrap();
+
+        let installed = agents_dir.path().join("from-install");
+        fs::create_dir_all(&installed).unwrap();
+        write_manifest(&installed, "installed-agent");
+        write_manifest(cwd.path(), "local-agent");
+        let extra = configured.path().join("from-config");
+        fs::create_dir_all(&extra).unwrap();
+        write_manifest(&extra, "configured-agent");
+
+        let config = Config {
+            agent_paths: vec![configured.path().to_path_buf()],
+            ..Config::default()
+        };
+        let report = build_list_report(agents_dir.path(), cwd.path(), &config);
+
+        let sourced: Vec<(&str, &str)> = report
+            .agents
+            .iter()
+            .map(|a| (a.info.name.as_str(), a.source))
+            .collect();
+        assert!(sourced.contains(&("installed-agent", "installed")));
+        assert!(sourced.contains(&("configured-agent", "configured")));
+        assert!(sourced.contains(&("local-agent", "local")));
+    }
+
+    #[test]
+    fn json_listing_reports_the_bundled_catalog_separately_from_runnable_agents() {
+        // Bundled agents are not runnable until installed, so they must not
+        // appear in `agents` on a machine with nothing installed.
+        let agents_dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+
+        let report = build_list_report(agents_dir.path(), cwd.path(), &Config::default());
+        assert!(report.agents.is_empty());
+        assert_eq!(report.bundled.len(), crate::bundled::BUNDLED_AGENTS.len());
+    }
+
+    #[test]
+    fn json_listing_flattens_the_agent_fields_next_to_its_source() {
+        // `#[serde(flatten)]` is easy to lose in a refactor, and losing it would
+        // nest every agent under an `info` key that no caller expects.
+        let agents_dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        write_manifest(cwd.path(), "flat-agent");
+
+        let report = build_list_report(agents_dir.path(), cwd.path(), &Config::default());
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
+        assert_eq!(value["agents"][0]["name"], serde_json::json!("flat-agent"));
+        assert_eq!(value["agents"][0]["source"], serde_json::json!("local"));
+        assert!(value["agents"][0]["path"].is_string());
+    }
+
+    #[tokio::test]
+    async fn execute_with_json_runs_without_error() {
+        crate::config::with_isolated_config_path_async("list-json-ok", |_fake_dir| async move {
+            let args = ListArgs {
+                filter: "all".to_string(),
+                json: true,
+            };
+            assert!(execute(args).await.is_ok());
+        })
+        .await;
+    }
 
     #[test]
     fn print_agent_listing_nothing_installed() {

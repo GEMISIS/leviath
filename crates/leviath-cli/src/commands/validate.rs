@@ -14,6 +14,95 @@ pub struct ValidateArgs {
     /// Fail on warnings too, not only errors. Notes never fail.
     #[arg(long)]
     pub(crate) deny_warnings: bool,
+
+    /// Report the blueprint and every finding as JSON instead of prose. The
+    /// exit status is unchanged, so a caller can branch on either.
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+/// The blueprint itself, for a caller that wants to know what it just validated.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BlueprintSummary {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    /// Null when the manifest names no `entry_stage`, in which case the first
+    /// stage is the entry.
+    pub entry_stage: Option<String>,
+    /// Stage names in blueprint order.
+    pub stages: Vec<String>,
+}
+
+/// What `lev validate --json` prints.
+///
+/// One shape for every outcome, so a caller parses once and branches on
+/// `valid`. A manifest that did not parse fills `error` and leaves `blueprint`
+/// null; one that did fills `blueprint` and leaves `error` null. `code` on each
+/// finding is a stable slug to branch on, where the prose line is written to be
+/// read.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ValidateReport {
+    /// True when nothing would have failed the command.
+    pub valid: bool,
+    /// Present when the manifest parsed and validated.
+    pub blueprint: Option<BlueprintSummary>,
+    /// Present when it did not.
+    pub error: Option<String>,
+    pub findings: Vec<LintFinding>,
+    pub errors: usize,
+    pub warnings: usize,
+    pub notes: usize,
+}
+
+impl ValidateReport {
+    /// The report for a manifest that got as far as linting.
+    fn linted(
+        blueprint: &leviath_core::Blueprint,
+        findings: Vec<LintFinding>,
+        deny_warnings: bool,
+    ) -> Self {
+        let count = |want: LintSeverity| findings.iter().filter(|f| f.severity == want).count();
+        let (errors, warnings) = (count(LintSeverity::Error), count(LintSeverity::Warning));
+        Self {
+            // Mirrors the exit-status rule exactly: notes never fail a build.
+            valid: errors == 0 && !(deny_warnings && warnings > 0),
+            blueprint: Some(BlueprintSummary {
+                name: blueprint.name.clone(),
+                version: blueprint.version.clone(),
+                description: blueprint.description.clone(),
+                entry_stage: blueprint.entry_stage.clone(),
+                stages: blueprint.stages.iter().map(|s| s.name.clone()).collect(),
+            }),
+            error: None,
+            errors,
+            warnings,
+            notes: count(LintSeverity::Note),
+            findings,
+        }
+    }
+
+    /// The report for a manifest that never parsed or never validated.
+    fn failed(error: String) -> Self {
+        Self {
+            valid: false,
+            blueprint: None,
+            error: Some(error),
+            findings: Vec::new(),
+            errors: 1,
+            warnings: 0,
+            notes: 0,
+        }
+    }
+
+    fn print(&self) {
+        // Owned scalars and vectors with no map keys to reject, so this cannot
+        // fail.
+        println!(
+            "{}",
+            serde_json::to_string_pretty(self).expect("a validate report serializes")
+        );
+    }
 }
 
 /// Resolve, read, parse, and validate the manifest at `path`. Distinguishes
@@ -187,12 +276,26 @@ fn execute_reporting_outcome(
     let checked = match check_manifest(&path) {
         Ok(c) => c,
         Err(ManifestCheckError::Io(e)) => return Err(e),
-        Err(ManifestCheckError::Parse(e)) => return Ok(ValidateOutcome::ParseError(e)),
-        Err(ManifestCheckError::Validation(e)) => return Ok(ValidateOutcome::ValidationError(e)),
+        Err(ManifestCheckError::Parse(e)) => {
+            if args.json {
+                ValidateReport::failed(format!("parse error: {e}")).print();
+            }
+            return Ok(ValidateOutcome::ParseError(e));
+        }
+        Err(ManifestCheckError::Validation(e)) => {
+            if args.json {
+                ValidateReport::failed(format!("validation failed: {e}")).print();
+            }
+            return Ok(ValidateOutcome::ValidationError(e));
+        }
     };
 
-    print_success(&checked.blueprint);
-    print_script_tool_report(&path);
+    // The human report is three separate printers. JSON is one document, so it
+    // is built after the lint and emitted once, and none of these run.
+    if !args.json {
+        print_success(&checked.blueprint);
+        print_script_tool_report(&path);
+    }
 
     let mut env = LintEnv::offline(&checked.agent_dir);
     if let Some(config) = config {
@@ -205,7 +308,14 @@ fn execute_reporting_outcome(
             .with_read_paths(&checked.blueprint, config, &workdir);
     }
     let findings = lint_manifest(&checked.content, &checked.blueprint, &env);
-    let (errors, warnings) = print_findings(&findings);
+    let (errors, warnings) = match args.json {
+        true => {
+            let report = ValidateReport::linted(&checked.blueprint, findings, args.deny_warnings);
+            report.print();
+            (report.errors, report.warnings)
+        }
+        false => print_findings(&findings),
+    };
 
     if errors > 0 || (args.deny_warnings && warnings > 0) {
         return Ok(ValidateOutcome::LintFailed { errors, warnings });
@@ -323,6 +433,7 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
         ValidateArgs {
             path: dir.to_str().unwrap().to_string(),
             deny_warnings: false,
+            json: false,
         }
     }
 
@@ -581,6 +692,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             let args = ValidateArgs {
                 path: manifest_path.to_str().unwrap().to_string(),
                 deny_warnings: false,
+                json: false,
             };
             assert!(execute(args).await.is_ok());
         })
@@ -629,6 +741,154 @@ system = { kind = "pinned", max_tokens = 1000 }
                 warnings: 0
             }
             .is_success()
+        );
+    }
+
+    // ─── --json ──────────────────────────────────────────────────────────
+
+    fn json_args_for(dir: &std::path::Path) -> ValidateArgs {
+        ValidateArgs {
+            json: true,
+            ..args_for(dir)
+        }
+    }
+
+    /// A finding of a given severity. `LintFinding::new` is private to `lint`,
+    /// but the fields are public, so the report can be exercised from here
+    /// without widening that API for a test.
+    fn finding(severity: LintSeverity, code: &'static str) -> LintFinding {
+        LintFinding {
+            severity,
+            code,
+            stage: None,
+            message: format!("{code} message"),
+            fix: None,
+        }
+    }
+
+    #[test]
+    fn json_report_of_a_clean_manifest_is_valid_and_names_its_stages() {
+        let blueprint = parse(CLEAN_MANIFEST);
+        let report = ValidateReport::linted(&blueprint, Vec::new(), false);
+        assert!(report.valid);
+        assert_eq!(report.error, None);
+        let summary = report.blueprint.expect("a parsed manifest has a summary");
+        assert_eq!(summary.name, "ok-agent");
+        assert_eq!(summary.stages, vec!["main".to_string()]);
+        assert_eq!((report.errors, report.warnings, report.notes), (0, 0, 0));
+    }
+
+    #[test]
+    fn json_report_counts_each_severity_separately() {
+        let blueprint = parse(CLEAN_MANIFEST);
+        let findings = vec![
+            finding(LintSeverity::Error, "a"),
+            finding(LintSeverity::Warning, "b"),
+            finding(LintSeverity::Note, "c"),
+        ];
+        let report = ValidateReport::linted(&blueprint, findings, false);
+        assert_eq!((report.errors, report.warnings, report.notes), (1, 1, 1));
+        // An error is fatal whatever --deny-warnings says.
+        assert!(!report.valid);
+    }
+
+    #[test]
+    fn json_report_is_valid_with_a_warning_until_deny_warnings() {
+        let blueprint = parse(CLEAN_MANIFEST);
+        let warning = || vec![finding(LintSeverity::Warning, "b")];
+        assert!(ValidateReport::linted(&blueprint, warning(), false).valid);
+        assert!(!ValidateReport::linted(&blueprint, warning(), true).valid);
+    }
+
+    #[test]
+    fn json_report_of_a_note_stays_valid_under_deny_warnings() {
+        // Notes never fail a build. This is the rule most likely to drift, since
+        // the JSON `valid` flag restates it in a second place.
+        let blueprint = parse(CLEAN_MANIFEST);
+        let notes = vec![finding(LintSeverity::Note, "c")];
+        assert!(ValidateReport::linted(&blueprint, notes, true).valid);
+    }
+
+    #[test]
+    fn json_report_of_a_broken_manifest_carries_the_error_and_no_blueprint() {
+        let report = ValidateReport::failed("parse error: boom".to_string());
+        assert!(!report.valid);
+        assert!(report.blueprint.is_none());
+        assert_eq!(report.error.as_deref(), Some("parse error: boom"));
+    }
+
+    #[test]
+    fn json_report_serializes_every_key_a_caller_reads() {
+        let blueprint = parse(CLEAN_MANIFEST);
+        let report = ValidateReport::linted(
+            &blueprint,
+            vec![finding(LintSeverity::Error, "unknown-tool")],
+            false,
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
+        assert_eq!(value["valid"], serde_json::json!(false));
+        assert_eq!(value["blueprint"]["name"], serde_json::json!("ok-agent"));
+        assert_eq!(value["error"], serde_json::Value::Null);
+        // `code` is the stable slug a caller branches on, and `severity` is
+        // lowercase rather than the padded table label.
+        assert_eq!(
+            value["findings"][0]["code"],
+            serde_json::json!("unknown-tool")
+        );
+        assert_eq!(value["findings"][0]["severity"], serde_json::json!("error"));
+    }
+
+    #[test]
+    fn json_mode_still_reports_a_parse_error_through_the_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(dir.path(), "not valid toml [[[");
+        assert!(
+            execute_reporting_outcome(&json_args_for(dir.path()), None)
+                .unwrap()
+                .is_parse_error()
+        );
+    }
+
+    #[test]
+    fn json_mode_still_reports_a_validation_error_through_the_outcome() {
+        // A manifest that parses but names an entry stage that does not exist:
+        // the other half of the failure path, and a different report line.
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(
+            dir.path(),
+            r#"
+[agent]
+name = "bad-entry-agent"
+version = "0.1.0"
+description = "Entry stage does not exist"
+entry_stage = "does-not-exist"
+
+[stages.main]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Main"
+max_iterations = 5
+
+[context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+"#,
+        );
+        assert!(
+            execute_reporting_outcome(&json_args_for(dir.path()), None)
+                .unwrap()
+                .is_validation_error()
+        );
+    }
+
+    #[test]
+    fn json_mode_still_succeeds_on_a_clean_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(dir.path(), CLEAN_MANIFEST);
+        assert!(
+            execute_reporting_outcome(&json_args_for(dir.path()), None)
+                .unwrap()
+                .is_success()
         );
     }
 
@@ -712,6 +972,7 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
         let args = ValidateArgs {
             path: dir.path().to_str().unwrap().to_string(),
             deny_warnings: true,
+            json: false,
         };
         assert!(execute_reporting_outcome(&args, None).unwrap().is_success());
     }

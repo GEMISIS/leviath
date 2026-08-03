@@ -61,6 +61,11 @@ pub struct RunArgs {
     #[arg(long, value_name = "DIR")]
     pub workdir: Option<std::path::PathBuf>,
 
+    /// Print the spawned run as JSON instead of a sentence, for a caller that
+    /// has to parse the run id back out and poll `lev ps --json`.
+    #[arg(long)]
+    pub json: bool,
+
     /// Dynamic per-region seed flags (`--<region> <text|@file>`), collected by an
     /// argv pre-scan in the binary since region names are blueprint-defined.
     /// clap skips this field; it is populated after parsing.
@@ -78,6 +83,10 @@ const KNOWN_RUN_FLAGS: &[&str] = &[
     "max-depth",
     "no-seed-commands",
     "workdir",
+    // Every flag `run` owns must be listed here. One that is missing is not a
+    // parse error: the pre-scan silently reads it as a `--<region>` seed and
+    // swallows the token after it.
+    "json",
     "verbose",
     "help",
     "version",
@@ -171,6 +180,23 @@ mod tests {
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn every_flag_run_declares_is_a_known_run_flag() {
+        // A flag clap owns but this list omits is not a parse error. The
+        // pre-scan reads it as a `--<region>` seed, eats the token after it, and
+        // the run starts with a region nobody asked for. Ask clap for the list
+        // rather than repeating it, so a new flag is covered when it is added.
+        let command = <RunArgs as clap::Args>::augment_args(clap::Command::new("run"));
+        for arg in command.get_arguments() {
+            if let Some(long) = arg.get_long() {
+                assert!(
+                    KNOWN_RUN_FLAGS.contains(&long),
+                    "`--{long}` is missing from KNOWN_RUN_FLAGS",
+                );
+            }
+        }
     }
 
     #[test]

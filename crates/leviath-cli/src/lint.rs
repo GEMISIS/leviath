@@ -32,13 +32,15 @@ use leviath_core::Blueprint;
 use leviath_core::blueprint::StageMode;
 use leviath_runtime::dynamic_interaction::BLOCKING_INTERACTION_TOOLS;
 use leviath_tools::canonical_tool_name;
+use serde::{Deserialize, Serialize};
 
 /// How much a finding matters. Only [`LintSeverity::Error`] fails
 /// `lev validate`; warnings are printed and the command still exits zero
 /// (unless `--deny-warnings` is passed); notes never fail anything.
 ///
 /// Declared worst-first so sorting by it groups the report.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum LintSeverity {
     /// The manifest says something that cannot be what the author meant - a
     /// tool name matching nothing, a permission for a tool the stage never
@@ -65,7 +67,10 @@ impl LintSeverity {
 }
 
 /// One thing worth telling the author about.
-#[derive(Debug, Clone)]
+///
+/// Serialize only: `code` is a `&'static str` pointing at a literal in this
+/// file, which no deserializer can produce.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LintFinding {
     pub severity: LintSeverity,
     /// Stable slug (`"unknown-tool"`), so a finding can be referenced in an
