@@ -7,13 +7,23 @@ order: 7
 
 # Rhai scripting
 
-Leviath is extensible without a recompile. Drop a [Rhai](https://rhai.rs) script into the right
-directory and it becomes a live part of the runtime.
+Eventually you want something Leviath does not ship: a tool for your internal API, a model provider
+nobody has added yet, a rule about which calls are allowed. You should not have to fork the project
+and rebuild it for that.
 
-Each script is small and focused. Leviath keeps ownership of the hard runtime concerns (transport,
-budgets, sandboxing, retries) and hands the script only the format or decision it owns. That is the
-whole design: you write the part that is specific to you, and none of the part that is hard to get
-right.
+So Leviath embeds **Rhai**, a small scripting language that looks a lot like Rust. Drop a `.rhai`
+file in the right directory and it becomes part of the runtime, with no recompile and usually no
+restart.
+
+Each script stays small, because Leviath keeps the hard parts. Transport, budgets, sandboxing, and
+retries stay with the runtime, and the script gets only the one decision that is specific to you.
+
+> [!NOTE]
+> **Before this page:** [Agent blueprints](/docs/agents).
+> **In one line:** four places you can drop a script, each with a narrow job and its own page.
+
+You do not need to know Rhai to read the pages below. Each one has a complete, working script you
+can copy and change. [rhai.rs](https://rhai.rs) has the language reference if you want it.
 
 ## The four extension points
 

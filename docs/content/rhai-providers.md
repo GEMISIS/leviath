@@ -7,16 +7,38 @@ order: 8
 
 # Custom model providers
 
-A `.rhai` script in `~/.leviath/providers/` teaches Leviath any OpenAI-compatible (or otherwise HTTP)
-LLM API. The script does only **format mapping** (Leviath's request to the API's HTTP body, and the
-response back). The Rust wrapper keeps HTTP transport, rate limiting, per-stage timeouts, retry with
-backoff, error classification, and token counting.
+Leviath ships support for the big providers, but there are always more. A `.rhai` script in
+`~/.leviath/providers/` teaches it any HTTP LLM API, without waiting for anyone to add it.
 
-The provider name is the filename stem, so `groq.rhai` is referenced as `provider = "groq"`. A script
-becomes a live provider the first time an agent references its name, and it is recompiled
-automatically whenever the file changes (the mtime is checked on each use). A broken script is skipped
-with a warning and starts working again once you fix the file. The daemon never scans-and-runs every
-dropped file at startup, only the ones an agent actually names.
+Your script does one job: translate. Leviath hands it a request in Leviath's own shape, the script
+turns that into whatever body the API wants, and then turns the reply back:
+
+```mermaid
+flowchart LR
+  L["Leviath<br/>builds a request"] -->|"inference(req)"| S["Your script"]
+  S -->|"http_post"| API["The provider's API"]
+  API -->|"raw JSON"| S
+  S -->|"a normal response"| L
+```
+
+Everything hard stays on Leviath's side: HTTP transport, rate limiting, per-stage timeouts, retry
+with backoff, working out which errors are worth retrying, and token counting. You write the mapping
+and nothing else.
+
+> [!NOTE]
+> **Before this page:** [Providers](/docs/providers) and [Rhai scripting](/docs/scripting).
+> **In one line:** name the file after the provider, write an `inference` function, reference it
+> from a stage.
+
+Four things about the lifecycle:
+
+- **The filename is the provider name.** `groq.rhai` is referenced as `provider = "groq"`.
+- **Nothing runs until it is named.** The daemon does not scan and execute every file it finds at
+  startup, only the ones an agent actually asks for.
+- **Edits apply on the next run.** The file's modification time is checked on each use, so a change
+  is picked up with no daemon restart.
+- **A broken script is skipped, not fatal.** It logs a warning, and starts working again as soon as
+  you fix the file.
 
 ## Where it goes and how it's referenced
 

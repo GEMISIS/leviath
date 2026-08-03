@@ -7,10 +7,28 @@ order: 9
 
 # Custom context regions
 
-When the built-in region kinds (`pinned`, `sliding_window`, `temporary`, `compacting`, `clearable`,
-`compact_history`, `hashmap`) do not fit, a `kind = "custom"` [context](/docs/context) region hands
-one region's behavior to a Rhai script: how it renders into the model's context, what happens to each
-incoming entry, and what gets dropped under budget pressure.
+A [context region](/docs/context) normally picks one of seven built-in behaviours: keep everything,
+keep the newest, summarize, drop it all, and so on. Sometimes none of those is what you want. Maybe
+entries should be scored and the weakest dropped, or the region should render as a table rather than
+a list.
+
+Setting `kind = "custom"` hands that one region to a Rhai script. The script answers three
+questions, and nothing else changes:
+
+```mermaid
+flowchart LR
+  W["The agent writes<br/>something to the region"] -->|"on_write(ctx)"| STORE["Stored"]
+  STORE -->|"render(ctx)"| M["What the model sees"]
+  STORE -->|"on_overflow(ctx)<br/>when over budget"| DROP["What gets dropped"]
+```
+
+| Hook | Answers |
+|---|---|
+| `render` | What does this region look like in the model's context? |
+| `on_write` | What happens to each incoming entry? |
+| `on_overflow` | What goes when the region is over budget? |
+
+Only `render` is required.
 
 ## Declaring one
 
@@ -23,13 +41,20 @@ budget     = "40%"                        # budgets work exactly as on built-ins
 min_tokens = 10000
 ```
 
-`script` resolves relative to the directory holding `agent.leviath`, so the script travels with the
-agent through `lev add` and bundles. `persistent = true` makes the region pinned-like (never evicted,
-fixed budget, `Always` cache hint). `persistent = false` behaves like temporary (evicted under
-pressure, but the script gets first say through `on_overflow`). Percentage budgets resolve at spawn
-against the stage model's window, and the script sees the resolved absolute number in
-`ctx.region.budget`. Per-stage layouts (`[stages.<name>.context.regions.<region>]`) may declare
-custom regions too.
+`script` resolves relative to the directory holding `agent.leviath`, so it travels with the agent
+through `lev add` and through bundles.
+
+`persistent` decides how the region behaves under budget pressure:
+
+| Value | Behaves like | What it means for your script |
+|---|---|---|
+| `false` (default) | `temporary` | The region can be evicted, but `on_overflow` gets first say |
+| `true` | `pinned` | Never evicted, fixed budget. Its rendered output is treated as cacheable across turns, since it does not change |
+
+Percentage budgets are worked out at spawn against the stage model's window, and your script sees
+the resulting absolute number in `ctx.region.budget`, not the percentage.
+
+Per-stage layouts (`[stages.<name>.context.regions.<region>]`) can declare custom regions too.
 
 The script is read and compile-checked **once, at spawn**. A missing or broken file, or one without
 `fn render(ctx)`, is a hard spawn error that `lev validate` also reports. Editing the script takes
@@ -61,8 +86,11 @@ can emit static scaffolding). `ctx`:
 
 `render` returns either a string (one system block, empty string means nothing) or a map with
 `system` (a string or an array of strings) and `messages` (typed `role`/`content` entries, optionally
-carrying `tool_calls` or `tool_results`). The assembler's orphan sanitizer strips any unpaired tool
-blocks, so a buggy script cannot produce a provider-invalid request.
+carrying `tool_calls` or `tool_results`).
+
+Providers reject a request where a tool call has no matching result, or the other way round. Leviath
+strips any unpaired tool block before sending, so a script with a bug in it cannot produce a request
+the provider will refuse.
 
 `on_write(ctx)` is **optional**. It sees each entry headed into the region, with
 `ctx = { region, entry: { content, kind, tokens } }`. Return a string to replace the content (tokens
