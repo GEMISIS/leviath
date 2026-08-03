@@ -23,7 +23,7 @@
 
 ---
 
-Most agent tools hand an LLM a flat message array and hope for the best. Leviath gives it **structure**: context that stays coherent across hundreds of tool calls, the right model for each phase of a task, and hundreds of agents running at once without melting your machine.
+Give a model one flat list of messages and a single big file read pushes your system prompt out of the window. Leviath gives it **structure** instead: context that stays coherent across hundreds of tool calls, the right model for each phase of a task, and hundreds of agents running at once on one machine.
 
 <p align="center">
   <img src="docs/assets/hero-final.gif" alt="Leviath's terminal dashboard running several agents concurrently" width="900">
@@ -61,7 +61,7 @@ lev create my-agent              # scaffold your own agent
 curl -fsSL https://leviath.dev/install.sh | sh
 ```
 
-**Windows** — pastes into either Command Prompt or PowerShell:
+**Windows**, pasting into either Command Prompt or PowerShell:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -c "irm https://leviath.dev/install.ps1 | iex"
@@ -240,7 +240,9 @@ Ten agents ship out of the box, each a multi-stage directed graph with structure
 
 ### Structured context memory
 
-Eight region kinds with deterministic eviction: architecture stays pinned, tool results evict first, and conversation auto-compacts into summaries. Route reads to specific regions so a file dump can't push out your system prompt. Budgets can be percentages of the model's context window, so a blueprint's intent survives across models of different sizes. And when the built-ins don't fit, a [`custom` region](https://leviath.dev/docs/rhai-regions) hands one region's rendering, writes, and eviction to a Rhai script you control - up to owning the entire context window as a single scripted region. [Learn more →](https://leviath.dev/docs/context)
+The context window is split into named regions, and you decide what each one drops first. Architecture stays pinned, tool results go first, conversation compacts into summaries. A file dump can only crowd out the region it landed in.
+
+Budgets are percentages of the model's window, so the same blueprint keeps its shape when you switch models. When the eight built-in region kinds do not fit, a [`custom` region](https://leviath.dev/docs/rhai-regions) hands one region to a Rhai script you write. [Learn more →](https://leviath.dev/docs/context)
 
 ### Multi-stage workflows
 
