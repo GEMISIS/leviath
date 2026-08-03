@@ -431,6 +431,26 @@ lev setup --non-interactive --anthropic-key sk-ant-... --install-agents
 > The bundled agents are **not** installed unless `--install-agents` is passed in non-interactive
 > mode. That is deliberate, so a scripted setup does not write blueprints you did not ask for.
 
+Inside the wizard, the keys work the same way on every screen:
+
+| Key | Meaning |
+|---|---|
+| `↑` `↓` (or `k` `j`) | Move between rows |
+| `←` `→` (or `h` `l`) | Cycle a choice or the reasoning effort |
+| Space or Enter | Select the focused row; Enter also opens editors for typed values |
+| Enter on `[ Continue ]` | Move to the next screen (the button is the last row) |
+| Tab / Shift-Tab | Next / previous screen |
+| Esc | Previous screen, or cancel an edit or dialog |
+| `v` | Re-check a credential against the provider's API |
+| `o` | Open the provider's signup page |
+| Ctrl-R | Show or hide credentials |
+| Ctrl-S | Write the config and finish, from anywhere |
+| `?` | Help overlay |
+| `q` / Ctrl-C | Quit without writing. If you changed anything, it asks first |
+
+Nothing is written until you confirm on the Review screen. Leaving the provider screen with
+nothing selected asks before letting you continue, since an agent cannot run without one.
+
 ### `lev mcp`
 
 Manage [MCP tool servers](/docs/mcp).

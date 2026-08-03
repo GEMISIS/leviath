@@ -1,15 +1,26 @@
 //! Key handling for the setup wizard.
 //!
-//! One entry point, [`Wizard::handle_key`], split into a text-editing mode and
-//! a navigation mode. Editing takes priority: while a field is open, letters
-//! are letters, so `q` types a `q` rather than quitting - losing a
-//! half-entered API key to a quit shortcut would be a genuinely bad way to find
-//! out about modal input.
+//! One entry point, [`Wizard::handle_key`], with a strict priority order:
+//! Ctrl-C, then an open confirmation dialog, then an open text edit, then the
+//! help overlay, then navigation. Editing before navigation matters: while a
+//! field is open, letters are letters, so `q` types a `q` rather than
+//! quitting - losing a half-entered API key to a quit shortcut would be a
+//! genuinely bad way to find out about modal input.
+//!
+//! Navigation resolves shared keys through `crate::tui::keymap`, so arrows,
+//! vim aliases, Space, Enter, Esc, Tab, `?`, and `q` mean here exactly what
+//! they mean in every other Leviath TUI. Enter acts on the focused row - it
+//! toggles a provider, opens an editor, cycles a choice - and only advances
+//! the screen when the cursor is visibly on the step's Continue button.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::catalog::Credential;
-use super::state::{Edit, EditTarget, FieldValue, Step, Wizard};
+use super::state::{ConfirmPurpose, Edit, EditTarget, FieldValue, Step, Wizard};
+use crate::tui::keymap;
+use crate::tui::widgets::confirm::ConfirmOutcome;
+use crate::tui::widgets::help::dismisses_help;
+use crate::tui::widgets::line_edit::{EditOutcome, LineEdit};
 
 /// What the loop should do after a key press.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,118 +34,186 @@ pub enum Action {
 impl Wizard {
     /// Handle one key press.
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
-        // Ctrl-C always quits, even mid-edit: it is the one binding a user
-        // reaches for expecting it to work no matter what.
+        // Ctrl-C always works, even mid-edit and even inside a dialog: it is
+        // the one binding a user reaches for expecting it to obey no matter
+        // what. With unsaved choices it asks once; pressed again (the dialog
+        // is then open), it quits unconditionally.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            self.should_quit = true;
+            if self.confirm.is_some() || !self.dirty {
+                self.should_quit = true;
+            } else {
+                self.open_quit_confirm();
+            }
             return Action::Continue;
+        }
+        // Ctrl-R also works mid-edit: revealing what you are typing is most
+        // useful precisely while you are typing it.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
+            self.reveal = !self.reveal;
+            self.message = Some(if self.reveal {
+                "Credentials shown.".to_string()
+            } else {
+                "Credentials hidden.".to_string()
+            });
+            return Action::Continue;
+        }
+        if self.confirm.is_some() {
+            return self.handle_confirm_key(key);
         }
         if let Some(edit) = self.edit.take() {
             self.handle_edit_key(key, edit);
             return Action::Continue;
         }
-        if self.show_tos_confirm {
-            // A hard gate: nothing else means anything until it is answered.
-            return self.handle_tos_key(key);
-        }
         if self.show_help {
-            // Any key dismisses the help overlay.
-            self.show_help = false;
+            if dismisses_help(&key) {
+                self.show_help = false;
+            }
             return Action::Continue;
         }
         self.handle_nav_key(key)
     }
 
+    /// Keys while a confirmation dialog is open. Its Yes routes by purpose;
+    /// No always just closes it.
+    fn handle_confirm_key(&mut self, key: KeyEvent) -> Action {
+        let Some(mut pending) = self.confirm.take() else {
+            return Action::Continue;
+        };
+        match pending.dialog.handle(&key) {
+            ConfirmOutcome::Pending => {
+                self.confirm = Some(pending);
+                Action::Continue
+            }
+            ConfirmOutcome::No => Action::Continue,
+            ConfirmOutcome::Yes => match pending.purpose {
+                ConfirmPurpose::QuitDiscard => {
+                    self.should_quit = true;
+                    Action::Continue
+                }
+                ConfirmPurpose::SaveTos => {
+                    self.claude_code_tos_accepted = true;
+                    Action::Save
+                }
+                ConfirmPurpose::NoProviders => {
+                    self.next_step();
+                    Action::Continue
+                }
+            },
+        }
+    }
+
     /// Keys while a text field is open.
     ///
-    /// Takes the buffer rather than re-reading `self.edit`: the caller already
+    /// Takes the edit rather than re-reading `self.edit`: the caller already
     /// established there is one, so re-checking would add arms nothing can
     /// reach.
     fn handle_edit_key(&mut self, key: KeyEvent, mut edit: Edit) {
-        match key.code {
-            KeyCode::Enter => {
+        match edit.line.handle_key(&key) {
+            EditOutcome::Commit => {
                 self.edit = Some(edit);
                 self.commit_edit();
                 self.message = None;
+                self.dirty = true;
             }
-            KeyCode::Esc => {
+            EditOutcome::Cancel => {
                 self.message = Some("Edit cancelled.".to_string());
             }
-            KeyCode::Backspace => {
-                edit.buffer.pop();
-                self.edit = Some(edit);
-            }
-            KeyCode::Char(c) => {
-                edit.buffer.push(c);
-                self.edit = Some(edit);
-            }
-            _ => self.edit = Some(edit),
+            EditOutcome::Pending => self.edit = Some(edit),
         }
     }
 
-    /// Keys while navigating.
+    /// Keys while navigating: surface-specific bindings first, then the
+    /// crate-wide keymap.
     fn handle_nav_key(&mut self, key: KeyEvent) -> Action {
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-
         match key.code {
-            KeyCode::Char('s') if ctrl => {
-                if self.needs_tos_confirmation() {
-                    self.show_tos_confirm = true;
-                    return Action::Continue;
-                }
-                return Action::Save;
-            }
-            KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char('?') => self.show_help = true,
-            KeyCode::Char('r') if ctrl => {
-                self.reveal = !self.reveal;
-                self.message = Some(if self.reveal {
-                    "Credentials shown.".to_string()
-                } else {
-                    "Credentials hidden.".to_string()
-                });
-            }
-            KeyCode::Up | KeyCode::Char('k') => self.move_cursor(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.move_cursor(1),
-            KeyCode::Left | KeyCode::Char('h') => self.adjust(-1),
-            KeyCode::Right | KeyCode::Char('l') => self.adjust(1),
-            KeyCode::Char(' ') => self.toggle(),
+            KeyCode::Char('s') if ctrl => return self.try_save(),
             KeyCode::Char('o') => self.open_signup_page(),
             KeyCode::Char('v') => self.verify_current(),
-            KeyCode::BackTab => self.back(),
-            KeyCode::Tab if shift => self.back(),
-            KeyCode::Tab => self.forward(),
-            KeyCode::Esc => self.back(),
-            KeyCode::Enter => return self.activate(),
-            _ => {}
+            _ => match keymap::resolve(&key) {
+                Some(keymap::Action::Up) => self.move_cursor(-1),
+                Some(keymap::Action::Down) => self.move_cursor(1),
+                Some(keymap::Action::Left) => self.adjust(-1),
+                Some(keymap::Action::Right) => self.adjust(1),
+                Some(keymap::Action::Toggle) => self.toggle(),
+                Some(keymap::Action::Activate) => return self.activate(),
+                Some(keymap::Action::Back) | Some(keymap::Action::Prev) => self.back(),
+                Some(keymap::Action::Next) => self.forward_guarded(),
+                Some(keymap::Action::Help) => self.show_help = true,
+                Some(keymap::Action::Quit) => self.request_quit(),
+                // Ctrl-C is intercepted in `handle_key`; this arm only fires
+                // when `handle_nav_key` is driven directly (tests do).
+                Some(keymap::Action::ForceQuit) => self.should_quit = true,
+                None => {}
+            },
         }
         Action::Continue
     }
 
-    /// `Enter`: open an editor, or advance.
-    ///
-    /// A screen with nothing to type into - a toggle, a choice, a list - falls
-    /// through to "next screen" rather than doing nothing at all, so Enter is
-    /// always the key that moves forward.
-    fn activate(&mut self) -> Action {
-        let opened = match self.step {
-            Step::Review => {
-                if self.needs_tos_confirmation() {
-                    self.show_tos_confirm = true;
-                    return Action::Continue;
-                }
-                return Action::Save;
-            }
-            Step::ProviderDetail => self.open_credential_editor(),
-            Step::Defaults | Step::Limits => self.open_field_editor(),
-            _ => false,
-        };
-        if opened {
+    /// `q`: quit - after a confirmation when there are unsaved choices.
+    fn request_quit(&mut self) {
+        if self.dirty {
+            self.open_quit_confirm();
+        } else {
+            self.should_quit = true;
+        }
+    }
+
+    /// Save, unless the Claude Code terms still need confirming first.
+    fn try_save(&mut self) -> Action {
+        if self.needs_tos_confirmation() {
+            self.open_tos_confirm();
             return Action::Continue;
         }
-        self.forward();
+        Action::Save
+    }
+
+    /// `Enter`: act on the focused row, or - only from the visible Continue
+    /// button - move on.
+    fn activate(&mut self) -> Action {
+        if self.on_continue() {
+            return match self.step {
+                Step::Review => self.try_save(),
+                Step::Providers => {
+                    self.forward_guarded();
+                    Action::Continue
+                }
+                _ => {
+                    self.forward();
+                    Action::Continue
+                }
+            };
+        }
+        match self.step {
+            Step::Providers | Step::Agents | Step::Mcp => self.toggle(),
+            Step::ProviderDetail => {
+                // The credential row opens its editor; the Claude Code row has
+                // nothing to type, so Enter cycles its effort instead.
+                if !self.open_credential_editor() {
+                    self.adjust(1);
+                }
+            }
+            Step::Defaults | Step::Limits => self.activate_field(),
+            // Rowless steps put the cursor on their button, so these arms are
+            // reachable only with a hand-forced cursor; acting on nothing is
+            // correct then.
+            Step::Welcome | Step::Review => {}
+        }
         Action::Continue
+    }
+
+    /// Enter on a Defaults/Limits row always acts on that row's kind: toggle
+    /// a bool, cycle a choice, open the editor for a number.
+    fn activate_field(&mut self) {
+        match self.fields().get(self.cursor).map(|f| &f.value) {
+            Some(FieldValue::Bool(_)) => self.toggle(),
+            Some(FieldValue::Choice { .. }) => self.adjust(1),
+            Some(FieldValue::Number(_)) => {
+                self.open_field_editor();
+            }
+            // Reachable only with a hand-forced cursor past the fields.
+            None => {}
+        }
     }
 
     /// Open the credential editor for the provider on screen. Returns false
@@ -151,8 +230,7 @@ impl Wizard {
         }
         self.edit = Some(Edit {
             target: EditTarget::Credential(index),
-            buffer: value,
-            masked: credential == Credential::ApiKey,
+            line: LineEdit::new(value, credential == Credential::ApiKey),
         });
         true
     }
@@ -167,33 +245,18 @@ impl Wizard {
         let buffer = current.map(|n| n.to_string()).unwrap_or_default();
         self.edit = Some(Edit {
             target: EditTarget::Field(cursor),
-            buffer,
-            masked: false,
+            line: LineEdit::new(buffer, false),
         });
         true
     }
 
-    /// Handle a key while the ToS confirmation overlay is showing.
-    ///
-    /// Y accepts the terms and lets the interrupted save proceed - the user
-    /// already asked to save; confirming is the last word, not a detour. Any
-    /// other key dismisses the overlay and stays put, leaving the transport
-    /// selected but unsaveable until it is either confirmed or deselected.
-    fn handle_tos_key(&mut self, key: KeyEvent) -> Action {
-        self.show_tos_confirm = false;
-        if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
-            self.claude_code_tos_accepted = true;
-            return Action::Save;
-        }
-        Action::Continue
-    }
-
-    /// `Space`: toggle whatever the cursor is on.
+    /// `Space` (or Enter on a row): toggle whatever the cursor is on.
     fn toggle(&mut self) {
         match self.step {
             Step::Providers => {
                 if let Some(row) = self.providers.get_mut(self.cursor) {
                     row.selected = !row.selected;
+                    self.dirty = true;
                     // Deselecting the Claude Code transport withdraws the
                     // terms acceptance so it must be re-confirmed if
                     // re-enabled.
@@ -209,20 +272,27 @@ impl Wizard {
             Step::Agents => {
                 if let Some(row) = self.agents.get_mut(self.cursor) {
                     row.selected = !row.selected;
+                    self.dirty = true;
                 }
             }
             Step::Mcp => {
                 if let Some(row) = self.mcp.get_mut(self.cursor) {
                     row.selected = !row.selected;
+                    self.dirty = true;
                 }
             }
             Step::Defaults | Step::Limits => {
                 let cursor = self.cursor;
+                let mut changed = false;
                 if let Some(fields) = self.fields_mut()
                     && let Some(field) = fields.get_mut(cursor)
                     && let FieldValue::Bool(b) = &mut field.value
                 {
                     *b = !*b;
+                    changed = true;
+                }
+                if changed {
+                    self.dirty = true;
                 }
             }
             Step::Welcome | Step::ProviderDetail | Step::Review => {}
@@ -242,6 +312,7 @@ impl Wizard {
                     let count = super::state::effort_options().len();
                     let next = row.effort as isize + delta;
                     row.effort = next.rem_euclid(count as isize) as usize;
+                    self.dirty = true;
                 }
             }
             Step::Defaults | Step::Limits => {
@@ -256,6 +327,9 @@ impl Wizard {
                     *index = next.rem_euclid(options.len() as isize) as usize;
                     changed_provider = true;
                 }
+                if changed_provider {
+                    self.dirty = true;
+                }
                 // Changing the default provider re-picks the concurrency
                 // default, so an Ollama-first setup does not inherit a number
                 // meant for hosted APIs.
@@ -265,6 +339,16 @@ impl Wizard {
             }
             _ => {}
         }
+    }
+
+    /// Advance, but guard the one advance that is almost always a slip:
+    /// leaving the Providers screen with nothing selected.
+    fn forward_guarded(&mut self) {
+        if self.step == Step::Providers && self.selected_providers().is_empty() {
+            self.open_no_providers_confirm();
+            return;
+        }
+        self.forward();
     }
 
     /// `Tab`: next provider on the credential screen, otherwise next step.
@@ -339,823 +423,4 @@ impl Wizard {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::commands::setup::state::{Edit, EditTarget, FieldValue};
-    fn press(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::empty())
-    }
-
-    fn press_with(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
-        KeyEvent::new(code, modifiers)
-    }
-
-    fn wizard() -> (tempfile::TempDir, Wizard) {
-        let dir = tempfile::tempdir().unwrap();
-        let wizard = crate::commands::setup::state::tests::test_wizard(dir.path());
-        (dir, wizard)
-    }
-
-    // ─── quitting and saving ────────────────────────────────────────────────
-
-    #[test]
-    fn ctrl_c_quits_from_anywhere_including_mid_edit() {
-        // The one binding a user reaches for expecting it to always work.
-        let (_dir, mut w) = wizard();
-        w.edit = Some(Edit {
-            target: EditTarget::Credential(0),
-            buffer: "half-typed".to_string(),
-            masked: true,
-        });
-
-        let action = w.handle_key(press_with(KeyCode::Char('c'), KeyModifiers::CONTROL));
-
-        assert_eq!(action, Action::Continue);
-        assert!(w.should_quit);
-    }
-
-    #[test]
-    fn q_quits_while_navigating() {
-        let (_dir, mut w) = wizard();
-        w.handle_key(press(KeyCode::Char('q')));
-        assert!(w.should_quit);
-    }
-
-    #[test]
-    fn q_types_a_letter_while_editing_rather_than_quitting() {
-        // Losing a half-entered API key to a quit shortcut would be a bad way
-        // to find out about modal input.
-        let (_dir, mut w) = wizard();
-        w.edit = Some(Edit {
-            target: EditTarget::Credential(0),
-            buffer: String::new(),
-            masked: true,
-        });
-
-        w.handle_key(press(KeyCode::Char('q')));
-
-        assert!(!w.should_quit);
-        assert_eq!(w.edit.as_ref().expect("still editing").buffer, "q");
-    }
-
-    #[test]
-    fn ctrl_s_saves_from_any_screen() {
-        let (_dir, mut w) = wizard();
-        w.enter(Step::Providers);
-
-        let action = w.handle_key(press_with(KeyCode::Char('s'), KeyModifiers::CONTROL));
-
-        assert_eq!(action, Action::Save);
-    }
-
-    #[test]
-    fn enter_on_the_review_screen_saves() {
-        let (_dir, mut w) = wizard();
-        w.enter(Step::Review);
-
-        assert_eq!(w.handle_key(press(KeyCode::Enter)), Action::Save);
-    }
-
-    // ─── help overlay ───────────────────────────────────────────────────────
-
-    #[test]
-    fn the_help_overlay_opens_and_any_key_closes_it() {
-        let (_dir, mut w) = wizard();
-
-        w.handle_key(press(KeyCode::Char('?')));
-        assert!(w.show_help);
-
-        // The dismissing key must not also do its normal job.
-        w.handle_key(press(KeyCode::Char('q')));
-        assert!(!w.show_help);
-        assert!(!w.should_quit);
-    }
-
-    // ─── editing ────────────────────────────────────────────────────────────
-
-    #[test]
-    fn typing_backspacing_and_committing_a_credential() {
-        let (_dir, mut w) = wizard();
-        w.providers[0].selected = true;
-        w.enter(Step::ProviderDetail);
-
-        w.handle_key(press(KeyCode::Enter));
-        assert!(w.edit.is_some(), "Enter opens the editor");
-        for c in "sk-antX".chars() {
-            w.handle_key(press(KeyCode::Char(c)));
-        }
-        w.handle_key(press(KeyCode::Backspace));
-        w.handle_key(press(KeyCode::Enter));
-
-        assert!(w.edit.is_none());
-        assert_eq!(w.providers[0].value, "sk-ant");
-    }
-
-    #[test]
-    fn escape_abandons_an_edit_without_changing_the_value() {
-        let (_dir, mut w) = wizard();
-        w.providers[0].selected = true;
-        w.providers[0].value = "sk-ant-original".to_string();
-        w.enter(Step::ProviderDetail);
-        w.handle_key(press(KeyCode::Enter));
-        w.handle_key(press(KeyCode::Char('z')));
-
-        w.handle_key(press(KeyCode::Esc));
-
-        assert!(w.edit.is_none());
-        assert_eq!(w.providers[0].value, "sk-ant-original");
-        assert_eq!(w.message.as_deref(), Some("Edit cancelled."));
-    }
-
-    #[test]
-    fn an_unhandled_key_while_editing_is_ignored() {
-        let (_dir, mut w) = wizard();
-        w.edit = Some(Edit {
-            target: EditTarget::Credential(0),
-            buffer: "abc".to_string(),
-            masked: false,
-        });
-
-        w.handle_key(press(KeyCode::F(5)));
-
-        assert_eq!(w.edit.as_ref().expect("still editing").buffer, "abc");
-    }
-
-    #[test]
-    fn backspace_on_an_empty_buffer_is_harmless() {
-        let (_dir, mut w) = wizard();
-        w.edit = Some(Edit {
-            target: EditTarget::Credential(0),
-            buffer: String::new(),
-            masked: false,
-        });
-
-        w.handle_key(press(KeyCode::Backspace));
-
-        assert!(w.edit.as_ref().expect("still editing").buffer.is_empty());
-    }
-
-    #[test]
-    fn the_claude_code_transport_has_nothing_to_type_so_enter_moves_on() {
-        let (_dir, mut w) = wizard();
-        let index = w
-            .providers
-            .iter()
-            .position(|r| r.provider.id == "claude-code")
-            .expect("the transport is offered");
-        w.providers[index].selected = true;
-        w.enter(Step::ProviderDetail);
-
-        w.handle_key(press(KeyCode::Enter));
-
-        assert!(w.edit.is_none());
-        assert_ne!(w.step, Step::ProviderDetail);
-    }
-
-    #[test]
-    fn enter_on_a_toggle_moves_on_rather_than_doing_nothing() {
-        let (_dir, mut w) = wizard();
-        w.enter(Step::Limits);
-        w.cursor = 3; // a boolean
-
-        w.handle_key(press(KeyCode::Enter));
-
-        assert!(w.edit.is_none());
-        assert_ne!(w.step, Step::Limits);
-    }
-
-    #[test]
-    fn enter_on_a_number_field_opens_it_seeded_with_the_current_value() {
-        let (_dir, mut w) = wizard();
-        w.enter(Step::Limits);
-
-        w.handle_key(press(KeyCode::Enter));
-
-        let edit = w.edit.as_ref().expect("the editor opened");
-        assert_eq!(edit.target, EditTarget::Field(0));
-        assert!(!edit.buffer.is_empty(), "seeded from the current value");
-        assert!(!edit.masked, "a limit is not a secret");
-    }
-
-    #[test]
-    fn an_unset_number_field_opens_empty() {
-        let (_dir, mut w) = wizard();
-        w.enter(Step::Limits);
-        w.limits[0].value = FieldValue::Number(None);
-
-        w.handle_key(press(KeyCode::Enter));
-
-        assert!(
-            w.edit
-                .as_ref()
-                .expect("the editor opened")
-                .buffer
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn opening_an_editor_out_of_range_is_a_no_op() {
-        let (_dir, mut w) = wizard();
-        w.enter(Step::Limits);
-        w.cursor = 99;
-
-        w.handle_key(press(KeyCode::Enter));
-
-        assert!(w.edit.is_none());
-    }
-
-    #[test]
-    fn the_credential_editor_declines_when_no_provider_is_on_screen() {
-        let (_dir, mut w) = wizard();
-        w.enter(Step::ProviderDetail);
-
-        w.handle_key(press(KeyCode::Enter));
-
-        assert!(w.edit.is_none());
-    }
-
-    // ─── selection ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn space_toggles_a_provider_and_resets_the_credential_walk() {
-        let (_dir, mut w) = wizard();
-        w.enter(Step::Providers);
-        w.detail = 3;
-
-        w.handle_key(press(KeyCode::Char(' ')));
-
-        assert!(w.providers[0].selected);
-        assert_eq!(w.detail, 0, "the walk is relative to the new selection");
-
-        w.handle_key(press(KeyCode::Char(' ')));
-        assert!(!w.providers[0].selected);
-    }
-
-    #[test]
-    fn space_toggles_agents_and_mcp_rows_and_booleans() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut w = Wizard::new(
-            crate::config::Config::default(),
-            &|_| None,
-            vec![(
-                "A".to_string(),
-                crate::commands::setup::import::Candidate {
-                    config: leviath_mcp::MCPServerConfig::stdio("fs", "npx", vec![]),
-                    scope: String::new(),
-                    inline_secrets: Vec::new(),
-                },
-            )],
-            Vec::new(),
-            dir.path(),
-            std::sync::Arc::new(|_| true),
-        );
-
-        w.enter(Step::Agents);
-        let before = w.agents[0].selected;
-        w.handle_key(press(KeyCode::Char(' ')));
-        assert_ne!(w.agents[0].selected, before);
-
-        w.enter(Step::Mcp);
-        w.handle_key(press(KeyCode::Char(' ')));
-        assert!(!w.mcp[0].selected);
-
-        w.enter(Step::Limits);
-        w.cursor = 3;
-        let before = w.limits[3].value.clone();
-        w.handle_key(press(KeyCode::Char(' ')));
-        assert_ne!(w.limits[3].value, before);
-    }
-
-    #[test]
-    fn space_on_a_screen_with_nothing_to_toggle_is_harmless() {
-        let (_dir, mut w) = wizard();
-        for step in [Step::Welcome, Step::ProviderDetail, Step::Review] {
-            w.enter(step);
-            w.handle_key(press(KeyCode::Char(' ')));
-        }
-        // Also out-of-range cursors on each list step.
-        for step in [Step::Providers, Step::Agents, Step::Mcp] {
-            w.enter(step);
-            w.cursor = 999;
-            w.handle_key(press(KeyCode::Char(' ')));
-        }
-        assert!(!w.should_quit);
-    }
-
-    // ─── movement ───────────────────────────────────────────────────────────
-
-    #[test]
-    fn both_arrow_and_vim_keys_move_the_cursor() {
-        let (_dir, mut w) = wizard();
-        w.enter(Step::Providers);
-
-        w.handle_key(press(KeyCode::Down));
-        assert_eq!(w.cursor, 1);
-        w.handle_key(press(KeyCode::Char('j')));
-        assert_eq!(w.cursor, 2);
-        w.handle_key(press(KeyCode::Up));
-        assert_eq!(w.cursor, 1);
-        w.handle_key(press(KeyCode::Char('k')));
-        assert_eq!(w.cursor, 0);
-    }
-
-    #[test]
-    fn left_and_right_cycle_a_choice_in_both_directions() {
-        let (_dir, mut w) = wizard();
-        w.providers[0].selected = true;
-        let ollama = w
-            .providers
-            .iter()
-            .position(|r| r.provider.id == "ollama")
-            .expect("ollama is offered");
-        w.providers[ollama].selected = true;
-        w.enter(Step::Defaults);
-
-        w.handle_key(press(KeyCode::Right));
-        assert_eq!(w.defaults[0].value.display(), "ollama");
-        w.handle_key(press(KeyCode::Char('h')));
-        assert_eq!(w.defaults[0].value.display(), "anthropic");
-        // Wrapping backwards from the first option lands on the last.
-        w.handle_key(press(KeyCode::Left));
-        assert_eq!(w.defaults[0].value.display(), "ollama");
-    }
-
-    #[test]
-    fn choosing_ollama_as_the_default_lowers_the_concurrency_limit() {
-        let (_dir, mut w) = wizard();
-        w.providers[0].selected = true;
-        let ollama = w
-            .providers
-            .iter()
-            .position(|r| r.provider.id == "ollama")
-            .expect("ollama is offered");
-        w.providers[ollama].selected = true;
-        w.enter(Step::Defaults);
-        w.cursor = 0;
-
-        w.handle_key(press(KeyCode::Right));
-
-        assert_eq!(w.defaults[0].value.display(), "ollama");
-        assert_eq!(
-            w.limits[0].value,
-            FieldValue::Number(Some(
-                crate::commands::setup::catalog::OLLAMA_MAX_CONCURRENT_INFERENCES as u64
-            ))
-        );
-    }
-
-    #[test]
-    fn left_and_right_cycle_the_claude_code_effort() {
-        let (_dir, mut w) = wizard();
-        let index = w
-            .providers
-            .iter()
-            .position(|r| r.provider.id == "claude-code")
-            .expect("the transport is offered");
-        w.providers[index].selected = true;
-        w.enter(Step::ProviderDetail);
-        let before = w.providers[index].effort;
-
-        w.handle_key(press(KeyCode::Right));
-        assert_ne!(w.providers[index].effort, before);
-        w.handle_key(press(KeyCode::Left));
-        assert_eq!(w.providers[index].effort, before);
-        // Wrapping backwards from the first level lands on the last.
-        w.providers[index].effort = 0;
-        w.handle_key(press(KeyCode::Left));
-        assert_eq!(
-            w.providers[index].effort,
-            crate::commands::setup::state::effort_options().len() - 1
-        );
-    }
-
-    #[test]
-    fn arrows_on_a_keyed_provider_do_not_change_anything() {
-        let (_dir, mut w) = wizard();
-        w.providers[0].selected = true;
-        w.enter(Step::ProviderDetail);
-        let before = w.providers[0].effort;
-
-        w.handle_key(press(KeyCode::Right));
-
-        assert_eq!(w.providers[0].effort, before);
-    }
-
-    #[test]
-    fn arrows_on_a_non_choice_field_or_empty_screen_are_harmless() {
-        let (_dir, mut w) = wizard();
-        w.enter(Step::Limits);
-        w.cursor = 0; // a number, not a choice
-        w.handle_key(press(KeyCode::Right));
-        assert_eq!(w.limits[0].value.display(), "8");
-
-        w.enter(Step::Welcome);
-        w.handle_key(press(KeyCode::Right));
-
-        w.enter(Step::ProviderDetail);
-        w.handle_key(press(KeyCode::Right));
-
-        assert!(!w.should_quit);
-    }
-
-    #[test]
-    fn an_empty_choice_list_does_not_divide_by_zero() {
-        let (_dir, mut w) = wizard();
-        w.enter(Step::Defaults);
-        w.defaults[0].value = FieldValue::Choice {
-            options: Vec::new(),
-            index: 0,
-        };
-
-        w.handle_key(press(KeyCode::Right));
-
-        assert_eq!(w.defaults[0].value.display(), "(none)");
-    }
-
-    // ─── moving between screens ─────────────────────────────────────────────
-
-    #[test]
-    fn tab_and_shift_tab_walk_the_steps() {
-        let (_dir, mut w) = wizard();
-
-        w.handle_key(press(KeyCode::Tab));
-        assert_eq!(w.step, Step::Providers);
-        w.handle_key(press(KeyCode::BackTab));
-        assert_eq!(w.step, Step::Welcome);
-        w.handle_key(press(KeyCode::Tab));
-        w.handle_key(press_with(KeyCode::Tab, KeyModifiers::SHIFT));
-        assert_eq!(w.step, Step::Welcome);
-    }
-
-    #[test]
-    fn escape_goes_back_a_step() {
-        let (_dir, mut w) = wizard();
-        w.enter(Step::Agents);
-
-        w.handle_key(press(KeyCode::Esc));
-
-        assert_eq!(w.step, Step::Limits);
-    }
-
-    #[test]
-    fn tab_on_the_credential_screen_walks_providers_then_leaves() {
-        let (_dir, mut w) = wizard();
-        let (mut requests, _replies) = w.take_verify_ends().expect("first take");
-        w.providers[0].selected = true;
-        w.providers[0].value = "sk-ant".to_string();
-        w.providers[1].selected = true;
-        w.providers[1].value = "sk-oai".to_string();
-        w.enter(Step::ProviderDetail);
-
-        w.handle_key(press(KeyCode::Tab));
-        assert_eq!(w.step, Step::ProviderDetail);
-        assert_eq!(w.detail, 1, "moved to the second provider");
-
-        w.handle_key(press(KeyCode::Tab));
-        assert_eq!(w.step, Step::Defaults, "past the last provider");
-
-        // Moving on verifies what was just entered, so the answer is waiting
-        // rather than starting when the user asks for it.
-        let mut checked = Vec::new();
-        while let Ok(request) = requests.try_recv() {
-            checked.push(request.provider_id);
-        }
-        assert_eq!(checked, vec!["anthropic", "openai"]);
-    }
-
-    #[test]
-    fn escape_on_the_credential_screen_walks_back_through_providers() {
-        let (_dir, mut w) = wizard();
-        w.providers[0].selected = true;
-        w.providers[1].selected = true;
-        w.enter(Step::ProviderDetail);
-        w.detail = 1;
-
-        w.handle_key(press(KeyCode::Esc));
-        assert_eq!(w.step, Step::ProviderDetail);
-        assert_eq!(w.detail, 0);
-
-        w.handle_key(press(KeyCode::Esc));
-        assert_eq!(w.step, Step::Providers);
-    }
-
-    // ─── reveal, verify, open ───────────────────────────────────────────────
-
-    #[test]
-    fn ctrl_r_toggles_credential_visibility_and_says_which_way() {
-        let (_dir, mut w) = wizard();
-
-        w.handle_key(press_with(KeyCode::Char('r'), KeyModifiers::CONTROL));
-        assert!(w.reveal);
-        assert_eq!(w.message.as_deref(), Some("Credentials shown."));
-
-        w.handle_key(press_with(KeyCode::Char('r'), KeyModifiers::CONTROL));
-        assert!(!w.reveal);
-        assert_eq!(w.message.as_deref(), Some("Credentials hidden."));
-    }
-
-    #[test]
-    fn v_rechecks_the_provider_on_screen() {
-        let (_dir, mut w) = wizard();
-        let (mut requests, _replies) = w.take_verify_ends().expect("first take");
-        w.providers[0].selected = true;
-        w.providers[0].value = "sk-ant".to_string();
-        w.enter(Step::ProviderDetail);
-
-        w.handle_key(press(KeyCode::Char('v')));
-
-        assert_eq!(w.message.as_deref(), Some("Checking…"));
-        assert_eq!(
-            requests.try_recv().expect("queued").provider_id,
-            "anthropic"
-        );
-    }
-
-    #[test]
-    fn v_on_the_list_and_review_screens_rechecks_everything() {
-        let (_dir, mut w) = wizard();
-        let (mut requests, _replies) = w.take_verify_ends().expect("first take");
-        w.providers[0].selected = true;
-        w.providers[0].value = "sk-ant".to_string();
-
-        w.enter(Step::Providers);
-        w.handle_key(press(KeyCode::Char('v')));
-        assert!(requests.try_recv().is_ok());
-
-        w.enter(Step::Review);
-        w.handle_key(press(KeyCode::Char('v')));
-        assert!(requests.try_recv().is_ok());
-    }
-
-    #[test]
-    fn v_elsewhere_does_nothing() {
-        let (_dir, mut w) = wizard();
-        let (mut requests, _replies) = w.take_verify_ends().expect("first take");
-        w.enter(Step::Limits);
-
-        w.handle_key(press(KeyCode::Char('v')));
-
-        assert!(requests.try_recv().is_err());
-    }
-
-    #[test]
-    fn v_on_the_credential_screen_with_no_provider_does_nothing() {
-        let (_dir, mut w) = wizard();
-        w.enter(Step::ProviderDetail);
-
-        w.handle_key(press(KeyCode::Char('v')));
-
-        assert!(w.message.is_none());
-    }
-
-    #[test]
-    fn o_opens_the_signup_page_from_both_provider_screens() {
-        let dir = tempfile::tempdir().unwrap();
-        let opened = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sink = opened.clone();
-        let mut w = Wizard::new(
-            crate::config::Config::default(),
-            &|_| None,
-            Vec::new(),
-            Vec::new(),
-            dir.path(),
-            std::sync::Arc::new(move |url: &str| {
-                sink.lock().expect("not poisoned").push(url.to_string());
-                true
-            }),
-        );
-
-        w.enter(Step::Providers);
-        w.handle_key(press(KeyCode::Char('o')));
-
-        w.providers[0].selected = true;
-        w.enter(Step::ProviderDetail);
-        w.handle_key(press(KeyCode::Char('o')));
-
-        let urls = opened.lock().expect("not poisoned").clone();
-        assert_eq!(urls.len(), 2);
-        assert!(urls.iter().all(|u| u.starts_with("https://")));
-        assert!(
-            w.message
-                .as_deref()
-                .unwrap_or_default()
-                .starts_with("Opened"),
-            "the user is told which page opened"
-        );
-    }
-
-    #[test]
-    fn a_browser_that_will_not_open_prints_the_url_instead() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut w = Wizard::new(
-            crate::config::Config::default(),
-            &|_| None,
-            Vec::new(),
-            Vec::new(),
-            dir.path(),
-            std::sync::Arc::new(|_| false),
-        );
-        w.enter(Step::Providers);
-
-        w.handle_key(press(KeyCode::Char('o')));
-
-        let message = w.message.as_deref().unwrap_or_default();
-        assert!(message.contains("Couldn't open"), "{message}");
-        assert!(message.contains("https://"), "{message}");
-    }
-
-    #[test]
-    fn o_where_there_is_nothing_to_open_says_so() {
-        let (_dir, mut w) = wizard();
-        let index = w
-            .providers
-            .iter()
-            .position(|r| r.provider.id == "claude-code")
-            .expect("the transport is offered");
-        w.providers[index].selected = true;
-        w.enter(Step::ProviderDetail);
-
-        w.handle_key(press(KeyCode::Char('o')));
-        assert_eq!(w.message.as_deref(), Some("Nothing to open here."));
-
-        w.enter(Step::Limits);
-        w.message = None;
-        w.handle_key(press(KeyCode::Char('o')));
-        assert_eq!(w.message.as_deref(), Some("Nothing to open here."));
-    }
-
-    #[test]
-    fn enter_on_a_list_screen_moves_on_rather_than_opening_an_editor() {
-        // Welcome, Providers, Agents and MCP have nothing to type into.
-        for step in [Step::Welcome, Step::Providers, Step::Agents] {
-            let (_dir, mut w) = wizard();
-            w.enter(step);
-
-            w.handle_key(press(KeyCode::Enter));
-
-            assert!(w.edit.is_none());
-            assert_ne!(w.step, step, "{step:?} should have advanced");
-        }
-    }
-
-    #[test]
-    fn space_on_a_number_field_leaves_it_alone() {
-        // Only booleans toggle; a count would have nothing to toggle *to*.
-        let (_dir, mut w) = wizard();
-        w.enter(Step::Limits);
-        w.cursor = 0;
-        let before = w.limits[0].value.clone();
-
-        w.handle_key(press(KeyCode::Char(' ')));
-
-        assert_eq!(w.limits[0].value, before);
-    }
-
-    #[test]
-    fn an_unbound_key_does_nothing() {
-        let (_dir, mut w) = wizard();
-        let before = w.step;
-
-        w.handle_key(press(KeyCode::F(9)));
-
-        assert_eq!(w.step, before);
-        assert!(!w.should_quit);
-    }
-
-    // ─── Claude Code ToS confirmation gate ──────────────────────────────────
-
-    fn wizard_with_claude_code() -> (tempfile::TempDir, Wizard) {
-        let (dir, mut w) = wizard();
-        let index = w
-            .providers
-            .iter()
-            .position(|r| r.provider.id == "claude-code")
-            .expect("the transport is offered");
-        w.providers[index].selected = true;
-        (dir, w)
-    }
-
-    #[test]
-    fn enter_on_review_with_claude_code_shows_tos_confirmation() {
-        let (_dir, mut w) = wizard_with_claude_code();
-        w.enter(Step::Review);
-
-        let action = w.handle_key(press(KeyCode::Enter));
-
-        assert_eq!(
-            action,
-            Action::Continue,
-            "must not save without ToS acceptance"
-        );
-        assert!(w.show_tos_confirm, "the overlay should be showing");
-    }
-
-    #[test]
-    fn ctrl_s_with_claude_code_shows_tos_confirmation() {
-        let (_dir, mut w) = wizard_with_claude_code();
-        w.enter(Step::Providers);
-
-        let action = w.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
-
-        assert_eq!(action, Action::Continue);
-        assert!(w.show_tos_confirm);
-    }
-
-    #[test]
-    fn pressing_y_on_tos_confirmation_accepts_and_saves() {
-        let (_dir, mut w) = wizard_with_claude_code();
-        w.enter(Step::Review);
-        w.handle_key(press(KeyCode::Enter));
-        assert!(w.show_tos_confirm);
-
-        let action = w.handle_key(press(KeyCode::Char('y')));
-
-        assert!(w.claude_code_tos_accepted);
-        assert!(!w.show_tos_confirm);
-        assert_eq!(
-            action,
-            Action::Save,
-            "confirming is the last word on the save the user already asked for"
-        );
-    }
-
-    #[test]
-    fn pressing_uppercase_y_also_accepts_and_saves() {
-        let (_dir, mut w) = wizard_with_claude_code();
-        w.enter(Step::Review);
-        w.handle_key(press(KeyCode::Enter));
-
-        let action = w.handle_key(press(KeyCode::Char('Y')));
-
-        assert!(w.claude_code_tos_accepted);
-        assert!(!w.show_tos_confirm);
-        assert_eq!(action, Action::Save);
-    }
-
-    #[test]
-    fn dismissing_the_tos_confirmation_stays_put_without_accepting() {
-        let (_dir, mut w) = wizard_with_claude_code();
-        w.enter(Step::Review);
-        w.handle_key(press(KeyCode::Enter));
-
-        let action = w.handle_key(press(KeyCode::Char('n')));
-
-        assert!(!w.claude_code_tos_accepted);
-        assert!(!w.show_tos_confirm);
-        assert_eq!(action, Action::Continue, "the save stays blocked");
-        assert_eq!(w.step, Step::Review, "declining must not navigate away");
-    }
-
-    #[test]
-    fn second_enter_on_review_after_accepting_saves() {
-        let (_dir, mut w) = wizard_with_claude_code();
-        w.enter(Step::Review);
-        w.handle_key(press(KeyCode::Enter)); // shows overlay
-        w.handle_key(press(KeyCode::Char('y'))); // accept, goes back
-
-        w.enter(Step::Review);
-        let action = w.handle_key(press(KeyCode::Enter));
-
-        assert_eq!(action, Action::Save, "should save after ToS accepted");
-    }
-
-    #[test]
-    fn deselecting_claude_code_resets_tos_acceptance() {
-        let (_dir, mut w) = wizard_with_claude_code();
-        w.claude_code_tos_accepted = true;
-
-        let index = w
-            .providers
-            .iter()
-            .position(|r| r.provider.id == "claude-code")
-            .unwrap();
-        w.enter(Step::Providers);
-        w.cursor = index;
-        w.handle_key(press(KeyCode::Char(' '))); // deselect
-
-        assert!(!w.claude_code_tos_accepted);
-    }
-
-    #[test]
-    fn tos_overlay_blocks_all_other_keys() {
-        let (_dir, mut w) = wizard_with_claude_code();
-        w.enter(Step::Review);
-        w.handle_key(press(KeyCode::Enter));
-        assert!(w.show_tos_confirm);
-
-        // q should NOT quit - the overlay eats it
-        w.handle_key(press(KeyCode::Char('q')));
-        assert!(!w.should_quit, "q must not quit while overlay is showing");
-        assert!(!w.show_tos_confirm, "overlay dismissed");
-    }
-
-    #[test]
-    fn without_claude_code_review_saves_immediately() {
-        let (_dir, mut w) = wizard();
-        w.enter(Step::Review);
-
-        let action = w.handle_key(press(KeyCode::Enter));
-        assert_eq!(action, Action::Save, "no claude-code means no gate");
-    }
-}
+mod tests;

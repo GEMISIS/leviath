@@ -556,6 +556,8 @@ async fn real_dashboard(_args: DashboardArgs) -> anyhow::Result<()> {
     let control = control_client()?;
     let mut setup = CrosstermSetup {
         viewport: Viewport::Fullscreen,
+        mouse_capture: true,
+        enabled: false,
     };
     let mut events = CrosstermEventSource::new();
     commands::dashboard::execute_with(control, &mut setup, &mut events, real_yank).await
@@ -620,6 +622,8 @@ async fn real_setup(args: commands::setup::SetupArgs) -> anyhow::Result<()> {
             &env,
             &mut CrosstermSetup {
                 viewport: Viewport::Fullscreen,
+                mouse_capture: false,
+                enabled: false,
             },
             &mut CrosstermEventSource::new(),
             false,
@@ -637,6 +641,8 @@ async fn real_setup(args: commands::setup::SetupArgs) -> anyhow::Result<()> {
     }
     let mut setup = CrosstermSetup {
         viewport: Viewport::Fullscreen,
+        mouse_capture: false,
+        enabled: false,
     };
     let mut events = CrosstermEventSource::new();
     commands::setup::execute_core(&mut wizard, &env, &mut setup, &mut events).await
@@ -645,25 +651,70 @@ async fn real_setup(args: commands::setup::SetupArgs) -> anyhow::Result<()> {
 /// Real [`TerminalSetup`]: enables raw mode, enters/leaves the real alternate
 /// screen, and builds a real `CrosstermBackend` on `stdout`. Lives in the
 /// binary because it can only be exercised against a real terminal.
+///
+/// `mouse_capture` is per-surface: the dashboard wants wheel events and its
+/// own click-drag selection, while the setup wizard handles no mouse events
+/// at all - capturing there would only steal the terminal's native
+/// drag-to-select (copying an error or a signup URL) for nothing.
 struct CrosstermSetup {
     viewport: Viewport,
+    mouse_capture: bool,
+    /// True between a successful `enable()` and the matching `disable()`, so
+    /// teardown (explicit, `Drop`, or the panic hook) runs exactly once.
+    enabled: bool,
+}
+
+/// Restore the terminal from raw mode / alternate screen / mouse capture.
+/// Safe to call redundantly: every step is a no-op when already released.
+fn restore_terminal() {
+    io::stdout().execute(DisableMouseCapture).ok();
+    disable_raw_mode().ok();
+    io::stdout().execute(LeaveAlternateScreen).ok();
+}
+
+/// Whether a `CrosstermSetup` currently holds the terminal; read by the panic
+/// hook so a panic after clean teardown doesn't re-issue restore sequences
+/// into a healthy shell.
+static TERMINAL_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Install (once) a chained panic hook that restores the terminal *before*
+/// the default hook prints the panic message - otherwise a panic mid-loop
+/// leaves the shell in raw mode with the message drawn into the vanished
+/// alternate screen.
+fn install_terminal_restore_panic_hook() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if TERMINAL_HELD.load(std::sync::atomic::Ordering::SeqCst) {
+                restore_terminal();
+            }
+            previous(info);
+        }));
+    });
 }
 
 impl TerminalSetup for CrosstermSetup {
     type B = ratatui::backend::CrosstermBackend<io::Stdout>;
 
     fn enable(&mut self) -> anyhow::Result<()> {
+        install_terminal_restore_panic_hook();
         enable_raw_mode().map_err(anyhow::Error::from)?;
         io::stdout()
             .execute(EnterAlternateScreen)
             .map_err(anyhow::Error::from)?;
-        // Mouse capture is what delivers wheel events, and it routes click-drag
-        // to the dashboard's own text selection (drag to highlight, release to
-        // copy). Hold Shift (or Option on macOS Terminal) to bypass capture and
-        // use the terminal's native selection instead.
-        io::stdout()
-            .execute(EnableMouseCapture)
-            .map_err(anyhow::Error::from)?;
+        if self.mouse_capture {
+            // Mouse capture is what delivers wheel events, and it routes
+            // click-drag to the dashboard's own text selection (drag to
+            // highlight, release to copy). Hold Shift (or Option on macOS
+            // Terminal) to bypass capture and use the terminal's native
+            // selection instead.
+            io::stdout()
+                .execute(EnableMouseCapture)
+                .map_err(anyhow::Error::from)?;
+        }
+        self.enabled = true;
+        TERMINAL_HELD.store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
@@ -679,15 +730,28 @@ impl TerminalSetup for CrosstermSetup {
     }
 
     fn disable(&mut self) {
-        // Released before leaving the alternate screen, and unconditionally: a
-        // terminal left in mouse-reporting mode emits escape sequences into the
-        // user's shell on every click afterwards.
-        io::stdout().execute(DisableMouseCapture).ok();
-        disable_raw_mode().ok();
-        io::stdout().execute(LeaveAlternateScreen).ok();
+        if !self.enabled {
+            return;
+        }
+        self.enabled = false;
+        TERMINAL_HELD.store(false, std::sync::atomic::Ordering::SeqCst);
+        // Mouse release runs before leaving the alternate screen, and
+        // unconditionally (even when capture was never enabled - it's a
+        // no-op then): a terminal left in mouse-reporting mode emits escape
+        // sequences into the user's shell on every click afterwards.
+        restore_terminal();
     }
 
     fn print_done(&self) {
         println!("Dashboard closed.");
+    }
+}
+
+/// Covers early-return paths (`?` between `enable()` and the loop's own
+/// teardown): the terminal is restored on unwind, and the `enabled` guard
+/// makes the common explicit-`disable()`-then-drop sequence a single restore.
+impl Drop for CrosstermSetup {
+    fn drop(&mut self) {
+        self.disable();
     }
 }

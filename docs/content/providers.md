@@ -246,6 +246,7 @@ claude_code_binary  = "/usr/local/bin/claude"   # unset resolves `claude` on PAT
 claude_code_effort  = "medium"                  # low | medium | high | xhigh | max
 ```
 
-It is off unless you turn it on, and `lev setup` defaults to declining, so pressing Enter through
-the wizard leaves it off. `claude_code_effort` is always sent explicitly: left to itself the CLI
-picks `high` with adaptive thinking, spending output tokens and latency Leviath never asked for.
+It is off unless you turn it on: the wizard never selects it for you, and saving with it selected
+first asks you to accept the terms risk on an explicit dialog. `claude_code_effort` is always sent
+explicitly: left to itself the CLI picks `high` with adaptive thinking, spending output tokens and
+latency Leviath never asked for.

@@ -8,15 +8,17 @@
 
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 
 use super::catalog::{self, Credential};
 use super::state::{FieldValue, Step, Wizard};
 use crate::tui::theme::*;
+use crate::tui::widgets::footer::{Hint, draw_hint_bar, hint};
+use crate::tui::widgets::help::{HelpSection, draw_help};
 
 /// Draw one frame.
 pub fn draw(frame: &mut Frame, wizard: &Wizard) {
@@ -33,11 +35,65 @@ pub fn draw(frame: &mut Frame, wizard: &Wizard) {
     draw_body(frame, chunks[1], wizard);
     draw_footer(frame, chunks[2], wizard);
 
-    if wizard.show_tos_confirm {
-        draw_tos_confirm(frame, frame.area());
+    if let Some(pending) = &wizard.confirm {
+        pending.dialog.draw(frame, frame.area());
     } else if wizard.show_help {
-        draw_help(frame, frame.area());
+        draw_help(frame, frame.area(), &help_sections());
     }
+}
+
+/// The help overlay's content, matching the bindings in `input.rs`.
+fn help_sections() -> [HelpSection; 3] {
+    [
+        HelpSection {
+            title: "Navigate",
+            entries: vec![
+                ("↑ ↓ / k j", "move"),
+                ("← → / h l", "change a choice"),
+                ("space", "select / toggle"),
+                ("enter", "act on the focused row; Continue moves on"),
+                ("tab", "next screen"),
+                ("shift-tab / esc", "previous screen"),
+            ],
+        },
+        HelpSection {
+            title: "Providers",
+            entries: vec![
+                ("v", "re-check a credential"),
+                ("o", "open a signup page"),
+                ("ctrl-r", "show or hide credentials"),
+            ],
+        },
+        HelpSection {
+            title: "Finish",
+            entries: vec![
+                ("ctrl-s", "write and finish, from anywhere"),
+                (
+                    "q / ctrl-c",
+                    "quit without writing (asks if you changed things)",
+                ),
+            ],
+        },
+    ]
+}
+
+/// The step's Continue/action button, rendered as the last cursor row.
+fn continue_line(wizard: &Wizard) -> Line<'static> {
+    let focused = wizard.on_continue();
+    let style = if focused {
+        Style::default()
+            .fg(C_ACCENT)
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        Style::default().fg(C_MUTED)
+    };
+    Line::from(vec![
+        Span::styled(
+            if focused { "› " } else { "  " },
+            Style::default().fg(C_ACCENT),
+        ),
+        Span::styled(format!("[ {} ]", wizard.continue_label()), style),
+    ])
 }
 
 /// The step breadcrumb.
@@ -141,10 +197,8 @@ fn draw_welcome(frame: &mut Frame, area: Rect, wizard: &Wizard) {
         "Nothing is written until the last screen.",
         Style::default().fg(C_DIM),
     )));
-    lines.push(Line::from(Span::styled(
-        "Press Enter to begin.",
-        Style::default().fg(C_ACCENT),
-    )));
+    lines.push(Line::from(""));
+    lines.push(continue_line(wizard));
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
@@ -199,7 +253,7 @@ fn wrap_plain(text: &str, width: usize) -> Vec<String> {
 }
 
 fn draw_providers(frame: &mut Frame, area: Rect, wizard: &Wizard) {
-    let items: Vec<ListItem> = wizard
+    let mut items: Vec<ListItem> = wizard
         .providers
         .iter()
         .enumerate()
@@ -237,12 +291,15 @@ fn draw_providers(frame: &mut Frame, area: Rect, wizard: &Wizard) {
             ListItem::new(item_lines)
         })
         .collect();
+    items.push(ListItem::new(vec![Line::from(""), continue_line(wizard)]));
 
     frame.render_widget(List::new(items), area);
 }
 
 fn draw_provider_detail(frame: &mut Frame, area: Rect, wizard: &Wizard) {
     let Some(index) = wizard.detail_row() else {
+        // Forced onto an empty credential screen (tests do): only the button.
+        frame.render_widget(Paragraph::new(vec![continue_line(wizard)]), area);
         return;
     };
     // `detail_row` yields an index into `providers`, so this is a read rather
@@ -269,6 +326,9 @@ fn draw_provider_detail(frame: &mut Frame, area: Rect, wizard: &Wizard) {
         Line::from(""),
     ];
 
+    // The credential (or effort) row is the screen's one cursor row; the
+    // marker shows whether it or the Continue button holds focus.
+    let row_marker = if wizard.on_continue() { "  " } else { "› " };
     match row.provider.credential {
         Credential::ApiKey | Credential::BaseUrl => {
             let label = if row.provider.credential == Credential::ApiKey {
@@ -276,11 +336,20 @@ fn draw_provider_detail(frame: &mut Frame, area: Rect, wizard: &Wizard) {
             } else {
                 "Base URL"
             };
-            let shown = credential_display(wizard, index);
-            lines.push(Line::from(vec![
+            let mut spans = vec![
+                Span::styled(row_marker, Style::default().fg(C_ACCENT)),
                 Span::styled(format!("{label}: "), Style::default().fg(C_MUTED)),
-                Span::styled(shown, Style::default().fg(C_WHITE)),
-            ]));
+            ];
+            match &wizard.edit {
+                Some(edit) if edit.target == super::state::EditTarget::Credential(index) => {
+                    spans.extend(edit.line.display_spans(wizard.reveal).spans);
+                }
+                _ => spans.push(Span::styled(
+                    credential_display(wizard, index),
+                    Style::default().fg(C_WHITE),
+                )),
+            }
+            lines.push(Line::from(spans));
             if let Some(var) = row.from_env {
                 lines.push(Line::from(Span::styled(
                     format!("Supplied by ${var} - it will not be written to the config."),
@@ -294,6 +363,7 @@ fn draw_provider_detail(frame: &mut Frame, area: Rect, wizard: &Wizard) {
         }
         Credential::None => {
             lines.push(Line::from(vec![
+                Span::styled(row_marker, Style::default().fg(C_ACCENT)),
                 Span::styled("Reasoning effort: ", Style::default().fg(C_MUTED)),
                 Span::styled(
                     super::state::effort_options()[row.effort],
@@ -322,22 +392,15 @@ fn draw_provider_detail(frame: &mut Frame, area: Rect, wizard: &Wizard) {
 
     lines.push(Line::from(""));
     lines.push(status_line(wizard, index));
+    lines.push(Line::from(""));
+    lines.push(continue_line(wizard));
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
-/// What to print in place of a credential.
+/// What to print in place of a credential when it is not being edited.
 fn credential_display(wizard: &Wizard, index: usize) -> String {
     let row = &wizard.providers[index];
-    if let Some(edit) = &wizard.edit
-        && edit.target == super::state::EditTarget::Credential(index)
-    {
-        return if edit.masked && !wizard.reveal {
-            format!("{}▌", "•".repeat(edit.buffer.chars().count()))
-        } else {
-            format!("{}▌", edit.buffer)
-        };
-    }
     if row.value.is_empty() {
         return match row.from_env {
             Some(_) => "(from the environment)".to_string(),
@@ -377,33 +440,39 @@ fn status_line(wizard: &Wizard, index: usize) -> Line<'static> {
 }
 
 fn draw_fields(frame: &mut Frame, area: Rect, wizard: &Wizard) {
-    let items: Vec<ListItem> = wizard
+    let mut items: Vec<ListItem> = wizard
         .fields()
         .iter()
         .enumerate()
         .map(|(index, field)| {
             let selected = index == wizard.cursor;
-            let value = match &wizard.edit {
-                Some(edit) if edit.target == super::state::EditTarget::Field(index) => {
-                    format!("{}▌", edit.buffer)
-                }
-                _ => field.value.display(),
-            };
             let hint = match &field.value {
-                FieldValue::Bool(_) => "space",
-                FieldValue::Choice { .. } => "← →",
+                FieldValue::Bool(_) => "enter/space",
+                FieldValue::Choice { .. } => "enter/← →",
                 _ => "enter",
             };
+            let mut spans = vec![
+                Span::styled(
+                    if selected { "› " } else { "  " },
+                    Style::default().fg(C_ACCENT),
+                ),
+                Span::styled(format!("{:<28}", field.label), name_style(selected)),
+            ];
+            match &wizard.edit {
+                Some(edit) if edit.target == super::state::EditTarget::Field(index) => {
+                    spans.extend(edit.line.display_spans(wizard.reveal).spans);
+                }
+                _ => spans.push(Span::styled(
+                    field.value.display(),
+                    Style::default().fg(C_ACCENT),
+                )),
+            }
+            spans.push(Span::styled(
+                format!("   [{hint}]"),
+                Style::default().fg(C_DIM),
+            ));
             ListItem::new(vec![
-                Line::from(vec![
-                    Span::styled(
-                        if selected { "› " } else { "  " },
-                        Style::default().fg(C_ACCENT),
-                    ),
-                    Span::styled(format!("{:<28}", field.label), name_style(selected)),
-                    Span::styled(value, Style::default().fg(C_ACCENT)),
-                    Span::styled(format!("   [{hint}]"), Style::default().fg(C_DIM)),
-                ]),
+                Line::from(spans),
                 Line::from(Span::styled(
                     format!("    {}", field.help),
                     Style::default().fg(C_DIM),
@@ -411,12 +480,13 @@ fn draw_fields(frame: &mut Frame, area: Rect, wizard: &Wizard) {
             ])
         })
         .collect();
+    items.push(ListItem::new(vec![Line::from(""), continue_line(wizard)]));
 
     frame.render_widget(List::new(items), area);
 }
 
 fn draw_agents(frame: &mut Frame, area: Rect, wizard: &Wizard) {
-    let items: Vec<ListItem> = wizard
+    let mut items: Vec<ListItem> = wizard
         .agents
         .iter()
         .enumerate()
@@ -445,6 +515,7 @@ fn draw_agents(frame: &mut Frame, area: Rect, wizard: &Wizard) {
             ]))
         })
         .collect();
+    items.push(ListItem::new(vec![Line::from(""), continue_line(wizard)]));
 
     frame.render_widget(List::new(items), area);
 }
@@ -515,6 +586,7 @@ fn draw_mcp(frame: &mut Frame, area: Rect, wizard: &Wizard) {
             Style::default().fg(C_WARN),
         ))));
     }
+    items.push(ListItem::new(vec![Line::from(""), continue_line(wizard)]));
 
     frame.render_widget(List::new(items), area);
 }
@@ -589,157 +661,73 @@ fn draw_review(frame: &mut Frame, area: Rect, wizard: &Wizard) {
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Enter or Ctrl-S to write.  Esc to go back.",
-        Style::default().fg(C_ACCENT),
-    )));
+    lines.push(continue_line(wizard));
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
+/// The footer's key hints for the wizard's current mode.
+fn footer_hints(wizard: &Wizard) -> Vec<Hint> {
+    if wizard.confirm.is_some() {
+        return vec![
+            hint("←→", "choose"),
+            hint("enter", "confirm"),
+            hint("esc", "cancel"),
+        ];
+    }
+    if wizard.edit.is_some() {
+        return vec![
+            hint("enter", "save"),
+            hint("esc", "cancel"),
+            hint("←→", "move cursor"),
+        ];
+    }
+    match wizard.step {
+        Step::Welcome => vec![hint("enter", "begin"), hint("?", "help"), hint("q", "quit")],
+        Step::Providers => vec![
+            hint("↑↓", "move"),
+            hint("space/enter", "select"),
+            hint("o", "signup"),
+            hint("v", "check"),
+            hint("tab", "next"),
+            hint("q", "quit"),
+        ],
+        Step::ProviderDetail => vec![
+            hint("enter", "edit"),
+            hint("v", "check"),
+            hint("o", "signup"),
+            hint("tab", "next"),
+            hint("esc", "back"),
+            hint("q", "quit"),
+        ],
+        Step::Defaults | Step::Limits => vec![
+            hint("↑↓", "move"),
+            hint("enter", "change"),
+            hint("←→", "cycle"),
+            hint("tab", "next"),
+            hint("esc", "back"),
+            hint("q", "quit"),
+        ],
+        Step::Agents | Step::Mcp => vec![
+            hint("↑↓", "move"),
+            hint("space/enter", "select"),
+            hint("tab", "next"),
+            hint("esc", "back"),
+            hint("q", "quit"),
+        ],
+        Step::Review => vec![
+            hint("enter", "apply"),
+            hint("v", "re-check"),
+            hint("esc", "back"),
+            hint("q", "quit"),
+        ],
+    }
+}
+
 fn draw_footer(frame: &mut Frame, area: Rect, wizard: &Wizard) {
-    let hints = if wizard.edit.is_some() {
-        "enter save field · esc cancel"
-    } else {
-        match wizard.step {
-            Step::Providers => "space select · o signup page · tab next · ? help · q quit",
-            Step::ProviderDetail => "enter edit · v check · o signup page · tab next · q quit",
-            Step::Defaults | Step::Limits => "↑↓ move · enter/space/←→ change · tab next · q quit",
-            Step::Agents | Step::Mcp => "space select · tab next · esc back · q quit",
-            Step::Review => "enter write · esc back · q quit",
-            Step::Welcome => "enter begin · ? help · q quit",
-        }
-    };
-
-    let message = wizard.message.clone().unwrap_or_default();
-    frame.render_widget(
-        Paragraph::new(vec![Line::from(vec![
-            Span::styled(message, Style::default().fg(C_WARN)),
-            Span::styled(
-                if wizard.message.is_some() { "  " } else { "" },
-                Style::default(),
-            ),
-            Span::styled(hints, Style::default().fg(C_DIM)),
-        ])])
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(C_BORDER)),
-        ),
-        area,
-    );
-}
-
-fn draw_help(frame: &mut Frame, area: Rect) {
-    let popup = centered(64, 60, area);
-    frame.render_widget(Clear, popup);
-    let lines = vec![
-        Line::from(Span::styled("Keys", Style::default().fg(C_ACCENT))),
-        Line::from(""),
-        Line::from("  ↑ ↓ / k j     move"),
-        Line::from("  ← → / h l     change a choice"),
-        Line::from("  space         select / toggle"),
-        Line::from("  enter         edit, or go on"),
-        Line::from("  tab / esc     next / previous screen"),
-        Line::from("  v             re-check a provider"),
-        Line::from("  o             open a signup page"),
-        Line::from("  ctrl-r        show or hide credentials"),
-        Line::from("  ctrl-s        write and finish, from anywhere"),
-        Line::from("  q / ctrl-c    quit without writing"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  any key closes this",
-            Style::default().fg(C_DIM),
-        )),
-    ];
-    frame.render_widget(
-        Paragraph::new(lines).alignment(Alignment::Left).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(C_BORDER_FOCUS))
-                .title(" Help "),
-        ),
-        popup,
-    );
-}
-
-/// Confirmation overlay for the Claude Code transport's terms risk.
-fn draw_tos_confirm(frame: &mut Frame, area: Rect) {
-    let popup = centered(70, 50, area);
-    frame.render_widget(Clear, popup);
-    let lines = vec![
-        Line::from(Span::styled(
-            "⚠️  Terms of Service",
-            Style::default().fg(C_WARN).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Anthropic's terms prohibit third-party developers from offering",
-            Style::default().fg(C_WARN),
-        )),
-        Line::from(Span::styled(
-            "claude.ai subscription auth for their products without prior",
-            Style::default().fg(C_WARN),
-        )),
-        Line::from(Span::styled(
-            "approval. The Claude Code transport routes inference through your",
-            Style::default().fg(C_WARN),
-        )),
-        Line::from(Span::styled(
-            "subscription via the CLI's OAuth session.",
-            Style::default().fg(C_WARN),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "For unambiguous compliance, use a direct Anthropic API key.",
-            Style::default().fg(C_WHITE),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("Press ", Style::default().fg(C_DIM)),
-            Span::styled(
-                "Y",
-                Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                " to accept responsibility for compliance,",
-                Style::default().fg(C_DIM),
-            ),
-        ]),
-        Line::from(Span::styled(
-            "or any other key to cancel.",
-            Style::default().fg(C_DIM),
-        )),
-    ];
-    frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(C_WARN))
-                .title(" Confirm "),
-        ),
-        popup,
-    );
-}
-
-/// A centred rectangle covering `percent_x`/`percent_y` of `area`.
-fn centered(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(area);
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(vertical[1])[1]
+    let hints = footer_hints(wizard);
+    let message = wizard.message.as_deref().map(|m| (m, C_WARN));
+    draw_hint_bar(frame, area, message, &hints, true);
 }
 
 /// Highlight style for the row under the cursor.
@@ -913,8 +901,7 @@ mod tests {
         w.enter(Step::ProviderDetail);
         w.edit = Some(Edit {
             target: EditTarget::Credential(0),
-            buffer: "sk-typing".to_string(),
-            masked: true,
+            line: crate::tui::widgets::line_edit::LineEdit::new("sk-typing".to_string(), true),
         });
 
         let hidden = rendered(&w);
@@ -1028,7 +1015,7 @@ mod tests {
     }
 
     #[test]
-    fn the_tos_confirmation_overlay_draws_over_the_review_screen() {
+    fn the_tos_confirmation_dialog_draws_over_the_review_screen() {
         let (_dir, mut w) = wizard();
         let index = w
             .providers
@@ -1036,22 +1023,38 @@ mod tests {
             .position(|r| r.provider.id == "claude-code")
             .expect("the transport is offered");
         w.providers[index].selected = true;
-        w.show_tos_confirm = true;
         w.enter(Step::Review);
+        w.open_tos_confirm();
 
         let screen = rendered(&w);
         assert!(
-            screen.contains("Terms of Service"),
-            "overlay title missing:\n{screen}"
+            screen.contains("terms of service"),
+            "dialog title missing:\n{screen}"
         );
         assert!(
-            screen.contains("Press"),
-            "call to action missing:\n{screen}"
+            screen.contains("[ Accept and save ]"),
+            "the affirmative button is missing:\n{screen}"
         );
         assert!(
-            screen.contains("any other key"),
-            "dismissal hint missing:\n{screen}"
+            screen.contains("[ Cancel ]"),
+            "the safe button is missing:\n{screen}"
         );
+    }
+
+    #[test]
+    fn the_quit_and_no_provider_dialogs_draw_their_buttons() {
+        let (_dir, mut w) = wizard();
+        w.open_quit_confirm();
+        let screen = rendered(&w);
+        assert!(screen.contains("Quit setup?"), "{screen}");
+        assert!(screen.contains("[ Stay ]"), "{screen}");
+
+        w.confirm = None;
+        w.open_no_providers_confirm();
+        let screen = rendered(&w);
+        assert!(screen.contains("No providers selected"), "{screen}");
+        assert!(screen.contains("[ Go back ]"), "{screen}");
+        assert!(screen.contains("[ Continue anyway ]"), "{screen}");
     }
 
     #[test]
@@ -1059,8 +1062,24 @@ mod tests {
         let (_dir, mut w) = wizard();
         w.enter(Step::ProviderDetail);
 
-        // Just the chrome, no panic.
+        // Just the chrome and the Continue button, no panic.
         assert!(rendered(&w).contains("Credentials"));
+    }
+
+    #[test]
+    fn the_credential_screen_moves_the_focus_marker_onto_the_continue_button() {
+        let (_dir, mut w) = wizard();
+        w.providers[0].selected = true;
+        w.enter(Step::ProviderDetail);
+
+        // Cursor on the credential row: the row carries the marker.
+        assert!(rendered(&w).contains("› API key:"));
+
+        // Cursor on the Continue button: the row loses it, the button gains it.
+        w.cursor = w.row_count();
+        let screen = rendered(&w);
+        assert!(!screen.contains("› API key:"), "{screen}");
+        assert!(screen.contains("› [ Continue: Defaults ]"), "{screen}");
     }
 
     #[test]
@@ -1069,8 +1088,7 @@ mod tests {
         w.enter(Step::Limits);
         w.edit = Some(Edit {
             target: EditTarget::Field(0),
-            buffer: "42".to_string(),
-            masked: false,
+            line: crate::tui::widgets::line_edit::LineEdit::new("42".to_string(), false),
         });
 
         assert!(rendered(&w).contains("42"));
@@ -1082,11 +1100,11 @@ mod tests {
         w.enter(Step::Limits);
         let screen = rendered(&w);
         assert!(screen.contains("[enter]"), "numbers are typed");
-        assert!(screen.contains("[space]"), "booleans are toggled");
+        assert!(screen.contains("[enter/space]"), "booleans are toggled");
 
         w.providers[0].selected = true;
         w.enter(Step::Defaults);
-        assert!(rendered(&w).contains("← →"), "choices are cycled");
+        assert!(rendered(&w).contains("enter/← →"), "choices are cycled");
     }
 
     #[test]
@@ -1213,13 +1231,13 @@ mod tests {
         w.message = None;
         for (step, expected) in [
             (Step::Welcome, "enter begin"),
-            (Step::Providers, "space select"),
+            (Step::Providers, "space/enter select"),
             (Step::ProviderDetail, "enter edit"),
-            (Step::Defaults, "↑↓ move"),
-            (Step::Limits, "↑↓ move"),
-            (Step::Agents, "space select"),
-            (Step::Mcp, "space select"),
-            (Step::Review, "enter write"),
+            (Step::Defaults, "enter change"),
+            (Step::Limits, "enter change"),
+            (Step::Agents, "space/enter select"),
+            (Step::Mcp, "space/enter select"),
+            (Step::Review, "enter apply"),
         ] {
             w.enter(step);
             let screen = rendered(&w);
@@ -1231,10 +1249,14 @@ mod tests {
 
         w.edit = Some(Edit {
             target: EditTarget::Field(0),
-            buffer: String::new(),
-            masked: false,
+            line: crate::tui::widgets::line_edit::LineEdit::new(String::new(), false),
         });
         assert!(rendered(&w).contains("esc cancel"));
+
+        // A dialog swaps the footer for its own answer hints.
+        w.edit = None;
+        w.open_quit_confirm();
+        assert!(rendered(&w).contains("enter confirm"));
     }
 
     #[test]

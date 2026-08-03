@@ -187,9 +187,26 @@ pub enum EditTarget {
 #[derive(Debug, Clone)]
 pub struct Edit {
     pub target: EditTarget,
-    pub buffer: String,
-    /// Draw the buffer masked. Set for API keys.
-    pub masked: bool,
+    /// The shared single-line editor (cursor movement, masking).
+    pub(crate) line: crate::tui::widgets::line_edit::LineEdit,
+}
+
+/// Why a confirmation dialog is on screen, so its Yes can be routed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmPurpose {
+    /// `q`/Ctrl-C with unsaved choices: quit and discard?
+    QuitDiscard,
+    /// Saving with the Claude Code transport selected: accept the terms risk?
+    SaveTos,
+    /// Leaving the Providers screen with nothing selected: continue anyway?
+    NoProviders,
+}
+
+/// A pending confirmation: the dialog plus what its Yes means.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingConfirm {
+    pub purpose: ConfirmPurpose,
+    pub(crate) dialog: crate::tui::widgets::confirm::Confirm,
 }
 
 /// The whole wizard.
@@ -209,9 +226,12 @@ pub struct Wizard {
     /// Show credentials in clear text.
     pub reveal: bool,
     pub show_help: bool,
-    /// The Claude Code terms-of-service confirmation is on screen, and is the
-    /// only thing keys mean until it is answered.
-    pub show_tos_confirm: bool,
+    /// A confirmation dialog is on screen, and (after Ctrl-C) it is the only
+    /// thing keys mean until it is answered.
+    pub confirm: Option<PendingConfirm>,
+    /// The user has changed something since the wizard opened, so quitting
+    /// silently would discard real choices.
+    pub dirty: bool,
     /// The user has acknowledged the Claude Code transport's terms risk. A
     /// hard gate on saving: the transport cannot be written to the config
     /// without it, and deselecting the transport withdraws it.
@@ -333,7 +353,8 @@ impl Wizard {
             edit: None,
             reveal: false,
             show_help: false,
-            show_tos_confirm: false,
+            confirm: None,
+            dirty: false,
             claude_code_tos_accepted: false,
             should_quit: false,
             finished: false,
@@ -424,18 +445,69 @@ impl Wizard {
         }
     }
 
-    /// Move the selection, clamped to the step's rows.
-    pub fn move_cursor(&mut self, delta: isize) {
-        let count = self.row_count();
-        if count == 0 {
-            self.cursor = 0;
-            return;
+    /// How many cursor positions the current step has: its rows plus the
+    /// Continue/action button that every step ends with.
+    pub fn nav_rows(&self) -> usize {
+        self.row_count() + 1
+    }
+
+    /// Whether the cursor sits on the step's Continue/action button (the
+    /// virtual row after the last real one).
+    pub fn on_continue(&self) -> bool {
+        self.cursor == self.row_count()
+    }
+
+    /// The label of the current step's Continue/action button. It carries
+    /// state (selection counts, what screen is next) so advancing is never a
+    /// surprise.
+    pub fn continue_label(&self) -> String {
+        match self.step {
+            Step::Welcome => "Get started".to_string(),
+            Step::Review => "Apply and finish".to_string(),
+            Step::Providers => {
+                let count = self.selected_providers().len();
+                if count == 0 {
+                    "Continue (no providers selected)".to_string()
+                } else {
+                    format!("Continue: {} ({count} selected)", self.next_step_title())
+                }
+            }
+            Step::ProviderDetail => {
+                let selected = self.selected_providers();
+                match selected.get(self.detail + 1) {
+                    Some(&next) => format!("Next: {}", self.providers[next].provider.display),
+                    None => format!("Continue: {}", self.next_step_title()),
+                }
+            }
+            Step::Defaults | Step::Limits | Step::Agents | Step::Mcp => {
+                format!("Continue: {}", self.next_step_title())
+            }
         }
+    }
+
+    /// The title of the step `next_step` would land on.
+    fn next_step_title(&self) -> &'static str {
+        let mut index = self.step.index();
+        while index + 1 < Step::ALL.len() {
+            index += 1;
+            let step = Step::ALL[index];
+            if !self.is_empty_step(step) {
+                return step.title();
+            }
+        }
+        Step::Review.title()
+    }
+
+    /// Move the selection, clamped to the step's rows plus its button.
+    pub fn move_cursor(&mut self, delta: isize) {
+        let count = self.nav_rows();
         let next = self.cursor as isize + delta;
         self.cursor = next.clamp(0, count as isize - 1) as usize;
     }
 
-    /// Advance to the next step, skipping ones with nothing to show.
+    /// Advance to the next step, skipping ones with nothing to show. Skipping
+    /// the credential screen is announced rather than silent: it looks exactly
+    /// like a bug when a screen the breadcrumb promises never appears.
     pub fn next_step(&mut self) {
         let mut index = self.step.index();
         while index + 1 < Step::ALL.len() {
@@ -444,6 +516,10 @@ impl Wizard {
             if !self.is_empty_step(step) {
                 self.enter(step);
                 return;
+            }
+            if step == Step::ProviderDetail {
+                self.message =
+                    Some("Skipped Credentials: no selected provider needs setup.".to_string());
             }
         }
         // Past the last step: the Review screen's action is to save.
@@ -720,6 +796,68 @@ impl Wizard {
         }
     }
 
+    // ── Confirmations ───────────────────────────────────────────────────────
+
+    /// `q`/Ctrl-C with unsaved choices: ask before discarding them.
+    pub fn open_quit_confirm(&mut self) {
+        use ratatui::text::Line;
+        self.confirm = Some(PendingConfirm {
+            purpose: ConfirmPurpose::QuitDiscard,
+            dialog: crate::tui::widgets::confirm::Confirm::new(
+                "Quit setup?",
+                vec![Line::from(
+                    "Nothing has been written yet. Your choices so far will be discarded.",
+                )],
+                "Quit",
+                "Stay",
+            ),
+        });
+    }
+
+    /// Saving with the Claude Code transport selected: the terms risk is
+    /// confirmed once, explicitly, on a dialog with real buttons.
+    pub fn open_tos_confirm(&mut self) {
+        use ratatui::text::Line;
+        self.confirm = Some(PendingConfirm {
+            purpose: ConfirmPurpose::SaveTos,
+            dialog: crate::tui::widgets::confirm::Confirm::new(
+                "Claude Code terms of service",
+                vec![
+                    Line::from("Anthropic's terms prohibit third-party developers from offering"),
+                    Line::from("claude.ai subscription auth for their products without prior"),
+                    Line::from("approval. The Claude Code transport routes inference through"),
+                    Line::from("your subscription via the CLI's OAuth session."),
+                    Line::from(""),
+                    Line::from("For unambiguous compliance, use a direct Anthropic API key."),
+                    Line::from(""),
+                    Line::from("Accepting means you take responsibility for compliance."),
+                ],
+                "Accept and save",
+                "Cancel",
+            )
+            .danger(),
+        });
+    }
+
+    /// Leaving the Providers screen with nothing selected: Leviath cannot run
+    /// an agent without a provider, so this is almost always a slip.
+    pub fn open_no_providers_confirm(&mut self) {
+        use ratatui::text::Line;
+        self.confirm = Some(PendingConfirm {
+            purpose: ConfirmPurpose::NoProviders,
+            dialog: crate::tui::widgets::confirm::Confirm::new(
+                "No providers selected",
+                vec![
+                    Line::from("Without a provider, Leviath cannot run any agent."),
+                    Line::from("Select one with Space or Enter, or continue anyway to"),
+                    Line::from("configure providers later."),
+                ],
+                "Continue anyway",
+                "Go back",
+            ),
+        });
+    }
+
     /// Commit an edited text buffer into wherever it belongs.
     pub fn commit_edit(&mut self) {
         let Some(edit) = self.edit.take() else {
@@ -728,7 +866,7 @@ impl Wizard {
         match edit.target {
             EditTarget::Credential(index) => {
                 if let Some(row) = self.providers.get_mut(index) {
-                    row.value = edit.buffer.trim().to_string();
+                    row.value = edit.line.value().trim().to_string();
                     // A typed credential replaces the environment's, and the
                     // row stops claiming the environment supplies it.
                     if !row.value.is_empty() {
@@ -744,7 +882,7 @@ impl Wizard {
                 if let Some(field) = fields.get_mut(index) {
                     match &mut field.value {
                         FieldValue::Number(n) => {
-                            let trimmed = edit.buffer.trim();
+                            let trimmed = edit.line.value().trim();
                             *n = if trimmed.is_empty() {
                                 None
                             } else {
@@ -1302,7 +1440,12 @@ pub(super) mod tests {
         wizard.move_cursor(-5);
         assert_eq!(wizard.cursor, 0);
         wizard.move_cursor(100);
-        assert_eq!(wizard.cursor, wizard.providers.len() - 1);
+        assert_eq!(
+            wizard.cursor,
+            wizard.providers.len(),
+            "clamped to the Continue button after the last row"
+        );
+        assert!(wizard.on_continue());
     }
 
     #[test]
@@ -1316,6 +1459,47 @@ pub(super) mod tests {
 
         assert_eq!(wizard.cursor, 0);
         assert_eq!(wizard.row_count(), 0);
+    }
+
+    #[test]
+    fn the_continue_label_names_where_it_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = test_wizard(dir.path());
+
+        wizard.enter(Step::Welcome);
+        assert_eq!(wizard.continue_label(), "Get started");
+
+        wizard.enter(Step::Providers);
+        assert_eq!(wizard.continue_label(), "Continue (no providers selected)");
+        wizard.providers[0].selected = true;
+        wizard.providers[1].selected = true;
+        assert_eq!(
+            wizard.continue_label(),
+            "Continue: Credentials (2 selected)"
+        );
+
+        // On the credential walk: the next selected provider, then the next step.
+        wizard.enter(Step::ProviderDetail);
+        assert_eq!(
+            wizard.continue_label(),
+            format!("Next: {}", wizard.providers[1].provider.display)
+        );
+        wizard.detail = 1;
+        assert_eq!(wizard.continue_label(), "Continue: Defaults");
+
+        wizard.enter(Step::Limits);
+        assert_eq!(wizard.continue_label(), "Continue: Agents");
+
+        wizard.enter(Step::Review);
+        assert_eq!(wizard.continue_label(), "Apply and finish");
+    }
+
+    #[test]
+    fn next_step_title_past_the_last_step_falls_back_to_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wizard = test_wizard(dir.path());
+        wizard.enter(Step::Review);
+        assert_eq!(wizard.next_step_title(), "Review");
     }
 
     #[test]
@@ -1848,8 +2032,7 @@ pub(super) mod tests {
         };
         wizard.edit = Some(Edit {
             target: EditTarget::Credential(0),
-            buffer: "  sk-ant-new  ".to_string(),
-            masked: true,
+            line: crate::tui::widgets::line_edit::LineEdit::new("  sk-ant-new  ".to_string(), true),
         });
 
         wizard.commit_edit();
@@ -1877,8 +2060,7 @@ pub(super) mod tests {
         assert!(wizard.providers[0].from_env.is_some());
         wizard.edit = Some(Edit {
             target: EditTarget::Credential(0),
-            buffer: "sk-ant-typed".to_string(),
-            masked: true,
+            line: crate::tui::widgets::line_edit::LineEdit::new("sk-ant-typed".to_string(), true),
         });
 
         wizard.commit_edit();
@@ -1898,8 +2080,7 @@ pub(super) mod tests {
 
         wizard.edit = Some(Edit {
             target: EditTarget::Field(0),
-            buffer: "16".to_string(),
-            masked: false,
+            line: crate::tui::widgets::line_edit::LineEdit::new("16".to_string(), false),
         });
         wizard.commit_edit();
         assert_eq!(wizard.limits[0].value, FieldValue::Number(Some(16)));
@@ -1907,8 +2088,7 @@ pub(super) mod tests {
         // Garbage keeps the previous value rather than silently unsetting it.
         wizard.edit = Some(Edit {
             target: EditTarget::Field(0),
-            buffer: "not a number".to_string(),
-            masked: false,
+            line: crate::tui::widgets::line_edit::LineEdit::new("not a number".to_string(), false),
         });
         wizard.commit_edit();
         assert_eq!(wizard.limits[0].value, FieldValue::Number(Some(16)));
@@ -1916,8 +2096,7 @@ pub(super) mod tests {
         // Blank means unset, which is a real and different choice.
         wizard.edit = Some(Edit {
             target: EditTarget::Field(0),
-            buffer: "   ".to_string(),
-            masked: false,
+            line: crate::tui::widgets::line_edit::LineEdit::new("   ".to_string(), false),
         });
         wizard.commit_edit();
         assert_eq!(wizard.limits[0].value, FieldValue::Number(None));
@@ -1931,16 +2110,14 @@ pub(super) mod tests {
 
         wizard.edit = Some(Edit {
             target: EditTarget::Credential(999),
-            buffer: "x".to_string(),
-            masked: false,
+            line: crate::tui::widgets::line_edit::LineEdit::new("x".to_string(), false),
         });
         wizard.commit_edit();
 
         wizard.enter(Step::Limits);
         wizard.edit = Some(Edit {
             target: EditTarget::Field(999),
-            buffer: "x".to_string(),
-            masked: false,
+            line: crate::tui::widgets::line_edit::LineEdit::new("x".to_string(), false),
         });
         wizard.commit_edit();
 
@@ -1948,8 +2125,7 @@ pub(super) mod tests {
         wizard.enter(Step::Welcome);
         wizard.edit = Some(Edit {
             target: EditTarget::Field(0),
-            buffer: "x".to_string(),
-            masked: false,
+            line: crate::tui::widgets::line_edit::LineEdit::new("x".to_string(), false),
         });
         wizard.commit_edit();
 
@@ -1994,8 +2170,7 @@ pub(super) mod tests {
 
         wizard.edit = Some(Edit {
             target: EditTarget::Field(2),
-            buffer: "45".to_string(),
-            masked: false,
+            line: crate::tui::widgets::line_edit::LineEdit::new("45".to_string(), false),
         });
         wizard.commit_edit();
 
@@ -2017,8 +2192,7 @@ pub(super) mod tests {
         );
         wizard.edit = Some(Edit {
             target: EditTarget::Credential(0),
-            buffer: "   ".to_string(),
-            masked: true,
+            line: crate::tui::widgets::line_edit::LineEdit::new("   ".to_string(), true),
         });
 
         wizard.commit_edit();
@@ -2075,8 +2249,7 @@ pub(super) mod tests {
 
         wizard.edit = Some(Edit {
             target: EditTarget::Field(3),
-            buffer: "yes".to_string(),
-            masked: false,
+            line: crate::tui::widgets::line_edit::LineEdit::new("yes".to_string(), false),
         });
         wizard.commit_edit();
 
