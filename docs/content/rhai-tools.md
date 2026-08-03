@@ -1,16 +1,26 @@
 ---
-title: Rhai tools
+title: Rhai tools & policy rules
 group: Reference
 group_order: 3
 order: 10
 ---
 
-# Global tools and policy rules
+# Rhai tools and policy rules
 
-Every `.rhai` file in `~/.leviath/tools/` is compiled at spawn and offered as an executable tool to
-**every** agent. This is how you give all agents a shared capability without editing each blueprint.
-Per-agent tools live in that agent's own `tools/` directory and are validated by
-`lev validate <agent>`; a per-agent tool of the same name shadows the global one.
+This page covers two things that both live in Rhai scripts. [Writing a tool](#declaring-a-tool)
+gives your agents a new capability. [Policy rules](#policy-rules) decide whether a tool call is
+allowed to fire. They are unrelated jobs, so read whichever half you came for.
+
+> [!NOTE]
+> **Before this page:** [Rhai scripting](/docs/scripting) and [Built-in tools](/docs/tools).
+> **In one line:** a `.rhai` file in a tools directory becomes a tool; a `.rhai` file in a rules
+> directory decides whether a call goes through.
+
+Every `.rhai` file in `~/.leviath/tools/` is compiled at spawn and offered as a tool to **every**
+agent. That is how you give all your agents a shared capability without editing each blueprint.
+
+Per-agent tools live in that agent's own `tools/` directory instead, and are checked by
+`lev validate <agent>`. A per-agent tool with the same name shadows the global one.
 
 > [!WARNING]
 > The directory is `~/.leviath/tools/`, inside Leviath's data root next to `providers/` and
@@ -38,13 +48,28 @@ JSON-encoded, and a bare `()` is an empty string. A missing optional param reads
 
 ## Host functions inside a tool
 
-Tools get a different host surface than providers, because they act on behalf of a running agent:
-`http_get(url [, headers])`, `http_post(url, body [, headers])`, `shell(cmd)`, `read_file(path)`,
-`write_file(path, content)`, and `env_var(name)` do the I/O (each gated by the tool's `@requires` and
-the agent's permissions). The pure helpers are `parse_json`, `to_json`, `encode_uri`, and
-`html_to_text`. Shared string/content helpers are also available: `contains`, `starts_with`,
-`ends_with`, `trim`, `join`, `split`, `count_tokens`, `is_json`, `is_markdown`, `is_mermaid`,
-`is_empty`, `content_format`.
+A tool gets a wider host surface than a provider script, because it acts on behalf of a running
+agent. The functions come in two kinds.
+
+**These reach the outside world**, and each one is gated by the tool's own `@requires` line and by
+the agent's permissions:
+
+| Function | Does |
+|---|---|
+| `http_get(url [, headers])` | An HTTP GET |
+| `http_post(url, body [, headers])` | An HTTP POST |
+| `shell(cmd)` | Runs a shell command |
+| `read_file(path)` | Reads a file, always confined to the workdir |
+| `write_file(path, content)` | Writes a file |
+| `env_var(name)` | Reads an environment variable. Credential-shaped names need [`allow_env_vars`](/docs/configuration#security) |
+
+**These are pure** and need no permission, because they only transform values you already have:
+
+| Group | Functions |
+|---|---|
+| JSON and encoding | `parse_json`, `to_json`, `encode_uri`, `html_to_text` |
+| Strings | `contains`, `starts_with`, `ends_with`, `trim`, `join`, `split` |
+| Content | `count_tokens`, `is_json`, `is_markdown`, `is_mermaid`, `is_empty`, `content_format` |
 
 ## A complete tool
 
@@ -101,12 +126,17 @@ an agent may actually call.
 
 ## Policy rules
 
-The [taint-gate](/docs/security) blocks any exfiltration-capable tool whose data taint exceeds its
-clearance. Beyond the static allowlist in `policy.toml`, you can relax the gate with scripted rules:
-`.rhai` files in the `leviath/rules/` directory under your OS config dir - `~/.config/leviath/rules/`
-on Linux, `~/Library/Application Support/leviath/rules/` on macOS. They are consulted **after** the
-static allowlist, and the first script that allows a call wins. The filename stem becomes the rule
-name in decisions.
+The [taint gate](/docs/security) blocks any tool that could send data off the machine when that data
+is more sensitive than the tool is cleared for. Sometimes a specific case is fine and you want to say
+so.
+
+`policy.toml` handles the simple cases with a static allowlist. For anything that needs a decision
+rather than a list, write a rule as a `.rhai` file in the `leviath/rules/` directory under your OS
+config dir. That is `~/.config/leviath/rules/` on Linux and
+`~/Library/Application Support/leviath/rules/` on macOS.
+
+Rules are consulted after the static allowlist, and the first script that allows a call wins. The
+filename becomes the rule's name in any decision it makes.
 
 Each rule receives a `context` map with `tool`, `target`, and `taint_level` (a string: `"public"`,
 `"internal"`, or `"private"`), and evaluates to a boolean. `true` allows the call.
