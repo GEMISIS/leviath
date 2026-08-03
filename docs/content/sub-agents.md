@@ -7,14 +7,29 @@ order: 6
 
 # Sub-agents and fan-out
 
-Agents spawn children with different blueprints, all in the same process and over one shared
-inference driver, with no new OS processes and no IPC. Sub-agents are just more entities in the
-[ECS world](/docs/engine).
+Some jobs are really many small jobs. Twelve failing tests, forty files to review, eight sub-topics
+to research. One agent working through them in sequence is slow, and by item nine its context is
+full of items one through eight.
+
+A **sub-agent** is a child agent started by another one. Give each item its own sub-agent and they
+run at the same time, each with a clean context, and the parent gets the results back.
+
+> [!NOTE]
+> **Before this page:** [Multi-stage workflows](/docs/stages).
+> **In one line:** a fan-out stage splits a task into items, runs one sub-agent per item, and merges
+> what they produce.
+
+This is how the bundled `parallel-fixer` agent repairs many failing tests at once, one worker per
+failure, and how a wide research sweep covers many sub-topics in parallel. See the
+[agent catalog](/docs/agent-catalog) for both.
+
+Sub-agents cost very little here. They are more entities in the same [world](/docs/engine), so there
+are no extra processes to start and nothing has to be serialized between a parent and its children.
 
 ## Fan-out
 
-A **fan-out** stage splits a task into work items and runs one sub-agent worker per item
-concurrently, bounded by `max_workers`, then merges their results back into the parent:
+A fan-out stage splits a task into work items, runs one sub-agent per item (up to `max_workers` at a
+time), and merges the results back into the parent:
 
 ```mermaid
 flowchart TB
@@ -32,38 +47,43 @@ mode         = "fan_out"
 worker_stage = "fix_one"    # which worker to run, see below
 split_prompt = "..."        # prompt that produces the JSON array of work items
 merge_stage  = "verify"     # stage the parent resumes at once workers finish
-max_workers  = 8            # concurrency bound, default 4
+max_workers  = 8            # how many run at once, default 4
 on_worker_failure = "continue"
 ```
 
-The keys sit directly on the stage alongside `mode = "fan_out"`, not in a sub-table.
+Those keys sit directly on the stage next to `mode = "fan_out"`, not in a sub-table.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `worker_agent` | unset | A separate installed blueprint run as the worker |
+| `worker_agent` | unset | A separate installed blueprint to run as the worker |
 | `worker_stage` | unset | A stage in *this* blueprint, which must set `allow_as_worker = true` |
-| `worker_query` | unset | A discovery hint matched against installed agent types |
-| `merge_stage` | unset | Stage that reconciles worker results before the parent transitions |
+| `worker_query` | unset | A hint matched against installed agent types |
+| `merge_stage` | unset | Stage that reconciles worker results before the parent moves on |
 | `max_workers` | `4` | How many workers run at once |
-| `on_worker_failure` | `"continue"` | `continue` merges what succeeded; `fail_all` fails the whole fan-out if any worker fails |
-| `split_prompt` | `""` | Folded onto the stage's system prompt; its response is parsed as the work-item array |
+| `on_worker_failure` | `"continue"` | `continue` merges what succeeded. `fail_all` fails the whole fan-out if any worker fails |
+| `split_prompt` | `""` | Added to the stage's system prompt. Its reply is parsed as the list of work items |
 
-Exactly one of `worker_agent`, `worker_stage`, or `worker_query` must be set. `lev validate`
-checks that, and that a named `worker_stage` exists and has opted in with `allow_as_worker`.
+Set exactly one of `worker_agent`, `worker_stage`, or `worker_query`. `lev validate` checks that,
+and checks that a named `worker_stage` exists and has opted in with `allow_as_worker`.
 
-> [!NOTE]
-> `max_workers` bounds how many *sub-agents* this stage spawns. It is not the same knob as
-> `[limits] max_concurrent_inferences`, which bounds in-flight requests per model across the whole
-> daemon, or `[rate_limits.<provider>]`, which shapes request rate. All three apply. See
-> [Inference pools](/docs/engine#inference-pools).
+## `max_workers` is not the knob you might think
 
-This is how the `parallel-fixer` agent fixes many failing tests at once, one worker per failure,
-and how a wide research sweep runs many sub-topics in parallel.
+Three different settings limit concurrency, and they are easy to confuse. All three apply at once:
 
-## Human-in-the-loop, at any depth
+| Setting | Bounds | Scope |
+|---|---|---|
+| `max_workers` | Sub-agents this stage spawns | One fan-out stage |
+| `[limits] max_concurrent_inferences` | Model requests in flight | Per model, daemon-wide |
+| `[rate_limits.<provider>]` | Requests per minute | Per provider |
 
-Any sub-agent, at any depth, can ask *you* a question directly, with no fire-and-forget and no
-routing through the parent:
+So `max_workers = 8` starts eight sub-agents, but if the model pool only allows four requests at
+once, four of them wait. That is fine and costs nothing. See
+[inference pools](/docs/engine#inference-pools).
+
+## Any sub-agent can ask you a question
+
+A sub-agent at any depth can ask *you* something directly. It does not have to route the question
+back up through its parent, and nothing is fire-and-forget:
 
 ```mermaid
 sequenceDiagram
@@ -76,6 +96,8 @@ sequenceDiagram
   Worker-->>Parent: result
 ```
 
+See [Human-in-the-loop](/docs/interaction) for how the question reaches you and how you answer it.
+
 > [!TIP]
-> The [dashboard](/docs/dashboard) and the API's `GET /api/agents/tree` show the full sub-agent
-> tree with per-subtree token roll-ups, so you can see exactly where the budget is going.
+> The [dashboard](/docs/dashboard) and the API's `GET /api/agents/tree` show the whole sub-agent
+> tree with token totals per subtree, so you can see where the budget is actually going.

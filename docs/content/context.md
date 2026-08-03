@@ -7,20 +7,42 @@ order: 4
 
 # Structured context memory
 
-Most agent tools hand an LLM a flat message array. When a big file read lands, it shoves the system
-prompt and the task toward the edge of the window. Leviath instead gives the agent **regions**:
-typed slices of the context window with deterministic eviction, so a file dump can't push out what
-the agent needs to remember.
+The usual way to give a model its history is one flat list of messages. That has a failure mode: read
+one large file and it pushes everything else toward the edge of the window, including the system
+prompt and the task the agent was given. The agent then forgets what it was doing, and nothing chose
+that outcome.
 
-A stage's context window is divided into regions, each with its own budget and eviction rule:
+Leviath splits the window into named **regions** instead. Each one has its own size limit and its
+own rule for what to throw away first, so a big file read can only ever crowd out the region it
+landed in.
 
-<div class="ctx-bar">
-  <div class="ctx-seg ctx-pinned" style="flex:0 0 12%" title="pinned">pinned<br/>12%</div>
-  <div class="ctx-seg ctx-codebase" style="flex:0 0 20%" title="compacting">codebase<br/>20%</div>
-  <div class="ctx-seg ctx-conversation" style="flex:0 0 33%" title="sliding_window">conversation<br/>33%</div>
-  <div class="ctx-seg ctx-history" style="flex:0 0 15%" title="compact_history">history<br/>15%</div>
-  <div class="ctx-seg ctx-headroom" style="flex:1 1 auto" title="free">headroom</div>
-</div>
+> [!NOTE]
+> **Before this page:** [Agent blueprints](/docs/agents).
+> **In one line:** you decide what the window is made of, and what gets dropped when it fills.
+
+## What that looks like
+
+A typical coding agent might divide its window like this:
+
+| Region | Share | Kind | Holds | When it fills |
+|---|---|---|---|---|
+| `task` | 12% | `pinned` | The task and the ground rules | Nothing. Pinned regions are never dropped |
+| `codebase` | 20% | `compacting` | Files the agent has read | Older content is summarized, not lost |
+| `conversation` | 33% | `sliding_window` | The back-and-forth | Oldest turns drop off |
+| `history` | 15% | `compact_history` | Summaries carried from earlier stages | Rolls forward, compacted |
+| headroom | 20% | | Left free for the reply | |
+
+The point is the last column. In a flat message list, all five of those compete for the same space
+and the loser is whatever happens to be oldest. Here, a file dump can fill `codebase` completely and
+`task` is still exactly where it was.
+
+```toml
+[context.regions]
+task         = { kind = "pinned", budget = "12%", seed = "task_input" }
+codebase     = { kind = "compacting", budget = "20%" }
+conversation = { kind = "sliding_window", budget = "33%", max_items = 20 }
+history      = { kind = "compact_history", budget = "15%", source_region = "codebase" }
+```
 
 ## The eight region kinds
 
@@ -30,7 +52,7 @@ A stage's context window is divided into regions, each with its own budget and e
 | `pinned` | Never evicted (architecture, the task). |
 | `sliding_window` | Keeps the most recent entries; the conversation lives here. |
 | `compacting` | Summarizes instead of evicting: file reads and tool results. |
-| `compact_history` | Rolls compacted summaries forward across stages. |
+| `compact_history` | Carries summaries from earlier stages forward, so a later stage knows what happened without holding the raw content. Names the region it summarizes with `source_region`. |
 | `clearable` | Wiped in one shot when space is needed (scratch). |
 | `hashmap` | Keyed entries (alias `hash_map`); a write to a key replaces it. |
 | `custom` | Behavior defined by a Rhai script (see [Rhai regions](/docs/rhai-regions)). |
@@ -52,8 +74,8 @@ compact_count = 10             # with strategy = "compact": how many to fold int
 [context.regions.codebase]
 kind             = "compacting"
 budget           = "20%"
-compact_at       = "80%"       # compact at this fraction of the resolved budget
-threshold_tokens = 30000       # absolute guard-rail, applied alongside compact_at
+compact_at       = "80%"       # compact once this full, see below
+threshold_tokens = 30000       # a hard token ceiling, applied as well as compact_at
 
 [context.regions.history]
 kind          = "compact_history"
@@ -73,15 +95,23 @@ persistent = false             # true behaves pinned-like: never evicted
 
 | Key | Default | Meaning |
 |---|---|---|
-| `budget` | unset | Percentage of the model's context window, as `"35%"` |
-| `max_tokens` | `5000` | Absolute ceiling. With `budget` set, it caps the resolved percentage instead |
-| `min_tokens` | unset | Floor for a percentage budget, so a small model still leaves the region usable |
+| `budget` | unset | A share of the model's context window, written as `"35%"` |
+| `max_tokens` | `5000` | A token ceiling. See below for how it interacts with `budget` |
+| `min_tokens` | unset | A floor for a percentage budget, so the region stays usable on a small model |
 | `seed` | unset | What the region starts with. See below |
-| `required` | `false` | The stage re-runs rather than transitioning while this region is empty |
+| `required` | `false` | The stage re-runs rather than moving on while this region is empty |
 | `required_message` | generated | What the model is told when a required region is empty. Supports `{region}` |
 
+**Resolved budget** is the phrase used for the number a region actually gets, once the percentage
+has been worked out against the model in front of it. A `budget = "20%"` region on a 200k-token
+model resolves to 40,000 tokens. `compact_at = "80%"` then means 80% of *that*, so 32,000.
+
+`max_tokens` behaves differently depending on whether `budget` is set. On its own it is a plain
+ceiling. Alongside `budget`, it caps the resolved percentage, so the region gets whichever is
+smaller.
+
 A malformed `budget` or `compact_at` string is a hard error at load, so `lev validate` catches it
-rather than a run failing later.
+instead of a run failing later.
 
 ### Seeding a region
 
@@ -150,10 +180,11 @@ read_file = "codebase"
 
 ## Budgets travel across models
 
-Budgets can be **percentages of the model's context window**, so a blueprint's intent survives
-across models of different sizes. A region sized "20% of the window" is 20% whether the model has
-32k or 200k tokens.
+This is why budgets are written as percentages. A region sized at 20% of the window is 20% whether
+the model has 32k or 200k tokens, so the same blueprint keeps its shape when you switch models. Fixed
+token counts would need rewriting every time.
 
 > [!NOTE]
-> Percentages are ceilings and may sum past 100% (regions rarely fill at once). Absolute
-> `max_tokens` and `threshold_tokens` are hard guard-rails when you need them.
+> Percentages are ceilings, and they may add up to more than 100%. That is deliberate: regions
+> rarely fill at the same time, so reserving exact shares would waste most of the window. Use
+> `max_tokens` and `threshold_tokens` when you need a limit that really is hard.

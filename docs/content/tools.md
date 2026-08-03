@@ -228,11 +228,37 @@ Two rules constrain that:
 - A launch flag (`--allow`, `--yolo`) can turn an `ask` into an `allow`, but it can **never** lift
   a `deny`.
 
-There are four layers in total. `available_tools` is visibility, `tool_permissions` is approval
-(alongside the schema check below, which runs before any prompt),
-`[tool_script_permissions]` gates what a Rhai script tool may do, and the
-[taint gate](/docs/security#taint-tracking-experimental) checks data flow before an
-exfiltration-capable call fires.
+### The four gates a call passes through
+
+Permissions are only one of them. A tool call has to get past all four, in this order:
+
+```mermaid
+flowchart TD
+  M["The model asks for a tool"] --> V{"1. available_tools<br/>Is the stage offering it?"}
+  V -->|no| R1["Refused. The stage never advertised it"]
+  V -->|yes| S{"2. Argument schema<br/>Do the arguments fit?"}
+  S -->|no| R2["Refused, with the violations named"]
+  S -->|yes| P{"3. tool_permissions<br/>allow, ask, or deny?"}
+  P -->|deny| R3["Refused"]
+  P -->|ask| A["Wait for a person"]
+  P -->|allow| T{"4. Taint gate<br/>Could this send data out?"}
+  A --> T
+  T -->|blocked| R4["Refused, or surfaced as an approval"]
+  T -->|clear| RUN["The tool runs"]
+```
+
+Each gate answers a different question:
+
+| Gate | Asks | Configured by |
+|---|---|---|
+| 1. Visibility | Does this stage offer the tool at all? | `available_tools` on the stage |
+| 2. Schema | Are the arguments the right shape? | The tool's own schema, nothing to set |
+| 3. Approval | Is this call allowed, and does a person need to say so? | `tool_permissions` |
+| 4. Data flow | Would this carry sensitive data off the machine? | The [taint gate](/docs/security#taint-tracking-experimental) |
+
+There is a fifth for script tools specifically: `[tool_script_permissions]` limits what a Rhai tool
+may do internally, such as whether it can run a shell command or read a file. See
+[Rhai tools](/docs/rhai-tools).
 
 > [!WARNING]
 > A tool set to `ask` in a headless context blocks until someone answers. It never auto-denies. For
@@ -242,16 +268,22 @@ exfiltration-capable call fires.
 
 ## Argument validation
 
-Before a call is dispatched, its arguments are checked against the exact JSON Schema the tool
-advertised to the model. This applies uniformly: built-in tools, Rhai script tools, MCP tools, and
-the sub-agent tools all declare schemas, and a call that does not satisfy its schema (a missing
-required argument, a number where a string belongs, a value outside a declared enum) is refused
-back to the model as an `[error]` result naming the violations. The call never executes and never
-reaches a permission prompt, and the refusal does not count as work the agent did; the model reads
-the message and corrects itself on the next turn.
+Before a call runs, its arguments are checked against the exact JSON Schema the tool advertised.
+Every kind of tool declares one: built-in, Rhai script, MCP, and the sub-agent tools alike.
 
-A schema that cannot be compiled (a typo'd type in a Rhai `@param` line, an MCP schema fragment the
-engine cannot interpret) turns validation off for that tool rather than refusing its calls. The
-daemon logs a warning when that happens so the broken schema gets noticed. Schemas with external
-`$ref` references fall in the same bucket by design: the validator never fetches anything over the
-network or filesystem, so such a schema fails to compile and is skipped.
+A call that does not fit its schema is refused back to the model as an `[error]` naming what was
+wrong. Three examples: a missing required argument, a number where a string belongs, a value outside
+a declared enum.
+
+Two things follow from that. The call never runs and never reaches an approval prompt, so a
+malformed call cannot wake anybody up. And the refusal does not count as work the agent did, so it
+cannot be used to satisfy an edge [gate](/docs/stages#gating-an-edge-on-actual-work). The model
+reads the message and corrects itself on its next turn.
+
+If a schema cannot be compiled, validation is turned off for that tool rather than refusing all its
+calls. That happens with a mistyped `@param` line in a Rhai tool, or an MCP schema fragment the
+engine cannot interpret. The daemon logs a warning so the broken schema gets noticed.
+
+Schemas using external `$ref` references land in that same bucket, deliberately. The validator never
+fetches anything over the network or from disk, so a schema that needs an external reference fails
+to compile and is skipped.
