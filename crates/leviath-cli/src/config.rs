@@ -86,18 +86,23 @@ pub struct ScriptToolPermissions {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Default provider
+    #[serde(default = "default_provider_name")]
     pub default_provider: String,
 
     /// Provider API keys
+    #[serde(default)]
     pub providers: ProviderConfig,
 
     /// Agent project paths
+    #[serde(default)]
     pub agent_paths: Vec<PathBuf>,
 
     /// OpenRouter API key
+    #[serde(default)]
     pub openrouter_api_key: Option<String>,
 
     /// Ollama base URL (default http://localhost:11434)
+    #[serde(default)]
     pub ollama_base_url: Option<String>,
 
     /// MCP server configurations
@@ -105,6 +110,7 @@ pub struct Config {
     pub mcp_servers: Vec<MCPServerConfig>,
 
     /// Default model override
+    #[serde(default)]
     pub default_model: Option<String>,
 
     /// Per-model capability overrides. Key is model ID (e.g. "my-local-llama").
@@ -161,6 +167,7 @@ pub struct Config {
     /// always SOME timeout, because a call that never completes wedges its
     /// run with no error. A stage's `[stages.<name>.model]
     /// request_timeout_secs` overrides either value for that stage's requests.
+    #[serde(default)]
     pub request_timeout_secs: Option<u64>,
 
     /// Client-side rate limits for the built-in providers, keyed by provider
@@ -448,6 +455,19 @@ fn default_wedge_timeout_secs() -> u64 {
     leviath_runtime::pipeline::DEFAULT_WEDGE_TIMEOUT_SECS
 }
 
+/// The provider a config that names none is assumed to mean.
+///
+/// Exists so `default_provider` can carry `#[serde(default)]`: without one,
+/// every field on [`Config`] that lacked a default made a hand-written
+/// `config.toml` a parse error. Writing three lines to point Leviath at
+/// OpenRouter used to fail with `missing field `providers``, which names a
+/// table the user has no reason to know about and says nothing about what to
+/// add. Kept in sync with [`Config::default`] by
+/// `an_empty_config_file_parses_to_the_defaults`.
+fn default_provider_name() -> String {
+    "anthropic".to_string()
+}
+
 fn default_provider_failures_before_open() -> u32 {
     leviath_runtime::pipeline::DEFAULT_FAILURES_BEFORE_OPEN
 }
@@ -689,15 +709,18 @@ impl Default for WebhookConfig {
 /// Provider configuration.
 ///
 /// `Debug` is hand-written (see below) so the keys cannot be printed.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct ProviderConfig {
     /// Anthropic API key
+    #[serde(default)]
     pub anthropic_api_key: Option<String>,
 
     /// OpenAI API key
+    #[serde(default)]
     pub openai_api_key: Option<String>,
 
     /// Google AI (Gemini) API key
+    #[serde(default)]
     pub google_api_key: Option<String>,
 
     /// Whether the Claude Code CLI transport is enabled.
@@ -2514,6 +2537,48 @@ agent_paths = []
         let config: Config = toml::from_str(toml_content).unwrap();
         assert_eq!(config.default_provider, "anthropic");
         assert!(config.providers.anthropic_api_key.is_none());
+    }
+
+    #[test]
+    fn the_three_lines_that_point_leviath_at_openrouter_are_enough() {
+        // What a user writes by hand after reading the OpenRouter docs. Every
+        // field on Config used to be required, so this failed with `missing
+        // field `providers`` - a table they have no reason to know about, in a
+        // message that says nothing about what to add.
+        let config: Config = toml::from_str(
+            r#"
+default_provider = "openrouter"
+default_model = "openai/gpt-4o-mini"
+openrouter_api_key = "sk-or-test"
+"#,
+        )
+        .expect("a hand-written OpenRouter config parses");
+        assert_eq!(config.default_provider, "openrouter");
+        assert_eq!(config.openrouter_api_key.as_deref(), Some("sk-or-test"));
+        assert_eq!(config.default_model.as_deref(), Some("openai/gpt-4o-mini"));
+    }
+
+    #[test]
+    fn an_empty_config_file_parses_to_the_defaults() {
+        // Pins the serde defaults against `Config::default` in both
+        // directions: a field that gains one but not the other means a fresh
+        // file and a fresh struct disagree about the same install.
+        let parsed: Config = toml::from_str("").expect("an empty config parses");
+        let default = Config::default();
+        assert_eq!(parsed.default_provider, default.default_provider);
+        assert_eq!(parsed.agent_paths, default.agent_paths);
+        assert_eq!(parsed.openrouter_api_key, default.openrouter_api_key);
+        assert_eq!(parsed.ollama_base_url, default.ollama_base_url);
+        assert_eq!(parsed.default_model, default.default_model);
+        assert_eq!(parsed.request_timeout_secs, default.request_timeout_secs);
+        assert_eq!(
+            parsed.providers.anthropic_api_key,
+            default.providers.anthropic_api_key
+        );
+        assert_eq!(
+            parsed.providers.claude_code_enabled,
+            default.providers.claude_code_enabled
+        );
     }
 
     #[test]

@@ -56,7 +56,8 @@ local [Ollama](https://ollama.com) for a no-key start.
 `lev doctor` says which provider your defaults actually resolve to, and which ones it tried to get
 there. That matters because a stage naming no model of its own falls back to `anthropic`. So a
 machine with only an OpenRouter key can resolve to a provider it has no credential for, spawn, and
-sit at iteration 0.
+sit at iteration 0. When your configured `default_provider` is the one being passed over, the
+`resolve` line says that too.
 
 ## Every run dies immediately with a payment or auth error
 
@@ -91,19 +92,39 @@ That stage's `models` list simply never mentions the provider you configured. A 
 on a provider it lists, and the [bundled agents](/docs/agent-catalog) list Anthropic, OpenAI, and
 Ollama only, so a Google or OpenRouter key does not qualify.
 
-Pass `--model <provider>/<model>` for the run, add a `[providers] fallback_order` entry, or copy the
-blueprint and name your provider on the stage. Setting `default_model` often will not help: it is
-only consulted when no listed provider is configured at all. See
+Set `default_provider` and `default_model` together, which puts your provider ahead of the
+blueprint's list for every stage that has not opted out. `--model <provider>/<model>` does it for
+one run, and copying the blueprint does it per stage. See
 [which entry a stage starts on](/docs/providers#which-entry-a-stage-starts-on).
 
 ## My run went to Ollama and I never asked for it
 
-Ollama needs no key, so it is registered unconditionally, and every bundled agent lists it as its
-last entry. On an install with no Anthropic or OpenAI key, that is the first entry that matches, and
-the run starts against `http://localhost:11434` whether or not Ollama is installed.
+Ollama needs no key, so it is registered whether or not a server is running, and every bundled agent
+lists it last. With nothing else configured that is the first entry that matches, and the run starts
+against `http://localhost:11434`.
 
-`lev doctor` reports the provider a run would start on before you spawn one, and a run records the
-model it actually used in its `meta.json`. The fixes are the same as the entry above.
+Set `default_model` alongside your `default_provider`. Without a model to send, `default_provider`
+is never consulted and Ollama wins by default. `lev doctor` says so in its `resolve` line when your
+configured provider is being passed over.
+
+A run that does start on a dead Ollama no longer dies there: an unreachable provider is treated the
+same as one out of credits, so the stage moves to its next candidate. You will see the swap in the
+stage log:
+
+```
+[failover] ollama/qwen3.5:9b is unusable (Request failed: error sending request for url
+(http://localhost:11434/api/chat)); retrying on openrouter/openai/gpt-4o-mini
+```
+
+## My OpenRouter agent finishes without saying anything
+
+Reasoning models on OpenRouter answer with `content: null` and put their text under `reasoning`.
+Leviath reads that field when the message carries nothing else, so a reasoning-only turn is no
+longer an empty response. If you are on an older build, an agent that loops and finishes silently
+on a `deepseek-r1`-style model is this.
+
+The reasoning text is only used when the turn has no content and no tool calls of its own, so it
+never displaces real output or a tool call.
 
 ## The provider says my model doesn't exist
 

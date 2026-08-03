@@ -89,8 +89,9 @@ provider = "anthropic"
 model    = "claude-sonnet-5"
 ```
 
-"Stops being usable" means the account is out of credits, or the key was rejected or is not allowed
-to use that model. An ordinary bad request is not that, and never spends a fallback.
+"Stops being usable" means the account is out of credits, the key was rejected or is not allowed to
+use that model, or the provider could not be reached at all after every retry. An ordinary bad
+request is not that, and never spends a fallback.
 
 ## A host-wide fallback chain
 
@@ -147,44 +148,44 @@ In order:
 
 1. `lev run --model <provider>/<model>`, which overrides everything and skips the check entirely. A
    bare `--model <model>` replaces only the model name and keeps the provider resolved below.
-2. The first entry in `models` whose provider is configured.
-3. Your `default_provider` / `default_model` from `config.toml`, if `default_model` is set, its
+2. Your `default_provider` / `default_model` from `config.toml`, when `default_model` is set, the
    provider is configured, and the stage did not set `allow_user_default = false`.
-4. The first entry in the list, whether or not its provider exists. If it does not, the run fails at
+3. The first entry in `models` whose provider is configured.
+4. The host-wide `fallback_order`, for the stages that got past everything above with nothing left.
+5. The first entry in the list, whether or not its provider exists. If it does not, the run fails at
    spawn with `stage '<name>' has no usable provider`.
 
+Everything below the first line is the failover chain, in that same order, so a stage that starts on
+your default still has the blueprint's own entries to fall back to.
+
 > [!IMPORTANT]
-> Step 3 is only reached when **no** listed provider is configured. Ollama needs no key and is
-> therefore registered unconditionally, so any stage listing Ollama matches at step 2 whether or not
-> Ollama is actually installed, and your `default_model` is never consulted for that stage.
+> `default_provider` on its own buys nothing. The resolver needs a model to send and has none, so it
+> falls through to whatever the blueprint listed. Set `default_model` alongside it. `lev doctor`
+> says so when you have not.
 
 ### Running the bundled agents on another provider
 
 The [bundled agents](/docs/agent-catalog) list Anthropic, OpenAI, and Ollama, in that order. None of
-them lists OpenRouter, Google, or a custom Rhai provider, so a key for one of those does not make
-them use it. On an install whose only key is an OpenRouter one:
+them lists OpenRouter, Google, or a custom Rhai provider. Naming yours as the default is what makes
+them use it:
 
-- Almost every stage matches Ollama at step 2 and runs against `http://localhost:11434`. If Ollama
-  is not installed, the run spawns fine and then fails at its first call.
-- `parallel-fixer`'s `parallel_fix` and `fix_worker` stages list only Anthropic and OpenAI, so they
-  fail at spawn: `stage 'parallel_fix' has no usable provider (tried: anthropic)`.
+```toml
+default_provider = "openrouter"
+default_model = "deepseek/deepseek-v4-flash"
+openrouter_api_key = "sk-or-..."
+```
 
-Setting `default_provider` and `default_model` does **not** fix this, for the reason in the note
-above. Three things do. A full override, per run:
+Every stage now starts on OpenRouter and keeps the blueprint's own list behind it. A stage that must
+stay on the provider its author picked opts out with `allow_user_default = false`.
+
+Two other ways in. A full override, for one run:
 
 ```bash
 lev run coder -t "fix the failing test" --model openrouter/deepseek/deepseek-v4-flash
 ```
 
-A host-wide `fallback_order`, which catches a stage once its own entries are exhausted:
-
-```toml
-[providers]
-fallback_order = ["openrouter/deepseek/deepseek-v4-flash"]
-```
-
-Or, for something permanent, copying the blueprint and naming your provider on the stages you care
-about:
+Or, for something permanent and per stage, copying the blueprint and naming your provider on the
+stages you care about:
 
 ```toml
 model = { models = [
@@ -192,6 +193,12 @@ model = { models = [
   { provider = "anthropic",  model = "claude-sonnet-5" },
 ] }
 ```
+
+> [!WARNING]
+> Ollama needs no key, so it is registered whether or not a server is running. Leave
+> `default_model` unset on a machine with no Ollama and every stage that lists it starts against
+> `http://localhost:11434`. The run now moves on to its next candidate instead of dying there, but
+> it still spends four attempts finding out.
 
 ## Where credentials live
 

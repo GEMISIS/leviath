@@ -128,6 +128,24 @@ pub fn resolve_stage_candidates(
         }
     }
 
+    // `default_provider = "openrouter"` is the user saying where their runs
+    // should go. It was only ever consulted after every registered entry the
+    // blueprint listed, so on a machine with an OpenRouter key it never won
+    // anything: the bundled blueprints all name anthropic, openai and ollama,
+    // and ollama registers with no key at all, so an OpenRouter-only install
+    // dispatched every stage at a localhost server that was not running.
+    //
+    // Registered candidates on the user's default provider therefore move to
+    // the front, keeping their relative order. A blueprint that must pin its
+    // own provider already has the way to say so - `allow_user_default =
+    // false` - and that suppresses this too.
+    if model_cfg.allow_user_default && registry.has(&defaults.provider) {
+        let (preferred, rest): (Vec<ModelEntry>, Vec<ModelEntry>) = candidates
+            .into_iter()
+            .partition(|c| c.provider == defaults.provider);
+        candidates = preferred.into_iter().chain(rest).collect();
+    }
+
     if candidates.is_empty() {
         // Nothing registered. Hand back the blueprint's own first entry so the
         // caller reports "no usable provider" against a name the user wrote,
@@ -752,13 +770,86 @@ mod tests {
         };
         let registry = registry_with(&["openrouter", "anthropic", "openai"]);
         let got = resolve_stage_candidates(&cfg, None, &defaults, &registry);
+        // The user default heads the list (it is on `default_provider`), the
+        // stage's own entry follows, and the host-wide chain is last - which is
+        // the ordering this test exists to pin.
         assert_eq!(
             pairs(&got),
             vec![
-                ("openrouter", "deepseek"),
                 ("anthropic", "sonnet"),
+                ("openrouter", "deepseek"),
                 ("openai", "gpt"),
             ]
+        );
+    }
+
+    #[test]
+    fn the_default_provider_outranks_the_stages_own_list() {
+        // `default_provider = "openrouter"` used to buy nothing: the bundled
+        // blueprints all name anthropic/openai/ollama, ollama registers with no
+        // key, so an OpenRouter-only install dispatched every stage at a
+        // localhost server that was not running.
+        let cfg = model_cfg(vec![
+            ("anthropic", "claude-sonnet-5"),
+            ("ollama", "qwen3.5:9b"),
+        ]);
+        let defaults = ModelDefaults {
+            provider: "openrouter".to_string(),
+            model: Some("openai/gpt-4o-mini".to_string()),
+            ..Default::default()
+        };
+        let registry = registry_with(&["openrouter", "ollama"]);
+        let got = resolve_stage_candidates(&cfg, None, &defaults, &registry);
+        assert_eq!(
+            pairs(&got),
+            vec![
+                ("openrouter", "openai/gpt-4o-mini"),
+                ("ollama", "qwen3.5:9b"),
+            ],
+            "the user's default provider heads the list; the registered stage \
+             entry stays behind it as a fallback"
+        );
+    }
+
+    #[test]
+    fn a_stage_that_forbids_the_user_default_keeps_its_own_order() {
+        // `allow_user_default = false` is the existing way a blueprint pins its
+        // provider, and it has to suppress the preference too - otherwise there
+        // is no way left to say "this stage runs where I said".
+        let cfg = ModelConfig {
+            allow_user_default: false,
+            ..model_cfg(vec![("anthropic", "sonnet"), ("openrouter", "deepseek")])
+        };
+        let defaults = ModelDefaults {
+            provider: "openrouter".to_string(),
+            model: Some("deepseek".to_string()),
+            ..Default::default()
+        };
+        let registry = registry_with(&["openrouter", "anthropic"]);
+        let got = resolve_stage_candidates(&cfg, None, &defaults, &registry);
+        assert_eq!(
+            pairs(&got),
+            vec![("anthropic", "sonnet"), ("openrouter", "deepseek")]
+        );
+    }
+
+    #[test]
+    fn an_unregistered_default_provider_changes_nothing() {
+        // The preference is over *registered* candidates only: a default
+        // provider with no key must not reorder anything, and must certainly
+        // not promote itself into the head where dispatch would park the run
+        // on `ProviderMissing`.
+        let cfg = model_cfg(vec![("anthropic", "sonnet"), ("ollama", "qwen")]);
+        let defaults = ModelDefaults {
+            provider: "openrouter".to_string(),
+            model: Some("deepseek".to_string()),
+            ..Default::default()
+        };
+        let registry = registry_with(&["anthropic", "ollama"]);
+        let got = resolve_stage_candidates(&cfg, None, &defaults, &registry);
+        assert_eq!(
+            pairs(&got),
+            vec![("anthropic", "sonnet"), ("ollama", "qwen")]
         );
     }
 

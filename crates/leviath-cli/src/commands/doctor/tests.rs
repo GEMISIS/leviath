@@ -263,6 +263,75 @@ fn resolve_check_reports_an_unconfigured_provider_and_what_was_tried() {
     assert!(resolved.is_none());
 }
 
+#[test]
+fn resolve_check_says_so_when_the_configured_default_never_wins() {
+    // `default_provider = "openrouter"` with no `default_model`: the resolver
+    // has no model to send, falls through to its hard-coded last resort, and
+    // used to report `resolve OK anthropic / claude-sonnet-4-6` with nothing
+    // anywhere saying the configured provider had been passed over.
+    let config = Config {
+        default_provider: "openrouter".to_string(),
+        default_model: None,
+        ..Config::default()
+    };
+    let mut registry = registry_with("openrouter", StubProvider::replying("hi"));
+    registry.register("anthropic".to_string(), StubProvider::replying("hi"));
+    let (check, _) = resolve_check(&config, None, &registry);
+    assert_eq!(check.status, CheckStatus::Ok);
+    assert!(
+        check.detail.contains("no default_model"),
+        "{}",
+        check.detail
+    );
+    assert!(check.detail.contains("openrouter"), "{}", check.detail);
+}
+
+#[test]
+fn resolve_check_is_quiet_when_the_configured_default_does_win() {
+    let config = Config {
+        default_provider: "openrouter".to_string(),
+        default_model: Some("openai/gpt-4o-mini".to_string()),
+        ..Config::default()
+    };
+    let registry = registry_with("openrouter", StubProvider::replying("hi"));
+    let (check, _) = resolve_check(&config, None, &registry);
+    assert_eq!(check.detail, "openrouter / openai/gpt-4o-mini");
+}
+
+#[test]
+fn resolve_check_does_not_second_guess_an_unregistered_default_provider() {
+    // Landing somewhere other than a default provider that has no key is not
+    // news - the `config` line already lists what is registered, and this
+    // check's fail arm covers the case where nothing usable is left. Saying it
+    // again here would put a note on every install with a stale provider name
+    // in its config.
+    for default_model in [None, Some("m-1".to_string())] {
+        let config = Config {
+            default_provider: "ghost".to_string(),
+            default_model,
+            ..Config::default()
+        };
+        let registry = registry_with("anthropic", StubProvider::replying("hi"));
+        let (check, _) = resolve_check(&config, None, &registry);
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(!check.detail.contains("note:"), "{}", check.detail);
+    }
+}
+
+#[test]
+fn resolve_check_stays_quiet_under_an_explicit_model_override() {
+    // `--model` is the caller overriding on purpose; telling them their
+    // default was passed over is noise.
+    let config = Config {
+        default_provider: "openrouter".to_string(),
+        default_model: None,
+        ..Config::default()
+    };
+    let registry = registry_with("stub", StubProvider::replying("hi"));
+    let (check, _) = resolve_check(&config, Some("stub/m-2"), &registry);
+    assert_eq!(check.detail, "stub / m-2");
+}
+
 // ─── inference_check ──────────────────────────────────────────────────────────
 
 #[tokio::test]
