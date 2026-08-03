@@ -67,6 +67,12 @@ pub struct SpawnArgs {
     /// tool call, waive the taint gate, and auto-answer the agent's own prompts
     /// (`ask_user_*`, blueprint interaction points) rather than parking on the
     /// interaction hub for a person who isn't there.
+    ///
+    /// An interaction point may opt out with `unattended = "ask"`, and then it
+    /// parks anyway: the point exists precisely because auto-approving it is
+    /// the wrong answer. Such a run waits for `[limits]
+    /// interaction_timeout_secs` (default 3600) rather than forever, but from
+    /// the outside an hour of `Waiting` is indistinguishable from a hang.
     #[serde(default)]
     pub yolo: bool,
     /// Refuse this run's `seed = { command = ... }` regions (the

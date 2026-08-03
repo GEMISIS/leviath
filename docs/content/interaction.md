@@ -177,6 +177,11 @@ before any code is written - and the prompt opens even under `--yolo`. The shipp
 [`interaction_timeout_secs`](/docs/configuration#limits), so an unanswered gate releases on its own
 terms instead of waiting for ever.
 
+Know what that looks like before you meet it. A `--yolo` run holding an `ask` gate reports
+`Waiting` in `lev ps`, with a wait reason of `interaction_point`, and does nothing until the timeout
+expires. The default timeout is one hour, so the run is not stuck, but for that hour it is
+indistinguishable from a run that is. `lev respond --json` lists the question it is holding.
+
 > [!WARNING]
 > The revise and edit loops are bounded: after 4 revision rounds at a single point (`MAX_REVISION_ROUNDS`),
 > the stage proceeds regardless, so a revise/edit loop can never run forever.
