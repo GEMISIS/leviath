@@ -37,7 +37,14 @@ pub struct RunArgs {
     pub model: Option<String>,
 
     /// Run unattended: approve every tool call, and answer the agent's own
-    /// prompts (ask_user_*, plan approvals) instead of waiting for a person.
+    /// prompts (ask_user_*, interaction points) instead of waiting for a person.
+    ///
+    /// One exception, and it is the one that looks like a hang: an interaction
+    /// point declaring `unattended = "ask"` still holds for a person. The
+    /// bundled software-engineer's plan approval does, deliberately, because
+    /// everything after it writes code. Such a run parks in `Waiting` until
+    /// `[limits] interaction_timeout_secs` (default 3600) releases it. Lower
+    /// that to bound the wait.
     #[arg(long)]
     pub yolo: bool,
 
