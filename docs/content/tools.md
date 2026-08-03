@@ -147,12 +147,25 @@ network at all.
 
 | Tool | Purpose | Arguments |
 | --- | --- | --- |
-| `web_search` | Search the web and return a JSON list of `{title, url, snippet}`. Uses Brave Search when `BRAVE_API_KEY` is set, otherwise a keyless Wikipedia search that works with no configuration. | `query`, `count` (optional, default 5) |
+| `web_search` | Search the web and return a JSON list of `{title, url, snippet}`. Uses Brave Search when `BRAVE_API_KEY` is readable, otherwise a keyless Wikipedia search that works with no configuration. | `query`, `count` (optional, default 5) |
 | `web_fetch` | Fetch a URL and return its readable text. HTML is stripped to prose; large pages are truncated, and a blocked or oversized request returns a diagnostic rather than failing the run. | `url` |
 
 Both ship with `researcher`, `deep-researcher`, `wide-researcher`, `daily-briefer`, and
 `writing-assistant`. To give another agent web access, copy them into that agent's `tools/`
 directory, or drop them in `~/.leviath/tools/` to offer them to every agent.
+
+> [!IMPORTANT]
+> Setting `BRAVE_API_KEY` is not enough on its own. The name ends in `KEY`, so Leviath treats it as
+> a credential and refuses to hand it to a script unless you list it explicitly:
+>
+> ```toml
+> [security]
+> allow_env_vars = ["BRAVE_API_KEY"]
+> ```
+>
+> Without that line the tool falls back to Wikipedia and says nothing about why. If your searches
+> come back looking like encyclopedia entries, this is usually the reason. See
+> [environment variables](/docs/configuration#environment-variables).
 
 > [!WARNING]
 > Fetches cannot reach loopback, private, or link-local addresses unless you set

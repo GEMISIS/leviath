@@ -44,7 +44,7 @@ Tools get a different host surface than providers, because they act on behalf of
 the agent's permissions). The pure helpers are `parse_json`, `to_json`, `encode_uri`, and
 `html_to_text`. Shared string/content helpers are also available: `contains`, `starts_with`,
 `ends_with`, `trim`, `join`, `split`, `count_tokens`, `is_json`, `is_markdown`, `is_mermaid`,
-`is_empty`.
+`is_empty`, `content_format`.
 
 ## A complete tool
 
