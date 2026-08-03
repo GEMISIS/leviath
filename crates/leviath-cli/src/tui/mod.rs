@@ -24,7 +24,9 @@
 //! single instantiation. Both doubles therefore carry an injectable-failure
 //! switch rather than having an always-failing sibling type.
 
+pub(crate) mod keymap;
 pub mod theme;
+pub(crate) mod widgets;
 
 use crossterm::event::Event;
 use ratatui::Terminal;
