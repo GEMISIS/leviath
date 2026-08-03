@@ -78,9 +78,9 @@ your PATH.
 Stdin has to be a terminal for any of this. In a script, a pipeline, or CI, pass `-t` and Leviath
 says so rather than blocking.
 
-`-t` reads a file when the value names one that exists. It is an error when the value looks like a
-path (no spaces, and a `/`, a `\`, or a leading `~`) but no such file is there, so a mistyped
-filename fails instead of becoming the prompt. Region flags work the other way round and want an
+`-t` reads a file when the value names one that exists. It is an error when the value looks like a path but no such
+file is there, so a mistyped filename fails instead of quietly becoming the prompt. "Looks like a
+path" means no spaces, plus a `/`, a `\`, or a leading `~`. Region flags work the other way round and want an
 explicit `@` before a path, because a region seed is usually a file while a task is usually a
 sentence.
 
