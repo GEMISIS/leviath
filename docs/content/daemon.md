@@ -15,9 +15,13 @@ So your runs keep going after you close the terminal, and hundreds of agents sha
 instead of taking a process each.
 
 > [!NOTE]
-> **Before this page:** [Getting Started](/docs/getting-started).
+> **Before this page:** [Getting Started](/docs/getting-started). If the daemon is misbehaving, go
+> straight to [Troubleshooting](/docs/troubleshooting).
 > **In one line:** one background process holds every run, and the CLI, dashboard, and API are all
-> just ways of talking to it.
+> ways of talking to it.
+>
+> Building Leviath into your own Rust program instead? You can skip the daemon entirely. See
+> [Embedding](/docs/embedding).
 
 ```mermaid
 flowchart TB
