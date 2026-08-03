@@ -1,6 +1,6 @@
 [agent]
 name = "wide-researcher"
-version = "0.0.1"
+version = "0.0.2"
 description = "Broad multi-topic survey - cast a wide net, compare approaches, dive on the interesting threads, and produce a landscape overview"
 entry_stage = "survey"
 
@@ -15,7 +15,7 @@ bash       = "ask"
 # ─── Stage 1: Survey ──────────────────────────────────────────────────────────
 [stages.survey]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Survey the landscape across multiple sub-topics"
 available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append"]
 max_iterations = 25
@@ -54,7 +54,7 @@ transform = "direct"
 # Three edges: more breadth (survey), dive on a thread (deep_dive), or write it up.
 [stages.compare]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "qwen3.6:27b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "qwen3.6:27b" }] }
 description = "Compare and contrast approaches across the landscape"
 available_tools = ["read_file", "web_fetch", "context_write", "context_append"]
 max_iterations = 15
@@ -98,7 +98,7 @@ transform = "direct"
 # ─── Stage 3: Deep dive ───────────────────────────────────────────────────────
 [stages.deep_dive]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Focused deep read on one interesting thread flagged during comparison"
 available_tools = ["web_search", "web_fetch", "read_file", "context_append"]
 max_iterations = 12
@@ -129,7 +129,7 @@ transform = "direct"
 # ─── Stage 4: Summarize (terminal) ────────────────────────────────────────────
 [stages.summarize]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Produce a landscape overview with recommendations"
 available_tools = ["write_file", "read_file"]
 max_iterations = 10
@@ -153,7 +153,7 @@ non-obvious claims.
 # ─── Stage 5: Error recovery ──────────────────────────────────────────────────
 [stages.error_recovery]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Recover from a failed source fetch during the survey"
 available_tools = ["read_file", "bash"]
 max_iterations = 8

@@ -1,6 +1,6 @@
 [agent]
 name = "writing-assistant"
-version = "0.0.1"
+version = "0.0.2"
 description = "Research-backed writing - topic to polished draft, with a web-research stage, an interactive outline checkpoint, a draft⇄edit loop, and a final proofread pass"
 entry_stage = "research"
 
@@ -15,7 +15,7 @@ bash       = "ask"
 # ─── Stage 1: Research ────────────────────────────────────────────────────────
 [stages.research]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Research the topic and gather supporting material"
 available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append"]
 max_iterations = 20
@@ -52,7 +52,7 @@ transform = "direct"
 # ─── Stage 2: Outline (human-in-the-loop) ─────────────────────────────────────
 [stages.outline]
 mode = "interactive_points"
-model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "qwen3.6:27b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "qwen3.6:27b" }] }
 description = "Create and refine an outline with user input"
 available_tools = ["ask_user_text", "read_file"]
 max_iterations = 15
@@ -118,7 +118,7 @@ abort_options = ["Abort - cancel this piece"]
 # ─── Stage 3: Draft ───────────────────────────────────────────────────────────
 [stages.draft]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "qwen3.6:27b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "qwen3.6:27b" }] }
 description = "Write the full draft"
 available_tools = ["write_file", "read_file"]
 max_iterations = 25
@@ -146,7 +146,7 @@ transform = "direct"
 # ─── Stage 4: Edit (structural) ───────────────────────────────────────────────
 [stages.edit]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "qwen3.6:27b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "qwen3.6:27b" }] }
 description = "Structural edit for clarity, accuracy, and flow"
 available_tools = ["read_file", "write_file", "context_append"]
 max_iterations = 15
@@ -197,7 +197,7 @@ transform = "direct"
 # it turns up a substantive problem.
 [stages.proofread]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Final line-level proofread and fact-check"
 available_tools = ["read_file", "write_file", "web_fetch"]
 max_iterations = 10
@@ -230,7 +230,7 @@ transform = "direct"
 # ─── Stage 6: Error recovery ──────────────────────────────────────────────────
 [stages.error_recovery]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Recover from a failed research fetch or file write"
 available_tools = ["read_file", "bash"]
 max_iterations = 8

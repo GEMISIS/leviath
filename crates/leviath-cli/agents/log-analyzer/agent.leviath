@@ -1,6 +1,6 @@
 [agent]
 name = "log-analyzer"
-version = "0.0.2"
+version = "0.0.3"
 description = "Analyzes log files - identifies anomalies, trends, and error patterns via a scripted analyze⇄script loop, maintaining a severity-ranked findings index"
 entry_stage = "ingest"
 
@@ -13,7 +13,7 @@ write_file = "ask"
 # ─── Stage 1: Ingest ──────────────────────────────────────────────────────────
 [stages.ingest]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Read log files, identify format and structure"
 available_tools = ["read_file", "list_dir", "bash", "context_write"]
 max_iterations = 15
@@ -48,7 +48,7 @@ transform = "direct"
 # ─── Stage 2: Analyze ─────────────────────────────────────────────────────────
 [stages.analyze]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "qwen3.6:27b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "qwen3.6:27b" }] }
 description = "Identify anomalies, trends, and error patterns"
 available_tools = ["read_file", "bash", "context_write", "context_append"]
 max_iterations = 25
@@ -97,7 +97,7 @@ transform = "direct"
 # ─── Stage 3: Script ──────────────────────────────────────────────────────────
 [stages.script]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Write and execute scripts to parse, filter, and aggregate log data"
 available_tools = ["read_file", "bash"]
 max_iterations = 20
@@ -140,7 +140,7 @@ transform = "direct"
 # ─── Stage 4: Report (terminal) ───────────────────────────────────────────────
 [stages.report]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "qwen3.6:27b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "qwen3.6:27b" }] }
 description = "Produce a structured analysis report with findings"
 available_tools = ["write_file", "read_file"]
 max_iterations = 10
@@ -167,7 +167,7 @@ severity counts must match `severity_index`.
 # ─── Stage 5: Error recovery ──────────────────────────────────────────────────
 [stages.error_recovery]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Recover from a failed read or script execution"
 available_tools = ["read_file", "bash"]
 max_iterations = 10

@@ -1,6 +1,6 @@
 [agent]
 name = "reviewer"
-version = "0.0.1"
+version = "0.0.2"
 description = "Code review agent - discover, scan, deep review, and report with error recovery and multi-provider fallback"
 entry_stage = "discover"
 
@@ -16,7 +16,7 @@ bash      = "ask"
 # iteration cap, one non-error edge (auto-followed, no routing call).
 [stages.discover]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Map the project and work out how to verify a hypothesis in it"
 available_tools = ["read_file", "list_dir", "bash", "context_write"]
 max_iterations = 6
@@ -57,7 +57,7 @@ transform = "direct"
 # ─── Stage 2: Scan ────────────────────────────────────────────────────────────
 [stages.scan]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Fast first pass for obvious issues"
 available_tools = ["read_file", "list_dir", "context_append"]
 max_iterations = 12
@@ -94,7 +94,7 @@ transform = "direct"
 # ─── Stage 3: Deep review ─────────────────────────────────────────────────────
 [stages.deep_review]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "devstral:24b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-5" }, { provider = "openai", model = "gpt-5.5" }, { provider = "google", model = "gemini-3.1-pro-preview" }, { provider = "openrouter", model = "deepseek/deepseek-v4-pro" }, { provider = "ollama", model = "devstral:24b" }] }
 description = "In-depth analysis of correctness, security, and architecture"
 available_tools = ["read_file", "list_dir", "bash", "context_write", "context_append"]
 max_iterations = 25
@@ -142,7 +142,7 @@ transform = "direct"
 # ─── Stage 4: Report (terminal) ───────────────────────────────────────────────
 [stages.report]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Produce an actionable, ranked review report"
 available_tools = ["read_file"]
 max_iterations = 10
@@ -169,7 +169,7 @@ went unreviewed.
 # ─── Stage 5: Error handler ───────────────────────────────────────────────────
 [stages.error_handler]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Handle errors encountered during scanning or review"
 available_tools = ["read_file", "bash"]
 max_iterations = 10

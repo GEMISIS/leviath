@@ -1116,7 +1116,10 @@ mod tests {
 
         let screen = rendered(&w);
         assert!(screen.contains("up to date"));
-        assert!(screen.contains("install 0.0.1"));
+        // Read the expected version off the bundled agent rather than spelling
+        // it out, so bumping a blueprint does not break this test.
+        let not_installed = &crate::bundled::BUNDLED_AGENTS[1];
+        assert!(screen.contains(&format!("install {}", not_installed.version)));
     }
 
     #[test]
