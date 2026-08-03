@@ -127,6 +127,12 @@ following Monday and stable the Thursday after. Channels with nothing new to
 publish skip in seconds. See
 [Releases and channels](https://leviath.dev/docs/releases) for the full picture.
 
+## Design notes
+
+Longer-form rationale that does not belong in the user docs lives in `docs/design/`. Today that is
+[the `lev setup` wizard](docs/design/setup-wizard.md), which explains what the old onboarding flow
+got wrong and why the replacement is shaped the way it is. Worth reading before changing `lev setup`.
+
 ## Regenerating the workflow diagrams
 
 The agent workflow SVGs in `docs/assets/agents/` are rendered from the Mermaid sources in `docs/assets/agents/src/`. See `docs/assets/agents/src/README.md` for the render command and theme configs. If you change an agent's stage graph in `crates/leviath-cli/agents/<name>/agent.leviath`, update its `.mmd` source and re-render both the light and dark variants.

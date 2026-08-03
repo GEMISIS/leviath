@@ -51,6 +51,10 @@ scoop bucket add leviath https://github.com/GEMISIS/leviath-dist.git
 scoop install leviath           # or: leviath-beta, leviath-alpha
 ```
 
+Every install method offers three channels. `stable` is the default and is what you want unless you
+have a reason to be ahead of it. See [Releases and channels](/docs/releases) for what `beta` and
+`alpha` mean and how often each moves.
+
 The three options above install prebuilt binaries; no Rust toolchain needed.
 
 **Cargo** (any platform, needs [Rust](https://rustup.rs/)):
@@ -153,3 +157,12 @@ lev run . --task "Your task here"
 
 This writes an `agent.leviath` config you can customize: the stages, the model for each phase,
 and the context regions. See [Agents](/docs/agents) to go deeper.
+
+## Where to go next
+
+- [Agent blueprints](/docs/agents) is the natural next page. It covers what goes in an
+  `agent.leviath` file.
+- [Troubleshooting](/docs/troubleshooting) has the common snags, and `lev doctor` diagnoses most of
+  them for you.
+- [Glossary](/docs/glossary) defines every term these docs use in a particular way. Worth a skim if
+  a page starts using a word you have not met.

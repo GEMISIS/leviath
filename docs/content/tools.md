@@ -11,8 +11,10 @@ Every [agent](/docs/agents) advertises a set of tools to its LLM. The runtime sh
 of **built-in tools** (file access, a shell, context memory, human-in-the-loop prompts, review
 surfaces, and sub-agent management) that need no configuration to exist. A [stage](/docs/stages)
 decides which of them the model may actually call via `available_tools`, and `tool_permissions`
-gates each call at `allow` / `ask` / `deny`. For tools beyond this catalog, connect an
-[MCP server](/docs/mcp).
+gates each call at `allow` / `ask` / `deny`.
+
+For tools beyond this catalog you have two options: connect an [MCP server](/docs/mcp), or write
+your own with [Rhai scripting](/docs/scripting).
 
 ## Files
 

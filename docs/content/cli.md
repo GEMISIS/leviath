@@ -10,6 +10,9 @@ order: 3
 Everything Leviath does is one binary, `lev`. This page lists every command and its flags.
 `lev <command> --help` prints the same thing at the terminal.
 
+If a command is not doing what you expect, [Troubleshooting](/docs/troubleshooting) is organised by
+symptom, and `lev doctor` checks the usual causes for you.
+
 `-v` / `--verbose` is global and works on every subcommand.
 
 Most commands talk to the [shared-world daemon](/docs/daemon). `lev run`, `lev dash`, `lev serve`,
