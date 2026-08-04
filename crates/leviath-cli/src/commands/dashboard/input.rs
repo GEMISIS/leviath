@@ -878,10 +878,11 @@ impl Dashboard {
                     let idx = self.choice_selected;
                     let label = r.options.get(idx).cloned().unwrap_or(idx.to_string());
                     let d = truncate(&label, 40);
-                    let (approved, scope) = match idx {
-                        0 => (true, ApprovalScope::Once),
-                        1 => (true, ApprovalScope::Session),
-                        _ => (false, ApprovalScope::Once),
+                    // The index-to-scope mapping lives with the labels, so the
+                    // two cannot drift; anything it does not recognise denies.
+                    let (approved, scope) = match leviath_core::interaction::approval_choice(idx) {
+                        Some(scope) => (true, scope),
+                        None => (false, ApprovalScope::Once),
                     };
                     (InteractionResponse::approval(&r.id, approved, scope), d)
                 }
@@ -2726,6 +2727,7 @@ mod tests {
                 "bash",
                 serde_json::json!({"cmd": "ls"}),
                 "main",
+                &[],
             ),
         );
         agent.waiting_prompt = Some("Allow tool?".to_string());
@@ -2735,18 +2737,18 @@ mod tests {
         dash.input_mode = true;
         dash.choice_selected = 0;
 
-        // Down through 3 options
-        dash.handle_key(key(KeyCode::Down));
-        assert_eq!(dash.choice_selected, 1);
-        dash.handle_key(key(KeyCode::Down));
-        assert_eq!(dash.choice_selected, 2);
+        // Down through once / stage / run / deny
+        for expected in 1..=3 {
+            dash.handle_key(key(KeyCode::Down));
+            assert_eq!(dash.choice_selected, expected);
+        }
         // Can't go past last
         dash.handle_key(key(KeyCode::Down));
-        assert_eq!(dash.choice_selected, 2);
+        assert_eq!(dash.choice_selected, 3);
 
         // Up back
         dash.handle_key(key(KeyCode::Up));
-        assert_eq!(dash.choice_selected, 1);
+        assert_eq!(dash.choice_selected, 2);
     }
 
     #[test]
@@ -2759,6 +2761,7 @@ mod tests {
                 "bash",
                 serde_json::json!({"cmd": "ls"}),
                 "main",
+                &[],
             ),
         );
         agent.waiting_prompt = Some("Allow tool?".to_string());
@@ -2856,79 +2859,49 @@ mod tests {
 
     // ─── submit_input for ToolApproval with different indices ─────────────
 
+    /// Every option position, end to end: the index the user landed on has to
+    /// become the scope the daemon is told about, or a person choosing "for this
+    /// stage" silently gets something else.
     #[test]
-    fn submit_input_tool_approval_allow_once() {
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-        let mut dash = Dashboard::new(cmd_tx);
-        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.pending_request = Some(
-            leviath_core::interaction::InteractionRequest::tool_approval(
-                "ta1",
-                "bash",
-                serde_json::json!({"cmd": "ls"}),
-                "main",
-            ),
-        );
-        agent.waiting_prompt = Some("Allow tool?".to_string());
-        dash.agents.push(agent);
-        dash.update_display_indices();
-        dash.detail_view = true;
-        dash.input_mode = true;
-        dash.choice_selected = 0; // "Allow once"
+    fn submit_input_tool_approval_sends_the_scope_the_option_named() {
+        let cases = [
+            (0, true, interaction::ApprovalScope::Once),
+            (1, true, interaction::ApprovalScope::Stage),
+            (2, true, interaction::ApprovalScope::Run),
+            (3, false, interaction::ApprovalScope::Once),
+        ];
+        for (index, approved, scope) in cases {
+            let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+            let mut dash = Dashboard::new(cmd_tx);
+            let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+            agent.pending_request = Some(
+                leviath_core::interaction::InteractionRequest::tool_approval(
+                    "ta1",
+                    "bash",
+                    serde_json::json!({"cmd": "ls"}),
+                    "main",
+                    &["shell:ls".to_string()],
+                ),
+            );
+            agent.waiting_prompt = Some("Allow tool?".to_string());
+            dash.agents.push(agent);
+            dash.update_display_indices();
+            dash.detail_view = true;
+            dash.input_mode = true;
+            dash.choice_selected = index;
 
-        dash.submit_input();
-        assert!(!dash.input_mode);
-        assert!(dash.agents[0].pending_request.is_none());
-    }
-
-    #[test]
-    fn submit_input_tool_approval_allow_session() {
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-        let mut dash = Dashboard::new(cmd_tx);
-        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.pending_request = Some(
-            leviath_core::interaction::InteractionRequest::tool_approval(
-                "ta1",
-                "bash",
-                serde_json::json!({"cmd": "ls"}),
-                "main",
-            ),
-        );
-        agent.waiting_prompt = Some("Allow tool?".to_string());
-        dash.agents.push(agent);
-        dash.update_display_indices();
-        dash.detail_view = true;
-        dash.input_mode = true;
-        dash.choice_selected = 1; // "Allow for this session"
-
-        dash.submit_input();
-        assert!(!dash.input_mode);
-        assert!(dash.agents[0].pending_request.is_none());
-    }
-
-    #[test]
-    fn submit_input_tool_approval_deny() {
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-        let mut dash = Dashboard::new(cmd_tx);
-        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.pending_request = Some(
-            leviath_core::interaction::InteractionRequest::tool_approval(
-                "ta1",
-                "bash",
-                serde_json::json!({"cmd": "ls"}),
-                "main",
-            ),
-        );
-        agent.waiting_prompt = Some("Allow tool?".to_string());
-        dash.agents.push(agent);
-        dash.update_display_indices();
-        dash.detail_view = true;
-        dash.input_mode = true;
-        dash.choice_selected = 2; // "Deny"
-
-        dash.submit_input();
-        assert!(!dash.input_mode);
-        assert!(dash.agents[0].pending_request.is_none());
+            dash.submit_input();
+            assert!(!dash.input_mode);
+            assert!(dash.agents[0].pending_request.is_none());
+            let cmd = cmd_rx.try_recv().expect("an Answer command was queued");
+            assert_eq!(
+                cmd,
+                DaemonCommand::Answer {
+                    response: interaction::InteractionResponse::approval("ta1", approved, scope),
+                },
+                "option {index}"
+            );
+        }
     }
 
     // ─── submit_input for Confirm ─────────────────────────────────────────

@@ -44,6 +44,20 @@ pub(super) async fn get_interaction(
     }
 }
 
+/// Read an approval scope off the wire.
+///
+/// `session` is the name every existing client sends for run scope, so it stays
+/// the accepted spelling. Anything unrecognised narrows to `once`: a typo in a
+/// request body must not widen a grant, and rejecting the request outright would
+/// turn a harmless mistake into a stalled run.
+fn approval_scope_from_wire(s: &str) -> ApprovalScope {
+    match s {
+        "session" | "run" => ApprovalScope::Run,
+        "stage" => ApprovalScope::Stage,
+        _ => ApprovalScope::Once,
+    }
+}
+
 /// `POST /api/agents/{id}/interaction`: answer an open interaction. The request
 /// id in the body selects the interaction (globally unique in the daemon).
 pub(super) async fn submit_interaction(
@@ -51,10 +65,7 @@ pub(super) async fn submit_interaction(
     AxumPath(_id): AxumPath<String>,
     Json(body): Json<SubmitInteractionReq>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    let scope = body.scope.as_deref().map(|s| match s {
-        "session" => ApprovalScope::Session,
-        _ => ApprovalScope::Once,
-    });
+    let scope = body.scope.as_deref().map(approval_scope_from_wire);
     let response = InteractionResponse {
         request_id: body.request_id,
         value: body.value,
@@ -231,6 +242,17 @@ mod tests {
             .await,
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    /// A typo must narrow to `once`, never widen a grant, and `session` has to
+    /// keep meaning run scope because that is what every client sends.
+    #[test]
+    fn a_wire_scope_never_widens_beyond_what_it_names() {
+        assert_eq!(approval_scope_from_wire("session"), ApprovalScope::Run);
+        assert_eq!(approval_scope_from_wire("run"), ApprovalScope::Run);
+        assert_eq!(approval_scope_from_wire("stage"), ApprovalScope::Stage);
+        assert_eq!(approval_scope_from_wire("once"), ApprovalScope::Once);
+        assert_eq!(approval_scope_from_wire("sesion"), ApprovalScope::Once);
     }
 
     // ─── submit_interaction ──────────────────────────────────────────────────

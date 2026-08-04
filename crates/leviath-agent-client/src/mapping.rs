@@ -166,7 +166,7 @@ pub fn stop_reason_for_label(status: &str) -> StopReason {
 ///
 /// The offered options mirror what Leviath's own approval prompt supports:
 /// approve once, approve for the rest of the session
-/// ([`leviath_core::interaction::ApprovalScope::Session`]), or reject. There is
+/// ([`leviath_core::interaction::ApprovalScope::Run`]), or reject. There is
 /// deliberately no "reject always" - Leviath has no persistent per-tool denylist
 /// to record it in, and offering a choice we cannot honour would be a lie.
 pub fn permission_request(

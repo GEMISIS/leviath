@@ -775,9 +775,13 @@ mod mapping {
 
     /// Interpret a host's permission outcome into an approve/deny + scope.
     ///
-    /// The three option ids we offer map to allow-once, allow-for-session, and
+    /// The three option ids we offer map to allow-once, allow-for-the-run, and
     /// reject. A `cancelled` outcome, or any option id we did not offer, is
     /// treated as a one-time rejection - the safe default.
+    ///
+    /// There is no stage-scoped option: the protocol has three permission
+    /// kinds, and an editor host that knows nothing about this run's stages has
+    /// nothing to say about them.
     pub(super) fn interpret_permission(outcome: &PermissionOutcome) -> PermissionChoice {
         match outcome {
             PermissionOutcome::Selected { option_id } if option_id == OPTION_ALLOW_ONCE => {
@@ -789,7 +793,7 @@ mod mapping {
             PermissionOutcome::Selected { option_id } if option_id == OPTION_ALLOW_ALWAYS => {
                 PermissionChoice {
                     approved: true,
-                    scope: ApprovalScope::Session,
+                    scope: ApprovalScope::Run,
                 }
             }
             PermissionOutcome::Selected { option_id } if option_id == OPTION_REJECT_ONCE => {
@@ -824,7 +828,7 @@ mod mapping {
                 option_id: OPTION_ALLOW_ALWAYS.to_string(),
             });
             assert!(allow_always.approved);
-            assert_eq!(allow_always.scope, ApprovalScope::Session);
+            assert_eq!(allow_always.scope, ApprovalScope::Run);
 
             let reject = interpret_permission(&PermissionOutcome::Selected {
                 option_id: OPTION_REJECT_ONCE.to_string(),

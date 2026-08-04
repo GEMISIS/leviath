@@ -199,7 +199,8 @@ holding it, its kind, and its options:
 ```bash
 lev respond --json
 lev respond <request_id> --approve            # a tool approval or a confirm
-lev respond <request_id> --approve --session  # and every later call to that tool
+lev respond <request_id> --approve --stage    # and every later call it covers, this stage
+lev respond <request_id> --approve --session  # and every later call it covers, this run
 lev respond <request_id> --deny
 lev respond <request_id> --choice 0           # a multiple-choice question
 lev respond <request_id> "some text"          # a free-text question

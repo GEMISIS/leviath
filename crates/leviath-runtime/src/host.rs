@@ -4479,7 +4479,13 @@ mod tests {
         let approval = open_prompt(
             &host,
             "run-a",
-            InteractionRequest::tool_approval("req-1", "shell", serde_json::json!({}), "implement"),
+            InteractionRequest::tool_approval(
+                "req-1",
+                "shell",
+                serde_json::json!({}),
+                "implement",
+                &[],
+            ),
         );
         await_pending(&host, "run-a").await;
         let reason = waiting_because(&mut host, e, |entity| {
