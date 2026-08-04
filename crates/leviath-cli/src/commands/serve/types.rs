@@ -511,12 +511,107 @@ impl LogsQuery {
     }
 }
 
-/// Query for `GET /api/agents/{id}/files`: the file to read. Relative paths
-/// resolve against the run's workdir; absolute paths are accepted but must
-/// still land inside it.
-#[derive(Deserialize)]
+/// Query for `GET /api/agents/{id}/files`.
+///
+/// With `path`, reads that file. Without, lists - the same idiom `GET
+/// /api/fs/dirs` uses for the folder picker.
+#[derive(Deserialize, Default)]
 pub(super) struct FileQuery {
+    /// The file to read. Relative paths resolve against the run's workdir;
+    /// absolute paths are accepted but must still land inside it. Absent means
+    /// "list", and a directory lists rather than erroring.
+    pub(super) path: Option<String>,
+    /// `modified` (default) or `workdir`. See [`FileSource`].
+    pub(super) source: Option<String>,
+    /// Include dot-prefixed entries when listing a directory. Off by default,
+    /// mirroring `DirsQuery`.
+    #[serde(default)]
+    pub(super) hidden: bool,
+}
+
+/// Which question a listing answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FileSource {
+    /// What the run recorded modifying. Free, but a claim about the run rather
+    /// than about the disk, and capped at record time.
+    Modified,
+    /// What is in the run's working directory now, one level at a time.
+    Workdir,
+}
+
+impl FileQuery {
+    /// Resolve `source`, or report the bad value.
+    pub(super) fn file_source(&self) -> Result<FileSource, String> {
+        match self.source.as_deref() {
+            None | Some("modified") => Ok(FileSource::Modified),
+            Some("workdir") => Ok(FileSource::Workdir),
+            Some(other) => Err(format!(
+                "Invalid source '{other}': expected 'modified' or 'workdir'"
+            )),
+        }
+    }
+}
+
+/// Response of `GET /api/agents/{id}/files`: either one file's contents, or a
+/// listing.
+///
+/// Untagged, with the listing carrying a literal `kind` field, so a client
+/// discriminates on a value rather than by trying parses until one fits.
+/// `FileContentResp` is unchanged and still serializes exactly as before, so
+/// existing readers of `?path=<file>` see no difference at all.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub(super) enum FileOrListing {
+    File(FileContentResp),
+    /// Boxed because it is much the larger variant, and every file read would
+    /// otherwise pay for its size.
+    Listing(Box<RunFileListing>),
+}
+
+/// Response of `GET /api/agents/{id}/files` with no file named.
+#[derive(Debug, Serialize)]
+pub(super) struct RunFileListing {
+    /// Always `"listing"`. What a client checks to tell the two shapes apart.
+    pub(super) kind: &'static str,
+    /// Which question this answers: `modified` or `workdir`.
+    pub(super) source: &'static str,
+    /// The directory listed, or the workdir for a `modified` listing.
     pub(super) path: String,
+    /// Where "up one level" goes, or `null` at the workdir root.
+    pub(super) parent: Option<String>,
+    /// The run's working directory, which paths are relative to.
+    pub(super) workdir: String,
+    pub(super) entries: Vec<RunFileEntry>,
+    /// Whether `entries` stops short of the directory's real contents.
+    pub(super) truncated: bool,
+    /// Whether the run hit the tracked-modified-files cap, so its recorded list
+    /// is a prefix and the remaining names were never stored anywhere.
+    ///
+    /// Exposed because the alternative - a client subtracting
+    /// `modifying_tool_calls` from `entries.len()` - is wrong, and was the
+    /// original "+N more" bug. Use `source=workdir` for ground truth about what
+    /// is actually on disk.
+    pub(super) modified_files_truncated: bool,
+    /// Successful **modifying tool calls**, which is not a file count: a run
+    /// that edits one file three times records three. Named for what it counts.
+    pub(super) modifying_tool_calls: usize,
+}
+
+/// One entry in a [`RunFileListing`].
+#[derive(Debug, Serialize)]
+pub(super) struct RunFileEntry {
+    pub(super) name: String,
+    /// Relative to the run's workdir where possible, so a client can pass it
+    /// straight back as `?path=`.
+    pub(super) path: String,
+    pub(super) is_dir: bool,
+    /// `null` when the entry could not be stat-ed.
+    pub(super) size: Option<u64>,
+    /// False for a recorded path that has since been deleted.
+    pub(super) exists: bool,
+    /// True for a recorded path that resolves outside the workdir - possible
+    /// when a tool was handed an absolute path. Reported rather than hidden.
+    pub(super) outside_workdir: bool,
 }
 
 /// Response of `GET /api/agents/{id}/files`: one file the run wrote, as text.

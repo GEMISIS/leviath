@@ -255,15 +255,27 @@
       "parameters": [{ "$ref": "#/components/parameters/Id" }],
       "get": {
         "tags": ["agents"],
-        "summary": "Read one file inside the run's workdir",
-        "description": "Confined to the run's working directory, and capped at 1 MiB.",
+        "summary": "Read a file inside the run's workdir, or list files",
+        "description": "With `path`, reads that file: confined to the run's working directory and capped at 1 MiB. Without `path`, lists instead, and the response carries `kind: \"listing\"` so the two shapes can be told apart. Reading a file returns exactly the shape it always has.\n\n`source=modified` lists what the run recorded changing - free, but capped when it was recorded, so check `modified_files_truncated`. `source=workdir` reads the filesystem, **one directory level per request**; pass a directory as `path` to descend. Note `modifying_tool_calls` counts modifying tool calls and not distinct files, so subtracting it from the entry count does not give \"how many more files\".",
         "parameters": [
           {
             "name": "path",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": { "type": "string" },
-            "description": "Workdir-relative path."
+            "description": "Workdir-relative path. A file is read; a directory is listed; absent lists the run's files."
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "schema": { "type": "string", "enum": ["modified", "workdir"], "default": "modified" },
+            "description": "`modified` lists what the run recorded changing; `workdir` reads one directory level of the filesystem."
+          },
+          {
+            "name": "hidden",
+            "in": "query",
+            "schema": { "type": "boolean", "default": false },
+            "description": "Include dot-prefixed entries when listing a directory."
           }
         ],
         "responses": {

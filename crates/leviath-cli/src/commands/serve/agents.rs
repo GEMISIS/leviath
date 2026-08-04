@@ -231,12 +231,21 @@ pub(super) const MAX_FILE_READ_BYTES: u64 = 1024 * 1024;
 pub(super) async fn agent_file(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<FileQuery>,
-) -> Result<Json<FileContentResp>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<FileOrListing>, (StatusCode, Json<ErrorResponse>)> {
     let meta = runstate::read_meta(&id)
         .map_err(|_| err(StatusCode::NOT_FOUND, format!("Agent run '{id}' not found")))?;
 
+    let source = query
+        .file_source()
+        .map_err(|message| err(StatusCode::BAD_REQUEST, message))?;
+
+    // No path means "what is there", which is a listing rather than a read.
+    let Some(ref requested_path) = query.path else {
+        return list_run_files(&meta, source, None, query.hidden).map(Json);
+    };
+
     let workdir = PathBuf::from(&meta.workdir);
-    let requested = PathBuf::from(&query.path);
+    let requested = PathBuf::from(requested_path);
     let resolved = match requested.is_absolute() {
         true => requested,
         false => workdir.join(&requested),
@@ -244,25 +253,23 @@ pub(super) async fn agent_file(
     if !leviath_core::resolves_within(&resolved, &workdir) {
         return Err(err(
             StatusCode::FORBIDDEN,
-            format!(
-                "path '{}' is outside the run's working directory",
-                query.path
-            ),
+            format!("path '{requested_path}' is outside the run's working directory"),
         ));
     }
 
     let size = match std::fs::metadata(&resolved) {
+        // A directory used to be a 400. It is the natural way to ask "what is
+        // in here", and the folder picker already answers that shape, so it
+        // lists instead. Nothing can have depended on the old error.
         Ok(m) if m.is_dir() => {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                format!("'{}' is a directory, not a file", query.path),
-            ));
+            return list_run_files(&meta, FileSource::Workdir, Some(&resolved), query.hidden)
+                .map(Json);
         }
         Ok(m) => m.len(),
         Err(_) => {
             return Err(err(
                 StatusCode::NOT_FOUND,
-                format!("file '{}' not found", query.path),
+                format!("file '{requested_path}' not found"),
             ));
         }
     };
@@ -274,7 +281,7 @@ pub(super) async fn agent_file(
     {
         return Err(err(
             StatusCode::NOT_FOUND,
-            format!("could not read '{}': {e}", query.path),
+            format!("could not read '{requested_path}': {e}"),
         ));
     }
     let truncated = size > MAX_FILE_READ_BYTES;
@@ -295,17 +302,169 @@ pub(super) async fn agent_file(
         Err(_) => {
             return Err(err(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                format!("'{}' is not a text file", query.path),
+                format!("'{requested_path}' is not a text file"),
             ));
         }
     };
 
-    Ok(Json(FileContentResp {
+    Ok(Json(FileOrListing::File(FileContentResp {
         path: resolved.to_string_lossy().into_owned(),
         size,
         content,
         truncated,
-    }))
+    })))
+}
+
+/// Most entries one directory listing returns.
+///
+/// A single `node_modules/.pnpm` really does hold six figures of entries, and
+/// the response is built in memory.
+pub(super) const MAX_LISTING_ENTRIES: usize = 1000;
+
+/// List what a run touched, or what is in its working directory.
+///
+/// Two genuinely different questions, and neither substitutes for the other:
+///
+/// - [`FileSource::Modified`] is the run's own record of what it changed. Free -
+///   it is already in `meta.json` - but capped at record time, so it is a claim
+///   about the run rather than about the disk.
+/// - [`FileSource::Workdir`] is what is actually there now, read **one directory
+///   level per request**. That bound is the answer to "a repo with
+///   node_modules": the client walks the tree itself, exactly as the existing
+///   folder picker does, instead of one request trying to enumerate everything.
+fn list_run_files(
+    meta: &RunMeta,
+    source: FileSource,
+    dir: Option<&std::path::Path>,
+    hidden: bool,
+) -> Result<FileOrListing, (StatusCode, Json<ErrorResponse>)> {
+    let workdir = PathBuf::from(&meta.workdir);
+    let listing = match source {
+        FileSource::Modified => modified_listing(meta, &workdir),
+        FileSource::Workdir => workdir_listing(meta, &workdir, dir, hidden)?,
+    };
+    Ok(FileOrListing::Listing(Box::new(listing)))
+}
+
+/// The paths the run recorded modifying, stat-ed against the workdir.
+fn modified_listing(meta: &RunMeta, workdir: &std::path::Path) -> RunFileListing {
+    let entries = meta
+        .flags
+        .modified_files
+        .iter()
+        .map(|rel| {
+            let resolved = if std::path::Path::new(rel).is_absolute() {
+                PathBuf::from(rel)
+            } else {
+                workdir.join(rel)
+            };
+            let stat = std::fs::metadata(&resolved).ok();
+            RunFileEntry {
+                name: std::path::Path::new(rel)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| rel.clone()),
+                path: rel.clone(),
+                is_dir: stat.as_ref().is_some_and(|m| m.is_dir()),
+                size: stat.as_ref().map(|m| m.len()),
+                // A recorded path can name a file since deleted, or - for a
+                // tool given an absolute path - one outside the workdir.
+                // Reported rather than filtered away, so the list stays a
+                // faithful account of what the run did.
+                exists: stat.is_some(),
+                outside_workdir: !leviath_core::resolves_within(&resolved, workdir),
+            }
+        })
+        .collect();
+
+    RunFileListing {
+        kind: "listing",
+        source: "modified",
+        path: meta.workdir.clone(),
+        parent: None,
+        workdir: meta.workdir.clone(),
+        entries,
+        truncated: false,
+        // Both of the ways this list misleads, made visible in the response
+        // rather than left in the documentation. See the field docs.
+        modified_files_truncated: meta.flags.modified_files.len()
+            >= leviath_core::run_meta::MAX_TRACKED_MODIFIED_FILES,
+        modifying_tool_calls: meta.flags.modified_file_count,
+    }
+}
+
+/// One directory level of the run's working directory.
+fn workdir_listing(
+    meta: &RunMeta,
+    workdir: &std::path::Path,
+    dir: Option<&std::path::Path>,
+    hidden: bool,
+) -> Result<RunFileListing, (StatusCode, Json<ErrorResponse>)> {
+    let target = dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workdir.to_path_buf());
+    if !target.is_dir() {
+        // Distinguished from an ordinary 404 because a lost workspace is a
+        // known run outcome (`flags.workspace_lost`), and an empty listing
+        // would read as "this run touched nothing".
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            format!(
+                "the run's working directory '{}' no longer exists",
+                target.display()
+            ),
+        ));
+    }
+
+    let mut entries: Vec<RunFileEntry> = Vec::new();
+    let mut truncated = false;
+    for child in std::fs::read_dir(&target).into_iter().flatten().flatten() {
+        if entries.len() >= MAX_LISTING_ENTRIES {
+            truncated = true;
+            break;
+        }
+        let name = child.file_name().to_string_lossy().into_owned();
+        if !hidden && name.starts_with('.') {
+            continue;
+        }
+        let path = child.path();
+        // Per entry, not just for the directory asked for: a symlinked child
+        // can point outside the fence. The folder picker already does this.
+        if !leviath_core::resolves_within(&path, workdir) {
+            continue;
+        }
+        let stat = child.metadata().ok();
+        entries.push(RunFileEntry {
+            path: path
+                .strip_prefix(workdir)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned(),
+            name,
+            is_dir: stat.as_ref().is_some_and(|m| m.is_dir()),
+            size: stat.as_ref().map(|m| m.len()),
+            exists: true,
+            outside_workdir: false,
+        });
+    }
+    // Directories first, then by name - the grouping a file tree wants, done
+    // once here rather than in every client.
+    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+
+    Ok(RunFileListing {
+        kind: "listing",
+        source: "workdir",
+        path: target.to_string_lossy().into_owned(),
+        parent: (target != workdir)
+            .then(|| target.parent().map(|p| p.to_string_lossy().into_owned()))
+            .flatten(),
+        workdir: meta.workdir.clone(),
+        entries,
+        truncated,
+        modified_files_truncated: meta.flags.modified_files.len()
+            >= leviath_core::run_meta::MAX_TRACKED_MODIFIED_FILES,
+        modifying_tool_calls: meta.flags.modified_file_count,
+    })
 }
 
 pub(super) async fn agent_result(
@@ -1477,6 +1636,179 @@ prompt = "Plan the work"
             .to_string()
     }
 
+    /// `GET /api/agents/{id}/files` with no `path`, plus any extra query.
+    async fn list_files(id: &str, extra: &str) -> (StatusCode, serde_json::Value) {
+        let uri = format!("/api/agents/{id}/files{extra}");
+        let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        let resp = files_app().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// The original Lair blocker: the console had a "+N more" badge and no
+    /// endpoint that could list the names behind it.
+    #[tokio::test]
+    async fn listing_defaults_to_what_the_run_recorded_modifying() {
+        crate::runstate::with_isolated_runs_dir_async("agent_files_modified", |_d| async move {
+            let workdir = tempfile::tempdir().unwrap();
+            std::fs::write(workdir.path().join("kept.rs"), "x").unwrap();
+            let run_id = unique_run_id("files-mod");
+
+            let mut meta = make_run(&run_id);
+            meta.workdir = workdir.path().to_string_lossy().into_owned();
+            meta.flags.modified_files = vec!["kept.rs".to_string(), "deleted.rs".to_string()];
+            // Three calls, two distinct files: the two numbers disagree, which
+            // is exactly why a client must not subtract them.
+            meta.flags.modified_file_count = 3;
+            create_run(&meta).unwrap();
+
+            let (status, listing) = list_files(&run_id, "").await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(listing["source"], "modified");
+            assert_eq!(listing["entries"].as_array().unwrap().len(), 2);
+            // A path the run recorded but which is now gone is reported as
+            // such rather than quietly dropped.
+            assert_eq!(listing["entries"][0]["exists"], true);
+            assert_eq!(listing["entries"][1]["name"], "deleted.rs");
+            assert_eq!(listing["entries"][1]["exists"], false);
+            // Named for what it counts, and not equal to the file count.
+            assert_eq!(listing["modifying_tool_calls"], 3);
+            assert_eq!(listing["modified_files_truncated"], false);
+
+            let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        })
+        .await;
+    }
+
+    /// Past the record-time cap the remaining names were never stored, so the
+    /// only honest thing the API can do is say the list is a prefix.
+    #[tokio::test]
+    async fn a_run_at_the_tracking_cap_reports_its_list_as_truncated() {
+        crate::runstate::with_isolated_runs_dir_async("agent_files_capped", |_d| async move {
+            let workdir = tempfile::tempdir().unwrap();
+            let run_id = unique_run_id("files-cap");
+            let mut meta = make_run(&run_id);
+            meta.workdir = workdir.path().to_string_lossy().into_owned();
+            meta.flags.modified_files = (0..leviath_core::run_meta::MAX_TRACKED_MODIFIED_FILES)
+                .map(|i| format!("f{i}.rs"))
+                .collect();
+            meta.flags.modified_file_count = 5_000;
+            create_run(&meta).unwrap();
+
+            let (_, listing) = list_files(&run_id, "").await;
+            assert_eq!(listing["modified_files_truncated"], true);
+
+            let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        })
+        .await;
+    }
+
+    /// One directory level per request is the answer to "a repo with
+    /// node_modules": the client walks the tree rather than one response
+    /// trying to enumerate it.
+    #[tokio::test]
+    async fn a_workdir_listing_is_one_level_deep_and_descends_by_path() {
+        crate::runstate::with_isolated_runs_dir_async("agent_files_workdir", |_d| async move {
+            let workdir = tempfile::tempdir().unwrap();
+            std::fs::write(workdir.path().join("top.txt"), "x").unwrap();
+            std::fs::write(workdir.path().join(".hidden"), "x").unwrap();
+            std::fs::create_dir(workdir.path().join("nested")).unwrap();
+            std::fs::write(workdir.path().join("nested/deep.txt"), "x").unwrap();
+            let run_id = unique_run_id("files-wd");
+            create_run_in(&run_id, workdir.path());
+
+            let (status, listing) = list_files(&run_id, "?source=workdir").await;
+            assert_eq!(status, StatusCode::OK);
+            let names: Vec<&str> = listing["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["name"].as_str().unwrap())
+                .collect();
+            // Directories first, then by name. The nested file is not here -
+            // one level only.
+            assert_eq!(names, vec!["nested", "top.txt"]);
+            assert!(listing["parent"].is_null(), "at the workdir root");
+
+            // Hidden entries are opt-in, mirroring the folder picker.
+            let (_, with_hidden) = list_files(&run_id, "?source=workdir&hidden=true").await;
+            assert_eq!(with_hidden["entries"].as_array().unwrap().len(), 3);
+
+            // Descending is the same route with a path.
+            let (_, deeper) = list_files(&run_id, "?source=workdir&path=nested").await;
+            assert_eq!(deeper["entries"][0]["name"], "deep.txt");
+
+            let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        })
+        .await;
+    }
+
+    /// A lost workspace is a known run outcome, and an empty listing would
+    /// read as "this run touched nothing".
+    #[tokio::test]
+    async fn a_workdir_listing_404s_when_the_workspace_is_gone() {
+        crate::runstate::with_isolated_runs_dir_async("agent_files_gone", |_d| async move {
+            let run_id = unique_run_id("files-gone");
+            let mut meta = make_run(&run_id);
+            meta.workdir = "/definitely/not/here".to_string();
+            create_run(&meta).unwrap();
+
+            let (status, _) = list_files(&run_id, "?source=workdir").await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+
+            let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_unknown_file_source_is_refused() {
+        crate::runstate::with_isolated_runs_dir_async("agent_files_bad_source", |_d| async move {
+            let run_id = unique_run_id("files-bad");
+            create_run(&make_run(&run_id)).unwrap();
+
+            let (status, body) = list_files(&run_id, "?source=everything").await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(body["error"].as_str().unwrap().contains("everything"));
+
+            let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        })
+        .await;
+    }
+
+    /// Reading a file must still serialize byte-for-byte as it did before the
+    /// listing shape was added, or every existing client breaks.
+    #[tokio::test]
+    async fn reading_a_file_still_returns_the_original_shape() {
+        crate::runstate::with_isolated_runs_dir_async("agent_files_compat", |_d| async move {
+            let workdir = tempfile::tempdir().unwrap();
+            std::fs::write(workdir.path().join("report.md"), "hello").unwrap();
+            let run_id = unique_run_id("files-compat");
+            create_run_in(&run_id, workdir.path());
+
+            let (status, body) = get_file(&run_id, "report.md").await;
+            assert_eq!(status, StatusCode::OK);
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let keys: Vec<&str> = value
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(keys, vec!["content", "path", "size", "truncated"]);
+            assert_eq!(value["content"], "hello");
+
+            let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn agent_file_unknown_run_returns_404() {
         let (status, body) = get_file("nonexistent-run-xyz-files", "report.md").await;
@@ -1627,18 +1959,27 @@ prompt = "Plan the work"
     }
 
     #[tokio::test]
-    async fn agent_file_directory_returns_400() {
+    /// A directory used to be a 400. Asking for one is the natural way to say
+    /// "what is in here", so it lists instead - the behavior change this route
+    /// deliberately makes.
+    async fn agent_file_directory_lists_instead_of_erroring() {
         crate::runstate::with_isolated_runs_dir_async(
-            "agent_file_directory_returns_400",
+            "agent_file_directory_lists",
             |_d| async move {
                 let workdir = tempfile::tempdir().unwrap();
                 std::fs::create_dir(workdir.path().join("sub")).unwrap();
+                std::fs::write(workdir.path().join("sub/inner.txt"), "hi").unwrap();
                 let run_id = unique_run_id("file-dir");
                 create_run_in(&run_id, workdir.path());
 
                 let (status, body) = get_file(&run_id, "sub").await;
-                assert_eq!(status, StatusCode::BAD_REQUEST);
-                assert_eq!(error_of(&body), "'sub' is a directory, not a file");
+                assert_eq!(status, StatusCode::OK);
+                let listing: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(listing["kind"], "listing");
+                assert_eq!(listing["source"], "workdir");
+                assert_eq!(listing["entries"][0]["name"], "inner.txt");
+                // "Up one level" from a subdirectory is the workdir.
+                assert!(listing["parent"].is_string());
 
                 let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
             },
