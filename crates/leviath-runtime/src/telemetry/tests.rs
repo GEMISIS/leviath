@@ -22,6 +22,7 @@ fn meta(run_id: &str) -> RunMetadata {
         title: None,
         unattended: false,
         read_paths: None,
+        output_request: None,
     }
 }
 

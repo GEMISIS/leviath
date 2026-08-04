@@ -341,6 +341,10 @@ fn reload_one(
         allow: Vec::new(),
         max_depth: None,
         parent_run_id: meta.parent_run_id.clone(),
+        // Restored for the same reason `yolo` is: a reload that dropped the
+        // caller's requested shape would silently revert the run to the
+        // blueprint's partway through, and the caller would never see why.
+        output: meta.output_request.clone(),
     };
     let entity = build_agent_for_reload(
         world.world_mut(),
@@ -612,6 +616,7 @@ mod tests {
             yolo: false,
             read_paths: None,
             final_output: None,
+            output_request: None,
         };
         std::fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
         if let Some(ctx) = context {

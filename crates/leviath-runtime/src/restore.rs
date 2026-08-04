@@ -305,6 +305,7 @@ mod tests {
             accepts_messages: true,
             context_layout: None,
             system_prompt: None,
+            output: None,
         }
     }
 
@@ -315,6 +316,7 @@ mod tests {
             tools: vec![],
             tool_filter: None,
             fallbacks: Vec::new(),
+            output: None,
         }
     }
 

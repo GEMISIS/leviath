@@ -61,6 +61,10 @@ pub struct RunMetadata {
     ///
     /// [`ReadPathGrantCounts`]: leviath_core::run_meta::ReadPathGrantCounts
     pub read_paths: Option<leviath_core::run_meta::ReadPathGrantCounts>,
+    /// The output shape the caller asked for at launch, if they overrode the
+    /// blueprint's. Held so it reaches `meta.json` and survives a restart; the
+    /// resolved per-stage shape lives on `StageInference`/`StageSetup`.
+    pub output_request: Option<leviath_core::output::OutputSpec>,
 }
 
 /// Running token + tool-call totals accumulated across an agent's inferences, for
@@ -327,6 +331,7 @@ pub fn build_run_meta(
         yolo: md.unattended,
         read_paths: md.read_paths,
         final_output: final_output.map(|o| o.0.clone()),
+        output_request: md.output_request.clone(),
     }
 }
 
@@ -365,6 +370,7 @@ mod tests {
             title: Some("Do It".to_string()),
             unattended: false,
             read_paths: None,
+            output_request: None,
         }
     }
 

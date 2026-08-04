@@ -205,6 +205,11 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
         args.max_depth,
         args.regions,
         args.no_seed_commands,
+        commands::run::output_request(
+            args.output_format,
+            args.output_instructions,
+            args.output_schema,
+        )?,
     )?;
     // Deliberately after the resolve, not before. No `--task` opens an editor,
     // and a user can sit in vim for twenty minutes: checking daemon liveness

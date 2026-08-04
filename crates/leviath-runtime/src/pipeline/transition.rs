@@ -44,6 +44,14 @@ pub struct StageSetup {
     pub context_layout: Option<leviath_core::ContextLayout>,
     /// Optional stage instructions injected as pinned context on entry.
     pub system_prompt: Option<String>,
+    /// The output shape resolved for this stage (agent, stage, and the
+    /// launching caller's request combined), and whether the stage must produce
+    /// one. `None` means no level asked for a shape.
+    ///
+    /// Held here as well as on [`StageInference`] because the two use it for
+    /// different things: this copy is folded into the stage's system prompt, and
+    /// that copy is what validates a submission at dispatch.
+    pub output: Option<leviath_core::output::OutputSpec>,
 }
 
 /// Pre-resolved [`StageSetup`] for every stage of the agent's blueprint.
@@ -1237,6 +1245,11 @@ pub struct ResolvedStage {
     /// Where to go if `provider_name` turns out to be unusable, best first.
     /// See [`crate::pipeline::resolve_stage_candidates`].
     pub fallbacks: Vec<leviath_core::blueprint::ModelEntry>,
+    /// The output shape resolved for this stage: the blueprint's default, the
+    /// stage's override, and the launching caller's request, combined. Resolved
+    /// caller-side (like the model and tool choices beside it) because only the
+    /// caller knows what was asked for at launch.
+    pub output: Option<leviath_core::output::OutputSpec>,
 }
 
 /// Fallback context window used when a stage's provider isn't registered (so
@@ -1276,6 +1289,7 @@ pub(crate) fn stage_setup_from(
     stage: &leviath_core::Stage,
     global_hints: leviath_core::config::PromptHints,
     agent_hints: leviath_core::config::PromptHintOverrides,
+    output: Option<leviath_core::output::OutputSpec>,
 ) -> StageSetup {
     let temperature = stage
         .model
@@ -1318,6 +1332,33 @@ pub(crate) fn stage_setup_from(
         }
         _ => base_prompt,
     };
+    // A stage that must hand something back says so in its own instructions, on
+    // top of the `submit_output` tool description carrying the same shape. Both,
+    // because a format the model has no prior knowledge of - a2ui, a house
+    // schema - is exactly the case where one mention is easy to miss, and there
+    // is no parser downstream to catch a near miss.
+    let system_prompt = match (&output, stage.require_output) {
+        (Some(spec), true) => {
+            let described = leviath_core::describe_spec(spec);
+            let demand = match described.is_empty() {
+                true => format!(
+                    "Before this stage ends you must call `{tool}` with your final answer. It is \
+                     the only thing the caller receives.",
+                    tool = leviath_core::blueprint::SUBMIT_OUTPUT_TOOL
+                ),
+                false => format!(
+                    "Before this stage ends you must call `{tool}` with your final answer. It is \
+                     the only thing the caller receives.\n\n{described}",
+                    tool = leviath_core::blueprint::SUBMIT_OUTPUT_TOOL
+                ),
+            };
+            Some(match system_prompt {
+                Some(base) => format!("{base}\n\n{demand}"),
+                None => demand,
+            })
+        }
+        _ => system_prompt,
+    };
     // Cascade each hint toggle: stage > agent > global (both default on).
     let batch_tool_hint = leviath_core::taint::resolve_batch_tool_hint(
         global_hints.batch_tool,
@@ -1342,6 +1383,7 @@ pub(crate) fn stage_setup_from(
         accepts_messages: stage.accepts_messages,
         context_layout: stage.context_layout.clone(),
         system_prompt,
+        output,
     }
 }
 
@@ -1435,6 +1477,10 @@ pub fn spawn_agent_seeded(
         }
     }
 
+    // Kept before `stages` is consumed, so each stage's setup can fold the same
+    // shape into its system prompt that its tool description already carries.
+    let stage_outputs: Vec<Option<leviath_core::output::OutputSpec>> =
+        stages.iter().map(|rs| rs.output.clone()).collect();
     let stage_infs: Vec<StageInference> = stages
         .into_iter()
         .map(|rs| StageInference {
@@ -1443,6 +1489,7 @@ pub fn spawn_agent_seeded(
             tools: rs.tools,
             tool_filter: None, // tools already resolved to the effective set
             fallbacks: rs.fallbacks,
+            output: rs.output,
         })
         .collect();
     let agent_hints = leviath_core::config::PromptHintOverrides {
@@ -1452,7 +1499,8 @@ pub fn spawn_agent_seeded(
     let setups: Vec<StageSetup> = blueprint
         .stages
         .iter()
-        .map(|s| stage_setup_from(s, global_hints, agent_hints))
+        .zip(stage_outputs)
+        .map(|(s, output)| stage_setup_from(s, global_hints, agent_hints, output))
         .collect();
 
     // Seed the window from the blueprint layout + task, then apply stage 0's

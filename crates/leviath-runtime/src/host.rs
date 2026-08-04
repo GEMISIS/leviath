@@ -92,6 +92,16 @@ pub struct SpawnArgs {
     /// tree) can nest children under their parent. `None` for a top-level run.
     #[serde(default)]
     pub parent_run_id: Option<String>,
+    /// The shape this caller wants the run's final output in, overriding what
+    /// the blueprint declares.
+    ///
+    /// A request, not a contract: it changes what the model is asked to produce
+    /// and what gets recorded, and nothing converts between shapes. Naming a
+    /// format without also supplying a schema drops the blueprint's declared
+    /// schema, since a check written for one shape says nothing about another
+    /// (see [`leviath_core::resolve_output_spec`]).
+    #[serde(default)]
+    pub output: Option<leviath_core::output::OutputSpec>,
 }
 
 /// One row of a run listing ([`ControlRequest::List`]): a live run, its status,
@@ -1964,6 +1974,7 @@ mod tests {
             tools: vec![],
             tool_filter: None,
             fallbacks: Vec::new(),
+            output: None,
         }
     }
 
@@ -1981,6 +1992,7 @@ mod tests {
             accepts_messages: true,
             context_layout: None,
             system_prompt: None,
+            output: None,
         }
     }
 
@@ -3430,6 +3442,7 @@ mod tests {
                 title: None,
                 unattended: false,
                 read_paths: None,
+                output_request: None,
             },
         ));
         assert!(
@@ -3805,6 +3818,7 @@ mod tests {
                 title: None,
                 unattended: false,
                 read_paths: None,
+                output_request: None,
             });
 
         // First emission after spawn: Spawned + Status + Tokens + Context.
@@ -4605,6 +4619,7 @@ mod tests {
                 title: None,
                 unattended: true,
                 read_paths: None,
+                output_request: None,
             },
             TokenTotals {
                 tool_calls: 9,

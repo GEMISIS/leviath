@@ -871,6 +871,7 @@ fn build_agent_inner(
             registry,
             &all_tool_defs,
             args.yolo,
+            args.output.as_ref(),
         )?
     };
 
@@ -1024,6 +1025,7 @@ fn build_agent_inner(
         title: None,
         unattended: args.yolo,
         read_paths: read_path_counts,
+        output_request: args.output.clone(),
     };
     {
         let mut entity_mut = world.entity_mut(entity);
@@ -1535,6 +1537,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             allow: Vec::new(),
             max_depth: None,
             parent_run_id: None,
+            output: None,
         }
     }
 
@@ -3162,6 +3165,7 @@ conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
             allow: Vec::new(),
             max_depth: None,
             parent_run_id: None,
+            output: None,
         }
     }
 

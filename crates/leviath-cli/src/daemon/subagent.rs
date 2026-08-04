@@ -134,6 +134,7 @@ async fn spawn(h: &SubAgentHandle, args: &serde_json::Value) -> String {
         // Sub-agents receive their whole task via `full_task`; no region flags.
         std::collections::HashMap::new(),
         h.no_seed_commands,
+        None,
     ) {
         Ok(a) => a,
         Err(e) => return format!("[error] cannot spawn '{blueprint}': {e}"),

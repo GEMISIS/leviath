@@ -542,6 +542,7 @@ mod tests {
                         title: None,
                         unattended: false,
                         read_paths: None,
+                        output_request: None,
                     },
                 ))
                 .id())
@@ -577,6 +578,7 @@ mod tests {
             tools: vec![],
             tool_filter: None,
             fallbacks: Vec::new(),
+            output: None,
         }
     }
 
@@ -594,6 +596,7 @@ mod tests {
             accepts_messages: true,
             context_layout: None,
             system_prompt: None,
+            output: None,
         }
     }
 

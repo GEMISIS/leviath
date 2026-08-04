@@ -159,6 +159,15 @@ pub struct RunMeta {
     /// reports a finished run reads it from here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_output: Option<crate::output::FinalOutput>,
+    /// The output shape this run was launched asking for, when the caller
+    /// overrode the blueprint's.
+    ///
+    /// Persisted for the same reason `yolo` is: a daemon restart rebuilds the
+    /// run's spawn arguments from this file, and dropping the request would
+    /// silently revert the run to the blueprint's shape partway through. The
+    /// caller asked once and should not have to ask again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_request: Option<crate::output::OutputSpec>,
 }
 
 /// How many `[read_paths]` entries a run's blueprint declared, and how many of
@@ -320,6 +329,7 @@ impl RunMeta {
             depth: 0,
             max_child_depth: 0,
             final_output: None,
+            output_request: None,
             flags: RunFlags::default(),
             yolo: false,
             read_paths: None,

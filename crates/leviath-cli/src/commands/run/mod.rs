@@ -73,6 +73,29 @@ pub struct RunArgs {
     #[arg(long)]
     pub json: bool,
 
+    /// Ask for the final output in a particular shape, overriding whatever the
+    /// blueprint declares. Any label works - `markdown`, `json`, `xml`, `a2ui`,
+    /// a media type, a house format - because nothing converts between shapes:
+    /// the label and any instructions are handed to the model, which produces
+    /// the bytes. Read the answer back with `lev result <run-id>`.
+    ///
+    /// Naming a format without `--output-schema` drops a schema the blueprint
+    /// declared, since a check written for one shape says nothing about another.
+    #[arg(long, value_name = "LABEL")]
+    pub output_format: Option<String>,
+
+    /// Extra guidance about the shape, passed to the model alongside
+    /// `--output-format`. This is how an unusual format gets explained.
+    #[arg(long, value_name = "TEXT")]
+    pub output_instructions: Option<String>,
+
+    /// A JSON Schema (inline, or `@path` to a file) the final output must
+    /// satisfy. The only thing that ever inspects the answer's contents, and it
+    /// only happens because you asked: a submission that fails is refused back
+    /// to the agent to correct.
+    #[arg(long, value_name = "JSON|@FILE")]
+    pub output_schema: Option<String>,
+
     /// Dynamic per-region seed flags (`--<region> <text|@file>`), collected by an
     /// argv pre-scan in the binary since region names are blueprint-defined.
     /// clap skips this field; it is populated after parsing.
@@ -90,6 +113,9 @@ const KNOWN_RUN_FLAGS: &[&str] = &[
     "max-depth",
     "no-seed-commands",
     "workdir",
+    "output-format",
+    "output-instructions",
+    "output-schema",
     // Every flag `run` owns must be listed here. One that is missing is not a
     // parse error: the pre-scan silently reads it as a `--<region>` seed and
     // swallows the token after it.
@@ -98,6 +124,39 @@ const KNOWN_RUN_FLAGS: &[&str] = &[
     "help",
     "version",
 ];
+
+/// Build the caller's requested output shape from the `--output-*` flags, or
+/// `None` when none were given (leaving whatever the blueprint declares).
+///
+/// The format label is passed through untouched and never matched against a
+/// known set, which is what lets `--output-format a2ui` work without a line of
+/// a2ui-specific code. Only `--output-schema` is interpreted, and only as JSON,
+/// because it is the one thing the runtime will actually check.
+pub fn output_request(
+    format: Option<String>,
+    instructions: Option<String>,
+    schema: Option<String>,
+) -> anyhow::Result<Option<leviath_core::output::OutputSpec>> {
+    if format.is_none() && instructions.is_none() && schema.is_none() {
+        return Ok(None);
+    }
+    let schema = match schema {
+        Some(raw) => {
+            let text = task::read_region_value(&raw)?;
+            Some(
+                serde_json::from_str(&text)
+                    .map_err(|e| anyhow::anyhow!("--output-schema is not valid JSON: {e}"))?,
+            )
+        }
+        None => None,
+    };
+    Ok(Some(leviath_core::output::OutputSpec {
+        format,
+        instructions,
+        example: None,
+        schema,
+    }))
+}
 
 /// The run's effective working directory: the `--workdir` flag when given
 /// (canonicalized, and refused early when it does not exist - a bad workdir

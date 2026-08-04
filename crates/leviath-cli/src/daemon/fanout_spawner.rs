@@ -119,6 +119,7 @@ impl FanOutSpawner for DaemonFanOutSpawner {
             // per worker would be pure waste (and up to `max_workers` copies of
             // the same output).
             true,
+            None,
         )
         .map_err(|e| format!("resolve worker blueprint: {e}"))?;
         // Nest the worker under its fan-out parent in the run tree.
@@ -452,6 +453,7 @@ mod tests {
             allow: Vec::new(),
             max_depth: None,
             parent_run_id: None,
+            output: None,
         };
         let parent = build_agent(
             world.world_mut(),

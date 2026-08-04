@@ -50,6 +50,21 @@ pub fn init_window_seeded(
         window.add_region(conv_region);
     }
 
+    // Where `submit_output` mirrors the run's answer. Pinned, so the answer
+    // stays visible to later stages (one can revise it) and is never evicted to
+    // make room for the work that produced it. Its budget is the output cap
+    // expressed in tokens, so a submission at the size limit still fits.
+    if window
+        .get_region(crate::output_tool::FINAL_OUTPUT_REGION)
+        .is_none()
+    {
+        window.add_region(Region::new(
+            crate::output_tool::FINAL_OUTPUT_REGION.to_string(),
+            RegionKind::Pinned,
+            crate::output_tool::FINAL_OUTPUT_REGION_TOKENS,
+        ));
+    }
+
     for (name, content) in seeds {
         // The task key keeps its legacy fallback: prefer a region named "task",
         // else the first pinned region. Every other key targets its region by
@@ -170,7 +185,18 @@ pub fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
     // the next stage would assemble with no messages, and its typed tool_use/
     // tool_result turns would have nowhere to land. `tool_results` likewise. A
     // blueprint that DOES declare them keeps its own budget (handled above).
-    for infra in ["conversation", "tool_results"] {
+    //
+    // `final_output` carries for a different reason: an answer submitted in one
+    // stage must still be there when a later stage runs, or a blueprint that
+    // submits early and then routes onward would silently lose it. The
+    // authoritative copy lives on the `FinalOutput` component either way, so
+    // this keeps the agent's own view of its answer consistent with what the
+    // caller will receive.
+    for infra in [
+        "conversation",
+        "tool_results",
+        crate::output_tool::FINAL_OUTPUT_REGION,
+    ] {
         if !kept.contains(infra)
             && let Some(existing) = window.get_region(infra)
         {
@@ -481,12 +507,20 @@ mod tests {
 
         apply_layout(&mut window, &new_layout);
 
-        // system + scratch from the new layout, PLUS the auto-added message-stream
-        // regions (conversation, tool_results) carried across the transition so the
-        // message history survives even though the new layout doesn't declare them.
-        assert_eq!(window.regions.len(), 4);
+        // system + scratch from the new layout, PLUS the auto-added infra regions
+        // carried across the transition even though the new layout doesn't declare
+        // them: conversation and tool_results so the message history survives, and
+        // final_output so an answer submitted before the transition is still there
+        // after it.
+        assert_eq!(window.regions.len(), 5);
         assert!(window.get_region("conversation").is_some());
         assert!(window.get_region("tool_results").is_some());
+        assert!(
+            window
+                .get_region(crate::output_tool::FINAL_OUTPUT_REGION)
+                .is_some(),
+            "a submitted answer must survive a stage transition"
+        );
         assert!(
             window
                 .get_region("system")

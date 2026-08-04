@@ -1147,6 +1147,7 @@ mod tests {
                 .collect(),
             tool_filter: None,
             fallbacks: Vec::new(),
+            output: None,
         }
     }
 
@@ -1164,6 +1165,7 @@ mod tests {
             accepts_messages: true,
             context_layout: None,
             system_prompt: None,
+            output: None,
         }
     }
 
@@ -1829,6 +1831,7 @@ mod tests {
                     model: "m".to_string(),
                     tools: vec![],
                     fallbacks: Vec::new(),
+                    output: None,
                 }],
                 hints(true),
             )
@@ -1881,6 +1884,7 @@ mod tests {
                 title: None,
                 unattended: false,
                 read_paths: None,
+                output_request: None,
             },
             crate::persistence::TokenTotals::default(),
             crate::pipeline::PersistWatermark::default(),
@@ -1966,6 +1970,7 @@ mod tests {
                 title: None,
                 unattended: false,
                 read_paths: None,
+                output_request: None,
             },
             crate::persistence::TokenTotals::default(),
             crate::pipeline::PersistWatermark::default(),
@@ -2071,6 +2076,7 @@ mod tests {
                 title: None,
                 unattended: false,
                 read_paths: None,
+                output_request: None,
             },
             crate::persistence::TokenTotals::default(),
             crate::pipeline::PersistWatermark::default(),
@@ -2155,6 +2161,7 @@ mod tests {
                 title: None,
                 unattended: false,
                 read_paths: None,
+                output_request: None,
             },
             crate::persistence::TokenTotals::default(),
             crate::pipeline::PersistWatermark::default(),
@@ -2220,6 +2227,7 @@ mod tests {
                 title: None,
                 unattended: false,
                 read_paths: None,
+                output_request: None,
             },
             crate::persistence::TokenTotals::default(),
             crate::pipeline::PersistWatermark::default(),
@@ -2342,6 +2350,7 @@ mod tests {
                 model: "m".to_string(),
                 tools: vec![],
                 fallbacks: Vec::new(),
+                output: None,
             }],
             hints(true),
         );

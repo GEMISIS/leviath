@@ -81,6 +81,7 @@ pub mod inference_pool;
 pub mod interaction_hub;
 pub mod interaction_points;
 pub(crate) mod lane_supervisor;
+pub mod output_tool;
 pub mod persistence;
 pub(crate) mod persistence_bridge;
 pub mod pipeline;

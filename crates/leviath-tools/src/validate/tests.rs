@@ -198,3 +198,70 @@ fn extra_properties_are_allowed_unless_the_schema_forbids_them() {
     );
     assert_eq!(v, ArgValidation::Valid);
 }
+
+// ── Final-output validation ──────────────────────────────────────────────────
+//
+// The one place anything inspects a submitted answer, and only when an author
+// supplied a schema. A format label never reaches here: that is what keeps the
+// engine free of per-format behavior.
+
+#[test]
+fn an_output_matching_its_schema_is_valid() {
+    let schema = json!({
+        "type": "object",
+        "required": ["summary"],
+        "properties": {"summary": {"type": "string"}}
+    });
+    assert_eq!(
+        validate_output(&schema, r#"{"summary": "two files changed"}"#),
+        ArgValidation::Valid
+    );
+}
+
+#[test]
+fn an_output_violating_its_schema_reports_the_offending_path() {
+    let schema = json!({
+        "type": "object",
+        "properties": {"count": {"type": "integer"}}
+    });
+    let msg = invalid_message(validate_output(&schema, r#"{"count": "seven"}"#));
+    assert!(msg.starts_with("[error]"), "{msg}");
+    assert!(msg.contains("final output"), "{msg}");
+    assert!(msg.contains("at /count:"), "{msg}");
+}
+
+/// A schema means the author wants JSON, so prose is a violation in its own
+/// right rather than a panic or a silent pass.
+#[test]
+fn an_output_that_is_not_json_fails_a_schema_check_readably() {
+    let msg = invalid_message(validate_output(&json!({"type": "object"}), "just prose"));
+    assert!(msg.contains("not valid JSON"), "{msg}");
+}
+
+/// Compilation is checked before parsing on purpose. A schema too broken to say
+/// anything must not be the reason a good answer is rejected for "not JSON".
+#[test]
+fn an_uncompilable_output_schema_skips_the_check_including_the_json_requirement() {
+    assert!(matches!(
+        validate_output(&json!({"type": "strng"}), "prose, not JSON"),
+        ArgValidation::SchemaUnusable(_)
+    ));
+}
+
+#[test]
+fn output_violations_are_capped_like_argument_violations() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "a": {"type": "integer"},
+            "b": {"type": "integer"},
+            "c": {"type": "integer"},
+            "d": {"type": "integer"}
+        }
+    });
+    let msg = invalid_message(validate_output(
+        &schema,
+        r#"{"a": "x", "b": "x", "c": "x", "d": "x"}"#,
+    ));
+    assert!(msg.contains("and 1 more"), "{msg}");
+}

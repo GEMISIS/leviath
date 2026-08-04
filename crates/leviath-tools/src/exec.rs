@@ -22,6 +22,12 @@ impl BuiltinTools {
             n if n.starts_with("context_") => {
                 "[error] context tools must be handled by the runtime".to_string()
             }
+            // Like the context tools, this one needs the live world: it writes
+            // an ECS component and a context region. Refused here so the
+            // runtime stays the only path that can record an output.
+            SUBMIT_OUTPUT_TOOL => {
+                "[error] submit_output must be handled by the runtime".to_string()
+            }
             _ => format!("[error] Unknown built-in tool: {}", name),
         }
     }

@@ -246,6 +246,7 @@ mod tests {
             tools: vec![],
             tool_filter: None,
             fallbacks: Vec::new(),
+            output: None,
         }
     }
 
