@@ -625,17 +625,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_agent_files_route_is_mounted() {
-        // Without its required `path` query the handler's Query extractor
-        // rejects with 400 - an unmounted route would 404 at the router, so
-        // the 400 is what proves the route exists in the shared table. (The
-        // handler's own behavior is covered in agents.rs.)
+        // Both a mounted and an unmounted route answer this with a 404 - the
+        // run does not exist either way - so the status alone proves nothing.
+        // What separates them is the body: the handler explains itself, and
+        // the router's own catch-all has nothing to say. (The handler's real
+        // behavior is covered in agents.rs.)
+        //
+        // `path` used to be required, and the resulting 400 was the proof.
+        // That stopped discriminating when it became optional so a bare call
+        // could list.
         let app = test_app();
         let req = Request::builder()
             .uri("/api/agents/some-run/files")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let error = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v["error"].as_str().map(str::to_string))
+            .unwrap_or_default();
+        assert!(error.contains("some-run"));
     }
 
     #[tokio::test]
