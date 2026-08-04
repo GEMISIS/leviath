@@ -59,10 +59,10 @@ fn blueprint_dir(name: &str) -> Result<PathBuf, (StatusCode, Json<ErrorResponse>
 /// existing `.find()` already meant to pick - the installed catalog first - and
 /// this only makes that choice deterministic rather than changing it.
 ///
-/// **Then sort by `(name, path)`.** `name` is the client-facing identity; `path`
-/// is a tie-break that cannot itself be ambiguous, so the order is total. A list
-/// that is merely "whatever the filesystem said" cannot be paginated: a cursor
-/// over an unstable order skips and repeats entries.
+/// **Then sort by name**, which needs no tie-break precisely because the dedup
+/// above ran first: after it, no two entries share a name, so name alone is a
+/// total order. A list that is merely "whatever the filesystem said" cannot be
+/// paginated - a cursor over an unstable order skips and repeats entries.
 fn canonicalize(found: Vec<BlueprintInfo>) -> Vec<BlueprintInfo> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut kept: Vec<BlueprintInfo> = Vec::with_capacity(found.len());
@@ -77,7 +77,7 @@ fn canonicalize(found: Vec<BlueprintInfo>) -> Vec<BlueprintInfo> {
             );
         }
     }
-    kept.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
+    kept.sort_by(|a, b| a.name.cmp(&b.name));
     kept
 }
 
@@ -219,9 +219,11 @@ pub(super) async fn list_blueprints(
 
     // `discover_blueprints` already sorts by (name, path); re-sort only when
     // something other than that default was asked for.
+    // Sorting by version needs the name to break ties; sorting by name needs
+    // nothing, because `canonicalize` already made names unique.
     let key = |bp: &BlueprintInfo| match sort_name {
         "version" => (bp.version.clone(), bp.name.clone()),
-        _ => (bp.name.clone(), bp.path.clone()),
+        _ => (bp.name.clone(), String::new()),
     };
     found.sort_by(|a, b| {
         if descending {
@@ -606,6 +608,18 @@ prompt = "do it"
         let (_, nothing) = page(&dir, "?q=nothing-like-this-at-all").await;
         assert!(names(&nothing).is_empty());
         assert_eq!(nothing["total"], 0);
+    }
+
+    /// Versions collide freely, so this is the sort where the name tie-break
+    /// actually does work.
+    #[tokio::test]
+    async fn the_catalog_can_be_sorted_by_version() {
+        let dir = catalog(&[("alpha", "a"), ("bravo", "b")]);
+        let (status, body) = page(&dir, "?sort=version&limit=200").await;
+        assert_eq!(status, StatusCode::OK);
+        // Both fixtures declare 1.0.0, so the shared version leaves the name
+        // to order them.
+        assert_eq!(fixture_names(&body), vec![fx("alpha"), fx("bravo")]);
     }
 
     #[tokio::test]

@@ -64,6 +64,63 @@ same list.
   a run starting on an installed bundled blueprint that this build ships a
   different version of prints a one-line note before it spawns.
 
+- **Security:** `GET /api/agents/{id}/context/history` served every run's webhook
+  signing secret to any holder of the API token. The route returns points
+  replayed from the run journal, and the journal stores run metadata whole,
+  `callback_secret` included, because the daemon needs it to keep signing
+  webhooks for a run it reloads after a restart. The redaction covering
+  `/api/agents` and its siblings was never applied here. It now happens in the
+  shared reader, so every consumer of a run's history inherits it.
+- New: `GET /api/runs`, the run listing, paginated and searchable. It supersedes
+  the `GET` half of `/api/agents`, which returns every run ever recorded as one
+  unbounded array and is now deprecated. Paging is keyset rather than offset, so
+  a run created or deleted mid-walk cannot shift the window; `sort=started_at`
+  is the default because it is the only sort key that never changes, since
+  `updated_at` advances on the persistence heartbeat. `ids=` replaces what used
+  to be one request per run, and `fields=` trims each item.
+- New: server-side run search, through `q=` and `q_in=`. The default sources
+  read metadata already in memory and cost nothing. `context`, `logs` and
+  `journal` read from disk, so they are opt-in and bounded by a scan cap that
+  reports itself as `scan_truncated` with a null `total`. Matching runs carry
+  highlights saying why they matched, which is the part a browser cannot work
+  out for itself: it never holds a run's transcript.
+- New: `GET /api/agents/{id}/files` lists a run's files when given no `path`,
+  either from what the run recorded modifying or from the working directory
+  itself, one directory level per request so a workdir containing
+  `node_modules` cannot be enumerated in one response.
+- New: `GET /api/config` reports `api_version`, a `capabilities` list and the
+  server's numeric `limits`, so a client can light up features in one call
+  instead of probing routes and reading a 404 as "unsupported" - which is also
+  what a missing run looks like.
+- New: `GET /api/agents/{id}/logs` takes `stage=<index>|all` and
+  `stream=output|logs`.
+- Breaking: `GET /api/blueprints` returns a paginated envelope rather than a
+  bare array, and accepts `limit`, `cursor`, `q`, `sort` and `order`. Worth
+  saying plainly that pagination saves the server nothing here, since discovery
+  parses every manifest on every request regardless; `q` is the parameter with
+  real value.
+- Breaking: `GET /api/agents/{id}/context/history` is paginated. It previously
+  returned every recorded point, each carrying a full context window with
+  untruncated text, on a journal that grows for as long as the run does.
+- Changed: `GET /api/agents/{id}/files?path=<dir>` returns a listing instead of
+  a 400. Asking for a directory is the natural way to say "what is in here".
+- Fixed: the run-status filter rejected the spelling it hands out. `RunMeta`
+  serializes `waiting_input`, but the filter compared a lowercased `Display`,
+  i.e. `waitinginput`, so feeding back a status you had just read matched
+  nothing - on exactly the two statuses where the reason is least visible.
+- Fixed: `GET /api/agents/{id}/logs` returned an empty string for every run. It
+  read a run-level `output.log` that nothing has ever written; a run's output
+  lives under `stages/<idx>/`.
+- Fixed: which blueprint a name resolved to depended on `readdir` order.
+  Discovery neither sorted nor deduplicated, and blueprint lookup and agent
+  spawning both take the first match by name, so with one name reachable from
+  two configured roots, which agent actually ran could differ between two calls.
+- Fixed: `RunFlags.modified_file_count` counts modifying tool calls rather than
+  distinct files, so a run that edits one file three times records three. The
+  file listing reports `modifying_tool_calls` and `modified_files_truncated` as
+  separate facts, so a client never subtracts one from the other to guess how
+  many files there were.
+
 ## 0.2.0 - 2026-08-04
 
 - Windows no longer flashes console windows across the desktop. Every child

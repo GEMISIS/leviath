@@ -727,6 +727,444 @@ async fn searching_the_journal_never_echoes_the_webhook_secret() {
     .await;
 }
 
+/// A journal exercising every record kind the highlighter reads: a tool call,
+/// an appended region, a replaced region, and a full checkpoint.
+fn plant_rich_journal(run_id: &str) {
+    use leviath_core::run_archive::{
+        self, ContextDelta, RegionDelta, RunIdentity, RunRecord, ToolCallRecord,
+    };
+    use leviath_core::run_meta::{ContextSnapshot, RegionEntrySnapshot, RegionSnapshot};
+
+    fn entry(content: &str) -> RegionEntrySnapshot {
+        RegionEntrySnapshot {
+            content: content.to_string(),
+            tokens: 1,
+            kind: leviath_core::region::EntryKind::Text,
+            metadata: None,
+            key: None,
+            taint: leviath_core::taint::TaintLevel::default(),
+        }
+    }
+    fn region(name: &str, content: &str) -> RegionSnapshot {
+        RegionSnapshot {
+            name: name.to_string(),
+            kind: "pinned".to_string(),
+            current_tokens: 1,
+            max_tokens: 100,
+            entries: vec![entry(content)],
+        }
+    }
+    fn snapshot(regions: Vec<RegionSnapshot>) -> ContextSnapshot {
+        ContextSnapshot {
+            stage_name: "work".to_string(),
+            total_tokens: 1,
+            max_tokens: 100,
+            regions,
+        }
+    }
+    fn delta(regions: Vec<RegionDelta>) -> ContextDelta {
+        ContextDelta {
+            stage_name: "work".to_string(),
+            total_tokens: 1,
+            max_tokens: 100,
+            regions,
+        }
+    }
+
+    let mut buf = Vec::new();
+    run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION).unwrap();
+    let write = |buf: &mut Vec<u8>, record: &RunRecord| {
+        run_archive::write_record(buf, record).unwrap();
+    };
+    write(
+        &mut buf,
+        &RunRecord::Header {
+            identity: RunIdentity {
+                run_id: run_id.to_string(),
+                machine_id: "m".to_string(),
+                world_id: "w".to_string(),
+                created_at: 0,
+            },
+            meta: Box::new(meta_at(run_id, 1)),
+        },
+    );
+    write(
+        &mut buf,
+        &RunRecord::ToolBatch {
+            calls: vec![ToolCallRecord {
+                id: "c1".to_string(),
+                name: "write_file".to_string(),
+                arguments: r#"{"path":"toolneedle.rs"}"#.to_string(),
+                result: Some("wrote resultneedle".to_string()),
+                thought_signature: None,
+            }],
+            at: 2,
+            stage_index: 3,
+            iteration: 0,
+            response: String::new(),
+        },
+    );
+    write(
+        &mut buf,
+        &RunRecord::ContextCheckpoint {
+            snapshot: snapshot(vec![region("system", "checkpointneedle here")]),
+            at: 3,
+        },
+    );
+    write(
+        &mut buf,
+        &RunRecord::Progress {
+            meta: Box::new(meta_at(run_id, 1)),
+            delta: delta(vec![RegionDelta::Append {
+                name: "conversation".to_string(),
+                entries: vec![entry("appendneedle here")],
+                current_tokens: 2,
+            }]),
+            at: 4,
+        },
+    );
+    write(
+        &mut buf,
+        &RunRecord::ContextDiff {
+            delta: delta(vec![RegionDelta::Set(region("scratch", "setneedle here"))]),
+            at: 5,
+        },
+    );
+    // Arms that carry no text of their own, so the highlighter must skip them
+    // rather than treat them as a miss.
+    write(
+        &mut buf,
+        &RunRecord::ContextDiff {
+            delta: delta(vec![
+                RegionDelta::Clear {
+                    name: "conversation".to_string(),
+                },
+                RegionDelta::Remove {
+                    name: "scratch".to_string(),
+                },
+            ]),
+            at: 6,
+        },
+    );
+    write(
+        &mut buf,
+        &RunRecord::Checkpoint {
+            meta: Box::new(meta_at(run_id, 1)),
+            context: snapshot(vec![region("final", "checkneedle here")]),
+            at: 7,
+        },
+    );
+    std::fs::write(crate::runstate::run_dir(run_id).join("run.lvr"), &buf).unwrap();
+}
+
+/// Each record kind that carries text has to be reachable, or a match in it is
+/// a result the user cannot account for.
+#[tokio::test]
+async fn journal_highlights_name_the_record_the_match_came_from() {
+    crate::runstate::with_isolated_runs_dir_async("runs-journal-kinds", |_d| async move {
+        create_run(&meta_at("run-rich", 1)).unwrap();
+        plant_rich_journal("run-rich");
+
+        // A tool call reports the tool and its stage, so a client can jump
+        // straight to that stage's log.
+        for (needle, field, stage) in [
+            ("toolneedle", "journal.tool.write_file", Some(3)),
+            ("resultneedle", "journal.tool.write_file", Some(3)),
+        ] {
+            let page = page_of(&[("q", needle), ("q_in", "journal")]).await;
+            assert_eq!(page.items.len(), 1, "{needle} should match");
+            assert_eq!(page.items[0].highlights[0].field, field);
+            assert_eq!(page.items[0].highlights[0].stage, stage);
+        }
+
+        // Context text is named by the region it lived in, whether it arrived
+        // as a checkpoint, an append, a replacement, or a full checkpoint.
+        for (needle, field) in [
+            ("checkpointneedle", "journal.context.system"),
+            ("appendneedle", "journal.context.conversation"),
+            ("setneedle", "journal.context.scratch"),
+            ("checkneedle", "journal.context.final"),
+        ] {
+            let page = page_of(&[("q", needle), ("q_in", "journal")]).await;
+            assert_eq!(page.items.len(), 1, "{needle} should match");
+            let highlight = &page.items[0].highlights[0];
+            assert_eq!(highlight.field, field);
+            assert!(highlight.snippet.contains(needle));
+        }
+    })
+    .await;
+}
+
+/// The operational stream carries tool activity and errors, which is often
+/// exactly what someone is looking for.
+#[tokio::test]
+async fn a_log_search_can_match_the_operational_stream() {
+    crate::runstate::with_isolated_runs_dir_async("runs-logs-operational", |_d| async move {
+        create_run(&meta_at("run-ops", 1)).unwrap();
+        crate::runstate::write_stages_index(
+            "run-ops",
+            &[leviath_core::run_meta::StageRecord {
+                name: "work".to_string(),
+                index: 0,
+                status: leviath_core::run_meta::StageRunStatus::Complete,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                cached_tokens: 0,
+                started_at: None,
+                ended_at: None,
+            }],
+        )
+        .unwrap();
+        crate::runstate::append_stage_output("run-ops", 0, "ordinary assistant text");
+        crate::runstate::append_stage_log("run-ops", 0, "[error] opsneedle exploded");
+
+        let page = page_of(&[("q", "opsneedle"), ("q_in", "logs")]).await;
+        assert_eq!(page.items.len(), 1);
+        let highlight = &page.items[0].highlights[0];
+        assert_eq!(highlight.field, "logs.operational");
+        assert_eq!(highlight.stage, Some(0));
+        assert!(highlight.snippet.contains("opsneedle"));
+    })
+    .await;
+}
+
+/// One run matching in many places must not crowd out the rest of the page.
+#[tokio::test]
+async fn journal_highlights_stop_at_the_cap() {
+    crate::runstate::with_isolated_runs_dir_async("runs-journal-cap", |_d| async move {
+        create_run(&meta_at("run-cap", 1)).unwrap();
+        plant_rich_journal("run-cap");
+
+        // "needle" appears in every planted record.
+        let page = page_of(&[("q", "needle"), ("q_in", "journal")]).await;
+        assert_eq!(page.items.len(), 1);
+        assert!(page.items[0].highlights.len() <= MAX_HIGHLIGHTS);
+    })
+    .await;
+}
+
+/// A match in the run's current context window, named by the region it is in.
+#[tokio::test]
+async fn a_context_search_names_the_region_that_matched() {
+    crate::runstate::with_isolated_runs_dir_async("runs-context-region", |_d| async move {
+        create_run(&meta_at("run-ctx", 1)).unwrap();
+        crate::runstate::write_context_snapshot(
+            "run-ctx",
+            &leviath_core::run_meta::ContextSnapshot {
+                stage_name: "work".to_string(),
+                total_tokens: 1,
+                max_tokens: 100,
+                regions: vec![leviath_core::run_meta::RegionSnapshot {
+                    name: "working_memory".to_string(),
+                    kind: "pinned".to_string(),
+                    current_tokens: 1,
+                    max_tokens: 100,
+                    entries: vec![leviath_core::run_meta::RegionEntrySnapshot {
+                        content: "the plan mentions ctxneedle somewhere".to_string(),
+                        tokens: 1,
+                        kind: leviath_core::region::EntryKind::Text,
+                        metadata: None,
+                        key: None,
+                        taint: leviath_core::taint::TaintLevel::default(),
+                    }],
+                }],
+            },
+        )
+        .unwrap();
+
+        let page = page_of(&[("q", "ctxneedle"), ("q_in", "context")]).await;
+        assert_eq!(page.items.len(), 1);
+        let highlight = &page.items[0].highlights[0];
+        assert_eq!(highlight.field, "context.working_memory");
+        assert!(highlight.snippet.contains("ctxneedle"));
+    })
+    .await;
+}
+
+/// Once a run has filled its highlight budget from one source, the remaining
+/// sources must stop rather than keep reading files for output that would be
+/// discarded. Also covers each deep source finding nothing to read at all.
+#[tokio::test]
+async fn deep_sources_stop_once_the_highlight_budget_is_full() {
+    crate::runstate::with_isolated_runs_dir_async("runs-budget-full", |_d| async move {
+        let mut meta = meta_at("run-full", 1);
+        // Enough metadata matches to fill the budget before any file is read.
+        meta.title = Some("aaa".to_string());
+        meta.error = Some("aaa".to_string());
+        meta.model = Some("aaa".to_string());
+        for i in 0..10 {
+            meta.metadata.insert(format!("k{i}"), "aaa".to_string());
+        }
+        create_run(&meta).unwrap();
+        // Deliberately no context.json, no stages and no journal, so each deep
+        // source also exercises its "nothing here" path.
+        crate::runstate::write_stages_index(
+            "run-full",
+            &[leviath_core::run_meta::StageRecord {
+                name: "work".to_string(),
+                index: 0,
+                status: leviath_core::run_meta::StageRunStatus::Complete,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                cached_tokens: 0,
+                started_at: None,
+                ended_at: None,
+            }],
+        )
+        .unwrap();
+
+        let page = page_of(&[("q", "aaa"), ("q_in", "meta,context,logs,journal")]).await;
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].highlights.len(), MAX_HIGHLIGHTS);
+    })
+    .await;
+}
+
+/// The descending walk is covered above; ascending mints its own cursors, and
+/// a cursor minted for the wrong direction is unusable.
+#[tokio::test]
+async fn an_ascending_page_mints_a_usable_cursor() {
+    crate::runstate::with_isolated_runs_dir_async("runs-asc-cursor", |_d| async move {
+        for i in 0..4 {
+            create_run(&meta_at(&format!("run-{i}"), 100 + i)).unwrap();
+        }
+
+        let first = page_of(&[("limit", "2"), ("order", "asc")]).await;
+        assert_eq!(
+            item_ids(&first),
+            vec!["run-0".to_string(), "run-1".to_string()]
+        );
+        let cursor = first.next_cursor.expect("more pages");
+
+        let second = page_of(&[("limit", "2"), ("order", "asc"), ("cursor", &cursor)]).await;
+        assert_eq!(
+            item_ids(&second),
+            vec!["run-2".to_string(), "run-3".to_string()]
+        );
+        assert!(second.next_cursor.is_none());
+    })
+    .await;
+}
+
+/// Every sort key has to survive a cursor round trip, since the cursor records
+/// which key it was minted for and refuses to be used against another.
+#[tokio::test]
+async fn each_sort_key_pages_with_its_own_cursor() {
+    crate::runstate::with_isolated_runs_dir_async("runs-sort-keys", |_d| async move {
+        for i in 0..4 {
+            let mut meta = meta_at(&format!("run-{i}"), 100 + i);
+            meta.updated_at = 200 + i;
+            meta.last_progress_at = Some(300 + i);
+            create_run(&meta).unwrap();
+        }
+
+        for sort in ["started_at", "updated_at", "last_progress_at"] {
+            let first = page_of(&[("limit", "2"), ("sort", sort)]).await;
+            assert_eq!(first.items.len(), 2, "{sort} first page");
+            let first_ids = item_ids(&first);
+            let cursor = first
+                .next_cursor
+                .clone()
+                .unwrap_or_else(|| panic!("{sort} should have a second page"));
+            let second = page_of(&[("limit", "2"), ("sort", sort), ("cursor", &cursor)]).await;
+            assert_eq!(second.items.len(), 2, "{sort} second page");
+            // No overlap between the two pages.
+            for id in item_ids(&second) {
+                assert!(!first_ids.contains(&id), "{sort} repeated {id}");
+            }
+        }
+    })
+    .await;
+}
+
+/// A source that is asked about but finds nothing must simply contribute no
+/// highlight, rather than suppressing the ones that did match.
+#[tokio::test]
+async fn a_source_with_nothing_to_say_does_not_suppress_the_others() {
+    crate::runstate::with_isolated_runs_dir_async("runs-quiet-source", |_d| async move {
+        let mut meta = meta_at("run-quiet", 1);
+        meta.title = Some("quietneedle in the title".to_string());
+        meta.flags.modified_files = vec!["unrelated.rs".to_string()];
+        create_run(&meta).unwrap();
+
+        // Matches only via meta, but every other source is asked too - and
+        // none of them has a file to read.
+        let page = page_of(&[
+            ("q", "quietneedle"),
+            ("q_in", "meta,files,context,logs,journal"),
+        ])
+        .await;
+        assert_eq!(page.items.len(), 1);
+        let highlights = &page.items[0].highlights;
+        assert_eq!(highlights.len(), 1);
+        assert_eq!(highlights[0].field, "title");
+    })
+    .await;
+}
+
+/// A run whose files exist but do not match, so the deep sources are read and
+/// come back empty rather than being skipped.
+#[tokio::test]
+async fn deep_sources_that_read_files_and_find_nothing_are_quiet() {
+    crate::runstate::with_isolated_runs_dir_async("runs-quiet-deep", |_d| async move {
+        let mut meta = meta_at("run-deepquiet", 1);
+        meta.title = Some("deepquietneedle".to_string());
+        create_run(&meta).unwrap();
+
+        // All three deep sources have something to read, none of it matching.
+        crate::runstate::write_context_snapshot(
+            "run-deepquiet",
+            &leviath_core::run_meta::ContextSnapshot {
+                stage_name: "work".to_string(),
+                total_tokens: 1,
+                max_tokens: 100,
+                regions: vec![leviath_core::run_meta::RegionSnapshot {
+                    name: "system".to_string(),
+                    kind: "pinned".to_string(),
+                    current_tokens: 1,
+                    max_tokens: 100,
+                    entries: vec![leviath_core::run_meta::RegionEntrySnapshot {
+                        content: "nothing of interest".to_string(),
+                        tokens: 1,
+                        kind: leviath_core::region::EntryKind::Text,
+                        metadata: None,
+                        key: None,
+                        taint: leviath_core::taint::TaintLevel::default(),
+                    }],
+                }],
+            },
+        )
+        .unwrap();
+        crate::runstate::write_stages_index(
+            "run-deepquiet",
+            &[leviath_core::run_meta::StageRecord {
+                name: "work".to_string(),
+                index: 0,
+                status: leviath_core::run_meta::StageRunStatus::Complete,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                cached_tokens: 0,
+                started_at: None,
+                ended_at: None,
+            }],
+        )
+        .unwrap();
+        crate::runstate::append_stage_output("run-deepquiet", 0, "ordinary output");
+        crate::runstate::append_stage_log("run-deepquiet", 0, "[tool] ordinary");
+        plant_rich_journal("run-deepquiet");
+
+        let page = page_of(&[
+            ("q", "deepquietneedle"),
+            ("q_in", "meta,context,logs,journal"),
+        ])
+        .await;
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].highlights.len(), 1);
+        assert_eq!(page.items[0].highlights[0].field, "title");
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn a_bad_request_is_reported_rather_than_served() {
     crate::runstate::with_isolated_runs_dir_async("runs-handler-bad", |_d| async move {
