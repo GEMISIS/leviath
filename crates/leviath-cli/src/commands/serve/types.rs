@@ -471,6 +471,10 @@ pub struct FinalOutputResp {
     pub submitted_at: i64,
     /// Whether the answer hit the size cap and was cut short.
     pub truncated: bool,
+    /// Files the run produced, as workdir-relative paths. Fetch one with
+    /// `GET /api/agents/{id}/files?path=`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<String>,
 }
 
 impl From<leviath_core::output::FinalOutput> for FinalOutputResp {
@@ -481,6 +485,7 @@ impl From<leviath_core::output::FinalOutput> for FinalOutputResp {
             stage: o.stage,
             submitted_at: o.submitted_at,
             truncated: o.truncated,
+            artifacts: o.artifacts,
         }
     }
 }

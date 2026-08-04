@@ -32,7 +32,10 @@ pub struct ResultArgs {
 pub async fn execute(args: ResultArgs) -> anyhow::Result<()> {
     let meta = crate::runstate::read_meta(&args.run_id)
         .map_err(|e| anyhow::anyhow!("no run '{}': {e}", args.run_id))?;
-    match render(&meta, args.json, args.raw) {
+    // `meta.json` says whether there is an answer and how big; the bytes are in
+    // the sidecar beside it.
+    let output = crate::runstate::read_final_output(&args.run_id);
+    match render(&args.run_id, output.as_ref(), args.json, args.raw) {
         Some(out) => {
             print!("{out}");
             Ok(())
@@ -51,8 +54,13 @@ pub async fn execute(args: ResultArgs) -> anyhow::Result<()> {
 
 /// Render the answer, or `None` when the run never gave one. Pure, so the
 /// formatting is directly testable.
-fn render(meta: &leviath_core::run_meta::RunMeta, json: bool, raw: bool) -> Option<String> {
-    let output = meta.final_output.as_ref()?;
+fn render(
+    run_id: &str,
+    output: Option<&leviath_core::FinalOutput>,
+    json: bool,
+    raw: bool,
+) -> Option<String> {
+    let output = output?;
     if json {
         // The whole record, not just the content: a caller parsing this wants
         // the format label too, and whether the answer was cut short.
@@ -77,8 +85,8 @@ fn render(meta: &leviath_core::run_meta::RunMeta, json: bool, raw: bool) -> Opti
         .map(|f| format!(" ({f})"))
         .unwrap_or_default();
     out.push_str(&format!(
-        "Final output{shape} from run '{}', stage '{}':\n\n",
-        meta.run_id, output.stage
+        "Final output{shape} from run '{run_id}', stage '{}':\n\n",
+        output.stage
     ));
     out.push_str(&output.content);
     if !output.content.ends_with('\n') {
@@ -88,6 +96,12 @@ fn render(meta: &leviath_core::run_meta::RunMeta, json: bool, raw: bool) -> Opti
         out.push_str(
             "\n[truncated: the agent's answer exceeded the size limit and was cut short]\n",
         );
+    }
+    if !output.artifacts.is_empty() {
+        out.push_str(&format!("\nFiles produced ({}):\n", output.artifacts.len()));
+        for path in &output.artifacts {
+            out.push_str(&format!("  {path}\n"));
+        }
     }
     Some(out)
 }

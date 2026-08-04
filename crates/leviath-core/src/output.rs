@@ -92,11 +92,16 @@ impl OutputSpec {
     }
 }
 
-/// What an agent actually produced.
+/// What an agent actually produced, content included.
 ///
 /// [`content`](Self::content) is stored exactly as submitted. Nothing in the
 /// engine reformats, re-indents, or re-serializes it, so a consumer that asked
 /// for a particular byte sequence receives that byte sequence.
+///
+/// This is the in-memory and one-shot form: the live ECS component, the
+/// completion event, a webhook body, a reply to a waiting parent. What a run's
+/// `meta.json` carries is the [`FinalOutputDescriptor`], because that file is
+/// read for every run on every listing and must not carry a payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FinalOutput {
     /// The submission, verbatim (subject only to [`MAX_FINAL_OUTPUT_BYTES`]).
@@ -117,6 +122,16 @@ pub struct FinalOutput {
     /// Whether [`MAX_FINAL_OUTPUT_BYTES`] cut the content short.
     #[serde(default)]
     pub truncated: bool,
+
+    /// Files the run produced, as workdir-relative paths.
+    ///
+    /// An answer is one model response; anything larger is a file. A run that
+    /// gathers two million rows writes them incrementally and names the file
+    /// here, so a consumer can fetch it rather than parse the path out of prose.
+    /// Validated to resolve inside the run's working directory, the same rule
+    /// the files endpoint enforces when serving one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<String>,
 }
 
 impl FinalOutput {
@@ -135,9 +150,62 @@ impl FinalOutput {
             stage,
             submitted_at,
             truncated,
+            artifacts: Vec::new(),
+        }
+    }
+
+    /// The same submission with `artifacts` attached.
+    pub fn with_artifacts(mut self, artifacts: Vec<String>) -> Self {
+        self.artifacts = artifacts;
+        self
+    }
+
+    /// Everything about this answer except the bytes.
+    pub fn descriptor(&self) -> FinalOutputDescriptor {
+        FinalOutputDescriptor {
+            format: self.format.clone(),
+            stage: self.stage.clone(),
+            submitted_at: self.submitted_at,
+            bytes: self.content.len(),
+            truncated: self.truncated,
+            artifacts: self.artifacts.clone(),
         }
     }
 }
+
+/// What a run's `meta.json` records about its answer: everything but the bytes.
+///
+/// The content lives beside it in a sidecar file
+/// ([`FINAL_OUTPUT_FILE`]). `meta.json` is
+/// parsed for every run on every `lev ps`, every `/api/runs` page, and every
+/// restart scan, so a payload in it is paid for by operations that never wanted
+/// it: a thousand answered runs would mean hundreds of megabytes of JSON per
+/// listing. A descriptor is a couple of hundred bytes and stays that way.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinalOutputDescriptor {
+    /// The format label the answer was produced under, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// The stage that produced it.
+    pub stage: String,
+    /// Unix seconds at submission.
+    pub submitted_at: i64,
+    /// Size of the answer in bytes, so a caller can decide whether to fetch it.
+    #[serde(default)]
+    pub bytes: usize,
+    /// Whether [`MAX_FINAL_OUTPUT_BYTES`] cut the answer short.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Files the run produced, as workdir-relative paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<String>,
+}
+
+/// The file, inside a run's directory, holding the answer's bytes.
+///
+/// Raw content with no wrapper, so serving it is a read and `lev result --raw`
+/// is a copy.
+pub const FINAL_OUTPUT_FILE: &str = "final_output";
 
 /// Combine the blueprint's, the stage's, and the caller's output specs into the
 /// one that governs a stage. Later levels win field by field, the way

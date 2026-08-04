@@ -451,13 +451,14 @@ fn reload_one(
         flags.0 = meta.flags.clone();
     }
 
-    // Put back an answer the run had already submitted. Without this the
-    // component is absent after a reload, and the very next persist tick writes
-    // a `meta.json` with no `final_output` - so a restart would not merely fail
-    // to restore the answer, it would erase the one already on disk. It also
-    // re-arms the required-output gate correctly: a stage that submitted before
-    // the restart is not asked to do it again.
-    if let Some(output) = meta.final_output.clone() {
+    // Put back an answer the run had already submitted, content and all: the
+    // descriptor is in `meta.json`, the bytes in the sidecar beside it. Without
+    // this the component is absent after a reload, and the very next persist
+    // tick writes a `meta.json` with no `final_output` - so a restart would not
+    // merely fail to restore the answer, it would erase the one on disk. It
+    // also re-arms the required-output gate correctly: a stage that submitted
+    // before the restart is not asked to do it again.
+    if let Some(output) = read_final_output_from(run_dir, meta) {
         world
             .world_mut()
             .entity_mut(entity)
@@ -487,6 +488,26 @@ fn reload_one(
     }
 
     Ok(entity)
+}
+
+/// Rebuild a run's submitted answer from its descriptor plus the sidecar in
+/// `dir`.
+///
+/// Recovery works from its configured runs directory rather than the home one,
+/// so it cannot use `runstate::read_final_output`, which resolves the path
+/// itself. A missing sidecar yields `None`: a run written before the answer
+/// moved out of `meta.json`, or one whose directory was pruned.
+fn read_final_output_from(dir: &Path, meta: &RunMeta) -> Option<leviath_core::FinalOutput> {
+    let descriptor = meta.final_output.clone()?;
+    let content = std::fs::read_to_string(dir.join(leviath_core::FINAL_OUTPUT_FILE)).ok()?;
+    Some(leviath_core::FinalOutput {
+        content,
+        format: descriptor.format,
+        stage: descriptor.stage,
+        submitted_at: descriptor.submitted_at,
+        truncated: descriptor.truncated,
+        artifacts: descriptor.artifacts,
+    })
 }
 
 #[cfg(test)]
@@ -631,18 +652,28 @@ mod tests {
             // Non-default on purpose, like `flags` above: proves a reload puts
             // the run's answer back rather than dropping it (and then erasing
             // the copy already on disk at the next persist tick).
-            final_output: Some(leviath_core::output::FinalOutput::new(
-                "already answered",
-                Some("markdown".to_string()),
-                "implement".to_string(),
-                777,
-            )),
+            final_output: Some(
+                leviath_core::output::FinalOutput::new(
+                    "already answered",
+                    Some("markdown".to_string()),
+                    "implement".to_string(),
+                    777,
+                )
+                .descriptor(),
+            ),
             output_request: Some(leviath_core::output::OutputSpec {
                 format: Some("a2ui".to_string()),
                 ..Default::default()
             }),
         };
         std::fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
+        // The answer's bytes live beside the descriptor, so a reload has
+        // something to restore.
+        std::fs::write(
+            dir.join(leviath_core::FINAL_OUTPUT_FILE),
+            "already answered",
+        )
+        .unwrap();
         if let Some(ctx) = context {
             std::fs::write(
                 dir.join("context.json"),

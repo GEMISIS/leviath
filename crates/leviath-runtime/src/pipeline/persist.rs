@@ -32,6 +32,12 @@ pub struct PersistWatermark {
     /// #184 was reported on the strength of a fresh `updated_at`, so this is the
     /// timestamp `lev ps` ages its rows against.
     last_progress_at: Option<i64>,
+    /// The answer already on disk, as `(submitted_at, bytes)`.
+    ///
+    /// The sidecar is only rewritten when this differs from what the agent
+    /// holds. Without it the heartbeat would rewrite a quarter-megabyte file
+    /// every thirty seconds for the whole life of a long run, to no effect.
+    last_output: Option<(i64, usize)>,
 }
 
 impl PersistWatermark {
@@ -308,6 +314,17 @@ pub fn dispatch_persistence(
             };
             Some(serde_json::to_string(&ip_state).expect("InteractionPointState always serializes"))
         });
+        // Send the answer's bytes only when they are not already on disk. The
+        // stamp-and-size pair identifies a submission: `submit_output` replaces
+        // rather than appends, so a new answer always carries a later stamp.
+        let output_key = final_output.map(|o| (o.0.submitted_at, o.0.content.len()));
+        let final_output_body = match output_key != watermark.last_output {
+            true => {
+                watermark.last_output = output_key;
+                final_output.map(|o| o.0.content.clone())
+            }
+            false => None,
+        };
         let _ = stage.0.send(PersistMsg::Snapshot(Box::new(PersistJob {
             run_id: md.run_id.clone(),
             meta,
@@ -316,6 +333,7 @@ pub fn dispatch_persistence(
             output_appends,
             log_appends,
             taint_audit,
+            final_output: final_output_body,
             fanout,
             interactions,
         })));

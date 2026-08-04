@@ -152,13 +152,15 @@ pub struct RunMeta {
     /// runs written before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_paths: Option<ReadPathGrantCounts>,
-    /// What the agent handed back, if it submitted anything.
+    /// What the agent handed back, if it submitted anything: everything about
+    /// the answer except the bytes.
     ///
     /// This is the run's answer, as distinct from `error` (why it failed) and
-    /// from the stage logs (what it did along the way). Every consumer that
-    /// reports a finished run reads it from here.
+    /// from the stage logs (what it did along the way). The content itself is
+    /// in a sidecar file beside this one, because this file is parsed for every
+    /// run on every listing and must stay small no matter how long an answer is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub final_output: Option<crate::output::FinalOutput>,
+    pub final_output: Option<crate::output::FinalOutputDescriptor>,
     /// The output shape this run was launched asking for, when the caller
     /// overrode the blueprint's.
     ///

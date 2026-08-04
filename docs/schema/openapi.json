@@ -710,6 +710,11 @@
             "type": "boolean",
             "default": false,
             "description": "The answer hit the 256 KiB cap and was cut short."
+          },
+          "artifacts": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Files the run produced, as workdir-relative paths. An answer is one model response, so anything larger is a file named here. Fetch one with GET /api/agents/{id}/files?path=."
           }
         }
       },
