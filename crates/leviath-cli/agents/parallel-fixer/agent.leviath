@@ -1,6 +1,6 @@
 [agent]
 name = "parallel-fixer"
-version = "0.0.2"
+version = "0.0.3"
 description = "Fixes failing tests in parallel: discover → validate → fan out one worker per failure → merge → verify (re-round until the suite is green)"
 entry_stage = "discover"
 
@@ -125,9 +125,14 @@ If `diagnosis` is exactly "NO FAILURES" (or lists none), output exactly: []
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Fix a single failing test"
-available_tools = ["read_file", "read_files", "edit_file", "shell"]
+available_tools = ["read_file", "read_files", "edit_file", "shell", "submit_output"]
 max_iterations = 50
 allow_as_worker = true
+# The merge stage reads what each worker submitted. Step 4 of the prompt below
+# used to report into the worker's trailing assistant text, which the merge
+# only saw when the worker happened to end on a text turn - a worker whose last
+# action was a tool call contributed nothing at all.
+require_output = true
 system_prompt = """
 You are fixing ONE failing test. Your work item (test name, source file,
 diagnosis, and the `verify` command for this exact test) is in your pinned
@@ -137,7 +142,9 @@ context - it is ALL the context you get, so work from it.
 2. Make the MINIMAL edit that fixes the failure - don't refactor unrelated code.
 3. Run the work item's `verify` command to confirm this test now passes. Don't
    claim a fix you haven't run.
-4. Report exactly which file(s) you changed and what you changed.
+4. Call `submit_output` with exactly which file(s) you changed, what you
+   changed, and whether the verify command passes now. That submission is what
+   the merge stage reads - nothing else you write reaches it.
 
 Only touch the source file for your work item - other workers are fixing other
 files in parallel.
@@ -179,7 +186,6 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { pro
 description = "Run the full suite and decide: done, or another fix round"
 available_tools = ["read_file", "read_files", "shell"]
 max_iterations = 10
-allow_complete = true
 transition_prompt = """
 Based on the full suite result:
 - If ALL tests pass, respond with: DONE
@@ -199,6 +205,9 @@ default_region = "conversation"
 [stages.verify.tool_routing.overrides]
 shell = "test_results"
 
+[stages.verify.transitions.summary]
+hint = "Every test passes"
+
 [stages.verify.transitions.validate]
 hint = "Failures remain - re-diagnose and fan out another round"
 transform = "compact"
@@ -207,6 +216,28 @@ transform = "compact"
 [compaction]
 provider = "anthropic"
 model = "claude-sonnet-5"
+
+# ─── Final output ────────────────────────────────────────────────────────────
+# Terminal. `mode = "output"` grants `submit_output`, requires the call, and
+# lets the run end here. No file tools on purpose: this stage reports, it does
+# not work.
+[stages.summary]
+mode = "output"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Say what was fixed"
+max_iterations = 4
+system_prompt = """
+Say what you fixed, for whoever asked for it.
+
+List the tests that were failing and what turned out to be wrong with each -
+one line each. Say whether the whole suite passes now. Call out any test you
+could not fix and why.
+
+Do not paste the diffs back. They can read those; what they cannot read is the
+diagnosis.
+"""
+
+[stages.summary.transitions]
 
 # ─── Context layout ──────────────────────────────────────────────────────────
 [context.regions]

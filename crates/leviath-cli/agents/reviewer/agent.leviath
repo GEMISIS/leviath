@@ -1,6 +1,6 @@
 [agent]
 name = "reviewer"
-version = "0.0.2"
+version = "0.0.3"
 description = "Code review agent - discover, scan, deep review, and report with error recovery and multi-provider fallback"
 entry_stage = "discover"
 
@@ -163,8 +163,8 @@ off before covering everything - say so in the overall assessment and list what
 went unreviewed.
 """
 
-# Explicit empty transitions = terminal.
-[stages.report.transitions]
+[stages.report.transitions.summary]
+hint = "The review is written"
 
 # ─── Stage 5: Error handler ───────────────────────────────────────────────────
 [stages.error_handler]
@@ -187,6 +187,26 @@ transform = "compact"
 [compaction]
 provider = "anthropic"
 model = "claude-sonnet-5"
+
+# ─── Final output ────────────────────────────────────────────────────────────
+# Terminal. `mode = "output"` grants `submit_output`, requires the call, and
+# lets the run end here. No file tools on purpose: this stage reports, it does
+# not work.
+[stages.summary]
+mode = "output"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Say what the review found"
+max_iterations = 4
+system_prompt = """
+Say what this review found, for whoever asked for it.
+
+Lead with whether the change is safe to merge and why. Then the findings that
+would block it, and the ones worth fixing later. Name the report file you wrote.
+
+If nothing blocking turned up, say so plainly - a clean review is a result.
+"""
+
+[stages.summary.transitions]
 
 # ─── Context layout ───────────────────────────────────────────────────────────
 # Budgets are a percentage of the model's context window (issue #100) with an

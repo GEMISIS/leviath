@@ -312,6 +312,76 @@ mod tests {
         }
     }
 
+    /// Every bundled agent ends in a stage that hands something back, and
+    /// nothing upstream can end the run before reaching it.
+    ///
+    /// The second half is the part that fails quietly. `allow_complete` on any
+    /// earlier stage offers the model a "DONE" it can pick instead of routing
+    /// onward - and it is appended even to a stage's custom `transition_prompt`,
+    /// so a blueprint can offer an exit its own prompt never mentions. A run
+    /// that takes it finishes with no answer, looking exactly like success.
+    /// That happened to `writing-assistant` while this was being written.
+    ///
+    /// Asserted over whatever is bundled rather than a hard-coded list, so a
+    /// new agent is held to it the day it lands.
+    #[test]
+    fn every_bundled_agent_ends_by_handing_something_back() {
+        for agent in BUNDLED_AGENTS {
+            let manifest = agent
+                .files
+                .iter()
+                .find(|(rel, _)| *rel == "agent.leviath")
+                .map(|(_, c)| *c)
+                .expect("checked above");
+            let blueprint = leviath_core::manifest::parse_manifest(manifest)
+                .expect("checked by every_bundled_manifest_parses");
+
+            let outputs: Vec<&leviath_core::Stage> = blueprint
+                .stages
+                .iter()
+                .filter(|s| s.mode == leviath_core::blueprint::StageMode::Output)
+                .collect();
+            assert!(
+                !outputs.is_empty(),
+                "bundled agent {} has no output stage, so a run of it hands back nothing",
+                agent.name
+            );
+
+            for stage in &outputs {
+                // The mode is meant to imply all three; a stage where it did
+                // not would advertise a tool it is not required to call.
+                assert!(stage.require_output, "{} output stage", agent.name);
+                assert!(
+                    stage
+                        .available_tools
+                        .iter()
+                        .any(|t| t == leviath_core::blueprint::SUBMIT_OUTPUT_TOOL),
+                    "{} output stage cannot submit",
+                    agent.name
+                );
+                // A stage whose job is to report has no business writing files.
+                assert!(
+                    !stage.available_tools.iter().any(|t| {
+                        leviath_core::blueprint::MODIFYING_TOOLS
+                            .contains(&leviath_tools::canonical_tool_name(t))
+                    }),
+                    "{} output stage can modify files",
+                    agent.name
+                );
+            }
+
+            for stage in &blueprint.stages {
+                assert!(
+                    !stage.allow_complete
+                        || stage.mode == leviath_core::blueprint::StageMode::Output,
+                    "bundled agent {}: stage '{}' may end the run, skipping the output stage",
+                    agent.name,
+                    stage.name
+                );
+            }
+        }
+    }
+
     /// Every provider `lev setup` can configure. Claude Code is a transport
     /// rather than a provider a stage names, so it is not in this list.
     const SETUP_PROVIDERS: &[&str] = &["anthropic", "openai", "google", "openrouter", "ollama"];

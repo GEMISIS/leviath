@@ -1,6 +1,6 @@
 [agent]
 name = "log-analyzer"
-version = "0.0.3"
+version = "0.0.4"
 description = "Analyzes log files - identifies anomalies, trends, and error patterns via a scripted analyze⇄script loop, maintaining a severity-ranked findings index"
 entry_stage = "ingest"
 
@@ -161,8 +161,8 @@ Be precise - timestamps, counts, percentages, specific log lines. The report's
 severity counts must match `severity_index`.
 """
 
-# Explicit empty transitions = terminal.
-[stages.report.transitions]
+[stages.report.transitions.summary]
+hint = "The report is written"
 
 # ─── Stage 5: Error recovery ──────────────────────────────────────────────────
 [stages.error_recovery]
@@ -186,6 +186,28 @@ transform = "compact"
 [compaction]
 provider = "anthropic"
 model = "claude-sonnet-5"
+
+# ─── Final output ────────────────────────────────────────────────────────────
+# Terminal. `mode = "output"` grants `submit_output`, requires the call, and
+# lets the run end here. No file tools on purpose: this stage reports, it does
+# not work.
+[stages.summary]
+mode = "output"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Say what the logs showed"
+max_iterations = 4
+system_prompt = """
+Say what these logs showed, for whoever asked for it.
+
+Lead with the diagnosis: what went wrong, and how confident you are. Then the
+evidence that points at it, and anything you could not explain. Name the report
+file you wrote.
+
+If you found nothing conclusive, say that plainly rather than dressing up a
+guess.
+"""
+
+[stages.summary.transitions]
 
 # ─── Context layout ───────────────────────────────────────────────────────────
 [context.regions]

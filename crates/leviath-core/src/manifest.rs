@@ -4130,20 +4130,29 @@ mode = "autonomous"
     }
 
     #[test]
-    fn software_engineer_review_stage_can_complete_and_routes_errors() {
+    fn software_engineer_review_stage_can_finish_and_routes_errors() {
         let manifest_content =
             include_str!("../../leviath-cli/agents/software-engineer/agent.leviath");
         let bp = parse_manifest(manifest_content).unwrap();
         let review = bp.find_stage("review").unwrap();
 
-        // review stage must allow_complete - an approving review has no real
-        // next stage and must not be forced back into 'implement'.
-        assert!(review.allow_complete);
-
         let transitions = review
             .transitions
             .as_ref()
             .expect("review stage must declare transitions");
+        // An approving review must not be forced back into 'implement'. It used
+        // to say so with `allow_complete`, which ended the run outright; now it
+        // routes to the output stage, so the run still explains what it did.
+        // The property is the same one either way: review has somewhere to go
+        // that is not more implementation.
+        assert!(
+            transitions.contains_key("summary"),
+            "an approving review needs an exit that is not 'implement'"
+        );
+        assert!(
+            !review.allow_complete,
+            "ending the run here would skip the output stage"
+        );
         // review stage should route errors to error_recovery, like implement does.
         assert!(
             transitions

@@ -139,7 +139,32 @@
         "dynamic_tools": { "type": "boolean", "default": false },
         "batch_tool_hint": { "type": "boolean" },
         "shell_hint": { "type": "boolean" },
-        "nudge": { "$ref": "#/$defs/nudge" }
+        "nudge": { "$ref": "#/$defs/nudge" },
+        "output": { "$ref": "#/$defs/outputSpec" }
+      }
+    },
+
+    "outputSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What shape the run's final output should take. Declared by the agent, narrowed by a stage, and overridable by whoever starts the run.",
+      "properties": {
+        "format": {
+          "type": "string",
+          "description": "An opaque label, carried to the model and recorded beside the answer. Deliberately not an enum: \"markdown\", \"json\", \"a2ui\", a media type, and a format invented next week are all equally valid, because nothing in the engine interprets it. Consumers that render differently per format match on this string."
+        },
+        "instructions": {
+          "type": "string",
+          "description": "Free-form guidance folded into the submit_output tool description and the stage's system prompt. Where a format the model has never seen gets explained."
+        },
+        "example": {
+          "type": "string",
+          "description": "A literal sample shown to the model verbatim. The most effective lever for an unusual format, and the reason one needs no code support."
+        },
+        "schema": {
+          "type": "object",
+          "description": "A JSON Schema. The only thing that ever inspects a submission, and only because you asked for it: setting format = \"json\" on its own validates nothing. A failing submission is refused back to the model to correct."
+        }
       }
     },
 
@@ -148,13 +173,14 @@
       "additionalProperties": false,
       "properties": {
         "mode": {
-          "description": "How the stage runs. `interactive_points` holds at each declared interaction point.",
+          "description": "How the stage runs. `interactive_points` holds at each declared interaction point. `output` produces the run's final answer and nothing else. An unrecognized value is a load error, not a silent fallback to autonomous.",
           "enum": [
             "autonomous",
             "interactive",
             "interactive_points",
             "fan_out",
-            "fan_out_merge"
+            "fan_out_merge",
+            "output"
           ]
         },
         "description": { "type": "string" },
@@ -165,6 +191,13 @@
           "description": "The only tools the model is offered here. Anything absent is refused at dispatch.",
           "items": { "type": "string" }
         },
+        "require_output": {
+          "type": "boolean",
+          "default": false,
+          "description": "This stage must call submit_output before it transitions. Unlike required_tools, which is never checked afterwards, this is enforced: a stage that finishes without submitting is nudged and re-run, bounded, then let through with the run's output_forced flag set. `mode = \"output\"` sets it for you.",
+          "$comment": "A stage that sets this must also grant submit_output; lev validate refuses it otherwise."
+        },
+        "output": { "$ref": "#/$defs/outputSpec" },
         "required_tools": {
           "type": "array",
           "description": "Tools this stage cannot work without. Every entry must also appear in available_tools. Survives an unattended run, where the blocking interaction tools are otherwise withheld.",

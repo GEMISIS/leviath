@@ -1,6 +1,6 @@
 [agent]
 name = "writing-assistant"
-version = "0.0.2"
+version = "0.0.3"
 description = "Research-backed writing - topic to polished draft, with a web-research stage, an interactive outline checkpoint, a draft⇄edit loop, and a final proofread pass"
 entry_stage = "research"
 
@@ -57,7 +57,6 @@ description = "Create and refine an outline with user input"
 available_tools = ["ask_user_text", "read_file"]
 max_iterations = 15
 max_revisits = 4
-allow_complete = true
 transition_prompt = """
 You've shown the outline and asked the user what to do:
 - If they approved it, transition to 'draft'.
@@ -65,6 +64,7 @@ You've shown the outline and asked the user what to do:
   their specific feedback (see the "detail" message in context), and present an
   updated outline before asking again.
 - If they want to gather more material first, transition to 'research'.
+- If they are done and want no piece written, transition to 'summary'.
 """
 system_prompt = """
 Propose an OUTLINE for the piece based on `research` - do NOT write the article
@@ -89,6 +89,9 @@ transform = "compact"
 [stages.outline.transitions.outline]
 hint = "User asked to revise or expand - keep refining the outline"
 transform = "direct"
+
+[stages.outline.transitions.summary]
+hint = "User is done - no piece to write"
 
 [stages.outline.transitions.research]
 hint = "User wants more material before committing to a structure"
@@ -193,8 +196,8 @@ condition = "error"
 transform = "direct"
 
 # ─── Stage 5: Proofread (terminal) ────────────────────────────────────────────
-# Final line-level pass. allow_complete lets it ship; can bounce back to edit if
-# it turns up a substantive problem.
+# Final line-level pass. Hands off to the output stage when the piece is clean;
+# can bounce back to edit if it turns up a substantive problem.
 [stages.proofread]
 mode = "autonomous"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
@@ -202,12 +205,11 @@ description = "Final line-level proofread and fact-check"
 available_tools = ["read_file", "write_file", "web_fetch"]
 max_iterations = 10
 max_revisits = 1
-allow_complete = true
 transition_prompt = """
 Final pass done. Decide:
 - If you found a SUBSTANTIVE problem (a wrong fact, a broken argument) that needs
   a structural fix, respond with: edit
-- If the piece is clean and ready for the reader, respond with: DONE
+- If the piece is clean and ready for the reader, respond with: summary
 """
 system_prompt = """
 Final line-level pass following `style_guide`:
@@ -218,6 +220,9 @@ Final line-level pass following `style_guide`:
 Write the final polished version. Don't introduce new claims. Ship it (DONE) once
 clean - don't over-polish.
 """
+
+[stages.proofread.transitions.summary]
+hint = "The draft is finished"
 
 [stages.proofread.transitions.edit]
 hint = "A substantive problem surfaced - back to structural editing"
@@ -248,6 +253,25 @@ transform = "compact"
 [compaction]
 provider = "anthropic"
 model = "claude-sonnet-5"
+
+# ─── Final output ────────────────────────────────────────────────────────────
+# Terminal. `mode = "output"` grants `submit_output`, requires the call, and
+# lets the run end here. No file tools on purpose: this stage reports, it does
+# not work.
+[stages.summary]
+mode = "output"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Say what was written"
+max_iterations = 4
+system_prompt = """
+Say what you produced, for whoever asked for it.
+
+Name the file, say what it is and roughly how long, and note anything you had to
+decide on your own - a structural choice, a section you left thin, a fact you
+could not verify. Those are the things the reader needs to check.
+"""
+
+[stages.summary.transitions]
 
 # ─── Context layout ───────────────────────────────────────────────────────────
 [context.regions]
