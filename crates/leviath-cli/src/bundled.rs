@@ -447,6 +447,7 @@ mod tests {
             known_models: crate::commands::models::closed_catalog_models(),
             available_providers: None,
             read_paths: None,
+            safe_commands_granted: None,
         }
     }
 

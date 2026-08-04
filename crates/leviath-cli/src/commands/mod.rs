@@ -34,6 +34,7 @@ pub(crate) fn force_cwd_error(on: bool) {
 
 pub mod add;
 pub mod agent_client;
+pub mod approvals;
 pub mod auth;
 pub mod context;
 pub mod create;

