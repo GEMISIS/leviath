@@ -122,6 +122,18 @@ on any PR that moves the version — the same deliberate sign-off
 `allow-main-rs-change` asks for, with its own label so approving a release never
 doubles as approving an entrypoint change.
 
+If you label the PR after CI has already started, the guard job that ran without
+it stays red and keeps the PR blocked, because the merge rollup counts every
+suite's copy of a check rather than only the newest. Clear it by rerunning that
+job in the suite it failed in:
+
+```bash
+gh run rerun <run-id> --failed
+```
+
+The guards read the PR's labels live when they run, so the rerun sees the label
+you just applied. Adding the label does not start a run of its own.
+
 Merging fires the alpha release for the bump commit; beta promotes it the
 following Monday and stable the Thursday after. Channels with nothing new to
 publish skip in seconds. See
