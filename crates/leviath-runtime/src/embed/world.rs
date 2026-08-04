@@ -64,6 +64,15 @@ pub struct SpawnSpec {
     pub regions: HashMap<String, String>,
     /// Custom key/value metadata carried in the run's metadata.
     pub metadata: HashMap<String, String>,
+    /// Ask for the run's final output in a particular shape, overriding what
+    /// the blueprint declares.
+    ///
+    /// The format is an opaque label handed to the model, never interpreted
+    /// here, so an embedder can ask for its own house format without this crate
+    /// knowing anything about it. Supplying a
+    /// [`schema`](leviath_core::output::OutputSpec::schema) is the one thing
+    /// that makes the runtime check the answer.
+    pub output: Option<leviath_core::output::OutputSpec>,
 }
 
 impl SpawnSpec {
@@ -80,7 +89,22 @@ impl SpawnSpec {
             model: None,
             regions: HashMap::new(),
             metadata: HashMap::new(),
+            output: None,
         }
+    }
+
+    /// Ask for the final output in `format`, with optional guidance.
+    ///
+    /// `format` is carried through untouched: `"markdown"`, `"a2ui"`, a media
+    /// type, or a shape invented for this program are all equally valid.
+    pub fn output(mut self, format: impl Into<String>, instructions: Option<String>) -> Self {
+        self.output = Some(leviath_core::output::OutputSpec {
+            format: Some(format.into()),
+            instructions,
+            example: None,
+            schema: None,
+        });
+        self
     }
 }
 
@@ -354,6 +378,7 @@ impl AgentWorld {
             model: spec.model,
             workdir: spec.workdir.to_string_lossy().into_owned(),
             metadata: spec.metadata,
+            output: spec.output,
             ..Default::default()
         };
         let run_id = self
@@ -364,6 +389,23 @@ impl AgentWorld {
             .await?
             .map_err(EmbedError::Spawn)?;
         Ok(RunId(run_id))
+    }
+
+    /// What a run handed back, or `None` if it has not submitted anything (or
+    /// the world does not know the run).
+    ///
+    /// The counterpart to [`status`](Self::status): that says whether a run is
+    /// done, this says what it concluded. An embedder that only watched
+    /// [`EventStream`] for a `Completed` event used to have no way to read a
+    /// result except by scraping the log stream.
+    pub async fn result(&self, id: &RunId) -> Option<leviath_core::output::FinalOutput> {
+        self.ask(|reply| ControlOp::Result {
+            run_id: id.0.clone(),
+            reply,
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     /// Subscribe to the world's events, from this moment on.

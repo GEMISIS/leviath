@@ -89,8 +89,20 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             AgentEvent::Log { line, .. } => {
                 println!("  {line}");
             }
-            AgentEvent::Completed { run_id, status, .. } if run_id == run.as_ref() => {
+            AgentEvent::Completed {
+                run_id,
+                status,
+                final_output,
+                ..
+            } if run_id == run.as_ref() => {
                 println!("finished: {status}");
+                // The answer rides the event, so there is no second call to
+                // make and no race with the persistence tick. An agent whose
+                // blueprint never asks for one leaves this `None`.
+                match final_output {
+                    Some(output) => println!("\n--- final output ---\n{}", output.content),
+                    None => println!("(this agent produced no final output)"),
+                }
                 break;
             }
             _ => {}

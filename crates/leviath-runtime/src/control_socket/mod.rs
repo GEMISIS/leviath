@@ -921,6 +921,9 @@ mod tests {
                     ControlOp::Status { reply, .. } => {
                         let _ = reply.send(Some(AgentStatus::Active));
                     }
+                    ControlOp::Result { reply, .. } => {
+                        let _ = reply.send(None);
+                    }
                     ControlOp::Pause { reply, .. }
                     | ControlOp::Resume { reply, .. }
                     | ControlOp::Cancel { reply, .. } => {

@@ -366,6 +366,17 @@ pub enum ControlOp {
         /// Reply channel.
         reply: oneshot::Sender<Option<AgentStatus>>,
     },
+    /// Report what a run handed back, if anything.
+    ///
+    /// The counterpart to [`Status`](Self::Status): that says whether a run is
+    /// done, this says what it concluded.
+    Result {
+        /// The run to query.
+        run_id: String,
+        /// Reply: the submitted answer, or `None` for a run that gave none (or
+        /// one the world no longer holds).
+        reply: oneshot::Sender<Option<leviath_core::output::FinalOutput>>,
+    },
     /// Pause a run. Reply is `false` if there is no such (live) run.
     Pause {
         /// The run to pause.
@@ -1737,6 +1748,17 @@ impl WorldHost {
                 }
                 let _ = reply.send(result);
             }
+            ControlOp::Result { run_id, reply } => {
+                // Live entities only. An unloaded run's answer is on disk in
+                // `meta.json`, which is what `lev result` reads; keeping a copy
+                // of every finished run's answer in memory would defeat the
+                // point of bounding the finished buffer.
+                let output = self
+                    .live_entity(&run_id)
+                    .and_then(|e| self.world.world().get::<crate::persistence::FinalOutput>(e))
+                    .map(|o| o.0.clone());
+                let _ = reply.send(output);
+            }
             ControlOp::Status { run_id, reply } => {
                 // A run the daemon has unloaded still has an answer for a
                 // while, so a caller that asks a moment too late learns how the
@@ -2851,6 +2873,56 @@ mod tests {
         })
         .await;
         assert_eq!(none, None);
+    }
+
+    /// The counterpart to `Status`: that says whether a run is done, this says
+    /// what it concluded. An embedder watching only for a `Completed` event had
+    /// no way to read a result except by scraping the log stream.
+    #[tokio::test]
+    async fn result_reports_the_submitted_answer() {
+        let mut host = host_with(vec![]);
+        let e = spawn(&mut host, "run-a", "agent-a");
+        // Nothing submitted yet.
+        assert_eq!(
+            ask(&mut host, |reply| ControlOp::Result {
+                run_id: "run-a".to_string(),
+                reply,
+            })
+            .await,
+            None
+        );
+
+        host.world_mut()
+            .world_mut()
+            .entity_mut(e)
+            .insert(crate::persistence::FinalOutput(
+                leviath_core::output::FinalOutput::new(
+                    "<report/>",
+                    Some("vnd.acme+xml".to_string()),
+                    "summary".to_string(),
+                    7,
+                ),
+            ));
+        let answer = ask(&mut host, |reply| ControlOp::Result {
+            run_id: "run-a".to_string(),
+            reply,
+        })
+        .await
+        .expect("the run submitted one");
+        // Byte-identical, with its label: nothing between here and the agent
+        // reformats an answer.
+        assert_eq!(answer.content, "<report/>");
+        assert_eq!(answer.format.as_deref(), Some("vnd.acme+xml"));
+
+        // An unknown run has no answer rather than an error.
+        assert_eq!(
+            ask(&mut host, |reply| ControlOp::Result {
+                run_id: "ghost".to_string(),
+                reply,
+            })
+            .await,
+            None
+        );
     }
 
     #[tokio::test]

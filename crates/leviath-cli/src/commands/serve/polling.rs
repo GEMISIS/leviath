@@ -56,8 +56,20 @@ async fn consume_once(state: &AppState, client: &reqwest::Client) {
 /// Broadcast one world event to WebSocket subscribers, firing a completion
 /// webhook when a run reaches a terminal status.
 fn handle_event(state: &AppState, client: &reqwest::Client, event: WorldEvent) {
-    if let WorldEvent::Completed { run_id, status, .. } = &event {
-        fire_completion_webhook(client, &state.config.webhook, run_id, status);
+    if let WorldEvent::Completed {
+        run_id,
+        status,
+        final_output,
+        ..
+    } = &event
+    {
+        fire_completion_webhook(
+            client,
+            &state.config.webhook,
+            run_id,
+            status,
+            final_output.as_ref(),
+        );
     }
     let _ = state.event_tx.send(to_server_event(event));
 }
@@ -183,6 +195,7 @@ fn fire_completion_webhook(
     cfg: &WebhookConfig,
     run_id: &str,
     status: &str,
+    final_output: Option<&leviath_core::output::FinalOutput>,
 ) {
     let Ok(meta) = runstate::read_meta(run_id) else {
         return; // metadata not yet persisted
@@ -191,20 +204,7 @@ fn fire_completion_webhook(
         return; // no webhook configured
     };
     let delivery = delivery_id("agent_completed", &meta.run_id);
-    let payload = serde_json::json!({
-        "event": "agent_completed",
-        "delivery_id": delivery,
-        "run_id": meta.run_id,
-        "agent_id": meta.agent_name,
-        "status": status,
-        "result": meta.error,
-        "metadata": meta.metadata,
-        "tokens": { "prompt": meta.prompt_tokens, "completion": meta.completion_tokens },
-        // A `complete` status only says the pipeline ran to the end, not that
-        // it achieved anything. A harness batching hundreds of runs has no
-        // other way to tell the difference without re-reading the workspace.
-        "empty_output": meta.flags.empty_output,
-    });
+    let payload = completion_payload(&meta, status, final_output, &delivery);
     // Serialize once so the signature covers the exact bytes we send. `Value`'s
     // `Display` is infallible and byte-identical to `to_vec`.
     let body = payload.to_string().into_bytes();
@@ -217,6 +217,40 @@ fn fire_completion_webhook(
         delivery,
         cfg.clone(),
     ));
+}
+
+/// The completion webhook's body.
+///
+/// Pure over its inputs so the exact bytes a receiver gets are testable without
+/// standing up an HTTP server - the signature covers these bytes, so getting
+/// them wrong is not a cosmetic bug.
+fn completion_payload(
+    meta: &leviath_core::run_meta::RunMeta,
+    status: &str,
+    final_output: Option<&leviath_core::output::FinalOutput>,
+    delivery: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "event": "agent_completed",
+        "delivery_id": delivery,
+        "run_id": meta.run_id,
+        "agent_id": meta.agent_name,
+        "status": status,
+        // Named `result` since before a run could produce one; it carries the
+        // run's *error*. The answer is `final_output`, below.
+        "result": meta.error,
+        // Taken from the event, not from `meta`: the webhook fires the moment
+        // the run goes terminal, and the persist tick that writes `meta.json`
+        // has not necessarily run yet - reading it here would race and deliver
+        // a finished run with no answer.
+        "final_output": final_output,
+        "metadata": meta.metadata,
+        "tokens": { "prompt": meta.prompt_tokens, "completion": meta.completion_tokens },
+        // A `complete` status only says the pipeline ran to the end, not that
+        // it achieved anything. A harness batching hundreds of runs has no
+        // other way to tell the difference without re-reading the workspace.
+        "empty_output": meta.flags.empty_output,
+    })
 }
 
 /// Compute the `X-Leviath-Signature` value: `sha256=<hex(HMAC-SHA256(secret, body))>`.
@@ -562,7 +596,7 @@ mod tests {
                 let client = reqwest::Client::new();
                 let cfg = fast_cfg();
                 // No meta on disk → no-op.
-                fire_completion_webhook(&client, &cfg, "ghost", "complete");
+                fire_completion_webhook(&client, &cfg, "ghost", "complete", None);
                 // Meta without a callback_url → no-op.
                 let meta = RunMeta::new(
                     "no-cb".into(),
@@ -574,7 +608,7 @@ mod tests {
                     1,
                 );
                 create_run(&meta).unwrap();
-                fire_completion_webhook(&client, &cfg, "no-cb", "complete");
+                fire_completion_webhook(&client, &cfg, "no-cb", "complete", None);
             },
         )
         .await;
@@ -754,7 +788,13 @@ mod tests {
                 meta.flags.empty_output = true;
                 create_run(&meta).unwrap();
 
-                fire_completion_webhook(&reqwest::Client::new(), &fast_cfg(), "signed", "complete");
+                fire_completion_webhook(
+                    &reqwest::Client::new(),
+                    &fast_cfg(),
+                    "signed",
+                    "complete",
+                    None,
+                );
                 let requests = server.await.unwrap();
                 assert!(
                     requests[0]
@@ -927,5 +967,61 @@ mod tests {
         assert_eq!(tag(&rx.recv().await.unwrap()), "agent_status");
         handle.abort();
         server.await.unwrap();
+    }
+
+    fn payload_meta() -> leviath_core::run_meta::RunMeta {
+        let mut meta = leviath_core::run_meta::RunMeta::new(
+            "run-7".to_string(),
+            "researcher".to_string(),
+            "/agents/researcher".to_string(),
+            "look it up".to_string(),
+            None,
+            "/work".to_string(),
+            2,
+        );
+        meta.prompt_tokens = 10;
+        meta.completion_tokens = 3;
+        meta
+    }
+
+    /// The answer rides the payload, so a receiver learns what the run
+    /// concluded without a second round trip to `/api/agents/{id}/result`.
+    #[test]
+    fn the_completion_payload_carries_the_agents_answer() {
+        let answer = leviath_core::output::FinalOutput::new(
+            r#"{"root":{"component":"Card"}}"#,
+            Some("a2ui".to_string()),
+            "summary".to_string(),
+            88,
+        );
+        let payload = completion_payload(&payload_meta(), "complete", Some(&answer), "d-1");
+        let output = &payload["final_output"];
+        assert_eq!(
+            output["content"].as_str().unwrap(),
+            r#"{"root":{"component":"Card"}}"#
+        );
+        // An unrecognized label travels intact for the receiver to dispatch on.
+        assert_eq!(output["format"].as_str().unwrap(), "a2ui");
+        assert_eq!(output["stage"].as_str().unwrap(), "summary");
+        assert_eq!(payload["event"].as_str().unwrap(), "agent_completed");
+        assert_eq!(payload["status"].as_str().unwrap(), "complete");
+        assert_eq!(payload["tokens"]["prompt"].as_u64().unwrap(), 10);
+    }
+
+    /// `result` has always carried the *error*, despite its name. A successful
+    /// run leaves it null and puts the answer in `final_output`.
+    #[test]
+    fn result_stays_the_error_field_it_has_always_been() {
+        let mut meta = payload_meta();
+        meta.error = Some("provider refused".to_string());
+        let payload = completion_payload(&meta, "error", None, "d-2");
+        assert_eq!(payload["result"].as_str().unwrap(), "provider refused");
+        assert!(payload["final_output"].is_null());
+    }
+
+    #[test]
+    fn a_run_that_submitted_nothing_sends_a_null_answer() {
+        let payload = completion_payload(&payload_meta(), "complete", None, "d-3");
+        assert!(payload["final_output"].is_null());
     }
 }
