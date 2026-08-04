@@ -508,6 +508,15 @@ pub enum WorldEvent {
         agent_id: String,
         /// The terminal status label.
         status: String,
+        /// What the run handed back, when it submitted anything.
+        ///
+        /// Carried on the event rather than left for the consumer to read off
+        /// disk: this fires the moment the run goes terminal, and the persist
+        /// tick that writes `meta.json` has not necessarily run yet. A webhook
+        /// or websocket consumer reading the file would race it and report a
+        /// finished run with no answer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        final_output: Option<leviath_core::output::FinalOutput>,
     },
     /// A run moved from one stage to another. Emitted by the transition systems
     /// at the moment the new stage is entered (the initial stage at spawn is
@@ -1163,6 +1172,14 @@ impl WorldHost {
                     run_id: run_id.clone(),
                     agent_id: agent_id.clone(),
                     status: status.to_string(),
+                    // Read off the live entity, not off disk: this fires the
+                    // moment the run goes terminal, and the persist tick that
+                    // writes `meta.json` has not necessarily run yet.
+                    final_output: self
+                        .world
+                        .world()
+                        .get::<crate::persistence::FinalOutput>(entity)
+                        .map(|o| o.0.clone()),
                 });
             }
             // Unload a terminal agent once its terminal state has been emitted (a
@@ -4331,6 +4348,7 @@ mod tests {
             run_id: "r".to_string(),
             agent_id: "a".to_string(),
             status: "complete".to_string(),
+            final_output: None,
         };
         host.event_sender().send(event.clone()).unwrap();
         assert_eq!(rx.try_recv().unwrap(), event);
@@ -4795,6 +4813,7 @@ mod tests {
                 run_id: rid.clone(),
                 agent_id: aid.clone(),
                 status: "complete".to_string(),
+                final_output: None,
             },
             WorldEvent::StageTransition {
                 run_id: rid.clone(),

@@ -1127,6 +1127,7 @@ mod tests {
             run_id: run_id.to_string(),
             agent_id: "a".to_string(),
             status: "complete".to_string(),
+            final_output: None,
         }
     }
 

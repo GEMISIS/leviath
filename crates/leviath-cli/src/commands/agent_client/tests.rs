@@ -208,6 +208,7 @@ fn completed(status: &str) -> WorldEvent {
         run_id: RUN_ID.to_string(),
         agent_id: RUN_ID.to_string(),
         status: status.to_string(),
+        final_output: None,
     }
 }
 

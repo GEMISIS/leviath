@@ -20,6 +20,28 @@ use crate::runstate::{self, ContextSnapshot, RunMeta};
 ///
 /// `yolo` / `allow` / `max_depth` from the request are forwarded through
 /// [`SpawnArgs`] to the daemon's tool-policy resolution.
+/// The output shape this request asks for, or `None` when it asks for nothing
+/// (leaving whatever the blueprint declares).
+///
+/// `output_format` is carried through as an opaque label and never checked
+/// against a known set, which is what lets a client ask for a2ui, a media type,
+/// or a house format without any server-side support. `output_schema` is the
+/// one field with meaning here, and only because the runtime will check it.
+fn output_request(body: &SpawnAgentReq) -> Option<leviath_core::output::OutputSpec> {
+    if body.output_format.is_none()
+        && body.output_instructions.is_none()
+        && body.output_schema.is_none()
+    {
+        return None;
+    }
+    Some(leviath_core::output::OutputSpec {
+        format: body.output_format.clone(),
+        instructions: body.output_instructions.clone(),
+        example: None,
+        schema: body.output_schema.clone(),
+    })
+}
+
 pub(super) async fn spawn_agent(
     State(state): State<AppState>,
     Json(body): Json<SpawnAgentReq>,
@@ -78,7 +100,7 @@ pub(super) async fn spawn_agent(
         yolo: body.yolo,
         no_seed_commands: body.no_seed_commands,
         allow: body.allow.clone(),
-        output: None,
+        output: output_request(&body),
         max_depth: body.max_depth,
         // Serve spawns are top-level runs.
         parent_run_id: None,
@@ -629,6 +651,10 @@ pub(super) async fn agent_result(
         run_id: meta.run_id,
         status: format!("{}", meta.status),
         output,
+        // The answer, when the agent gave one. `output` above is the last
+        // stage's log tail, which is what this endpoint served before an agent
+        // had any way to say "here is my result".
+        final_output: meta.final_output.map(Into::into),
         error: meta.error,
         prompt_tokens: meta.prompt_tokens,
         completion_tokens: meta.completion_tokens,
@@ -2574,6 +2600,120 @@ prompt = "Plan the work"
 
     // ─── agent_result ─────────────────────────────────────────────────────────
 
+    /// The endpoint served a 64 KiB log tail long before an agent could say
+    /// "here is my answer". Both are returned now: the tail says what the run
+    /// did, `final_output` says what it concluded.
+    #[tokio::test]
+    async fn agent_result_serves_the_submitted_answer_beside_the_log_tail() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_result_serves_the_submitted_answer",
+            |_d| async move {
+                let run_id = unique_run_id("result-answer");
+                let mut meta = make_run(&run_id);
+                meta.status = RunStatus::Complete;
+                meta.final_output = Some(leviath_core::output::FinalOutput::new(
+                    r#"{"root":{"component":"Card"}}"#,
+                    Some("a2ui".to_string()),
+                    "summary".to_string(),
+                    99,
+                ));
+                create_run(&meta).unwrap();
+                std::fs::write(
+                    runstate::run_dir(&run_id).join("output.log"),
+                    "ran some tools\n",
+                )
+                .unwrap();
+
+                let app = Router::new()
+                    .route("/api/agents/{id}/result", get(agent_result))
+                    .with_state(test_state());
+                let req = Request::builder()
+                    .uri(format!("/api/agents/{}/result", run_id))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::OK);
+                let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let output = &result["final_output"];
+                // Byte-identical: an unrecognized format is served exactly as
+                // the agent wrote it, with its label alongside for the UI.
+                assert_eq!(
+                    output["content"].as_str().unwrap(),
+                    r#"{"root":{"component":"Card"}}"#
+                );
+                assert_eq!(output["format"].as_str().unwrap(), "a2ui");
+                assert_eq!(output["stage"].as_str().unwrap(), "summary");
+                assert!(!output["truncated"].as_bool().unwrap());
+                // And the log tail is still there for callers that read it.
+                assert!(
+                    result["output"]
+                        .as_str()
+                        .unwrap()
+                        .contains("ran some tools")
+                );
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
+    }
+
+    /// A run that submitted nothing reports `null` rather than an empty string,
+    /// so a consumer can tell "no answer" from "an empty answer".
+    #[tokio::test]
+    async fn agent_result_reports_no_answer_as_null() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_result_reports_no_answer_as_null",
+            |_d| async move {
+                let run_id = unique_run_id("result-none");
+                let meta = make_run(&run_id);
+                create_run(&meta).unwrap();
+                let app = Router::new()
+                    .route("/api/agents/{id}/result", get(agent_result))
+                    .with_state(test_state());
+                let req = Request::builder()
+                    .uri(format!("/api/agents/{}/result", run_id))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert!(result["final_output"].is_null());
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
+    }
+
+    /// A client may ask for any shape. The label is carried through untouched,
+    /// which is what lets a browser console ask for a2ui with no server support.
+    #[test]
+    fn a_spawn_request_carries_an_arbitrary_output_shape() {
+        let body = SpawnAgentReq {
+            blueprint: "x".to_string(),
+            task: "t".to_string(),
+            output_format: Some("a2ui".to_string()),
+            output_instructions: Some("One card per finding.".to_string()),
+            output_schema: Some(serde_json::json!({"type": "object"})),
+            ..Default::default()
+        };
+        let spec = output_request(&body).expect("a shape was asked for");
+        assert_eq!(spec.format.as_deref(), Some("a2ui"));
+        assert_eq!(spec.instructions.as_deref(), Some("One card per finding."));
+        assert_eq!(spec.schema, Some(serde_json::json!({"type": "object"})));
+    }
+
+    #[test]
+    fn a_spawn_request_asking_for_nothing_leaves_the_blueprint_in_charge() {
+        assert!(output_request(&SpawnAgentReq::default()).is_none());
+    }
+
     #[tokio::test]
     async fn agent_result_existing_run_no_stages() {
         crate::runstate::with_isolated_runs_dir_async(
@@ -2913,6 +3053,7 @@ prompt = "Plan the work"
             error: None,
             prompt_tokens: 5000,
             completion_tokens: 1200,
+            final_output: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"run_id\":\"run-123\""));
@@ -2930,6 +3071,7 @@ prompt = "Plan the work"
             error: Some("something went wrong".to_string()),
             prompt_tokens: 100,
             completion_tokens: 0,
+            final_output: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("something went wrong"));
