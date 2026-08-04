@@ -40,6 +40,49 @@ pub fn truncate_at_boundary(s: &str, max: usize) -> &str {
     &s[..floor_char_boundary(s, max)]
 }
 
+/// Smallest byte index `>= min` that is a char boundary in `s`.
+///
+/// The mirror of [`floor_char_boundary`], for cutting the *end* of a window.
+/// The walk-forward always terminates: `s.len()` is a boundary in every string.
+pub fn ceil_char_boundary(s: &str, min: usize) -> usize {
+    let mut start = min.min(s.len());
+    while !s.is_char_boundary(start) {
+        start += 1;
+    }
+    start
+}
+
+/// A window of `s` around the byte offset `at`, reaching `radius` bytes either
+/// side, with `…` marking each end that was cut.
+///
+/// For showing *why* something matched: a search hit deep in a megabyte of
+/// transcript is only useful with the text around it, and neither existing
+/// helper gives that - [`truncate_at_boundary`] only takes a prefix.
+///
+/// Both ends are moved outward to char boundaries rather than inward, so the
+/// window never loses a character that was inside the requested radius, and the
+/// match itself cannot be clipped by a boundary walk. `at` past the end clamps,
+/// so a stale offset yields a short window instead of a panic.
+#[expect(
+    clippy::string_slice,
+    reason = "both indices come from the boundary helpers above, so the range is a char boundary \
+              by construction"
+)]
+pub fn snippet_around(s: &str, at: usize, radius: usize) -> String {
+    let at = at.min(s.len());
+    let start = floor_char_boundary(s, at.saturating_sub(radius));
+    let end = ceil_char_boundary(s, (at + radius).min(s.len()));
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.push_str(&s[start..end]);
+    if end < s.len() {
+        out.push('…');
+    }
+    out
+}
+
 /// The workspace's one generic token estimate: bytes divided by four,
 /// rounded up.
 ///
@@ -71,6 +114,71 @@ pub fn interpolate(template: &str, vars: &[(&str, &str)]) -> String {
         out = out.replace(&format!("{{{name}}}"), value);
     }
     out
+}
+
+#[cfg(test)]
+mod snippet_tests {
+    use super::*;
+
+    const HAY: &str = "the quick brown fox jumps over the lazy dog";
+
+    #[test]
+    fn a_window_in_the_middle_is_elided_at_both_ends() {
+        let at = HAY.find("fox").unwrap();
+        let out = snippet_around(HAY, at, 6);
+        assert!(out.starts_with('…'));
+        assert!(out.ends_with('…'));
+        assert!(out.contains("fox"));
+    }
+
+    #[test]
+    fn a_window_at_the_edges_is_not_elided_there() {
+        assert!(!snippet_around(HAY, 0, 5).starts_with('…'));
+        assert!(!snippet_around(HAY, HAY.len(), 5).ends_with('…'));
+    }
+
+    #[test]
+    fn a_radius_covering_everything_returns_the_whole_string_unmarked() {
+        assert_eq!(snippet_around(HAY, 10, 1000), HAY);
+    }
+
+    /// The reason this lives here rather than at a call site: a byte offset
+    /// landing inside a multi-byte character used to abort the daemon.
+    #[test]
+    fn multi_byte_characters_are_never_split() {
+        let hay = "aaa🇯🇵🎉bbb needle ccc🚀ddd";
+        let at = hay.find("needle").unwrap();
+        // Every radius walks the ends over the emoji in both directions.
+        for radius in 0..hay.len() + 4 {
+            let out = snippet_around(hay, at, radius);
+            assert!(out.chars().all(|c| c != '\u{FFFD}'));
+            if radius >= "needle".len() {
+                assert!(out.contains("needle"));
+            }
+        }
+    }
+
+    #[test]
+    fn an_offset_past_the_end_clamps_instead_of_panicking() {
+        let out = snippet_around(HAY, HAY.len() + 500, 4);
+        assert!(out.starts_with('…'));
+        assert!(!out.ends_with('…'));
+    }
+
+    #[test]
+    fn an_empty_haystack_yields_an_empty_snippet() {
+        assert_eq!(snippet_around("", 0, 10), "");
+        assert_eq!(snippet_around("", 7, 10), "");
+    }
+
+    #[test]
+    fn ceil_char_boundary_walks_forward_and_clamps() {
+        let s = "a🎉b";
+        assert_eq!(ceil_char_boundary(s, 0), 0);
+        // Bytes 2..4 are inside the emoji; the next boundary is 5.
+        assert_eq!(ceil_char_boundary(s, 2), 5);
+        assert_eq!(ceil_char_boundary(s, 900), s.len());
+    }
 }
 
 #[cfg(test)]

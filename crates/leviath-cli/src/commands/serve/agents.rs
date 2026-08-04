@@ -117,10 +117,7 @@ pub(super) async fn list_agents(Query(query): Query<ListAgentsQuery>) -> Json<Ve
 
     if let Some(ref status_filter) = query.status {
         let filters: Vec<&str> = status_filter.split(',').collect();
-        runs.retain(|r| {
-            let s = format!("{}", r.status).to_lowercase();
-            filters.iter().any(|f| f.to_lowercase() == s)
-        });
+        runs.retain(|r| filters.iter().any(|f| status_matches(&r.status, f)));
     }
 
     // `.redacted()`: `RunMeta` carries the webhook signing secret, and this
@@ -183,6 +180,14 @@ pub(super) async fn agent_context_history(
     Ok(Json(history))
 }
 
+/// `GET /api/agents/{id}/logs`: what a run has written, by stage.
+///
+/// This read `<run_dir>/output.log`, a path nothing in the codebase writes, so
+/// it returned an empty string for every run that has ever existed - a run's
+/// real output lives under `stages/<idx>/`. `?stage=` and `?stream=` select
+/// which log; both default to what a caller tailing a live run wants (the
+/// current stage's readable output). Response stays a bare string, so an
+/// existing client sees only that it finally has content.
 pub(super) async fn agent_logs(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<LogsQuery>,
@@ -197,9 +202,15 @@ pub(super) async fn agent_logs(
         ));
     }
 
+    let selector = query
+        .selector()
+        .map_err(|message| err(StatusCode::BAD_REQUEST, message))?;
+    let stream = query
+        .log_stream()
+        .map_err(|message| err(StatusCode::BAD_REQUEST, message))?;
+
     let max_bytes = query.tail.unwrap_or(32_768);
-    let log = runstate::tail_file(&run_dir.join("output.log"), max_bytes);
-    Ok(log)
+    Ok(runstate::tail_run_logs(&id, selector, stream, max_bytes))
 }
 
 /// How much of a file `GET /api/agents/{id}/files` returns: 1 MiB, enough for
@@ -309,14 +320,14 @@ pub(super) async fn agent_result(
         )
     })?;
 
-    // Read the last stage's output
-    let stages = runstate::read_stages_index(&id);
-    let output = if !stages.is_empty() {
-        let last_idx = stages.len() - 1;
-        runstate::tail_stage_output(&id, last_idx, 65_536)
-    } else {
-        runstate::tail_file(&runstate::run_dir(&id).join("output.log"), 65_536)
-    };
+    // The last stage's output, through the same reader `agent_logs` uses -
+    // including its fallback for a run with no stages recorded.
+    let output = runstate::tail_run_logs(
+        &id,
+        runstate::StageSelector::Current,
+        runstate::LogStream::Output,
+        65_536,
+    );
 
     Ok(Json(AgentResultResp {
         run_id: meta.run_id,
@@ -631,6 +642,39 @@ mod tests {
             "/tmp".to_string(),
             1,
         )
+    }
+
+    /// A `stages.json` entry, so a log test can say which stages exist.
+    fn stage_rec(index: usize, name: &str) -> leviath_core::run_meta::StageRecord {
+        leviath_core::run_meta::StageRecord {
+            name: name.to_string(),
+            index,
+            status: leviath_core::run_meta::StageRunStatus::Complete,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cached_tokens: 0,
+            started_at: None,
+            ended_at: None,
+        }
+    }
+
+    /// Call `GET /api/agents/{id}/logs{query}` and return the body as text.
+    /// The endpoint's whole bug was that its body was always empty, so a log
+    /// test that does not read the body proves nothing.
+    async fn logs_body(run_id: &str, query: &str) -> String {
+        let app = Router::new()
+            .route("/api/agents/{id}/logs", get(agent_logs))
+            .with_state(test_state());
+        let req = Request::builder()
+            .uri(format!("/api/agents/{run_id}/logs{query}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&bytes).into_owned()
     }
 
     fn test_state_with_agent_paths(paths: Vec<PathBuf>, control: ControlClient) -> AppState {
@@ -1229,27 +1273,35 @@ prompt = "Plan the work"
     // ─── agent_logs ───────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn agent_logs_existing_run_returns_ok() {
+    async fn agent_logs_reads_the_current_stage_not_the_dead_run_level_file() {
         crate::runstate::with_isolated_runs_dir_async(
-            "agent_logs_existing_run_returns_ok",
+            "agent_logs_reads_current_stage",
             |_d| async move {
                 let run_id = unique_run_id("logs-ok");
                 let meta = make_run(&run_id);
                 create_run(&meta).unwrap();
 
-                // Write something to output.log
-                let log_path = runstate::run_dir(&run_id).join("output.log");
-                std::fs::write(&log_path, "hello log\n").unwrap();
+                // Two stages, so "current" has to mean the last one and not
+                // just "the only one that exists".
+                runstate::write_stages_index(
+                    &run_id,
+                    &[stage_rec(0, "plan"), stage_rec(1, "code")],
+                )
+                .unwrap();
+                runstate::append_stage_output(&run_id, 0, "from the planning stage");
+                runstate::append_stage_output(&run_id, 1, "from the coding stage");
+                // The path the handler used to read. Nothing writes it in
+                // production; planting it here proves the handler stopped.
+                std::fs::write(
+                    runstate::run_dir(&run_id).join("output.log"),
+                    "the dead run-level file",
+                )
+                .unwrap();
 
-                let app = Router::new()
-                    .route("/api/agents/{id}/logs", get(agent_logs))
-                    .with_state(test_state());
-                let req = Request::builder()
-                    .uri(format!("/api/agents/{}/logs", run_id))
-                    .body(Body::empty())
-                    .unwrap();
-                let resp = app.oneshot(req).await.unwrap();
-                assert_eq!(resp.status(), axum::http::StatusCode::OK);
+                let body = logs_body(&run_id, "").await;
+                assert!(body.contains("from the coding stage"));
+                assert!(!body.contains("from the planning stage"));
+                assert!(!body.contains("the dead run-level file"));
 
                 let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
             },
@@ -1258,26 +1310,116 @@ prompt = "Plan the work"
     }
 
     #[tokio::test]
-    async fn agent_logs_with_tail_param() {
+    async fn agent_logs_selects_a_stage_a_stream_and_every_stage() {
         crate::runstate::with_isolated_runs_dir_async(
-            "agent_logs_with_tail_param",
+            "agent_logs_selects_stage_and_stream",
+            |_d| async move {
+                let run_id = unique_run_id("logs-select");
+                let meta = make_run(&run_id);
+                create_run(&meta).unwrap();
+                runstate::write_stages_index(
+                    &run_id,
+                    &[stage_rec(0, "plan"), stage_rec(1, "code")],
+                )
+                .unwrap();
+                runstate::append_stage_output(&run_id, 0, "plan output");
+                runstate::append_stage_output(&run_id, 1, "code output");
+                runstate::append_stage_log(&run_id, 1, "[tool] write_file: ok");
+
+                // An explicit index reaches back past the current stage.
+                let stage0 = logs_body(&run_id, "?stage=0").await;
+                assert!(stage0.contains("plan output"));
+                assert!(!stage0.contains("code output"));
+
+                // The two streams stay separate.
+                let operational = logs_body(&run_id, "?stream=logs").await;
+                assert!(operational.contains("[tool] write_file: ok"));
+                assert!(!operational.contains("code output"));
+
+                // `all` joins every stage, oldest first, and labels them.
+                let all = logs_body(&run_id, "?stage=all").await;
+                assert!(all.contains("plan output"));
+                assert!(all.contains("code output"));
+                assert!(all.contains("stage 0: plan"));
+                assert!(all.find("plan output") < all.find("code output"));
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn agent_logs_tail_bounds_the_bytes_returned() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_logs_tail_bounds_bytes",
             |_d| async move {
                 let run_id = unique_run_id("logs-tail");
                 let meta = make_run(&run_id);
                 create_run(&meta).unwrap();
+                runstate::write_stages_index(&run_id, &[stage_rec(0, "only")]).unwrap();
+                for i in 0..200 {
+                    runstate::append_stage_output(&run_id, 0, &format!("line {i}"));
+                }
 
-                let log_path = runstate::run_dir(&run_id).join("output.log");
-                std::fs::write(&log_path, "line1\nline2\nline3\n").unwrap();
+                let full = logs_body(&run_id, "?tail=100000").await;
+                assert!(full.contains("line 0"));
 
-                let app = Router::new()
-                    .route("/api/agents/{id}/logs", get(agent_logs))
-                    .with_state(test_state());
-                let req = Request::builder()
-                    .uri(format!("/api/agents/{}/logs?tail=100", run_id))
-                    .body(Body::empty())
-                    .unwrap();
-                let resp = app.oneshot(req).await.unwrap();
-                assert_eq!(resp.status(), axum::http::StatusCode::OK);
+                // `tail` is a byte budget, so a small one drops the head.
+                let tailed = logs_body(&run_id, "?tail=200").await;
+                assert!(tailed.len() <= 200);
+                assert!(tailed.contains("line 199"));
+                assert!(!tailed.contains("line 0\n"));
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn agent_logs_falls_back_to_the_run_level_file_when_no_stages_exist() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_logs_no_stages_fallback",
+            |_d| async move {
+                let run_id = unique_run_id("logs-fallback");
+                let meta = make_run(&run_id);
+                create_run(&meta).unwrap();
+                // No stages.json at all - a run whose stage dirs were pruned.
+                std::fs::write(
+                    runstate::run_dir(&run_id).join("output.log"),
+                    "legacy output",
+                )
+                .unwrap();
+
+                assert!(logs_body(&run_id, "").await.contains("legacy output"));
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn agent_logs_rejects_an_unparseable_stage_or_stream() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_logs_rejects_bad_params",
+            |_d| async move {
+                let run_id = unique_run_id("logs-bad");
+                let meta = make_run(&run_id);
+                create_run(&meta).unwrap();
+
+                for query in ["?stage=middle", "?stream=everything"] {
+                    let app = Router::new()
+                        .route("/api/agents/{id}/logs", get(agent_logs))
+                        .with_state(test_state());
+                    let req = Request::builder()
+                        .uri(format!("/api/agents/{run_id}/logs{query}"))
+                        .body(Body::empty())
+                        .unwrap();
+                    let resp = app.oneshot(req).await.unwrap();
+                    assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+                }
 
                 let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
             },

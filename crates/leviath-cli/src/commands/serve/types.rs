@@ -337,6 +337,29 @@ pub(super) struct ListAgentsQuery {
     pub(super) status: Option<String>,
 }
 
+/// Does `filter` name this run's status?
+///
+/// `RunStatus` reaches a client two different ways: `Json<RunMeta>` serializes
+/// it through serde, which is `snake_case` (`waiting_input`), while the status
+/// filter compared it through `Display`, which is PascalCase, lowercased
+/// (`waitinginput`). So a client that took a status out of one response and fed
+/// it back as a filter got nothing, on exactly the two multi-word variants where
+/// it is least obvious why.
+///
+/// Normalizing both sides - lowercase, and drop `_` and `-` - accepts every
+/// spelling of the same status, including the two that already worked. That
+/// makes this strictly wider than the old comparison, so nothing a client does
+/// today can start failing.
+pub(super) fn status_matches(status: &crate::runstate::RunStatus, filter: &str) -> bool {
+    fn normalize(s: &str) -> String {
+        s.chars()
+            .filter(|c| *c != '_' && *c != '-')
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+    normalize(&format!("{status}")) == normalize(filter)
+}
+
 #[derive(Serialize)]
 pub(super) struct AgentResultResp {
     pub(super) run_id: String,
@@ -347,9 +370,49 @@ pub(super) struct AgentResultResp {
     pub(super) completion_tokens: usize,
 }
 
-#[derive(Deserialize)]
+/// Query for `GET /api/agents/{id}/logs`.
+#[derive(Deserialize, Default)]
 pub(super) struct LogsQuery {
+    /// How many **bytes** from the end to return (default 32 KiB). Bytes, not
+    /// lines - the OpenAPI description said lines and was wrong.
     pub(super) tail: Option<u64>,
+    /// Which stage: a numeric index, or `all` for every stage joined oldest
+    /// first. Absent means the stage the run is on now.
+    pub(super) stage: Option<String>,
+    /// `output` (default) for the assistant's readable output, or `logs` for
+    /// the operational stream (`[tool]`, `[Tokens: …]`, `[error]`).
+    ///
+    /// Kept as two separate streams rather than interleaved: they have
+    /// different audiences and no shared clock in the files, so merging them
+    /// would be presenting a guess at ordering as a fact.
+    pub(super) stream: Option<String>,
+}
+
+impl LogsQuery {
+    /// Resolve `stage` into a [`StageSelector`], or report the bad value.
+    pub(super) fn selector(&self) -> Result<crate::runstate::StageSelector, String> {
+        use crate::runstate::StageSelector;
+        match self.stage.as_deref() {
+            None => Ok(StageSelector::Current),
+            Some("all") => Ok(StageSelector::All),
+            Some(other) => other
+                .parse::<usize>()
+                .map(StageSelector::Index)
+                .map_err(|_| format!("Invalid stage '{other}': expected a stage index or 'all'")),
+        }
+    }
+
+    /// Resolve `stream`, or report the bad value.
+    pub(super) fn log_stream(&self) -> Result<crate::runstate::LogStream, String> {
+        use crate::runstate::LogStream;
+        match self.stream.as_deref() {
+            None | Some("output") => Ok(LogStream::Output),
+            Some("logs") => Ok(LogStream::Operational),
+            Some(other) => Err(format!(
+                "Invalid stream '{other}': expected 'output' or 'logs'"
+            )),
+        }
+    }
 }
 
 /// Query for `GET /api/agents/{id}/files`: the file to read. Relative paths
@@ -535,6 +598,55 @@ pub(super) struct ModelEntry {
     pub(super) max_context_tokens: usize,
     pub(super) max_output_tokens: usize,
     pub(super) supports_tools: bool,
+}
+
+#[cfg(test)]
+mod status_matches_tests {
+    use super::*;
+    use crate::runstate::RunStatus;
+
+    /// The bug this function exists for: `WaitingInput` serializes as
+    /// `waiting_input`, so that is the spelling a client has in hand - and the
+    /// old `Display`-lowercased comparison rejected exactly that.
+    #[test]
+    fn the_serde_spelling_a_client_reads_back_is_accepted() {
+        assert!(status_matches(&RunStatus::WaitingInput, "waiting_input"));
+        assert!(status_matches(
+            &RunStatus::CompleteInteractive,
+            "complete_interactive"
+        ));
+    }
+
+    /// The spellings that worked before must keep working - this widens the
+    /// filter, it does not move it.
+    #[test]
+    fn the_display_spelling_that_already_worked_still_does() {
+        assert!(status_matches(&RunStatus::WaitingInput, "waitinginput"));
+        assert!(status_matches(&RunStatus::Running, "running"));
+        assert!(status_matches(&RunStatus::Running, "Running"));
+    }
+
+    #[test]
+    fn hyphens_and_mixed_case_are_accepted_too() {
+        assert!(status_matches(&RunStatus::WaitingInput, "Waiting-Input"));
+        assert!(status_matches(
+            &RunStatus::CompleteInteractive,
+            "COMPLETE-INTERACTIVE"
+        ));
+    }
+
+    /// Normalizing must not collapse genuinely different statuses into each
+    /// other, or a filter would quietly return the wrong runs.
+    #[test]
+    fn a_different_status_still_does_not_match() {
+        assert!(!status_matches(&RunStatus::Running, "complete"));
+        assert!(!status_matches(
+            &RunStatus::Complete,
+            "complete_interactive"
+        ));
+        assert!(!status_matches(&RunStatus::CompleteInteractive, "complete"));
+        assert!(!status_matches(&RunStatus::Running, ""));
+    }
 }
 
 #[cfg(test)]

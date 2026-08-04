@@ -641,6 +641,87 @@ pub fn tail_stage_log(run_id: &str, stage_idx: usize, max_bytes: u64) -> String 
     tail_file(&stage_dir(run_id, stage_idx).join("logs.log"), max_bytes)
 }
 
+/// Which stage's logs to read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageSelector {
+    /// The stage the run is on now - the last entry in `stages.json`. What a
+    /// caller tailing a live run wants, and what `agent_result` already picked.
+    Current,
+    /// One specific stage by index.
+    Index(usize),
+    /// Every stage, oldest first, with a separator between them.
+    All,
+}
+
+/// Which of a stage's two logs to read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogStream {
+    /// `output.log` - the assistant's readable output.
+    Output,
+    /// `logs.log` - operational lines: `[tool] …`, `[Tokens: …]`, `[error] …`.
+    Operational,
+}
+
+/// Read a run's logs, choosing the stage and the stream.
+///
+/// Exists because there were two answers in the codebase to "where is a run's
+/// output", and one of them was wrong: `GET /api/agents/{id}/logs` read
+/// `<run_dir>/output.log`, which nothing has ever written, so it returned an
+/// empty string for every run there has ever been. The real logs are per-stage,
+/// under `stages/<idx>/`. Routing both that handler and `agent_result` through
+/// here leaves one answer.
+///
+/// Stages come from `stages.json` rather than a `read_dir` of `stages/`, because
+/// that index is the record of which stages exist and in what order - the
+/// directory is just where their bytes landed.
+///
+/// `max_bytes` applies to what is returned, so for [`StageSelector::All`] it
+/// bounds the joined text rather than each stage separately: "the last N bytes
+/// of what you asked for" holds whatever the selector was.
+pub fn tail_run_logs(
+    run_id: &str,
+    selector: StageSelector,
+    stream: LogStream,
+    max_bytes: u64,
+) -> String {
+    let read = |idx: usize| match stream {
+        LogStream::Output => tail_stage_output(run_id, idx, max_bytes),
+        LogStream::Operational => tail_stage_log(run_id, idx, max_bytes),
+    };
+    let stages = read_stages_index(run_id);
+    match selector {
+        StageSelector::Index(idx) => read(idx),
+        StageSelector::Current => match stages.len().checked_sub(1) {
+            Some(last) => read(last),
+            // No stages recorded yet. Fall back to the legacy run-level file:
+            // nothing writes it today, but a run whose stage dirs were pruned
+            // still reads honestly instead of claiming it produced nothing.
+            None => tail_file(&run_dir(run_id).join("output.log"), max_bytes),
+        },
+        StageSelector::All => {
+            let joined = stages
+                .iter()
+                .map(|stage| {
+                    format!(
+                        "===== stage {}: {} =====\n{}",
+                        stage.index,
+                        stage.name,
+                        read(stage.index)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            // Re-bound the join: each part was capped individually, so their
+            // concatenation can exceed the cap the caller asked for.
+            let start = leviath_core::text::floor_char_boundary(
+                &joined,
+                joined.len().saturating_sub(max_bytes as usize),
+            );
+            joined.split_at(start).1.to_string()
+        }
+    }
+}
+
 /// Build the isolated base directory for a run-state test and create its
 /// `runs/` subdir. Returned so the caller's closure can plant fixtures under it.
 ///
