@@ -75,10 +75,29 @@ pub fn read_run_archive(run_id: &str) -> Option<Vec<leviath_core::run_archive::R
 
 /// A run's context-window history: the full window (+ metadata) at each recorded
 /// point over time, oldest first. Empty when there's no readable archive.
+///
+/// Every point's `meta` is [`RunMeta::redacted`]. The journal stores `RunMeta`
+/// whole - including `callback_secret`, which the daemon needs to keep signing
+/// webhooks for a run it reloads - so a replayed point carries the secret unless
+/// it is stripped here. `GET /api/agents/{id}/context/history` serialized these
+/// points directly, which handed the webhook signing key to any holder of the
+/// API token: the same disclosure `redacted()` was introduced for on
+/// `/api/agents`, re-opened through the archive.
+///
+/// Redacted in this shared reader rather than in that one handler so the next
+/// consumer of a run's history inherits the fix instead of having to remember
+/// it. No caller needs the secret: the CLI printer, the dashboard, and the API
+/// all only display these points.
 pub fn context_history(run_id: &str) -> Vec<leviath_core::run_archive::RunPoint> {
     read_run_archive(run_id)
         .map(|records| leviath_core::run_archive::replay_points(&records))
         .unwrap_or_default()
+        .into_iter()
+        .map(|point| leviath_core::run_archive::RunPoint {
+            meta: point.meta.redacted(),
+            ..point
+        })
+        .collect()
 }
 
 fn now_secs() -> i64 {
@@ -1373,6 +1392,82 @@ mod tests {
             assert_eq!(records.len(), 2);
             let history = context_history(run_id);
             assert_eq!(history.len(), 1);
+            assert_eq!(history[0].context.stage_name, "plan");
+        });
+    }
+
+    /// The journal keeps `callback_secret` (the daemon re-signs webhooks for a
+    /// run it reloads), so a replayed point carries it unless the reader strips
+    /// it. `GET /api/agents/{id}/context/history` serves these points straight
+    /// out, which handed the webhook signing key to any API token holder.
+    ///
+    /// Asserts against the *archive* as well as the history, so the test still
+    /// means something if the journal ever stops storing the secret: were that
+    /// to happen, the first assertion fails rather than the second silently
+    /// passing on a field that is no longer there to leak.
+    #[test]
+    fn context_history_redacts_the_webhook_secret_the_journal_keeps() {
+        with_isolated_runs_dir("context-history-redacts-secret", |_d| {
+            use leviath_core::run_archive::{self, RunIdentity, RunRecord};
+            let run_id = "archive-secret-unit";
+            std::fs::create_dir_all(run_dir(run_id)).unwrap();
+            let mut buf = Vec::new();
+            run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION).unwrap();
+            let mut meta = RunMeta::new(
+                run_id.to_string(),
+                "a".to_string(),
+                "/p".to_string(),
+                "t".to_string(),
+                None,
+                "/w".to_string(),
+                1,
+            );
+            meta.callback_url = Some("https://example.invalid/hook".to_string());
+            meta.callback_secret = Some("super-secret-signing-key".to_string());
+            run_archive::write_record(
+                &mut buf,
+                &RunRecord::Header {
+                    identity: RunIdentity {
+                        run_id: run_id.to_string(),
+                        machine_id: "m".to_string(),
+                        world_id: "w".to_string(),
+                        created_at: 0,
+                    },
+                    meta: Box::new(meta),
+                },
+            )
+            .unwrap();
+            run_archive::write_record(
+                &mut buf,
+                &RunRecord::ContextCheckpoint {
+                    snapshot: ContextSnapshot {
+                        stage_name: "plan".to_string(),
+                        total_tokens: 3,
+                        max_tokens: 100,
+                        regions: vec![],
+                    },
+                    at: 1,
+                },
+            )
+            .unwrap();
+            std::fs::write(run_dir(run_id).join("run.lvr"), &buf).unwrap();
+
+            // The secret really is in the journal, so redaction has work to do.
+            let records = read_run_archive(run_id).expect("archive read");
+            let archived_secret = records.iter().find_map(|r| match r {
+                RunRecord::Header { meta, .. } => meta.callback_secret.clone(),
+                _ => None,
+            });
+            assert_eq!(archived_secret.as_deref(), Some("super-secret-signing-key"));
+
+            // What the reader hands out has it stripped, and keeps the rest.
+            let history = context_history(run_id);
+            assert_eq!(history.len(), 1);
+            assert_eq!(history[0].meta.callback_secret, None);
+            assert_eq!(
+                history[0].meta.callback_url.as_deref(),
+                Some("https://example.invalid/hook")
+            );
             assert_eq!(history[0].context.stage_name, "plan");
         });
     }
