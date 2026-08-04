@@ -1,6 +1,6 @@
 [agent]
 name = "deep-researcher"
-version = "0.0.2"
+version = "0.0.3"
 description = "Thorough single-topic investigation - searches, follows citation chains, cross-checks claims, and produces a structured cited report"
 entry_stage = "gather"
 
@@ -163,8 +163,8 @@ following the citation/confidence rules in `format`. Structure:
 Write for a technical audience. Be precise. Distinguish evidence from inference.
 """
 
-# Explicit empty transitions = terminal.
-[stages.synthesize.transitions]
+[stages.synthesize.transitions.summary]
+hint = "The synthesis is written"
 
 # ─── Stage 5: Error recovery ──────────────────────────────────────────────────
 [stages.error_recovery]
@@ -187,6 +187,27 @@ transform = "compact"
 [compaction]
 provider = "anthropic"
 model = "claude-sonnet-5"
+
+# ─── Final output ────────────────────────────────────────────────────────────
+# Terminal. `mode = "output"` grants `submit_output`, requires the call, and
+# lets the run end here. No file tools on purpose: this stage reports, it does
+# not work.
+[stages.summary]
+mode = "output"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Say what the investigation found"
+max_iterations = 4
+system_prompt = """
+Say what this investigation concluded, for whoever asked for it.
+
+Lead with the answer, then the evidence that carried the most weight and the
+open questions that remain. Name the file you wrote.
+
+Where the sources disagreed, say so - a summary that hides a live disagreement
+is worse than no summary.
+"""
+
+[stages.summary.transitions]
 
 # ─── Context layout ───────────────────────────────────────────────────────────
 # Percentage budgets (issue #100) with absolute guard-rails.

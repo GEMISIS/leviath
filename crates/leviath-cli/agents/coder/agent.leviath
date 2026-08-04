@@ -1,6 +1,6 @@
 [agent]
 name = "coder"
-version = "0.0.2"
+version = "0.0.3"
 description = "Multi-stage coding agent - discover, analyze, optionally prototype, implement, and review, with stuck detection and graph-based error recovery"
 entry_stage = "discover"
 
@@ -355,7 +355,6 @@ description = "Review the code before finalizing"
 available_tools = ["read_file", "list_dir", "bash"]
 max_iterations = 10
 max_revisits = 3
-allow_complete = true
 transition_prompt = """
 Review complete. Based on your findings:
 - If there are issues that must be fixed, respond with: implement
@@ -410,6 +409,9 @@ bash      = "test_results"
 # Custom transform: carry the plan/architecture/task/codebase forward, compact the
 # review conversation into a fix list, and clear scratch + test_results before
 # re-implementing so stale failures don't confuse the next pass.
+[stages.review.transitions.summary]
+hint = "The work is done and reviewed"
+
 [stages.review.transitions.implement]
 hint = "Issues found - needs another implementation pass"
 transform = "custom"
@@ -523,6 +525,28 @@ transform = "compact"
 [compaction]
 provider = "anthropic"
 model = "claude-sonnet-5"
+
+# ─── Final output ────────────────────────────────────────────────────────────
+# Terminal. `mode = "output"` grants `submit_output`, requires the call, and
+# lets the run end here. No file tools on purpose: this stage reports, it does
+# not work.
+[stages.summary]
+mode = "output"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Say what changed"
+max_iterations = 4
+system_prompt = """
+Say what you changed, for whoever asked for it.
+
+List the files you touched and what each change does - one line each. Then
+anything they need to know: a decision you made, a test you could not run, a
+loose end you left.
+
+Do not paste the code back. They can read the diff; what they cannot read is
+why.
+"""
+
+[stages.summary.transitions]
 
 # ─── Context layout ───────────────────────────────────────────────────────────
 # Budgets are given as a percentage of the model's context window (issue #100),

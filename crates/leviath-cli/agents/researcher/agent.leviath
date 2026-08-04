@@ -1,6 +1,6 @@
 [agent]
 name = "researcher"
-version = "0.0.2"
+version = "0.0.3"
 description = "Research assistant - gather, analyze, and summarize with a gather↔analyze refinement loop, error recovery, and multi-provider fallback"
 entry_stage = "gather"
 
@@ -121,8 +121,8 @@ Structure:
 Keep it tight and skimmable. Every non-obvious claim must carry a [n] citation.
 """
 
-# Explicit empty transitions table = terminal stage (the run ends here).
-[stages.summarize.transitions]
+[stages.summarize.transitions.summary]
+hint = "The report is written"
 
 # ─── Stage 4: Error recovery ──────────────────────────────────────────────────
 [stages.error_recovery]
@@ -146,6 +146,28 @@ transform = "compact"
 [compaction]
 provider = "anthropic"
 model = "claude-sonnet-5"
+
+# ─── Final output ────────────────────────────────────────────────────────────
+# Terminal. `mode = "output"` grants `submit_output`, requires the call, and
+# lets the run end here. No file tools on purpose: this stage reports, it does
+# not work.
+[stages.summary]
+mode = "output"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Say what the research found"
+max_iterations = 4
+system_prompt = """
+Say what this research produced, for whoever asked for it.
+
+Lead with the answer to the question, in two or three sentences. Then the two or
+three findings that matter most, each with its confidence level. Name the report
+file you wrote so they can read the whole thing.
+
+Do not re-derive anything or re-list every source. This is the summary someone
+reads instead of the report, not a second copy of it.
+"""
+
+[stages.summary.transitions]
 
 # ─── Context layout ───────────────────────────────────────────────────────────
 # Budgets are a percentage of the model's context window (issue #100) with an

@@ -1,6 +1,6 @@
 [agent]
 name = "daily-briefer"
-version = "0.0.2"
+version = "0.0.3"
 description = "Morning summary agent - gathers from local + web sources, prioritizes into a running index, and delivers a concise briefing"
 entry_stage = "collect"
 
@@ -115,8 +115,8 @@ Keep each item to 1-2 sentences. The whole briefing should read in under 2 minut
 If a source failed, add a short "⚠️ Gaps" note listing what couldn't be checked.
 """
 
-# Explicit empty transitions = terminal.
-[stages.brief.transitions]
+[stages.brief.transitions.summary]
+hint = "The brief is written"
 
 # ─── Stage 4: Error recovery ──────────────────────────────────────────────────
 [stages.error_recovery]
@@ -140,6 +140,26 @@ transform = "compact"
 [compaction]
 provider = "anthropic"
 model = "claude-sonnet-5"
+
+# ─── Final output ────────────────────────────────────────────────────────────
+# Terminal. `mode = "output"` grants `submit_output`, requires the call, and
+# lets the run end here. No file tools on purpose: this stage reports, it does
+# not work.
+[stages.summary]
+mode = "output"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Say what today's brief covers"
+max_iterations = 4
+system_prompt = """
+Say what this brief covers, for whoever asked for it.
+
+Lead with the one thing they should act on today. Then what changed since the
+last brief. Name the file you wrote.
+
+Keep it to a few sentences - the brief itself is already the short version.
+"""
+
+[stages.summary.transitions]
 
 # ─── Context layout ───────────────────────────────────────────────────────────
 [context.regions]

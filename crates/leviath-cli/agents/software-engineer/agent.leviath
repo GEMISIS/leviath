@@ -1,6 +1,6 @@
 [agent]
 name = "software-engineer"
-version = "0.0.3"
+version = "0.0.4"
 description = "Plan-then-implement agent - mirrors the Claude Code discover→plan→approve→code→review workflow"
 entry_stage = "discover"
 
@@ -448,7 +448,6 @@ max_iterations = 20
 max_revisits = 3
 # Lets the run end here (via "DONE") when the review approves the work,
 # instead of being forced down the only declared edge back to implement.
-allow_complete = true
 transition_prompt = """
 Review complete. Based on your findings:
 - If there are issues that need fixing, respond with: implement
@@ -502,6 +501,9 @@ default_region = "conversation"
 read_file = "codebase"
 list_dir  = "codebase"
 bash      = "test_results"
+
+[stages.review.transitions.summary]
+hint = "The work is done and reviewed"
 
 [stages.review.transitions.implement]
 hint = "Issues found - needs another implementation pass"
@@ -620,6 +622,28 @@ model    = "claude-sonnet-5"
 # ─── Context layout ──────────────────────────────────────────────────────────
 # Budgets are a percentage of the model's context window (issue #100) with an
 # absolute `max_tokens`/`threshold_tokens` guard-rail. Percentages are ceilings.
+
+# ─── Final output ────────────────────────────────────────────────────────────
+# Terminal. `mode = "output"` grants `submit_output`, requires the call, and
+# lets the run end here. No file tools on purpose: this stage reports, it does
+# not work.
+[stages.summary]
+mode = "output"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Say what changed"
+max_iterations = 4
+system_prompt = """
+Say what you changed, for whoever asked for it.
+
+Lead with one sentence on what the change does. Then the files you touched and
+what each one does now, one line each. Then anything they need to know before
+merging: a decision you made, a test you could not run, a loose end you left.
+
+Do not paste the code back. They can read the diff; what they cannot read is
+why you did it this way.
+"""
+
+[stages.summary.transitions]
 
 [context.regions]
 # ── Inputs (pinned, stable, cacheable) ──

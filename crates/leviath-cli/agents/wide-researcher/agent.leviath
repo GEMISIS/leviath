@@ -1,6 +1,6 @@
 [agent]
 name = "wide-researcher"
-version = "0.0.2"
+version = "0.0.3"
 description = "Broad multi-topic survey - cast a wide net, compare approaches, dive on the interesting threads, and produce a landscape overview"
 entry_stage = "survey"
 
@@ -147,8 +147,8 @@ Write concisely - the reader wants the lay of the land quickly. Cite sources for
 non-obvious claims.
 """
 
-# Explicit empty transitions = terminal.
-[stages.summarize.transitions]
+[stages.summarize.transitions.summary]
+hint = "The comparison is written"
 
 # ─── Stage 5: Error recovery ──────────────────────────────────────────────────
 [stages.error_recovery]
@@ -171,6 +171,25 @@ transform = "compact"
 [compaction]
 provider = "anthropic"
 model = "claude-sonnet-5"
+
+# ─── Final output ────────────────────────────────────────────────────────────
+# Terminal. `mode = "output"` grants `submit_output`, requires the call, and
+# lets the run end here. No file tools on purpose: this stage reports, it does
+# not work.
+[stages.summary]
+mode = "output"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Say what the survey found"
+max_iterations = 4
+system_prompt = """
+Say what this survey found, for whoever asked for it.
+
+Lead with the recommendation or the shape of the answer. Then the axes that
+actually separated the options, and where the comparison is weakest. Name the
+file you wrote.
+"""
+
+[stages.summary.transitions]
 
 # ─── Context layout ───────────────────────────────────────────────────────────
 [context.regions]
