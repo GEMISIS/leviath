@@ -84,6 +84,9 @@ pub enum Commands {
     /// List and validate the global Rhai script tools
     Tools(commands::tools::ToolsArgs),
 
+    /// Show what runs without an approval prompt, and why
+    Approvals(commands::approvals::ApprovalsArgs),
+
     /// Manage taint tracking policy rules
     Policy(commands::policy::PolicyArgs),
 
@@ -191,6 +194,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Models(args) => commands::models::execute(args).await,
         Commands::Validate(args) => commands::validate::execute(args).await,
         Commands::Tools(args) => commands::tools::execute(args).await,
+        Commands::Approvals(args) => commands::approvals::execute(args).await,
         Commands::Policy(args) => commands::policy::execute(args).await,
         Commands::Serve(args) => ex.serve(args).await,
         Commands::AgentClient(args) => ex.agent_client(args).await,
@@ -572,6 +576,64 @@ mod tests {
             full: false,
         };
         let result = dispatch(Commands::Context(args), &MockRisky).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn dispatch_approvals_variant_is_routed() {
+        // A temp home means an empty config, so the report is the shipped
+        // defaults and nothing touches the user's own file.
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join("config.toml");
+        let result = temp_env::async_with_vars(
+            [
+                ("LEVIATH_HOME", Some(home.path().to_str().unwrap())),
+                ("LEVIATH_CONFIG_PATH", Some(config.to_str().unwrap())),
+            ],
+            async {
+                // Both spellings: with an agent named, and without, which is
+                // the form that reports only what every agent gets.
+                let args = commands::approvals::ApprovalsArgs {
+                    command: commands::approvals::ApprovalsCommand::Safe(
+                        commands::approvals::SafeArgs {
+                            agent: Some("coder".to_string()),
+                            json: true,
+                        },
+                    ),
+                };
+                dispatch(Commands::Approvals(args), &MockRisky).await
+            },
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    /// A config that will not parse has to surface, not be reported as "these
+    /// are your defaults" - the whole point of the command is telling the user
+    /// what is actually in effect.
+    #[tokio::test]
+    async fn dispatch_approvals_surfaces_a_broken_config() {
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join("config.toml");
+        std::fs::write(&config, "this is not = = toml").unwrap();
+        let result = temp_env::async_with_vars(
+            [
+                ("LEVIATH_HOME", Some(home.path().to_str().unwrap())),
+                ("LEVIATH_CONFIG_PATH", Some(config.to_str().unwrap())),
+            ],
+            async {
+                let args = commands::approvals::ApprovalsArgs {
+                    command: commands::approvals::ApprovalsCommand::Safe(
+                        commands::approvals::SafeArgs {
+                            agent: None,
+                            json: false,
+                        },
+                    ),
+                };
+                dispatch(Commands::Approvals(args), &MockRisky).await
+            },
+        )
+        .await;
         assert!(result.is_err());
     }
 

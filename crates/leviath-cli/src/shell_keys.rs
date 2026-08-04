@@ -108,6 +108,24 @@ pub fn command_keys(command: &str) -> Vec<String> {
     keys.into_iter().collect()
 }
 
+/// The program half of a key, dropping any folded subcommand or argument.
+///
+/// This is what makes a safe-command entry cover a family rather than a single
+/// invocation. A call to `cat notes.md` keys `shell:cat notes.md`, and an entry
+/// of `cat` keys `shell:cat`; without this they would never meet and naming a
+/// program as safe would do nothing for any call that passed it an argument.
+///
+/// The widening is one-directional and deliberate. It applies to entries a user
+/// wrote in their own config, where naming `cat` means every `cat`. A grant made
+/// at a prompt still matches exactly, so approving `git diff` never covers
+/// `git push`.
+pub fn program_of(key: &str) -> &str {
+    match key.split_once(' ') {
+        Some((program, _)) => program,
+        None => key,
+    }
+}
+
 /// Whether `entry` is usable as a `[safe_commands] shell` entry.
 ///
 /// Defined as "derives back to exactly itself", so there is one grammar rather

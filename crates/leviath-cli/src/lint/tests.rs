@@ -642,6 +642,95 @@ fn a_stage_with_an_empty_models_list_is_not_checked_for_reachability() {
     assert!(findings.is_empty(), "{:?}", codes(&findings));
 }
 
+// ─── safe_commands ────────────────────────────────────────────────────────────
+
+fn with_safe_commands(body: &str) -> String {
+    format!("{}\n[safe_commands]\n{body}\n", manifest(CLEAN_STAGE))
+}
+
+/// Declaring `[safe_commands]` is legitimate, so it is a note - but an author
+/// who does not know that declaring is not granting ships a block that does
+/// nothing on every install but their own.
+#[test]
+fn a_safe_commands_block_is_noted_as_needing_a_grant() {
+    let findings = lint(
+        &with_safe_commands("shell = [\"cargo test\"]"),
+        &LintEnv::default(),
+    );
+    assert_eq!(codes(&findings), ["safe-commands-declared"]);
+    assert_eq!(findings[0].severity, LintSeverity::Note);
+    assert!(
+        findings[0].message.contains("Declaring is not granting"),
+        "{findings:?}"
+    );
+    assert!(
+        findings[0]
+            .fix
+            .as_ref()
+            .is_some_and(|f| f.contains("allow_blueprint")),
+        "{findings:?}"
+    );
+}
+
+/// With the answer in hand the note says which it is, and disappears entirely
+/// once the user has opted in.
+#[test]
+fn the_note_reflects_whether_the_install_honours_the_block() {
+    let refused = lint(
+        &with_safe_commands("tools = [\"web_fetch\"]"),
+        &LintEnv {
+            safe_commands_granted: Some(false),
+            ..LintEnv::default()
+        },
+    );
+    assert_eq!(codes(&refused), ["safe-commands-declared"]);
+    assert!(
+        refused[0].message.contains("none of it applies"),
+        "{refused:?}"
+    );
+
+    let honoured = lint(
+        &with_safe_commands("tools = [\"web_fetch\"]"),
+        &LintEnv {
+            safe_commands_granted: Some(true),
+            ..LintEnv::default()
+        },
+    );
+    assert!(honoured.is_empty(), "{:?}", codes(&honoured));
+}
+
+/// An entry the key parser reads as anything other than itself can never match
+/// a call, so it reads as a decision and is not one.
+#[test]
+fn a_safe_command_entry_that_can_never_match_is_an_error() {
+    let findings = lint(
+        &with_safe_commands("shell = [\"ls; curl evil\", \"cargo test\"]"),
+        &LintEnv {
+            safe_commands_granted: Some(true),
+            ..LintEnv::default()
+        },
+    );
+    assert_eq!(codes(&findings), ["unparseable-safe-command"]);
+    assert_eq!(findings[0].severity, LintSeverity::Error);
+    assert!(
+        findings[0].message.contains("ls; curl evil"),
+        "{findings:?}"
+    );
+}
+
+/// An empty block, and no block at all, both say nothing.
+#[test]
+fn no_safe_commands_means_no_finding() {
+    for toml in [
+        manifest(CLEAN_STAGE),
+        with_safe_commands("shell = []\ntools = []"),
+    ] {
+        let found = codes(&lint(&toml, &LintEnv::default()));
+        assert!(!found.contains(&"safe-commands-declared"), "{found:?}");
+        assert!(!found.contains(&"unparseable-safe-command"), "{found:?}");
+    }
+}
+
 // ─── read_paths ───────────────────────────────────────────────────────────────
 
 /// Declaring `[read_paths]` is legitimate, so it is a note rather than a

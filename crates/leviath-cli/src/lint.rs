@@ -149,6 +149,15 @@ pub struct LintEnv {
     /// check only says that a declaration needs granting. `Some(Err(..))` is a
     /// grant list of the user's own that will not compile.
     pub read_paths: Option<Result<crate::read_path_report::GrantReport, String>>,
+
+    /// Whether this install's config honours the blueprint's own
+    /// `[safe_commands]`. `None` means nobody asked (the daemon's offline
+    /// lint), in which case the check only says the declaration needs granting.
+    ///
+    /// A bool rather than a report: unlike read paths, where *which* entries are
+    /// granted is the interesting part, a safe-commands block is honoured whole
+    /// or not at all.
+    pub safe_commands_granted: Option<bool>,
 }
 
 impl LintEnv {
@@ -185,6 +194,7 @@ impl LintEnv {
             known_models: crate::commands::models::closed_catalog_models(),
             available_providers: None,
             read_paths: None,
+            safe_commands_granted: None,
         }
     }
 
@@ -218,6 +228,15 @@ impl LintEnv {
         workdir: &Path,
     ) -> Self {
         self.read_paths = crate::read_path_report::build(blueprint, config, workdir);
+        // Asked here rather than in its own builder: both answers come from the
+        // same config, and a caller that has one always has the other.
+        self.safe_commands_granted = Some(
+            config.security.allow_blueprint_safe_commands
+                || config
+                    .agent_safe_commands
+                    .get(&blueprint.name)
+                    .is_some_and(|a| a.allow_blueprint),
+        );
         self
     }
 }
@@ -245,6 +264,7 @@ pub fn lint_manifest(content: &str, blueprint: &Blueprint, env: &LintEnv) -> Vec
 
     findings.extend(lint_command_seeds(blueprint));
     findings.extend(lint_read_paths(blueprint, env));
+    findings.extend(lint_safe_commands(blueprint, env));
     findings.extend(lint_graph(blueprint));
 
     let agent_permissions = blueprint.agent_tool_permissions();
@@ -608,6 +628,71 @@ fn lint_command_seeds(blueprint: &Blueprint) -> Vec<LintFinding> {
 /// refused with nothing said earlier. When `env` has no answer - the daemon's
 /// offline lint, which has no user config to consult - the note falls back to
 /// stating the rule.
+/// A `[safe_commands]` block: entries that will never match, and whether the
+/// block counts at all on this install.
+fn lint_safe_commands(blueprint: &Blueprint, env: &LintEnv) -> Vec<LintFinding> {
+    let Some(sc) = blueprint.safe_commands.as_ref() else {
+        return Vec::new();
+    };
+    let mut findings = Vec::new();
+
+    // An entry the key parser reads as anything other than itself can never
+    // match a call, so it reads as a decision and is not one. An error rather
+    // than a warning: unlike a permission written under an alias, there is no
+    // spelling of this that does something else useful.
+    for entry in &sc.shell {
+        if !crate::shell_keys::is_valid_prefix(entry) {
+            findings.push(
+                LintFinding::new(
+                    LintSeverity::Error,
+                    "unparseable-safe-command",
+                    format!(
+                        "[safe_commands] shell entry '{entry}' is not a bare command prefix, so \
+                         no call can ever match it"
+                    ),
+                )
+                .with_fix(
+                    "write a program, optionally with the subcommand that narrows it: \
+                     'rg', 'cargo test', 'git status'. No flags, arguments, redirects, \
+                     quotes or chained commands",
+                ),
+            );
+        }
+    }
+
+    // Declaring is not granting, and an author who does not know that ships a
+    // block that does nothing on every install but their own.
+    if !sc.shell.is_empty() || !sc.tools.is_empty() {
+        let message = match env.safe_commands_granted {
+            Some(true) => None,
+            Some(false) => Some(
+                "declares [safe_commands], and your config does not honour blueprint \
+                 safe-commands, so none of it applies"
+                    .to_string(),
+            ),
+            None => Some(
+                "declares [safe_commands]. Declaring is not granting: entries apply only \
+                 where the user opts in"
+                    .to_string(),
+            ),
+        };
+        if let Some(message) = message {
+            findings.push(
+                LintFinding::new(LintSeverity::Note, "safe-commands-declared", message).with_fix(
+                    format!(
+                        "set [agent_safe_commands.{}] allow_blueprint = true in your \
+                         config.toml, or [security] allow_blueprint_safe_commands for every \
+                         agent",
+                        blueprint.name
+                    ),
+                ),
+            );
+        }
+    }
+
+    findings
+}
+
 fn lint_read_paths(blueprint: &Blueprint, env: &LintEnv) -> Vec<LintFinding> {
     let Some(rp) = blueprint
         .read_paths

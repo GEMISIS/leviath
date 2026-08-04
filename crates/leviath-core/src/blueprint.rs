@@ -101,6 +101,36 @@ pub struct Blueprint {
     /// Semantics live in [`crate::read_paths`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_paths: Option<ReadPathsConfig>,
+
+    /// The `[safe_commands]` section: tools and shell command prefixes this
+    /// agent would like to run without an approval prompt.
+    ///
+    /// Declaring is not granting, exactly as for [`Self::read_paths`]: entries
+    /// take effect only when the user opts in, per agent via
+    /// `[agent_safe_commands.<name>] allow_blueprint = true` or globally via
+    /// `[security] allow_blueprint_safe_commands`. Otherwise any agent package
+    /// could pre-approve its own shell with one TOML line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safe_commands: Option<SafeCommandsConfig>,
+}
+
+/// The `[safe_commands]` section of a manifest.
+///
+/// Entry syntax is not checked here. What counts as a usable shell prefix is
+/// defined by the key parser in the CLI (a program, optionally with the
+/// subcommand that narrows it), which this crate does not depend on. A bad
+/// entry is a lint finding and is skipped with a warning at spawn, rather than
+/// a parse error - the same place the check can be written once instead of
+/// twice.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SafeCommandsConfig {
+    /// Tools that need no prompt whatever their arguments.
+    #[serde(default)]
+    pub tools: Vec<String>,
+    /// Shell command prefixes that need no prompt: `"cargo test"`, not
+    /// `"cargo test --lib"` and never `"cargo"`.
+    #[serde(default)]
+    pub shell: Vec<String>,
 }
 
 /// The `[read_paths]` section of a manifest: raw declared entries, compiled
@@ -147,6 +177,7 @@ impl Blueprint {
             sandbox: None,
             dynamic_tools: false,
             read_paths: None,
+            safe_commands: None,
         }
     }
 

@@ -1,5 +1,6 @@
 //! Leviath CLI library - re-exports for integration tests.
 
+pub mod approvals;
 pub mod bundled;
 pub mod commands;
 pub mod config;

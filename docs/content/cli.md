@@ -103,6 +103,7 @@ in three levels: an **error** exits non-zero, a **warning** does not, and a **no
 | Level | Code | What it means |
 |---|---|---|
 | error | `unknown-tool` | A name in `available_tools` matches no built-in, sub-agent tool, or `tools/*.rhai`. The stage silently advertises one tool fewer, so the model is told it does not exist. MCP names (`server__tool`) are skipped, since they resolve only once that server is installed. |
+| error | `unparseable-safe-command` | A `[safe_commands] shell` entry that is not a bare command prefix, so no call can ever match it. Write a program, optionally with the subcommand that narrows it: `rg`, `cargo test`. |
 | error | `orphan-stage-permission` | A `[stages.X.tool_permissions]` key names a tool the stage never granted. It reads as a grant and is not one. |
 | warning | `stage-missing-model` | No `[stages.X.model]` block, so the stage runs on whatever your `default_provider` is. |
 | warning | `stage-missing-mode` | No `mode`, so the stage runs as `autonomous`. |
@@ -116,6 +117,7 @@ in three levels: an **error** exits non-zero, a **warning** does not, and a **no
 | warning | `unreachable-stage`, `cycle-without-max-revisits`, `broad-read-path` | Graph and `[read_paths]` shape. |
 | warning | `read-paths-not-granted` | The blueprint declares `[read_paths]` your `config.toml` does not grant. Declaring is not granting, so those reads are refused; the fix line carries the stanza to add. |
 | warning | `read-paths-grant-invalid` | A `read_paths` grant in your own config will not compile. It is a hard spawn error, named here first. |
+| note | `safe-commands-declared` | The blueprint declares `[safe_commands]`. Declaring is not granting: it applies only where the user opts in, per agent via `[agent_safe_commands.<name>] allow_blueprint` or globally via `[security] allow_blueprint_safe_commands`. |
 | note | `command-seed`, `read-paths-declared` | What the blueprint will do that you should know about before running it. `read-paths-declared` carries the granted/declared counts and each entry's status. |
 
 | Flag | Purpose |
@@ -485,6 +487,20 @@ Transport is inferred from whether you pass `--url` or `--command`.
 | `--json` | Emit the inventory as JSON |
 
 Lists and validates the global [Rhai tool scripts](/docs/rhai-tools) in `~/.leviath/tools/`.
+
+### `lev approvals safe`
+
+Print what runs without an approval prompt, and which file put each entry there. This is the answer
+to "why did it not ask me".
+
+| Flag | Purpose |
+|---|---|
+| `--agent <NAME>` | Include that agent's `[agent_safe_commands.<name>]` entries |
+| `--json` | Emit the inventory as JSON |
+
+There is no `list` or `clear`: nothing is persisted. A grant made at a prompt dies with the run that
+made it, so the only durable state is the config this reports. See
+[Human-in-the-loop](/docs/interaction) for what the entries mean.
 
 ### `lev policy`
 

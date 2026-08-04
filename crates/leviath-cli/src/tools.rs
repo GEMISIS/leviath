@@ -206,7 +206,14 @@ pub(crate) async fn resolve_bearer(
 /// approval.
 pub fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPolicy {
     match tool_name {
-        "read_file" | "list_dir" => ToolPolicy::Allow,
+        "read_file" | "read_files" | "list_dir" => ToolPolicy::Allow,
+        // The context tools write the agent's own context regions, not the
+        // filesystem. They fell through to `Ask` below, so a run that used them
+        // to keep notes paid a prompt per note: 25 of them on the run that
+        // prompted this work, none of which a person could act on.
+        "context_write" | "context_append" | "context_read" | "context_delete" | "context_list" => {
+            ToolPolicy::Allow
+        }
         "write_file" | "edit_file" | "bash" => ToolPolicy::Ask,
         // The sub-agent tools default to `Allow`, and the point of routing them
         // through this function at all is the *config*, not the prompt.
@@ -1255,6 +1262,28 @@ mod policy_tests {
     #[test]
     fn test_default_policy_list_dir_not_builtin_still_allow() {
         assert_eq!(default_tool_policy("list_dir", false), ToolPolicy::Allow);
+    }
+
+    /// The context tools write the agent's own context regions, not the
+    /// filesystem, and they used to fall through to `Ask` - so a run that kept
+    /// notes paid a prompt per note, 25 of them on the run that prompted this
+    /// work.
+    #[test]
+    fn the_context_tools_do_not_prompt() {
+        for tool in [
+            "context_write",
+            "context_append",
+            "context_read",
+            "context_delete",
+            "context_list",
+            "read_files",
+        ] {
+            assert_eq!(
+                default_tool_policy(tool, true),
+                ToolPolicy::Allow,
+                "{tool} must not raise a prompt by default"
+            );
+        }
     }
 
     // ─── resolve_policy: agent-level deny ─────────────────────────────────

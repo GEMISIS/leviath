@@ -273,6 +273,7 @@ fn build_tool_state(
     script_host: Arc<dyn leviath_scripting::ScriptHost>,
     dynamic: Option<Arc<crate::daemon::tool_service::DynamicToolCtx>>,
     unattended: bool,
+    blueprint_safe: Option<&leviath_core::blueprint::SafeCommandsConfig>,
 ) -> Arc<AgentToolState> {
     let entry_perms = stage_perms_by_index
         .get(entry_index)
@@ -287,6 +288,12 @@ fn build_tool_state(
         mcp,
         builtin_names,
         launch_overrides: Arc::new(launch_overrides),
+        safe_keys: Arc::new(
+            config
+                .safe_keys_for_agent(agent_name, blueprint_safe)
+                .into_keys()
+                .collect(),
+        ),
         run_allows: Arc::new(Mutex::new(HashSet::new())),
         stage_allows: Arc::new(StdMutex::new(HashSet::new())),
         stage_allows_index: Arc::new(StdMutex::new(None)),
@@ -980,6 +987,9 @@ fn build_agent_inner(
     // change for the rest of the run. A run that could never write is never
     // reported as having written nothing (issue #192).
     let outcome_flags = leviath_runtime::persistence::RunOutcomeFlags::for_blueprint(&blueprint);
+    // Taken here for the same reason: the tool state is built after the
+    // blueprint has been handed to the world, and this list cannot change.
+    let blueprint_safe = blueprint.safe_commands.clone();
 
     // 6. Spawn the agent.
     let entity = spawn_agent_seeded(
@@ -1182,6 +1192,7 @@ fn build_agent_inner(
         script_host,
         dynamic,
         args.yolo,
+        blueprint_safe.as_ref(),
     );
     tool_service.register(entity, state);
 
