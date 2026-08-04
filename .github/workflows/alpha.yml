@@ -135,6 +135,19 @@ jobs:
     name: Gate
     needs: check-version
     if: needs.check-version.outputs.skip != 'true'
+    # The ceiling for every job inside ci.yml, so it has to cover the widest
+    # scope any of them asks for - even one that will not run from here.
+    # Permissions are settled when the run is created, before a single `if:`
+    # has been evaluated, so `guard-main-rs` requesting `pull-requests: read`
+    # to read its override label off the API failed the WHOLE nightly at
+    # startup with "requesting 'pull-requests: read', but is only allowed
+    # 'pull-requests: none'" - no jobs, no logs, just a dead run. Grant it
+    # here, and note that anything ci.yml adds later has to be granted here
+    # too, because the failure lands on this workflow rather than on the PR
+    # that introduced it.
+    permissions:
+      contents: read
+      pull-requests: read
     uses: ./.github/workflows/ci.yml
     secrets: inherit
 
