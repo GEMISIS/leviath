@@ -4,20 +4,14 @@
   "title": "Leviath agent blueprint (agent.leviath)",
   "description": "The TOML manifest defining a Leviath agent: its stages, the model each one runs on, the tools it may call, and the shape of its context. Written against the parser in crates/leviath-core/src/manifest.rs, and checked against every bundled blueprint by a test in crates/leviath-cli/src/bundled.rs. See https://leviath.dev/docs/agents.",
   "type": "object",
-  "required": [
-    "agent"
-  ],
+  "required": ["agent"],
   "additionalProperties": false,
   "properties": {
-    "agent": {
-      "$ref": "#/$defs/agent"
-    },
+    "agent": { "$ref": "#/$defs/agent" },
     "stages": {
       "type": "object",
       "description": "One entry per stage, keyed by stage name.",
-      "additionalProperties": {
-        "$ref": "#/$defs/stage"
-      }
+      "additionalProperties": { "$ref": "#/$defs/stage" }
     },
     "context": {
       "type": "object",
@@ -26,49 +20,27 @@
         "regions": {
           "type": "object",
           "description": "One entry per context region, keyed by region name.",
-          "additionalProperties": {
-            "$ref": "#/$defs/region"
-          }
+          "additionalProperties": { "$ref": "#/$defs/region" }
         },
         "file_tracking": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "region": {
-              "type": "string",
-              "default": "files"
-            },
-            "track_reads": {
-              "type": "boolean",
-              "default": true
-            },
-            "track_writes": {
-              "type": "boolean",
-              "default": true
-            },
-            "max_file_tokens": {
-              "type": "integer",
-              "minimum": 0
-            }
+            "region": { "type": "string", "default": "files" },
+            "track_reads": { "type": "boolean", "default": true },
+            "track_writes": { "type": "boolean", "default": true },
+            "max_file_tokens": { "type": "integer", "minimum": 0 }
           }
         }
       }
     },
-    "tool_permissions": {
-      "$ref": "#/$defs/toolPermissions"
-    },
+    "tool_permissions": { "$ref": "#/$defs/toolPermissions" },
     "security": {
       "type": "object",
       "description": "Taint tracking for this blueprint. A machine-wide ceiling still applies.",
-      "properties": {
-        "taint_tracking": {
-          "type": "boolean"
-        }
-      }
+      "properties": { "taint_tracking": { "type": "boolean" } }
     },
-    "sandbox": {
-      "$ref": "#/$defs/sandbox"
-    },
+    "sandbox": { "$ref": "#/$defs/sandbox" },
     "read_paths": {
       "type": "object",
       "description": "Paths outside the workdir this agent may read. Inert until the host grants them under [agent_read_paths] in config.toml.",
@@ -109,39 +81,20 @@
       "description": "The model that summarizes a compacting region. Skipped without error when its provider is not registered, so a run on another provider loses compaction rather than failing.",
       "additionalProperties": false,
       "properties": {
-        "provider": {
-          "type": "string"
-        },
-        "model": {
-          "type": "string"
-        },
-        "system_prompt": {
-          "type": "string"
-        },
-        "max_summary_tokens": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "temperature": {
-          "type": "number"
-        }
+        "provider": { "type": "string" },
+        "model": { "type": "string" },
+        "system_prompt": { "type": "string" },
+        "max_summary_tokens": { "type": "integer", "minimum": 1 },
+        "temperature": { "type": "number" }
       }
     },
     "repetition_detection": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "max_repeat_calls": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "max_readonly_streak": {
-          "type": "integer",
-          "minimum": 1
-        }
+        "enabled": { "type": "boolean" },
+        "max_repeat_calls": { "type": "integer", "minimum": 1 },
+        "max_readonly_streak": { "type": "integer", "minimum": 1 }
       }
     },
     "transforms": {
@@ -151,37 +104,18 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "from_blueprint": {
-            "type": "string"
-          },
-          "to_blueprint": {
-            "type": "string"
-          },
+          "from_blueprint": { "type": "string" },
+          "to_blueprint": { "type": "string" },
           "mappings": {
             "type": "array",
             "items": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "from_region": {
-                  "type": "string"
-                },
-                "to_region": {
-                  "type": "string"
-                },
-                "transform": {
-                  "enum": [
-                    "direct",
-                    "summarize",
-                    "extract"
-                  ]
-                },
-                "fields": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                }
+                "from_region": { "type": "string" },
+                "to_region": { "type": "string" },
+                "transform": { "enum": ["direct", "summarize", "extract"] },
+                "fields": { "type": "array", "items": { "type": "string" } }
               }
             }
           }
@@ -194,41 +128,21 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "name": {
-          "type": "string",
-          "default": "unnamed"
-        },
-        "version": {
-          "type": "string",
-          "default": "0.1.0"
-        },
-        "description": {
-          "type": "string",
-          "default": ""
-        },
+        "name": { "type": "string", "default": "unnamed" },
+        "version": { "type": "string", "default": "0.1.0" },
+        "description": { "type": "string", "default": "" },
         "entry_stage": {
           "type": "string",
           "description": "The stage a run starts in. Defaults to the first stage declared."
         },
-        "max_child_depth": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "dynamic_tools": {
-          "type": "boolean",
-          "default": false
-        },
-        "batch_tool_hint": {
-          "type": "boolean"
-        },
-        "shell_hint": {
-          "type": "boolean"
-        },
-        "nudge": {
-          "$ref": "#/$defs/nudge"
-        }
+        "max_child_depth": { "type": "integer", "minimum": 0 },
+        "dynamic_tools": { "type": "boolean", "default": false },
+        "batch_tool_hint": { "type": "boolean" },
+        "shell_hint": { "type": "boolean" },
+        "nudge": { "$ref": "#/$defs/nudge" }
       }
     },
+
     "stage": {
       "type": "object",
       "additionalProperties": false,
@@ -243,99 +157,45 @@
             "fan_out_merge"
           ]
         },
-        "description": {
-          "type": "string"
-        },
-        "system_prompt": {
-          "type": "string"
-        },
-        "transition_prompt": {
-          "type": "string"
-        },
+        "description": { "type": "string" },
+        "system_prompt": { "type": "string" },
+        "transition_prompt": { "type": "string" },
         "available_tools": {
           "type": "array",
           "description": "The only tools the model is offered here. Anything absent is refused at dispatch.",
-          "items": {
-            "type": "string"
-          }
+          "items": { "type": "string" }
         },
         "required_tools": {
           "type": "array",
           "description": "Tools this stage cannot work without. Every entry must also appear in available_tools. Survives an unattended run, where the blocking interaction tools are otherwise withheld.",
-          "items": {
-            "type": "string"
-          }
+          "items": { "type": "string" }
         },
-        "max_iterations": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "max_revisits": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "requires_children": {
-          "type": "boolean",
-          "default": false
-        },
-        "allow_complete": {
-          "type": "boolean",
-          "default": false
-        },
-        "allow_as_worker": {
-          "type": "boolean",
-          "default": false
-        },
-        "accepts_messages": {
-          "type": "boolean",
-          "default": true
-        },
-        "allow_blocking_tools": {
-          "type": "boolean",
-          "default": false
-        },
-        "batch_tool_hint": {
-          "type": "boolean"
-        },
-        "shell_hint": {
-          "type": "boolean"
-        },
-        "model": {
-          "$ref": "#/$defs/modelConfig"
-        },
-        "nudge": {
-          "$ref": "#/$defs/nudge"
-        },
-        "sandbox": {
-          "$ref": "#/$defs/sandbox"
-        },
-        "security": {
-          "type": "object"
-        },
-        "tool_permissions": {
-          "$ref": "#/$defs/toolPermissions"
-        },
+        "max_iterations": { "type": "integer", "minimum": 1 },
+        "max_revisits": { "type": "integer", "minimum": 0 },
+        "requires_children": { "type": "boolean", "default": false },
+        "allow_complete": { "type": "boolean", "default": false },
+        "allow_as_worker": { "type": "boolean", "default": false },
+        "accepts_messages": { "type": "boolean", "default": true },
+        "allow_blocking_tools": { "type": "boolean", "default": false },
+        "batch_tool_hint": { "type": "boolean" },
+        "shell_hint": { "type": "boolean" },
+        "model": { "$ref": "#/$defs/modelConfig" },
+        "nudge": { "$ref": "#/$defs/nudge" },
+        "sandbox": { "$ref": "#/$defs/sandbox" },
+        "security": { "type": "object" },
+        "tool_permissions": { "$ref": "#/$defs/toolPermissions" },
         "tool_routing": {
           "type": "object",
           "description": "Where a tool result lands in context.",
           "additionalProperties": false,
           "properties": {
-            "default_region": {
-              "type": "string"
-            },
-            "persist": {
-              "type": "boolean"
-            },
-            "max_result_tokens": {
-              "type": "integer",
-              "minimum": 1
-            },
+            "default_region": { "type": "string" },
+            "persist": { "type": "boolean" },
+            "max_result_tokens": { "type": "integer", "minimum": 1 },
             "overrides": {
               "type": "object",
               "description": "Tool name to region name.",
-              "additionalProperties": {
-                "type": "string"
-              }
+              "additionalProperties": { "type": "string" }
             }
           }
         },
@@ -345,52 +205,29 @@
           "properties": {
             "regions": {
               "type": "object",
-              "additionalProperties": {
-                "$ref": "#/$defs/region"
-              }
+              "additionalProperties": { "$ref": "#/$defs/region" }
             }
           }
         },
         "transitions": {
           "type": "object",
           "description": "Outgoing edges, keyed by target stage name. An empty table marks a terminal stage.",
-          "additionalProperties": {
-            "$ref": "#/$defs/transition"
-          }
+          "additionalProperties": { "$ref": "#/$defs/transition" }
         },
         "interaction_points": {
           "type": "array",
-          "items": {
-            "$ref": "#/$defs/interactionPoint"
-          }
+          "items": { "$ref": "#/$defs/interactionPoint" }
         },
-        "on_worker_failure": {
-          "enum": [
-            "continue",
-            "abort"
-          ]
-        },
-        "max_workers": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "worker_agent": {
-          "type": "string"
-        },
-        "worker_stage": {
-          "type": "string"
-        },
-        "worker_query": {
-          "type": "string"
-        },
-        "merge_stage": {
-          "type": "string"
-        },
-        "split_prompt": {
-          "type": "string"
-        }
+        "on_worker_failure": { "enum": ["continue", "abort"] },
+        "max_workers": { "type": "integer", "minimum": 1 },
+        "worker_agent": { "type": "string" },
+        "worker_stage": { "type": "string" },
+        "worker_query": { "type": "string" },
+        "merge_stage": { "type": "string" },
+        "split_prompt": { "type": "string" }
       }
     },
+
     "modelConfig": {
       "type": "object",
       "description": "Which model this stage runs on. `models` is an ordered fallback list: the first entry whose provider is registered wins.",
@@ -398,9 +235,7 @@
       "properties": {
         "models": {
           "type": "array",
-          "items": {
-            "$ref": "#/$defs/modelEntry"
-          }
+          "items": { "$ref": "#/$defs/modelEntry" }
         },
         "provider": {
           "type": "string",
@@ -413,19 +248,14 @@
         "fallbacks": {
           "type": "array",
           "description": "Back-compat: folded onto the end of `models`.",
-          "items": {
-            "$ref": "#/$defs/modelEntry"
-          }
+          "items": { "$ref": "#/$defs/modelEntry" }
         },
         "allow_user_default": {
           "type": "boolean",
           "default": true,
           "description": "Whether the host's default model may be used when nothing listed is registered."
         },
-        "request_timeout_secs": {
-          "type": "integer",
-          "minimum": 1
-        },
+        "request_timeout_secs": { "type": "integer", "minimum": 1 },
         "parameters": {
           "type": "object",
           "description": "Passed to the provider verbatim, so the accepted keys are the provider's.",
@@ -433,12 +263,10 @@
         }
       }
     },
+
     "modelEntry": {
       "type": "object",
-      "required": [
-        "provider",
-        "model"
-      ],
+      "required": ["provider", "model"],
       "additionalProperties": false,
       "properties": {
         "provider": {
@@ -451,6 +279,7 @@
         }
       }
     },
+
     "region": {
       "type": "object",
       "description": "One region of the context window. Budgets are ceilings, not allocations, and may sum past 100%.",
@@ -475,70 +304,30 @@
           "pattern": "^[0-9]+(\\.[0-9]+)?%$",
           "description": "A percentage of the window, as a string such as \"35%\"."
         },
-        "max_tokens": {
-          "type": "integer",
-          "minimum": 1,
-          "default": 5000
-        },
-        "min_tokens": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "required": {
-          "type": "boolean",
-          "default": false
-        },
+        "max_tokens": { "type": "integer", "minimum": 1, "default": 5000 },
+        "min_tokens": { "type": "integer", "minimum": 0 },
+        "required": { "type": "boolean", "default": false },
         "required_message": {
           "type": "string",
           "description": "Shown when a required region is empty. `{region}` interpolates."
         },
-        "seed": {
-          "$ref": "#/$defs/regionSeed"
-        },
-        "max_items": {
-          "type": "integer",
-          "minimum": 1,
-          "default": 10
-        },
-        "strategy": {
-          "enum": [
-            "per_item",
-            "bulk",
-            "compact"
-          ]
-        },
-        "overflow": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "compact_count": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "compact_at": {
-          "type": "string",
-          "pattern": "^[0-9]+(\\.[0-9]+)?%$"
-        },
-        "threshold_tokens": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "source_region": {
-          "type": "string"
-        },
-        "max_entries": {
-          "type": "integer",
-          "minimum": 1
-        },
+        "seed": { "$ref": "#/$defs/regionSeed" },
+        "max_items": { "type": "integer", "minimum": 1, "default": 10 },
+        "strategy": { "enum": ["per_item", "bulk", "compact"] },
+        "overflow": { "type": "integer", "minimum": 0 },
+        "compact_count": { "type": "integer", "minimum": 1 },
+        "compact_at": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?%$" },
+        "threshold_tokens": { "type": "integer", "minimum": 1 },
+        "source_region": { "type": "string" },
+        "max_entries": { "type": "integer", "minimum": 1 },
         "script": {
           "type": "string",
           "description": "For `kind = \"custom\"`: the Rhai script under context_hooks/."
         },
-        "persistent": {
-          "type": "boolean"
-        }
+        "persistent": { "type": "boolean" }
       }
     },
+
     "regionSeed": {
       "description": "What fills the region at spawn. The table form is checked key by key in the order below, so the first one present wins.",
       "oneOf": [
@@ -558,9 +347,7 @@
             "files": {
               "type": "array",
               "description": "Concatenated contents of these workdir-relative paths.",
-              "items": {
-                "type": "string"
-              }
+              "items": { "type": "string" }
             },
             "literal": {
               "type": "string",
@@ -582,6 +369,7 @@
         }
       ]
     },
+
     "transition": {
       "type": "object",
       "description": "One outgoing edge. A `hint` with no `condition` implies `llm_choice`.",
@@ -593,49 +381,20 @@
         },
         "condition": {
           "description": "An unrecognised value is a hard parse error.",
-          "enum": [
-            "always",
-            "llm_choice",
-            "error",
-            "max_iterations",
-            "stuck"
-          ]
+          "enum": ["always", "llm_choice", "error", "max_iterations", "stuck"]
         },
         "transform": {
           "description": "What happens to context on this edge. `custom` reads transform_config. Anything else is a hard parse error rather than a silent downgrade to `direct`.",
-          "enum": [
-            "direct",
-            "clear",
-            "compact",
-            "summarize",
-            "custom"
-          ]
+          "enum": ["direct", "clear", "compact", "summarize", "custom"]
         },
         "transform_config": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "carry": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "compact": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "clear": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "compact_prompt": {
-              "type": "string"
-            }
+            "carry": { "type": "array", "items": { "type": "string" } },
+            "compact": { "type": "array", "items": { "type": "string" } },
+            "clear": { "type": "array", "items": { "type": "string" } },
+            "compact_prompt": { "type": "string" }
           }
         },
         "gate": {
@@ -643,110 +402,58 @@
           "description": "A condition the stage must satisfy before this edge may be taken.",
           "additionalProperties": false,
           "properties": {
-            "require_modifications": {
-              "type": "boolean"
-            },
-            "message": {
-              "type": "string"
-            },
-            "region": {
-              "type": "string"
-            },
-            "tools": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "max_attempts": {
-              "type": "integer",
-              "minimum": 1
-            }
+            "require_modifications": { "type": "boolean" },
+            "message": { "type": "string" },
+            "region": { "type": "string" },
+            "tools": { "type": "array", "items": { "type": "string" } },
+            "max_attempts": { "type": "integer", "minimum": 1 }
           }
         },
-        "stuck_after_iterations": {
-          "type": "integer"
-        },
-        "stuck_after_minutes": {
-          "type": "integer"
-        },
-        "stuck_after_same_file_edits": {
-          "type": "integer"
-        },
-        "stuck_after_tool_calls": {
-          "type": "integer"
-        }
+        "stuck_after_iterations": { "type": "integer" },
+        "stuck_after_minutes": { "type": "integer" },
+        "stuck_after_same_file_edits": { "type": "integer" },
+        "stuck_after_tool_calls": { "type": "integer" }
       }
     },
+
     "interactionPoint": {
       "type": "object",
       "description": "A checkpoint the runtime raises at the stage boundary, every time, rather than one the model chooses to raise.",
       "additionalProperties": false,
       "properties": {
-        "name": {
-          "type": "string"
-        },
-        "prompt": {
-          "type": "string"
-        },
-        "required": {
-          "type": "boolean",
-          "default": true
-        },
+        "name": { "type": "string" },
+        "prompt": { "type": "string" },
+        "required": { "type": "boolean", "default": true },
         "unattended": {
           "description": "What a --yolo run does here. `auto_approve` (the default) resolves it without asking. `ask` holds for a person even unattended, and the run then waits for [limits] interaction_timeout_secs.",
-          "enum": [
-            "ask",
-            "auto_approve"
-          ]
+          "enum": ["ask", "auto_approve"]
         },
-        "style": {
-          "enum": [
-            "free_text",
-            "multiple_choice",
-            "confirm"
-          ]
-        },
-        "options": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
+        "style": { "enum": ["free_text", "multiple_choice", "confirm"] },
+        "options": { "type": "array", "items": { "type": "string" } },
         "choices": {
           "type": "array",
           "description": "Alias for `options`.",
-          "items": {
-            "type": "string"
-          }
+          "items": { "type": "string" }
         },
         "directives": {
           "type": "object",
           "description": "Option text to the instruction added when it is picked.",
-          "additionalProperties": {
-            "type": "string"
-          }
+          "additionalProperties": { "type": "string" }
         },
         "followups": {
           "type": "object",
           "description": "Alias for `directives`.",
-          "additionalProperties": {
-            "type": "string"
-          }
+          "additionalProperties": { "type": "string" }
         },
         "abort_options": {
           "type": "array",
           "description": "Options that end the run immediately, with no further inference.",
-          "items": {
-            "type": "string"
-          }
+          "items": { "type": "string" }
         },
         "edit_options": {
           "type": "array",
           "description": "Options that open the document for the user to edit directly.",
-          "items": {
-            "type": "string"
-          }
+          "items": { "type": "string" }
         },
         "document_region": {
           "type": "string",
@@ -754,78 +461,36 @@
         }
       }
     },
+
     "toolPermissions": {
       "type": "object",
       "description": "Tool name to policy. May only tighten the machine-wide ceiling in config.toml, never loosen it. `ask` blocks until answered.",
-      "additionalProperties": {
-        "enum": [
-          "allow",
-          "ask",
-          "deny"
-        ]
-      }
+      "additionalProperties": { "enum": ["allow", "ask", "deny"] }
     },
+
     "sandbox": {
       "type": "object",
       "description": "Where tools execute. An agent and a stage resolve to the stronger of the pair.",
       "additionalProperties": false,
       "properties": {
-        "kind": {
-          "enum": [
-            "none",
-            "namespace",
-            "container"
-          ]
-        },
-        "image": {
-          "type": "string"
-        },
-        "engine": {
-          "enum": [
-            "docker",
-            "podman",
-            "nerdctl",
-            "finch"
-          ]
-        },
-        "network": {
-          "type": "boolean"
-        },
-        "mount": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "mounts": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "persist": {
-          "type": "boolean"
-        },
-        "on_unavailable": {
-          "enum": [
-            "error",
-            "warn"
-          ]
-        }
+        "kind": { "enum": ["none", "namespace", "container"] },
+        "image": { "type": "string" },
+        "engine": { "enum": ["docker", "podman", "nerdctl", "finch"] },
+        "network": { "type": "boolean" },
+        "mount": { "type": "array", "items": { "type": "string" } },
+        "mounts": { "type": "array", "items": { "type": "string" } },
+        "persist": { "type": "boolean" },
+        "on_unavailable": { "enum": ["error", "warn"] }
       }
     },
+
     "nudge": {
       "type": "object",
       "description": "What to say to a stage that has gone quiet. Cascades stage over agent over config.",
       "additionalProperties": false,
       "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "max": {
-          "type": "integer",
-          "minimum": 0
-        },
+        "enabled": { "type": "boolean" },
+        "max": { "type": "integer", "minimum": 0 },
         "text": {
           "type": "string",
           "description": "`{stage}` and `{regions}` interpolate."
