@@ -451,6 +451,19 @@ fn reload_one(
         flags.0 = meta.flags.clone();
     }
 
+    // Put back an answer the run had already submitted. Without this the
+    // component is absent after a reload, and the very next persist tick writes
+    // a `meta.json` with no `final_output` - so a restart would not merely fail
+    // to restore the answer, it would erase the one already on disk. It also
+    // re-arms the required-output gate correctly: a stage that submitted before
+    // the restart is not asked to do it again.
+    if let Some(output) = meta.final_output.clone() {
+        world
+            .world_mut()
+            .entity_mut(entity)
+            .insert(leviath_runtime::persistence::FinalOutput(output));
+    }
+
     // If this run was parked at a stage-boundary interaction point (e.g.
     // plan_approval), re-present it in the *waiting* state rather than the default
     // `Active` + `ReadyToInfer` restore - so the open prompt survives the restart
@@ -615,8 +628,19 @@ mod tests {
             },
             yolo: false,
             read_paths: None,
-            final_output: None,
-            output_request: None,
+            // Non-default on purpose, like `flags` above: proves a reload puts
+            // the run's answer back rather than dropping it (and then erasing
+            // the copy already on disk at the next persist tick).
+            final_output: Some(leviath_core::output::FinalOutput::new(
+                "already answered",
+                Some("markdown".to_string()),
+                "implement".to_string(),
+                777,
+            )),
+            output_request: Some(leviath_core::output::OutputSpec {
+                format: Some("a2ui".to_string()),
+                ..Default::default()
+            }),
         };
         std::fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
         if let Some(ctx) = context {
@@ -895,6 +919,21 @@ mod tests {
         // Including the capability answer, which the blueprint on disk would
         // now compute differently - the run is judged as it ran (issue #192).
         assert!(flags.0.no_output_tools);
+        // The answer the run had already given is put back on the entity. Were
+        // it not, the next persist tick would write a meta.json without it and
+        // erase the copy already on disk.
+        let output = world
+            .world()
+            .get::<leviath_runtime::persistence::FinalOutput>(*entity)
+            .expect("a submitted answer survives the restart");
+        assert_eq!(output.0.content, "already answered");
+        assert_eq!(output.0.stage, "implement");
+        // As does the shape the caller asked for at launch, so the resumed run
+        // does not silently revert to the blueprint's partway through.
+        assert_eq!(
+            md.output_request.as_ref().and_then(|s| s.format.as_deref()),
+            Some("a2ui")
+        );
     }
 
     /// Fresh + stale differ on every observable field, so the assertions below
