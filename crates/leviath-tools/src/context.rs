@@ -82,6 +82,40 @@ pub fn canonical_tool_name(name: &str) -> &str {
     name
 }
 
+/// Every name that refers to the same tool as `name`: the name itself, its
+/// canonical form, and every alias of that canonical form.
+///
+/// For matching a tool against something a *person* wrote, rather than against
+/// a tool definition. [`canonical_tool_name`] is enough when the written name is
+/// the one being resolved, but not when it is the key of a map being searched: a
+/// call the model makes is always canonical (`shell`), so looking up only
+/// `shell` and its canonical form never finds a `bash` entry, however many
+/// spellings the writer had to choose from.
+///
+/// The first item is always `name`, so a caller that stops at the first hit
+/// prefers the exact spelling.
+pub fn tool_name_spellings(name: &str) -> impl Iterator<Item = &str> {
+    let canonical = canonical_tool_name(name);
+    std::iter::once(name)
+        .chain(std::iter::once(canonical))
+        .chain(
+            TOOL_ALIASES
+                .iter()
+                .filter(move |(_, c)| *c == canonical)
+                .map(|(alias, _)| *alias),
+        )
+        .filter({
+            let mut seen: Vec<&str> = Vec::new();
+            move |s| match seen.contains(s) {
+                true => false,
+                false => {
+                    seen.push(s);
+                    true
+                }
+            }
+        })
+}
+
 /// Redirects shell command execution off the host into a sandbox.
 ///
 /// The default (no executor) runs the command directly on the host - the exact

@@ -522,69 +522,40 @@ fn lint_tool_policies(
     stage: &leviath_core::Stage,
     agent_permissions: &HashMap<String, String>,
 ) -> Vec<LintFinding> {
+    // Either spelling counts, because policy resolution accepts either: a stage
+    // granting `bash` is covered by a `shell` permission and the reverse. This
+    // used to warn about the mismatch, back when only the name as called was
+    // looked up and every entry written under an alias was dead.
     let has_policy = |name: &str| {
-        stage.tool_permissions.contains_key(name) || agent_permissions.contains_key(name)
+        leviath_tools::tool_name_spellings(name)
+            .any(|n| stage.tool_permissions.contains_key(n) || agent_permissions.contains_key(n))
     };
 
     stage
         .available_tools
         .iter()
         .filter(|t| !has_policy(t))
-        .filter_map(|tool| {
-            match alias_siblings(tool).into_iter().find(|s| has_policy(s)) {
-                Some(other) => Some(
-                    LintFinding::new(
-                        LintSeverity::Warning,
-                        "permission-name-mismatch",
-                        format!(
-                            "grants '{tool}' but its permission is written for \
-                             '{other}'. Policy is matched on the name the model \
-                             calls, which is '{tool}', so that entry has no effect"
-                        ),
-                    )
-                    .in_stage(&stage.name)
-                    .with_fix(format!("rename the permission key '{other}' to '{tool}'")),
+        // Only worth saying for the shell, whose default is `ask` - and an `ask`
+        // with nobody to answer waits rather than denying, so an unattended run
+        // hangs on the first command instead of failing it.
+        .filter(|t| canonical_tool_name(t) == "shell")
+        .map(|tool| {
+            LintFinding::new(
+                LintSeverity::Warning,
+                "implicit-shell-policy",
+                format!(
+                    "grants '{tool}' with no permission set for it, so it \
+                     defaults to ask - and an unattended run waits on that \
+                     prompt rather than being denied"
                 ),
-                // No policy under any spelling. Only worth saying for the shell,
-                // whose default is `ask` - and an `ask` with nobody to answer
-                // waits rather than denying, so an unattended run hangs on the
-                // first command instead of failing it.
-                None if canonical_tool_name(tool) == "shell" => Some(
-                    LintFinding::new(
-                        LintSeverity::Warning,
-                        "implicit-shell-policy",
-                        format!(
-                            "grants '{tool}' with no permission set for it, so it \
-                             defaults to ask - and an unattended run waits on that \
-                             prompt rather than being denied"
-                        ),
-                    )
-                    .in_stage(&stage.name)
-                    .with_fix(format!(
-                        "set {tool} = \"allow\" or \"deny\" in [tool_permissions] or \
-                         [stages.{}.tool_permissions]",
-                        stage.name
-                    )),
-                ),
-                None => None,
-            }
+            )
+            .in_stage(&stage.name)
+            .with_fix(format!(
+                "set {tool} = \"allow\" or \"deny\" in [tool_permissions] or \
+                 [stages.{}.tool_permissions]",
+                stage.name
+            ))
         })
-        .collect()
-}
-
-/// Every other name for the same built-in tool: the canonical name when `name`
-/// is an alias, plus every alias of it. Never includes `name` itself.
-fn alias_siblings(name: &str) -> Vec<String> {
-    let canonical = canonical_tool_name(name);
-    std::iter::once(canonical)
-        .chain(
-            leviath_tools::TOOL_ALIASES
-                .iter()
-                .filter(|(_, c)| *c == canonical)
-                .map(|(alias, _)| *alias),
-        )
-        .filter(|s| *s != name)
-        .map(str::to_string)
         .collect()
 }
 
@@ -626,17 +597,6 @@ fn lint_command_seeds(blueprint: &Blueprint) -> Vec<LintFinding> {
     ]
 }
 
-/// `[read_paths]` declarations: what the agent asks to read beyond its workdir,
-/// whether this machine's config actually grants each entry, and a sharper
-/// warning for an entry so broad it amounts to "my whole home directory" or
-/// "any absolute path".
-///
-/// The grant status is the point (issue #209). A declaration is inert on its
-/// own, and before this it took reading the config schema to find that out: the
-/// blueprint validated, the run spawned, and the first out-of-workdir read was
-/// refused with nothing said earlier. When `env` has no answer - the daemon's
-/// offline lint, which has no user config to consult - the note falls back to
-/// stating the rule.
 /// Checkpoints that hold a `--yolo` run for a person.
 ///
 /// A note, not a warning: this is the blueprint working as written. It is worth
@@ -736,6 +696,17 @@ fn lint_safe_commands(blueprint: &Blueprint, env: &LintEnv) -> Vec<LintFinding> 
     findings
 }
 
+/// `[read_paths]` declarations: what the agent asks to read beyond its workdir,
+/// whether this machine's config actually grants each entry, and a sharper
+/// warning for an entry so broad it amounts to "my whole home directory" or
+/// "any absolute path".
+///
+/// The grant status is the point (issue #209). A declaration is inert on its
+/// own, and before this it took reading the config schema to find that out: the
+/// blueprint validated, the run spawned, and the first out-of-workdir read was
+/// refused with nothing said earlier. When `env` has no answer - the daemon's
+/// offline lint, which has no user config to consult - the note falls back to
+/// stating the rule.
 fn lint_read_paths(blueprint: &Blueprint, env: &LintEnv) -> Vec<LintFinding> {
     let Some(rp) = blueprint
         .read_paths

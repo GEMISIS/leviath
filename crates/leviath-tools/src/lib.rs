@@ -310,6 +310,21 @@ mod tests {
         assert!(names.contains(&"shell".to_string()));
     }
 
+    /// Policy is matched against the name the model calls, which is always
+    /// canonical, while the writer of a config may have picked either spelling.
+    /// Both have to find each other, or a `bash` entry is dead.
+    #[test]
+    fn tool_name_spellings_covers_both_directions_without_repeating() {
+        fn of(n: &str) -> Vec<&str> {
+            tool_name_spellings(n).collect()
+        }
+        assert_eq!(of("shell"), ["shell", "bash"]);
+        assert_eq!(of("bash"), ["bash", "shell"]);
+        // A name with no alias yields itself once, not twice.
+        assert_eq!(of("read_file"), ["read_file"]);
+        assert_eq!(of("linear__search"), ["linear__search"]);
+    }
+
     #[test]
     fn canonical_tool_name_resolves_aliases_and_passes_others_through() {
         // An alias resolves to its canonical name.

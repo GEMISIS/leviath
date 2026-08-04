@@ -45,6 +45,14 @@ same list.
   the run starts, and `lev validate` reports them as `holds-under-yolo`.
   `--yolo` waives approvals, not checkpoints, and a run that stops anyway used
   to be indistinguishable from a hang.
+- Fixed: a tool permission written under an alias never matched. Policy is
+  resolved against the name the model calls, which is always the canonical
+  `shell`, so `[tool_permissions] bash = "allow"` granted nothing and
+  `lev run --allow bash` did nothing at all. Every layer now accepts either
+  spelling. The shipped `software-engineer` writes `bash = "ask"`, which had
+  only ever behaved as intended because the built-in default for an unlisted
+  tool is also `ask`. The `permission-name-mismatch` lint is gone with the
+  problem it described.
 - New: `lev approvals safe` prints what runs without an approval prompt and
   which file put each entry there.
 - Fixed: a bundled blueprint installed at the bundled version read as up to date

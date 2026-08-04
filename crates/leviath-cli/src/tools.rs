@@ -205,7 +205,9 @@ pub(crate) async fn resolve_bearer(
 /// human-in-the-loop tools are always allowed, and anything else requires
 /// approval.
 pub fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPolicy {
-    match tool_name {
+    // Matched on the canonical name, so the `shell` arm covers a call named
+    // `bash` and vice versa.
+    match leviath_tools::canonical_tool_name(tool_name) {
         "read_file" | "read_files" | "list_dir" => ToolPolicy::Allow,
         // The context tools write the agent's own context regions, not the
         // filesystem. They fell through to `Ask` below, so a run that used them
@@ -214,7 +216,7 @@ pub fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPolicy {
         "context_write" | "context_append" | "context_read" | "context_delete" | "context_list" => {
             ToolPolicy::Allow
         }
-        "write_file" | "edit_file" | "bash" => ToolPolicy::Ask,
+        "write_file" | "edit_file" | "shell" => ToolPolicy::Ask,
         // The sub-agent tools default to `Allow`, and the point of routing them
         // through this function at all is the *config*, not the prompt.
         //
@@ -300,12 +302,11 @@ pub fn resolve_policy(
     agent_permissions: &HashMap<String, String>,
     global_permissions: &HashMap<String, ToolPolicy>,
 ) -> ToolPolicy {
-    let ceiling = global_permissions.get(tool_name).copied();
+    let ceiling = by_any_spelling(global_permissions, tool_name).copied();
 
     // Blueprint layers: stage over agent, each clamped by the user's ceiling.
-    let blueprint = stage_permissions
-        .get(tool_name)
-        .or_else(|| agent_permissions.get(tool_name))
+    let blueprint = by_any_spelling(stage_permissions, tool_name)
+        .or_else(|| by_any_spelling(agent_permissions, tool_name))
         .map(|s| parse_policy_str(s));
 
     let configured = match (blueprint, ceiling) {
@@ -320,8 +321,7 @@ pub fn resolve_policy(
         return ToolPolicy::Deny;
     }
 
-    launch_overrides
-        .get(tool_name)
+    by_any_spelling(launch_overrides, tool_name)
         .or_else(|| launch_overrides.get("*"))
         .copied()
         .unwrap_or(configured)
@@ -348,6 +348,20 @@ pub fn session_approval_keys(tool_name: &str, arguments: &serde_json::Value) -> 
         return Vec::new();
     };
     crate::shell_keys::command_keys(command)
+}
+
+/// Look a tool up in a permission map under any name that refers to it.
+///
+/// Policy is matched against the name the *model* calls, which is always the
+/// canonical one (`shell`), while a manifest, a config file, or a `--allow` flag
+/// may write an alias (`bash`). Matching only the name as called meant every
+/// `bash` entry was dead: `[tool_permissions] bash = "allow"` granted nothing
+/// and `lev run --allow bash` did nothing, because neither key was ever asked
+/// for. The shipped `software-engineer` writes `bash = "ask"`, which only
+/// behaved as intended because the built-in default for an unlisted tool is
+/// also `ask`.
+fn by_any_spelling<'a, V>(map: &'a HashMap<String, V>, tool_name: &str) -> Option<&'a V> {
+    leviath_tools::tool_name_spellings(tool_name).find_map(|name| map.get(name))
 }
 
 fn parse_policy_str(s: &str) -> ToolPolicy {
@@ -1262,6 +1276,58 @@ mod policy_tests {
     #[test]
     fn test_default_policy_list_dir_not_builtin_still_allow() {
         assert_eq!(default_tool_policy("list_dir", false), ToolPolicy::Allow);
+    }
+
+    /// Policy is matched against the name the model calls, which is always the
+    /// canonical `shell`, while a manifest, a config, or a `--allow` flag may
+    /// have written `bash`. Every one of those entries used to be dead:
+    /// `lev run --allow bash` did nothing at all, and `bash = "ask"` in the
+    /// shipped `software-engineer` only behaved as intended because the default
+    /// for an unlisted tool is also `ask`.
+    #[test]
+    fn a_permission_written_as_an_alias_reaches_the_tool() {
+        let policy = |layer: &str, spelling: &str, called: &str| {
+            let mut launch = HashMap::new();
+            let mut stage = HashMap::new();
+            let mut agent = HashMap::new();
+            let mut global = HashMap::new();
+            match layer {
+                "launch" => {
+                    launch.insert(spelling.to_string(), ToolPolicy::Allow);
+                }
+                "stage" => {
+                    stage.insert(spelling.to_string(), "deny".to_string());
+                }
+                "agent" => {
+                    agent.insert(spelling.to_string(), "deny".to_string());
+                }
+                _ => {
+                    global.insert(spelling.to_string(), ToolPolicy::Deny);
+                }
+            }
+            resolve_policy(called, true, &launch, &stage, &agent, &global)
+        };
+
+        // Written as the alias, called canonically: the shape every real run has.
+        assert_eq!(policy("launch", "bash", "shell"), ToolPolicy::Allow);
+        assert_eq!(policy("stage", "bash", "shell"), ToolPolicy::Deny);
+        assert_eq!(policy("agent", "bash", "shell"), ToolPolicy::Deny);
+        assert_eq!(policy("global", "bash", "shell"), ToolPolicy::Deny);
+
+        // And the reverse, so neither spelling is the privileged one.
+        assert_eq!(policy("launch", "shell", "bash"), ToolPolicy::Allow);
+        assert_eq!(policy("global", "shell", "bash"), ToolPolicy::Deny);
+
+        // A tool with no alias is unaffected: nothing else starts matching.
+        assert_eq!(policy("global", "read_file", "write_file"), ToolPolicy::Ask);
+    }
+
+    /// The built-in default is matched canonically too, so the shell's `ask`
+    /// applies however the call was spelled.
+    #[test]
+    fn the_default_shell_policy_covers_both_spellings() {
+        assert_eq!(default_tool_policy("shell", true), ToolPolicy::Ask);
+        assert_eq!(default_tool_policy("bash", true), ToolPolicy::Ask);
     }
 
     /// The context tools write the agent's own context regions, not the
