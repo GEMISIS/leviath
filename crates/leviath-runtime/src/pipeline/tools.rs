@@ -345,6 +345,9 @@ pub fn dispatch_tools(
         // as `[blocked]`, or (interactive) held for a user gate prompt.
         let mut context_results = Vec::new();
         let mut lane_calls = Vec::new();
+        // A final output submitted in this batch, committed to the entity after
+        // the loop (the loop holds borrows `commands` would conflict with).
+        let mut submitted: Option<leviath_core::output::FinalOutput> = None;
         // (tool_id, name, taint, clearance) for blocked calls awaiting a prompt.
         let mut pending_prompts: Vec<(
             String,
@@ -389,6 +392,26 @@ pub fn dispatch_tools(
             if crate::context_tools::is_context_tool(&c.name) {
                 let text =
                     crate::context_tools::handle_context_tool(&c.name, &c.arguments, &mut window);
+                context_results.push((c.tool_id.clone(), text));
+                continue;
+            }
+            // Applied inline for the same reason the context tools are: it
+            // writes the live window and an ECS component, neither of which the
+            // async lane can reach. Recorded here and committed after the loop,
+            // because `commands` cannot be borrowed inside it.
+            if crate::output_tool::is_output_tool(&c.name) {
+                let (text, output) = crate::output_tool::handle_output_tool(
+                    &c.arguments,
+                    stage_inf.output.as_ref(),
+                    &state.current_stage,
+                    chrono::Utc::now().timestamp(),
+                    &mut window,
+                );
+                // A refused submission leaves any earlier one alone: a bad
+                // correction must not erase a good answer.
+                if let Some(output) = output {
+                    submitted = Some(output);
+                }
                 context_results.push((c.tool_id.clone(), text));
                 continue;
             }
@@ -458,6 +481,17 @@ pub fn dispatch_tools(
                 arguments: c.arguments.clone(),
                 thought_signature: c.thought_signature.clone(),
             });
+        }
+
+        // Commit a submitted output before any of the paths below can take an
+        // early exit, so an answer is recorded whether the rest of the batch
+        // dispatches, holds for a gate prompt, or turns out to be empty.
+        // Re-applying it on a gate-prompt re-run is harmless: the same
+        // submission produces the same component.
+        if let Some(output) = submitted {
+            commands
+                .entity(entity)
+                .insert(crate::persistence::FinalOutput(output));
         }
 
         // Hold the batch and ask the user about each blocked call.

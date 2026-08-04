@@ -78,6 +78,7 @@ pub(super) async fn spawn_agent(
         yolo: body.yolo,
         no_seed_commands: body.no_seed_commands,
         allow: body.allow.clone(),
+        output: None,
         max_depth: body.max_depth,
         // Serve spawns are top-level runs.
         parent_run_id: None,

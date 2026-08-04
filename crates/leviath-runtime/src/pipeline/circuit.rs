@@ -394,6 +394,7 @@ mod tests {
                     leviath_core::blueprint::ModelEntry::new((*p).to_string(), format!("{p}-model"))
                 })
                 .collect(),
+            output: None,
         }
     }
 

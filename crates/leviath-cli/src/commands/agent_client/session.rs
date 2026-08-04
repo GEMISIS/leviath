@@ -77,6 +77,9 @@ pub(super) fn spawn_args(
         allow: args.allow.clone(),
         max_depth: args.max_depth,
         parent_run_id: None,
+        // The ACP client has no way to ask for a shape, so the blueprint's own
+        // declaration stands.
+        output: None,
     }
 }
 

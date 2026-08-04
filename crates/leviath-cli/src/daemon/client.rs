@@ -138,6 +138,7 @@ pub fn resolve_spawn_args(
     max_depth: Option<usize>,
     regions: HashMap<String, String>,
     no_seed_commands: bool,
+    output_request: Option<leviath_core::output::OutputSpec>,
 ) -> anyhow::Result<SpawnArgs> {
     let source = load_agent_source(path)?;
     let resolved_regions = resolve_regions(&source.blueprint, regions)?;
@@ -164,6 +165,7 @@ pub fn resolve_spawn_args(
         max_depth,
         // A top-level run (sub-agents/fan-out set this on the host side).
         parent_run_id: None,
+        output: output_request,
     })
 }
 
@@ -368,6 +370,7 @@ mod tests {
             None,
             HashMap::new(),
             false,
+            None,
         )
         .unwrap();
         assert!(args.run_id.contains("my-agent"));
@@ -425,6 +428,7 @@ mod tests {
             None,
             HashMap::new(),
             false,
+            None,
         )
         .unwrap();
         assert!(
@@ -449,6 +453,7 @@ mod tests {
                 None,
                 HashMap::new(),
                 false,
+                None,
             )
             .is_err()
         );
@@ -476,6 +481,7 @@ mod tests {
             None,
             HashMap::new(),
             false,
+            None,
         )
         .unwrap();
         assert_eq!(args.task, "summarize the README");
@@ -501,6 +507,7 @@ mod tests {
             None,
             HashMap::new(),
             false,
+            None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("No task provided"), "got: {err}");
@@ -525,6 +532,7 @@ mod tests {
             None,
             regions,
             false,
+            None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("unknown region"), "got: {err}");
@@ -579,6 +587,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             None,
             regions,
             false,
+            None,
         )
         .unwrap();
         // `@path` was read and trimmed.
@@ -626,6 +635,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             None,
             regions,
             false,
+            None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("(none)"), "got: {err}");
@@ -650,6 +660,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             None,
             regions,
             false,
+            None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("read manifest"), "got: {err}");
@@ -677,6 +688,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             None,
             regions,
             false,
+            None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("parse manifest"), "got: {err}");
@@ -700,6 +712,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             None,
             regions,
             false,
+            None,
         )
         .unwrap_err();
         assert!(
@@ -724,6 +737,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             None,
             regions,
             false,
+            None,
         )
         .unwrap_err();
         assert!(

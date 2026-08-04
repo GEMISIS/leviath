@@ -508,6 +508,7 @@ async fn spawn_and_wait(
         None,
         std::collections::HashMap::new(),
         false,
+        None,
     );
     let args = match args {
         Ok(args) => args,

@@ -620,6 +620,7 @@ mod tests {
                 allow: Vec::new(),
                 max_depth: None,
                 parent_run_id: None,
+                output: None,
             }),
             reply,
         });
@@ -1207,6 +1208,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
                     allow: Vec::new(),
                     max_depth: None,
                     parent_run_id: None,
+                    output: None,
                 }),
                 reply,
             })
@@ -1284,6 +1286,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
                 allow: Vec::new(),
                 max_depth: None,
                 parent_run_id: None,
+                output: None,
             }),
             reply,
         });
@@ -1343,6 +1346,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
             yolo: false,
             read_paths: None,
             final_output: None,
+            output_request: None,
         };
         std::fs::write(
             run_dir.join("meta.json"),
@@ -1441,6 +1445,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
             yolo: false,
             read_paths: None,
             final_output: None,
+            output_request: None,
         };
         std::fs::write(
             run_dir.join("meta.json"),

@@ -58,10 +58,6 @@ pub enum ArgValidation {
 /// object when a model omits tool input entirely, and a null reaching here
 /// means the same "no arguments" - not a JSON null argument object.
 pub fn validate_tool_args(tool_name: &str, schema: &Value, args: &Value) -> ArgValidation {
-    let validator = match jsonschema::validator_for(schema) {
-        Ok(v) => v,
-        Err(e) => return ArgValidation::SchemaUnusable(e.to_string()),
-    };
     let empty_object;
     let instance = match args.is_null() {
         true => {
@@ -69,6 +65,59 @@ pub fn validate_tool_args(tool_name: &str, schema: &Value, args: &Value) -> ArgV
             &empty_object
         }
         false => args,
+    };
+    check(
+        schema,
+        instance,
+        &format!("invalid arguments for '{tool_name}'"),
+    )
+}
+
+/// Validate a submitted final output against the schema its blueprint declared.
+///
+/// **This is the only thing in the framework that looks inside a final
+/// output**, and it runs only when an author supplied a schema. A format label
+/// never triggers it: `format = "json"` on its own validates nothing, which is
+/// what keeps the engine free of per-format behavior.
+///
+/// `content` is the agent's submission verbatim. Because a schema means the
+/// author wants JSON, content that will not parse as JSON is a violation in its
+/// own right, reported the same way so the model can correct itself on the next
+/// turn.
+pub fn validate_output(schema: &Value, content: &str) -> ArgValidation {
+    // Compile before parsing. A schema that will not compile means "no check at
+    // all", and that has to include the JSON requirement: demanding JSON on the
+    // strength of a schema too broken to say anything would reject a perfectly
+    // good answer over the author's typo.
+    if let Err(e) = jsonschema::validator_for(schema) {
+        return ArgValidation::SchemaUnusable(e.to_string());
+    }
+    let instance = match serde_json::from_str::<Value>(content) {
+        Ok(v) => v,
+        Err(e) => {
+            let rendered = e.to_string();
+            let message = leviath_core::truncate_at_boundary(&rendered, MAX_ERROR_LEN);
+            return ArgValidation::Invalid(format!(
+                "[error] final output does not match the declared schema: it is not valid JSON \
+                 ({message})"
+            ));
+        }
+    };
+    check(
+        schema,
+        &instance,
+        "final output does not match the declared schema",
+    )
+}
+
+/// Compile `schema`, check `instance`, and render any violations under
+/// `subject`. Shared so an output refusal and an argument refusal cap, truncate,
+/// and summarise identically, and so an uncompilable schema means "skip the
+/// check" in both places rather than only one.
+fn check(schema: &Value, instance: &Value, subject: &str) -> ArgValidation {
+    let validator = match jsonschema::validator_for(schema) {
+        Ok(v) => v,
+        Err(e) => return ArgValidation::SchemaUnusable(e.to_string()),
     };
     let violations: Vec<String> = validator.iter_errors(instance).map(render_error).collect();
     if violations.is_empty() {
@@ -84,9 +133,7 @@ pub fn validate_tool_args(tool_name: &str, schema: &Value, args: &Value) -> ArgV
         true => format!("; (and {} more)", violations.len() - MAX_REPORTED_ERRORS),
         false => String::new(),
     };
-    ArgValidation::Invalid(format!(
-        "[error] invalid arguments for '{tool_name}': {reported}{suffix}"
-    ))
+    ArgValidation::Invalid(format!("[error] {subject}: {reported}{suffix}"))
 }
 
 /// One violation as the model will read it: the validator's own message,

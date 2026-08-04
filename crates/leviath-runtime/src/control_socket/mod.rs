@@ -1043,6 +1043,7 @@ mod tests {
                 allow: Vec::new(),
                 max_depth: None,
                 parent_run_id: None,
+                output: None,
             }),
         })
         .await;

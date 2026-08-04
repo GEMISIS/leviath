@@ -31,6 +31,28 @@ pub(crate) fn shell_tool_description(shell: &str) -> String {
     )
 }
 
+/// The `submit_output` tool's description, built from the output shape resolved
+/// for the stage rather than fixed at compile time.
+///
+/// This is the whole mechanism by which an arbitrary format works. There is no
+/// per-format code anywhere in the engine; what makes a model produce a2ui, or a
+/// house schema, or a format invented after this function was written, is that
+/// the format label, the author's instructions, and a literal example all arrive
+/// here and go straight to the model. `described` is
+/// [`leviath_core::describe_spec`]'s rendering of the resolved spec, and is
+/// empty when nothing was declared.
+pub fn submit_output_description(described: &str) -> String {
+    let base = "Submit your final answer for this run. This is the value the caller receives - a \
+                person reading the run, a parent agent, the API. Nothing else you write is \
+                returned to them, so put the answer itself here rather than a pointer to it. \
+                Call this once, when your work is done; calling it again replaces what you \
+                submitted.";
+    match described.is_empty() {
+        true => base.to_string(),
+        false => format!("{base}\n\n{described}"),
+    }
+}
+
 /// [`shell_tool_description`] for the resolved shell, computed once.
 ///
 /// `detect_shell` reads `$SHELL` and probes the filesystem on Unix, and
@@ -320,6 +342,23 @@ impl BuiltinTools {
                     "required": []
                 }),
             },
+            Tool {
+                // The shape lives in the description, not the arguments, so
+                // that a stage asking for a2ui and one asking for markdown
+                // advertise the same schema. Nothing here parses `content`.
+                name: crate::SUBMIT_OUTPUT_TOOL.to_string(),
+                description: submit_output_description(""),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "description": "Your final answer, in full."
+                        }
+                    },
+                    "required": ["content"]
+                }),
+            },
         ];
         defs.retain(|t| self.available(&t.name));
         defs
@@ -463,6 +502,7 @@ impl BuiltinTools {
             "context_read",
             "context_delete",
             "context_list",
+            crate::SUBMIT_OUTPUT_TOOL,
         ]
         .iter()
         // Drop any canonical built-in the current platform can't provide, so a

@@ -241,6 +241,30 @@ pub fn filter_tools_for_stage(
     tools
 }
 
+/// Rewrite the `submit_output` definition in `tools` to describe the shape this
+/// stage is meant to produce.
+///
+/// This is the entire mechanism for arbitrary output formats. There is no
+/// per-format code path anywhere: what makes a model emit a2ui, a house schema,
+/// or something invented after this was written is that the format label, the
+/// author's instructions, and a literal example are pasted into the description
+/// the model reads. A stage that declares nothing keeps the generic wording.
+///
+/// A no-op when the stage does not offer the tool, which is most stages.
+fn apply_output_shape(tools: &mut [Tool], spec: Option<&leviath_core::output::OutputSpec>) {
+    let Some(spec) = spec else { return };
+    let described = leviath_core::describe_spec(spec);
+    if described.is_empty() {
+        return;
+    }
+    for tool in tools
+        .iter_mut()
+        .filter(|t| t.name == leviath_tools::SUBMIT_OUTPUT_TOOL)
+    {
+        tool.description = leviath_tools::submit_output_description(&described);
+    }
+}
+
 /// Every provider a stage could have used, in the order they were tried, for
 /// the error message when none of them is configured.
 ///
@@ -292,6 +316,11 @@ pub fn providers_tried(
 /// `unattended` is the run's `--yolo` setting: it decides whether a stage's
 /// human-in-the-loop tools are advertised at all (see
 /// [`filter_tools_for_stage`]).
+///
+/// `output_request` is the shape whoever launched the run asked for, if any. It
+/// is resolved here, alongside the model and tool choices, because this is the
+/// one place that can see all three levels at once - and because a caller's
+/// request only exists at launch.
 pub fn resolve_stages(
     blueprint: &Blueprint,
     model_override: Option<&str>,
@@ -299,6 +328,7 @@ pub fn resolve_stages(
     registry: &ProviderRegistry,
     all_tool_defs: &[Tool],
     unattended: bool,
+    output_request: Option<&leviath_core::output::OutputSpec>,
 ) -> Result<Vec<ResolvedStage>, String> {
     blueprint
         .stages
@@ -322,17 +352,24 @@ pub fn resolve_stages(
             // set by name (alias-resolved). A name matching nothing (a typo, or an
             // MCP tool whose server isn't installed) is simply omitted. An
             // unattended run also loses the tools that block on a person.
-            let tools = filter_tools_for_stage(
+            let mut tools = filter_tools_for_stage(
                 all_tool_defs,
                 &stage.available_tools,
                 &stage.required_tools,
                 unattended,
             );
+            let output = leviath_core::resolve_output_spec(
+                blueprint.output.as_ref(),
+                stage.output.as_ref(),
+                output_request,
+            );
+            apply_output_shape(&mut tools, output.as_ref());
             Ok(ResolvedStage {
                 provider_name: head.provider,
                 model: head.model,
                 tools,
                 fallbacks: candidates,
+                output,
             })
         })
         .collect()
@@ -545,6 +582,7 @@ mod tests {
             &registry_with(&["anthropic"]),
             &tools,
             false,
+            None,
         )
         .expect("anthropic is registered");
         assert!(resolved[0].tools.is_empty());
@@ -566,6 +604,7 @@ mod tests {
             &registry_with(&[]),
             &[],
             false,
+            None,
         )
         .expect_err("no provider is configured");
 
@@ -590,6 +629,7 @@ mod tests {
             &registry_with(&["anthropic"]),
             &[],
             false,
+            None,
         )
         .expect_err("the override names a provider that isn't registered");
 
@@ -657,6 +697,7 @@ mod tests {
             &registry_with(&["anthropic"]),
             &tools,
             false,
+            None,
         )
         .expect("anthropic is registered");
         let selected: Vec<&str> = resolved[0].tools.iter().map(|t| t.name.as_str()).collect();
@@ -918,8 +959,16 @@ mod tests {
         let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
         let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
         let registry = registry_with(&["openrouter", "anthropic"]);
-        let resolved = resolve_stages(&bp, None, &ModelDefaults::default(), &registry, &[], false)
-            .expect("both providers are registered");
+        let resolved = resolve_stages(
+            &bp,
+            None,
+            &ModelDefaults::default(),
+            &registry,
+            &[],
+            false,
+            None,
+        )
+        .expect("both providers are registered");
         assert_eq!(resolved[0].provider_name, "openrouter");
         assert_eq!(pairs(&resolved[0].fallbacks), vec![("anthropic", "sonnet")]);
     }
@@ -983,6 +1032,7 @@ mod tests {
             &registry_with(&["anthropic"]),
             &ask_and_read_defs(),
             true,
+            None,
         )
         .expect("anthropic is registered");
 
@@ -1008,5 +1058,146 @@ mod tests {
         let available = vec!["bash".to_string()];
         let tools = filter_tools_for_stage(&defs, &available, &[], true);
         assert_eq!(names(&tools), vec!["shell"]);
+    }
+
+    // ── The output shape reaches the tool description ────────────────────────
+
+    /// A helper mirroring how a stage that can submit is set up.
+    fn output_stage_blueprint(
+        agent: Option<leviath_core::output::OutputSpec>,
+        stage_spec: Option<leviath_core::output::OutputSpec>,
+    ) -> Blueprint {
+        let mut stage =
+            leviath_core::Stage::new("summary".to_string(), model_cfg(vec![("anthropic", "m")]));
+        stage.available_tools = vec![leviath_tools::SUBMIT_OUTPUT_TOOL.to_string()];
+        stage.output = stage_spec;
+        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let mut bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
+        bp.output = agent;
+        bp
+    }
+
+    fn submit_tool_defs() -> Vec<Tool> {
+        vec![Tool {
+            name: leviath_tools::SUBMIT_OUTPUT_TOOL.to_string(),
+            description: leviath_tools::submit_output_description(""),
+            parameters: serde_json::Value::Null,
+        }]
+    }
+
+    fn resolve_one(
+        bp: &Blueprint,
+        request: Option<&leviath_core::output::OutputSpec>,
+    ) -> ResolvedStage {
+        resolve_stages(
+            bp,
+            None,
+            &ModelDefaults::default(),
+            &registry_with(&["anthropic"]),
+            &submit_tool_defs(),
+            false,
+            request,
+        )
+        .expect("anthropic is registered")
+        .remove(0)
+    }
+
+    /// The whole mechanism for arbitrary formats: a label this crate has never
+    /// heard of is pasted into the description the model reads, with no parsing
+    /// and no per-format branch anywhere.
+    #[test]
+    fn an_unrecognized_format_reaches_the_submit_tool_description() {
+        let bp = output_stage_blueprint(
+            None,
+            Some(leviath_core::output::OutputSpec {
+                format: Some("a2ui".to_string()),
+                instructions: Some("One card per finding.".to_string()),
+                example: Some("{\"root\": {}}".to_string()),
+                schema: None,
+            }),
+        );
+        let resolved = resolve_one(&bp, None);
+        let description = &resolved
+            .tools
+            .iter()
+            .find(|t| t.name == leviath_tools::SUBMIT_OUTPUT_TOOL)
+            .expect("the stage offers the tool")
+            .description;
+        assert!(description.contains("a2ui"), "{description}");
+        assert!(
+            description.contains("One card per finding."),
+            "{description}"
+        );
+        assert!(description.contains("{\"root\": {}}"), "{description}");
+        assert_eq!(
+            resolved.output.and_then(|s| s.format).as_deref(),
+            Some("a2ui")
+        );
+    }
+
+    /// A stage that declares nothing keeps the generic wording rather than
+    /// growing an empty shape paragraph.
+    #[test]
+    fn a_stage_declaring_no_shape_keeps_the_generic_description() {
+        let bp = output_stage_blueprint(None, None);
+        let resolved = resolve_one(&bp, None);
+        assert_eq!(
+            resolved.tools[0].description,
+            leviath_tools::submit_output_description("")
+        );
+        assert!(resolved.output.is_none());
+    }
+
+    /// The caller's request wins over the blueprint, and naming a format
+    /// without a schema retires the one the blueprint declared: a check written
+    /// for one shape says nothing about another.
+    #[test]
+    fn a_callers_request_overrides_the_blueprint_and_drops_its_schema() {
+        let bp = output_stage_blueprint(
+            Some(leviath_core::output::OutputSpec {
+                format: Some("json".to_string()),
+                schema: Some(serde_json::json!({"type": "object"})),
+                ..Default::default()
+            }),
+            None,
+        );
+        let request = leviath_core::output::OutputSpec {
+            format: Some("xml".to_string()),
+            ..Default::default()
+        };
+        let resolved = resolve_one(&bp, Some(&request));
+        let spec = resolved.output.expect("a shape was asked for");
+        assert_eq!(spec.format.as_deref(), Some("xml"));
+        assert_eq!(spec.schema, None);
+        assert!(resolved.tools[0].description.contains("xml"));
+    }
+
+    /// A stage that never offers the tool is untouched, which is most stages.
+    #[test]
+    fn a_stage_without_the_submit_tool_is_left_alone() {
+        let mut stage =
+            leviath_core::Stage::new("plan".to_string(), model_cfg(vec![("anthropic", "m")]));
+        stage.available_tools = vec!["read_file".to_string()];
+        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let mut bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
+        bp.output = Some(leviath_core::output::OutputSpec {
+            format: Some("a2ui".to_string()),
+            ..Default::default()
+        });
+        let resolved = resolve_stages(
+            &bp,
+            None,
+            &ModelDefaults::default(),
+            &registry_with(&["anthropic"]),
+            &[Tool {
+                name: "read_file".to_string(),
+                description: "read a file".to_string(),
+                parameters: serde_json::Value::Null,
+            }],
+            false,
+            None,
+        )
+        .expect("anthropic is registered");
+        assert_eq!(resolved[0].tools[0].description, "read a file");
     }
 }

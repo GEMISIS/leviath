@@ -19,9 +19,16 @@ mod exec;
 mod platform;
 mod validate;
 pub use context::*;
-pub use defs::{SUBAGENT_TOOLS, is_subagent_tool};
+pub use defs::{SUBAGENT_TOOLS, is_subagent_tool, submit_output_description};
 pub use platform::*;
 pub use validate::*;
+
+/// The tool an agent calls to hand back the run's final output.
+///
+/// Re-exported from `leviath-core`, which owns the name because the blueprint
+/// validator and the manifest parser both need it and neither may depend on
+/// this crate.
+pub use leviath_core::blueprint::SUBMIT_OUTPUT_TOOL;
 
 /// Built-in tools: read_file, write_file, edit_file, list_dir, shell.
 ///
@@ -123,11 +130,11 @@ mod tests {
     // ── Tool definitions ──────────────────────────────────────────────────
 
     #[test]
-    fn tool_defs_returns_sixteen_tools() {
+    fn tool_defs_returns_seventeen_tools() {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
         let defs = tools.tool_defs();
-        assert_eq!(defs.len(), 16);
+        assert_eq!(defs.len(), 17);
     }
 
     #[test]
@@ -342,10 +349,10 @@ mod tests {
     }
 
     #[test]
-    fn names_returns_seventeen_entries() {
+    fn names_returns_eighteen_entries() {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
-        assert_eq!(tools.names().len(), 17);
+        assert_eq!(tools.names().len(), 18);
     }
 
     // ── Sub-agent tool definitions ────────────────────────────────────────
@@ -1790,8 +1797,8 @@ mod tests {
         let tools = make_mobile_tools(&dir);
         let names: Vec<String> = tools.tool_defs().iter().map(|t| t.name.clone()).collect();
         assert!(!names.contains(&"shell".to_string()));
-        // The other 15 built-ins remain.
-        assert_eq!(tools.tool_defs().len(), 15);
+        // The other 16 built-ins remain.
+        assert_eq!(tools.tool_defs().len(), 16);
         assert!(names.contains(&"read_file".to_string()));
         assert!(names.contains(&"context_write".to_string()));
         assert!(names.contains(&"present_for_review".to_string()));

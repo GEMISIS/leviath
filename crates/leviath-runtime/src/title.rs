@@ -268,6 +268,7 @@ mod tests {
             title: None,
             unattended: false,
             read_paths: None,
+            output_request: None,
         }
     }
 

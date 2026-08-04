@@ -96,6 +96,7 @@ impl EmbedSpawner {
                 registry,
                 &all_tool_defs,
                 args.yolo,
+                args.output.as_ref(),
             )?
         };
 
@@ -145,6 +146,7 @@ impl EmbedSpawner {
                 // there is nothing to report; `[read_paths]` enforcement is the
                 // host's, through the tool context it supplies.
                 read_paths: None,
+                output_request: args.output.clone(),
             },
             TokenTotals::default(),
             PersistWatermark::default(),

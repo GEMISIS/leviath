@@ -71,6 +71,7 @@ fn stage(model: &str, tools: Vec<Tool>, filter: Option<Vec<String>>) -> StageInf
         tools,
         tool_filter: filter,
         fallbacks: Vec::new(),
+        output: None,
     }
 }
 
@@ -775,6 +776,7 @@ fn stage_with_fallback() -> StageInference {
             "alive".to_string(),
             "model-b".to_string(),
         )],
+        output: None,
     }
 }
 
@@ -2581,6 +2583,7 @@ fn stage_inf(tools: &[&str]) -> StageInference {
             .collect(),
         tool_filter: None,
         fallbacks: Vec::new(),
+        output: None,
     }
 }
 
@@ -3046,6 +3049,7 @@ fn offering(names: &[&str]) -> StageInference {
             .collect(),
         tool_filter: None,
         fallbacks: Vec::new(),
+        output: None,
     }
 }
 
@@ -3381,6 +3385,7 @@ fn offering_with_schemas(tools: &[(&str, serde_json::Value)]) -> StageInference 
             .collect(),
         tool_filter: None,
         fallbacks: Vec::new(),
+        output: None,
     }
 }
 
@@ -4588,6 +4593,7 @@ fn si(model: &str) -> StageInference {
         tools: vec![],
         tool_filter: None,
         fallbacks: Vec::new(),
+        output: None,
     }
 }
 
@@ -4606,6 +4612,7 @@ fn setup() -> StageSetup {
         accepts_messages: true,
         context_layout: None,
         system_prompt: None,
+        output: None,
     }
 }
 
@@ -5089,6 +5096,7 @@ fn resolved(model: &str) -> ResolvedStage {
         model: model.to_string(),
         tools: vec![],
         fallbacks: Vec::new(),
+        output: None,
     }
 }
 
@@ -5214,7 +5222,7 @@ fn stage_setup_from_folds_fanout_split_prompt() {
         "system_prompt".to_string(),
         serde_json::Value::String("base instructions".to_string()),
     );
-    let sp = stage_setup_from(&s, hints(true), Default::default())
+    let sp = stage_setup_from(&s, hints(true), Default::default(), None)
         .system_prompt
         .unwrap();
     assert!(sp.contains("base instructions") && sp.contains("SPLIT NOW"));
@@ -5223,7 +5231,7 @@ fn stage_setup_from_folds_fanout_split_prompt() {
     let mut s2 = stage_named("fan", None, false, None);
     s2.mode = fanout("ONLY SPLIT");
     assert_eq!(
-        stage_setup_from(&s2, hints(true), Default::default()).system_prompt,
+        stage_setup_from(&s2, hints(true), Default::default(), None).system_prompt,
         Some("ONLY SPLIT".to_string())
     );
 
@@ -5231,7 +5239,7 @@ fn stage_setup_from_folds_fanout_split_prompt() {
     let mut s3 = stage_named("fan", None, false, None);
     s3.mode = fanout("   ");
     assert_eq!(
-        stage_setup_from(&s3, hints(true), Default::default()).system_prompt,
+        stage_setup_from(&s3, hints(true), Default::default(), None).system_prompt,
         None
     );
 }
@@ -5242,7 +5250,8 @@ fn stage_setup_from_cascades_each_hint_independently() {
 
     // Globals on, agent silent, stage silent → both inherit on.
     let s = stage_named("plan", None, false, None);
-    let cfg = stage_setup_from(&s, hints(true), PromptHintOverrides::default()).inference_config;
+    let cfg =
+        stage_setup_from(&s, hints(true), PromptHintOverrides::default(), None).inference_config;
     assert!(cfg.batch_tool_hint);
     assert!(cfg.shell_hint);
 
@@ -5251,7 +5260,7 @@ fn stage_setup_from_cascades_each_hint_independently() {
         batch_tool: None,
         shell: Some(false),
     };
-    let cfg = stage_setup_from(&s, hints(true), agent_off_shell).inference_config;
+    let cfg = stage_setup_from(&s, hints(true), agent_off_shell, None).inference_config;
     assert!(cfg.batch_tool_hint);
     assert!(!cfg.shell_hint);
 
@@ -5266,6 +5275,7 @@ fn stage_setup_from_cascades_each_hint_independently() {
             shell: false,
         },
         agent_off_shell,
+        None,
     )
     .inference_config;
     assert!(!cfg.batch_tool_hint);
@@ -5290,7 +5300,7 @@ fn stage_setup_from_collects_extra_model_parameters() {
         .parameters
         .insert("seed".to_string(), serde_json::json!(11));
 
-    let setup = stage_setup_from(&s, hints(true), Default::default());
+    let setup = stage_setup_from(&s, hints(true), Default::default(), None);
     assert_eq!(setup.inference_config.temperature, Some(0.3));
     assert_eq!(setup.inference_config.max_output_tokens, Some(256));
     let extra = &setup.inference_config.extra_params;
@@ -5305,7 +5315,7 @@ fn stage_setup_from_threads_request_timeout() {
     // Unset on the stage → None on the inference config.
     let s = stage_named("plan", None, false, None);
     assert_eq!(
-        stage_setup_from(&s, hints(true), Default::default())
+        stage_setup_from(&s, hints(true), Default::default(), None)
             .inference_config
             .request_timeout_secs,
         None
@@ -5315,7 +5325,7 @@ fn stage_setup_from_threads_request_timeout() {
     let mut s2 = stage_named("plan", None, false, None);
     s2.model.request_timeout_secs = Some(300);
     assert_eq!(
-        stage_setup_from(&s2, hints(true), Default::default())
+        stage_setup_from(&s2, hints(true), Default::default(), None)
             .inference_config
             .request_timeout_secs,
         Some(300)
@@ -8109,6 +8119,7 @@ fn run_metadata() -> RunMetadata {
         title: None,
         unattended: false,
         read_paths: None,
+        output_request: None,
     }
 }
 
@@ -8602,6 +8613,7 @@ fn stage_infs_head() -> StageInference {
         tools: vec![],
         tool_filter: None,
         fallbacks: Vec::new(),
+        output: None,
     }
 }
 
@@ -8713,6 +8725,7 @@ async fn dispatch_choice_stays_when_provider_missing() {
         tools: vec![],
         tool_filter: None,
         fallbacks: Vec::new(),
+        output: None,
     });
 
     let mut schedule = Schedule::default();
@@ -9049,6 +9062,7 @@ fn collect_inference_records_activity_with_provider_and_latency() {
                 tools: vec![],
                 tool_filter: None,
                 fallbacks: Vec::new(),
+                output: None,
             },
             crate::telemetry::StageActivity::default(),
         ))
@@ -9406,4 +9420,71 @@ fn collect_tools_reports_finished_lane_calls() {
         }
     );
     assert!(sink_rx.try_recv().is_err(), "no extra events");
+}
+
+// ── Final-output shape reaches the model ─────────────────────────────────────
+
+/// A required output is stated in the stage's own instructions, on top of the
+/// tool description carrying the same shape. Both, because a format the model
+/// has no prior knowledge of is exactly where one mention is easy to miss.
+#[test]
+fn stage_setup_from_folds_a_required_output_into_the_system_prompt() {
+    let spec = leviath_core::output::OutputSpec {
+        format: Some("a2ui".to_string()),
+        instructions: Some("One card per finding.".to_string()),
+        example: Some("{\"root\": {}}".to_string()),
+        schema: None,
+    };
+    let mut s = stage_named("summary", None, false, None);
+    s.require_output = true;
+    s.config.insert(
+        "system_prompt".to_string(),
+        serde_json::Value::String("base instructions".to_string()),
+    );
+    let prompt = stage_setup_from(&s, hints(true), Default::default(), Some(spec))
+        .system_prompt
+        .expect("a required output always produces instructions");
+    assert!(prompt.contains("base instructions"), "{prompt}");
+    assert!(prompt.contains("submit_output"), "{prompt}");
+    // The unrecognized format and its example are pasted through verbatim;
+    // nothing here knows what a2ui is.
+    assert!(prompt.contains("a2ui"), "{prompt}");
+    assert!(prompt.contains("One card per finding."), "{prompt}");
+    assert!(prompt.contains("{\"root\": {}}"), "{prompt}");
+}
+
+/// A stage that declares a shape but is not required to submit is left alone:
+/// declaring is not demanding.
+#[test]
+fn stage_setup_from_leaves_an_unrequired_stage_prompt_alone() {
+    let spec = leviath_core::output::OutputSpec {
+        format: Some("markdown".to_string()),
+        ..Default::default()
+    };
+    let mut s = stage_named("plan", None, false, None);
+    s.config.insert(
+        "system_prompt".to_string(),
+        serde_json::Value::String("base instructions".to_string()),
+    );
+    let prompt = stage_setup_from(&s, hints(true), Default::default(), Some(spec))
+        .system_prompt
+        .expect("the base prompt survives");
+    assert_eq!(prompt, "base instructions");
+}
+
+/// A required output with nothing declared about its shape still says it is
+/// required, since that is the part the agent must act on.
+#[test]
+fn stage_setup_from_demands_an_output_even_with_no_declared_shape() {
+    let mut s = stage_named("summary", None, false, None);
+    s.require_output = true;
+    let prompt = stage_setup_from(
+        &s,
+        hints(true),
+        Default::default(),
+        Some(leviath_core::output::OutputSpec::default()),
+    )
+    .system_prompt
+    .expect("the demand stands on its own");
+    assert!(prompt.contains("submit_output"), "{prompt}");
 }

@@ -107,6 +107,10 @@ pub struct StageInference {
     /// to be unusable. Consumed from the front by `collect_inference`, so an
     /// exhausted list means "nowhere left to go" (issue #201).
     pub fallbacks: Vec<leviath_core::blueprint::ModelEntry>,
+    /// The output shape resolved for this stage, carried alongside the tools it
+    /// was already folded into. Dispatch reads it to know which format label to
+    /// record and, when the author supplied a schema, what to validate against.
+    pub output: Option<leviath_core::output::OutputSpec>,
 }
 
 // ─── World resources for the inference stage ─────────────────────────────────
