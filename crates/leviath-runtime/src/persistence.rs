@@ -107,6 +107,16 @@ impl RunOutcomeFlags {
     }
 }
 
+/// The final output an agent has submitted, held on the agent entity until the
+/// persistence lane copies it into `meta.json`.
+///
+/// Absent until `submit_output` is called, and replaced (not appended to) by a
+/// later call: an agent that submits twice meant the second one. The stage name
+/// travels inside so the enforcement gate can tell "this stage submitted" from
+/// "an earlier one did".
+#[derive(Component, Clone, Debug, PartialEq)]
+pub struct FinalOutput(pub leviath_core::output::FinalOutput);
+
 /// Whether `stage` advertises a tool whose writes the framework would record:
 /// a built-in [`MODIFYING_TOOLS`] name, or one that this stage's own outgoing
 /// transition gates name (the declared escape hatch for agents whose writes go
@@ -151,10 +161,11 @@ impl TokenTotals {
 /// Whether a run in `status` carrying `flags` stopped with nothing to show for
 /// itself.
 ///
-/// Three things have to hold. The run has to have *stopped* - an agent that
+/// Four things have to hold. The run has to have *stopped* - an agent that
 /// hasn't written anything yet is not an empty run, it is a busy one. It has to
-/// have modified nothing. And its blueprint has to have offered a way to modify
-/// something, or the question does not apply to it (see
+/// have modified nothing. It must not have submitted a final output, which is
+/// producing something even when no file changed. And its blueprint has to have
+/// offered a way to modify something, or the question does not apply to it (see
 /// [`no_output_tools`](leviath_core::run_meta::RunFlags::no_output_tools)).
 ///
 /// One definition, called by both `meta.json` and the run listing, so what an
@@ -165,6 +176,7 @@ pub fn is_empty_output(status: &AgentStatus, flags: &leviath_core::run_meta::Run
         run_status_from(status),
         RunStatus::Complete | RunStatus::Error | RunStatus::Cancelled
     ) && flags.modified_file_count == 0
+        && !flags.produced_output
         && !flags.no_output_tools
 }
 
@@ -269,9 +281,13 @@ pub fn build_run_meta(
     last_progress_at: Option<i64>,
     depth: usize,
     max_child_depth: usize,
+    final_output: Option<&FinalOutput>,
 ) -> RunMeta {
     let status = run_status_from(&state.status);
     let mut flags = flags.0.clone();
+    // Having submitted an output is itself production, so this is settled before
+    // the emptiness verdict rather than after it.
+    flags.produced_output = final_output.is_some();
     flags.empty_output = is_empty_output(&state.status, &flags);
     RunMeta {
         run_id: md.run_id.clone(),
@@ -310,6 +326,7 @@ pub fn build_run_meta(
         flags,
         yolo: md.unattended,
         read_paths: md.read_paths,
+        final_output: final_output.map(|o| o.0.clone()),
     }
 }
 
@@ -575,6 +592,7 @@ mod tests {
             Some(1900),
             1,
             4,
+            None,
         );
 
         assert_eq!(meta.run_id, "run-1");
@@ -619,6 +637,7 @@ mod tests {
             None,
             1,
             4,
+            None,
         );
         assert!(meta.yolo);
     }
@@ -638,6 +657,7 @@ mod tests {
             None,
             0,
             0,
+            None,
         );
         assert!(!running.flags.empty_output);
         assert_eq!(running.flags.gates_forced, 2);
@@ -660,6 +680,7 @@ mod tests {
                 None,
                 0,
                 0,
+                None,
             );
             assert!(meta.flags.empty_output);
         }
@@ -677,6 +698,7 @@ mod tests {
             None,
             0,
             0,
+            None,
         );
         assert!(!meta.flags.empty_output);
         assert_eq!(meta.flags.modified_files, vec!["src/a.rs".to_string()]);
@@ -695,6 +717,7 @@ mod tests {
             None,
             0,
             0,
+            None,
         );
         assert!(!meta.flags.empty_output);
         assert!(meta.flags.no_output_tools);
@@ -714,9 +737,68 @@ mod tests {
             None,
             0,
             0,
+            None,
         );
         assert_eq!(meta.status, RunStatus::Error);
         assert_eq!(meta.error.as_deref(), Some("boom"));
+    }
+
+    /// A submitted output reaches `meta.json` and settles the emptiness verdict.
+    ///
+    /// The second half is the point: an agent whose whole deliverable is its
+    /// answer modifies no files, and before `produced_output` existed every one
+    /// of its successful runs was reported `complete (no output)`.
+    #[test]
+    fn build_run_meta_carries_a_submitted_output_and_clears_the_empty_verdict() {
+        let submitted = FinalOutput(leviath_core::output::FinalOutput::new(
+            "Renamed two helpers and updated their callers.",
+            Some("markdown".to_string()),
+            "summary".to_string(),
+            1234,
+        ));
+        let meta = build_run_meta(
+            &metadata(),
+            &state(AgentStatus::Complete),
+            &TokenTotals::default(),
+            &RunOutcomeFlags::default(),
+            0,
+            1000,
+            None,
+            0,
+            0,
+            Some(&submitted),
+        );
+        let carried = meta.final_output.expect("the submission reached meta.json");
+        assert_eq!(
+            carried.content,
+            "Renamed two helpers and updated their callers."
+        );
+        assert_eq!(carried.format.as_deref(), Some("markdown"));
+        assert_eq!(carried.stage, "summary");
+        assert!(meta.flags.produced_output);
+        // Modified nothing, yet produced something: not an empty run.
+        assert!(!meta.flags.empty_output);
+    }
+
+    /// The same run without the submission is still judged empty, so the clause
+    /// above is doing the work rather than some other condition.
+    #[test]
+    fn a_run_that_submits_nothing_is_still_judged_empty() {
+        let meta = build_run_meta(
+            &metadata(),
+            &state(AgentStatus::Complete),
+            &TokenTotals::default(),
+            &RunOutcomeFlags::default(),
+            0,
+            1000,
+            None,
+            0,
+            0,
+            None,
+        );
+        assert!(meta.final_output.is_none());
+        assert!(!meta.flags.produced_output);
+        assert!(meta.flags.empty_output);
     }
 
     #[test]
