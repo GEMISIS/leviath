@@ -103,6 +103,9 @@ pub enum Commands {
     /// Show a run's context-window history (from its run.lvr archive)
     Context(commands::context::ContextArgs),
 
+    /// Print what an agent handed back when a run finished
+    Result(commands::result::ResultArgs),
+
     /// Manage MCP tool servers and their authentication
     Mcp(commands::mcp::McpArgs),
 
@@ -200,6 +203,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::AgentClient(args) => ex.agent_client(args).await,
         Commands::Daemon(args) => ex.daemon(args).await,
         Commands::Context(args) => commands::context::execute(args).await,
+        Commands::Result(args) => commands::result::execute(args).await,
         Commands::Mcp(args) => ex.mcp(args).await,
         Commands::Auth(args) => ex.auth(args).await,
     }

@@ -900,6 +900,7 @@ mod tests {
             unattended: false,
             empty_output: false,
             read_paths: None,
+            has_final_output: false,
         }
     }
 

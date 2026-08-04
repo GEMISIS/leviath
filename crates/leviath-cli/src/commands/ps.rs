@@ -80,7 +80,10 @@ lane nothing, so `parked` is not a problem on its own; `queued` with no progress
 is.
 
 --json prints {\"runs\": [...], \"finished\": [...], \"health\": {...}}, keeping
-finished runs apart from the ones the daemon is still hosting.
+finished runs apart from the ones the daemon is still hosting. A row's
+\"has_final_output\" says whether the agent handed something back; read the
+answer itself with `lev result <run-id>` (it can be large, so it is not
+inlined here).
 
 --all adds a NOT RUNNING block, read from the runs dir rather than the daemon's
 memory. The retention window above covers the minutes after a run ends; this
@@ -140,6 +143,10 @@ pub struct OfflineRun {
     /// Whether the run finished having modified nothing, when it could have.
     #[serde(default)]
     pub empty_output: bool,
+    /// Whether the run submitted a final output. The flag only; read the answer
+    /// itself with `lev result <run-id>`.
+    #[serde(default)]
+    pub has_final_output: bool,
     /// Disk says this run is still going, and the daemon is not hosting it, and
     /// it has not moved in a long time. See [`runstate::looks_abandoned`].
     ///
@@ -169,6 +176,7 @@ pub fn offline_runs(
             updated_at: m.updated_at,
             last_progress_at: m.last_progress_at,
             empty_output: m.flags.empty_output,
+            has_final_output: m.final_output.is_some(),
         })
         .collect()
 }

@@ -164,6 +164,13 @@ pub struct RunListEntry {
     /// designed it around.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_paths: Option<leviath_core::run_meta::ReadPathGrantCounts>,
+    /// Whether the run has submitted a final output.
+    ///
+    /// The flag only, never the content: this row is sent over the control
+    /// socket on every `lev ps`, and an answer may be a quarter of a megabyte.
+    /// `lev result <run-id>` fetches it.
+    #[serde(default)]
+    pub has_final_output: bool,
 }
 
 /// Everything one [`ControlOp::List`] answers with: the live runs, the runs that
@@ -1625,6 +1632,9 @@ impl WorldHost {
     fn entry_for(&self, run_id: &str, entity: Entity, state: &AgentState) -> RunListEntry {
         let world = self.world.world();
         let metadata = world.get::<RunMetadata>(entity);
+        let has_output = world
+            .get::<crate::persistence::FinalOutput>(entity)
+            .is_some();
         RunListEntry {
             run_id: run_id.to_string(),
             status: state.status.clone(),
@@ -1642,8 +1652,20 @@ impl WorldHost {
             unattended: metadata.is_some_and(|m| m.unattended),
             empty_output: world
                 .get::<crate::persistence::RunOutcomeFlags>(entity)
-                .is_some_and(|f| crate::persistence::is_empty_output(&state.status, &f.0)),
+                .is_some_and(|f| {
+                    // `produced_output` lives on the component only after a
+                    // persist tick fills it, so it is answered from the live
+                    // entity here. Without this, a researcher that submitted a
+                    // perfectly good answer still read `complete (no output)`
+                    // in `lev ps` while `meta.json` said otherwise - the exact
+                    // drift between the two surfaces that one shared
+                    // `is_empty_output` exists to prevent.
+                    let mut flags = f.0.clone();
+                    flags.produced_output = has_output;
+                    crate::persistence::is_empty_output(&state.status, &flags)
+                }),
             read_paths: metadata.and_then(|m| m.read_paths),
+            has_final_output: has_output,
         }
     }
 
@@ -4151,6 +4173,7 @@ mod tests {
             unattended: false,
             empty_output: false,
             read_paths: None,
+            has_final_output: false,
         };
         host.record_finished(entry(AgentStatus::Cancelled), 100);
         host.record_finished(entry(AgentStatus::Complete), 200);
@@ -4180,6 +4203,7 @@ mod tests {
                     unattended: false,
                     empty_output: false,
                     read_paths: None,
+                    has_final_output: false,
                 },
                 100,
             );
@@ -4748,6 +4772,45 @@ mod tests {
             .0
             .no_output_tools = true;
         assert!(!ask(&mut host, |reply| ControlOp::List { reply }).await.runs[0].empty_output);
+    }
+
+    /// A run whose whole deliverable is its answer modified no files, and used
+    /// to read `complete (no output)` in `lev ps` while `meta.json` said
+    /// otherwise - the two surfaces disagreeing about the same run, which one
+    /// shared `is_empty_output` exists to prevent.
+    #[tokio::test]
+    async fn a_submitted_answer_clears_the_listing_s_empty_verdict() {
+        let mut host = host_with(vec![]);
+        let e = spawn(&mut host, "run-a", "run-a");
+        host.world_mut()
+            .world_mut()
+            .entity_mut(e)
+            .insert(crate::persistence::RunOutcomeFlags::default());
+        host.world_mut()
+            .world_mut()
+            .get_mut::<AgentState>(e)
+            .expect("spawned agent has state")
+            .status = AgentStatus::Complete;
+        // Finished having written nothing: empty, and no answer to point at.
+        let before = ask(&mut host, |reply| ControlOp::List { reply }).await.runs;
+        assert!(before[0].empty_output);
+        assert!(!before[0].has_final_output);
+
+        host.world_mut()
+            .world_mut()
+            .entity_mut(e)
+            .insert(crate::persistence::FinalOutput(
+                leviath_core::output::FinalOutput::new(
+                    "here is what I found",
+                    None,
+                    "summary".to_string(),
+                    0,
+                ),
+            ));
+        let after = ask(&mut host, |reply| ControlOp::List { reply }).await.runs;
+        assert!(!after[0].empty_output, "an answer is output");
+        // The flag travels; the answer itself does not - `lev result` fetches it.
+        assert!(after[0].has_final_output);
     }
 
     /// The listing carries the reason and the progress context, not just a word.
