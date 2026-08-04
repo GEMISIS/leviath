@@ -5,9 +5,16 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-    # `labeled`/`unlabeled` are included so the `guard-main-rs` job re-runs when
-    # a maintainer applies/removes the `allow-main-rs-change` override label.
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    # Deliberately no `labeled`/`unlabeled`. Those used to be here so the guard
+    # jobs re-ran when a maintainer applied an override label, but a label event
+    # starts a whole second CI suite - the full three-OS matrix, ten minutes - to
+    # re-decide a five-second check. Worse, it does not even unblock the PR: the
+    # original suite's guard check run stays FAILURE on that commit forever, and
+    # the merge rollup counts each suite's copy of a check separately, so one
+    # stale failure keeps the PR red no matter how many later suites go green.
+    # The guards now read labels live (see `guard-main-rs`), so the fix is to
+    # rerun the failed job in its own suite - `gh run rerun <id> --failed`.
+    types: [opened, synchronize, reopened]
   # The merge queue runs required checks against a temporary `merge_group` ref.
   # Without this trigger those checks never run, so queued PRs block forever.
   merge_group:
@@ -352,16 +359,30 @@ jobs:
     name: Guard bin entrypoint (main.rs)
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
+    # Reading the labels needs more than the workflow-wide `contents: read`.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
       - name: Require maintainer override to change main.rs
         env:
-          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
+          # Asked over the API rather than read from
+          # `github.event.pull_request.labels`, because a rerun replays the
+          # event payload it was given the first time. A maintainer who labels
+          # a PR after CI started would rerun this job, watch it report no
+          # labels at all, and have no way to clear the failure short of
+          # pushing a commit. The API answers for the PR as it is right now.
+          LABELS=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '[.[].name] | join(",")')
+          echo "Labels on this PR right now: ${LABELS:-(none)}"
+
           # Three dots, so this asks "what did the PR change" rather than "how
           # do these two trees differ". With two dots the diff also contains
           # everything main gained since the branch point, so any PR would fail
@@ -392,17 +413,28 @@ jobs:
     name: Guard release version bump
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
+    # See `guard-main-rs`: the live label read needs its own scope.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
       - name: Require maintainer override to bump the release version
         env:
-          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
+          # Read live rather than from the event payload, for the reason spelled
+          # out in `guard-main-rs`: a rerun replays the payload the run started
+          # with, so a label applied afterwards would be invisible.
+          LABELS=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '[.[].name] | join(",")')
+          echo "Labels on this PR right now: ${LABELS:-(none)}"
+
           # The merge base, not the base branch tip: comparing against the tip
           # would report a bump for every PR opened after someone else's release
           # landed on main.
