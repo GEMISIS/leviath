@@ -23,15 +23,27 @@ pub enum AgentAction {
     Install,
     /// Installed at a different version.
     Update { from: String },
-    /// Installed at the bundled version.
+    /// Installed at the bundled version, but the files on disk differ from the
+    /// bundled ones.
+    Modified,
+    /// Installed at the bundled version, byte for byte.
     UpToDate,
 }
 
 impl AgentAction {
-    /// Whether applying this action would change anything on disk. Drives which
-    /// rows the wizard pre-checks.
+    /// Whether applying this action would change anything on disk.
     pub fn is_change(&self) -> bool {
         !matches!(self, Self::UpToDate)
+    }
+
+    /// Whether the wizard should pre-check this row.
+    ///
+    /// Not the same question as [`Self::is_change`], and the difference is the
+    /// point of [`Self::Modified`]: reinstalling over a tree the user edited
+    /// destroys their work, and `install_bundled` removes the destination
+    /// first, so it destroys files they added too. Offered, never assumed.
+    pub fn preselect(&self) -> bool {
+        matches!(self, Self::Install | Self::Update { .. })
     }
 
     /// Short label for the wizard's blueprint list.
@@ -39,6 +51,7 @@ impl AgentAction {
         match self {
             Self::Install => format!("install {to}"),
             Self::Update { from } => format!("update {from} → {to}"),
+            Self::Modified => format!("{to}, edited locally - reinstall overwrites"),
             Self::UpToDate => "up to date".to_string(),
         }
     }
@@ -58,27 +71,104 @@ pub fn installed_version(agents_dir: &Path, name: &str) -> Option<String> {
         .map(|bp| bp.version)
 }
 
+/// Whether the installed copy of `agent` is byte-identical to the bundled one.
+///
+/// [`install_bundled`] removes the destination first, so a tree it wrote has
+/// exactly the bundle's files with exactly the bundle's bytes. Any difference -
+/// an edited manifest, a tool script the user added, one they deleted - means
+/// what is on disk is not what shipped.
+///
+/// An IO error reads as *differing*, which is the safe direction: the caller
+/// uses this to decide whether overwriting is safe, and a directory it cannot
+/// read is not one to clobber unasked.
+fn matches_bundled(agent: &BundledAgent, agents_dir: &Path) -> bool {
+    let dest = agents_dir.join(agent.name);
+    for (rel, contents) in agent.files {
+        match std::fs::read_to_string(dest.join(rel)) {
+            Ok(on_disk) if on_disk == *contents => {}
+            _ => return false,
+        }
+    }
+    // Every declared file was found and matched, so equal counts means the two
+    // sets are equal - which is what catches a file the user added.
+    installed_file_count(&dest) == agent.files.len()
+}
+
+/// How many files are under `dir`, recursively.
+///
+/// An entry that cannot be read counts as one file rather than aborting the
+/// walk. The only caller is asking whether the tree is exactly the bundled one,
+/// and something on disk it cannot read is already an answer of "no".
+fn installed_file_count(dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .map(|entry| match entry.map(|e| e.path()) {
+            Ok(path) if path.is_dir() => installed_file_count(&path),
+            _ => 1,
+        })
+        .sum()
+}
+
 /// Decide what to do with every bundled blueprint.
 ///
 /// Version comparison is plain string inequality, not semver ordering: this
 /// crate has no semver dependency, and both versions are shown to the user
-/// anyway, so a hand-edited blueprint surfaces as an offered update they can
-/// decline rather than being silently overwritten or silently skipped.
+/// anyway, so a downgrade and an upgrade both surface as an offered update they
+/// can decline.
 ///
-/// Known limitation: a blueprint edited *without* bumping its version reads as
-/// up to date, because nothing hashes the contents.
+/// A blueprint at the bundled version is only up to date if its files are the
+/// bundled files. Comparing versions alone meant a blueprint edited without a
+/// version bump read as current forever - and so did a stale install whose
+/// version happened to match, which is how an install could sit on an old
+/// checkpoint policy while believing itself current. Nothing is hashed and
+/// nothing is stored: the bundled bytes are in the binary, so the files
+/// themselves are the comparison.
 pub fn plan_agent_actions(agents_dir: &Path) -> Vec<(&'static BundledAgent, AgentAction)> {
     BUNDLED_AGENTS
         .iter()
         .map(|agent| {
             let action = match installed_version(agents_dir, agent.name) {
                 None => AgentAction::Install,
-                Some(v) if v == agent.version => AgentAction::UpToDate,
-                Some(from) => AgentAction::Update { from },
+                Some(v) if v != agent.version => AgentAction::Update { from: v },
+                Some(_) if matches_bundled(agent, agents_dir) => AgentAction::UpToDate,
+                Some(_) => AgentAction::Modified,
             };
             (agent, action)
         })
         .collect()
+}
+
+/// A note for a run about to start on an installed bundled blueprint that this
+/// binary ships a different version of.
+///
+/// `lev setup` is the only thing that has ever said this, and only when asked.
+/// Nothing said it at the moment it mattered, so an install could sit versions
+/// behind indefinitely - which is exactly how a run kept using an old
+/// checkpoint policy while the fix had shipped.
+///
+/// Deliberately narrow. It fires only for a manifest that *is* the installed
+/// copy, under `agents_dir/<name>/`, so a blueprint of the user's own that
+/// happens to share a name with a bundled one is never nagged about.
+pub fn stale_install_note(
+    manifest_path: &Path,
+    blueprint: &leviath_core::Blueprint,
+    agents_dir: Option<&Path>,
+) -> Option<String> {
+    let installed = agents_dir?.join(&blueprint.name);
+    if !manifest_path.starts_with(&installed) {
+        return None;
+    }
+    let bundled = BUNDLED_AGENTS.iter().find(|a| a.name == blueprint.name)?;
+    if bundled.version == blueprint.version {
+        return None;
+    }
+    Some(format!(
+        "note: '{}' is installed at {}, and this build ships {}. \
+         Run `lev setup` to update it.",
+        blueprint.name, blueprint.version, bundled.version
+    ))
 }
 
 /// Write one bundled blueprint into `<agents_dir>/<name>/`, replacing whatever
@@ -643,6 +733,158 @@ write_file = "allow"
         assert_eq!(
             action.label(agent.version),
             format!("update 9.9.9 → {}", agent.version)
+        );
+    }
+
+    /// The limitation this closes: comparing versions alone meant a blueprint
+    /// edited without a version bump read as current forever, so the user was
+    /// never told their copy had drifted from the one that shipped.
+    #[test]
+    fn plan_reports_an_edited_install_as_modified() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = &BUNDLED_AGENTS[0];
+        install_bundled(agent, dir.path()).unwrap();
+        let manifest_path = dir.path().join(agent.name).join("agent.leviath");
+        let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+        std::fs::write(&manifest_path, manifest + "\n# a local edit\n").unwrap();
+
+        let action = action_for(&plan_agent_actions(dir.path()), agent.name);
+        assert_eq!(action, AgentAction::Modified);
+        // It would change disk, so the wizard offers it - but never unasked,
+        // because reinstalling destroys the edit.
+        assert!(action.is_change());
+        assert!(!action.preselect());
+        let label = action.label(agent.version);
+        assert!(label.contains("edited locally"), "{label}");
+    }
+
+    /// `install_bundled` removes the destination first, so a file the user
+    /// added is destroyed by a reinstall too - which makes it exactly as
+    /// important to notice as an edited one.
+    #[test]
+    fn a_file_the_user_added_or_removed_counts_as_modified() {
+        let agent = &BUNDLED_AGENTS[0];
+
+        let added = tempfile::tempdir().unwrap();
+        install_bundled(agent, added.path()).unwrap();
+        std::fs::write(added.path().join(agent.name).join("notes.md"), "mine").unwrap();
+        assert_eq!(
+            action_for(&plan_agent_actions(added.path()), agent.name),
+            AgentAction::Modified
+        );
+
+        // A file deleted from a blueprint that ships more than the manifest.
+        // The manifest still parses at the bundled version, so only the file
+        // comparison can catch this.
+        let multi = BUNDLED_AGENTS
+            .iter()
+            .find(|a| a.files.len() > 1)
+            .expect("some bundled blueprint ships more than its manifest");
+        let removed = tempfile::tempdir().unwrap();
+        install_bundled(multi, removed.path()).unwrap();
+        let extra = multi
+            .files
+            .iter()
+            .map(|(rel, _)| *rel)
+            .find(|rel| *rel != "agent.leviath")
+            .expect("a file other than the manifest");
+        std::fs::remove_file(removed.path().join(multi.name).join(extra)).unwrap();
+        assert_eq!(
+            action_for(&plan_agent_actions(removed.path()), multi.name),
+            AgentAction::Modified
+        );
+    }
+
+    /// A directory that cannot be walked reads as differing, which is the safe
+    /// direction: this decides whether overwriting is safe.
+    #[test]
+    fn an_unreadable_tree_is_not_up_to_date() {
+        assert_eq!(installed_file_count(Path::new("/no/such/dir")), 0);
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!matches_bundled(&BUNDLED_AGENTS[0], dir.path()));
+    }
+
+    #[test]
+    fn installed_file_count_walks_nested_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/b")).unwrap();
+        std::fs::write(dir.path().join("top.txt"), "x").unwrap();
+        std::fs::write(dir.path().join("a/mid.txt"), "x").unwrap();
+        std::fs::write(dir.path().join("a/b/leaf.txt"), "x").unwrap();
+        assert_eq!(installed_file_count(dir.path()), 3);
+    }
+
+    fn action_for(plan: &[(&'static BundledAgent, AgentAction)], name: &str) -> AgentAction {
+        plan.iter()
+            .find(|(a, _)| a.name == name)
+            .expect("the bundled agent is in the plan")
+            .1
+            .clone()
+    }
+
+    // ─── stale_install_note ─────────────────────────────────────────────────
+
+    /// The case that prompted this: an install sitting versions behind, with
+    /// nothing saying so at the moment it mattered.
+    #[test]
+    fn a_stale_install_is_named_when_the_run_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = &BUNDLED_AGENTS[0];
+        install_bundled(agent, dir.path()).unwrap();
+        let manifest = dir.path().join(agent.name).join("agent.leviath");
+        let mut blueprint =
+            leviath_core::manifest::parse_manifest(&std::fs::read_to_string(&manifest).unwrap())
+                .unwrap();
+
+        // At the bundled version there is nothing to say.
+        assert_eq!(
+            stale_install_note(&manifest, &blueprint, Some(dir.path())),
+            None
+        );
+
+        blueprint.version = "0.0.1".to_string();
+        let note = stale_install_note(&manifest, &blueprint, Some(dir.path()))
+            .expect("a behind install is named");
+        assert!(note.contains("0.0.1"), "{note}");
+        assert!(note.contains(agent.version), "{note}");
+        assert!(note.contains("lev setup"), "{note}");
+    }
+
+    /// Deliberately narrow: a blueprint of the user's own that happens to share
+    /// a name with a bundled one is never nagged about, and neither is one this
+    /// build does not ship.
+    #[test]
+    fn a_blueprint_that_is_not_the_installed_copy_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = &BUNDLED_AGENTS[0];
+        install_bundled(agent, dir.path()).unwrap();
+        let manifest = dir.path().join(agent.name).join("agent.leviath");
+        let mut blueprint =
+            leviath_core::manifest::parse_manifest(&std::fs::read_to_string(&manifest).unwrap())
+                .unwrap();
+        blueprint.version = "0.0.1".to_string();
+
+        // Somewhere else on disk, under the same name.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let copy = elsewhere.path().join(agent.name).join("agent.leviath");
+        assert_eq!(
+            stale_install_note(&copy, &blueprint, Some(dir.path())),
+            None,
+            "not the installed copy"
+        );
+
+        // No agents dir resolves at all.
+        assert_eq!(stale_install_note(&manifest, &blueprint, None), None);
+
+        // A name this build ships nothing for.
+        blueprint.name = "not-a-bundled-agent".to_string();
+        assert_eq!(
+            stale_install_note(
+                &dir.path().join("not-a-bundled-agent").join("agent.leviath"),
+                &blueprint,
+                Some(dir.path())
+            ),
+            None
         );
     }
 

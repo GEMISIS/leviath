@@ -47,6 +47,14 @@ same list.
   to be indistinguishable from a hang.
 - New: `lev approvals safe` prints what runs without an approval prompt and
   which file put each entry there.
+- Fixed: a bundled blueprint installed at the bundled version read as up to date
+  whatever its files said, so an install that had drifted from the one that
+  shipped stayed invisible. `lev setup` now compares the files, not just the
+  version, and reports a locally edited copy as `edited locally` - offered, but
+  never pre-checked, because installing removes the destination directory first
+  and would take the edits with it. `lev run` says it at the moment it matters:
+  a run starting on an installed bundled blueprint that this build ships a
+  different version of prints a one-line note before it spawns.
 
 ## 0.2.0 - 2026-08-04
 
