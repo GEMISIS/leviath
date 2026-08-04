@@ -624,6 +624,109 @@ async fn a_deep_search_finds_text_only_present_in_a_stage_log_and_says_where() {
     .await;
 }
 
+/// Write a journal for `run_id` whose context carries `content`, and whose
+/// metadata carries a webhook secret.
+fn plant_journal(run_id: &str, content: &str, secret: Option<&str>) {
+    use leviath_core::run_archive::{self, RunIdentity, RunRecord};
+    use leviath_core::run_meta::{ContextSnapshot, RegionEntrySnapshot, RegionSnapshot};
+
+    let mut meta = meta_at(run_id, 1);
+    meta.callback_secret = secret.map(str::to_string);
+
+    let mut buf = Vec::new();
+    run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION).unwrap();
+    run_archive::write_record(
+        &mut buf,
+        &RunRecord::Header {
+            identity: RunIdentity {
+                run_id: run_id.to_string(),
+                machine_id: "m".to_string(),
+                world_id: "w".to_string(),
+                created_at: 0,
+            },
+            meta: Box::new(meta),
+        },
+    )
+    .unwrap();
+    run_archive::write_record(
+        &mut buf,
+        &RunRecord::ContextCheckpoint {
+            snapshot: ContextSnapshot {
+                stage_name: "work".to_string(),
+                total_tokens: 1,
+                max_tokens: 100,
+                regions: vec![RegionSnapshot {
+                    name: "system".to_string(),
+                    kind: "pinned".to_string(),
+                    current_tokens: 1,
+                    max_tokens: 100,
+                    entries: vec![RegionEntrySnapshot {
+                        content: content.to_string(),
+                        tokens: 1,
+                        kind: leviath_core::region::EntryKind::Text,
+                        metadata: None,
+                        key: None,
+                        taint: leviath_core::taint::TaintLevel::default(),
+                    }],
+                }],
+            },
+            at: 2,
+        },
+    )
+    .unwrap();
+    std::fs::write(crate::runstate::run_dir(run_id).join("run.lvr"), &buf).unwrap();
+}
+
+/// Regression test for a gap found by running this against real journals: runs
+/// matched on `q_in=journal` and came back with no highlight at all, because
+/// only tool batches were being inspected while the text lived in the journal's
+/// context records. A result with no explanation is the thing server-side
+/// search exists to avoid.
+#[tokio::test]
+async fn a_journal_match_in_a_context_record_still_explains_itself() {
+    crate::runstate::with_isolated_runs_dir_async("runs-journal-context", |_d| async move {
+        create_run(&meta_at("run-j", 1)).unwrap();
+        plant_journal("run-j", "the codex entry mentions xylophone here", None);
+
+        let page = page_of(&[("q", "xylophone"), ("q_in", "journal")]).await;
+        assert_eq!(page.items.len(), 1);
+        let highlights = &page.items[0].highlights;
+        assert!(
+            !highlights.is_empty(),
+            "a match with no highlight is the bug"
+        );
+        assert_eq!(highlights[0].field, "journal.context.system");
+        assert!(highlights[0].snippet.contains("xylophone"));
+    })
+    .await;
+}
+
+/// The journal stores `RunMeta` whole, secret included, so the highlighter must
+/// never cut a snippet from those bytes. Phase one scans the raw file and so
+/// *can* match there - the run may come back - but nothing it returns may echo
+/// the secret.
+#[tokio::test]
+async fn searching_the_journal_never_echoes_the_webhook_secret() {
+    crate::runstate::with_isolated_runs_dir_async("runs-journal-secret", |_d| async move {
+        create_run(&meta_at("run-s", 1)).unwrap();
+        plant_journal(
+            "run-s",
+            "ordinary content",
+            Some("super-secret-signing-key"),
+        );
+
+        for source in ["journal", "meta", "context"] {
+            let page = page_of(&[("q", "super-secret-signing-key"), ("q_in", source)]).await;
+            let rendered = serde_json::to_string(&page.items).unwrap();
+            assert!(
+                !rendered.contains("super-secret-signing-key"),
+                "q_in={source} echoed the signing key"
+            );
+        }
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn a_bad_request_is_reported_rather_than_served() {
     crate::runstate::with_isolated_runs_dir_async("runs-handler-bad", |_d| async move {

@@ -631,38 +631,114 @@ fn logs_highlights(meta: &RunMeta, q: &str, out: &mut Vec<Highlight>) {
     }
 }
 
-/// Which tool call the match is in, from the run journal.
+/// Where in the run's history the match is: a tool call, or the context as it
+/// stood at some earlier point.
 ///
-/// Streams the records and looks only at tool batches. Deliberately never at
-/// `Header`/`Progress`/`Checkpoint` metadata: those carry a whole `RunMeta`,
-/// including the webhook signing secret, and a snippet cut from those bytes
-/// would put it in the response.
+/// Both halves matter. Live-testing this against real journals turned up runs
+/// that matched on `q_in=journal` and came back with **no highlight at all** -
+/// a result with no explanation, which is precisely what search-on-the-server
+/// was supposed to fix. The text was in the journal's context records, and only
+/// tool batches were being looked at.
+///
+/// Reads entry *content* and tool calls, and deliberately never the `meta` field
+/// of `Header`/`Progress`/`Checkpoint`. Those carry a whole `RunMeta` including
+/// the webhook signing secret, and a snippet cut from those bytes would put it
+/// in the response. That exclusion is structural - the code never reaches for
+/// the field - rather than a filter applied afterwards.
+///
+/// One residual case is left, and documented rather than papered over: the phase
+/// one filter scans the journal's raw bytes, which *do* include those repeated
+/// metadata blocks. A query matching only there (a workdir path, say) yields a
+/// run with no highlight. The same text is searchable, with a highlight, through
+/// `q_in=meta`.
 fn journal_highlights(meta: &RunMeta, q: &str, out: &mut Vec<Highlight>) {
+    use leviath_core::run_archive::{RegionDelta, RunRecord};
+
     let Some(records) = runstate::read_run_archive(&meta.run_id) else {
         return;
     };
+
+    /// Look through a region's entries, naming the region if one matches.
+    fn scan_entries(
+        region_name: &str,
+        entries: &[leviath_core::run_meta::RegionEntrySnapshot],
+        q: &str,
+        out: &mut Vec<Highlight>,
+    ) -> bool {
+        for entry in entries {
+            if let Some(at) = search::find_ignore_ascii_case(&entry.content, q) {
+                out.push(Highlight {
+                    field: format!("journal.context.{region_name}"),
+                    snippet: search::snippet(&entry.content, at),
+                    stage: None,
+                });
+                return true;
+            }
+        }
+        false
+    }
+
     for record in &records {
         if out.len() >= MAX_HIGHLIGHTS {
             return;
         }
-        let leviath_core::run_archive::RunRecord::ToolBatch {
-            calls, stage_index, ..
-        } = record
-        else {
-            continue;
-        };
-        for call in calls {
-            let haystacks = [&call.arguments, call.result.as_ref().unwrap_or(&call.name)];
-            for text in haystacks {
-                if let Some(at) = search::find_ignore_ascii_case(text, q) {
-                    out.push(Highlight {
-                        field: format!("journal.tool.{}", call.name),
-                        snippet: search::snippet(text, at),
-                        stage: Some(*stage_index),
-                    });
-                    return;
+        match record {
+            RunRecord::ToolBatch {
+                calls, stage_index, ..
+            } => {
+                for call in calls {
+                    let haystacks = [&call.arguments, call.result.as_ref().unwrap_or(&call.name)];
+                    for text in haystacks {
+                        if let Some(at) = search::find_ignore_ascii_case(text, q) {
+                            out.push(Highlight {
+                                field: format!("journal.tool.{}", call.name),
+                                snippet: search::snippet(text, at),
+                                stage: Some(*stage_index),
+                            });
+                            return;
+                        }
+                    }
                 }
             }
+            RunRecord::ContextCheckpoint { snapshot, .. } => {
+                for region in &snapshot.regions {
+                    if scan_entries(&region.name, &region.entries, q, out) {
+                        return;
+                    }
+                }
+            }
+            RunRecord::ContextDiff { delta, .. } | RunRecord::Progress { delta, .. } => {
+                for region in &delta.regions {
+                    let matched = match region {
+                        RegionDelta::Set(snapshot) => {
+                            scan_entries(&snapshot.name, &snapshot.entries, q, out)
+                        }
+                        RegionDelta::Append { name, entries, .. } => {
+                            scan_entries(name, entries, q, out)
+                        }
+                        // Carry no text of their own.
+                        RegionDelta::Clear { .. } | RegionDelta::Remove { .. } => false,
+                    };
+                    if matched {
+                        return;
+                    }
+                }
+            }
+            RunRecord::Checkpoint { context, .. } => {
+                for region in &context.regions {
+                    if scan_entries(&region.name, &region.entries, q, out) {
+                        return;
+                    }
+                }
+            }
+            // Carry no searchable content of their own - only the metadata this
+            // function must not cut a snippet from.
+            RunRecord::Header { .. }
+            | RunRecord::OwnershipChanged { .. }
+            | RunRecord::StatusChanged { .. }
+            | RunRecord::Inference { .. }
+            | RunRecord::ToolCallDone { .. }
+            | RunRecord::Message { .. } => {}
         }
     }
 }
