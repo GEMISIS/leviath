@@ -43,7 +43,48 @@ fn blueprint_dir(name: &str) -> Result<PathBuf, (StatusCode, Json<ErrorResponse>
     Ok(agents_dir().join(name))
 }
 
+/// Collapse a raw discovery scan into the canonical catalog: one blueprint per
+/// name, in a stable order.
+///
+/// Split out of [`discover_blueprints`] because it is the part with the rules,
+/// and it can be tested over a hand-built `Vec` instead of a directory tree.
+///
+/// **Dedup by name, first wins.** `get_blueprint` and `spawn_agent` both resolve
+/// a blueprint with `.find(|b| b.name == name)` over this list, so a name
+/// reachable from two roots (the installed agents dir and a `config.agent_paths`
+/// entry, say) made *which agent actually ran* depend on `read_dir` order, which
+/// is a filesystem detail that can differ between two calls on one machine. The
+/// dedup happens in scan order, before the sort, so the winner is the one the
+/// existing `.find()` already meant to pick - the installed catalog first - and
+/// this only makes that choice deterministic rather than changing it.
+///
+/// **Then sort by `(name, path)`.** `name` is the client-facing identity; `path`
+/// is a tie-break that cannot itself be ambiguous, so the order is total. A list
+/// that is merely "whatever the filesystem said" cannot be paginated: a cursor
+/// over an unstable order skips and repeats entries.
+fn canonicalize(found: Vec<BlueprintInfo>) -> Vec<BlueprintInfo> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut kept: Vec<BlueprintInfo> = Vec::with_capacity(found.len());
+    for info in found {
+        if seen.insert(info.name.clone()) {
+            kept.push(info);
+        } else {
+            tracing::debug!(
+                name = %info.name,
+                shadowed = %info.path,
+                "duplicate blueprint name; keeping the earlier one"
+            );
+        }
+    }
+    kept.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
+    kept
+}
+
 /// Scan for blueprints from installed agents dir and configured agent_paths.
+///
+/// The result is deduplicated by name and name-sorted - see [`canonicalize`].
+/// Every consumer goes through here (`list_blueprints`, `get_blueprint`,
+/// `spawn_agent`), so they all share one answer to "which blueprint is `x`".
 pub(super) fn discover_blueprints(config: &crate::config::Config) -> Vec<BlueprintInfo> {
     let mut results = Vec::new();
     let agents = agents_dir();
@@ -60,19 +101,27 @@ pub(super) fn discover_blueprints(config: &crate::config::Config) -> Vec<Bluepri
         if manifest.exists() {
             results.extend(read_blueprint_info(&manifest, &dir));
         }
-        // Check subdirs
-        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                let m = p.join("agent.leviath");
-                if m.exists() {
-                    results.extend(read_blueprint_info(&m, &p));
-                }
+        // Check subdirs. Sorted, because `canonicalize` resolves a duplicate
+        // name by taking the first one scanned - and two subdirectories of the
+        // *same* root can declare the same name, so without this the winner
+        // would still come down to `read_dir` order.
+        let mut subdirs: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        subdirs.sort();
+        for p in subdirs {
+            let m = p.join("agent.leviath");
+            if m.exists() {
+                results.extend(read_blueprint_info(&m, &p));
             }
         }
     }
 
-    results
+    canonicalize(results)
 }
 
 pub(super) fn read_blueprint_info(manifest_path: &Path, dir: &Path) -> Option<BlueprintInfo> {
@@ -252,6 +301,58 @@ fn validate_manifest_text(manifest: &str) -> ValidateResponse {
         valid: errors.is_empty(),
         errors: (!errors.is_empty()).then(|| errors.iter().map(render).collect()),
         warnings: (!warnings.is_empty()).then(|| warnings.iter().map(render).collect()),
+    }
+}
+
+#[cfg(test)]
+mod canonicalize_tests {
+    use super::*;
+
+    fn info(name: &str, path: &str) -> BlueprintInfo {
+        BlueprintInfo {
+            name: name.to_string(),
+            version: "1".to_string(),
+            description: String::new(),
+            path: path.to_string(),
+            stages: vec![],
+        }
+    }
+
+    /// The scan order decides the winner, so the *earlier* root keeps the name
+    /// even though its path sorts later. Getting this backwards would silently
+    /// change which agent a spawn runs.
+    #[test]
+    fn duplicate_names_keep_the_first_scanned_not_the_first_sorted() {
+        let out = canonicalize(vec![
+            info("coder", "/zzz/installed"),
+            info("coder", "/aaa/custom"),
+        ]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, "/zzz/installed");
+    }
+
+    #[test]
+    fn output_is_name_sorted_with_path_as_the_tie_break() {
+        let out = canonicalize(vec![
+            info("zebra", "/b"),
+            info("alpha", "/z"),
+            info("alpha2", "/a"),
+        ]);
+        let names: Vec<&str> = out.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "alpha2", "zebra"]);
+    }
+
+    /// Distinct names from the same root all survive - the dedup keys on name,
+    /// not on the directory a blueprint was found in.
+    #[test]
+    fn distinct_names_are_all_kept() {
+        let out = canonicalize(vec![info("a", "/1"), info("b", "/2"), info("c", "/3")]);
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn an_empty_scan_canonicalizes_to_an_empty_catalog() {
+        assert!(canonicalize(vec![]).is_empty());
     }
 }
 
