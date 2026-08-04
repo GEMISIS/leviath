@@ -286,12 +286,13 @@ pub enum SubAgentOp {
         /// Reply: the child's run id, or an error message.
         reply: oneshot::Sender<Result<String, String>>,
     },
-    /// Report a run's current status (`None` if the host has no such live run).
+    /// Report a run's current status and answer (`None` if the host has no such
+    /// live run).
     Check {
         /// The run to query.
         run_id: String,
-        /// Reply: the run's status.
-        reply: oneshot::Sender<Option<AgentStatus>>,
+        /// Reply: what the run is doing and what it has handed back.
+        reply: oneshot::Sender<Option<SubAgentReport>>,
     },
     /// Deliver a message into a running agent's inbox. Reply is whether a live
     /// agent accepted it.
@@ -320,6 +321,24 @@ pub enum SubAgentOp {
         /// Reply: whether anything was cancelled.
         reply: oneshot::Sender<bool>,
     },
+}
+
+/// What a parent learns when it checks on a child: what the child is doing, and
+/// what it has handed back.
+///
+/// The two used to be one thing - the status alone - which is why
+/// `wait_for_agent`, whose schema has always promised "return its final result",
+/// returned `"Sub-agent 'x' finished with status: Complete"` and nothing else. A
+/// parent had no way to receive a child's work except by agreeing on a file path
+/// out of band.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubAgentReport {
+    /// What the child is doing now.
+    pub status: AgentStatus,
+    /// What the child submitted, if anything. `None` for a child still working,
+    /// one whose blueprint never asks for an output, or one that finished
+    /// without giving it.
+    pub final_output: Option<leviath_core::output::FinalOutput>,
 }
 
 /// A control operation addressed to the host, each carrying a oneshot channel the
@@ -1317,10 +1336,17 @@ impl WorldHost {
                 let _ = reply.send(self.spawn_child(*args, &parent_run_id, max_depth));
             }
             SubAgentOp::Check { run_id, reply } => {
-                let status = self
-                    .live_entity(&run_id)
-                    .and_then(|e| self.world.agent_status(e));
-                let _ = reply.send(status);
+                let report = self.live_entity(&run_id).and_then(|e| {
+                    self.world.agent_status(e).map(|status| SubAgentReport {
+                        status,
+                        final_output: self
+                            .world
+                            .world()
+                            .get::<crate::persistence::FinalOutput>(e)
+                            .map(|o| o.0.clone()),
+                    })
+                });
+                let _ = reply.send(report);
             }
             SubAgentOp::Send {
                 run_id,
@@ -3059,6 +3085,34 @@ mod tests {
         assert_eq!(r, Err("bad blueprint".to_string()));
     }
 
+    /// A parent asking after a finished child receives its answer, not just a
+    /// status word. `wait_for_agent`'s schema has always promised this.
+    #[tokio::test]
+    async fn subagent_check_carries_the_childs_submitted_answer() {
+        let mut host = host_with(vec![]);
+        let entity = spawn(&mut host, "run-a", "run-a");
+        host.world
+            .world_mut()
+            .entity_mut(entity)
+            .insert(crate::persistence::FinalOutput(
+                leviath_core::output::FinalOutput::new(
+                    "changed src/lib.rs and its test",
+                    Some("markdown".to_string()),
+                    "fix_worker".to_string(),
+                    5,
+                ),
+            ));
+        let report = ask_sub(&mut host, |reply| SubAgentOp::Check {
+            run_id: "run-a".to_string(),
+            reply,
+        })
+        .await
+        .expect("the run is live");
+        let output = report.final_output.expect("the answer came back");
+        assert_eq!(output.content, "changed src/lib.rs and its test");
+        assert_eq!(output.stage, "fix_worker");
+    }
+
     #[tokio::test]
     async fn subagent_check_reports_status_or_none() {
         let mut host = host_with(vec![]);
@@ -3068,7 +3122,14 @@ mod tests {
             reply,
         })
         .await;
-        assert_eq!(status, Some(AgentStatus::Active));
+        assert_eq!(
+            status,
+            Some(SubAgentReport {
+                status: AgentStatus::Active,
+                // A working child has nothing to hand back yet.
+                final_output: None,
+            })
+        );
 
         let none = ask_sub(&mut host, |reply| SubAgentOp::Check {
             run_id: "ghost".to_string(),

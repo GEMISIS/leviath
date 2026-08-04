@@ -409,17 +409,33 @@ fn start_worker(
     Ok(child)
 }
 
-/// A worker's terminal result: `Some(Ok(final_text))` if complete,
+/// A worker's terminal result: `Some(Ok(deliverable))` if complete,
 /// `Some(Err(reason))` if it errored/was cancelled/vanished, `None` if still
 /// running.
+///
+/// A worker that called `submit_output` contributes exactly what it submitted.
+/// Otherwise this falls back to the text of its last assistant message, which is
+/// what every worker used to contribute and is usually wrong: a worker whose
+/// final turn was a tool call has no trailing text, so the merge stage received
+/// an empty string. The shipped `parallel-fixer` blueprint tells its worker to
+/// "report exactly which file(s) you changed", into that same channel.
+///
+/// The fallback stays because it costs nothing and an existing blueprint that
+/// happens to end on a text turn keeps working. A blueprint that wants the
+/// guarantee sets `require_output` on its worker stage.
 fn worker_terminal_result(world: &World, worker: Entity) -> Option<Result<String, String>> {
     match agent_status(world, worker) {
         None => Some(Err("worker vanished".to_string())),
         Some(AgentStatus::Complete) => {
-            let content = world
-                .get::<InferenceResult>(worker)
-                .map(|r| r.response.clone())
-                .unwrap_or_default();
+            let submitted = world
+                .get::<crate::persistence::FinalOutput>(worker)
+                .map(|o| o.0.content.clone());
+            let content = submitted.unwrap_or_else(|| {
+                world
+                    .get::<InferenceResult>(worker)
+                    .map(|r| r.response.clone())
+                    .unwrap_or_default()
+            });
             Some(Ok(content))
         }
         Some(AgentStatus::Error { message }) => Some(Err(message)),
@@ -1082,6 +1098,65 @@ mod tests {
     }
 
     // ── worker_terminal_result / build_report / inject_conversation ───────────
+
+    /// The bug this feature exists to fix. A worker's contribution used to be
+    /// the text of its last assistant message, so a worker whose final turn was
+    /// a tool call contributed an empty string - and the shipped
+    /// `parallel-fixer` tells its worker to "report exactly which file(s) you
+    /// changed" into exactly that channel.
+    #[test]
+    fn a_submitted_answer_beats_the_last_assistant_text() {
+        let mut world = World::new();
+        let worker = world
+            .spawn((
+                parent_state(),
+                InferenceResult {
+                    // What the old code would have handed the merge stage: the
+                    // trailing aside, not the deliverable.
+                    response: "Let me run the tests one more time.".to_string(),
+                    tool_calls: vec![],
+                    tokens_used: 0,
+                    timestamp: 0,
+                },
+                crate::persistence::FinalOutput(leviath_core::output::FinalOutput::new(
+                    "changed src/lib.rs; the failing test now passes",
+                    None,
+                    "fix_worker".to_string(),
+                    0,
+                )),
+            ))
+            .id();
+        set_status(&mut world, worker, AgentStatus::Complete);
+        assert_eq!(
+            worker_terminal_result(&world, worker),
+            Some(Ok(
+                "changed src/lib.rs; the failing test now passes".to_string()
+            ))
+        );
+    }
+
+    /// The fallback stays, so a blueprint that happens to end on a text turn
+    /// keeps working without declaring anything.
+    #[test]
+    fn a_worker_that_submitted_nothing_still_falls_back_to_its_text() {
+        let mut world = World::new();
+        let worker = world
+            .spawn((
+                parent_state(),
+                InferenceResult {
+                    response: "the old behaviour".to_string(),
+                    tool_calls: vec![],
+                    tokens_used: 0,
+                    timestamp: 0,
+                },
+            ))
+            .id();
+        set_status(&mut world, worker, AgentStatus::Complete);
+        assert_eq!(
+            worker_terminal_result(&world, worker),
+            Some(Ok("the old behaviour".to_string()))
+        );
+    }
 
     #[test]
     fn worker_terminal_result_covers_every_status() {
