@@ -1,0 +1,723 @@
+//! `GET /api/runs` - the paginated, searchable run listing.
+//!
+//! Supersedes `GET /api/agents`, which returns every run ever recorded as one
+//! unbounded array and accepts only a status filter. That route stays exactly as
+//! it is, deprecated: it is the legacy spelling (the console says "runs"
+//! everywhere), and it gets a replacement at a new path rather than a changed
+//! response shape, so nothing that calls it today breaks.
+//!
+//! What this adds over that: keyset pagination, sorting, server-side search with
+//! highlights, batch fetch by id, and field projection.
+//!
+//! **What it does not fix.** Every listing here still walks the runs directory
+//! and parses every `meta.json`, because that is the only index there is.
+//! Pagination bounds what crosses the wire and what the browser holds; it does
+//! not bound the server's work, and runs are never pruned. The guard that does
+//! bound the damage is [`MAX_SEARCH_SCAN`], on the filesystem-reading half of
+//! search.
+
+use std::collections::HashSet;
+
+use axum::extract::Query;
+use axum::http::StatusCode;
+use axum::response::Json;
+
+use super::cursor::{self, Cursor, CursorKey};
+use super::search;
+use super::types::*;
+use crate::runstate::{self, RunMeta};
+
+/// Page size when the client does not ask.
+const DEFAULT_LIMIT: usize = 50;
+/// Largest page size served. A larger `limit` is clamped rather than refused: a
+/// client asking for 1000 wants as much as it can get, and the real value is
+/// discoverable from `GET /api/config`.
+const MAX_LIMIT: usize = 200;
+/// Most ids one batch fetch may name.
+const MAX_IDS: usize = 200;
+/// How many runs a filesystem-reading search will examine before giving up.
+///
+/// `q_in=logs` over an unbounded, never-pruned run set is a self-inflicted
+/// denial of service: every request would read two files per stage per run, for
+/// every run that has ever existed. Stopping after a bounded prefix - taken in
+/// the requested sort order, so it is the newest runs - answers the common case
+/// and says so via `scan_truncated`, which is better than refusing the query or
+/// than quietly taking longer every month.
+const MAX_SEARCH_SCAN: usize = 500;
+/// How much of each stage log a search reads, from the end.
+const SEARCH_LOG_TAIL_BYTES: u64 = 256 * 1024;
+/// Most highlights attached to one item. A log with ten thousand matches must
+/// not become the response body.
+const MAX_HIGHLIGHTS: usize = 5;
+
+/// Which field a run is ordered by.
+///
+/// The shared `At` suffix is the point, not an accident: these are the three
+/// timestamps on a run, and each variant is named for the `RunMeta` field it
+/// reads and the query value that selects it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "named after the fields they read"
+)]
+enum SortKey {
+    StartedAt,
+    UpdatedAt,
+    LastProgressAt,
+}
+
+impl SortKey {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "started_at" => Some(SortKey::StartedAt),
+            "updated_at" => Some(SortKey::UpdatedAt),
+            "last_progress_at" => Some(SortKey::LastProgressAt),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            SortKey::StartedAt => "started_at",
+            SortKey::UpdatedAt => "updated_at",
+            SortKey::LastProgressAt => "last_progress_at",
+        }
+    }
+
+    /// This run's value for the key.
+    ///
+    /// `last_progress_at` is `Option`, and absent means "written by a daemon
+    /// older than the field, or before the first snapshot landed". The run
+    /// demonstrably started, so `started_at` is the honest floor - and it keeps
+    /// the key non-null, which the cursor needs.
+    fn value(self, meta: &RunMeta) -> i64 {
+        match self {
+            SortKey::StartedAt => meta.started_at,
+            SortKey::UpdatedAt => meta.updated_at,
+            SortKey::LastProgressAt => meta.last_progress_at.unwrap_or(meta.started_at),
+        }
+    }
+}
+
+/// Where search looks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Source {
+    /// Fields already parsed into `RunMeta`. No IO.
+    Meta,
+    /// The tracked modified-file paths. No IO.
+    Files,
+    /// The run's current context window, as raw unparsed bytes.
+    Context,
+    /// The tail of each stage's logs, as raw bytes.
+    Logs,
+    /// The run journal, as raw bytes.
+    Journal,
+}
+
+impl Source {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "meta" => Some(Source::Meta),
+            "files" => Some(Source::Files),
+            "context" => Some(Source::Context),
+            "logs" => Some(Source::Logs),
+            "journal" => Some(Source::Journal),
+            _ => None,
+        }
+    }
+
+    /// Does answering this source require reading files?
+    ///
+    /// Only these count against [`MAX_SEARCH_SCAN`] - the in-memory sources are
+    /// free and must not consume the budget.
+    fn reads_filesystem(self) -> bool {
+        matches!(self, Source::Context | Source::Logs | Source::Journal)
+    }
+}
+
+/// Query parameters of `GET /api/runs`.
+#[derive(serde::Deserialize, Default)]
+pub(super) struct RunsQuery {
+    pub(super) limit: Option<usize>,
+    pub(super) cursor: Option<String>,
+    pub(super) status: Option<String>,
+    pub(super) sort: Option<String>,
+    pub(super) order: Option<String>,
+    pub(super) q: Option<String>,
+    pub(super) q_in: Option<String>,
+    pub(super) fields: Option<String>,
+    pub(super) ids: Option<String>,
+    pub(super) since: Option<i64>,
+}
+
+/// A validated query. Every 400 this route can produce is decided here, so the
+/// handler below is a straight-line composition and the error paths are all
+/// reachable from a plain unit test.
+struct Resolved {
+    limit: usize,
+    cursor: Option<Cursor>,
+    statuses: Vec<String>,
+    sort: SortKey,
+    descending: bool,
+    q: Option<String>,
+    sources: Vec<Source>,
+    fields: Option<HashSet<String>>,
+    ids: Option<Vec<String>>,
+    since: Option<i64>,
+    digest: String,
+}
+
+impl Resolved {
+    /// Does any requested source read files?
+    fn searches_filesystem(&self) -> bool {
+        self.q.is_some() && self.sources.iter().any(|s| s.reads_filesystem())
+    }
+}
+
+type ApiError = (StatusCode, Json<ErrorResponse>);
+
+fn bad_request(message: String) -> ApiError {
+    err(StatusCode::BAD_REQUEST, message)
+}
+
+/// Split a comma list, dropping empties so `a,,b` and a trailing comma are not
+/// errors a client has to think about.
+fn comma_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn resolve(query: &RunsQuery) -> Result<Resolved, ApiError> {
+    // `ids` is a batch fetch, not a filter: it names exactly what it wants, so
+    // paging, ordering and filtering have nothing to act on. Rejecting the
+    // combination is deliberate - a silently ignored parameter produces the
+    // kind of bug report that takes a day to read.
+    let ids = query.ids.as_deref().map(comma_list);
+    if let Some(ref ids) = ids {
+        let conflicts = [
+            ("cursor", query.cursor.is_some()),
+            ("q", query.q.is_some()),
+            ("status", query.status.is_some()),
+            ("since", query.since.is_some()),
+        ];
+        if let Some((name, _)) = conflicts.iter().find(|(_, present)| *present) {
+            return Err(bad_request(format!(
+                "`ids` names exactly which runs to return, so it cannot be combined with `{name}`"
+            )));
+        }
+        if ids.len() > MAX_IDS {
+            return Err(bad_request(format!(
+                "`ids` names {} runs; at most {MAX_IDS} may be fetched at once",
+                ids.len()
+            )));
+        }
+    }
+
+    let limit = match query.limit {
+        None => DEFAULT_LIMIT,
+        Some(0) => {
+            return Err(bad_request(
+                "`limit` must be at least 1; omit it for the default".to_string(),
+            ));
+        }
+        Some(n) => n.min(MAX_LIMIT),
+    };
+
+    let sort_raw = query.sort.as_deref().unwrap_or("started_at");
+    let sort = SortKey::parse(sort_raw).ok_or_else(|| {
+        bad_request(format!(
+            "Unknown sort '{sort_raw}': expected started_at, updated_at or last_progress_at"
+        ))
+    })?;
+
+    let order_raw = query.order.as_deref().unwrap_or("desc");
+    let descending = match order_raw {
+        "desc" => true,
+        "asc" => false,
+        other => {
+            return Err(bad_request(format!(
+                "Unknown order '{other}': expected desc or asc"
+            )));
+        }
+    };
+
+    let q = query
+        .q
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let sources_raw = query.q_in.as_deref().unwrap_or("meta,files");
+    let mut sources = Vec::new();
+    for name in comma_list(sources_raw) {
+        let source = Source::parse(&name).ok_or_else(|| {
+            bad_request(format!(
+                "Unknown q_in '{name}': expected meta, files, context, logs or journal"
+            ))
+        })?;
+        if !sources.contains(&source) {
+            sources.push(source);
+        }
+    }
+
+    let fields = match query.fields.as_deref() {
+        None => None,
+        Some(raw) => {
+            let requested = comma_list(raw);
+            let known = known_meta_fields();
+            let unknown: Vec<&String> = requested
+                .iter()
+                .filter(|name| !known.contains(name.as_str()))
+                .collect();
+            if let Some(first) = unknown.first() {
+                // Naming the nested case separately, because `flags.count` is
+                // the natural thing to try and "unknown field" would be a
+                // misleading answer to it.
+                if first.contains('.') {
+                    return Err(bad_request(format!(
+                        "`fields` selects top-level fields only, so '{first}' is not available"
+                    )));
+                }
+                return Err(bad_request(format!("Unknown field '{first}' in `fields`")));
+            }
+            let mut set: HashSet<String> = requested.into_iter().collect();
+            // Identity is never optional: a projected item nothing can be keyed
+            // by is useless to every client.
+            set.insert("run_id".to_string());
+            Some(set)
+        }
+    };
+
+    let statuses = query.status.as_deref().map(comma_list).unwrap_or_default();
+
+    // The filters, in a fixed order, so the same filter set always digests the
+    // same way.
+    let digest = cursor::filter_digest(&[
+        &statuses.join(","),
+        q.as_deref().unwrap_or(""),
+        sources_raw,
+        &query.since.map(|s| s.to_string()).unwrap_or_default(),
+    ]);
+
+    let cursor = match query.cursor.as_deref() {
+        None => None,
+        Some(raw) => Some(
+            cursor::decode(raw, sort.as_str(), order_raw, &digest)
+                .map_err(|e| bad_request(e.message()))?,
+        ),
+    };
+
+    Ok(Resolved {
+        limit,
+        cursor,
+        statuses,
+        sort,
+        descending,
+        q,
+        sources,
+        fields,
+        ids,
+        since: query.since,
+        digest,
+    })
+}
+
+/// The top-level keys of a serialized `RunMeta`, for validating `fields`.
+///
+/// Derived from an actual serialization rather than a hand-written list, so the
+/// allowlist cannot drift away from the struct when a field is added.
+fn known_meta_fields() -> HashSet<String> {
+    let probe = RunMeta::new(
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
+        None,
+        String::new(),
+        0,
+    );
+    match serde_json::to_value(probe) {
+        Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
+        _ => HashSet::new(),
+    }
+}
+
+/// `GET /api/runs`
+pub(super) async fn list_runs(
+    Query(query): Query<RunsQuery>,
+) -> Result<Json<Page<RunItem>>, ApiError> {
+    let resolved = resolve(&query)?;
+    let server_time = now_secs();
+
+    // A batch fetch reads exactly the named runs, rather than scanning the
+    // whole directory and filtering it down to them.
+    if let Some(ref ids) = resolved.ids {
+        let mut items = Vec::new();
+        let mut missing = Vec::new();
+        for id in ids {
+            match runstate::read_meta(id) {
+                Ok(meta) => items.push(build_item(&meta, &resolved, None)),
+                Err(_) => missing.push(id.clone()),
+            }
+        }
+        let total = items.len();
+        let mut page = Page::new(items, None, Some(total), server_time);
+        page.missing = missing;
+        return Ok(Json(page));
+    }
+
+    let mut runs = runstate::list_runs();
+    if !resolved.statuses.is_empty() {
+        runs.retain(|meta| {
+            resolved
+                .statuses
+                .iter()
+                .any(|filter| status_matches(&meta.status, filter))
+        });
+    }
+    if let Some(since) = resolved.since {
+        // Inclusive: at seconds granularity an exclusive comparison drops
+        // updates that land in the same second as the previous watermark, and a
+        // re-delivered item is recoverable where a lost one is not.
+        runs.retain(|meta| resolved.sort.value(meta) >= since);
+    }
+
+    // Sort before searching, so the scan budget is spent on the runs the client
+    // asked to see first.
+    sort_runs(&mut runs, &resolved);
+
+    let (runs, scan_truncated) = apply_search(runs, &resolved);
+    let total = if scan_truncated {
+        None
+    } else {
+        Some(runs.len())
+    };
+
+    let (page_runs, next_cursor) = paginate(runs, &resolved);
+    let items = page_runs
+        .iter()
+        .map(|meta| {
+            let highlights = resolved
+                .q
+                .as_deref()
+                .map(|q| highlights_for(meta, q, &resolved.sources))
+                .unwrap_or_default();
+            build_item(meta, &resolved, Some(highlights))
+        })
+        .collect();
+
+    let mut page = Page::new(items, next_cursor, total, server_time);
+    page.scan_truncated = scan_truncated;
+    Ok(Json(page))
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Order by `(sort value, run_id)`, with the tie-break following the primary
+/// direction.
+///
+/// The tie-break is not decoration: two runs can start in the same second, and
+/// a keyset walk over a non-total order drops whichever colliding run it
+/// resumed past. Run ids are unique, so this makes the order total.
+fn sort_runs(runs: &mut [RunMeta], resolved: &Resolved) {
+    runs.sort_by(|a, b| {
+        let ka = (resolved.sort.value(a), a.run_id.as_str());
+        let kb = (resolved.sort.value(b), b.run_id.as_str());
+        if resolved.descending {
+            kb.cmp(&ka)
+        } else {
+            ka.cmp(&kb)
+        }
+    });
+}
+
+/// Phase one of search: keep the runs that could match, bounding how many of
+/// them are allowed to cost a file read.
+fn apply_search(runs: Vec<RunMeta>, resolved: &Resolved) -> (Vec<RunMeta>, bool) {
+    let Some(ref q) = resolved.q else {
+        return (runs, false);
+    };
+    let budgeted = resolved.searches_filesystem();
+    let mut kept = Vec::new();
+    let mut scanned = 0usize;
+    let mut truncated = false;
+    for meta in runs {
+        if budgeted {
+            if scanned >= MAX_SEARCH_SCAN {
+                truncated = true;
+                break;
+            }
+            scanned += 1;
+        }
+        if matches_query(&meta, q, &resolved.sources) {
+            kept.push(meta);
+        }
+    }
+    (kept, truncated)
+}
+
+/// Does this run match, according to the requested sources? Sources are OR-ed.
+///
+/// Nothing here parses. The cheap sources read already-parsed metadata; the
+/// deep ones substring-scan raw file bytes. Parsing is phase two's job, and it
+/// only happens for the items actually being returned.
+fn matches_query(meta: &RunMeta, q: &str, sources: &[Source]) -> bool {
+    sources.iter().any(|source| match source {
+        Source::Meta => meta_fields(meta)
+            .iter()
+            .any(|(_, text)| search::find_ignore_ascii_case(text, q).is_some()),
+        Source::Files => meta
+            .flags
+            .modified_files
+            .iter()
+            .any(|path| search::find_ignore_ascii_case(path, q).is_some()),
+        Source::Context => scan_file(&runstate::run_dir(&meta.run_id).join("context.json"), q),
+        Source::Journal => scan_file(&runstate::run_dir(&meta.run_id).join("run.lvr"), q),
+        Source::Logs => stage_indices(&meta.run_id).iter().any(|idx| {
+            let output = runstate::tail_stage_output(&meta.run_id, *idx, SEARCH_LOG_TAIL_BYTES);
+            let operational = runstate::tail_stage_log(&meta.run_id, *idx, SEARCH_LOG_TAIL_BYTES);
+            search::find_ignore_ascii_case(&output, q).is_some()
+                || search::find_ignore_ascii_case(&operational, q).is_some()
+        }),
+    })
+}
+
+/// The stage indices a run recorded, from `stages.json` - the index of record,
+/// rather than a `read_dir` of the directory its bytes happened to land in.
+fn stage_indices(run_id: &str) -> Vec<usize> {
+    runstate::read_stages_index(run_id)
+        .iter()
+        .map(|stage| stage.index)
+        .collect()
+}
+
+/// Substring-scan a whole file's bytes without parsing it.
+fn scan_file(path: &std::path::Path, q: &str) -> bool {
+    match std::fs::read(path) {
+        Ok(bytes) => search::contains_ignore_ascii_case(&bytes, q.as_bytes()).is_some(),
+        Err(_) => false,
+    }
+}
+
+/// The searchable `(name, text)` pairs already present in a `RunMeta`.
+fn meta_fields(meta: &RunMeta) -> Vec<(String, String)> {
+    let mut out = vec![
+        ("run_id".to_string(), meta.run_id.clone()),
+        ("agent_name".to_string(), meta.agent_name.clone()),
+        ("agent_path".to_string(), meta.agent_path.clone()),
+        ("task".to_string(), meta.task.clone()),
+        ("workdir".to_string(), meta.workdir.clone()),
+        ("current_stage".to_string(), meta.current_stage.clone()),
+    ];
+    if let Some(ref title) = meta.title {
+        out.push(("title".to_string(), title.clone()));
+    }
+    if let Some(ref model) = meta.model {
+        out.push(("model".to_string(), model.clone()));
+    }
+    if let Some(ref error) = meta.error {
+        out.push(("error".to_string(), error.clone()));
+    }
+    // `callback_url` and `callback_secret` are deliberately absent. The secret
+    // never leaves the process, and neither is something a user searches for.
+    let mut keys: Vec<&String> = meta.metadata.keys().collect();
+    keys.sort();
+    for key in keys {
+        if let Some(value) = meta.metadata.get(key) {
+            out.push((format!("metadata.{key}"), value.clone()));
+        }
+    }
+    out
+}
+
+/// Phase two: why this run matched, for the items actually being returned.
+fn highlights_for(meta: &RunMeta, q: &str, sources: &[Source]) -> Vec<Highlight> {
+    let mut out = Vec::new();
+    for source in sources {
+        if out.len() >= MAX_HIGHLIGHTS {
+            break;
+        }
+        match source {
+            Source::Meta => {
+                for (field, text) in meta_fields(meta) {
+                    if out.len() >= MAX_HIGHLIGHTS {
+                        break;
+                    }
+                    if let Some(at) = search::find_ignore_ascii_case(&text, q) {
+                        out.push(Highlight {
+                            field,
+                            snippet: search::snippet(&text, at),
+                            stage: None,
+                        });
+                    }
+                }
+            }
+            Source::Files => {
+                if let Some(path) = meta
+                    .flags
+                    .modified_files
+                    .iter()
+                    .find(|p| search::find_ignore_ascii_case(p, q).is_some())
+                {
+                    out.push(Highlight {
+                        field: "modified_files".to_string(),
+                        snippet: path.clone(),
+                        stage: None,
+                    });
+                }
+            }
+            Source::Context => context_highlight(meta, q, &mut out),
+            Source::Logs => logs_highlights(meta, q, &mut out),
+            Source::Journal => journal_highlights(meta, q, &mut out),
+        }
+    }
+    out.truncate(MAX_HIGHLIGHTS);
+    out
+}
+
+/// Where in the run's context window the match is, named by region.
+///
+/// Parses `context.json` once. Never replays the journal: that deep-copies a
+/// whole context window per recorded point, which is the cost this design
+/// exists to avoid.
+fn context_highlight(meta: &RunMeta, q: &str, out: &mut Vec<Highlight>) {
+    let Some(snapshot) = runstate::read_context_snapshot(&meta.run_id) else {
+        return;
+    };
+    for region in &snapshot.regions {
+        for entry in &region.entries {
+            if let Some(at) = search::find_ignore_ascii_case(&entry.content, q) {
+                out.push(Highlight {
+                    field: format!("context.{}", region.name),
+                    snippet: search::snippet(&entry.content, at),
+                    stage: None,
+                });
+                return;
+            }
+        }
+    }
+}
+
+/// Which stage's log the match is in - so a client can then fetch that stage.
+fn logs_highlights(meta: &RunMeta, q: &str, out: &mut Vec<Highlight>) {
+    for idx in stage_indices(&meta.run_id) {
+        if out.len() >= MAX_HIGHLIGHTS {
+            return;
+        }
+        let output = runstate::tail_stage_output(&meta.run_id, idx, SEARCH_LOG_TAIL_BYTES);
+        if let Some(at) = search::find_ignore_ascii_case(&output, q) {
+            out.push(Highlight {
+                field: "logs.output".to_string(),
+                snippet: search::snippet(&output, at),
+                stage: Some(idx),
+            });
+            continue;
+        }
+        let operational = runstate::tail_stage_log(&meta.run_id, idx, SEARCH_LOG_TAIL_BYTES);
+        if let Some(at) = search::find_ignore_ascii_case(&operational, q) {
+            out.push(Highlight {
+                field: "logs.operational".to_string(),
+                snippet: search::snippet(&operational, at),
+                stage: Some(idx),
+            });
+        }
+    }
+}
+
+/// Which tool call the match is in, from the run journal.
+///
+/// Streams the records and looks only at tool batches. Deliberately never at
+/// `Header`/`Progress`/`Checkpoint` metadata: those carry a whole `RunMeta`,
+/// including the webhook signing secret, and a snippet cut from those bytes
+/// would put it in the response.
+fn journal_highlights(meta: &RunMeta, q: &str, out: &mut Vec<Highlight>) {
+    let Some(records) = runstate::read_run_archive(&meta.run_id) else {
+        return;
+    };
+    for record in &records {
+        if out.len() >= MAX_HIGHLIGHTS {
+            return;
+        }
+        let leviath_core::run_archive::RunRecord::ToolBatch {
+            calls, stage_index, ..
+        } = record
+        else {
+            continue;
+        };
+        for call in calls {
+            let haystacks = [&call.arguments, call.result.as_ref().unwrap_or(&call.name)];
+            for text in haystacks {
+                if let Some(at) = search::find_ignore_ascii_case(text, q) {
+                    out.push(Highlight {
+                        field: format!("journal.tool.{}", call.name),
+                        snippet: search::snippet(text, at),
+                        stage: Some(*stage_index),
+                    });
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Take this page's runs and mint the cursor for the next one.
+///
+/// Takes `limit + 1` and keeps `limit`, so a cursor is only ever emitted when a
+/// further item is known to exist. Emitting one speculatively would make a
+/// client's "loop until null" run one empty request longer, every time.
+fn paginate(runs: Vec<RunMeta>, resolved: &Resolved) -> (Vec<RunMeta>, Option<String>) {
+    let mut after_cursor: Vec<RunMeta> = match resolved.cursor {
+        None => runs,
+        Some(ref cursor) => runs
+            .into_iter()
+            .filter(|meta| {
+                cursor.precedes(
+                    &CursorKey::Int(resolved.sort.value(meta)),
+                    &meta.run_id,
+                    resolved.descending,
+                )
+            })
+            .collect(),
+    };
+
+    let has_more = after_cursor.len() > resolved.limit;
+    after_cursor.truncate(resolved.limit);
+    let next = has_more.then(|| after_cursor.last()).flatten().map(|last| {
+        cursor::encode(
+            resolved.sort.as_str(),
+            if resolved.descending { "desc" } else { "asc" },
+            &resolved.digest,
+            CursorKey::Int(resolved.sort.value(last)),
+            &last.run_id,
+        )
+    });
+    (after_cursor, next)
+}
+
+/// Build one response item, redacting and then projecting.
+///
+/// `redacted()` is applied here, at the single place a `RunMeta` becomes JSON on
+/// this route, rather than at each call site - it is what strips the webhook
+/// signing secret, and a redaction that has to be remembered per handler is the
+/// one that gets forgotten.
+fn build_item(meta: &RunMeta, resolved: &Resolved, highlights: Option<Vec<Highlight>>) -> RunItem {
+    let mut value = serde_json::to_value(meta.redacted()).unwrap_or(serde_json::Value::Null);
+    if let (Some(fields), serde_json::Value::Object(map)) = (&resolved.fields, &mut value) {
+        map.retain(|key, _| fields.contains(key));
+    }
+    RunItem {
+        meta: value,
+        highlights: highlights.unwrap_or_default(),
+    }
+}
+
+#[cfg(test)]
+#[path = "runs_tests.rs"]
+mod tests;

@@ -9,6 +9,7 @@
   "servers": [{ "url": "http://127.0.0.1:3000", "description": "The default `lev serve` bind." }],
   "security": [{ "bearerAuth": [] }],
   "tags": [
+    { "name": "runs" },
     { "name": "blueprints" },
     { "name": "agents" },
     { "name": "interactions" },
@@ -89,10 +90,89 @@
         "responses": { "200": { "$ref": "#/components/responses/Ok" } }
       }
     },
+    "/api/runs": {
+      "get": {
+        "tags": ["runs"],
+        "summary": "List runs, paginated and searchable",
+        "description": "Supersedes the GET half of /api/agents, which returns every run ever recorded as one unbounded array.\n\nPagination is keyset, not offset: runs are created and deleted while a client walks the list, and an offset into a shifting list silently skips and repeats items. Pass `next_cursor` back verbatim and loop until it is null.\n\n`sort=started_at` is the only immutable sort key, and it is the default. `updated_at` also advances on the daemon's 30-second persistence heartbeat, so every live run moves under a walk, and a run whose sort value changes mid-walk may be skipped or repeated. Use started_at for a stable walk, and `since=` with no cursor to poll for what changed.",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 },
+            "description": "Page size. Larger values are clamped rather than refused; the live cap is in GET /api/config."
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": { "type": "string" },
+            "description": "Continuation token from a previous page's next_cursor. Opaque - do not parse or construct it. Presenting one against a different sort, order or filter set is a 400, not a quietly different result."
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": { "type": "string" },
+            "description": "Comma-separated statuses to keep. Matched loosely: waiting_input, waitinginput and Waiting-Input are all accepted."
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["started_at", "updated_at", "last_progress_at"],
+              "default": "started_at"
+            },
+            "description": "Ordering key. last_progress_at falls back to started_at where it is absent."
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "schema": { "type": "string", "enum": ["desc", "asc"], "default": "desc" },
+            "description": "Sort direction."
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "schema": { "type": "string" },
+            "description": "Case-insensitive substring to search for. Not a regex; no boolean operators or phrase quoting, and ASCII case folding only."
+          },
+          {
+            "name": "q_in",
+            "in": "query",
+            "schema": { "type": "string", "default": "meta,files" },
+            "description": "Comma-separated search sources: meta, files, context, logs, journal. The last three read files, so they are opt-in and subject to a scan cap - see scan_truncated in the response. They also match the raw JSON on disk, so a query containing a quote, backslash or newline may not match text that does contain it."
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "schema": { "type": "string" },
+            "description": "Comma-separated top-level RunMeta fields to return. run_id is always included. Nested paths are not supported."
+          },
+          {
+            "name": "ids",
+            "in": "query",
+            "schema": { "type": "string" },
+            "description": "Comma-separated run ids to fetch directly, bypassing the scan. Cannot be combined with cursor, q, status or since. Ids that no longer exist come back in `missing` rather than failing the request."
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "schema": { "type": "integer" },
+            "description": "Keep only runs whose sort field is at or after this unix-seconds value. Inclusive, so a client polling with the previous response's server_time re-receives same-second items rather than losing them."
+          }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/Ok" },
+          "400": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
     "/api/agents": {
       "get": {
         "tags": ["agents"],
         "summary": "List runs",
+        "description": "Deprecated: use GET /api/runs, which paginates and supports search. This route returns every run ever recorded as one array, and is kept unchanged for existing clients.",
+        "deprecated": true,
         "parameters": [
           {
             "name": "status",
@@ -198,15 +278,31 @@
       "get": {
         "tags": ["agents"],
         "summary": "The run's logs",
+        "description": "A run's logs, by stage. Output is recorded per stage under stages/<idx>/, and the two streams are kept separate rather than interleaved because they share no ordering.",
         "parameters": [
           {
             "name": "tail",
             "in": "query",
-            "schema": { "type": "integer", "minimum": 1 },
-            "description": "Return only the last N lines."
+            "schema": { "type": "integer", "minimum": 1, "default": 32768 },
+            "description": "Return only the last N bytes (not lines)."
+          },
+          {
+            "name": "stage",
+            "in": "query",
+            "schema": { "type": "string" },
+            "description": "Stage index to read, or `all` to join every stage oldest first. Defaults to the stage the run is on now."
+          },
+          {
+            "name": "stream",
+            "in": "query",
+            "schema": { "type": "string", "enum": ["output", "logs"], "default": "output" },
+            "description": "`output` for the assistant's readable output, `logs` for the operational stream: tool calls, token counts and errors."
           }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": { "$ref": "#/components/responses/Ok" },
+          "400": { "$ref": "#/components/responses/Error" }
+        }
       }
     },
     "/api/agents/{id}/result": {

@@ -39,6 +39,7 @@
 //! [`fold`] reconstructs the current state from the whole journal.
 
 use std::io::{self, Read, Write};
+use std::ops::ControlFlow;
 
 use serde::{Deserialize, Serialize};
 
@@ -654,16 +655,45 @@ pub struct RunPoint {
     pub at: i64,
 }
 
-/// Replay a run journal into the sequence of context-window snapshots over time,
-/// one [`RunPoint`] per record that changes the context (a checkpoint, diff, or
-/// progress step). This is what the context-history views (TUI/CLI/API) consume
-/// to show the window "at each stage and point". Returns an empty vec if the
-/// records don't start with a [`RunRecord::Header`].
-pub fn replay_points(records: &[RunRecord]) -> Vec<RunPoint> {
+/// One replayed point, lent to a [`visit_points`] visitor rather than handed
+/// over. Borrowing is the whole purpose: see that function.
+#[derive(Debug)]
+pub struct PointRef<'a> {
+    /// Position in the timeline, counting only records that produce a point.
+    /// Stable for a given journal prefix, because the journal is append-only -
+    /// which is what makes it usable as a pagination cursor.
+    pub index: usize,
+    /// Unix seconds this point was recorded.
+    pub at: i64,
+    /// The run metadata in effect at this point.
+    pub meta: &'a RunMeta,
+    /// The full context window at this point.
+    pub context: &'a ContextSnapshot,
+}
+
+/// Replay a run journal, calling `visit` once per record that changes the
+/// context (a checkpoint, diff, or progress step), in order. Stops early if the
+/// visitor returns [`ControlFlow::Break`]. Does nothing if the records don't
+/// start with a [`RunRecord::Header`].
+///
+/// The point of lending each point instead of collecting them: replaying a run
+/// means carrying one running window and mutating it, so materializing the
+/// timeline costs a **full deep copy of the context window per point** - and a
+/// window holds every region's entry text. On a megabyte-scale journal that is
+/// hundreds of whole-window clones, which is why anything that wants a slice of
+/// the timeline, or just an answer to "does any point contain this text",
+/// should come through here rather than [`replay_points`].
+///
+/// `&mut dyn FnMut` rather than a generic parameter, deliberately: this is
+/// called from a handful of places with unrelated closure types, and one
+/// monomorphization keeps both the compiled size and the coverage instantiation
+/// count at one - the same reasoning `execute_with_shutdown` documents in the
+/// serve module.
+pub fn visit_points(records: &[RunRecord], visit: &mut dyn FnMut(PointRef<'_>) -> ControlFlow<()>) {
     let mut iter = records.iter();
     let mut meta = match iter.next() {
         Some(RunRecord::Header { meta, .. }) => (**meta).clone(),
-        _ => return Vec::new(),
+        _ => return,
     };
     let mut context = ContextSnapshot {
         stage_name: String::new(),
@@ -671,26 +701,24 @@ pub fn replay_points(records: &[RunRecord]) -> Vec<RunPoint> {
         max_tokens: 0,
         regions: Vec::new(),
     };
-    let mut points = Vec::new();
+    let mut index = 0usize;
     for record in iter {
-        match record {
-            RunRecord::Header { meta: m, .. } => meta = (**m).clone(),
-            RunRecord::StatusChanged { status, .. } => meta.status = status.clone(),
+        let at = match record {
+            RunRecord::Header { meta: m, .. } => {
+                meta = (**m).clone();
+                continue;
+            }
+            RunRecord::StatusChanged { status, .. } => {
+                meta.status = status.clone();
+                continue;
+            }
             RunRecord::ContextCheckpoint { snapshot, at } => {
                 context = snapshot.clone();
-                points.push(RunPoint {
-                    meta: meta.clone(),
-                    context: context.clone(),
-                    at: *at,
-                });
+                *at
             }
             RunRecord::ContextDiff { delta, at } => {
                 apply_delta(&mut context, delta);
-                points.push(RunPoint {
-                    meta: meta.clone(),
-                    context: context.clone(),
-                    at: *at,
-                });
+                *at
             }
             RunRecord::Checkpoint {
                 meta: m,
@@ -699,29 +727,52 @@ pub fn replay_points(records: &[RunRecord]) -> Vec<RunPoint> {
             } => {
                 meta = (**m).clone();
                 context = c.clone();
-                points.push(RunPoint {
-                    meta: meta.clone(),
-                    context: context.clone(),
-                    at: *at,
-                });
+                *at
             }
             RunRecord::Progress { meta: m, delta, at } => {
                 meta = (**m).clone();
                 apply_delta(&mut context, delta);
-                points.push(RunPoint {
-                    meta: meta.clone(),
-                    context: context.clone(),
-                    at: *at,
-                });
+                *at
             }
             // Non-context records don't add a timeline point.
             RunRecord::OwnershipChanged { .. }
             | RunRecord::Inference { .. }
             | RunRecord::ToolBatch { .. }
             | RunRecord::ToolCallDone { .. }
-            | RunRecord::Message { .. } => {}
+            | RunRecord::Message { .. } => continue,
+        };
+        let flow = visit(PointRef {
+            index,
+            at,
+            meta: &meta,
+            context: &context,
+        });
+        index += 1;
+        if flow.is_break() {
+            return;
         }
     }
+}
+
+/// Replay a run journal into the sequence of context-window snapshots over time,
+/// one [`RunPoint`] per record that changes the context (a checkpoint, diff, or
+/// progress step). This is what the context-history views (TUI/CLI/API) consume
+/// to show the window "at each stage and point". Returns an empty vec if the
+/// records don't start with a [`RunRecord::Header`].
+///
+/// Materializes every point, so it deep-copies the whole context window once per
+/// point. Prefer [`visit_points`] when only part of the timeline is wanted, or
+/// when the answer is a predicate rather than the points themselves.
+pub fn replay_points(records: &[RunRecord]) -> Vec<RunPoint> {
+    let mut points = Vec::new();
+    visit_points(records, &mut |point| {
+        points.push(RunPoint {
+            meta: point.meta.clone(),
+            context: point.context.clone(),
+            at: point.at,
+        });
+        ControlFlow::Continue(())
+    });
     points
 }
 
@@ -1551,6 +1602,135 @@ mod tests {
     }
 
     // ── replay_points (context-window history) ──
+
+    /// Three context changes, so a windowing caller has something to page over.
+    fn three_point_records() -> Vec<RunRecord> {
+        let mut running = meta();
+        running.status = RunStatus::Running;
+        vec![
+            header(),
+            RunRecord::ContextCheckpoint {
+                snapshot: snapshot("plan", vec![region("conv", vec![entry("first", 1)])]),
+                at: 10,
+            },
+            RunRecord::ContextDiff {
+                delta: ContextDelta {
+                    stage_name: "plan".to_string(),
+                    total_tokens: 2,
+                    max_tokens: 10_000,
+                    regions: vec![RegionDelta::Append {
+                        name: "conv".to_string(),
+                        entries: vec![entry("second", 1)],
+                        current_tokens: 2,
+                    }],
+                },
+                at: 20,
+            },
+            RunRecord::Progress {
+                meta: Box::new(running),
+                delta: ContextDelta {
+                    stage_name: "code".to_string(),
+                    total_tokens: 3,
+                    max_tokens: 10_000,
+                    regions: vec![RegionDelta::Append {
+                        name: "conv".to_string(),
+                        entries: vec![entry("third", 1)],
+                        current_tokens: 3,
+                    }],
+                },
+                at: 30,
+            },
+        ]
+    }
+
+    #[test]
+    fn visit_points_indexes_points_in_order_and_carries_the_running_window() {
+        let records = three_point_records();
+        let mut seen: Vec<(usize, i64, usize)> = Vec::new();
+        visit_points(&records, &mut |point| {
+            seen.push((
+                point.index,
+                point.at,
+                point.context.regions[0].entries.len(),
+            ));
+            ControlFlow::Continue(())
+        });
+        // Index counts points, not records - the Header produces none.
+        assert_eq!(seen, vec![(0, 10, 1), (1, 20, 2), (2, 30, 3)]);
+    }
+
+    /// The reason this function exists: a caller wanting one window, or an
+    /// answer to "does any point match", must be able to stop.
+    #[test]
+    fn visit_points_stops_at_the_first_break() {
+        let records = three_point_records();
+        let mut visits = 0;
+        visit_points(&records, &mut |point| {
+            visits += 1;
+            if point.index == 1 {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        });
+        assert_eq!(
+            visits, 2,
+            "stopped at the breaking point, did not run the third"
+        );
+    }
+
+    #[test]
+    fn visit_points_without_a_header_visits_nothing() {
+        let mut visits = 0;
+        visit_points(&[], &mut |_| {
+            visits += 1;
+            ControlFlow::Continue(())
+        });
+        visit_points(
+            &[RunRecord::ContextCheckpoint {
+                snapshot: snapshot("plan", vec![]),
+                at: 1,
+            }],
+            &mut |_| {
+                visits += 1;
+                ControlFlow::Continue(())
+            },
+        );
+        assert_eq!(visits, 0);
+    }
+
+    /// `replay_points` is now a thin collector over `visit_points`, so this
+    /// pins the two together: if the reimplementation ever drifts, the borrowed
+    /// walk and the materialized one stop agreeing here first.
+    #[test]
+    fn visit_points_and_replay_points_agree() {
+        for records in [
+            three_point_records(),
+            vec![header()],
+            vec![],
+            vec![RunRecord::Message {
+                message: MessageRecord {
+                    role: "user".to_string(),
+                    content: "x".to_string(),
+                },
+                at: 1,
+            }],
+        ] {
+            let collected: Vec<RunPoint> = {
+                let mut out = Vec::new();
+                visit_points(&records, &mut |point| {
+                    out.push(RunPoint {
+                        meta: point.meta.clone(),
+                        context: point.context.clone(),
+                        at: point.at,
+                    });
+                    ControlFlow::Continue(())
+                });
+                out
+            };
+            assert_eq!(collected, replay_points(&records));
+        }
+    }
 
     #[test]
     fn replay_points_requires_a_header() {
