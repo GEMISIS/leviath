@@ -388,3 +388,34 @@ fn artifacts_with_no_workdir_are_refused() {
     assert!(output.is_none());
     assert!(message.contains("working directory"), "{message}");
 }
+
+/// The mirror is a convenience, not the storage. Sized at a whole answer it
+/// would pin ~65k tokens into every later inference for the rest of the run, so
+/// a long answer is mirrored as a preview and the full text stays on the
+/// component and on disk.
+#[test]
+fn a_long_answer_is_mirrored_as_a_bounded_preview() {
+    let mut w = win();
+    let long = "y".repeat(200_000);
+    let (_, output) = handle_output_tool(
+        &json!({ "content": long }),
+        None,
+        "summary",
+        0,
+        None,
+        &mut w,
+    );
+    // The component keeps the whole thing.
+    assert_eq!(output.expect("accepted").content.len(), 200_000);
+
+    let region = w.get_region(FINAL_OUTPUT_REGION).expect("region");
+    assert!(!region.content.is_empty(), "a preview landed");
+    assert!(
+        region.current_tokens <= region.max_tokens,
+        "and it fits the budget"
+    );
+    assert!(
+        region.content[0].content.contains("not in context"),
+        "and says where the rest is"
+    );
+}
