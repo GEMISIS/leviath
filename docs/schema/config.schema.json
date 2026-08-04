@@ -1,0 +1,283 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leviath.dev/docs/stable/config.schema.json",
+  "title": "Leviath machine configuration (config.toml)",
+  "description": "Machine-wide settings, at ~/.leviath/config.toml (or wherever LEVIATH_HOME or LEVIATH_CONFIG_PATH points). Everything is optional: an install with one provider key needs nothing else. Written against the serde structs in crates/leviath-cli/src/config.rs and checked against a golden config by a test there. See https://leviath.dev/docs/configuration.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "default_provider": {
+      "type": "string",
+      "default": "anthropic",
+      "description": "Which provider a stage falls back to when it states no preference of its own. `lev setup` points this at a provider you configured; leaving it on one you did not is what makes `lev doctor` report a resolve failure."
+    },
+    "default_model": {
+      "type": "string",
+      "description": "The model to pair with default_provider. Without it a stage naming no model falls through to a hard-coded last resort, which fails on a machine with no Anthropic key."
+    },
+    "agent_paths": {
+      "type": "array",
+      "description": "Extra directories to scan for blueprints. Read by `lev list` and the serve API, but not by `lev run <name>`, which resolves installed names and paths only.",
+      "items": { "type": "string" }
+    },
+    "openrouter_api_key": { "type": "string" },
+    "ollama_base_url": { "type": "string", "default": "http://localhost:11434" },
+    "request_timeout_secs": { "type": "integer", "minimum": 1 },
+    "taint_tracking": { "type": "boolean", "default": false },
+    "batch_tool_hint": { "type": "boolean", "default": true },
+    "shell_hint": { "type": "boolean", "default": true },
+    "allow": {
+      "type": "array",
+      "description": "Tools allowed outright, the config-file form of repeated --allow.",
+      "items": { "type": "string" }
+    },
+
+    "providers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "anthropic_api_key": { "type": "string" },
+        "openai_api_key": { "type": "string" },
+        "google_api_key": { "type": "string" },
+        "claude_code_enabled": { "type": "boolean", "default": false },
+        "claude_code_binary": { "type": "string" },
+        "claude_code_effort": {
+          "enum": ["low", "medium", "high", "xhigh", "max"]
+        },
+        "fallback_order": {
+          "type": "array",
+          "description": "Host-wide failover chain, best first, as \"provider/model\" strings. Tried after the blueprint's own list.",
+          "items": { "type": "string" }
+        }
+      }
+    },
+
+    "limits": {
+      "type": "object",
+      "description": "The daemon reads these once at startup, so a change needs `lev daemon restart`.",
+      "additionalProperties": false,
+      "properties": {
+        "max_concurrent_inferences": { "type": "integer", "minimum": 1, "default": 8 },
+        "max_concurrent_tools": { "type": "integer", "minimum": 1, "default": 8 },
+        "default_max_iterations": { "type": "integer", "minimum": 1, "default": 50 },
+        "exact_token_counting": { "type": "boolean", "default": false },
+        "script_shell_timeout_secs": { "type": "integer", "minimum": 0, "default": 60 },
+        "stall_timeout_secs": { "type": "integer", "minimum": 0, "default": 60 },
+        "dead_cycles_before_relief": { "type": "integer", "minimum": 0, "default": 10 },
+        "finished_retention_secs": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 300,
+          "description": "How long a finished run stays in the `finished` list of `lev ps`."
+        },
+        "wedge_timeout_secs": { "type": "integer", "minimum": 0, "default": 0 },
+        "provider_failures_before_open": { "type": "integer", "minimum": 1, "default": 3 },
+        "provider_circuit_cooldown_secs": { "type": "integer", "minimum": 0, "default": 300 },
+        "interaction_timeout_secs": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 3600,
+          "description": "How long a prompt waits for a person before resolving as cancelled. `0` waits forever. This is what releases an interaction point that holds under --yolo, so the default means such a run sits for an hour looking dead."
+        }
+      }
+    },
+
+    "security": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow_seed_commands": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether a blueprint's `seed = { command = ... }` regions may run. They execute at spawn, before any approval prompt."
+        },
+        "allow_local_network": { "type": "boolean", "default": false },
+        "allow_env_vars": {
+          "type": "array",
+          "description": "Credential-looking variables a Rhai script may read. Matched exactly and case-insensitively; \"*\" means a variable literally named `*`, not everything.",
+          "items": { "type": "string" }
+        },
+        "allow_blueprint_read_paths": { "type": "boolean", "default": false },
+        "read_paths": { "type": "array", "items": { "type": "string" } },
+        "credential_store": { "enum": ["file", "keychain"], "default": "file" }
+      }
+    },
+
+    "webhook": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_retries": { "type": "integer", "minimum": 0, "default": 3 },
+        "base_delay_ms": { "type": "integer", "minimum": 0, "default": 500 },
+        "max_delay_ms": { "type": "integer", "minimum": 0, "default": 30000 },
+        "timeout_secs": { "type": "integer", "minimum": 1, "default": 10 }
+      }
+    },
+
+    "observability": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "exporter": { "enum": ["otlp", "stdout", "none"] },
+        "endpoint": {
+          "type": "string",
+          "description": "OTLP over HTTP/protobuf only. The gRPC port 4317 will not work."
+        },
+        "service_name": { "type": "string" }
+      }
+    },
+
+    "nudge": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "max": { "type": "integer", "minimum": 0 },
+        "text": { "type": "string" }
+      }
+    },
+
+    "title": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean", "default": true },
+        "provider": { "type": "string" },
+        "model": { "type": "string" }
+      }
+    },
+
+    "sandbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "enum": ["none", "namespace", "container"] },
+        "image": { "type": "string" },
+        "engine": { "enum": ["docker", "podman", "nerdctl", "finch"] },
+        "network": { "type": "boolean" },
+        "mounts": { "type": "array", "items": { "type": "string" } },
+        "persist": { "type": "boolean" },
+        "on_unavailable": { "enum": ["error", "warn"] }
+      }
+    },
+
+    "tool_permissions": {
+      "type": "object",
+      "description": "Tool name to policy, machine-wide. A blueprint may tighten this, never loosen it.",
+      "additionalProperties": { "enum": ["allow", "ask", "deny"] }
+    },
+
+    "agent_tool_permissions": {
+      "type": "object",
+      "description": "Per-agent overrides, keyed by agent name. The escape hatch above the machine-wide ceiling.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": { "enum": ["allow", "ask", "deny"] }
+      }
+    },
+
+    "tool_script_permissions": {
+      "type": "object",
+      "description": "What a Rhai tool script may do. `inherit` defers to the equivalent built-in tool's policy.",
+      "additionalProperties": false,
+      "properties": {
+        "http_get": { "$ref": "#/$defs/scriptPermission" },
+        "http_post": { "$ref": "#/$defs/scriptPermission" },
+        "shell": { "$ref": "#/$defs/scriptPermission" },
+        "read_file": { "$ref": "#/$defs/scriptPermission" },
+        "write_file": { "$ref": "#/$defs/scriptPermission" },
+        "env_var": { "$ref": "#/$defs/scriptPermission" }
+      }
+    },
+
+    "agent_read_paths": {
+      "type": "object",
+      "description": "Read grants outside the workdir, keyed by agent name. A blueprint's [read_paths] is inert until granted here.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "allow": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+
+    "rate_limits": {
+      "type": "object",
+      "description": "Keyed by built-in provider name.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "requests_per_minute": { "type": "integer", "minimum": 1 },
+          "tokens_per_minute": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+
+    "model_capabilities": {
+      "type": "object",
+      "description": "Keyed by model id. Overrides what Leviath believes about a model.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "supports_temperature": { "type": "boolean" },
+          "supports_streaming": { "type": "boolean" },
+          "supports_tools": { "type": "boolean" },
+          "supports_system_prompt": { "type": "boolean" },
+          "max_context_tokens": { "type": "integer", "minimum": 1 },
+          "max_output_tokens": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+
+    "model_providers": {
+      "type": "object",
+      "description": "Overrides for Rhai script providers, keyed by the name an agent references. Any key not listed here is forwarded verbatim to the script's initialize().",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "script": { "type": "string" },
+          "api_key": { "type": "string" },
+          "base_url": { "type": "string" },
+          "rate_limit": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "requests_per_minute": { "type": "integer", "minimum": 1 },
+              "tokens_per_minute": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      }
+    },
+
+    "mcp_servers": {
+      "type": "array",
+      "description": "MCP tool servers to connect to. `${VAR}` interpolates in headers and env.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string" },
+          "transport": {
+            "enum": ["stdio", "http"],
+            "description": "Inferred from whichever of command or url is present when omitted."
+          },
+          "url": { "type": "string" },
+          "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+          "command": { "type": "string" },
+          "args": { "type": "array", "items": { "type": "string" } },
+          "env": { "type": "object", "additionalProperties": { "type": "string" } }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "scriptPermission": { "enum": ["allow", "deny", "inherit"] }
+  }
+}

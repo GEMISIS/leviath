@@ -2322,6 +2322,7 @@ dependencies = [
  "glob",
  "hex",
  "hmac 0.13.0",
+ "jsonschema",
  "keyring-core",
  "leviath-agent-client",
  "leviath-core",

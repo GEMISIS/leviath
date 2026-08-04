@@ -121,6 +121,73 @@ fn api_router() -> Router<AppState> {
         .route("/ws/agents/{id}", get(websocket::ws_agent))
 }
 
+/// Every `(path, method)` this file registers, read out of its own source.
+///
+/// Axum's `Router` offers no way to enumerate what it holds, so the only place
+/// the route table can be read back is the text that declares it. Used by the
+/// test that holds `docs/schema/openapi.json` to the real router, so a route
+/// added without a spec entry fails the build rather than shipping undocumented.
+/// The same technique `xtask/src/docs.rs` uses on the docs.
+#[cfg(test)]
+fn declared_routes() -> Vec<(String, String)> {
+    const SOURCE: &str = include_str!("mod.rs");
+    // Only the half above the test module. The tests below declare routes of
+    // their own as fixtures for the reader, and those are not served by
+    // anything. Reading the whole file counted them as production routes.
+    let production = SOURCE.split("\nmod tests {").next().unwrap_or(SOURCE);
+    routes_in(production)
+}
+
+/// The route reader itself, over arbitrary source text.
+///
+/// Split from [`declared_routes`] so its parsing can be tested against input a
+/// test writes, rather than only against this file, which a test cannot vary.
+#[cfg(test)]
+fn routes_in(source: &str) -> Vec<(String, String)> {
+    let mut routes = Vec::new();
+    // Split rather than index: the workspace denies `clippy::string_slice`,
+    // and a byte range into UTF-8 text is exactly the hazard that lint is for.
+    for chunk in source.split(".route(").skip(1) {
+        // Balance parentheses to take just this call's arguments. The handler
+        // chain (`get(..).post(..)`) contains its own, and the chunk runs on
+        // past the call's end.
+        let mut depth = 1usize;
+        let mut body = String::new();
+        for ch in chunk.chars() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            body.push(ch);
+        }
+        let Some(path) = body
+            .split_once('"')
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .map(|(path, _)| path)
+        else {
+            continue;
+        };
+        // This function's own source contains the text it splits on, so one
+        // chunk is always the split call itself. Requiring a route-shaped path
+        // drops it rather than inventing a route from the code around it.
+        if !path.starts_with('/') {
+            continue;
+        }
+        for method in ["get", "post", "put", "delete", "patch"] {
+            if body.contains(&format!("{method}(")) {
+                routes.push((path.to_string(), method.to_uppercase()));
+            }
+        }
+    }
+    routes
+}
+
 /// Core of [`execute`], with an optional shutdown signal so tests can stop
 /// the server gracefully and cover the `Ok(())` return path.
 ///
@@ -302,6 +369,99 @@ mod tests {
 
     use crate::runstate::RunMeta;
     use crate::test_support::with_tracing;
+
+    /// The published OpenAPI spec for this API.
+    const OPENAPI: &str = include_str!("../../../../../docs/schema/openapi.json");
+
+    /// Every `(path, METHOD)` the spec documents.
+    fn documented_routes() -> Vec<(String, String)> {
+        let spec: serde_json::Value = serde_json::from_str(OPENAPI).expect("the spec is JSON");
+        let paths = spec["paths"].as_object().expect("the spec has paths");
+        let mut routes = Vec::new();
+        for (path, item) in paths {
+            let operations = item.as_object().expect("a path item is an object");
+            for method in ["get", "post", "put", "delete", "patch"] {
+                if operations.contains_key(method) {
+                    routes.push((path.clone(), method.to_uppercase()));
+                }
+            }
+        }
+        routes
+    }
+
+    /// A set of `(path, METHOD)` pairs.
+    type Routes = Vec<(String, String)>;
+
+    /// The two ways the spec can be wrong: a route served but not documented,
+    /// and one documented but no longer served.
+    fn spec_drift() -> (Routes, Routes) {
+        let declared = declared_routes();
+        let documented = documented_routes();
+        let missing = declared
+            .iter()
+            .filter(|r| !documented.contains(r))
+            .cloned()
+            .collect();
+        let extra = documented
+            .iter()
+            .filter(|r| !declared.contains(r))
+            .cloned()
+            .collect();
+        (missing, extra)
+    }
+
+    #[test]
+    fn the_openapi_spec_documents_exactly_the_routes_this_router_serves() {
+        // Hand-written, because there is no derive to generate it from. Without
+        // this the spec would be a snapshot of whatever the API looked like the
+        // day it was written, and an agent reading it would call routes that
+        // moved.
+        //
+        // Bare `assert!` over a bool, with no message: anything in an assert's
+        // format arguments is a region only the failing path reaches, which the
+        // 100% coverage gate then reports as uncovered. That costs the failure
+        // its detail, so when one of these trips, call `spec_drift()` and print
+        // it: `missing` is served but undocumented, `extra` is the reverse.
+        let (missing, extra) = spec_drift();
+        assert!(missing.is_empty());
+        assert!(extra.is_empty());
+    }
+
+    #[test]
+    fn the_route_reader_finds_the_routes_that_are_actually_there() {
+        // Guards the guard. This reads its own source text, so a change to how
+        // routes are written could quietly make it find nothing, and a test
+        // comparing two empty lists passes.
+        let declared = declared_routes();
+        assert!(declared.len() > 25);
+        assert!(declared.contains(&("/api/agents".to_string(), "POST".to_string())));
+        assert!(declared.contains(&("/api/agents/{id}".to_string(), "DELETE".to_string())));
+        assert!(declared.contains(&("/ws".to_string(), "GET".to_string())));
+    }
+
+    #[test]
+    fn the_route_reader_ignores_text_that_is_not_a_route() {
+        // The reader splits on a literal its own source contains, so it always
+        // sees at least one chunk that is not a route call. Anything without a
+        // route-shaped path has to be dropped rather than guessed at.
+        let source = concat!(
+            "let x = source.split(\".route(\").skip(1);\n",
+            ".route(\"not a path\", get(h))\n",
+            ".route(\"/real\", get(h).post(h))\n"
+        );
+        assert_eq!(
+            routes_in(source),
+            vec![
+                ("/real".to_string(), "GET".to_string()),
+                ("/real".to_string(), "POST".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_route_reader_reads_nothing_out_of_source_with_no_routes() {
+        assert_eq!(routes_in("fn main() {}"), Vec::new());
+    }
 
     /// Extracted so the `assert!` failure-message region (only executed
     /// when the assertion fails) is covered by this function's own
