@@ -119,7 +119,7 @@ stable slug to branch on; the `message` is written to be read. Notes never fail 
 ## 5. Spawn a run
 
 ```bash
-lev run <blueprint> --task "..." --json
+lev run <blueprint> --task "..." --json --yolo
 ```
 
 This is the step that surprises callers. `lev run` does not run the agent in your process. It hands
@@ -136,6 +136,11 @@ exiting. The reply is the only handle you get on it:
 ```
 
 Keep `run_id`. Everything after this needs it. Warnings go to stderr, so stdout parses on its own.
+
+`--yolo` is in that command deliberately. Without it, most blueprints stop on the first tool call
+whose permission is `ask` and wait for a person to approve it. Nobody answers, and an hour later
+`[limits] interaction_timeout_secs` expires and denies it. If you leave `--yolo` off, you are
+committing to answering prompts yourself, which step 7 covers.
 
 Useful flags: `--workdir <dir>` confines the agent's file tools, `--model provider/model` overrides
 the blueprint's choice for every stage, and `--task` also accepts a file path.
@@ -154,7 +159,7 @@ inference call takes seconds, so a faster loop only burns CPU.
 |---|---|---|
 | `Active` | Working | Keep polling |
 | `Idle` | Alive, with nothing queued | Keep polling |
-| `Waiting` | Blocked on an answer | Read `wait_reason`, then see step 7 |
+| `Waiting` | Blocked | Read `wait_reason`, below |
 | `Paused` | Held by `lev pause` | `lev resume <run_id>` |
 | `Complete` | Finished | Read its output; stop polling |
 | `Error` | Errored, with a `message` | `lev context <run_id> --json` has the history |
@@ -162,15 +167,46 @@ inference call takes seconds, so a faster loop only burns CPU.
 
 `Complete`, `Error`, and `Cancelled` are terminal. The rest can still change.
 
+`Waiting` is the one that needs care, because two very different things share it. `wait_reason` is
+an object with a `reason` key:
+
+| `wait_reason.reason` | Needs a person | What to do |
+|---|---|---|
+| `fan_out_workers` | No | Nothing. `outstanding` counts the workers still going |
+| `children` | No | Nothing. Sub-agents are running |
+| `tool_approval` | Yes | Approve it, or use `--yolo`. See step 7 |
+| `user_prompt` | Yes | The agent asked a question. See step 7 |
+| `interaction_point` | Yes | A blueprint checkpoint. See step 7 |
+| `taint_gate` | Yes | A clearance prompt. See step 7 |
+
+The first two resolve on their own and are healthy. The rest are stopped until somebody answers, and
+a caller that treats them as healthy waits out the timeout for nothing.
+
 A finished run leaves `runs` and appears in `finished` for `[limits] finished_retention_secs`
 (300 by default). A run that is in neither is older than that, not lost. `lev ps --all` also lists
 on-disk runs the daemon is not hosting.
 
-## 7. Unattended runs
+## 7. Unattended runs, and answering when you are not one
 
-Add `--yolo` to approve every tool call and answer the agent's own `ask_user_*` prompts instead of
+`--yolo` approves every tool call and answers the agent's own `ask_user_*` prompts instead of
 waiting for a person. Under `--yolo` those five tools are not advertised to the model at all, so it
-decides for itself rather than spending a round trip to be told nobody is there.
+decides for itself rather than spending a round trip to be told nobody is there. That clears
+`tool_approval`, `user_prompt`, and `taint_gate`.
+
+Without `--yolo`, you answer them. `lev respond --json` lists every open question with the run
+holding it, its kind, and its options:
+
+```bash
+lev respond --json
+lev respond <request_id> --approve            # a tool approval or a confirm
+lev respond <request_id> --approve --session  # and every later call to that tool
+lev respond <request_id> --deny
+lev respond <request_id> --choice 0           # a multiple-choice question
+lev respond <request_id> "some text"          # a free-text question
+```
+
+A prompt nobody answers is not held forever. `[limits] interaction_timeout_secs` expires it, and an
+expired tool approval is **denied**: a timeout is never read as consent.
 
 One exception matters, and it is the one that looks like a hang. A blueprint
 [interaction point](/docs/interaction#interaction-points) may declare `unattended = "ask"`, and then
