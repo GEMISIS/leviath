@@ -46,8 +46,16 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         match event {
             AgentEvent::StageTransition { from, to, .. } => println!("{from} -> {to}"),
             AgentEvent::ToolCallFinished { tool, ok, .. } => println!("{tool}: ok={ok}"),
-            AgentEvent::Completed { run_id, status, .. } if run_id == run.as_ref() => {
+            AgentEvent::Completed {
+                run_id,
+                status,
+                final_output,
+                ..
+            } if run_id == run.as_ref() => {
                 println!("finished: {status}");
+                if let Some(output) = final_output {
+                    println!("{}", output.content);
+                }
                 break;
             }
             _ => {}
@@ -103,12 +111,30 @@ Everything the world does streams through `world.events()`, an async stream of
 | `ToolCallStarted` / `ToolCallFinished` | A tool call entered the async lane / returned, paired by `call_id`. |
 | `Interaction` | The agent asked something and is waiting on an answer. |
 | `Log` | A readable output or operational log line. |
-| `Completed` | The run reached a terminal status. |
+| `Completed` | The run reached a terminal status, with whatever it handed back. |
 
 The enum is non-exhaustive; keep a catch-all arm. Every variant carries the
 run id (`event.run_id()`), so one stream serves any number of concurrent
 agents. A consumer that falls behind the channel skips ahead rather than
 erroring, and the stream ends after `shutdown()`.
+
+## Getting the answer back
+
+`Completed` carries `final_output`: the answer the agent submitted, its format label, and the stage
+that produced it. Reading it from the event avoids a second call and avoids racing the write to
+disk.
+
+`AgentWorld::result(&run_id)` asks for the same thing at any point while the run is loaded.
+
+Ask for a shape when you spawn. The label reaches the model untouched, so your own house format
+works with no support from this crate.
+
+```rust
+let spec = SpawnSpec::new(source, "audit the auth module", cwd)
+    .output("a2ui", Some("One card per finding.".to_string()));
+```
+
+[Final outputs](/docs/outputs) covers the whole cascade, including schema validation.
 
 ## Answering an agent's questions
 

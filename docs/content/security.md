@@ -3,7 +3,7 @@ title: Security & sandboxing
 description: Sandboxed execution, tool permissions, and taint tracking, for running a blueprint you did not write.
 group: Concepts
 group_order: 2
-order: 8
+order: 9
 ---
 
 # Security: sandboxed execution and taint tracking

@@ -174,8 +174,9 @@ built-ins.
 
 ### What counts as output
 
-Exactly three things count as an agent having produced something: a successful `write_file`, a
-successful `edit_file`, or a successful call to a tool you named in a gate's `tools` list.
+Four things count as an agent having produced something. A successful `write_file`, a successful
+`edit_file`, a successful call to a tool you named in a gate's `tools` list, or a submitted
+[final output](/docs/outputs).
 
 Nothing else counts, and `shell` in particular does not. An agent can edit a file with `sed -i`, and
 Leviath has no way to see that it happened.
@@ -185,8 +186,9 @@ scope: the gate asks about one stage, the verdict asks about the whole run.
 
 The verdict is only ever applied to agents that could plausibly write files. If no stage of a
 blueprint advertises a file-modifying tool, the run is never marked as having produced nothing. A
-router that delegates and a researcher that writes a report have no file changes to be missing, so
-flagging them would be wrong. The side effect is that an agent writing through MCP looks the same
+router that delegates and a researcher whose answer is its text have no file changes to be missing,
+so flagging them would be wrong. Such an agent can also settle the question outright by submitting a
+[final output](/docs/outputs). The side effect is that an agent writing through MCP looks the same
 way, so name that tool in a gate's `tools` list to have it counted.
 
 `lev ps` marks such a run `complete (no output)`, and the flag travels with it into `meta.json`, the

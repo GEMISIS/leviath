@@ -67,7 +67,7 @@ Base path `/api`; all JSON unless noted.
 | `GET /api/runs` | List runs: paginated, sortable, searchable. See [below](#listing-and-searching-runs) |
 | `GET /api/agents` · `POST /api/agents` | List runs *(deprecated, use `/api/runs`)* · spawn an agent. Reads the persisted records, so unlike `lev ps` it keeps finished runs |
 | `GET /api/agents/{id}` · `DELETE …` | Get one · cancel |
-| `GET /api/agents/{id}/result` · `/context` | Run output and current context window |
+| `GET /api/agents/{id}/result` · `/context` | The run's answer and log tail · current context window |
 | `GET /api/agents/{id}/logs?stage=&stream=&tail=` | A run's logs. `stage` takes an index or `all`, defaulting to the current stage; `stream` is `output` (the assistant's text) or `logs` (tool calls, token counts, errors); `tail` is a byte budget |
 | `GET /api/agents/{id}/context/history` | How the context window changed over the run, paginated |
 | `GET /api/agents/{id}/files` | List a run's files, or read one with `?path=`. See [below](#a-runs-files) |
@@ -191,6 +191,23 @@ sequenceDiagram
   Serve-->>Browser: {done}
 ```
 
+## Asking for a shape
+
+Add `output_format` to ask for the answer in a particular shape. Any label works, because nothing
+converts between shapes: the label reaches the model, which produces the bytes.
+
+```bash
+curl -X POST http://localhost:3000/api/agents \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"blueprint":"reviewer","task":"Review the auth module",
+       "output_format":"a2ui",
+       "output_instructions":"One card per finding, highest severity first."}'
+```
+
+Then read it back from `GET /api/agents/{id}/result`, where `final_output` carries the answer, its
+format label, and the stage that produced it. Add `output_schema` when you want the answer validated
+against a JSON Schema. [Final outputs](/docs/outputs) covers the whole cascade.
+
 ## Spawning with a signed webhook
 
 ```bash
@@ -200,7 +217,11 @@ curl -X POST http://localhost:3000/api/agents \
        "callback_url":"https://example.com/hook","callback_secret":"whsec_…"}'
 ```
 
-Three things to know about the delivery.
+Four things to know about the delivery.
+
+**It carries the answer.** `final_output` holds whatever the agent submitted, so your receiver
+learns what the run concluded without a second request. The `result` field beside it is the run's
+error, which is what it has always been. See [Final outputs](/docs/outputs).
 
 **It is signed.** Verify the `X-Leviath-Signature: sha256=<hex>` header against your
 `callback_secret` before trusting the body.
