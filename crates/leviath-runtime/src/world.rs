@@ -45,7 +45,7 @@ use crate::pipeline::{
     dispatch_tools, dispatch_transition_choice, enforce_max_iterations, fail_stalled_dispatch,
     fail_wedged_runs, gate_requires_children, handle_empty_response, poll_dynamic_tool_refresh,
     process_response, reflect_interaction_status, refresh_advertised_tools,
-    require_context_regions, resolve_transition, sync_tool_stages,
+    require_context_regions, require_final_output, resolve_transition, sync_tool_stages,
 };
 use crate::providers::ProviderRegistry;
 use crate::tool_bridge::ToolLane;
@@ -351,6 +351,11 @@ impl PipelineWorld {
                 // Re-run a stage that left a `required` context region empty
                 // before it may transition or ask for approval.
                 require_context_regions,
+                // Same, for a stage that owes a final output and has not
+                // submitted one. Beside its sibling and before any transition
+                // resolves, so an unfinished stage is sent back rather than
+                // silently ending the run with nothing to hand back.
+                require_final_output,
                 // Intercept a would-be transition for an interactive-points stage
                 // (e.g. plan_approval) and drive the interaction-point lane.
                 crate::interaction_points::gate_interaction_points,

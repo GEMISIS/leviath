@@ -722,6 +722,96 @@ pub fn require_context_regions(
     }
 }
 
+/// Counts how many times the current stage has been re-run for a final output
+/// it was required to produce. Absent ⇒ 0; reset when a new stage is entered.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct OutputReentries(pub usize);
+
+/// The nudge a stage gets when it finishes without the output it owes.
+///
+/// Names the tool rather than describing it, because the description the model
+/// already has carries the shape; what it missed was that the call is not
+/// optional.
+const MISSING_OUTPUT_NUDGE: &str = "This stage is not finished: you have not called `submit_output`. Whatever you wrote to \
+     files or to context is not what the caller receives - only the final output is. Call \
+     `submit_output` now with your answer.";
+
+/// Required-output gate: hold a stage that owes a final output and has not
+/// submitted one, nudge it, and re-run - bounded, then give up loudly.
+///
+/// The same shape as [`require_context_regions`] and the edge gate's
+/// `require_modifications`, and deliberately so: a missing output never strands
+/// a run. When the re-entry budget is spent the transition proceeds and the run
+/// records `output_forced`, so a caller reading `meta.json` can tell "no answer
+/// because the agent never gave one" from "no answer because nobody asked".
+///
+/// Skipped when the stage ended on an error or max-iterations outcome, which
+/// take precedence: an agent that already failed should follow its error edge
+/// rather than be told to summarise.
+///
+/// Whether *this stage* submitted is the question, not whether the run holds an
+/// output from anywhere. A blueprint whose worker stage submits and whose later
+/// summary stage also must would otherwise let the summary coast on the
+/// worker's answer.
+#[allow(clippy::type_complexity)]
+pub fn require_final_output(
+    mut agents: Query<
+        (
+            Entity,
+            &AgentBlueprint,
+            &StageCursor,
+            &AgentState,
+            &mut ContextWindow,
+            Option<&OutputReentries>,
+            Option<&StageOutcome>,
+            Option<&crate::persistence::FinalOutput>,
+            Option<&mut crate::persistence::RunOutcomeFlags>,
+        ),
+        With<ResolveTransition>,
+    >,
+    mut commands: Commands,
+) {
+    crate::tick_scope::clear();
+    for (entity, bp, cursor, state, mut window, reentries, outcome, submitted, mut flags) in
+        agents.iter_mut()
+    {
+        crate::tick_scope::enter(entity);
+        if outcome.is_some() {
+            continue; // error / max-iterations transition takes precedence
+        }
+        let stage = &bp.0.stages[cursor.index];
+        if !stage.require_output {
+            continue;
+        }
+        // An output carried in from an earlier stage does not discharge this
+        // stage's obligation.
+        if submitted.is_some_and(|o| o.0.stage == state.current_stage) {
+            continue;
+        }
+        let cap = stage
+            .max_revisits
+            .unwrap_or(leviath_core::blueprint::DEFAULT_OUTPUT_REENTRY_CAP);
+        let round = reentries.map_or(0, |r| r.0);
+        if round >= cap {
+            tracing::warn!(
+                stage = %stage.name,
+                attempts = cap,
+                "stage never produced its required final output; proceeding without one"
+            );
+            if let Some(flags) = flags.as_mut() {
+                flags.0.output_forced += 1;
+            }
+            continue; // proceed rather than strand the run
+        }
+        crate::pipeline::response::inject_system_nudge(&mut window, MISSING_OUTPUT_NUDGE);
+        commands
+            .entity(entity)
+            .remove::<ResolveTransition>()
+            .insert(ReadyToInfer)
+            .insert(OutputReentries(round + 1));
+    }
+}
+
 /// What a chosen edge's gate says about the transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum GateDecision {
@@ -1133,10 +1223,13 @@ pub(crate) fn attach_stage_components(
             index: stage_index,
             name: stage_name,
         })
-        // A fresh stage re-arms its interaction points + required-region gate.
+        // A fresh stage re-arms its interaction points and its required-region
+        // and required-output gates: each stage owes its own, and gets its own
+        // budget of attempts to produce it.
         .remove::<crate::interaction_points::InteractionPointCursor>()
         .remove::<crate::interaction_points::InteractionPointRounds>()
         .remove::<RequiredReentries>()
+        .remove::<OutputReentries>()
         .insert(ReadyToInfer);
     match &setup.routing {
         Some(routing) => {
