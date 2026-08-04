@@ -369,13 +369,22 @@ available_tools = ["ask_user_text", "ask_user_confirm"]
 required_tools = ["ask_user_text"]
 "#,
     );
-    // Only the tool that was *not* kept is still worth remarking on.
+    // Only the tool that was *not* kept is still warned about. The kept one is
+    // noted instead, because keeping it is what makes it hold under `--yolo`.
     let findings = lint(&toml, &LintEnv::default());
-    assert_eq!(codes(&findings), ["blocking-tool-in-autonomous-stage"]);
+    assert_eq!(
+        codes(&findings),
+        ["blocking-tool-in-autonomous-stage", "holds-under-yolo"]
+    );
     assert!(
         findings[0].message.contains("ask_user_confirm"),
         "{:?}",
         findings[0].message
+    );
+    assert!(
+        findings[1].message.contains("ask_user_text"),
+        "{:?}",
+        findings[1].message
     );
 }
 
@@ -640,6 +649,73 @@ fn a_stage_with_an_empty_models_list_is_not_checked_for_reachability() {
     };
     let findings = lint_manifest(&manifest(CLEAN_STAGE), &bp, &env);
     assert!(findings.is_empty(), "{:?}", codes(&findings));
+}
+
+// ─── held checkpoints ─────────────────────────────────────────────────────────
+
+/// A checkpoint that holds under `--yolo` is the blueprint working as written,
+/// so it is a note. It is worth saying because `--yolo` reads as "run without
+/// me", and a run that stops anyway looks like a hang.
+#[test]
+fn a_checkpoint_that_holds_under_yolo_is_noted() {
+    let toml = manifest(
+        r#"
+[stages.plan]
+mode = "interactive_points"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 10
+available_tools = ["read_file", "ask_user_text"]
+required_tools = ["ask_user_text"]
+
+[[stages.plan.interaction_points]]
+name = "plan_approval"
+prompt = "Review the plan"
+style = "confirm"
+unattended = "ask"
+"#,
+    );
+    let all = lint(&toml, &LintEnv::default());
+    let findings = with_code(&all, "holds-under-yolo");
+    assert_eq!(findings.len(), 2, "the point and the kept tool");
+    assert!(findings.iter().all(|f| f.severity == LintSeverity::Note));
+    assert!(
+        findings.iter().any(|f| f.message.contains("plan_approval")),
+        "{findings:?}"
+    );
+    assert!(
+        findings.iter().any(|f| f.message.contains("ask_user_text")),
+        "{findings:?}"
+    );
+    assert!(findings.iter().all(|f| f.stage.as_deref() == Some("plan")));
+}
+
+/// A blueprint with nothing held says nothing, so the note does not become
+/// background noise on every validate.
+#[test]
+fn a_blueprint_that_holds_nothing_is_not_noted() {
+    let found = codes(&lint(&manifest(CLEAN_STAGE), &LintEnv::default()));
+    assert!(!found.contains(&"holds-under-yolo"), "{found:?}");
+}
+
+/// A stage granting `bash` and keeping `shell` is one decision, not two - the
+/// runtime canonicalises both sides, so the lint has to as well.
+#[test]
+fn the_blocking_tool_check_canonicalises_required_tools() {
+    let toml = manifest(
+        r#"
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 10
+available_tools = ["ask_user_text", "bash"]
+required_tools = ["ask_user_text", "bash"]
+"#,
+    );
+    let found = codes(&lint(&toml, &LintEnv::default()));
+    assert!(
+        !found.contains(&"blocking-tool-in-autonomous-stage"),
+        "{found:?}"
+    );
 }
 
 // ─── safe_commands ────────────────────────────────────────────────────────────

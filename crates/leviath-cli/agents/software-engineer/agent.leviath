@@ -214,8 +214,9 @@ required = true
 # Hold this checkpoint for a person even under `--yolo`. Approving a plan
 # unread is the one thing this agent must not do on its own: everything after
 # it writes code. An operator who wants the run to sail through sets
-# `[limits] interaction_timeout_secs`, which releases the gate on its own
-# terms rather than pretending someone approved it.
+# `[limits] interaction_timeout_secs`, which bounds the wait - and when it
+# passes the run stops with an error rather than pretending someone approved
+# it.
 unattended = "ask"
 style    = "multiple_choice"
 options  = ["Approve - proceed to implementation", "Revise - I'll describe changes", "Add detail - expand a section", "Abort - cancel this run"]

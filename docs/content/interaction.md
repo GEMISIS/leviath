@@ -91,7 +91,7 @@ would:
 | Tool approval | Denied. A timeout is never read as consent. |
 | Taint gate | Denied. |
 | `ask_user_*` | The model is told no answer came, and carries on. |
-| Interaction point | Proceeds with no user text, as a cancelled checkpoint does. |
+| Interaction point | Proceeds with no user text, as a cancelled checkpoint does - unless it declared `unattended = "ask"`, in which case the run **stops with an error** rather than approving a checkpoint nobody made. |
 
 The deadline is read once when the daemon starts, so changing it needs a daemon restart.
 

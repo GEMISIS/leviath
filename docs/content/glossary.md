@@ -28,7 +28,9 @@ layout. Some older text says *manifest*; it means the same file.
 **Daemon**: the background process that holds every running agent. See [the daemon](/docs/daemon).
 
 **Unattended**: a run with nobody watching, usually started with `--yolo`. Tools that wait for a
-person are removed so the run cannot stop and wait forever.
+person are removed so the run does not stop for somebody who is not there. It waives approvals, not
+checkpoints: a stage keeps whatever it lists in `required_tools`, and an interaction point declaring
+`unattended = "ask"` still opens its prompt.
 
 **Workdir**: the directory a run treats as its project. File tools cannot read or write outside it
 unless you grant a [read path](/docs/security). Defaults to wherever you ran `lev run`.

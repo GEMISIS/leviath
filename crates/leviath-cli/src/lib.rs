@@ -7,6 +7,7 @@ pub mod config;
 pub mod credentials;
 pub mod daemon;
 pub mod dispatch;
+pub mod held_checkpoints;
 pub mod lint;
 pub mod logging;
 pub mod read_path_report;
