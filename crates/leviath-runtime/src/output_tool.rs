@@ -31,11 +31,19 @@ use crate::components::ContextWindow;
 /// lands in the run's `context.json` with no extra persistence work.
 pub const FINAL_OUTPUT_REGION: &str = "final_output";
 
-/// Token budget for [`FINAL_OUTPUT_REGION`]: the byte cap on a submission, in
-/// the workspace's generic bytes-over-four estimate. Sized so a submission at
-/// the limit still fits the region that mirrors it.
-pub const FINAL_OUTPUT_REGION_TOKENS: usize =
-    leviath_core::output::MAX_FINAL_OUTPUT_BYTES.div_ceil(4);
+/// Token budget for [`FINAL_OUTPUT_REGION`].
+///
+/// Deliberately far smaller than a maximal answer. The region is a convenience,
+/// not the storage: it exists so a later stage can see what was submitted and
+/// revise it, while the authoritative copy lives on the component and on disk.
+/// Sized at the whole answer, a maximal submission would pin ~65k tokens into
+/// every subsequent inference for the rest of the run, which costs more than the
+/// convenience is worth. A long answer is mirrored as a preview instead.
+pub const FINAL_OUTPUT_REGION_TOKENS: usize = 2_000;
+
+/// Marker appended to a mirrored answer that did not fit the region.
+const MIRROR_TRUNCATION_MARKER: &str =
+    "\n[...the full answer is on the run's final output, not in context]";
 
 /// Whether a tool name is the final-output tool this module handles.
 pub fn is_output_tool(name: &str) -> bool {
@@ -173,17 +181,37 @@ fn resolve_artifacts(
 /// region exists so the answer stays in the agent's own context (a later stage
 /// can revise it) and so it appears in `context.json`.
 fn mirror_into_region(window: &mut ContextWindow, content: &str) {
-    if window.get_region(FINAL_OUTPUT_REGION).is_none() {
+    let Some(budget) = window.get_region(FINAL_OUTPUT_REGION).map(|r| r.max_tokens) else {
         return;
-    }
-    let tokens = leviath_core::estimate_tokens(content);
+    };
+    let mirrored = fit_to_region(content, budget);
+    let tokens = leviath_core::estimate_tokens(&mirrored);
     if let Some(region) = window.get_region_mut(FINAL_OUTPUT_REGION) {
         region.clear();
     }
     window.current_tokens = window.calculate_tokens();
     // Through the window method rather than the region directly, so a custom
     // region's `on_write` hook fires - the same reason `context_write` does it.
-    let _ = window.add_to_region(FINAL_OUTPUT_REGION, content.to_string(), tokens);
+    let _ = window.add_to_region(FINAL_OUTPUT_REGION, mirrored, tokens);
+}
+
+/// Trim `content` to fit `budget` tokens, marking it when cut.
+///
+/// An over-budget entry is *rejected* by `add_entry`, not truncated, so mirroring
+/// a long answer without this would leave the region empty - the one outcome
+/// worse than a preview.
+fn fit_to_region(content: &str, budget: usize) -> String {
+    let allowed = budget.saturating_mul(4);
+    if content.len() <= allowed {
+        return content.to_string();
+    }
+    let Some(room) = allowed.checked_sub(MIRROR_TRUNCATION_MARKER.len()) else {
+        return String::new();
+    };
+    format!(
+        "{}{MIRROR_TRUNCATION_MARKER}",
+        leviath_core::truncate_at_boundary(content, room)
+    )
 }
 
 #[cfg(test)]

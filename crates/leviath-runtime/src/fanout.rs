@@ -444,6 +444,32 @@ fn worker_terminal_result(world: &World, worker: Entity) -> Option<Result<String
     }
 }
 
+/// How much of one worker's answer the consolidated report carries, in bytes.
+///
+/// A fan-out of a hundred workers, each answering at the size limit, would build
+/// a 25 MB report - and `add_entry` *rejects* an over-budget entry rather than
+/// truncating it, while `inject_conversation` ignores the error. So the merge
+/// stage would receive nothing at all, silently, in exactly the case fan-out
+/// exists for. Each worker gets a bounded share instead, and the full answer
+/// stays on that worker's own run for anyone who wants it.
+const REPORT_BYTES_PER_WORKER: usize = 4_000;
+
+/// Marker appended to a worker's section that was cut to fit the report.
+const REPORT_TRUNCATION_MARKER: &str =
+    "\n[...truncated; read this worker's own run for the full answer]";
+
+/// One worker's contribution, trimmed to [`REPORT_BYTES_PER_WORKER`].
+fn fit_worker_section(content: &str) -> String {
+    if content.len() <= REPORT_BYTES_PER_WORKER {
+        return content.to_string();
+    }
+    let room = REPORT_BYTES_PER_WORKER.saturating_sub(REPORT_TRUNCATION_MARKER.len());
+    format!(
+        "{}{REPORT_TRUNCATION_MARKER}",
+        leviath_core::truncate_at_boundary(content, room)
+    )
+}
+
 /// Build the consolidated `[fan_out results: …]` report from worker outcomes.
 fn build_report(summaries: &[(String, String)], failures: &[(String, String)]) -> String {
     let mut report = format!(
@@ -452,7 +478,10 @@ fn build_report(summaries: &[(String, String)], failures: &[(String, String)]) -
         failures.len()
     );
     for (id, content) in summaries {
-        report.push_str(&format!("\n## worker {id}\n{content}\n"));
+        report.push_str(&format!(
+            "\n## worker {id}\n{}\n",
+            fit_worker_section(content)
+        ));
     }
     for (id, err) in failures {
         report.push_str(&format!("\n## worker {id} FAILED\n{err}\n"));
@@ -460,17 +489,39 @@ fn build_report(summaries: &[(String, String)], failures: &[(String, String)]) -
     report
 }
 
-/// Add `text` to the parent's `conversation` region (best-effort).
+/// Add `text` to the parent's `conversation` region, trimming it to fit.
+///
+/// The write used to be best-effort in the worst sense: `add_entry` rejects an
+/// over-budget entry outright, and the error was discarded, so a report too big
+/// for the region left the merge stage with nothing and said nothing about it.
+/// Trimming first means the merge always receives *something*, and a report that
+/// had to be cut says so where the model will read it.
 fn inject_conversation(world: &mut World, parent: Entity, text: &str) {
-    if let Some(mut window) = world.get_mut::<ContextWindow>(parent) {
-        let tokens = leviath_core::estimate_tokens(text);
-        let _ = window.add_typed_entry(
-            "conversation",
-            leviath_core::EntryKind::UserMessage,
-            text.to_string(),
-            tokens,
-        );
-    }
+    let Some(mut window) = world.get_mut::<ContextWindow>(parent) else {
+        return;
+    };
+    let budget = window
+        .get_region("conversation")
+        .map(|r| r.max_tokens.saturating_sub(r.current_tokens))
+        .unwrap_or(0);
+    let allowed = budget.saturating_mul(4);
+    let fitted = match text.len() <= allowed {
+        true => text.to_string(),
+        false => {
+            let room = allowed.saturating_sub(REPORT_TRUNCATION_MARKER.len());
+            format!(
+                "{}{REPORT_TRUNCATION_MARKER}",
+                leviath_core::truncate_at_boundary(text, room)
+            )
+        }
+    };
+    let tokens = leviath_core::estimate_tokens(&fitted);
+    let _ = window.add_typed_entry(
+        "conversation",
+        leviath_core::EntryKind::UserMessage,
+        fitted,
+        tokens,
+    );
 }
 
 /// An agent's status, if it still exists.
@@ -1213,6 +1264,70 @@ mod tests {
             )
             .is_some_and(|r| r.is_err())
         );
+    }
+
+    /// The failure this bound exists for. A hundred workers answering at the
+    /// size limit build a 25 MB report; `add_entry` rejects an over-budget entry
+    /// rather than truncating, and the error was discarded - so the merge stage
+    /// received nothing at all, silently, in exactly the case fan-out is for.
+    #[test]
+    fn a_huge_fan_out_still_reaches_the_merge_stage() {
+        let mut world = World::new();
+        let mut window = ContextWindow::new(100_000);
+        window.add_region(leviath_core::Region::new(
+            "conversation".to_string(),
+            leviath_core::RegionKind::Clearable,
+            10_000,
+        ));
+        let parent = world.spawn((parent_state(), window)).id();
+
+        // A hundred workers, each answering at the per-submission cap.
+        let huge = "x".repeat(leviath_core::output::MAX_FINAL_OUTPUT_BYTES);
+        let summaries: Vec<(String, String)> =
+            (0..100).map(|i| (format!("w{i}"), huge.clone())).collect();
+        let report = build_report(&summaries, &[]);
+        inject_conversation(&mut world, parent, &report);
+
+        let region = world
+            .get::<ContextWindow>(parent)
+            .expect("window")
+            .get_region("conversation")
+            .expect("region");
+        assert!(
+            !region.content.is_empty(),
+            "the merge stage must receive something rather than nothing"
+        );
+        let landed = &region.content[0].content;
+        // Every worker is still accounted for in the header, and the text says
+        // it was cut rather than pretending to be whole.
+        assert!(landed.contains("100 succeeded"), "header survives");
+        assert!(landed.contains("truncated"), "and says it was cut");
+        assert!(region.current_tokens <= region.max_tokens, "within budget");
+    }
+
+    /// A report that fits is passed through untouched, so the common case reads
+    /// exactly as it did.
+    #[test]
+    fn a_small_fan_out_report_is_not_trimmed() {
+        let mut world = World::new();
+        let mut window = ContextWindow::new(100_000);
+        window.add_region(leviath_core::Region::new(
+            "conversation".to_string(),
+            leviath_core::RegionKind::Clearable,
+            10_000,
+        ));
+        let parent = world.spawn((parent_state(), window)).id();
+        let report = build_report(&[("a".to_string(), "did the thing".to_string())], &[]);
+        inject_conversation(&mut world, parent, &report);
+        let landed = world
+            .get::<ContextWindow>(parent)
+            .expect("window")
+            .get_region("conversation")
+            .expect("region")
+            .content[0]
+            .content
+            .clone();
+        assert_eq!(landed, report);
     }
 
     #[test]
