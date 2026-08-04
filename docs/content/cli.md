@@ -36,6 +36,9 @@ Spawn an agent into the daemon. `PATH` is an installed agent name, a blueprint d
 | `--allow <TOOL>` | Allow one tool outright. Repeatable |
 | `--max-depth <N>` | Override the blueprint's maximum sub-agent tree depth |
 | `--no-seed-commands` | Refuse the blueprint's `seed = { command = "..." }` regions for this run |
+| `--output-format <LABEL>` | Ask for the final output in this shape. See [Final outputs](/docs/outputs) |
+| `--output-instructions <TEXT>` | Extra guidance about that shape |
+| `--output-schema <JSON\|@FILE>` | A JSON Schema the final output must satisfy |
 | `--<region> <TEXT\|@FILE>` | Seed a named context region. See below |
 
 **`--yolo`** waives approvals, not checkpoints. It approves every tool call, and it takes away the
@@ -186,12 +189,30 @@ Serve an agent over the [Agent Client Protocol](/docs/agent-client-protocol) as 
 | `lev resume <RUN_ID>` | | Un-pause a run |
 | `lev cancel <RUN_ID>` | `--force` | Cancel a run. Also aliased as `lev kill` |
 | `lev context <RUN_ID>` | `--json`, `--full` | Show a run's context-window history from its `run.lvr` archive |
+| `lev result <RUN_ID>` | `--json`, `--raw` | Print what the agent handed back. See [below](#lev-result) |
 
 `lev cancel --force` writes the run's on-disk state terminal without asking the daemon, for when
 the daemon is gone or unresponsive. Without it, the daemon is asked first, since it can stop the
 work rather than only record the outcome, and the on-disk write is the fallback.
 
 `lev context --full` includes each region's entry contents instead of per-region summaries.
+
+### `lev result`
+
+Print the answer a finished run submitted. It reads the run's `meta.json`, so it needs no daemon and
+works for a run that finished last week.
+
+```bash
+lev result agent-abc123          # the answer, with its run and stage
+lev result agent-abc123 --raw    # the answer alone, for a pipeline
+lev result agent-abc123 --json   # the answer plus its shape and stage
+```
+
+A run that produced no answer exits non-zero rather than printing nothing. So
+`lev result <id> > answer.txt` in a script cannot quietly write an empty file.
+
+Only an agent that calls `submit_output` has an answer to show. See
+[Final outputs](/docs/outputs) for how a blueprint asks for one.
 
 ### `lev respond [REQUEST_ID] [VALUE]`
 

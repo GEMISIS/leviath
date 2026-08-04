@@ -3,7 +3,7 @@ title: Sub-agents & fan-out
 description: Start child agents and fan work out across them, so many small jobs run at once.
 group: Concepts
 group_order: 2
-order: 6
+order: 7
 ---
 
 # Sub-agents and fan-out
@@ -66,6 +66,26 @@ Those keys sit directly on the stage next to `mode = "fan_out"`, not in a sub-ta
 
 Set exactly one of `worker_agent`, `worker_stage`, or `worker_query`. `lev validate` checks that,
 and checks that a named `worker_stage` exists and has opted in with `allow_as_worker`.
+
+## What a worker hands back
+
+A worker contributes whatever it submitted through
+[`submit_output`](/docs/outputs). That submission is what the merge stage reads.
+
+A worker that submits nothing falls back to the text of its last message. That text is often empty,
+because a worker whose final action was a tool call has no trailing prose. Set `require_output` on
+the worker stage when the merge depends on its answer.
+
+```toml
+[stages.fix_worker]
+mode = "autonomous"
+available_tools = ["read_file", "edit_file", "shell", "submit_output"]
+allow_as_worker = true
+require_output = true
+```
+
+A worker that finishes without submitting is nudged and re-run a few times first. It never strands
+the fan-out: after that the merge proceeds anyway, and the run records `output_forced`.
 
 ## `max_workers` is not the knob you might think
 

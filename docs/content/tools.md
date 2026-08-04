@@ -82,6 +82,20 @@ back into the system prompt on later turns.
 | `context_delete` | Remove a specific keyed entry from a section. | `region`, `key` |
 | `context_list` | List sections with their token counts and entry counts. | `region` (optional) |
 
+## Final output
+
+One tool, for the answer the run hands back. See [Final outputs](/docs/outputs).
+
+| Tool | Purpose | Arguments |
+| --- | --- | --- |
+| `submit_output` | Submit the run's final answer. Every surface reports it. | `content` |
+
+Its description is built for the stage that offers it. If you declared a shape, the format, your
+instructions, and your example appear in the description the model reads. That is how a format
+Leviath has never heard of still gets produced.
+
+`mode = "output"` grants this tool, so a stage using that mode does not list it.
+
 ## Human-in-the-loop
 
 Pause the run and hand control to the user. Each of these blocks until the user responds.
@@ -136,11 +150,15 @@ model but executed by the engine's tool registry, since they act on the shared a
 
 | Tool | Purpose | Arguments |
 | --- | --- | --- |
-| `spawn_agent` | Spawn a sub-agent from a blueprint; returns its ID (blocks and returns the result when `wait` is true). | `blueprint`, `task`, `wait` (default false), `seed_context` (optional), `max_child_depth` (optional) |
-| `check_agent` | Non-blocking status check; returns the result if complete. | `agent_id` |
-| `wait_for_agent` | Block until a sub-agent completes, then return its final result. | `agent_id` |
+| `spawn_agent` | Spawn a sub-agent from a blueprint; returns its ID (blocks and returns the result when `wait` is true). | `blueprint`, `task`, `wait` (default false), `seed_context` (optional), `max_child_depth` (optional), `output_format` (optional), `output_instructions` (optional) |
+| `check_agent` | Non-blocking status check; returns the child's answer once it is done. | `agent_id` |
+| `wait_for_agent` | Block until a sub-agent completes, then return its answer. | `agent_id` |
 | `send_to_agent` | Send a message into a running sub-agent's context. | `agent_id`, `message`, `target_region` (optional; defaults to the conversation) |
 | `kill_agent` | Kill a sub-agent and all its descendants. | `agent_id` |
+
+A child reports whatever it submitted through [`submit_output`](/docs/outputs). A child that
+submitted nothing says so, rather than returning an empty result. `output_format` asks the child for
+a particular shape, overriding what its blueprint declares.
 
 ## Web access
 
