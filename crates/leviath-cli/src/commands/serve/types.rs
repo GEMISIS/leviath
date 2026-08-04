@@ -245,6 +245,102 @@ pub(super) fn err(
     (code, axum::response::Json(ErrorResponse { error: message }))
 }
 
+// ─── Pagination ─────────────────────────────────────────────────────────────
+
+/// One page of a collection: the shape every paginated route returns.
+///
+/// One envelope rather than one per route, so a client writes the paging loop
+/// once. The house rule for which routes get it: **collections that grow
+/// without bound are paginated; bounded catalogs stay bare arrays.** Runs
+/// accumulate forever and are never pruned, so they are paged; `/api/models`
+/// and `/api/mcp/servers` are sized by what the user configured, and
+/// `/api/agents/tree` is a tree, where `next_cursor` would not mean anything.
+#[derive(Debug, Serialize)]
+pub(super) struct Page<T> {
+    /// This page's items, in the requested order.
+    pub(super) items: Vec<T>,
+    /// Pass back as `cursor` for the next page. `null` means this was the last
+    /// one - clients loop until null rather than counting against `total`,
+    /// because `total` can move underneath a walk.
+    ///
+    /// Only ever emitted when a further item is known to exist: the handler
+    /// takes `limit + 1` and keeps `limit`.
+    pub(super) next_cursor: Option<String>,
+    /// How many items matched this query, at the moment of this request.
+    ///
+    /// `null` when the answer would be a guess - see `scan_truncated`. A count
+    /// derived from a partial scan is worse than no count, because a UI renders
+    /// it as fact and a user paginates against it.
+    pub(super) total: Option<usize>,
+    /// Unix **seconds** at which this page was built, on the server's clock.
+    ///
+    /// The watermark for a client's next `since=`: round-tripping the server's
+    /// own timestamp keeps a polling client from missing or re-fetching work
+    /// because its clock disagrees.
+    pub(super) server_time: i64,
+    /// Set when a filesystem-scanning filter gave up before examining every
+    /// candidate, so this page is a prefix of the truth rather than all of it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(super) scan_truncated: bool,
+    /// Ids from an `ids=` batch fetch that no longer exist. Absent otherwise.
+    ///
+    /// A missing id is reported rather than 404ing the whole request: a batch
+    /// refresh of ten runs should not fail because one was deleted.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) missing: Vec<String>,
+}
+
+impl<T> Page<T> {
+    /// A page with nothing unusual about it: no truncation, no missing ids.
+    pub(super) fn new(
+        items: Vec<T>,
+        next_cursor: Option<String>,
+        total: Option<usize>,
+        server_time: i64,
+    ) -> Self {
+        Self {
+            items,
+            next_cursor,
+            total,
+            server_time,
+            scan_truncated: false,
+            missing: Vec::new(),
+        }
+    }
+}
+
+/// One run in a `GET /api/runs` page.
+#[derive(Debug, Serialize)]
+pub(super) struct RunItem {
+    /// The run's metadata, redacted, and narrowed to the requested `fields`.
+    ///
+    /// A `serde_json::Value` rather than a second `RunSummary` struct: field
+    /// projection is a runtime choice, and serializing through `RunMeta`'s own
+    /// serde means there is no parallel shape that can drift away from it.
+    pub(super) meta: serde_json::Value,
+    /// Why this run matched, when the request carried a `q`. Empty otherwise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) highlights: Vec<Highlight>,
+}
+
+/// Where a search matched, and enough text to show a user why.
+///
+/// The part of search that cannot be done in the browser: the console never has
+/// a run's transcript, so without this a deep match is an unexplained result.
+#[derive(Debug, Serialize)]
+pub(super) struct Highlight {
+    /// What matched: a `RunMeta` field name, `metadata.<key>`,
+    /// `modified_files`, `context.<region>`, `logs.output`, `logs.operational`,
+    /// or `journal.tool.<tool_name>`.
+    pub(super) field: String,
+    /// The matching text with a little either side, elided at any cut end.
+    pub(super) snippet: String,
+    /// Which stage the match came from, for the sources that have one. A client
+    /// can pass it straight to `GET /api/agents/{id}/logs?stage=`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) stage: Option<usize>,
+}
+
 // ─── Blueprint types ────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]

@@ -7,11 +7,14 @@ mod agents;
 mod auth;
 mod blueprints;
 mod config;
+mod cursor;
 mod doctor;
 mod fs;
 mod interactions;
 mod mcp;
 mod polling;
+mod runs;
+mod search;
 #[cfg(test)]
 mod testutil;
 mod tree;
@@ -73,6 +76,9 @@ fn api_router() -> Router<AppState> {
                 .put(blueprints::update_blueprint)
                 .delete(blueprints::delete_blueprint),
         )
+        // Runs - the paginated, searchable listing. Supersedes the GET half of
+        // /api/agents, which stays as it is for existing clients.
+        .route("/api/runs", get(runs::list_runs))
         // Agents
         .route(
             "/api/agents",
