@@ -208,6 +208,9 @@ impl ClaudeCodeProvider {
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        // This runs once per inference call, so on Windows it would be a
+        // console window per turn of every agent.
+        leviath_sys::hide_console_window(cmd.as_std_mut());
 
         let mut child = retry_etxtbsy(|| cmd.spawn()).await.map_err(|e| {
             // Permanent: a missing or unusable binary will not fix itself, and

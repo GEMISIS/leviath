@@ -1,4 +1,4 @@
-//! Process control: detached spawning.
+//! Process control: detached spawning and console-window suppression.
 
 use std::process::Command;
 
@@ -9,6 +9,30 @@ use std::process::Command;
 /// platforms it is a no-op. Call this before `cmd.spawn()`.
 pub fn configure_detached(cmd: &mut Command) {
     crate::platform::configure_detached(cmd);
+}
+
+/// Configure `cmd` so the spawned child gets no console window.
+///
+/// On Windows a console application is given a console. A child of a process
+/// that has one shares it and draws nothing; a child of a process that has
+/// none, such as the daemon started from Explorer, from a service, or from a UI
+/// console, gets a brand new window on the interactive desktop. Agent tooling
+/// spawns `cmd.exe` many times per run, so without this the desktop fills with
+/// flashing consoles (issue #228). Elsewhere this is a no-op: no other platform
+/// hands a child a window.
+///
+/// Apply it to a child whose stdout/stderr are already piped or nulled, which
+/// is what every caller in this workspace does. Do **not** apply it to a child
+/// meant to share the user's terminal: the editor launched by `lev run` needs
+/// that console to draw in, and starting `vim` without one just breaks it.
+///
+/// One sharp edge worth knowing: `Command::creation_flags` *assigns* the flag
+/// word rather than OR-ing into it, so two callers setting different flags on
+/// one command would silently clobber each other. This function is deliberately
+/// the only writer of creation flags in the workspace. Add any future flag
+/// here, alongside `CREATE_NO_WINDOW`, rather than at a call site.
+pub fn hide_console_window(cmd: &mut Command) {
+    crate::platform::hide_console_window(cmd);
 }
 
 /// SIGKILL every process in the group led by `pgid` (a no-op on platforms
@@ -101,5 +125,15 @@ mod tests {
         // must not fork/exec or panic.
         let mut cmd = Command::new("true");
         configure_detached(&mut cmd);
+    }
+
+    #[test]
+    fn hide_console_window_public_wrapper_registers_without_spawning() {
+        // Same shape as the shim above: callers apply this unconditionally on
+        // every platform, so it must configure and return rather than fail
+        // where there is no window to suppress. Whether it took effect is only
+        // observable on Windows, and is asserted in that platform module.
+        let mut cmd = Command::new("true");
+        hide_console_window(&mut cmd);
     }
 }

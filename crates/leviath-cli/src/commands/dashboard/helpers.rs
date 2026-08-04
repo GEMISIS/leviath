@@ -126,13 +126,16 @@ fn yank_to_clipboard_with(
 
     // Try native clipboard tools first - most reliable
     for (cmd, args) in clipboard_cmds {
-        if let Ok(mut child) = Command::new(cmd)
+        let mut command = Command::new(cmd);
+        command
             .args(*args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
+            .stderr(Stdio::null());
+        // The dashboard is a full-screen TUI; a console window popping over it
+        // on every yank would be the worst place for one.
+        leviath_sys::hide_console_window(&mut command);
+        if let Ok(mut child) = command.spawn() {
             // `child.stdin` is guaranteed `Some` here because the child was
             // spawned with `.stdin(Stdio::piped())` above - an `if let`
             // guard would introduce an implicit "pattern didn't match" branch

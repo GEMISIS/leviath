@@ -131,6 +131,11 @@ pub fn launch_via(
         };
         let mut cmd = Command::new(program);
         cmd.args(args);
+        // Deliberately *not* `hide_console_window`, unlike every other spawn in
+        // this workspace: the editor is the one child that is meant to be seen.
+        // It inherits this process's stdio and draws in the user's terminal, so
+        // starting `vim` or `edit` without a console would leave it nowhere to
+        // draw and nothing to read from.
 
         match run(&mut cmd) {
             // Exited, even non-zero: the user closed the editor.

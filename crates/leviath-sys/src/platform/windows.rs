@@ -67,8 +67,34 @@ pub(crate) fn ensure_private(path: &Path, _mode: u32) -> io::Result<Option<u32>>
     Ok(None)
 }
 
-/// No process groups on Windows; the caller kills the direct child.
-pub(crate) fn configure_detached(_cmd: &mut std::process::Command) {}
+/// No process groups on Windows, but detaching still means something here: a
+/// child launched with no console of its own is the Windows equivalent of
+/// escaping the launching terminal, so it neither inherits Ctrl+C nor pops a
+/// window when the parent has no console to share. The caller kills the direct
+/// child.
+pub(crate) fn configure_detached(cmd: &mut std::process::Command) {
+    hide_console_window(cmd);
+}
+
+/// Start `cmd` without a console window.
+///
+/// Windows gives a console application a console. When the parent has one, the
+/// child shares it and nothing is drawn; when it does not - the daemon started
+/// from Explorer, a service, or a UI console - the OS allocates a fresh window
+/// and shows it on the interactive desktop. An agent calling the `shell` tool
+/// runs `cmd.exe` dozens of times per run, so that is a flood of flashing
+/// windows, and concurrent agents make it worse (issue #228).
+///
+/// `CREATE_NO_WINDOW` says "this is a console application, run it without a
+/// console window". It is right only for a child whose stdio is already piped
+/// or nulled, which is every caller here; a child meant to share the user's
+/// terminal (the editor) must not get it, or it opens with nowhere to draw.
+pub(crate) fn hide_console_window(cmd: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    // <https://learn.microsoft.com/windows/win32/procthread/process-creation-flags>
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
 
 /// Windows has no POSIX uid; the value only addresses a per-user
 /// launchd/systemd domain, neither of which exists here.
@@ -86,9 +112,12 @@ pub(crate) fn kill_process_group(_pgid: u32) -> io::Result<()> {
 /// Remove every inherited permission from `path` and grant only its owner.
 fn restrict_to_owner(path: &Path) -> io::Result<()> {
     let user = resolve_user(std::env::var("USERNAME").ok())?;
-    let output = std::process::Command::new(icacls_program())
-        .args(icacls_args(path, &user))
-        .output()?;
+    let mut cmd = std::process::Command::new(icacls_program());
+    cmd.args(icacls_args(path, &user));
+    // Every secret write hardens its file, so this runs often enough to be
+    // noticed if each one flashed a console.
+    hide_console_window(&mut cmd);
+    let output = cmd.output()?;
     interpret_icacls(output.status.success(), &output.stderr, path)
 }
 
@@ -355,5 +384,22 @@ mod tests {
         configure_detached(&mut cmd);
         assert_eq!(current_uid(), 0);
         assert!(kill_process_group(1).is_ok());
+    }
+
+    /// The flag must hide the window without costing us the output - the whole
+    /// point is that a piped child behaves exactly as before, just unseen.
+    /// There is no way to observe "no window appeared" from a headless runner,
+    /// so what is asserted here is the half that *can* regress.
+    #[test]
+    fn a_hidden_child_still_has_its_output_captured() {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/C", "echo leviath"]);
+        hide_console_window(&mut cmd);
+        let output = cmd.output().expect("cmd.exe runs");
+        assert!(output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("leviath"),
+            "stdout is still captured with CREATE_NO_WINDOW set"
+        );
     }
 }

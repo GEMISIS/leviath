@@ -1498,17 +1498,19 @@ mod tests {
 
     // ── detect_shell ──────────────────────────────────────────────────────
 
-    /// Windows' `detect_shell()` branch is a plain, unconditional constant
-    /// return (no env/filesystem dependence to inject) - the
-    /// platform-agnostic `detect_shell_returns_valid_shell` test below
-    /// already exercises it on Windows CI, but this asserts the exact
-    /// documented return value directly.
-    #[cfg(windows)]
+    /// The Windows answer, asserted from every platform now that the OS is a
+    /// parameter rather than a `#[cfg]`. `$SHELL` is ignored there even when it
+    /// is set (Git for Windows sets it to an MSYS path `CreateProcess` cannot
+    /// run), which is what the second call pins.
     #[test]
-    fn detect_shell_returns_cmd_exe() {
-        let (shell, flag) = BuiltinTools::detect_shell();
+    fn detect_shell_returns_cmd_exe_on_windows() {
+        let (shell, flag) = BuiltinTools::detect_shell_for("windows", None, &|_| true);
         assert_eq!(shell, "cmd.exe");
         assert_eq!(flag, "/C");
+
+        let (shell, _) =
+            BuiltinTools::detect_shell_for("windows", Some("/usr/bin/bash".to_string()), &|_| true);
+        assert_eq!(shell, "cmd.exe", "$SHELL is not consulted on Windows");
     }
 
     #[test]
@@ -1523,18 +1525,22 @@ mod tests {
         assert_eq!(flag, "-c");
     }
 
-    /// Forces `detect_shell()` to exercise the real `shell_exists` closure by
-    /// temporarily setting $SHELL to an unrecognized path, causing the candidate
-    /// loop (and the closure) to be reached. `temp_env::with_var` sets the var,
-    /// runs the closure, and restores it - serialized against every other
-    /// temp-env test process-wide, so no hand-rolled lock is needed.
-    #[cfg(not(windows))]
+    /// Drives the real filesystem probe (`shell_path_exists`) through the seam,
+    /// with an unrecognized `$SHELL` so the candidate loop is reached. Passing
+    /// `"linux"` rather than the host OS is what lets this run on the Windows
+    /// leg too - production's probe would otherwise be a function no Windows
+    /// test ever calls.
+    ///
+    /// The result is host-dependent: a Unix host finds one of the candidates,
+    /// a Windows host finds none and falls to the last resort. Both are correct,
+    /// so only the shape is asserted.
     #[test]
-    fn detect_shell_queries_real_filesystem_for_unrecognized_shell() {
-        let (shell, flag) =
-            temp_env::with_var("SHELL", Some("/opt/not-a-recognized-shell"), || {
-                BuiltinTools::detect_shell()
-            });
+    fn detect_shell_queries_the_real_filesystem_for_an_unrecognized_shell() {
+        let (shell, flag) = BuiltinTools::detect_shell_for(
+            "linux",
+            Some("/opt/not-a-recognized-shell".to_string()),
+            &BuiltinTools::shell_path_exists,
+        );
         assert_eq!(flag, "-c");
         assert!(
             [
@@ -1542,84 +1548,86 @@ mod tests {
                 "/usr/bin/bash",
                 "/bin/zsh",
                 "/usr/bin/zsh",
-                "/bin/sh"
+                "/bin/sh",
+                "sh",
             ]
-            .contains(&shell)
+            .contains(&shell),
+            "unexpected shell: {shell}"
         );
     }
 
-    // ── detect_shell_impl() - inject env and filesystem for full branch coverage ──
+    // ── detect_shell_for() - inject OS, env and filesystem for full branch coverage ──
 
-    #[cfg(not(windows))]
     #[test]
-    fn detect_shell_impl_returns_zsh_from_env() {
+    fn detect_shell_for_returns_zsh_from_env() {
         // `$SHELL` is trusted only when it exists on disk.
         let (shell, flag) =
-            BuiltinTools::detect_shell_impl(Some("/usr/local/bin/zsh".to_string()), &|s| {
+            BuiltinTools::detect_shell_for("linux", Some("/usr/local/bin/zsh".to_string()), &|s| {
                 s == "/usr/local/bin/zsh"
             });
         assert_eq!(shell, "/usr/local/bin/zsh");
         assert_eq!(flag, "-c");
     }
 
-    #[cfg(not(windows))]
     #[test]
-    fn detect_shell_impl_returns_bash_from_env() {
-        let (shell, flag) =
-            BuiltinTools::detect_shell_impl(Some("/usr/local/bin/bash".to_string()), &|s| {
-                s == "/usr/local/bin/bash"
-            });
+    fn detect_shell_for_returns_bash_from_env() {
+        let (shell, flag) = BuiltinTools::detect_shell_for(
+            "macos",
+            Some("/usr/local/bin/bash".to_string()),
+            &|s| s == "/usr/local/bin/bash",
+        );
         assert_eq!(shell, "/usr/local/bin/bash");
         assert_eq!(flag, "-c");
     }
 
-    #[cfg(not(windows))]
     #[test]
-    fn detect_shell_impl_returns_sh_from_env() {
+    fn detect_shell_for_returns_sh_from_env() {
+        // An OS nobody special-cases still gets the POSIX treatment rather than
+        // falling into the Windows arm.
         let (shell, flag) =
-            BuiltinTools::detect_shell_impl(Some("/usr/bin/sh".to_string()), &|s| {
+            BuiltinTools::detect_shell_for("freebsd", Some("/usr/bin/sh".to_string()), &|s| {
                 s == "/usr/bin/sh"
             });
         assert_eq!(shell, "/usr/bin/sh");
         assert_eq!(flag, "-c");
     }
 
-    #[cfg(not(windows))]
     #[test]
-    fn detect_shell_impl_falls_back_when_env_shell_is_missing() {
+    fn detect_shell_for_falls_back_when_env_shell_is_missing() {
         // Regression for #79: `$SHELL` is a recognized shell name but does not
         // exist on disk (a stale or sandbox-missing `/bin/zsh`). It must NOT be
         // returned - fall through to an available fallback instead of failing
         // every shell call with "No such file or directory".
         let (shell, flag) =
-            BuiltinTools::detect_shell_impl(Some("/bin/zsh".to_string()), &|s| s == "/bin/sh");
+            BuiltinTools::detect_shell_for("linux", Some("/bin/zsh".to_string()), &|s| {
+                s == "/bin/sh"
+            });
         assert_eq!(shell, "/bin/sh");
         assert_eq!(flag, "-c");
     }
 
-    #[cfg(not(windows))]
     #[test]
-    fn detect_shell_impl_falls_through_when_env_unrecognized() {
+    fn detect_shell_for_falls_through_when_env_unrecognized() {
         // /opt/fish doesn't end with /zsh, /bash, or /sh → falls to candidate loop
         let (shell, flag) =
-            BuiltinTools::detect_shell_impl(Some("/opt/fish".to_string()), &|s| s == "/bin/bash");
+            BuiltinTools::detect_shell_for("linux", Some("/opt/fish".to_string()), &|s| {
+                s == "/bin/bash"
+            });
         assert_eq!(shell, "/bin/bash");
         assert_eq!(flag, "-c");
     }
 
-    #[cfg(not(windows))]
     #[test]
-    fn detect_shell_impl_skips_missing_candidates_and_finds_zsh() {
+    fn detect_shell_for_skips_missing_candidates_and_finds_zsh() {
         // bash paths return false; /bin/zsh exists - covers shell_exists false branch
-        let (shell, flag) = BuiltinTools::detect_shell_impl(None, &|s| s == "/bin/zsh");
+        let (shell, flag) = BuiltinTools::detect_shell_for("linux", None, &|s| s == "/bin/zsh");
         assert_eq!(shell, "/bin/zsh");
         assert_eq!(flag, "-c");
     }
 
-    #[cfg(not(windows))]
     #[test]
-    fn detect_shell_impl_returns_last_resort_when_nothing_exists() {
-        let (shell, flag) = BuiltinTools::detect_shell_impl(None, &|_| false);
+    fn detect_shell_for_returns_last_resort_when_nothing_exists() {
+        let (shell, flag) = BuiltinTools::detect_shell_for("linux", None, &|_| false);
         assert_eq!(shell, "sh");
         assert_eq!(flag, "-c");
     }

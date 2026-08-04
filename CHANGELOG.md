@@ -13,6 +13,22 @@ same list.
 
 ## Unreleased
 
+- Windows no longer flashes console windows across the desktop. Every child
+  process Leviath starts is a console application, and one started by a process
+  with no console of its own gets a fresh window on the interactive desktop.
+  With a `shell` call or two per agent iteration that is a strobe, and a fleet
+  of agents made it worse. Every spawn whose output is already piped or
+  discarded now asks for no window: the `shell` tool, a script tool's `shell()`,
+  seed commands, container lifecycle commands, MCP servers, the Claude Code
+  provider, the browser launcher, the dashboard's clipboard helper, and the
+  daemon itself. The editor `lev run` opens for you is deliberately left alone,
+  since it is the one child meant to be seen. Nothing about output capture
+  changes.
+- Which shell a command runs in is now decided by a function that takes the
+  platform as an argument rather than by a compile-time branch, so the Windows
+  answer is checked on every CI machine instead of only on the Windows one.
+  Behaviour is unchanged: `cmd.exe /C` on Windows, `$SHELL` then bash, zsh, sh
+  for the `shell` tool elsewhere, and always `/bin/sh -c` for script tools.
 - OpenRouter works end to end. Several separate faults added up to an install
   that was configured correctly and still did nothing useful:
   - `default_provider` is now honoured. It was only consulted after every

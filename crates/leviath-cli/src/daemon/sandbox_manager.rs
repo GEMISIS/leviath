@@ -262,10 +262,12 @@ fn unavailable(
 /// Real lifecycle-command runner: spawn synchronously, map a non-zero exit to
 /// its stderr.
 fn real_run(argv: &[String]) -> Result<(), String> {
-    let output = StdCommand::new(&argv[0])
-        .args(&argv[1..])
-        .output()
-        .map_err(|e| e.to_string())?;
+    let mut cmd = StdCommand::new(&argv[0]);
+    cmd.args(&argv[1..]);
+    // `docker run`/`docker rm` are bookkeeping the operator never watches, so
+    // they get no console window on Windows.
+    leviath_sys::hide_console_window(&mut cmd);
+    let output = cmd.output().map_err(|e| e.to_string())?;
     if output.status.success() {
         Ok(())
     } else {

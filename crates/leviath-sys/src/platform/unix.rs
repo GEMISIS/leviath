@@ -18,6 +18,11 @@ pub(crate) fn configure_detached(cmd: &mut Command) {
     cmd.process_group(0);
 }
 
+/// Nothing to hide: a Unix process has no console of its own to be given, so
+/// there is no window for a child to pop. Windows is the only platform where
+/// this does anything.
+pub(crate) fn hide_console_window(_cmd: &mut Command) {}
+
 /// Create (or truncate) `path` with `mode` already applied, then write
 /// `contents`.
 ///
@@ -216,5 +221,9 @@ mod tests {
         // takes effect on a later spawn(), which this test deliberately omits.
         let mut cmd = Command::new("true");
         configure_detached(&mut cmd);
+        // And the console-window shim is a no-op here rather than an error -
+        // callers apply it unconditionally and must not have to ask which
+        // platform they are on.
+        hide_console_window(&mut cmd);
     }
 }

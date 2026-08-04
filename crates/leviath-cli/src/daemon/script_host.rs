@@ -692,6 +692,10 @@ impl ScriptIo for RealScriptIo {
         // tool, which does the same.
         cmd.kill_on_drop(true);
         leviath_tools::own_process_group(&mut cmd);
+        // No console window on Windows - a script tool's `shell()` is as chatty
+        // as the built-in one. Applied here, after the sandbox has had its say,
+        // so the sandboxed command is covered too.
+        leviath_tools::hide_console_window(&mut cmd);
         // `spawn` inherits stdio where `output` pipes it; pipe explicitly so the
         // command's output is still captured.
         cmd.stdout(std::process::Stdio::piped())
@@ -751,13 +755,18 @@ impl ScriptIo for RealScriptIo {
 /// once and run on every machine, so it gets the POSIX shell it can count on
 /// instead of whatever interactive shell the operator happens to prefer.
 pub(crate) fn default_shell() -> (&'static str, &'static str) {
-    #[cfg(windows)]
-    {
-        ("cmd.exe", "/C")
-    }
-    #[cfg(not(windows))]
-    {
-        ("/bin/sh", "-c")
+    default_shell_for(std::env::consts::OS)
+}
+
+/// [`default_shell`] with the platform as a parameter.
+///
+/// Pure over the OS string rather than `#[cfg(windows)]`-switched, following
+/// `leviath_sys::browser::open_command_for`, so the Windows answer is reachable
+/// under test on every platform instead of only on the Windows CI leg.
+pub(crate) fn default_shell_for(os: &str) -> (&'static str, &'static str) {
+    match os {
+        "windows" => ("cmd.exe", "/C"),
+        _ => ("/bin/sh", "-c"),
     }
 }
 
@@ -1814,6 +1823,18 @@ mod tests {
         let (shell, flag) = default_shell();
         assert!(!shell.is_empty());
         assert!(!flag.is_empty());
+    }
+
+    /// Both answers, from whichever platform is running the test. A script tool
+    /// gets `/bin/sh` everywhere it exists and `cmd.exe` where it does not -
+    /// never the operator's `$SHELL`, which is what makes a Rhai tool behave
+    /// the same on every machine.
+    #[test]
+    fn default_shell_for_answers_per_platform() {
+        assert_eq!(default_shell_for("windows"), ("cmd.exe", "/C"));
+        for posix in ["linux", "macos", "freebsd", "haiku"] {
+            assert_eq!(default_shell_for(posix), ("/bin/sh", "-c"), "{posix}");
+        }
     }
 
     #[test]

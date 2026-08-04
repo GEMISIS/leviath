@@ -150,6 +150,18 @@ blueprint's `[agent]` / `[stages.<name>]` block. A blueprint that spells out POS
 own prompt will still ask for them; that text has to change in the blueprint. See
 [which shell you get](/docs/tools#which-shell-you-get).
 
+## Console windows keep flashing on my Windows desktop
+
+Every child process Leviath starts is asked for no console window, so this
+should not happen on 0.1.3 or later. Before that, each `shell` call, each MCP
+server, and each provider that shells out could pop a `cmd.exe` window on the
+desktop, which a fleet of agents turned into a steady flicker.
+
+If you still see it, check what is spawning. `lev` itself run from a terminal
+shares that terminal and draws nothing extra. The one child that is still meant
+to be visible is your editor: `lev run` with no `--task` opens `$EDITOR` in the
+console on purpose, and that is not this bug.
+
 ## A run says `running` but never does anything
 
 Check its provider first, with `lev doctor`. If a stage's model list names only providers you

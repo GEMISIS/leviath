@@ -154,6 +154,11 @@ impl StdioTransport {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
+        // The server talks JSON-RPC over those pipes and has no use for a
+        // console. It matters most here: `command_candidates` resolves `npx` to
+        // `npx.cmd`, a batch file, which Windows always runs through `cmd.exe`.
+        leviath_sys::hide_console_window(cmd.as_std_mut());
+
         cmd.spawn()
     }
 
