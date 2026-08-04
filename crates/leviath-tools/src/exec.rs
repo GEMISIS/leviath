@@ -407,34 +407,52 @@ impl BuiltinTools {
     /// - Windows: cmd.exe (always available)
     /// - Unix: $SHELL env var (user's preferred shell) → bash → zsh → sh
     pub(crate) fn detect_shell() -> (&'static str, &'static str) {
-        #[cfg(windows)]
-        {
-            ("cmd.exe", "/C")
-        }
-
-        #[cfg(not(windows))]
-        {
-            Self::detect_shell_impl(std::env::var("SHELL").ok(), &|s| {
-                std::path::Path::new(s).exists()
-            })
-        }
+        Self::detect_shell_for(
+            std::env::consts::OS,
+            std::env::var("SHELL").ok(),
+            &Self::shell_path_exists,
+        )
     }
 
-    /// Core shell-detection logic with injectable env and filesystem checks
-    /// for testing.
+    /// Whether `path` names something on disk.
+    ///
+    /// A named `fn` rather than the closure this used to be. On Windows
+    /// [`Self::detect_shell_for`] returns before probing anything, so a closure
+    /// written at the call site would be a region the Windows coverage leg
+    /// never executes; a `fn` can be handed to the seam directly by a test that
+    /// runs on every platform.
+    pub(crate) fn shell_path_exists(path: &str) -> bool {
+        std::path::Path::new(path).exists()
+    }
+
+    /// Core shell-detection logic with injectable OS, env, and filesystem
+    /// checks for testing.
+    ///
+    /// `os` is a parameter rather than a `#[cfg(windows)]` branch, following
+    /// `leviath_sys::browser::open_command_for` and
+    /// `leviath_runtime::pipeline::shell_guidance_for`: the Windows answer is
+    /// then reachable under test from any platform instead of only on the
+    /// Windows CI leg. Callers pass `std::env::consts::OS`.
+    ///
+    /// `$SHELL` is deliberately ignored on Windows even though Git for Windows
+    /// sets it - the value names an MSYS path (`/usr/bin/bash`) that
+    /// `CreateProcess` cannot run.
     ///
     /// `shell_exists` is a trait object (`&dyn Fn(&str) -> bool`) rather
     /// than `impl Fn(&str) -> bool` so every caller - production's real
-    /// `Path::exists` closure and each test's distinct closure - shares
+    /// `Path::exists` probe and each test's distinct closure - shares
     /// exactly ONE monomorphization of this function instead of one per
     /// closure type (this function was a confirmed generic-monomorphization
     /// coverage-attribution artifact: every source position had a covered
     /// instantiation, but the summary table still reported some as missed).
-    #[cfg(not(windows))]
-    pub(crate) fn detect_shell_impl(
+    pub(crate) fn detect_shell_for(
+        os: &str,
         env_shell: Option<String>,
         shell_exists: &dyn Fn(&str) -> bool,
     ) -> (&'static str, &'static str) {
+        if os == "windows" {
+            return ("cmd.exe", "/C");
+        }
         if let Some(shell) = env_shell
             && (shell.ends_with("/zsh") || shell.ends_with("/bash") || shell.ends_with("/sh"))
             && shell_exists(&shell)
@@ -502,6 +520,10 @@ impl BuiltinTools {
         // signalling the group on drop takes the whole tree down with it.
         cmd.kill_on_drop(true);
         own_process_group(&mut cmd);
+        // An agent runs this dozens of times per run, and on Windows each spawn
+        // would otherwise be given a console window. Applied here rather than in
+        // either branch above so it covers the sandboxed command too.
+        hide_console_window(&mut cmd);
         // `spawn` inherits stdio where `output` pipes it; pipe explicitly so the
         // command's output is still captured.
         cmd.stdout(std::process::Stdio::piped())

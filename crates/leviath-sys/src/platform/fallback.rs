@@ -25,6 +25,10 @@ pub(crate) fn ensure_private(_path: &Path, _mode: u32) -> io::Result<Option<u32>
 
 pub(crate) fn configure_detached(_cmd: &mut std::process::Command) {}
 
+/// No consoles to suppress on such a target; Windows is the only platform where
+/// a child process can be handed a window.
+pub(crate) fn hide_console_window(_cmd: &mut std::process::Command) {}
+
 /// No POSIX uid here; the value is only used to address a per-user
 /// launchd/systemd domain, neither of which exists on such a target.
 pub(crate) fn current_uid() -> u32 {

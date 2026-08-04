@@ -55,7 +55,13 @@ pub fn open_url_via(spawn: fn(&mut Command) -> std::io::Result<()>, url: &str) -
 ///
 /// The browser launcher is detached: we neither wait for it nor read its
 /// pipes, since it may outlive this process.
+///
+/// The Windows launcher is `cmd /C start`, which would otherwise flash a
+/// console on its way to opening the browser. `start` hands the URL to the
+/// shell association and needs no console of its own, so suppressing the window
+/// costs nothing - the browser still opens.
 pub fn spawn_detached(cmd: &mut Command) -> std::io::Result<()> {
+    crate::process::hide_console_window(cmd);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

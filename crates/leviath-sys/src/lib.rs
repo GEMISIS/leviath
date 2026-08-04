@@ -42,7 +42,7 @@ pub use editor::launch as launch_editor;
 pub use perms::{ensure_file_private, secure_dir_perms, secure_file_perms, write_private};
 #[cfg(unix)]
 pub use process::peer_uid;
-pub use process::{configure_detached, current_uid, kill_process_group};
+pub use process::{configure_detached, current_uid, hide_console_window, kill_process_group};
 pub use sandbox::{
     ContainerRunSpec, container_exec_argv, container_rm_argv, container_run_argv,
     detect_container_engine, namespace_argv, namespace_supported,
