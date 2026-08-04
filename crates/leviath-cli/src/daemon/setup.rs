@@ -1342,6 +1342,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
             flags: Default::default(),
             yolo: false,
             read_paths: None,
+            final_output: None,
         };
         std::fs::write(
             run_dir.join("meta.json"),
@@ -1439,6 +1440,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
             flags: Default::default(),
             yolo: false,
             read_paths: None,
+            final_output: None,
         };
         std::fs::write(
             run_dir.join("meta.json"),

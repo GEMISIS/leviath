@@ -112,6 +112,15 @@ pub struct Blueprint {
     /// could pre-approve its own shell with one TOML line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub safe_commands: Option<SafeCommandsConfig>,
+
+    /// Agent-level default shape for the run's final output. A per-stage
+    /// `[stages.<name>.output]` narrows it, and whoever starts the run can
+    /// override it again. See [`crate::output::resolve_output_spec`].
+    ///
+    /// `None` means this agent declares no shape, which is not the same as
+    /// producing no output: a stage may still ask for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<crate::output::OutputSpec>,
 }
 
 /// The `[safe_commands]` section of a manifest.
@@ -178,6 +187,7 @@ impl Blueprint {
             dynamic_tools: false,
             read_paths: None,
             safe_commands: None,
+            output: None,
         }
     }
 
@@ -553,13 +563,24 @@ pub enum StageMode {
         /// Fan-out configuration (worker source, concurrency, failure policy).
         config: FanOutConfig,
     },
+
+    /// Produces the run's final output and nothing else.
+    ///
+    /// Sugar over three settings the manifest parser applies on the author's
+    /// behalf: `submit_output` is added to `available_tools`, `require_output`
+    /// is turned on, and `allow_complete` defaults to true (an output stage is
+    /// normally the last thing a run does). Everything it does is expressible
+    /// without the mode; naming it says what the stage is *for*.
+    Output,
 }
 
 impl PartialEq for StageMode {
     #[inline(never)]
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Autonomous, Self::Autonomous) | (Self::Interactive, Self::Interactive) => true,
+            (Self::Autonomous, Self::Autonomous)
+            | (Self::Interactive, Self::Interactive)
+            | (Self::Output, Self::Output) => true,
             (Self::InteractivePoints { points: a }, Self::InteractivePoints { points: b }) => {
                 a == b
             }
@@ -873,6 +894,29 @@ pub struct Stage {
     /// of the default "conversation" region.
     #[serde(default)]
     pub tool_result_routing: Option<ToolResultRouting>,
+
+    /// What shape this stage's final output should take, narrowing the
+    /// agent-level `[agent.output]`. Whoever starts the run overrides both.
+    ///
+    /// Declaring a shape does not by itself demand one: pair it with
+    /// [`Self::require_output`] (or `mode = "output"`, which sets that for you)
+    /// when the stage must not finish without submitting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<crate::output::OutputSpec>,
+
+    /// Whether this stage must call `submit_output` before it transitions.
+    ///
+    /// Unlike [`Self::required_tools`], which only keeps a blocking human tool
+    /// advertised through an unattended run and is never checked afterwards,
+    /// this *is* enforced: a stage that finishes without submitting is nudged
+    /// and re-run, bounded, and then allowed through with the run's
+    /// `output_forced` flag set. A missing output never strands a run.
+    ///
+    /// `mode = "output"` turns this on. Setting it on an ordinary stage is the
+    /// way to demand a deliverable from a stage that also does other work, e.g.
+    /// a fan-out worker whose summary its merge stage depends on.
+    #[serde(default)]
+    pub require_output: bool,
 }
 
 /// Default value for bool fields that should default to true.
@@ -908,6 +952,8 @@ impl Stage {
             nudge: None,
             sandbox: None,
             tool_result_routing: None,
+            output: None,
+            require_output: false,
         }
     }
 
@@ -959,6 +1005,20 @@ impl Stage {
                     ),
                 });
             }
+        }
+
+        // A stage told to produce a final output that cannot call the tool would
+        // burn its whole re-entry budget being nudged toward a tool it was never
+        // offered, then give up. `mode = "output"` grants the tool at parse time,
+        // so reaching this means someone set `require_output` by hand.
+        if self.require_output && !self.available_tools.iter().any(|t| t == SUBMIT_OUTPUT_TOOL) {
+            return Err(ValidationError::Stage {
+                stage: self.name.clone(),
+                message: format!(
+                    "require_output is set but '{SUBMIT_OUTPUT_TOOL}' is not in available_tools - \
+                     the stage cannot produce the output it is required to produce"
+                ),
+            });
         }
 
         // Validate stage-specific context layout if present
@@ -1210,6 +1270,18 @@ pub const DEFAULT_GATE_ATTEMPTS: usize = 3;
 /// `require_modifications` accounting. Extended per-edge by
 /// [`TransitionGate::tools`].
 pub const MODIFYING_TOOLS: &[&str] = &["write_file", "edit_file"];
+
+/// The tool an agent calls to hand back the run's final output.
+///
+/// Named here rather than in `leviath-tools` because both the blueprint
+/// validator and the manifest parser need it, and neither may depend on the
+/// tools crate.
+pub const SUBMIT_OUTPUT_TOOL: &str = "submit_output";
+
+/// Times a stage is re-run for a missing final output before the gate gives up
+/// and lets it through with the run's `output_forced` flag set. Matches
+/// [`DEFAULT_GATE_ATTEMPTS`], and is overridden by a stage's `max_revisits`.
+pub const DEFAULT_OUTPUT_REENTRY_CAP: usize = 3;
 
 /// Settings for the empty-response nudge: the `[System]` message injected when
 /// a stage's model replies with text before making any tool call.
@@ -2251,6 +2323,54 @@ mod tests {
         let bp = Blueprint::new("t".into(), "".into(), vec![stage], make_layout());
 
         bp.validate().expect("the tool is on offer");
+    }
+
+    /// A stage required to produce an output, without the tool that produces
+    /// one, would spend its whole re-entry budget being nudged toward a tool it
+    /// was never offered and then give up. Caught at load instead.
+    #[test]
+    fn validate_rejects_require_output_without_the_submit_tool() {
+        let mut stage = Stage::new("summary".to_string(), make_model());
+        stage.available_tools = vec!["read_file".to_string()];
+        stage.require_output = true;
+        let bp = Blueprint::new("t".into(), "".into(), vec![stage], make_layout());
+
+        let err = bp.validate().expect_err("no way to submit");
+        let text = format!("{err:?}");
+        assert!(text.contains(SUBMIT_OUTPUT_TOOL), "names the tool: {text}");
+        assert!(text.contains("require_output"), "says why: {text}");
+    }
+
+    #[test]
+    fn validate_accepts_require_output_when_the_stage_can_submit() {
+        let mut stage = Stage::new("summary".to_string(), make_model());
+        stage.available_tools = vec![SUBMIT_OUTPUT_TOOL.to_string()];
+        stage.require_output = true;
+        let bp = Blueprint::new("t".into(), "".into(), vec![stage], make_layout());
+
+        bp.validate().expect("the stage can submit");
+    }
+
+    /// Declaring a shape is not the same as demanding one, so a stage carrying
+    /// only an `output` block needs no tool grant.
+    #[test]
+    fn validate_accepts_a_declared_shape_without_require_output() {
+        let mut stage = Stage::new("summary".to_string(), make_model());
+        stage.available_tools = vec!["read_file".to_string()];
+        stage.output = Some(crate::output::OutputSpec {
+            format: Some("a2ui".to_string()),
+            ..Default::default()
+        });
+        let bp = Blueprint::new("t".into(), "".into(), vec![stage], make_layout());
+
+        bp.validate().expect("declaring a shape demands nothing");
+    }
+
+    #[test]
+    fn output_mode_compares_equal_only_to_itself() {
+        assert_eq!(StageMode::Output, StageMode::Output);
+        assert_ne!(StageMode::Output, StageMode::Autonomous);
+        assert_ne!(StageMode::Autonomous, StageMode::Output);
     }
 
     #[test]

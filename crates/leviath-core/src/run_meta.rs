@@ -152,6 +152,13 @@ pub struct RunMeta {
     /// runs written before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_paths: Option<ReadPathGrantCounts>,
+    /// What the agent handed back, if it submitted anything.
+    ///
+    /// This is the run's answer, as distinct from `error` (why it failed) and
+    /// from the stage logs (what it did along the way). Every consumer that
+    /// reports a finished run reads it from here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_output: Option<crate::output::FinalOutput>,
 }
 
 /// How many `[read_paths]` entries a run's blueprint declared, and how many of
@@ -218,6 +225,22 @@ pub struct RunFlags {
     /// The working directory disappeared mid-run.
     #[serde(default)]
     pub workspace_lost: bool,
+    /// The run submitted a final output.
+    ///
+    /// Counts as having produced something, alongside file modifications.
+    /// Without this an agent whose whole deliverable is its answer - a
+    /// researcher, a reviewer, a router - reported itself empty on every
+    /// successful run, which is the same mistake [`Self::no_output_tools`] was
+    /// added to correct from the other direction.
+    #[serde(default)]
+    pub produced_output: bool,
+    /// How many stages transitioned without the final output they required,
+    /// because the re-run budget ran out.
+    ///
+    /// The counterpart to [`Self::gates_forced`]: the run finished, and this
+    /// says the answer it hands back may be missing.
+    #[serde(default)]
+    pub output_forced: usize,
 }
 
 /// How many distinct modified paths [`RunFlags`] records before it stops
@@ -296,6 +319,7 @@ impl RunMeta {
             children: Vec::new(),
             depth: 0,
             max_child_depth: 0,
+            final_output: None,
             flags: RunFlags::default(),
             yolo: false,
             read_paths: None,

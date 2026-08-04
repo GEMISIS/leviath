@@ -176,6 +176,7 @@ pub fn dispatch_persistence(
             Option<&crate::interaction_points::InteractionPointCursor>,
             Option<&crate::interaction_points::InteractionPointRounds>,
             Option<&crate::persistence::RunOutcomeFlags>,
+            Option<&crate::persistence::FinalOutput>,
         ),
     )>,
     stage: Res<PersistenceStage>,
@@ -197,7 +198,7 @@ pub fn dispatch_persistence(
         parent_ref,
         children,
         fan_out_waiting,
-        (awaiting_point, ip_cursor, ip_rounds, outcome_flags),
+        (awaiting_point, ip_cursor, ip_rounds, outcome_flags, final_output),
     ) in agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
@@ -269,6 +270,7 @@ pub fn dispatch_persistence(
             watermark.last_progress_at(),
             depth,
             max_child_depth,
+            final_output,
         );
         let context = build_context_snapshot(window, &state.current_stage);
         let stages = ledger.as_deref().map(|l| l.0.clone()).unwrap_or_default();
