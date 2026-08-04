@@ -328,8 +328,14 @@ fn resolve(query: &RunsQuery) -> Result<Resolved, ApiError> {
 ///
 /// Derived from an actual serialization rather than a hand-written list, so the
 /// allowlist cannot drift away from the struct when a field is added.
+///
+/// Every `Option` field is filled first. Several carry
+/// `skip_serializing_if = "Option::is_none"`, so a probe left at its defaults
+/// omits them and the allowlist silently refuses a field that does exist -
+/// `?fields=read_paths` and `?fields=final_output` were both rejected on runs
+/// that had them. Filling the options is what makes the sentence above true.
 fn known_meta_fields() -> HashSet<String> {
-    let probe = RunMeta::new(
+    let mut probe = RunMeta::new(
         String::new(),
         String::new(),
         String::new(),
@@ -338,6 +344,14 @@ fn known_meta_fields() -> HashSet<String> {
         String::new(),
         0,
     );
+    probe.read_paths = Some(Default::default());
+    probe.final_output = Some(leviath_core::output::FinalOutput::new(
+        "",
+        None,
+        String::new(),
+        0,
+    ));
+    probe.output_request = Some(Default::default());
     // `RunMeta` is a struct, so this is always an object; `as_object` keeps
     // that assumption in one place instead of adding a match arm nothing can
     // reach.

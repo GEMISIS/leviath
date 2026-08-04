@@ -75,6 +75,20 @@ Flags (run `lev agent-client --help` for the authoritative list):
 | `--allow <tool>` | Allow a tool outright. Repeatable. |
 | `--max-depth <n>` | Override the blueprint's max sub-agent tree depth. |
 | `--no-seed-commands` | Refuse the blueprint's `seed = { command = "..." }` regions, which run a shell command at spawn, before the first inference, and so before any approval prompt. |
+| `--output-format <label>` | Ask for the [final output](/docs/outputs) in this shape. Any label works. |
+| `--output-instructions <text>` | Extra guidance about that shape. |
+
+## The agent's answer
+
+ACP has no result field. A turn returns a stop reason, and everything the user sees arrives as
+`agent_message_chunk` updates carrying the stage's streamed output.
+
+An agent that submits a [final output](/docs/outputs) gets one more chunk at the end of the turn,
+holding the answer and its format label. It is set apart from the streamed output, so a host can show
+it as the agent's conclusion rather than more log text.
+
+A run that submits nothing adds nothing. Ask for a shape with `--output-format`, since the protocol
+carries no field for it.
 
 ## Permission handling
 

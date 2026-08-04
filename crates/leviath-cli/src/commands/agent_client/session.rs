@@ -77,9 +77,17 @@ pub(super) fn spawn_args(
         allow: args.allow.clone(),
         max_depth: args.max_depth,
         parent_run_id: None,
-        // The ACP client has no way to ask for a shape, so the blueprint's own
-        // declaration stands.
-        output: None,
+        // A host that wants a particular shape says so when it starts the
+        // server; ACP itself carries no field for it.
+        output: match (&args.output_format, &args.output_instructions) {
+            (None, None) => None,
+            (format, instructions) => Some(leviath_core::output::OutputSpec {
+                format: format.clone(),
+                instructions: instructions.clone(),
+                example: None,
+                schema: None,
+            }),
+        },
     }
 }
 
@@ -151,6 +159,8 @@ prompt = "Plan the work"
             no_seed_commands: false,
             allow: vec!["bash".to_string()],
             max_depth: Some(2),
+            output_format: None,
+            output_instructions: None,
         };
         let regions =
             std::collections::HashMap::from([("criteria".to_string(), "be safe".to_string())]);
@@ -172,5 +182,39 @@ prompt = "Plan the work"
         assert!(spawn.parent_run_id.is_none());
         // The run id is derived from the agent name.
         assert!(spawn.run_id.starts_with(&resolved.agent_name));
+        // Nothing asked for a shape, so the blueprint's own stands.
+        assert!(spawn.output.is_none());
+    }
+
+    /// ACP carries no field for an output shape, so a host that wants one says
+    /// so when it starts the server. The label is passed through untouched.
+    #[test]
+    fn spawn_args_carry_a_requested_output_shape() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("coder");
+        write_blueprint(&dir, "coder");
+        let resolved = resolve_blueprint(None, &dir.to_string_lossy()).unwrap();
+        let args = AgentClientArgs {
+            agent: None,
+            yolo: false,
+            no_seed_commands: false,
+            allow: vec![],
+            max_depth: None,
+            output_format: Some("a2ui".to_string()),
+            output_instructions: Some("One card per finding.".to_string()),
+        };
+        let spawn = spawn_args(
+            &resolved,
+            "do the thing",
+            "/work",
+            &args,
+            std::collections::HashMap::new(),
+        );
+        let spec = spawn.output.expect("the host asked for a shape");
+        assert_eq!(spec.format.as_deref(), Some("a2ui"));
+        assert_eq!(spec.instructions.as_deref(), Some("One card per finding."));
+        // No schema from this path: a CLI flag is a poor place to compose one,
+        // and the blueprint can declare it instead.
+        assert!(spec.schema.is_none());
     }
 }

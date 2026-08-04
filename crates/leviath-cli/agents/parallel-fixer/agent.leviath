@@ -1,6 +1,6 @@
 [agent]
 name = "parallel-fixer"
-version = "0.0.3"
+version = "0.0.2"
 description = "Fixes failing tests in parallel: discover → validate → fan out one worker per failure → merge → verify (re-round until the suite is green)"
 entry_stage = "discover"
 
