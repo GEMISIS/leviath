@@ -1,0 +1,525 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Leviath HTTP API",
+    "version": "0.1.2",
+    "description": "The REST and WebSocket surface `lev serve` puts in front of the shared-world daemon. Every route requires a bearer token. Paths here are checked against the router in crates/leviath-cli/src/commands/serve/mod.rs by a test in that file, so a route added without a spec entry fails the build. See https://leviath.dev/docs/api.",
+    "license": { "name": "MIT" }
+  },
+  "servers": [{ "url": "http://127.0.0.1:3000", "description": "The default `lev serve` bind." }],
+  "security": [{ "bearerAuth": [] }],
+  "tags": [
+    { "name": "blueprints" },
+    { "name": "agents" },
+    { "name": "interactions" },
+    { "name": "mcp" },
+    { "name": "config" },
+    { "name": "diagnostics" },
+    { "name": "events" }
+  ],
+  "paths": {
+    "/api/blueprints": {
+      "get": {
+        "tags": ["blueprints"],
+        "summary": "List installed blueprints",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      },
+      "post": {
+        "tags": ["blueprints"],
+        "summary": "Install a blueprint from a manifest string",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name", "manifest"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "manifest": { "type": "string", "description": "The agent.leviath text." }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      }
+    },
+    "/api/blueprints/validate": {
+      "post": {
+        "tags": ["blueprints"],
+        "summary": "Validate a manifest without installing it",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["manifest"],
+                "properties": { "manifest": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The verdict. Note an invalid manifest is still a 200 with `valid: false`.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ValidateResponse" } }
+            }
+          }
+        }
+      }
+    },
+    "/api/blueprints/{name}": {
+      "parameters": [{ "$ref": "#/components/parameters/Name" }],
+      "get": {
+        "tags": ["blueprints"],
+        "summary": "Fetch one blueprint",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      },
+      "put": {
+        "tags": ["blueprints"],
+        "summary": "Replace a blueprint's manifest",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      },
+      "delete": {
+        "tags": ["blueprints"],
+        "summary": "Uninstall a blueprint",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      }
+    },
+    "/api/agents": {
+      "get": {
+        "tags": ["agents"],
+        "summary": "List runs",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "schema": { "type": "string" },
+            "description": "Filter to one status."
+          }
+        ],
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      },
+      "post": {
+        "tags": ["agents"],
+        "summary": "Spawn a run",
+        "description": "Returns as soon as the daemon accepts the run. Poll GET /api/agents/{id} or subscribe to /ws for what happens next.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/SpawnAgentReq" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The new run's identifiers.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/SpawnAgentResp" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/agents/tree": {
+      "get": {
+        "tags": ["agents"],
+        "summary": "The full sub-agent tree",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      }
+    },
+    "/api/agents/{id}": {
+      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "get": {
+        "tags": ["agents"],
+        "summary": "One run's metadata, with secrets redacted",
+        "responses": {
+          "200": { "$ref": "#/components/responses/Ok" },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "delete": {
+        "tags": ["agents"],
+        "summary": "Cancel a run",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      }
+    },
+    "/api/agents/{id}/children": {
+      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "get": {
+        "tags": ["agents"],
+        "summary": "This run's direct children",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      }
+    },
+    "/api/agents/{id}/context": {
+      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "get": {
+        "tags": ["agents"],
+        "summary": "The run's current context window",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      }
+    },
+    "/api/agents/{id}/context/history": {
+      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "get": {
+        "tags": ["agents"],
+        "summary": "How the context window changed over the run",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      }
+    },
+    "/api/agents/{id}/files": {
+      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "get": {
+        "tags": ["agents"],
+        "summary": "Read one file inside the run's workdir",
+        "description": "Confined to the run's working directory, and capped at 1 MiB.",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "Workdir-relative path."
+          }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/Ok" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/agents/{id}/logs": {
+      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "get": {
+        "tags": ["agents"],
+        "summary": "The run's logs",
+        "parameters": [
+          {
+            "name": "tail",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1 },
+            "description": "Return only the last N lines."
+          }
+        ],
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      }
+    },
+    "/api/agents/{id}/result": {
+      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "get": {
+        "tags": ["agents"],
+        "summary": "The run's output and token usage",
+        "responses": {
+          "200": {
+            "description": "The result so far. Check `status` before trusting `output`.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/AgentResultResp" } }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/tree-status": {
+      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "get": {
+        "tags": ["agents"],
+        "summary": "Token roll-ups across this run and its descendants",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      }
+    },
+    "/api/agents/{id}/pause": {
+      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "post": {
+        "tags": ["agents"],
+        "summary": "Pause a run after its in-flight step",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      }
+    },
+    "/api/agents/{id}/resume": {
+      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "post": {
+        "tags": ["agents"],
+        "summary": "Un-pause a run",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      }
+    },
+    "/api/agents/{id}/message": {
+      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "post": {
+        "tags": ["agents"],
+        "summary": "Inject a message into a running agent's context",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["content"],
+                "properties": { "content": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      }
+    },
+    "/api/agents/{id}/interaction": {
+      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "get": {
+        "tags": ["interactions"],
+        "summary": "The question this run is waiting on, if any",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      },
+      "post": {
+        "tags": ["interactions"],
+        "summary": "Answer the pending question",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      }
+    },
+    "/api/mcp/servers": {
+      "get": {
+        "tags": ["mcp"],
+        "summary": "Configured MCP servers",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      },
+      "post": {
+        "tags": ["mcp"],
+        "summary": "Add an MCP server",
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed, because adding a stdio server is arbitrary code execution by construction.",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      }
+    },
+    "/api/mcp/servers/{name}": {
+      "parameters": [{ "$ref": "#/components/parameters/Name" }],
+      "delete": {
+        "tags": ["mcp"],
+        "summary": "Remove an MCP server",
+        "description": "Admin only. See POST /api/mcp/servers.",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      }
+    },
+    "/api/mcp/servers/{name}/status": {
+      "parameters": [{ "$ref": "#/components/parameters/Name" }],
+      "get": {
+        "tags": ["mcp"],
+        "summary": "Whether this server is authenticated",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      }
+    },
+    "/api/mcp/servers/{name}/login": {
+      "parameters": [{ "$ref": "#/components/parameters/Name" }],
+      "post": {
+        "tags": ["mcp"],
+        "summary": "Begin the OAuth flow for this server",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      }
+    },
+    "/api/mcp/servers/{name}/test": {
+      "parameters": [{ "$ref": "#/components/parameters/Name" }],
+      "post": {
+        "tags": ["mcp"],
+        "summary": "Connect and list this server's tools",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      }
+    },
+    "/api/doctor": {
+      "get": {
+        "tags": ["diagnostics"],
+        "summary": "The `lev doctor` checks, as data",
+        "description": "A failing check is reported inside a 200 with `ok: false`, not as an HTTP error: the request succeeded, the install is what did not.",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      }
+    },
+    "/api/fs/dirs": {
+      "get": {
+        "tags": ["diagnostics"],
+        "summary": "One directory level, for a folder picker",
+        "parameters": [
+          { "name": "path", "in": "query", "schema": { "type": "string" } },
+          {
+            "name": "hidden",
+            "in": "query",
+            "schema": { "type": "boolean" },
+            "description": "Include dot-directories."
+          }
+        ],
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      }
+    },
+    "/api/config": {
+      "get": {
+        "tags": ["config"],
+        "summary": "The active configuration, with credentials redacted",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      },
+      "put": {
+        "tags": ["config"],
+        "summary": "Replace the configuration",
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed.",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      }
+    },
+    "/api/config/validate": {
+      "post": {
+        "tags": ["config"],
+        "summary": "Validate one configuration key",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ValidateResponse" } }
+            },
+            "description": "Whether the key and value are usable."
+          }
+        }
+      }
+    },
+    "/api/models": {
+      "get": {
+        "tags": ["config"],
+        "summary": "Models this install can reach",
+        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+      }
+    },
+    "/ws": {
+      "get": {
+        "tags": ["events"],
+        "summary": "Event stream for every run",
+        "description": "A WebSocket upgrade, not a JSON response. Authenticate with `?token=` since a browser cannot set a header on the handshake. Each frame is a ServerEvent.",
+        "parameters": [
+          { "name": "token", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "101": { "description": "Switching protocols." } }
+      }
+    },
+    "/ws/agents/{id}": {
+      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "get": {
+        "tags": ["events"],
+        "summary": "Event stream for one run",
+        "description": "As /ws, filtered to a single run.",
+        "parameters": [
+          { "name": "token", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "101": { "description": "Switching protocols." } }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The token from `lev serve --token` or LEVIATH_API_TOKEN. The server refuses to start without one. WebSocket routes take it as `?token=` instead."
+      }
+    },
+    "parameters": {
+      "Id": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" },
+        "description": "A run id, as returned by `lev run --json` or POST /api/agents."
+      },
+      "Name": {
+        "name": "name",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+      }
+    },
+    "responses": {
+      "Ok": {
+        "description": "Success.",
+        "content": { "application/json": { "schema": { "type": "object" } } }
+      },
+      "Error": {
+        "description": "The request failed.",
+        "content": {
+          "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } }
+        }
+      }
+    },
+    "schemas": {
+      "SpawnAgentReq": {
+        "type": "object",
+        "required": ["blueprint", "task"],
+        "properties": {
+          "blueprint": {
+            "type": "string",
+            "description": "An installed blueprint name, or a path to one."
+          },
+          "task": { "type": "string" },
+          "model": {
+            "type": "string",
+            "description": "\"provider/model\", or a bare model id."
+          },
+          "max_depth": { "type": "integer", "minimum": 0 },
+          "yolo": {
+            "type": "boolean",
+            "default": false,
+            "description": "Run unattended. Refused when the server was started with --no-remote-yolo."
+          },
+          "allow": { "type": "array", "items": { "type": "string" } },
+          "no_seed_commands": { "type": "boolean", "default": false },
+          "workdir": {
+            "type": "string",
+            "description": "Confined to --workdir-root when the server sets one."
+          },
+          "regions": {
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "description": "Seed content per named context region."
+          },
+          "metadata": { "type": "object", "additionalProperties": { "type": "string" } },
+          "callback_url": {
+            "type": "string",
+            "description": "POSTed on completion or error."
+          },
+          "callback_secret": {
+            "type": "string",
+            "description": "Shared secret for the HMAC-SHA256 signature on that callback."
+          }
+        }
+      },
+      "SpawnAgentResp": {
+        "type": "object",
+        "required": ["agent_id", "run_id"],
+        "properties": {
+          "agent_id": { "type": "string" },
+          "run_id": { "type": "string" }
+        }
+      },
+      "AgentResultResp": {
+        "type": "object",
+        "required": ["run_id", "status", "output", "prompt_tokens", "completion_tokens"],
+        "properties": {
+          "run_id": { "type": "string" },
+          "status": { "type": "string" },
+          "output": { "type": "string" },
+          "error": { "type": ["string", "null"] },
+          "prompt_tokens": { "type": "integer", "minimum": 0 },
+          "completion_tokens": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "ValidateResponse": {
+        "type": "object",
+        "required": ["valid"],
+        "properties": {
+          "valid": { "type": "boolean" },
+          "errors": { "type": ["array", "null"], "items": { "type": "string" } },
+          "warnings": { "type": ["array", "null"], "items": { "type": "string" } }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": ["error"],
+        "properties": { "error": { "type": "string" } }
+      }
+    }
+  }
+}

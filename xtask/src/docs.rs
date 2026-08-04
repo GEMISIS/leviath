@@ -288,6 +288,37 @@ fn check_orders(pages: &[Page], problems: &mut Vec<String>) {
 }
 
 /// Read `docs/content/`, run every check, and report.
+/// The machine-readable artifacts published beside the pages.
+///
+/// `llms.txt` links these by name and the S3 sync uses `--delete`, so one that
+/// stops being emitted becomes a 404 the index still advertises.
+pub const SCHEMAS: &[&str] = &[
+    "blueprint.schema.json",
+    "config.schema.json",
+    "openapi.json",
+];
+
+/// Every published schema must exist and be parseable JSON.
+///
+/// Whether each one *describes the format correctly* is a different question,
+/// answered by tests in `leviath-cli` that validate real manifests and the real
+/// router against them. This only catches the file going missing or being
+/// truncated, which the release would otherwise ship without noticing.
+pub fn check_schemas(dir: &Path) -> Result<Vec<String>> {
+    let mut problems = Vec::new();
+    for name in SCHEMAS {
+        let path = dir.join(name);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            problems.push(format!("docs/schema/{name}: missing"));
+            continue;
+        };
+        if let Err(e) = serde_json::from_str::<serde_json::Value>(&text) {
+            problems.push(format!("docs/schema/{name}: not valid JSON ({e})"));
+        }
+    }
+    Ok(problems)
+}
+
 pub fn run(_mode: DocsMode) -> Result<()> {
     let dir = Path::new("docs/content");
     let mut pages = Vec::new();
@@ -305,9 +336,14 @@ pub fn run(_mode: DocsMode) -> Result<()> {
         pages.push(parse_page(slug, &std::fs::read_to_string(&path)?));
     }
 
-    let problems = check_all(&pages);
+    let mut problems = check_all(&pages);
+    problems.extend(check_schemas(Path::new("docs/schema"))?);
     if problems.is_empty() {
-        println!("docs: {} pages, no problems", pages.len());
+        println!(
+            "docs: {} pages, {} schemas, no problems",
+            pages.len(),
+            SCHEMAS.len()
+        );
         return Ok(());
     }
     for problem in &problems {

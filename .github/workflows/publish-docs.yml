@@ -68,6 +68,17 @@ jobs:
       - name: Render docs
         run: node site/packages/docs-ssg/dist/cli.mjs docs/content docs-out "${{ inputs.channel }}"
 
+      # The machine-readable half: JSON Schemas for agent.leviath and
+      # config.toml, and the OpenAPI spec for `lev serve`. llms.txt links these
+      # by name, and the sync below uses --delete, so anything not copied in
+      # here becomes a 404 that the index still advertises.
+      - name: Add the machine-readable schemas
+        run: |
+          cp docs/schema/*.json docs-out/
+          for f in blueprint.schema.json config.schema.json openapi.json; do
+            test -s "docs-out/$f" || { echo "missing docs-out/$f"; exit 1; }
+          done
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:

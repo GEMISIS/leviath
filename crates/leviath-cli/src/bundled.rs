@@ -226,6 +226,151 @@ mod tests {
     /// rather than a provider a stage names, so it is not in this list.
     const SETUP_PROVIDERS: &[&str] = &["anthropic", "openai", "google", "openrouter", "ollama"];
 
+    /// The published JSON Schema for `agent.leviath`.
+    ///
+    /// Compiled into the test so it cannot drift from the file that ships:
+    /// this is the same text served at
+    /// `https://leviath.dev/docs/<channel>/blueprint.schema.json`.
+    const BLUEPRINT_SCHEMA: &str = include_str!("../../../docs/schema/blueprint.schema.json");
+
+    /// Every way `value` fails `validator`, as readable lines.
+    ///
+    /// Shared by the positive and negative tests so the formatting closure runs
+    /// against real errors. Called only from the passing path of each, because
+    /// a call inside an `assert!` message is a region only failure reaches.
+    fn schema_problems(
+        validator: &jsonschema::Validator,
+        value: &serde_json::Value,
+    ) -> Vec<String> {
+        validator
+            .iter_errors(value)
+            .map(|e| format!("{}: {e}", e.instance_path()))
+            .collect()
+    }
+
+    /// Convert parsed TOML to JSON so a JSON Schema can be applied to it.
+    fn toml_to_json(value: &toml::Value) -> serde_json::Value {
+        match value {
+            toml::Value::String(s) => serde_json::Value::String(s.clone()),
+            toml::Value::Integer(i) => serde_json::Value::from(*i),
+            toml::Value::Float(f) => serde_json::Value::from(*f),
+            toml::Value::Boolean(b) => serde_json::Value::Bool(*b),
+            // A TOML datetime has no JSON counterpart; the blueprint format has
+            // no datetime-valued key, so rendering it as its own text is enough
+            // for the schema to reject it wherever it appears.
+            toml::Value::Datetime(d) => serde_json::Value::String(d.to_string()),
+            toml::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(toml_to_json).collect())
+            }
+            toml::Value::Table(table) => serde_json::Value::Object(
+                table
+                    .iter()
+                    .map(|(k, v)| (k.clone(), toml_to_json(v)))
+                    .collect(),
+            ),
+        }
+    }
+
+    #[test]
+    fn toml_converts_to_json_for_every_value_kind() {
+        // Every arm, because a kind converted wrongly would be validated
+        // against the wrong JSON type and the schema would pass or fail for the
+        // wrong reason. `temperature` is a real float-valued blueprint key, so
+        // that arm is not hypothetical.
+        let source = concat!(
+            "s = \"text\"\n",
+            "i = 7\n",
+            "f = 0.5\n",
+            "b = true\n",
+            "d = 1979-05-27T07:32:00Z\n",
+            "a = [1, \"two\"]\n",
+            "[t]\n",
+            "nested = 1\n"
+        );
+        let parsed: toml::Value = toml::from_str(source).expect("valid TOML");
+        let json = toml_to_json(&parsed);
+        assert_eq!(json["s"], serde_json::json!("text"));
+        assert_eq!(json["i"], serde_json::json!(7));
+        assert_eq!(json["f"], serde_json::json!(0.5));
+        assert_eq!(json["b"], serde_json::json!(true));
+        // No JSON counterpart for a datetime, so it becomes its own text.
+        assert!(json["d"].is_string());
+        assert_eq!(json["a"], serde_json::json!([1, "two"]));
+        assert_eq!(json["t"]["nested"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn every_bundled_blueprint_validates_against_the_published_schema() {
+        // The schema is the only machine-readable description of this format,
+        // and an agent authoring a blueprint will write against it. Nothing but
+        // this test keeps it honest: the parser is a hand-rolled toml::Value
+        // walker, so there is no derive to generate it from.
+        let schema: serde_json::Value =
+            serde_json::from_str(BLUEPRINT_SCHEMA).expect("the schema is valid JSON");
+        let validator = jsonschema::validator_for(&schema).expect("the schema compiles");
+
+        for agent in BUNDLED_AGENTS {
+            let manifest = agent
+                .files
+                .iter()
+                .find(|(rel, _)| *rel == "agent.leviath")
+                .map(|(_, c)| *c)
+                .expect("every bundled agent has a manifest");
+            let parsed: toml::Value = toml::from_str(manifest).expect("the manifest is valid TOML");
+            let json = toml_to_json(&parsed);
+
+            assert_eq!(
+                schema_problems(&validator, &json),
+                Vec::<String>::new(),
+                "{} does not match blueprint.schema.json",
+                agent.name
+            );
+        }
+    }
+
+    #[test]
+    fn the_blueprint_schema_rejects_what_the_parser_rejects() {
+        // A schema that accepts everything would pass the test above over any
+        // input at all. These are the mistakes it exists to catch before a run
+        // is ever spawned.
+        let schema: serde_json::Value =
+            serde_json::from_str(BLUEPRINT_SCHEMA).expect("the schema is valid JSON");
+        let validator = jsonschema::validator_for(&schema).expect("the schema compiles");
+        // Goes through `schema_problems` rather than `is_valid`, so the same
+        // error-formatting path the positive test uses is actually exercised
+        // by something that produces errors.
+        let rejects = |manifest: &str| {
+            let parsed: toml::Value = toml::from_str(manifest).expect("valid TOML");
+            !schema_problems(&validator, &toml_to_json(&parsed)).is_empty()
+        };
+
+        assert!(
+            rejects("[stages.main]\nmode = \"autonomous\"\n"),
+            "no [agent]"
+        );
+        assert!(
+            rejects("[agent]\nname = \"a\"\n\n[context.regions]\nx = { kind = \"nonsense\" }\n"),
+            "unknown region kind"
+        );
+        assert!(
+            rejects(
+                "[agent]\nname = \"a\"\n\n[stages.main.transitions.other]\ncondition = \"whenever\"\n"
+            ),
+            "unknown transition condition"
+        );
+        assert!(
+            rejects("[agent]\nname = \"a\"\n\n[stages.main]\nmax_iteratoins = 5\n"),
+            "a typo'd stage key"
+        );
+        assert!(
+            rejects("[agent]\nname = \"a\"\n\n[tool_permissions]\nshell = \"maybe\"\n"),
+            "an invalid tool policy"
+        );
+        // And the minimum the parser accepts still passes, so the rules above
+        // are not rejecting everything.
+        assert!(!rejects("[agent]\nname = \"a\"\n"), "a minimal manifest");
+    }
+
     #[test]
     fn every_bundled_stage_offers_every_provider_setup_can_configure() {
         // Getting Started promises that one provider is all you need. That is

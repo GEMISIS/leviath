@@ -319,3 +319,44 @@ fn the_shipped_docs_pass_every_check() {
         problems.join("\n  ")
     );
 }
+
+// ── Published schemas ───────────────────────────────────────────────────────
+
+#[test]
+fn the_real_schemas_are_present_and_parse() {
+    // `run` resolves this relative to the repo root, but a test's working
+    // directory is the crate root, so anchor on the manifest directory.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask/ has a parent");
+    assert_eq!(
+        check_schemas(&root.join("docs/schema")).unwrap(),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_missing_schema_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let problems = check_schemas(dir.path()).unwrap();
+    assert_eq!(problems.len(), SCHEMAS.len());
+    assert!(
+        problems.iter().all(|p| p.contains("missing")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn a_truncated_schema_is_reported() {
+    // The failure this exists for: a half-written file still gets synced to S3
+    // and served under a name llms.txt advertises.
+    let dir = tempfile::tempdir().unwrap();
+    for name in SCHEMAS {
+        std::fs::write(dir.path().join(name), "{\"$schema\": ").unwrap();
+    }
+    let problems = check_schemas(dir.path()).unwrap();
+    assert!(
+        problems.iter().all(|p| p.contains("not valid JSON")),
+        "{problems:?}"
+    );
+}

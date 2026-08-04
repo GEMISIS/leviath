@@ -83,6 +83,10 @@ keyring-core = "1"
 
 tempfile = "3"
 temp-env = { workspace = true, features = ["async_closure"] }
+# Validates the bundled blueprints against the published JSON Schema. A test
+# dependency only: nothing at runtime reads that schema, it exists so an agent
+# authoring a blueprint has something to write against.
+jsonschema = { workspace = true }
 # In-memory OTLP exporters for the logging reload-slot test - it asserts a
 # tracing event actually comes out of the installed bridge layer.
 opentelemetry_sdk = { workspace = true, features = ["testing"] }

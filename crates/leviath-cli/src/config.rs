@@ -1472,6 +1472,81 @@ mod dotenv_tests {
 
 #[cfg(test)]
 mod tests {
+    /// The published JSON Schema for `config.toml`, and a config exercising
+    /// every section of it. Compiled in so neither can drift from what ships.
+    const CONFIG_SCHEMA: &str = include_str!("../../../docs/schema/config.schema.json");
+    const CONFIG_EXAMPLE: &str = include_str!("../../../docs/schema/config.example.toml");
+
+    /// Every way `value` fails `validator`. See the twin in `bundled.rs`.
+    fn schema_problems(
+        validator: &jsonschema::Validator,
+        value: &serde_json::Value,
+    ) -> Vec<String> {
+        validator
+            .iter_errors(value)
+            .map(|e| format!("{}: {e}", e.instance_path()))
+            .collect()
+    }
+
+    #[test]
+    fn the_example_config_satisfies_the_published_schema_and_deserializes() {
+        // Both halves matter. The schema alone could describe a shape `Config`
+        // rejects; `Config` alone could accept a shape the schema forbids.
+        // Holding one fixture to both is what keeps them describing the same
+        // format, since the schema is hand-written and nothing generates it.
+        let example: toml::Value = toml::from_str(CONFIG_EXAMPLE).expect("the example is TOML");
+        let schema: serde_json::Value =
+            serde_json::from_str(CONFIG_SCHEMA).expect("the schema is JSON");
+        let validator = jsonschema::validator_for(&schema).expect("the schema compiles");
+
+        let json = serde_json::to_value(&example).expect("TOML converts to JSON");
+        assert_eq!(
+            schema_problems(&validator, &json),
+            Vec::<String>::new(),
+            "config.example.toml does not match config.schema.json"
+        );
+
+        let parsed: Config = toml::from_str(CONFIG_EXAMPLE).expect("the example deserializes");
+        // A couple of spot checks that the values landed where the schema says,
+        // rather than being silently dropped into nothing.
+        assert_eq!(parsed.default_provider, "anthropic");
+        assert_eq!(parsed.limits.interaction_timeout_secs, 3600);
+        assert_eq!(parsed.mcp_servers.len(), 2);
+    }
+
+    #[test]
+    fn the_config_schema_rejects_a_key_that_is_not_a_setting() {
+        // Without `additionalProperties: false` the schema would accept any
+        // typo, which is most of what an author wants it to catch.
+        let schema: serde_json::Value =
+            serde_json::from_str(CONFIG_SCHEMA).expect("the schema is JSON");
+        let validator = jsonschema::validator_for(&schema).expect("the schema compiles");
+        // Through `schema_problems` rather than `is_valid`, so the formatting
+        // path the positive test relies on runs against real errors.
+        let rejects = |toml_text: &str| {
+            let value: toml::Value = toml::from_str(toml_text).expect("valid TOML");
+            let json = serde_json::to_value(&value).expect("converts");
+            !schema_problems(&validator, &json).is_empty()
+        };
+
+        assert!(
+            rejects("default_provdier = \"anthropic\"\n"),
+            "a typo'd key"
+        );
+        assert!(
+            rejects("[limits]\ninteraction_timeout_secs = \"an hour\"\n"),
+            "a string where a number belongs"
+        );
+        assert!(
+            rejects("[security]\ncredential_store = \"vault\"\n"),
+            "an unsupported credential store"
+        );
+        assert!(
+            !rejects("default_provider = \"openrouter\"\n"),
+            "a real key"
+        );
+    }
+
     /// Saving with a keychain that cannot be reached must fail rather than
     /// quietly writing the keys into the file. A user who asked for the keychain
     /// would otherwise end up with plaintext keys on disk and no sign of it.
