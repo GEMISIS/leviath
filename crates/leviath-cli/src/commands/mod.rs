@@ -50,6 +50,7 @@ pub mod pack;
 pub mod policy;
 pub mod ps;
 pub mod remove;
+pub mod result;
 pub mod run;
 pub mod serve;
 pub mod setup;

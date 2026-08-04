@@ -28,6 +28,7 @@ fn entry(run_id: &str, status: AgentStatus) -> RunListEntry {
         unattended: false,
         empty_output: false,
         read_paths: None,
+        has_final_output: false,
     }
 }
 
@@ -765,4 +766,30 @@ async fn send_list_all_survives_an_unreachable_daemon() {
         }
     })
     .await;
+}
+
+/// A finished run says whether it has an answer, so a harness knows whether
+/// `lev result` will give it anything. The content stays out of the row: this
+/// crosses the control socket on every `lev ps`, and an answer may be a quarter
+/// of a megabyte.
+#[test]
+fn offline_runs_report_whether_an_answer_is_waiting() {
+    let mut answered = on_disk("run-answered", RunStatus::Complete, 100);
+    answered.final_output = Some(leviath_core::output::FinalOutput::new(
+        "the answer",
+        None,
+        "summary".to_string(),
+        0,
+    ));
+    let silent = on_disk("run-silent", RunStatus::Complete, 100);
+
+    let rows = offline_runs(vec![answered, silent], Some(&Default::default()), 200);
+    let by_id = |id: &str| {
+        rows.iter()
+            .find(|r| r.run_id == id)
+            .expect("the run is listed")
+            .has_final_output
+    };
+    assert!(by_id("run-answered"));
+    assert!(!by_id("run-silent"));
 }
