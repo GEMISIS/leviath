@@ -459,59 +459,29 @@ bash = "allow"
     assert!(lint(&toml, &LintEnv::default()).is_empty());
 }
 
-/// The bug this check exists for, found in a shipped blueprint: the stage
-/// grants `shell` and the agent writes `bash = "ask"`. Policy is matched on the
-/// name the model calls, so the entry is dead.
+/// A permission written under either spelling reaches the tool, so neither is
+/// a mismatch to warn about. It used to be: only the name the model calls was
+/// looked up, so `bash = "ask"` against a stage granting `shell` was dead, and
+/// this check told the author so. Policy resolution now accepts both, and a
+/// warning here would send them to fix something that works.
 #[test]
-fn a_permission_written_under_the_other_spelling_is_warned_about() {
-    let toml = format!(
-        "{}\n[tool_permissions]\nbash = \"ask\"\n",
-        manifest(
-            r#"
+fn either_spelling_of_a_permission_settles_the_shell() {
+    for (granted, written) in [("shell", "bash"), ("bash", "shell")] {
+        let toml = format!(
+            "{}\n[tool_permissions]\n{written} = \"ask\"\n",
+            manifest(&format!(
+                r#"
 [stages.main]
 mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-5" }}] }}
 max_iterations = 10
-available_tools = ["shell"]
-"#,
-        )
-    );
-    let findings = lint(&toml, &LintEnv::default());
-    assert_eq!(codes(&findings), ["permission-name-mismatch"]);
-    assert!(
-        findings[0].message.contains("grants 'shell'"),
-        "{findings:?}"
-    );
-    assert!(findings[0].message.contains("'bash'"), "{findings:?}");
-}
-
-/// And the reverse: granted as `bash`, written as `shell`.
-#[test]
-fn the_mismatch_is_caught_in_either_direction() {
-    let toml = format!(
-        "{}\n[tool_permissions]\nshell = \"allow\"\n",
-        manifest(
-            r#"
-[stages.main]
-mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-max_iterations = 10
-available_tools = ["bash"]
-"#,
-        )
-    );
-    assert_eq!(
-        codes(&lint(&toml, &LintEnv::default())),
-        ["permission-name-mismatch"]
-    );
-}
-
-#[test]
-fn alias_siblings_never_include_the_name_itself() {
-    assert_eq!(alias_siblings("bash"), ["shell"]);
-    assert_eq!(alias_siblings("shell"), ["bash"]);
-    // A tool with no aliases has no siblings at all.
-    assert!(alias_siblings("read_file").is_empty());
+available_tools = ["{granted}"]
+"#
+            ))
+        );
+        let found = codes(&lint(&toml, &LintEnv::default()));
+        assert!(found.is_empty(), "{granted}/{written}: {found:?}");
+    }
 }
 
 #[test]
