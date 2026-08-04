@@ -441,6 +441,14 @@ lev setup --non-interactive --anthropic-key sk-ant-... --install-agents
 > The bundled agents are **not** installed unless `--install-agents` is passed in non-interactive
 > mode. That is deliberate, so a scripted setup does not write blueprints you did not ask for.
 
+Each blueprint is listed with what setup would do to it: install it, update it from the version on
+disk, or nothing. A copy at the bundled version whose files differ from the bundled ones reads as
+`edited locally` and is offered **unchecked**, because installing removes the destination directory
+first and would take your edits with it.
+
+`lev run` says the same thing at the moment it matters: a run starting on an installed bundled
+blueprint that this build ships a different version of prints a one-line note before it spawns.
+
 Inside the wizard, the keys work the same way on every screen:
 
 | Key | Meaning |

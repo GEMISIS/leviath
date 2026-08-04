@@ -243,22 +243,35 @@ fn warn_held_checkpoints(spawn_args: &SpawnArgs) {
     }
 }
 
-/// The pre-flight block for a spawn request. Empty for an attended run, which
-/// stops for a person everywhere and needs no warning about it.
+/// The pre-flight block for a spawn request: the checkpoints a `--yolo` run
+/// will still stop at, and whether the blueprint is behind the one this build
+/// ships.
+///
+/// The staleness note is not gated on `--yolo`. An install that is versions
+/// behind is worth saying however the run was launched, and it is the reason
+/// this exists: nothing said it at the moment it mattered, so a run could keep
+/// using an old blueprint long after the fix had shipped.
 fn held_checkpoint_warning_for_spawn(spawn_args: &SpawnArgs) -> Vec<String> {
-    if !spawn_args.yolo {
-        return Vec::new();
-    }
-    let Ok(content) = std::fs::read_to_string(&spawn_args.blueprint_path) else {
+    let path = std::path::Path::new(&spawn_args.blueprint_path);
+    let Ok(content) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
     let Ok(blueprint) = leviath_core::manifest::parse_manifest(&content) else {
         return Vec::new();
     };
-    let timeout = crate::config::Config::load()
-        .map(|c| c.limits.interaction_timeout_secs)
-        .unwrap_or(leviath_runtime::interaction_hub::DEFAULT_INTERACTION_TIMEOUT_SECS);
-    crate::held_checkpoints::preflight_lines(&blueprint, timeout)
+    let mut lines: Vec<String> =
+        crate::bundled::stale_install_note(path, &blueprint, leviath_core::agents_dir().as_deref())
+            .into_iter()
+            .collect();
+    if spawn_args.yolo {
+        let timeout = crate::config::Config::load()
+            .map(|c| c.limits.interaction_timeout_secs)
+            .unwrap_or(leviath_runtime::interaction_hub::DEFAULT_INTERACTION_TIMEOUT_SECS);
+        lines.extend(crate::held_checkpoints::preflight_lines(
+            &blueprint, timeout,
+        ));
+    }
+    lines
 }
 
 /// What `lev run --json` prints on a successful spawn.

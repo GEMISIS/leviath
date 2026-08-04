@@ -312,7 +312,7 @@ impl Wizard {
         let agents = crate::bundled::plan_agent_actions(agents_dir)
             .into_iter()
             .map(|(agent, action)| AgentRow {
-                selected: action.is_change(),
+                selected: action.preselect(),
                 agent,
                 action,
             })

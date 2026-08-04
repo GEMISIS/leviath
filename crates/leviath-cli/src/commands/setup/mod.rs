@@ -133,7 +133,9 @@ pub fn run_non_interactive(args: &SetupArgs, env: &SetupEnv) -> anyhow::Result<(
     let agents = if args.install_agents {
         crate::bundled::plan_agent_actions(&env.agents_dir)
             .into_iter()
-            .filter(|(_, action)| action.is_change())
+            // `preselect`, not `is_change`: the headless path must not overwrite
+            // a blueprint the user edited, any more than the wizard does.
+            .filter(|(_, action)| action.preselect())
             .map(|(agent, _)| agent)
             .collect()
     } else {

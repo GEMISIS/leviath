@@ -497,7 +497,9 @@ fn draw_agents(frame: &mut Frame, area: Rect, wizard: &Wizard) {
                 GLYPH_PENDING
             };
             let action = row.action.label(row.agent.version);
-            let action_style = if row.action.is_change() {
+            // Dim for "nothing to do", and for a locally edited install too:
+            // it is offered, not urged, because reinstalling destroys the edit.
+            let action_style = if row.action.preselect() {
                 Style::default().fg(C_ACCENT)
             } else {
                 Style::default().fg(C_DIM)
