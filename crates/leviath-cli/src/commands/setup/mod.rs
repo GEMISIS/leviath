@@ -191,6 +191,47 @@ fn apply_flags(config: &mut Config, args: &SetupArgs) {
     if let Some(ref e) = args.claude_code_effort {
         config.providers.claude_code_effort = Some(e.clone());
     }
+    retarget_default_provider(config);
+}
+
+/// The providers this config holds a credential for, best first.
+///
+/// Ollama sits last on purpose. It needs no key, so a config that merely
+/// mentions it is not a statement of preference, and putting it first would
+/// make it the default on a machine that never installed it.
+fn configured_providers(config: &Config) -> Vec<&'static str> {
+    [
+        ("anthropic", config.providers.anthropic_api_key.is_some()),
+        ("openai", config.providers.openai_api_key.is_some()),
+        ("google", config.providers.google_api_key.is_some()),
+        ("openrouter", config.openrouter_api_key.is_some()),
+        ("claude-code", config.providers.claude_code_enabled),
+        ("ollama", config.ollama_base_url.is_some()),
+    ]
+    .into_iter()
+    .filter(|(_, configured)| *configured)
+    .map(|(id, _)| id)
+    .collect()
+}
+
+/// Point `default_provider` at a provider this config can actually reach.
+///
+/// It defaults to `anthropic` and nothing in non-interactive mode ever moved
+/// it, so `lev setup --non-interactive --openrouter-key ...` produced a config
+/// whose very next `lev doctor` said it "resolved to 'anthropic', which is not
+/// configured". The install was fine; the default was pointing at a provider
+/// the user had not asked for.
+///
+/// Only ever moves a default that is unreachable, so a deliberate choice
+/// already in the file survives.
+fn retarget_default_provider(config: &mut Config) {
+    let configured = configured_providers(config);
+    if configured.contains(&config.default_provider.as_str()) {
+        return;
+    }
+    if let Some(first) = configured.first() {
+        config.default_provider = (*first).to_string();
+    }
 }
 
 /// Build a wizard against `env`.
@@ -381,6 +422,103 @@ mod tests {
             env_lookup: Box::new(|_| None),
             opener: std::sync::Arc::new(|_| true),
         }
+    }
+
+    // ─── default_provider retargeting ───────────────────────────────────────
+
+    #[test]
+    fn a_single_non_anthropic_key_becomes_the_default_provider() {
+        // The bug this exists for: setup succeeded, then `lev doctor` said the
+        // install resolved to a provider the user had never configured.
+        let mut config = Config::default();
+        assert_eq!(config.default_provider, "anthropic");
+        apply_flags(
+            &mut config,
+            &SetupArgs {
+                openrouter_key: Some("sk-or-test".to_string()),
+                ..args()
+            },
+        );
+        assert_eq!(config.default_provider, "openrouter");
+    }
+
+    #[test]
+    fn a_reachable_default_provider_is_left_alone() {
+        let mut config = Config::default();
+        apply_flags(
+            &mut config,
+            &SetupArgs {
+                anthropic_key: Some("sk-ant-test".to_string()),
+                openrouter_key: Some("sk-or-test".to_string()),
+                ..args()
+            },
+        );
+        assert_eq!(config.default_provider, "anthropic");
+    }
+
+    #[test]
+    fn a_deliberate_default_provider_survives() {
+        let mut config = Config {
+            default_provider: "google".to_string(),
+            ..Config::default()
+        };
+        apply_flags(
+            &mut config,
+            &SetupArgs {
+                google_key: Some("AIza-test".to_string()),
+                openrouter_key: Some("sk-or-test".to_string()),
+                ..args()
+            },
+        );
+        assert_eq!(config.default_provider, "google");
+    }
+
+    #[test]
+    fn configuring_nothing_leaves_the_default_provider_untouched() {
+        // Nothing to retarget to, so moving it would only make it wrong
+        // differently.
+        let mut config = Config::default();
+        apply_flags(&mut config, &args());
+        assert_eq!(config.default_provider, "anthropic");
+    }
+
+    #[test]
+    fn ollama_is_the_last_provider_considered() {
+        // It needs no key, so it is the one most likely to be present by
+        // accident. Anything the user actually holds a credential for wins.
+        let mut config = Config::default();
+        apply_flags(
+            &mut config,
+            &SetupArgs {
+                ollama_url: Some("http://localhost:11434".to_string()),
+                google_key: Some("AIza-test".to_string()),
+                ..args()
+            },
+        );
+        assert_eq!(config.default_provider, "google");
+
+        let mut ollama_only = Config::default();
+        apply_flags(
+            &mut ollama_only,
+            &SetupArgs {
+                ollama_url: Some("http://localhost:11434".to_string()),
+                ..args()
+            },
+        );
+        assert_eq!(ollama_only.default_provider, "ollama");
+    }
+
+    #[test]
+    fn the_claude_code_transport_counts_as_a_configured_provider() {
+        let mut config = Config::default();
+        apply_flags(
+            &mut config,
+            &SetupArgs {
+                claude_code: Some(true),
+                ..args()
+            },
+        );
+        assert_eq!(config.default_provider, "claude-code");
     }
 
     // ─── the non-interactive path ───────────────────────────────────────────
