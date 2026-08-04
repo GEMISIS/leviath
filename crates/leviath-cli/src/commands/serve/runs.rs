@@ -32,9 +32,9 @@ const DEFAULT_LIMIT: usize = 50;
 /// Largest page size served. A larger `limit` is clamped rather than refused: a
 /// client asking for 1000 wants as much as it can get, and the real value is
 /// discoverable from `GET /api/config`.
-const MAX_LIMIT: usize = 200;
+pub(super) const MAX_LIMIT: usize = 200;
 /// Most ids one batch fetch may name.
-const MAX_IDS: usize = 200;
+pub(super) const MAX_IDS: usize = 200;
 /// How many runs a filesystem-reading search will examine before giving up.
 ///
 /// `q_in=logs` over an unbounded, never-pruned run set is a self-inflicted
@@ -43,9 +43,9 @@ const MAX_IDS: usize = 200;
 /// the requested sort order, so it is the newest runs - answers the common case
 /// and says so via `scan_truncated`, which is better than refusing the query or
 /// than quietly taking longer every month.
-const MAX_SEARCH_SCAN: usize = 500;
+pub(super) const MAX_SEARCH_SCAN: usize = 500;
 /// How much of each stage log a search reads, from the end.
-const SEARCH_LOG_TAIL_BYTES: u64 = 256 * 1024;
+pub(super) const SEARCH_LOG_TAIL_BYTES: u64 = 256 * 1024;
 /// Most highlights attached to one item. A log with ten thousand matches must
 /// not become the response body.
 const MAX_HIGHLIGHTS: usize = 5;

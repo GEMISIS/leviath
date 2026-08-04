@@ -352,6 +352,20 @@ pub(super) struct BlueprintInfo {
     pub(super) stages: Vec<String>,
 }
 
+/// Query for `GET /api/blueprints`.
+#[derive(Deserialize, Default)]
+pub(super) struct BlueprintsQuery {
+    pub(super) limit: Option<usize>,
+    pub(super) cursor: Option<String>,
+    /// Case-insensitive substring over name, description and stage names.
+    pub(super) q: Option<String>,
+    /// `name` (default) or `version`.
+    pub(super) sort: Option<String>,
+    /// `asc` (default) or `desc`. Ascending by name is the catalog order a
+    /// person reads.
+    pub(super) order: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub(super) struct CreateBlueprintReq {
     pub(super) name: String,
@@ -509,6 +523,19 @@ impl LogsQuery {
             )),
         }
     }
+}
+
+/// Query for `GET /api/agents/{id}/context/history`.
+#[derive(Deserialize, Default)]
+pub(super) struct HistoryQuery {
+    /// How many points to return. Capped lower than the run listing's, because
+    /// each item carries a whole context window.
+    pub(super) limit: Option<usize>,
+    /// Continuation token from the previous page's `next_cursor`.
+    pub(super) cursor: Option<String>,
+    /// `asc` (default, chronological - and what the unpaged response gave) or
+    /// `desc` to start from the most recent point.
+    pub(super) order: Option<String>,
 }
 
 /// Query for `GET /api/agents/{id}/files`.
@@ -750,6 +777,86 @@ pub(super) struct RedactedConfig {
     pub(super) ollama_base_url: Option<String>,
     pub(super) agent_paths: Vec<PathBuf>,
     pub(super) mcp_server_count: usize,
+    /// The API contract this server implements, matching `info.version` in
+    /// `docs/schema/openapi.json`. A test holds the two together.
+    pub(super) api_version: String,
+    /// What this server can do, so a client can light up features in one call.
+    ///
+    /// Before this, the console feature-detected by calling a route and reading
+    /// a 404 as "unsupported" - fragile, because a 404 also means "no such run",
+    /// and one round trip per feature.
+    pub(super) capabilities: Vec<String>,
+    pub(super) limits: ApiLimits,
+}
+
+/// The API contract version. Held equal to the OpenAPI spec's `info.version` by
+/// a test, because a version that can silently disagree with the document it
+/// names is worse than no version at all.
+pub(super) const API_VERSION: &str = "0.3.0";
+
+/// Every capability a client may check for.
+pub(super) const API_CAPABILITIES: &[&str] = &[
+    "runs.envelope",
+    "runs.cursor",
+    "runs.search",
+    "runs.search.context",
+    "runs.search.logs",
+    "runs.search.journal",
+    "runs.fields",
+    "runs.ids",
+    "runs.since",
+    "runs.files.listing",
+    "runs.files.workdir",
+    "logs.stage",
+    "logs.stream",
+    "context.history.page",
+    "blueprints.envelope",
+    "blueprints.query",
+];
+
+/// The server's numeric limits.
+///
+/// This is what makes capability discovery useful rather than decorative: a
+/// client that knows the feature exists still has to guess the page cap, the
+/// file-size cap and the tracked-file cap, and every one of those guesses would
+/// be hardcoded and eventually wrong.
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct ApiLimits {
+    /// Largest `limit` on `GET /api/runs`; larger values are clamped.
+    pub(super) max_limit: usize,
+    /// Most ids one `ids=` batch may name.
+    pub(super) max_ids: usize,
+    /// Largest file body `?path=` returns.
+    pub(super) max_file_bytes: u64,
+    /// Most entries one directory listing returns.
+    pub(super) max_listing_entries: usize,
+    /// How many runs a filesystem-reading search examines before reporting
+    /// `scan_truncated`.
+    pub(super) max_search_scan: usize,
+    /// How much of each stage log a search reads, from the end.
+    pub(super) search_log_tail_bytes: u64,
+    /// Largest `limit` on the context-history route.
+    pub(super) max_history_limit: usize,
+    /// How many distinct modified paths a run records before
+    /// `modified_files_truncated` is set.
+    pub(super) max_tracked_modified_files: usize,
+}
+
+impl ApiLimits {
+    /// Read from the constants the handlers actually use, so the two cannot
+    /// drift into disagreeing.
+    pub(super) fn current() -> Self {
+        Self {
+            max_limit: super::runs::MAX_LIMIT,
+            max_ids: super::runs::MAX_IDS,
+            max_file_bytes: super::agents::MAX_FILE_READ_BYTES,
+            max_listing_entries: super::agents::MAX_LISTING_ENTRIES,
+            max_search_scan: super::runs::MAX_SEARCH_SCAN,
+            search_log_tail_bytes: super::runs::SEARCH_LOG_TAIL_BYTES,
+            max_history_limit: super::agents::HISTORY_MAX_LIMIT,
+            max_tracked_modified_files: leviath_core::run_meta::MAX_TRACKED_MODIFIED_FILES,
+        }
+    }
 }
 
 /// Body of `PUT /api/config` (admin-only). Every field is optional; a present
@@ -991,6 +1098,9 @@ mod tests {
             ollama_base_url: None,
             agent_paths: vec![],
             mcp_server_count: 0,
+            api_version: API_VERSION.to_string(),
+            capabilities: API_CAPABILITIES.iter().map(|c| c.to_string()).collect(),
+            limits: ApiLimits::current(),
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: RedactedConfig = serde_json::from_str(&json).unwrap();
