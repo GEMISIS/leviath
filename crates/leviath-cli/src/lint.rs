@@ -265,6 +265,7 @@ pub fn lint_manifest(content: &str, blueprint: &Blueprint, env: &LintEnv) -> Vec
     findings.extend(lint_command_seeds(blueprint));
     findings.extend(lint_read_paths(blueprint, env));
     findings.extend(lint_safe_commands(blueprint, env));
+    findings.extend(lint_held_checkpoints(blueprint));
     findings.extend(lint_graph(blueprint));
 
     let agent_permissions = blueprint.agent_tool_permissions();
@@ -481,7 +482,15 @@ fn lint_blocking_tools(stage: &leviath_core::Stage) -> Vec<LintFinding> {
         // A tool kept in `required_tools` is the same statement of intent
         // `allow_blocking_tools` makes, made one tool at a time - and it is the
         // one that also survives an unattended run, so it is worth more.
-        .filter(|t| !stage.required_tools.contains(t))
+        //
+        // Canonicalised on both sides, as the runtime does: a stage granting
+        // `bash` and keeping `shell` is one decision, not two.
+        .filter(|t| {
+            !stage
+                .required_tools
+                .iter()
+                .any(|r| canonical_tool_name(r) == canonical_tool_name(t))
+        })
         .map(|tool| {
             LintFinding::new(
                 LintSeverity::Warning,
@@ -628,6 +637,40 @@ fn lint_command_seeds(blueprint: &Blueprint) -> Vec<LintFinding> {
 /// refused with nothing said earlier. When `env` has no answer - the daemon's
 /// offline lint, which has no user config to consult - the note falls back to
 /// stating the rule.
+/// Checkpoints that hold a `--yolo` run for a person.
+///
+/// A note, not a warning: this is the blueprint working as written. It is worth
+/// saying because `--yolo` reads as "run without me", so a run that stops anyway
+/// looks like a hang, and `lev validate` is where an author or an operator finds
+/// out before the run rather than during it.
+fn lint_held_checkpoints(blueprint: &Blueprint) -> Vec<LintFinding> {
+    let held = crate::held_checkpoints::held_points(blueprint)
+        .into_iter()
+        .map(|h| (h, "an interaction point that declares unattended = \"ask\""))
+        .chain(
+            crate::held_checkpoints::held_tools(blueprint)
+                .into_iter()
+                .map(|h| (h, "a blocking tool the stage keeps in required_tools")),
+        );
+    held.map(|(h, what)| {
+        LintFinding::new(
+            LintSeverity::Note,
+            "holds-under-yolo",
+            format!(
+                "'{}' still stops an unattended run for a person: {what}",
+                h.name
+            ),
+        )
+        .in_stage(&h.stage)
+        .with_fix(
+            "this is deliberate if the checkpoint needs a person. `[limits] \
+             interaction_timeout_secs` bounds the wait, and an unanswered \
+             checkpoint stops the run with an error rather than approving it",
+        )
+    })
+    .collect()
+}
+
 /// A `[safe_commands]` block: entries that will never match, and whether the
 /// block counts at all on this install.
 fn lint_safe_commands(blueprint: &Blueprint, env: &LintEnv) -> Vec<LintFinding> {

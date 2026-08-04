@@ -38,13 +38,18 @@ Spawn an agent into the daemon. `PATH` is an installed agent name, a blueprint d
 | `--no-seed-commands` | Refuse the blueprint's `seed = { command = "..." }` regions for this run |
 | `--<region> <TEXT\|@FILE>` | Seed a named context region. See below |
 
-**`--yolo`** does two things. It approves every tool call, and it takes away the tools that wait on
-a person (`ask_user_*`, `present_for_review`, `edit_document`) so the run cannot stop and wait for
-somebody who is not there. Plan approvals resolve themselves.
+**`--yolo`** waives approvals, not checkpoints. It approves every tool call, and it takes away the
+tools that wait on a person (`ask_user_*`, `present_for_review`, `edit_document`) so the run does
+not stop for somebody who is not there.
 
-A stage keeps whatever it lists in [`required_tools`](/docs/tools#these-tools-need-someone-there),
-so a stage that genuinely needs to ask still can. And `--yolo` can turn an `ask` into an `allow`,
-but it can never lift a `deny`.
+Two things still hold it. A stage keeps whatever it lists in
+[`required_tools`](/docs/tools#these-tools-need-someone-there), and an
+[interaction point](/docs/interaction#interaction-points) declaring `unattended = "ask"` opens its
+prompt however the run was launched. The shipped `software-engineer` does exactly that for its plan
+approval, because everything after that gate writes code. `lev run --yolo` prints what will hold
+before the run starts, and `lev validate` reports it as `holds-under-yolo`.
+
+`--yolo` can turn an `ask` into an `allow`, but it can never lift a `deny`.
 
 Region seed flags are dynamic, because region names come from the blueprint. Any `--<name>` that is
 not one of the flags above is read as a seed for the region called `<name>`, and a value starting
@@ -117,6 +122,7 @@ in three levels: an **error** exits non-zero, a **warning** does not, and a **no
 | warning | `unreachable-stage`, `cycle-without-max-revisits`, `broad-read-path` | Graph and `[read_paths]` shape. |
 | warning | `read-paths-not-granted` | The blueprint declares `[read_paths]` your `config.toml` does not grant. Declaring is not granting, so those reads are refused; the fix line carries the stanza to add. |
 | warning | `read-paths-grant-invalid` | A `read_paths` grant in your own config will not compile. It is a hard spawn error, named here first. |
+| note | `holds-under-yolo` | A checkpoint that still stops an unattended run for a person: an interaction point declaring `unattended = "ask"`, or a blocking tool a stage keeps in `required_tools`. Deliberate where it appears; noted because `--yolo` reads as "run without me". |
 | note | `safe-commands-declared` | The blueprint declares `[safe_commands]`. Declaring is not granting: it applies only where the user opts in, per agent via `[agent_safe_commands.<name>] allow_blueprint` or globally via `[security] allow_blueprint_safe_commands`. |
 | note | `command-seed`, `read-paths-declared` | What the blueprint will do that you should know about before running it. `read-paths-declared` carries the granted/declared counts and each entry's status. |
 

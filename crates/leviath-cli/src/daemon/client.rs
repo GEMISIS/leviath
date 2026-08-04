@@ -228,6 +228,39 @@ fn spawn_warning_lines(
     lines
 }
 
+/// Say, before the run starts, that `--yolo` will still stop for a person.
+///
+/// `--yolo` means "run without me", so a run that stops anyway reads as a hang.
+/// The daemon does lint the blueprint at spawn, but only into `daemon.log`,
+/// which the person typing the command never sees.
+///
+/// Best-effort for the same reason as [`warn_ungranted_read_paths`]: an
+/// unreadable manifest or config is the daemon's to report, and this must never
+/// be why a run does not start.
+fn warn_held_checkpoints(spawn_args: &SpawnArgs) {
+    for line in held_checkpoint_warning_for_spawn(spawn_args) {
+        eprintln!("{line}");
+    }
+}
+
+/// The pre-flight block for a spawn request. Empty for an attended run, which
+/// stops for a person everywhere and needs no warning about it.
+fn held_checkpoint_warning_for_spawn(spawn_args: &SpawnArgs) -> Vec<String> {
+    if !spawn_args.yolo {
+        return Vec::new();
+    }
+    let Ok(content) = std::fs::read_to_string(&spawn_args.blueprint_path) else {
+        return Vec::new();
+    };
+    let Ok(blueprint) = leviath_core::manifest::parse_manifest(&content) else {
+        return Vec::new();
+    };
+    let timeout = crate::config::Config::load()
+        .map(|c| c.limits.interaction_timeout_secs)
+        .unwrap_or(leviath_runtime::interaction_hub::DEFAULT_INTERACTION_TIMEOUT_SECS);
+    crate::held_checkpoints::preflight_lines(&blueprint, timeout)
+}
+
 /// What `lev run --json` prints on a successful spawn.
 ///
 /// `lev run` hands the agent to the daemon and returns, so the run id is the
@@ -267,6 +300,7 @@ pub async fn send_spawn(
     json: bool,
 ) -> anyhow::Result<()> {
     warn_ungranted_read_paths(&spawn_args);
+    warn_held_checkpoints(&spawn_args);
     let blueprint_path = spawn_args.blueprint_path.clone();
     let workdir = spawn_args.workdir.clone();
     let yolo = spawn_args.yolo;
@@ -880,6 +914,113 @@ allow = ["/data/runs"]
                 })
                 .is_empty()
             );
+        });
+    }
+
+    /// A manifest that declares a held checkpoint, written to disk, so the
+    /// warning is exercised through the real read-and-parse path.
+    fn manifest_with_a_held_checkpoint(dir: &std::path::Path) -> String {
+        let manifest = dir.join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            r#"
+[agent]
+name = "held"
+version = "0.1.0"
+description = "holds a checkpoint"
+entry_stage = "plan"
+
+[stages.plan]
+mode = "interactive_points"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+available_tools = ["read_file"]
+
+[[stages.plan.interaction_points]]
+name = "plan_approval"
+prompt = "Review the plan"
+style = "confirm"
+unattended = "ask"
+
+[context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
+"#,
+        )
+        .unwrap();
+        manifest.to_string_lossy().into_owned()
+    }
+
+    /// `--yolo` reads as "run without me", so a run that stops anyway has to say
+    /// so before it starts rather than look like a hang twenty minutes in.
+    #[test]
+    fn a_yolo_spawn_announces_the_checkpoints_that_still_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let blueprint_path = manifest_with_a_held_checkpoint(dir.path());
+        crate::config::with_isolated_config_path("spawn-warn-held", |_fake| {
+            let args = SpawnArgs {
+                blueprint_path: blueprint_path.clone(),
+                yolo: true,
+                ..SpawnArgs::default()
+            };
+            let joined = held_checkpoint_warning_for_spawn(&args).join("\n");
+            assert!(joined.contains("plan: plan_approval"), "{joined}");
+            warn_held_checkpoints(&args);
+
+            // An attended run stops for a person everywhere, so there is nothing
+            // to announce.
+            assert!(
+                held_checkpoint_warning_for_spawn(&SpawnArgs {
+                    blueprint_path: blueprint_path.clone(),
+                    yolo: false,
+                    ..SpawnArgs::default()
+                })
+                .is_empty()
+            );
+        });
+    }
+
+    /// The same three lenient arms as the read-path warning: a manifest that is
+    /// not there, one that will not parse, and a config that will not load.
+    /// None of them may stop a spawn.
+    #[test]
+    fn the_held_checkpoint_warning_gives_up_quietly() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.leviath");
+        assert!(
+            held_checkpoint_warning_for_spawn(&SpawnArgs {
+                blueprint_path: missing.to_string_lossy().into_owned(),
+                yolo: true,
+                ..SpawnArgs::default()
+            })
+            .is_empty()
+        );
+
+        let unparseable = dir.path().join("agent.leviath");
+        std::fs::write(&unparseable, "not valid toml [[[").unwrap();
+        assert!(
+            held_checkpoint_warning_for_spawn(&SpawnArgs {
+                blueprint_path: unparseable.to_string_lossy().into_owned(),
+                yolo: true,
+                ..SpawnArgs::default()
+            })
+            .is_empty()
+        );
+
+        // A config that will not load falls back to the default deadline rather
+        // than saying nothing: the checkpoints still hold, and naming them
+        // matters more than naming the exact timeout.
+        let held = manifest_with_a_held_checkpoint(dir.path());
+        crate::config::with_isolated_config_path("spawn-held-broken-config", |fake_dir| {
+            std::fs::write(fake_dir.join("config.toml"), "not = valid = toml").unwrap();
+            let joined = held_checkpoint_warning_for_spawn(&SpawnArgs {
+                blueprint_path: held.clone(),
+                yolo: true,
+                ..SpawnArgs::default()
+            })
+            .join("\n");
+            assert!(joined.contains("plan_approval"), "{joined}");
+            assert!(joined.contains("after 1h"), "{joined}");
         });
     }
 

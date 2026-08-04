@@ -111,6 +111,9 @@ pub enum PointOutcome {
     },
     /// An edit option ⇒ inject the user's edited text and re-present the point.
     Edit { user_text: String, edited: String },
+    /// A point declaring `unattended = "ask"` expired or was cancelled with no
+    /// answer ⇒ stop the run rather than proceed past a checkpoint nobody made.
+    Unanswered,
 }
 
 /// One resolved interaction-point answer, reported on the lane.
@@ -211,6 +214,18 @@ fn resolve_answer(resp: &InteractionResponse, options: &[String]) -> String {
     resp.value.clone().unwrap_or_default()
 }
 
+/// Whether `resp` carries no decision at all.
+///
+/// This is the neutral response the hub hands back when a request expires or is
+/// cancelled: `InteractionResponse::text(id, "")`. Every real answer sets
+/// exactly one of the three fields, including a `confirm` denial, which sets
+/// `approved`.
+fn is_unanswered(resp: &InteractionResponse) -> bool {
+    resp.approved.is_none()
+        && resp.choice_index.is_none()
+        && resp.value.as_deref().unwrap_or("").trim().is_empty()
+}
+
 /// Route a resolved answer to a [`PointOutcome`] (pure; the edit branch's second
 /// ask is done by the caller, which knows the edited text).
 fn route_answer(point: &InteractionPoint, user_text: String) -> Routed {
@@ -266,6 +281,23 @@ async fn run_interaction_point(
     let backend = hub.backend_for(agent_id);
     let req = build_point_request(&point, ask_id.clone(), &body);
     let resp = backend.ask(req).await;
+
+    // A point that declared it needs a person, and did not get one. Routing an
+    // empty answer normally lands in the final `else` of `route_answer`, which
+    // is `Approve` - so a `--yolo` run in CI waited out the interaction timeout
+    // and then approved the plan nobody read. A timeout is not a person.
+    //
+    // The default `auto_approve` policy never takes this arm, so a point that
+    // does not claim to need a person behaves exactly as before.
+    if point.unattended == UnattendedPolicy::Ask && is_unanswered(&resp) {
+        let _ = outcomes.send(InteractionPointOutcome {
+            entity,
+            decision: PointOutcome::Unanswered,
+        });
+        wake.notify_one();
+        return;
+    }
+
     let user_text = resolve_answer(&resp, &point.options);
 
     let decision = match route_answer(&point, user_text) {
@@ -601,6 +633,21 @@ pub fn collect_interaction_point(
         match out.decision {
             PointOutcome::Abort => {
                 state.status = AgentStatus::Cancelled;
+            }
+            // Terminal, and `Error` rather than `Cancelled`: a poller waiting on
+            // an unattended run needs it to end, the reason has to reach
+            // `meta.json` and `lev ps`, and it must read differently from an
+            // operator's `lev cancel`. No `ResolveTransition` is inserted, so
+            // the run stops here rather than diverting to an `error_recovery`
+            // edge - there is nothing to recover from, only a person to wait for
+            // who did not come.
+            PointOutcome::Unanswered => {
+                state.status = AgentStatus::Error {
+                    message: format!(
+                        "checkpoint '{name}' went unanswered within the interaction timeout; \
+                         the run stopped rather than approving it unread"
+                    ),
+                };
             }
             PointOutcome::Approve { user_text } => {
                 state.status = AgentStatus::Active;
@@ -1196,6 +1243,56 @@ mod tests {
         assert_eq!(pending[0].1.stage_name, "plan_approval");
     }
 
+    /// End to end through the real ask task: a held point whose prompt expires
+    /// unanswered reports `Unanswered`, and one left on the default policy still
+    /// approves. The second half is the regression guard - the whole point of
+    /// keying this on `unattended` is that nothing else changes.
+    #[tokio::test]
+    async fn an_expired_prompt_stops_a_held_point_and_approves_an_auto_one() {
+        for (policy, expected) in [
+            (UnattendedPolicy::Ask, PointOutcome::Unanswered),
+            (
+                UnattendedPolicy::AutoApprove,
+                PointOutcome::Approve {
+                    user_text: String::new(),
+                },
+            ),
+        ] {
+            let hub = InteractionHub::new();
+            let (tx, mut rx) = unbounded_channel();
+            let mut point = plan_point();
+            point.unattended = policy;
+            let task = tokio::spawn(run_interaction_point(
+                Entity::from_raw_u32(1).unwrap(),
+                hub.clone(),
+                "run-1".to_string(),
+                point,
+                "the plan".to_string(),
+                0,
+                tx,
+                Arc::new(Notify::new()),
+            ));
+            // Expiring and cancelling hand back the same neutral response, and
+            // cancelling does not need a clock. The id is the one
+            // `run_interaction_point` mints, so cancelling succeeds exactly once
+            // the prompt has registered.
+            // Polling the runtime is enough to get there: `tokio::spawn` has
+            // not run the task at all yet, and its first await point is inside
+            // the hub, after the request has registered.
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                hub.cancel("run-1-point-plan_approval-0"),
+                "the point opened a prompt"
+            );
+            task.await.unwrap();
+
+            let out = rx.try_recv().expect("an outcome was published");
+            assert_eq!(out.decision, expected, "{policy:?}");
+        }
+    }
+
     #[tokio::test]
     async fn dispatch_without_document_region_skips_region_write() {
         // A point with no `document_region` still asks, but writes no region.
@@ -1356,6 +1453,64 @@ mod tests {
         assert_eq!(world.get::<InteractionPointCursor>(e).unwrap().0, 1);
         assert!(world.get::<ReadyForInteractionPoint>(e).is_some());
         assert!(world.get::<ResolveTransition>(e).is_none());
+    }
+
+    /// The neutral response the hub hands back on a timeout or cancel carries
+    /// no decision at all. Every real answer sets exactly one of the three
+    /// fields, including a `confirm` denial, which sets `approved` - so a denial
+    /// must not read as "nobody answered".
+    #[test]
+    fn is_unanswered_tells_a_timeout_from_every_real_answer() {
+        let cases: &[(InteractionResponse, bool, &str)] = &[
+            (InteractionResponse::text("id", ""), true, "expired"),
+            (InteractionResponse::text("id", "   "), true, "whitespace"),
+            (InteractionResponse::text("id", "Approve"), false, "text"),
+            (InteractionResponse::choice("id", 0), false, "a choice"),
+            (
+                InteractionResponse::approval(
+                    "id",
+                    false,
+                    leviath_core::interaction::ApprovalScope::Once,
+                ),
+                false,
+                "a confirm denial",
+            ),
+        ];
+        for (resp, expected, what) in cases {
+            assert_eq!(is_unanswered(resp), *expected, "{what}");
+        }
+    }
+
+    /// The bug this closes: an empty answer routes through the final `else` of
+    /// `route_answer`, which is `Approve`. A `--yolo` run in CI waited out the
+    /// interaction timeout and then approved the plan nobody read, and went on
+    /// to write code from it.
+    #[test]
+    fn an_unanswered_held_checkpoint_stops_the_run() {
+        let (mut world, tx) = collect_world();
+        let e = spawn_awaiting(&mut world, vec![plan_point()]);
+        tx.send(InteractionPointOutcome {
+            entity: e,
+            decision: PointOutcome::Unanswered,
+        })
+        .unwrap();
+        run_collect(&mut world);
+
+        // Asserted whole rather than by substring, because the message is what
+        // the operator reads out of `lev ps` and `meta.json`.
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Error {
+                message: "checkpoint 'plan_approval' went unanswered within the interaction \
+                          timeout; the run stopped rather than approving it unread"
+                    .to_string(),
+            }
+        );
+        // Terminal: no transition, so the run stops here rather than moving on
+        // to the stage the checkpoint was guarding.
+        assert!(world.get::<ResolveTransition>(e).is_none());
+        assert!(world.get::<ReadyToInfer>(e).is_none());
+        assert!(world.get::<AwaitingInteractionPoint>(e).is_none());
     }
 
     #[test]

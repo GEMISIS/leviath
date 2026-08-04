@@ -214,12 +214,14 @@ One exception matters, and it is the one that looks like a hang. A blueprint
 it holds for a person even under `--yolo`. The shipped `software-engineer` does exactly that for its
 plan approval, deliberately, because everything after that gate writes code.
 
-Such a run reports `Waiting` with a `wait_reason` of `interaction_point` and does nothing until
-`[limits] interaction_timeout_secs` expires. That defaults to one hour, so the run is not stuck, but
-for an hour it is indistinguishable from a run that is. You have three ways out:
+`lev run --yolo` prints what will hold before the run starts, so this is announced rather than
+discovered. Such a run reports `Waiting` with a `wait_reason` of `interaction_point` and does
+nothing until `[limits] interaction_timeout_secs` expires. That defaults to one hour, and when it
+does expire the run **stops with an error** naming the checkpoint: a held gate is never approved on
+the strength of a timeout. You have three ways to answer it sooner:
 
-- Lower `interaction_timeout_secs` in `config.toml` so the gate releases sooner. It is read once at
-  daemon start, so change it before `lev daemon restart`.
+- Lower `interaction_timeout_secs` in `config.toml` so the run fails sooner rather than sitting. It
+  is read once at daemon start, so change it before `lev daemon restart`.
 - Answer the question yourself. `lev respond --json` lists every open interaction with the agent
   holding it, and `lev respond <request_id> --choice <n>` answers one.
 - Run a blueprint with no such gate. `coder` does the same work with no plan checkpoint.
