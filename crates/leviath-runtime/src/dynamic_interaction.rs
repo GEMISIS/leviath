@@ -73,16 +73,19 @@ pub fn resolve_gate_with_asker(
     let Some((tool_name, taint, clearance)) = gate_block_info(decision) else {
         return GateResolution::AllowOnce;
     };
-    let req = InteractionRequest::tool_approval(
+    let req = InteractionRequest::gate_approval(
         format!("taint-{}", tool_name),
         &tool_name,
         gate_prompt_args(&tool_name, taint, clearance),
         stage_name,
     );
     let resp = ask(&req);
+    // Any scope wider than `Once` raises the tool's clearance for the run. A
+    // gate has nothing narrower to offer: clearance is not keyed on what the
+    // call runs, so there is no per-stage version of it to grant.
     map_gate_approval(
         response_approved(&resp),
-        resp.scope == Some(ApprovalScope::Session),
+        resp.scope.is_some_and(|s| s != ApprovalScope::Once),
     )
 }
 
@@ -915,7 +918,7 @@ mod tests {
         let r = resolve_gate_with_asker(&blocked_decision("shell"), "plan", |req| {
             assert_eq!(req.tool_name.as_deref(), Some("shell"));
             assert_eq!(req.stage_name, "plan");
-            InteractionResponse::approval("", true, ApprovalScope::Session)
+            InteractionResponse::approval("", true, ApprovalScope::Run)
         });
         assert_eq!(r, GateResolution::AlwaysAllow);
         // A text response (no approval) denies. Bind the asker as a fn pointer
@@ -1011,7 +1014,8 @@ mod tests {
     fn unattended_answer_approves_a_tool_approval() {
         // The tool-policy layer normally short-circuits these under --yolo, so
         // cover the arm directly.
-        let req = InteractionRequest::tool_approval("t1", "shell", serde_json::json!({}), "impl");
+        let req =
+            InteractionRequest::tool_approval("t1", "shell", serde_json::json!({}), "impl", &[]);
         let resp = unattended_answer(&req);
         assert!(leviath_core::interaction::response_approved(&resp));
         assert_eq!(resp.scope, Some(ApprovalScope::Once));

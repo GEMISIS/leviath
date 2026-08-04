@@ -108,15 +108,27 @@ bash       = "ask"
 ```
 
 An `ask` gate raises a `tool_approval` prompt naming the tool and its telling argument (the shell
-command for `bash`/`shell`, the path for the file tools), with three options:
+command for `bash`/`shell`, the path for the file tools), with four options:
 
 - **Allow once**: permit just this one call.
-- **Allow for this session**: permit every call to this tool for the rest of the run (`session` scope).
+- **Allow ... for this stage**: permit every later call this covers, until the run leaves the
+  current stage. Re-entering the same stage keeps the grant, so a revision loop does not re-ask.
+- **Allow ... for this run**: permit every later call this covers, for the rest of the run.
 - **Deny**: reject the call.
 
-The same prompt backs the [security](/docs/security) taint gate: an outbound tool that would carry
-sensitive data above its clearance is blocked and surfaced as a tool-approval, where **Allow for
-this session** maps to always-allow and **Deny** blocks it.
+The two scoped options name what they grant, because a grant is not keyed on the tool. Approving
+`ls && git status` for the run grants `ls` and `git status`, not "the shell": a later
+`ls && curl evil` still asks, because `curl` was never approved. Approving `git diff` does not
+approve `git push`. A line the parser cannot read as a list of commands (a backtick, a heredoc, an
+`eval`, a program named by a variable) has nothing reusable to grant, and the prompt says so.
+
+Nothing is written to disk. Every grant dies with the run that made it.
+
+The taint gate in [security](/docs/security) uses the same prompt shape with its own wording: an
+outbound tool that would carry sensitive data above its clearance is blocked and surfaced as a
+tool-approval, where **Allow for this run** raises the tool's clearance for the rest of the run and
+**Deny** blocks it. It offers no per-stage option, because a clearance is not keyed on what a call
+runs.
 
 ## Interaction points
 
@@ -220,7 +232,8 @@ lev respond                              # list open interactions
 lev respond <request-id> "your answer"   # free-text / edited value
 lev respond <request-id> --choice 1      # multiple-choice, 0-based index
 lev respond <request-id> --approve       # tool-approval / confirm
-lev respond <request-id> --approve --session   # allow for the rest of the run
+lev respond <request-id> --approve --stage     # and every later call this covers, this stage
+lev respond <request-id> --approve --session   # and every later call this covers, this run
 lev respond <request-id> --deny          # reject
 ```
 

@@ -65,9 +65,13 @@ pub struct RespondArgs {
     /// Deny a tool-approval / confirm interaction.
     #[arg(long)]
     pub deny: bool,
-    /// With `--approve`, allow the tool for the rest of the session.
-    #[arg(long)]
+    /// With `--approve`, allow what this call runs for the rest of the run.
+    #[arg(long, visible_alias = "run")]
     pub session: bool,
+    /// With `--approve`, allow what this call runs until the run leaves the
+    /// current stage.
+    #[arg(long, conflicts_with = "session")]
+    pub stage: bool,
     /// Report open interactions (or the outcome of answering one) as JSON.
     /// This is how an unattended caller finds the questions it has to answer.
     #[arg(long)]
@@ -255,10 +259,10 @@ fn format_interaction(agent_id: &str, req: &InteractionRequest) -> String {
 /// then an explicit `--choice`, otherwise a free-text value (empty if omitted).
 fn build_response(request_id: &str, args: &RespondArgs) -> InteractionResponse {
     if args.approve || args.deny {
-        let scope = if args.session {
-            ApprovalScope::Session
-        } else {
-            ApprovalScope::Once
+        let scope = match (args.session, args.stage) {
+            (true, _) => ApprovalScope::Run,
+            (_, true) => ApprovalScope::Stage,
+            _ => ApprovalScope::Once,
         };
         InteractionResponse::approval(request_id, args.approve, scope)
     } else if let Some(index) = args.choice {
@@ -695,6 +699,7 @@ mod tests {
             approve: false,
             deny: false,
             session: false,
+            stage: false,
             json: false,
         }
     }
@@ -752,7 +757,19 @@ mod tests {
         );
         assert_eq!(
             session,
-            InteractionResponse::approval("q1", true, ApprovalScope::Session)
+            InteractionResponse::approval("q1", true, ApprovalScope::Run)
+        );
+        let stage = build_response(
+            "q1",
+            &RespondArgs {
+                approve: true,
+                stage: true,
+                ..respond_args()
+            },
+        );
+        assert_eq!(
+            stage,
+            InteractionResponse::approval("q1", true, ApprovalScope::Stage)
         );
         let denied = build_response(
             "q1",

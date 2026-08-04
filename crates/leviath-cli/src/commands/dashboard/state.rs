@@ -2805,6 +2805,7 @@ mod tests {
                     "write_file",
                     serde_json::json!({}),
                     "implement",
+                    &[],
                 );
 
                 let mut dash = make_test_dashboard();

@@ -339,6 +339,7 @@ mod tests {
             approve: false,
             deny: false,
             session: false,
+            stage: false,
             json: false,
         };
         assert!(dispatch(Commands::Respond(args), &MockRisky).await.is_ok());

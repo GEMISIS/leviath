@@ -567,6 +567,7 @@ mod tests {
                     "shell",
                     serde_json::json!({"command": "rm -rf /"}),
                     "implement",
+                    &[],
                 ))
                 .await
         });
