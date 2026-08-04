@@ -13,6 +13,8 @@ same list.
 
 ## Unreleased
 
+## 0.2.0 - 2026-08-04
+
 - Windows no longer flashes console windows across the desktop. Every child
   process Leviath starts is a console application, and one started by a process
   with no console of its own gets a fresh window on the interactive desktop.
