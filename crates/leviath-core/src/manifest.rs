@@ -313,7 +313,21 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                         };
                         stage.with_mode(StageMode::FanOut { config })
                     }
-                    _ => stage.with_mode(StageMode::Autonomous),
+                    "output" => stage.with_mode(StageMode::Output),
+                    "autonomous" => stage.with_mode(StageMode::Autonomous),
+                    // A misspelled mode used to become an autonomous stage in
+                    // silence, so `mode = "outupt"` produced a stage that ran
+                    // normally and never asked for the output it was written to
+                    // produce. Region kinds have always rejected an unknown
+                    // `kind` for the same reason; this brings stage modes into
+                    // line. Any manifest this refuses was already not doing what
+                    // it said.
+                    unknown => {
+                        return Err(Error::Other(format!(
+                            "stage '{stage_name}': unknown mode \"{unknown}\" (valid modes: \
+                             autonomous, interactive, interactive_points, fan_out, output)"
+                        )));
+                    }
                 };
             }
 
@@ -421,6 +435,38 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                 stage.allow_as_worker = aw;
             }
 
+            // Whether the stage must hand back a final output. `mode = "output"`
+            // means it by definition; any other stage opts in by hand (a fan-out
+            // worker whose merge stage depends on its summary, say).
+            if let Some(ro) = stage_value.get("require_output").and_then(|v| v.as_bool()) {
+                stage.require_output = ro;
+            }
+
+            // `mode = "output"` is sugar for three settings, applied here rather
+            // than in the mode arm above because `available_tools` and
+            // `allow_complete` are read after it and would otherwise clobber
+            // them. Writing them onto the Stage - instead of special-casing the
+            // mode at dispatch - means `lev validate`, the tool filter, and the
+            // lint all read one honest list.
+            if stage.mode == StageMode::Output {
+                stage.require_output = true;
+                if !stage
+                    .available_tools
+                    .iter()
+                    .any(|t| t == crate::blueprint::SUBMIT_OUTPUT_TOOL)
+                {
+                    stage
+                        .available_tools
+                        .push(crate::blueprint::SUBMIT_OUTPUT_TOOL.to_string());
+                }
+                // An output stage is normally the last thing a run does, so it
+                // may end the run. An author who routes onward can say
+                // `allow_complete = false` and be believed.
+                if stage_value.get("allow_complete").is_none() {
+                    stage.allow_complete = true;
+                }
+            }
+
             // Parse allow_blocking_tools flag: says this autonomous stage means
             // to offer `ask_user_*` / `present_for_review`, so `lev validate`
             // stops warning about it.
@@ -458,6 +504,12 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
             // Parse per-stage sandbox override: [stages.<name>.sandbox]
             if let Some(sandbox_table) = stage_value.get("sandbox").and_then(|v| v.as_table()) {
                 stage.sandbox = Some(parse_sandbox_config(sandbox_table)?);
+            }
+
+            // Parse the stage's declared output shape: [stages.<name>.output].
+            // Narrows [agent.output]; whoever starts the run overrides both.
+            if let Some(output_table) = stage_value.get("output").and_then(|v| v.as_table()) {
+                stage.output = Some(parse_output_spec(output_table));
             }
 
             // Parse accepts_messages flag: whether mid-run user messages are
@@ -744,6 +796,12 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
     // inherits the global config's [nudge] section; a per-stage block wins.
     if let Some(nudge_table) = agent.get("nudge").and_then(|v| v.as_table()) {
         blueprint.nudge = Some(parse_nudge_config(nudge_table));
+    }
+
+    // Parse the agent's default output shape: [agent.output]. A per-stage
+    // block narrows it, and whoever starts the run overrides both.
+    if let Some(output_table) = agent.get("output").and_then(|v| v.as_table()) {
+        blueprint.output = Some(parse_output_spec(output_table));
     }
 
     // Parse agent-level sandbox config: [sandbox]
@@ -1269,6 +1327,36 @@ fn parse_nudge_config(table: &toml::value::Table) -> crate::blueprint::NudgeConf
         nudge.text = Some(text.trim().to_string());
     }
     nudge
+}
+
+/// Parse an `[agent.output]` or `[stages.<name>.output]` block.
+///
+/// `format` is read as an opaque string and never matched against a known set:
+/// a value this parser has never seen is as valid as `"markdown"`, which is what
+/// lets a blueprint ask for a2ui, a house schema, or a format invented after
+/// this code was written without touching it.
+///
+/// `schema` is taken as arbitrary TOML and converted to JSON, so an author can
+/// write the schema inline as a TOML table rather than embedding a JSON string.
+fn parse_output_spec(table: &toml::value::Table) -> crate::output::OutputSpec {
+    let string_field = |key: &str| {
+        table
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+    };
+    crate::output::OutputSpec {
+        format: string_field("format"),
+        instructions: string_field("instructions"),
+        example: string_field("example"),
+        // A schema that will not convert is dropped rather than fatal: the
+        // validator itself already treats an uncompilable schema as "skip the
+        // check" rather than "refuse every submission", and disagreeing here
+        // would make the same bad schema fatal at load and harmless at dispatch.
+        schema: table
+            .get("schema")
+            .and_then(|v| serde_json::to_value(v).ok()),
+    }
 }
 
 fn parse_security_config(security_table: &toml::value::Table) -> crate::SecurityConfig {
@@ -3677,6 +3765,156 @@ mode = "interactive"
         // Default mode (no mode specified) - Autonomous
         let default = bp.find_stage("default_mode").unwrap();
         assert_eq!(default.mode, StageMode::Autonomous);
+    }
+
+    /// A misspelled mode used to become an autonomous stage in silence, so a
+    /// stage written to produce an output ran normally and never asked for one.
+    /// Region kinds have always rejected an unknown value; modes now match.
+    #[test]
+    fn parse_manifest_rejects_an_unknown_stage_mode() {
+        let toml = r#"
+[agent]
+name = "typo-test"
+
+[stages.summary]
+mode = "outupt"
+"#;
+        let err = parse_manifest(toml).expect_err("a misspelled mode is not autonomous");
+        let msg = err.to_string();
+        assert!(msg.contains("summary"), "names the stage: {msg}");
+        assert!(msg.contains("outupt"), "quotes the bad value: {msg}");
+        assert!(msg.contains("valid modes"), "lists the alternatives: {msg}");
+    }
+
+    /// `mode = "output"` is sugar for three settings. They are written onto the
+    /// Stage at parse time rather than special-cased at dispatch, so the tool
+    /// filter, `lev validate`, and the lint all read one honest list.
+    #[test]
+    fn output_mode_grants_the_submit_tool_and_requires_an_output() {
+        let toml = r#"
+[agent]
+name = "output-test"
+
+[stages.summary]
+mode = "output"
+"#;
+        let bp = parse_manifest(toml).expect("parses");
+        let stage = bp.find_stage("summary").expect("the stage exists");
+        assert_eq!(stage.mode, StageMode::Output);
+        assert!(stage.require_output);
+        assert!(
+            stage
+                .available_tools
+                .contains(&crate::blueprint::SUBMIT_OUTPUT_TOOL.to_string())
+        );
+        // An output stage is normally the last thing a run does.
+        assert!(stage.allow_complete);
+        // And the grant survives validation, which would otherwise reject a
+        // stage required to produce an output it cannot submit.
+        bp.validate().expect("the auto-grant satisfies validation");
+    }
+
+    /// The auto-grant appends rather than replaces, and does not duplicate a
+    /// tool the author already listed.
+    #[test]
+    fn output_mode_keeps_the_authors_own_tools_and_does_not_duplicate() {
+        let toml = r#"
+[agent]
+name = "output-test"
+
+[stages.summary]
+mode = "output"
+available_tools = ["read_file", "submit_output"]
+allow_complete = false
+"#;
+        let bp = parse_manifest(toml).expect("parses");
+        let stage = bp.find_stage("summary").expect("the stage exists");
+        assert_eq!(
+            stage.available_tools,
+            vec!["read_file".to_string(), "submit_output".to_string()]
+        );
+        // An author who routes onward is believed.
+        assert!(!stage.allow_complete);
+    }
+
+    /// An ordinary stage can be made to hand something back, which is how a
+    /// fan-out worker guarantees its merge stage something to merge.
+    #[test]
+    fn require_output_works_on_a_stage_that_is_not_an_output_stage() {
+        let toml = r#"
+[agent]
+name = "worker-test"
+
+[stages.fix_worker]
+mode = "autonomous"
+available_tools = ["edit_file", "submit_output"]
+require_output = true
+"#;
+        let bp = parse_manifest(toml).expect("parses");
+        let stage = bp.find_stage("fix_worker").expect("the stage exists");
+        assert!(stage.require_output);
+        assert_eq!(stage.mode, StageMode::Autonomous);
+        bp.validate().expect("the stage can submit");
+    }
+
+    /// An output shape is read at both levels, and `format` is taken as an
+    /// opaque string: a value this parser has never heard of is as valid as
+    /// `"markdown"`, which is what lets a2ui work with no code support.
+    #[test]
+    fn output_specs_parse_at_agent_and_stage_level_with_an_opaque_format() {
+        let toml = r#"
+[agent]
+name = "shape-test"
+
+[agent.output]
+format = "markdown"
+instructions = "Two sentences, no preamble."
+
+[stages.summary]
+mode = "output"
+
+[stages.summary.output]
+format = "a2ui"
+example = "{\"root\": {\"component\": \"Card\"}}"
+
+[stages.summary.output.schema]
+type = "object"
+"#;
+        let bp = parse_manifest(toml).expect("parses");
+        let agent_spec = bp.output.as_ref().expect("the agent declares a shape");
+        assert_eq!(agent_spec.format.as_deref(), Some("markdown"));
+        assert_eq!(
+            agent_spec.instructions.as_deref(),
+            Some("Two sentences, no preamble.")
+        );
+
+        let stage_spec = bp
+            .find_stage("summary")
+            .expect("the stage exists")
+            .output
+            .as_ref()
+            .expect("the stage narrows the shape");
+        // An unrecognized format is carried through untouched.
+        assert_eq!(stage_spec.format.as_deref(), Some("a2ui"));
+        assert_eq!(
+            stage_spec.example.as_deref(),
+            Some("{\"root\": {\"component\": \"Card\"}}")
+        );
+        // A schema written as an inline TOML table becomes JSON.
+        assert_eq!(
+            stage_spec.schema,
+            Some(serde_json::json!({"type": "object"}))
+        );
+
+        // And the two levels combine the way the cascade says.
+        let resolved =
+            crate::output::resolve_output_spec(bp.output.as_ref(), Some(stage_spec), None)
+                .expect("some level asked for an output");
+        assert_eq!(resolved.format.as_deref(), Some("a2ui"));
+        assert_eq!(
+            resolved.instructions.as_deref(),
+            Some("Two sentences, no preamble.")
+        );
     }
 
     #[test]
