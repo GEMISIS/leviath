@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use leviath_providers::ToolCall;
 use leviath_runtime::components::AgentStatus;
-use leviath_runtime::host::SubAgentOp;
+use leviath_runtime::host::{SubAgentOp, SubAgentReport};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
@@ -121,6 +121,29 @@ async fn spawn(h: &SubAgentHandle, args: &serde_json::Value) -> String {
         .and_then(|v| v.as_u64())
         .map(|n| n as usize);
     let wait_flag = args.get("wait").and_then(|v| v.as_bool()).unwrap_or(false);
+    // A parent may ask its child for a particular shape. Passed through as a
+    // label, never interpreted: the child's own `submit_output` description is
+    // where it turns into an instruction. No schema here - a model composing a
+    // JSON Schema inline is a worse idea than letting the child's blueprint
+    // declare one.
+    let child_output = {
+        let field = |key: &str| {
+            args.get(key)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        let (format, instructions) = (field("output_format"), field("output_instructions"));
+        match format.is_none() && instructions.is_none() {
+            true => None,
+            false => Some(leviath_core::output::OutputSpec {
+                format,
+                instructions,
+                example: None,
+                schema: None,
+            }),
+        }
+    };
 
     let spawn_args = match resolve_spawn_args(
         blueprint,
@@ -134,7 +157,7 @@ async fn spawn(h: &SubAgentHandle, args: &serde_json::Value) -> String {
         // Sub-agents receive their whole task via `full_task`; no region flags.
         std::collections::HashMap::new(),
         h.no_seed_commands,
-        None,
+        child_output,
     ) {
         Ok(a) => a,
         Err(e) => return format!("[error] cannot spawn '{blueprint}': {e}"),
@@ -161,8 +184,16 @@ async fn spawn(h: &SubAgentHandle, args: &serde_json::Value) -> String {
 }
 
 async fn check(h: &SubAgentHandle, agent_id: &str) -> String {
-    match status_of(h, agent_id).await {
-        Some(status) => format!("Sub-agent '{agent_id}' status: {}", label(&status)),
+    match report_of(h, agent_id).await {
+        // The tool's schema promises "its current status and result if
+        // complete", so a finished child's answer comes back with the status
+        // rather than the parent being told only that it finished.
+        Some(report) if is_terminal(&report.status) => format!(
+            "Sub-agent '{agent_id}' status: {}{}",
+            label(&report.status),
+            describe_result(&report)
+        ),
+        Some(report) => format!("Sub-agent '{agent_id}' status: {}", label(&report.status)),
         None => format!("[error] no such sub-agent '{agent_id}'"),
     }
 }
@@ -182,12 +213,17 @@ async fn wait(h: &SubAgentHandle, agent_id: &str) -> String {
 /// Poll `agent_id` until it reaches a terminal state, or until the caller does.
 async fn poll_until_finished(h: &SubAgentHandle, agent_id: &str) -> String {
     loop {
-        match status_of(h, agent_id).await {
+        match report_of(h, agent_id).await {
             None => return format!("[error] no such sub-agent '{agent_id}'"),
-            Some(status) if is_terminal(&status) => {
+            Some(report) if is_terminal(&report.status) => {
+                // This is what the tool has always advertised - "block until a
+                // sub-agent completes, then return its final result" - and what
+                // it never did. A parent that waited got a status label and had
+                // to agree on a file path out of band to receive any work.
                 return format!(
-                    "Sub-agent '{agent_id}' finished with status: {}",
-                    label(&status)
+                    "Sub-agent '{agent_id}' finished with status: {}{}",
+                    label(&report.status),
+                    describe_result(&report)
                 );
             }
             // The caller itself was cancelled (or failed) while waiting. Give up
@@ -270,7 +306,7 @@ async fn kill(h: &SubAgentHandle, agent_id: &str) -> String {
 
 /// Query a child's status via the host, `None` if it dropped the request or the
 /// run is unknown.
-async fn status_of(h: &SubAgentHandle, agent_id: &str) -> Option<AgentStatus> {
+async fn report_of(h: &SubAgentHandle, agent_id: &str) -> Option<SubAgentReport> {
     let (tx, rx) = oneshot::channel();
     h.sender
         .send(SubAgentOp::Check {
@@ -279,6 +315,38 @@ async fn status_of(h: &SubAgentHandle, agent_id: &str) -> Option<AgentStatus> {
         })
         .ok()?;
     rx.await.ok().flatten()
+}
+
+/// Just the status, for the callers that only need to know whether a run is
+/// still going.
+async fn status_of(h: &SubAgentHandle, agent_id: &str) -> Option<AgentStatus> {
+    report_of(h, agent_id).await.map(|r| r.status)
+}
+
+/// Render a finished child's answer for its parent to read.
+///
+/// A child that submitted nothing says so rather than reporting an empty
+/// result: "produced no final output" is actionable (the parent can ask, or
+/// route around it), and a bare status line looks like success.
+fn describe_result(report: &SubAgentReport) -> String {
+    match &report.final_output {
+        Some(output) => {
+            let shape = output
+                .format
+                .as_deref()
+                .map(|f| format!(" ({f})"))
+                .unwrap_or_default();
+            let truncated = match output.truncated {
+                true => "\n[the agent's output was truncated at the size limit]",
+                false => "",
+            };
+            format!(
+                "\n\n--- final output{shape} ---\n{}{truncated}",
+                output.content
+            )
+        }
+        None => "\n\n[this agent produced no final output]".to_string(),
+    }
 }
 
 fn is_terminal(status: &AgentStatus) -> bool {
@@ -412,6 +480,26 @@ mod tests {
         fake_host_with_parent(spawn_result, statuses, ok, Some(AgentStatus::Active))
     }
 
+    /// [`fake_host`] with the child's submitted answer scripted too, so the
+    /// "return its final result" half of `check`/`wait` can be exercised.
+    #[allow(clippy::type_complexity)]
+    fn fake_host_with_output(
+        statuses: Vec<Option<AgentStatus>>,
+        output: Option<leviath_core::output::FinalOutput>,
+    ) -> (
+        SubAgentHandle,
+        std::sync::Arc<std::sync::Mutex<Vec<SpawnArgs>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        fake_host_full(
+            Ok("child-1".to_string()),
+            statuses,
+            false,
+            Some(AgentStatus::Active),
+            output,
+        )
+    }
+
     /// [`fake_host`] with the calling agent's own status scripted too.
     #[allow(clippy::type_complexity)]
     fn fake_host_with_parent(
@@ -419,6 +507,22 @@ mod tests {
         statuses: Vec<Option<AgentStatus>>,
         ok: bool,
         parent_status: Option<AgentStatus>,
+    ) -> (
+        SubAgentHandle,
+        std::sync::Arc<std::sync::Mutex<Vec<SpawnArgs>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        fake_host_full(spawn_result, statuses, ok, parent_status, None)
+    }
+
+    /// The one fake behind the three wrappers above.
+    #[allow(clippy::type_complexity)]
+    fn fake_host_full(
+        spawn_result: Result<String, String>,
+        statuses: Vec<Option<AgentStatus>>,
+        ok: bool,
+        parent_status: Option<AgentStatus>,
+        child_output: Option<leviath_core::output::FinalOutput>,
     ) -> (
         SubAgentHandle,
         std::sync::Arc<std::sync::Mutex<Vec<SpawnArgs>>>,
@@ -440,10 +544,16 @@ mod tests {
                     // answers only for children - the caller is reported Active
                     // unless a test scripts it otherwise.
                     SubAgentOp::Check { reply, run_id } if run_id == "parent" => {
-                        let _ = reply.send(parent_status.clone());
+                        let _ = reply.send(parent_status.clone().map(|status| SubAgentReport {
+                            status,
+                            final_output: None,
+                        }));
                     }
                     SubAgentOp::Check { reply, .. } => {
-                        let _ = reply.send(checks.next().flatten());
+                        let _ = reply.send(checks.next().flatten().map(|status| SubAgentReport {
+                            status,
+                            final_output: child_output.clone(),
+                        }));
                     }
                     SubAgentOp::Send { reply, .. } => {
                         let _ = reply.send(ok);
@@ -1014,5 +1124,106 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         );
         drop(h);
         t.await.unwrap();
+    }
+
+    fn answer(text: &str) -> leviath_core::output::FinalOutput {
+        leviath_core::output::FinalOutput::new(
+            text,
+            Some("markdown".to_string()),
+            "fix_worker".to_string(),
+            0,
+        )
+    }
+
+    /// `wait_for_agent`'s schema has always said "block until a sub-agent
+    /// completes, then return its final result". It returned a status label and
+    /// nothing else, so a parent had to agree on a file path out of band to
+    /// receive any work at all.
+    #[tokio::test]
+    async fn wait_returns_the_childs_final_output() {
+        let (h, _seen, _t) = fake_host_with_output(
+            vec![Some(AgentStatus::Complete)],
+            Some(answer("changed src/lib.rs and its test")),
+        );
+        let out = handle(&h, &tc("wait_for_agent", json!({"agent_id": "child-1"}))).await;
+        assert!(out.contains("complete"), "{out}");
+        assert!(out.contains("changed src/lib.rs and its test"), "{out}");
+        assert!(out.contains("markdown"), "names the shape: {out}");
+    }
+
+    #[tokio::test]
+    async fn check_returns_the_childs_final_output_once_it_is_done() {
+        let (h, _seen, _t) = fake_host_with_output(
+            vec![Some(AgentStatus::Complete)],
+            Some(answer("all three tests pass")),
+        );
+        let out = handle(&h, &tc("check_agent", json!({"agent_id": "child-1"}))).await;
+        assert!(out.contains("all three tests pass"), "{out}");
+    }
+
+    /// A child still working has nothing to report yet, so the status line
+    /// stands alone rather than claiming an empty answer.
+    #[tokio::test]
+    async fn check_on_a_running_child_reports_status_only() {
+        let (h, _seen, _t) = fake_host_with_output(vec![Some(AgentStatus::Active)], None);
+        let out = handle(&h, &tc("check_agent", json!({"agent_id": "child-1"}))).await;
+        assert!(out.contains("active"), "{out}");
+        assert!(!out.contains("final output"), "{out}");
+    }
+
+    /// "produced no final output" is actionable - the parent can ask, or route
+    /// around it. A bare status line reads as success.
+    #[tokio::test]
+    async fn a_finished_child_that_submitted_nothing_says_so() {
+        let (h, _seen, _t) = fake_host_with_output(vec![Some(AgentStatus::Complete)], None);
+        let out = handle(&h, &tc("wait_for_agent", json!({"agent_id": "child-1"}))).await;
+        assert!(out.contains("no final output"), "{out}");
+    }
+
+    /// A parent may ask its child for a shape. It travels as a label, so a
+    /// format nothing in this crate has heard of reaches the child intact.
+    #[tokio::test]
+    async fn spawn_passes_a_requested_output_shape_to_the_child() {
+        let (h, seen, _t) = fake_host(Ok("child-1".to_string()), vec![], false);
+        let dir = temp_blueprint();
+        let _ = handle(
+            &h,
+            &tc(
+                "spawn_agent",
+                json!({
+                    "blueprint": dir.path().to_str().unwrap(),
+                    "task": "do it",
+                    "output_format": "a2ui",
+                    "output_instructions": "One card per finding.",
+                }),
+            ),
+        )
+        .await;
+        let args = seen.lock().unwrap();
+        let spec = args[0]
+            .output
+            .as_ref()
+            .expect("the request reached the child");
+        assert_eq!(spec.format.as_deref(), Some("a2ui"));
+        assert_eq!(spec.instructions.as_deref(), Some("One card per finding."));
+        // A model composing a JSON Schema inline is a worse idea than letting
+        // the child's blueprint declare one, so the tool does not offer it.
+        assert!(spec.schema.is_none());
+    }
+
+    /// A spawn that asks for nothing leaves the child's blueprint in charge.
+    #[tokio::test]
+    async fn spawn_without_output_args_requests_no_shape() {
+        let (h, seen, _t) = fake_host(Ok("child-1".to_string()), vec![], false);
+        let dir = temp_blueprint();
+        let _ = handle(
+            &h,
+            &tc(
+                "spawn_agent",
+                json!({"blueprint": dir.path().to_str().unwrap(), "task": "do it"}),
+            ),
+        )
+        .await;
+        assert!(seen.lock().unwrap()[0].output.is_none());
     }
 }

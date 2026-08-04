@@ -396,6 +396,14 @@ impl BuiltinTools {
                         "max_child_depth": {
                             "type": "integer",
                             "description": "Optional max depth for the sub-agent's own children"
+                        },
+                        "output_format": {
+                            "type": "string",
+                            "description": "Optional shape to ask the sub-agent for its final answer in, overriding its blueprint's. Any label works (markdown, json, xml, a media type, your own); it is passed to the sub-agent, not interpreted here."
+                        },
+                        "output_instructions": {
+                            "type": "string",
+                            "description": "Optional extra guidance about that shape, passed to the sub-agent alongside output_format."
                         }
                     },
                     "required": ["blueprint", "task"]

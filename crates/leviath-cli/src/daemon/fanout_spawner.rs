@@ -87,7 +87,10 @@ impl FanOutSpawner for DaemonFanOutSpawner {
         // `unattended` rides along: a worker of an unattended parent is a worker
         // nobody is watching either, and one that stops on an approval prompt
         // parks the parent behind it for good.
-        let (parent_path, workdir, parent_run_id, unattended) = world
+        // The requested output shape rides along too: a caller who asked the
+        // parent for a2ui wants its workers' contributions in the same shape,
+        // and the worker's answer is what the merge stage reads.
+        let (parent_path, workdir, parent_run_id, unattended, output_request) = world
             .get::<RunMetadata>(parent)
             .map(|md| {
                 (
@@ -95,6 +98,7 @@ impl FanOutSpawner for DaemonFanOutSpawner {
                     md.workdir.clone(),
                     md.run_id.clone(),
                     md.unattended,
+                    md.output_request.clone(),
                 )
             })
             .ok_or_else(|| "fan-out parent has no run metadata".to_string())?;
@@ -119,7 +123,7 @@ impl FanOutSpawner for DaemonFanOutSpawner {
             // per worker would be pure waste (and up to `max_workers` copies of
             // the same output).
             true,
-            None,
+            output_request,
         )
         .map_err(|e| format!("resolve worker blueprint: {e}"))?;
         // Nest the worker under its fan-out parent in the run tree.
