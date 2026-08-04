@@ -248,10 +248,13 @@ pub(super) async fn agent_context_history(
 
     // Which indices this page wants, given the direction and where the cursor
     // left off. Computed up front so the replay can skip everything else.
-    let after = cursor.as_ref().and_then(|c| match c.key {
-        super::cursor::CursorKey::Int(i) => usize::try_from(i).ok(),
-        super::cursor::CursorKey::Text(_) => None,
-    });
+    // This route only ever mints an integer key, so anything else means a
+    // cursor that did not come from here - and the `_` arm is what the common
+    // "no cursor at all" case takes too.
+    let after = match cursor.as_ref().map(|c| &c.key) {
+        Some(super::cursor::CursorKey::Int(i)) => usize::try_from(*i).ok(),
+        _ => None,
+    };
     let wanted: Vec<usize> = if ascending {
         let start = after.map(|i| i + 1).unwrap_or(0);
         (start..total).take(limit + 1).collect()
@@ -2037,6 +2040,157 @@ prompt = "Plan the work"
 
             let (status, _) = list_files(&run_id, "?source=workdir").await;
             assert_eq!(status, StatusCode::NOT_FOUND);
+
+            let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        })
+        .await;
+    }
+
+    /// A recorded path can be absolute, because a tool can be handed one, and
+    /// it can be shaped so it has no file name at all. Neither may panic or
+    /// silently vanish from the list.
+    #[tokio::test]
+    async fn a_modified_listing_handles_absolute_and_nameless_paths() {
+        crate::runstate::with_isolated_runs_dir_async("agent_files_odd_paths", |_d| async move {
+            let workdir = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            std::fs::write(outside.path().join("elsewhere.txt"), "x").unwrap();
+            let run_id = unique_run_id("files-odd");
+
+            let mut meta = make_run(&run_id);
+            meta.workdir = workdir.path().to_string_lossy().into_owned();
+            meta.flags.modified_files = vec![
+                outside
+                    .path()
+                    .join("elsewhere.txt")
+                    .to_string_lossy()
+                    .into_owned(),
+                // `Path::file_name` is None for a path ending in `..`.
+                "nested/..".to_string(),
+            ];
+            create_run(&meta).unwrap();
+
+            let (status, listing) = list_files(&run_id, "").await;
+            assert_eq!(status, StatusCode::OK);
+            let entries = listing["entries"].as_array().unwrap();
+            assert_eq!(entries.len(), 2);
+            // The absolute one resolved, exists, and is flagged as outside the
+            // fence rather than quietly dropped.
+            assert_eq!(entries[0]["name"], "elsewhere.txt");
+            assert_eq!(entries[0]["exists"], true);
+            assert_eq!(entries[0]["outside_workdir"], true);
+            // With no file name to show, the recorded path stands in for it.
+            assert_eq!(entries[1]["name"], "nested/..");
+
+            let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        })
+        .await;
+    }
+
+    /// A single directory really can hold six figures of entries, and the
+    /// response is built in memory.
+    #[tokio::test]
+    async fn a_workdir_listing_stops_at_the_entry_cap() {
+        crate::runstate::with_isolated_runs_dir_async("agent_files_cap", |_d| async move {
+            let workdir = tempfile::tempdir().unwrap();
+            for i in 0..MAX_LISTING_ENTRIES + 5 {
+                std::fs::write(workdir.path().join(format!("f{i}.txt")), "x").unwrap();
+            }
+            let run_id = unique_run_id("files-many");
+            create_run_in(&run_id, workdir.path());
+
+            let (status, listing) = list_files(&run_id, "?source=workdir").await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                listing["entries"].as_array().unwrap().len(),
+                MAX_LISTING_ENTRIES
+            );
+            assert_eq!(listing["truncated"], true);
+
+            let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        })
+        .await;
+    }
+
+    /// A symlinked child can point outside the workdir even when the directory
+    /// being listed is inside it, so containment is checked per entry.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_workdir_listing_excludes_a_child_that_escapes_the_workdir() {
+        crate::runstate::with_isolated_runs_dir_async("agent_files_escape", |_d| async move {
+            let workdir = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            std::fs::write(workdir.path().join("inside.txt"), "x").unwrap();
+            std::os::unix::fs::symlink(outside.path(), workdir.path().join("escape")).unwrap();
+            let run_id = unique_run_id("files-escape");
+            create_run_in(&run_id, workdir.path());
+
+            let (_, listing) = list_files(&run_id, "?source=workdir").await;
+            let names: Vec<&str> = listing["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(names, vec!["inside.txt"]);
+
+            let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        })
+        .await;
+    }
+
+    /// Windows twin of the above. Windows spells a directory link
+    /// `symlink_dir`; the fence behaves the same because `resolves_within`
+    /// canonicalizes before comparing.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_workdir_listing_excludes_a_child_that_escapes_the_workdir_windows() {
+        crate::runstate::with_isolated_runs_dir_async("agent_files_escape", |_d| async move {
+            let workdir = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            std::fs::write(workdir.path().join("inside.txt"), "x").unwrap();
+            std::os::windows::fs::symlink_dir(outside.path(), workdir.path().join("escape"))
+                .unwrap();
+            let run_id = unique_run_id("files-escape");
+            create_run_in(&run_id, workdir.path());
+
+            let (_, listing) = list_files(&run_id, "?source=workdir").await;
+            let names: Vec<&str> = listing["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(names, vec!["inside.txt"]);
+
+            let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        })
+        .await;
+    }
+
+    /// A journal that records no context change has no timeline to show, which
+    /// is a 404 rather than an empty page - but only when the caller was not
+    /// already partway through a walk.
+    #[tokio::test]
+    async fn context_history_404s_when_a_journal_records_no_points() {
+        crate::runstate::with_isolated_runs_dir_async("ctx-hist-empty", |_d| async move {
+            let run_id = unique_run_id("ctx-empty");
+            create_run(&make_run(&run_id)).unwrap();
+            // A header and nothing else: a valid archive with zero points.
+            write_archive_with_points(&run_id, 0, None);
+
+            let app = Router::new()
+                .route(
+                    "/api/agents/{id}/context/history",
+                    get(agent_context_history),
+                )
+                .with_state(test_state());
+            let req = Request::builder()
+                .uri(format!("/api/agents/{run_id}/context/history"))
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
 
             let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
         })

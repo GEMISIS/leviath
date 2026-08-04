@@ -338,10 +338,15 @@ fn known_meta_fields() -> HashSet<String> {
         String::new(),
         0,
     );
-    match serde_json::to_value(probe) {
-        Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
-        _ => HashSet::new(),
-    }
+    // `RunMeta` is a struct, so this is always an object; `as_object` keeps
+    // that assumption in one place instead of adding a match arm nothing can
+    // reach.
+    serde_json::to_value(probe)
+        .ok()
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .map(|map| map.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 /// `GET /api/runs`
@@ -389,11 +394,9 @@ pub(super) async fn list_runs(
     sort_runs(&mut runs, &resolved);
 
     let (runs, scan_truncated) = apply_search(runs, &resolved);
-    let total = if scan_truncated {
-        None
-    } else {
-        Some(runs.len())
-    };
+    // Null when the scan was cut short: a count taken from a partial scan is
+    // worse than no count, because a UI renders it as fact.
+    let total = (!scan_truncated).then_some(runs.len());
 
     let (page_runs, next_cursor) = paginate(runs, &resolved);
     let items = page_runs
@@ -527,12 +530,12 @@ fn meta_fields(meta: &RunMeta) -> Vec<(String, String)> {
     }
     // `callback_url` and `callback_secret` are deliberately absent. The secret
     // never leaves the process, and neither is something a user searches for.
-    let mut keys: Vec<&String> = meta.metadata.keys().collect();
-    keys.sort();
-    for key in keys {
-        if let Some(value) = meta.metadata.get(key) {
-            out.push((format!("metadata.{key}"), value.clone()));
-        }
+    // Sorted so the highlight a search reports for a metadata match does not
+    // depend on hash order.
+    let mut entries: Vec<(&String, &String)> = meta.metadata.iter().collect();
+    entries.sort();
+    for (key, value) in entries {
+        out.push((format!("metadata.{key}"), value.clone()));
     }
     out
 }
@@ -573,9 +576,9 @@ fn highlights_for(meta: &RunMeta, q: &str, sources: &[Source]) -> Vec<Highlight>
                     });
                 }
             }
-            Source::Context => context_highlight(meta, q, &mut out),
-            Source::Logs => logs_highlights(meta, q, &mut out),
-            Source::Journal => journal_highlights(meta, q, &mut out),
+            Source::Context => out.extend(context_highlight(meta, q)),
+            Source::Logs => out.extend(logs_highlights(meta, q)),
+            Source::Journal => out.extend(journal_highlights(meta, q)),
         }
     }
     out.truncate(MAX_HIGHLIGHTS);
@@ -587,48 +590,47 @@ fn highlights_for(meta: &RunMeta, q: &str, sources: &[Source]) -> Vec<Highlight>
 /// Parses `context.json` once. Never replays the journal: that deep-copies a
 /// whole context window per recorded point, which is the cost this design
 /// exists to avoid.
-fn context_highlight(meta: &RunMeta, q: &str, out: &mut Vec<Highlight>) {
-    let Some(snapshot) = runstate::read_context_snapshot(&meta.run_id) else {
-        return;
-    };
-    for region in &snapshot.regions {
-        for entry in &region.entries {
-            if let Some(at) = search::find_ignore_ascii_case(&entry.content, q) {
-                out.push(Highlight {
-                    field: format!("context.{}", region.name),
-                    snippet: search::snippet(&entry.content, at),
-                    stage: None,
-                });
-                return;
-            }
-        }
-    }
+fn context_highlight(meta: &RunMeta, q: &str) -> Option<Highlight> {
+    let snapshot = runstate::read_context_snapshot(&meta.run_id)?;
+    snapshot.regions.iter().find_map(|region| {
+        region.entries.iter().find_map(|entry| {
+            search::find_ignore_ascii_case(&entry.content, q).map(|at| Highlight {
+                field: format!("context.{}", region.name),
+                snippet: search::snippet(&entry.content, at),
+                stage: None,
+            })
+        })
+    })
 }
 
 /// Which stage's log the match is in - so a client can then fetch that stage.
-fn logs_highlights(meta: &RunMeta, q: &str, out: &mut Vec<Highlight>) {
-    for idx in stage_indices(&meta.run_id) {
-        if out.len() >= MAX_HIGHLIGHTS {
-            return;
-        }
-        let output = runstate::tail_stage_output(&meta.run_id, idx, SEARCH_LOG_TAIL_BYTES);
-        if let Some(at) = search::find_ignore_ascii_case(&output, q) {
-            out.push(Highlight {
-                field: "logs.output".to_string(),
-                snippet: search::snippet(&output, at),
-                stage: Some(idx),
-            });
-            continue;
-        }
-        let operational = runstate::tail_stage_log(&meta.run_id, idx, SEARCH_LOG_TAIL_BYTES);
-        if let Some(at) = search::find_ignore_ascii_case(&operational, q) {
-            out.push(Highlight {
+///
+/// One highlight per stage at most, and the two streams are tried in the order
+/// a person reads them: the assistant's own output first, the operational log
+/// second. Expressed as a `find_map` rather than a loop with early returns
+/// because the caller already caps the total, so there is nothing here that
+/// needs to bail out partway.
+fn logs_highlights(meta: &RunMeta, q: &str) -> Vec<Highlight> {
+    stage_indices(&meta.run_id)
+        .into_iter()
+        .filter_map(|idx| {
+            let output = runstate::tail_stage_output(&meta.run_id, idx, SEARCH_LOG_TAIL_BYTES);
+            if let Some(at) = search::find_ignore_ascii_case(&output, q) {
+                return Some(Highlight {
+                    field: "logs.output".to_string(),
+                    snippet: search::snippet(&output, at),
+                    stage: Some(idx),
+                });
+            }
+            let operational = runstate::tail_stage_log(&meta.run_id, idx, SEARCH_LOG_TAIL_BYTES);
+            search::find_ignore_ascii_case(&operational, q).map(|at| Highlight {
                 field: "logs.operational".to_string(),
                 snippet: search::snippet(&operational, at),
                 stage: Some(idx),
-            });
-        }
-    }
+            })
+        })
+        .take(MAX_HIGHLIGHTS)
+        .collect()
 }
 
 /// Where in the run's history the match is: a tool call, or the context as it
@@ -651,86 +653,56 @@ fn logs_highlights(meta: &RunMeta, q: &str, out: &mut Vec<Highlight>) {
 /// metadata blocks. A query matching only there (a workdir path, say) yields a
 /// run with no highlight. The same text is searchable, with a highlight, through
 /// `q_in=meta`.
-fn journal_highlights(meta: &RunMeta, q: &str, out: &mut Vec<Highlight>) {
+fn journal_highlights(meta: &RunMeta, q: &str) -> Option<Highlight> {
     use leviath_core::run_archive::{RegionDelta, RunRecord};
 
-    let Some(records) = runstate::read_run_archive(&meta.run_id) else {
-        return;
-    };
-
-    /// Look through a region's entries, naming the region if one matches.
-    fn scan_entries(
+    /// The first entry in a region whose content matches, named by region.
+    fn in_entries(
         region_name: &str,
         entries: &[leviath_core::run_meta::RegionEntrySnapshot],
         q: &str,
-        out: &mut Vec<Highlight>,
-    ) -> bool {
-        for entry in entries {
-            if let Some(at) = search::find_ignore_ascii_case(&entry.content, q) {
-                out.push(Highlight {
-                    field: format!("journal.context.{region_name}"),
-                    snippet: search::snippet(&entry.content, at),
-                    stage: None,
-                });
-                return true;
-            }
-        }
-        false
+    ) -> Option<Highlight> {
+        entries.iter().find_map(|entry| {
+            search::find_ignore_ascii_case(&entry.content, q).map(|at| Highlight {
+                field: format!("journal.context.{region_name}"),
+                snippet: search::snippet(&entry.content, at),
+                stage: None,
+            })
+        })
     }
 
-    for record in &records {
-        if out.len() >= MAX_HIGHLIGHTS {
-            return;
-        }
+    /// The first match in one record, or `None` if it carries no matching text.
+    fn in_record(record: &RunRecord, q: &str) -> Option<Highlight> {
         match record {
             RunRecord::ToolBatch {
                 calls, stage_index, ..
-            } => {
-                for call in calls {
-                    let haystacks = [&call.arguments, call.result.as_ref().unwrap_or(&call.name)];
-                    for text in haystacks {
-                        if let Some(at) = search::find_ignore_ascii_case(text, q) {
-                            out.push(Highlight {
-                                field: format!("journal.tool.{}", call.name),
-                                snippet: search::snippet(text, at),
-                                stage: Some(*stage_index),
-                            });
-                            return;
-                        }
-                    }
-                }
-            }
-            RunRecord::ContextCheckpoint { snapshot, .. } => {
-                for region in &snapshot.regions {
-                    if scan_entries(&region.name, &region.entries, q, out) {
-                        return;
-                    }
-                }
-            }
+            } => calls.iter().find_map(|call| {
+                [&call.arguments, call.result.as_ref().unwrap_or(&call.name)]
+                    .into_iter()
+                    .find_map(|text| {
+                        search::find_ignore_ascii_case(text, q).map(|at| Highlight {
+                            field: format!("journal.tool.{}", call.name),
+                            snippet: search::snippet(text, at),
+                            stage: Some(*stage_index),
+                        })
+                    })
+            }),
+            RunRecord::ContextCheckpoint { snapshot, .. } => snapshot
+                .regions
+                .iter()
+                .find_map(|region| in_entries(&region.name, &region.entries, q)),
             RunRecord::ContextDiff { delta, .. } | RunRecord::Progress { delta, .. } => {
-                for region in &delta.regions {
-                    let matched = match region {
-                        RegionDelta::Set(snapshot) => {
-                            scan_entries(&snapshot.name, &snapshot.entries, q, out)
-                        }
-                        RegionDelta::Append { name, entries, .. } => {
-                            scan_entries(name, entries, q, out)
-                        }
-                        // Carry no text of their own.
-                        RegionDelta::Clear { .. } | RegionDelta::Remove { .. } => false,
-                    };
-                    if matched {
-                        return;
-                    }
-                }
+                delta.regions.iter().find_map(|region| match region {
+                    RegionDelta::Set(snapshot) => in_entries(&snapshot.name, &snapshot.entries, q),
+                    RegionDelta::Append { name, entries, .. } => in_entries(name, entries, q),
+                    // Carry no text of their own.
+                    RegionDelta::Clear { .. } | RegionDelta::Remove { .. } => None,
+                })
             }
-            RunRecord::Checkpoint { context, .. } => {
-                for region in &context.regions {
-                    if scan_entries(&region.name, &region.entries, q, out) {
-                        return;
-                    }
-                }
-            }
+            RunRecord::Checkpoint { context, .. } => context
+                .regions
+                .iter()
+                .find_map(|region| in_entries(&region.name, &region.entries, q)),
             // Carry no searchable content of their own - only the metadata this
             // function must not cut a snippet from.
             RunRecord::Header { .. }
@@ -738,9 +710,12 @@ fn journal_highlights(meta: &RunMeta, q: &str, out: &mut Vec<Highlight>) {
             | RunRecord::StatusChanged { .. }
             | RunRecord::Inference { .. }
             | RunRecord::ToolCallDone { .. }
-            | RunRecord::Message { .. } => {}
+            | RunRecord::Message { .. } => None,
         }
     }
+
+    let records = runstate::read_run_archive(&meta.run_id)?;
+    records.iter().find_map(|record| in_record(record, q))
 }
 
 /// Take this page's runs and mint the cursor for the next one.

@@ -1533,13 +1533,12 @@ mod tests {
             .unwrap();
             std::fs::write(run_dir(run_id).join("run.lvr"), &buf).unwrap();
 
-            // The secret really is in the journal, so redaction has work to do.
-            let records = read_run_archive(run_id).expect("archive read");
-            let archived_secret = records.iter().find_map(|r| match r {
-                RunRecord::Header { meta, .. } => meta.callback_secret.clone(),
-                _ => None,
-            });
-            assert_eq!(archived_secret.as_deref(), Some("super-secret-signing-key"));
+            // The secret really is on disk, so redaction has work to do. Read
+            // the raw bytes rather than matching over parsed records: a match
+            // that stops at the Header leaves its other arm unreachable, and
+            // this says the thing that actually matters anyway.
+            let raw = std::fs::read(run_dir(run_id).join("run.lvr")).unwrap();
+            assert!(String::from_utf8_lossy(&raw).contains("super-secret-signing-key"));
 
             // What the reader hands out has it stripped, and keeps the rest.
             let history = context_history(run_id);

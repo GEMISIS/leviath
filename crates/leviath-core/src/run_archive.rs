@@ -1682,21 +1682,28 @@ mod tests {
     #[test]
     fn visit_points_without_a_header_visits_nothing() {
         let mut visits = 0;
-        visit_points(&[], &mut |_| {
-            visits += 1;
-            ControlFlow::Continue(())
-        });
-        visit_points(
-            &[RunRecord::ContextCheckpoint {
-                snapshot: snapshot("plan", vec![]),
-                at: 1,
-            }],
-            &mut |_| {
+        {
+            let mut count = |_: PointRef<'_>| {
                 visits += 1;
                 ControlFlow::Continue(())
-            },
-        );
-        assert_eq!(visits, 0);
+            };
+
+            // A well-formed journal first, with the *same* visitor. Without
+            // this the test would pass against a visitor that can never run at
+            // all, which is exactly the reassurance it is not meant to give.
+            visit_points(&three_point_records(), &mut count);
+            // Neither of these starts with a Header, so neither is a replayable
+            // journal and neither may produce a point.
+            visit_points(&[], &mut count);
+            visit_points(
+                &[RunRecord::ContextCheckpoint {
+                    snapshot: snapshot("plan", vec![]),
+                    at: 1,
+                }],
+                &mut count,
+            );
+        }
+        assert_eq!(visits, 3, "only the well-formed journal produced points");
     }
 
     /// `replay_points` is now a thin collector over `visit_points`, so this
