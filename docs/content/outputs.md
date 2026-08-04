@@ -32,7 +32,7 @@ hint = "The work is done"
 mode = "output"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 description = "Say what changed"
-max_iterations = 4
+max_iterations = 8
 system_prompt = """
 Say what you changed, for whoever asked for it. List the files you touched and
 what each change does. Then anything they need to know before merging.
@@ -141,6 +141,10 @@ flowchart LR
 A missing output never strands a run. The stage is nudged and re-run a few times, bounded by its
 `max_revisits`. After that the run finishes anyway and records `output_forced` in its flags, so you
 can tell a missing answer from an answer nobody asked for.
+
+Give the stage enough `max_iterations` to spend that budget. Each nudge costs one iteration, so a
+stage that runs out of iterations first ends on its `max_iterations` path instead. That path takes
+precedence, and the run records `max_iterations_hit` rather than `output_forced`.
 
 ## What each surface returns
 

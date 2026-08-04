@@ -262,7 +262,7 @@ model = "claude-sonnet-5"
 mode = "output"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Say what was written"
-max_iterations = 4
+max_iterations = 8
 system_prompt = """
 Say what you produced, for whoever asked for it.
 
