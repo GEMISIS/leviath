@@ -82,6 +82,16 @@ pub struct AgentClientArgs {
     /// approval prompt.
     #[arg(long)]
     pub no_seed_commands: bool,
+
+    /// Ask the agent for its final output in this shape, overriding what the
+    /// blueprint declares. Any label works: it reaches the model, which produces
+    /// the bytes. The answer arrives as the turn's closing message.
+    #[arg(long, value_name = "LABEL")]
+    pub output_format: Option<String>,
+
+    /// Extra guidance about that shape, passed alongside `--output-format`.
+    #[arg(long, value_name = "TEXT")]
+    pub output_instructions: Option<String>,
 }
 
 /// The protocol server. Generic over transport at the boundary, then erased to
@@ -420,7 +430,8 @@ impl Server {
                     }
                     self.flush_output(&session_id, &mut tail, &run_id).await;
                     match event {
-                        WorldEvent::Completed { status, .. } => {
+                        WorldEvent::Completed { status, final_output, .. } => {
+                            self.emit_final_output(&session_id, final_output.as_ref()).await;
                             return leviath_agent_client::stop_reason_for_label(&status);
                         }
                         WorldEvent::Context { total_tokens, max_tokens, .. } => {
@@ -679,6 +690,35 @@ impl Server {
         };
         self.write(&JsonRpcMessage::notification("session/update", &params))
             .await;
+    }
+
+    /// Emit the run's submitted answer as the agent's closing message.
+    ///
+    /// ACP has no result field: a turn returns a stop reason, and everything the
+    /// host shows the user arrived as `agent_message_chunk` updates. Those carry
+    /// the stage's streamed output, which is what the agent *did*. A submitted
+    /// answer never appears there - `submit_output` writes a component and a
+    /// context region, not the stage log - so without this an ACP host would
+    /// watch the whole run and never receive its conclusion.
+    ///
+    /// Prefixed and separated so the answer reads as a distinct closing message
+    /// rather than more streamed output. A run that submitted nothing emits
+    /// nothing, leaving the turn exactly as it was.
+    async fn emit_final_output(
+        &mut self,
+        session_id: &str,
+        output: Option<&leviath_core::output::FinalOutput>,
+    ) {
+        let Some(output) = output else { return };
+        let shape = output
+            .format
+            .as_deref()
+            .map(|f| format!(" ({f})"))
+            .unwrap_or_default();
+        let text = format!("\n\n--- final output{shape} ---\n{}", output.content);
+        for chunk in split_chunks(&text) {
+            self.emit_chunk(session_id, chunk).await;
+        }
     }
 
     /// Emit one `usage_update` update.

@@ -212,6 +212,21 @@ fn completed(status: &str) -> WorldEvent {
     }
 }
 
+/// A completion carrying an answer, for the ACP closing-message path.
+fn completed_with_answer(content: &str, format: Option<&str>) -> WorldEvent {
+    WorldEvent::Completed {
+        run_id: RUN_ID.to_string(),
+        agent_id: RUN_ID.to_string(),
+        status: "complete".to_string(),
+        final_output: Some(leviath_core::output::FinalOutput::new(
+            content,
+            format.map(str::to_string),
+            "summary".to_string(),
+            0,
+        )),
+    }
+}
+
 fn status_event() -> WorldEvent {
     WorldEvent::Status {
         run_id: RUN_ID.to_string(),
@@ -314,6 +329,8 @@ prompt = "Do it"
         no_seed_commands: false,
         allow: vec![],
         max_depth: None,
+        output_format: None,
+        output_instructions: None,
     };
     (root, args)
 }
@@ -1408,4 +1425,73 @@ mod run_status_helpers {
         std::fs::write(run.join("meta.json"), "not json").unwrap();
         assert_eq!(read_run_status(dir.path(), "bad"), None);
     }
+}
+
+// ─── the answer reaches the host ─────────────────────────────────────────────
+
+/// ACP has no result field: a turn returns a stop reason, and everything the
+/// user sees arrived as `agent_message_chunk` updates carrying the stage's
+/// streamed output. A submitted answer is not in that stream, so without an
+/// explicit closing message an ACP host would watch the whole run and never
+/// receive its conclusion.
+#[tokio::test]
+async fn a_submitted_answer_arrives_as_the_turns_closing_message() {
+    let daemon = ScriptedDaemon::new(
+        vec![
+            status_event(),
+            completed_with_answer("<report><finding/></report>", Some("xml")),
+        ],
+        spawn_ok,
+    );
+    let (mut h, _bp) = opened_session(daemon, false).await;
+    h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}"#)
+        .await;
+
+    let mut assembled = String::new();
+    loop {
+        let msg = h.recv().await;
+        if let Some("agent_message_chunk") = update_kind(&msg).as_deref() {
+            assembled.push_str(
+                msg.params.unwrap()["update"]["content"]["text"]
+                    .as_str()
+                    .unwrap(),
+            );
+        } else if is_result(&msg) {
+            break;
+        }
+    }
+    // Byte-identical, with its label, and set apart from the streamed output.
+    assert!(
+        assembled.contains("<report><finding/></report>"),
+        "got: {assembled}"
+    );
+    assert!(assembled.contains("final output (xml)"), "got: {assembled}");
+    h.close_input().await;
+}
+
+/// A run that submitted nothing emits nothing extra, leaving the turn exactly
+/// as it was before this existed.
+#[tokio::test]
+async fn a_run_with_no_answer_adds_no_closing_message() {
+    let daemon = ScriptedDaemon::new(vec![status_event(), completed("complete")], spawn_ok);
+    let (mut h, _bp) = opened_session(daemon, false).await;
+    h.write_output(0, "streamed work");
+    h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}"#)
+        .await;
+
+    let mut assembled = String::new();
+    loop {
+        let msg = h.recv().await;
+        if let Some("agent_message_chunk") = update_kind(&msg).as_deref() {
+            assembled.push_str(
+                msg.params.unwrap()["update"]["content"]["text"]
+                    .as_str()
+                    .unwrap(),
+            );
+        } else if is_result(&msg) {
+            break;
+        }
+    }
+    assert_eq!(assembled, "streamed work");
+    h.close_input().await;
 }

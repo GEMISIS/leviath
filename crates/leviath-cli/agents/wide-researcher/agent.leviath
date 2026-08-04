@@ -1,6 +1,6 @@
 [agent]
 name = "wide-researcher"
-version = "0.0.3"
+version = "0.0.2"
 description = "Broad multi-topic survey - cast a wide net, compare approaches, dive on the interesting threads, and produce a landscape overview"
 entry_stage = "survey"
 

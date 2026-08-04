@@ -1,6 +1,6 @@
 [agent]
 name = "software-engineer"
-version = "0.0.4"
+version = "0.0.3"
 description = "Plan-then-implement agent - mirrors the Claude Code discover→plan→approve→code→review workflow"
 entry_stage = "discover"
 

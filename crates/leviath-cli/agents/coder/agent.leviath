@@ -1,6 +1,6 @@
 [agent]
 name = "coder"
-version = "0.0.3"
+version = "0.0.2"
 description = "Multi-stage coding agent - discover, analyze, optionally prototype, implement, and review, with stuck detection and graph-based error recovery"
 entry_stage = "discover"
 

@@ -75,16 +75,63 @@ differently from markdown matches on that string. Leviath itself never does.
 
 ## Asking for a shape at launch
 
-A blueprint declares a default. Whoever starts the run can ask for something else.
+A blueprint declares a default. Whoever starts the run can ask for something else. Every bundled
+agent ends in an output stage, so this works on all of them out of the box.
+
+### From the command line
 
 ```bash
-lev run ./my-agent --task "audit the auth module" \
+lev run reviewer --task "review the auth module" --diff @./change.patch \
   --output-format xml \
+  --output-instructions "One <finding> element per issue, with a severity attribute."
+```
+
+`lev run` returns as soon as the run starts, printing the run id. Read the answer when it finishes:
+
+```bash
+lev run reviewer --task "..." --output-format xml --json   # prints {"run_id": "..."}
+lev ps                                                     # watch it
+lev result <run-id> --raw > findings.xml                   # the XML, and nothing else
+```
+
+`--raw` matters for a pipeline. The default rendering adds a heading naming the run and stage, and
+`--json` wraps the answer in a record. Only `--raw` gives you the bytes the agent produced.
+
+Nothing converts between shapes. `--output-format xml` puts the label and your instructions in front
+of the model, and the model writes the XML. Ask for something the model cannot produce and you get
+its best attempt, not an error.
+
+### From the API
+
+`POST /api/agents` takes the same three fields:
+
+```bash
+curl -X POST http://localhost:3000/api/agents \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"blueprint":"reviewer","task":"review the auth module",
+       "output_format":"xml",
+       "output_instructions":"One <finding> element per issue."}'
+```
+
+Then `GET /api/agents/{id}/result`, where `final_output` carries the answer and its label. The
+completion webhook carries the same, so a receiver needs no second request.
+
+### From a host over ACP
+
+The [Agent Client Protocol](/docs/agent-client-protocol) has no field for this, so the host asks when
+it starts the server:
+
+```bash
+lev agent-client --agent reviewer --output-format xml \
   --output-instructions "One <finding> element per issue."
 ```
 
-The same three fields exist on `POST /api/agents` as `output_format`, `output_instructions`, and
-`output_schema`. A parent agent can ask a child through `spawn_agent`.
+The answer arrives as the turn's closing `agent_message_chunk`, set apart from the streamed output.
+
+### From a parent agent
+
+A parent asks a child through `spawn_agent`, using `output_format` and `output_instructions`. The
+child's answer comes back from `wait_for_agent`.
 
 Three levels combine, and the later one wins per field.
 

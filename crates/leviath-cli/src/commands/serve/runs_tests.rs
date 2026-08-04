@@ -147,6 +147,22 @@ fn fields_always_keeps_run_id_and_rejects_what_it_cannot_serve() {
     assert!(resolve_err(&[("fields", "flags.modified_file_count")]).contains("top-level"));
 }
 
+/// A field that only appears on runs that have it is still a field.
+///
+/// `known_meta_fields` builds its allowlist by serializing a probe `RunMeta`,
+/// and several fields carry `skip_serializing_if = "Option::is_none"`. A probe
+/// left at its defaults omits those, so asking for one was refused as unknown
+/// even on a run that carried it. The probe fills every option to keep the
+/// allowlist honest.
+#[test]
+fn fields_accepts_the_optional_ones_that_only_some_runs_carry() {
+    for optional in ["read_paths", "final_output", "output_request"] {
+        let r = resolve_ok(&[("fields", optional)]);
+        let fields = r.fields.expect("fields set");
+        assert!(fields.contains(optional), "{optional} should be selectable");
+    }
+}
+
 /// A silently ignored parameter is the API smell that produces the worst bug
 /// reports, so each conflicting combination is refused by name.
 #[test]
