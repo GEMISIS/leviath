@@ -405,6 +405,7 @@ pub fn dispatch_tools(
                     stage_inf.output.as_ref(),
                     &state.current_stage,
                     chrono::Utc::now().timestamp(),
+                    metadata.map(|m| std::path::Path::new(&m.workdir)),
                     &mut window,
                 );
                 // A refused submission leaves any earlier one alone: a bad

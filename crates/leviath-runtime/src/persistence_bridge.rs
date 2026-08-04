@@ -33,6 +33,15 @@ pub struct PersistJob {
     /// `(stage_index, serialized GateEvent log)` to write to
     /// `stages/<idx>/taint_audit.json`. `None` ⇒ no audit to persist.
     pub taint_audit: Option<(usize, String)>,
+    /// The run's answer, to write to its `final_output` sidecar. `None` ⇒
+    /// nothing to write this job, either because the run has no answer or
+    /// because the one it has is already on disk.
+    ///
+    /// `meta.json` carries only the descriptor, so this is the sole path by
+    /// which the bytes reach disk. Sent only when it changes: a heartbeat that
+    /// rewrote a quarter-megabyte answer every thirty seconds would be pure
+    /// waste on a long run.
+    pub final_output: Option<String>,
     /// Serialized [`FanOutState`](crate::fanout::FanOutState) for a parent parked
     /// mid fan-out, written to `fanout.json` so the split/merge resumes after a
     /// restart. `None` ⇒ the agent isn't waiting on a fan-out (any stale file is
@@ -221,6 +230,17 @@ async fn write_snapshot(
     let ctx_json =
         serde_json::to_string_pretty(&job.context).expect("ContextSnapshot always serializes");
     write_bytes_atomic(&dir.join("context.json"), ctx_json.as_bytes(), &job.run_id).await;
+
+    // The answer's bytes, beside the descriptor `meta.json` carries. Written
+    // raw, so serving it is a read and `lev result --raw` is a copy.
+    if let Some(content) = &job.final_output {
+        write_bytes_atomic(
+            &dir.join(leviath_core::FINAL_OUTPUT_FILE),
+            content.as_bytes(),
+            &job.run_id,
+        )
+        .await;
+    }
 
     // Per-stage index (names/status), rewritten whole; empty ⇒ agent has no ledger.
     if !job.stages.is_empty() {
@@ -441,6 +461,7 @@ mod tests {
             taint_audit: None,
             fanout: None,
             interactions: None,
+            final_output: None,
         })))
         .unwrap();
         drop(tx); // close so the worker loop ends
@@ -467,6 +488,7 @@ mod tests {
             taint_audit: None,
             fanout: None,
             interactions: None,
+            final_output: None,
         }
     }
 
@@ -800,6 +822,7 @@ mod tests {
                 taint_audit: None,
                 fanout: None,
                 interactions: None,
+                final_output: None,
             },
             "machine-test",
             "world-test",
@@ -833,6 +856,7 @@ mod tests {
                 taint_audit: Some((2, r#"[{"tool_name":"shell"}]"#.to_string())),
                 fanout: None,
                 interactions: None,
+                final_output: None,
             },
             "machine-test",
             "world-test",
@@ -884,6 +908,7 @@ mod tests {
                 taint_audit: None,
                 fanout: None,
                 interactions: None,
+                final_output: None,
             },
             "machine-test",
             "world-test",
@@ -922,6 +947,7 @@ mod tests {
                 taint_audit: None,
                 fanout: None,
                 interactions: None,
+                final_output: None,
             },
             "machine-test",
             "world-test",
@@ -951,6 +977,7 @@ mod tests {
                 taint_audit: None,
                 fanout: None,
                 interactions: None,
+                final_output: None,
             },
             "machine-test",
             "world-test",
@@ -984,6 +1011,7 @@ mod tests {
                 taint_audit: None,
                 fanout: None,
                 interactions: None,
+                final_output: None,
             },
             "machine-test",
             "world-test",

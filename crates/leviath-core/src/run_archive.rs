@@ -1409,12 +1409,15 @@ mod tests {
     #[test]
     fn fold_carries_a_submitted_final_output_through_progress() {
         let mut answered = meta();
-        answered.final_output = Some(crate::output::FinalOutput::new(
-            "renamed two helpers",
-            Some("markdown".to_string()),
-            "summary".to_string(),
-            9,
-        ));
+        answered.final_output = Some(
+            crate::output::FinalOutput::new(
+                "renamed two helpers",
+                Some("markdown".to_string()),
+                "summary".to_string(),
+                9,
+            )
+            .descriptor(),
+        );
         answered.output_request = Some(crate::output::OutputSpec {
             format: Some("a2ui".to_string()),
             ..Default::default()
@@ -1434,7 +1437,9 @@ mod tests {
         ];
         let folded = fold(&records).unwrap();
         let output = folded.meta.final_output.expect("the answer folded through");
-        assert_eq!(output.content, "renamed two helpers");
+        // The descriptor, not the bytes: the answer itself is a sidecar file,
+        // so what folds is the record of it.
+        assert_eq!(output.bytes, "renamed two helpers".len());
         assert_eq!(output.stage, "summary");
         assert_eq!(
             folded.meta.output_request.and_then(|s| s.format).as_deref(),

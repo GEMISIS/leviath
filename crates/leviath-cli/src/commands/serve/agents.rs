@@ -654,7 +654,12 @@ pub(super) async fn agent_result(
         // The answer, when the agent gave one. `output` above is the last
         // stage's log tail, which is what this endpoint served before an agent
         // had any way to say "here is my result".
-        final_output: meta.final_output.map(Into::into),
+        //
+        // Read from the sidecar rather than `meta`, which carries only the
+        // descriptor: this endpoint is the one place that wants the whole thing,
+        // which is exactly why the bytes are not in the file every listing
+        // parses.
+        final_output: runstate::read_final_output(&id).map(Into::into),
         error: meta.error,
         prompt_tokens: meta.prompt_tokens,
         completion_tokens: meta.completion_tokens,
@@ -2609,15 +2614,18 @@ prompt = "Plan the work"
             "agent_result_serves_the_submitted_answer",
             |_d| async move {
                 let run_id = unique_run_id("result-answer");
-                let mut meta = make_run(&run_id);
-                meta.status = RunStatus::Complete;
-                meta.final_output = Some(leviath_core::output::FinalOutput::new(
+                let answer = leviath_core::output::FinalOutput::new(
                     r#"{"root":{"component":"Card"}}"#,
                     Some("a2ui".to_string()),
                     "summary".to_string(),
                     99,
-                ));
+                );
+                let mut meta = make_run(&run_id);
+                meta.status = RunStatus::Complete;
+                // The descriptor goes in `meta.json`; the bytes go beside it.
+                meta.final_output = Some(answer.descriptor());
                 create_run(&meta).unwrap();
+                runstate::write_final_output(&runstate::run_dir(&run_id), &answer.content).unwrap();
                 std::fs::write(
                     runstate::run_dir(&run_id).join("output.log"),
                     "ran some tools\n",

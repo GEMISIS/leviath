@@ -1376,6 +1376,73 @@ fn dispatch_persistence_emits_stage_index_and_drains_io_buffer() {
     assert!(world.get::<StageIoBuffer>(e).unwrap().output.is_empty());
 }
 
+/// The answer's bytes are sent once, not on every heartbeat.
+///
+/// `meta.json` carries only a descriptor, so this is the sole path by which the
+/// content reaches disk - and a run that lives for hours would otherwise rewrite
+/// a quarter-megabyte file every thirty seconds to no effect.
+#[test]
+fn dispatch_persistence_sends_the_answer_once_and_again_when_it_changes() {
+    let (mut world, mut rx) = world_with_persistence();
+    let e = world
+        .spawn((
+            run_metadata(),
+            agent_state(),
+            conv_window(),
+            StageCursor { index: 0 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+            crate::persistence::FinalOutput(leviath_core::output::FinalOutput::new(
+                "the first answer",
+                None,
+                "summary".to_string(),
+                100,
+            )),
+        ))
+        .id();
+
+    run_dispatch_persistence(&mut world);
+    let first = snapshot_job(rx.try_recv().expect("job sent"));
+    assert_eq!(first.final_output.as_deref(), Some("the first answer"));
+    // The descriptor rides in meta either way.
+    assert_eq!(
+        first.meta.final_output.as_ref().map(|d| d.bytes),
+        Some("the first answer".len())
+    );
+
+    // A second tick with the same answer sends no bytes. Backdating the
+    // watermark makes the heartbeat due, which is the case that would otherwise
+    // rewrite the file for no reason.
+    world
+        .get_mut::<PersistWatermark>(e)
+        .expect("watermark present")
+        .backdate(0);
+    run_dispatch_persistence(&mut world);
+    let second = snapshot_job(rx.try_recv().expect("job sent"));
+    assert!(
+        second.final_output.is_none(),
+        "an unchanged answer is not rewritten"
+    );
+    assert!(second.meta.final_output.is_some(), "but is still described");
+
+    // A new submission is written again.
+    world.entity_mut(e).insert(crate::persistence::FinalOutput(
+        leviath_core::output::FinalOutput::new(
+            "the corrected answer",
+            None,
+            "summary".to_string(),
+            200,
+        ),
+    ));
+    world
+        .get_mut::<PersistWatermark>(e)
+        .expect("watermark present")
+        .backdate(0);
+    run_dispatch_persistence(&mut world);
+    let third = snapshot_job(rx.try_recv().expect("job sent"));
+    assert_eq!(third.final_output.as_deref(), Some("the corrected answer"));
+}
+
 #[test]
 fn dispatch_persistence_records_tree_links() {
     use crate::components::{ParentRef, SubAgentChildren};

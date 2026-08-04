@@ -51,7 +51,8 @@ pub use net::{
     is_restricted_addr,
 };
 pub use output::{
-    FinalOutput, MAX_FINAL_OUTPUT_BYTES, OutputSpec, describe_spec, resolve_output_spec,
+    FINAL_OUTPUT_FILE, FinalOutput, FinalOutputDescriptor, MAX_FINAL_OUTPUT_BYTES, OutputSpec,
+    describe_spec, resolve_output_spec,
 };
 pub use panic_payload::panic_message;
 pub use paths::{

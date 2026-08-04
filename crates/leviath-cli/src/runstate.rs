@@ -37,15 +37,20 @@ pub fn write_context_snapshot(run_id: &str, snap: &ContextSnapshot) -> anyhow::R
 /// callers, whose concrete production types
 /// (`ContextSnapshot`/`RunMeta`/`&[StageRecord]`) are provably infallible to
 /// serialize (see the `.expect` sites).
-fn write_json_atomic(path: &std::path::Path, json: &str) -> anyhow::Result<()> {
-    let tmp = path.with_extension("json.tmp");
+/// Write `body` to `path` atomically, readable only by this user.
+///
+/// Not JSON-specific despite where it started: the final-output sidecar is raw
+/// content, and wants the same private-then-rename treatment for the same
+/// reason.
+fn write_private_atomic(path: &std::path::Path, body: &str) -> anyhow::Result<()> {
+    let tmp = path.with_extension("tmp");
     // `write_private`: these files carry the run's full task prompt,
     // conversation and tool output - and `meta.json` carries the webhook
     // signing secret. They were written with a plain `fs::write` at the umask
     // default (typically 0644), protected only by the 0700 on the enclosing run
     // directory. That is one `chmod` away from being readable, and defence in
     // depth is the whole point of a mode on the file itself.
-    leviath_sys::write_private(&tmp, json.as_bytes())?;
+    leviath_sys::write_private(&tmp, body.as_bytes())?;
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
@@ -53,7 +58,7 @@ fn write_json_atomic(path: &std::path::Path, json: &str) -> anyhow::Result<()> {
 fn write_context_snapshot_to(dir: &std::path::Path, snap: &ContextSnapshot) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(snap)
         .expect("infallible: ContextSnapshot always serializes to JSON");
-    write_json_atomic(&dir.join("context.json"), &json)
+    write_private_atomic(&dir.join("context.json"), &json)
 }
 
 /// Read the context snapshot for a run, if present.
@@ -299,12 +304,45 @@ pub fn write_meta(meta: &RunMeta) -> anyhow::Result<()> {
 pub(crate) fn write_meta_to(dir: &std::path::Path, meta: &RunMeta) -> anyhow::Result<()> {
     let json =
         serde_json::to_string_pretty(meta).expect("infallible: RunMeta always serializes to JSON");
-    write_json_atomic(&dir.join("meta.json"), &json)
+    write_private_atomic(&dir.join("meta.json"), &json)
 }
 
 /// Read run metadata for a given run ID.
 pub fn read_meta(run_id: &str) -> anyhow::Result<RunMeta> {
     read_meta_from(&run_dir(run_id))
+}
+
+/// Read a run's final output, content included.
+///
+/// The descriptor in `meta.json` says whether there is one and how big it is;
+/// this fetches the bytes from the sidecar beside it. Returns `None` when the
+/// run produced no answer, or when the sidecar is missing (a run written by a
+/// build that stored the answer inline, or one whose directory was pruned).
+pub fn read_final_output(run_id: &str) -> Option<leviath_core::FinalOutput> {
+    let meta = read_meta(run_id).ok()?;
+    let descriptor = meta.final_output?;
+    let content = std::fs::read_to_string(final_output_path(&run_dir(run_id))).ok()?;
+    Some(leviath_core::FinalOutput {
+        content,
+        format: descriptor.format,
+        stage: descriptor.stage,
+        submitted_at: descriptor.submitted_at,
+        truncated: descriptor.truncated,
+        artifacts: descriptor.artifacts,
+    })
+}
+
+/// Where a run's answer lives, beside its `meta.json`.
+pub fn final_output_path(dir: &std::path::Path) -> PathBuf {
+    dir.join(leviath_core::FINAL_OUTPUT_FILE)
+}
+
+/// Write a run's answer to its sidecar, atomically.
+///
+/// Raw content with no wrapper: serving it is a read, and `lev result --raw` is
+/// a copy. The descriptor in `meta.json` is what says it exists.
+pub fn write_final_output(dir: &std::path::Path, content: &str) -> anyhow::Result<()> {
+    write_private_atomic(&final_output_path(dir), content)
 }
 
 /// Whether an on-disk run status means the run has finished and should be left
@@ -567,7 +605,7 @@ pub fn write_stages_index(run_id: &str, stages: &[StageRecord]) -> anyhow::Resul
 fn write_stages_index_to(dir: &std::path::Path, stages: &[StageRecord]) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(&stages)
         .expect("infallible: StageRecord slice always serializes to JSON");
-    write_json_atomic(&dir.join("stages.json"), &json)
+    write_private_atomic(&dir.join("stages.json"), &json)
 }
 
 /// Read the stages index for a run, or return an empty vec on any error.
@@ -943,7 +981,7 @@ mod tests {
         // Drive the `std::fs::write(&tmp, json)?` error arm: writing the
         // `.json.tmp` sibling into a directory that does not exist fails.
         let path = std::path::Path::new("/nonexistent/leviath/runstate-cov/out.json");
-        let result = write_json_atomic(path, "{}");
+        let result = write_private_atomic(path, "{}");
         assert!(result.is_err());
         assert!(!path.exists());
     }

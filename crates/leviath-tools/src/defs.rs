@@ -46,7 +46,9 @@ pub fn submit_output_description(described: &str) -> String {
                 person reading the run, a parent agent, the API. Nothing else you write is \
                 returned to them, so put the answer itself here rather than a pointer to it. \
                 Call this once, when your work is done; calling it again replaces what you \
-                submitted.";
+                submitted.\n\nYour answer is one response, so it cannot hold a large dataset or a \
+                very long document. Write those to files as you go, then name them in \
+                `artifacts` and describe them here.";
     match described.is_empty() {
         true => base.to_string(),
         false => format!("{base}\n\n{described}"),
@@ -354,6 +356,11 @@ impl BuiltinTools {
                         "content": {
                             "type": "string",
                             "description": "Your final answer, in full."
+                        },
+                        "artifacts": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Files you produced that the caller should read, as paths relative to the working directory. Use this for anything too large to put in the answer: a dataset, a long report, a generated file. Name the file here rather than only mentioning it in prose."
                         }
                     },
                     "required": ["content"]

@@ -56,6 +56,7 @@ fn a_submission_is_recorded_verbatim_and_mirrored_into_the_region() {
         Some(&spec(Some("markdown"), None)),
         "summary",
         1234,
+        None,
         &mut w,
     );
     let output = output.expect("the submission was accepted");
@@ -82,6 +83,7 @@ fn an_unrecognized_format_is_carried_through_without_inspection() {
         Some(&spec(Some("a2ui"), None)),
         "summary",
         0,
+        None,
         &mut w,
     );
     let output = output.expect("accepted");
@@ -99,6 +101,7 @@ fn a_format_with_no_schema_never_parses_the_content() {
         Some(&spec(Some("xml"), None)),
         "summary",
         0,
+        None,
         &mut w,
     );
     assert_eq!(
@@ -116,6 +119,7 @@ fn format_json_alone_validates_nothing() {
         Some(&spec(Some("json"), None)),
         "summary",
         0,
+        None,
         &mut w,
     );
     assert!(output.is_some(), "no schema means no check");
@@ -124,7 +128,14 @@ fn format_json_alone_validates_nothing() {
 #[test]
 fn no_spec_at_all_still_records_an_answer() {
     let mut w = win();
-    let (_, output) = handle_output_tool(&json!({"content": "done"}), None, "summary", 0, &mut w);
+    let (_, output) = handle_output_tool(
+        &json!({"content": "done"}),
+        None,
+        "summary",
+        0,
+        None,
+        &mut w,
+    );
     let output = output.expect("accepted");
     assert_eq!(output.content, "done");
     assert!(output.format.is_none());
@@ -143,6 +154,7 @@ fn a_submission_matching_its_schema_is_accepted() {
         Some(&spec(Some("json"), Some(schema))),
         "summary",
         0,
+        None,
         &mut w,
     );
     assert!(output.is_some());
@@ -161,6 +173,7 @@ fn a_submission_violating_its_schema_is_refused_and_records_nothing() {
         Some(&spec(Some("json"), Some(schema))),
         "summary",
         0,
+        None,
         &mut w,
     );
     assert!(output.is_none(), "nothing recorded");
@@ -182,6 +195,7 @@ fn content_that_is_not_json_fails_a_schema_check_with_a_readable_reason() {
         Some(&spec(None, Some(json!({"type": "object"})))),
         "summary",
         0,
+        None,
         &mut w,
     );
     assert!(output.is_none());
@@ -200,6 +214,7 @@ fn an_uncompilable_schema_records_the_submission_unchecked() {
         Some(&spec(None, Some(json!({"type": "strng"})))),
         "summary",
         0,
+        None,
         &mut w,
     );
     assert!(output.is_some(), "a broken schema does not block the run");
@@ -208,7 +223,7 @@ fn an_uncompilable_schema_records_the_submission_unchecked() {
 #[test]
 fn a_missing_content_argument_is_refused() {
     let mut w = win();
-    let (message, output) = handle_output_tool(&json!({}), None, "summary", 0, &mut w);
+    let (message, output) = handle_output_tool(&json!({}), None, "summary", 0, None, &mut w);
     assert!(output.is_none());
     assert!(message.starts_with("[error]"), "{message}");
     assert!(message.contains("content"), "{message}");
@@ -218,8 +233,14 @@ fn a_missing_content_argument_is_refused() {
 fn a_blank_submission_is_refused() {
     let mut w = win();
     for blank in ["", "   ", "\n\t "] {
-        let (message, output) =
-            handle_output_tool(&json!({ "content": blank }), None, "summary", 0, &mut w);
+        let (message, output) = handle_output_tool(
+            &json!({ "content": blank }),
+            None,
+            "summary",
+            0,
+            None,
+            &mut w,
+        );
         assert!(output.is_none(), "{blank:?} should not count as an answer");
         assert!(message.starts_with("[error]"), "{message}");
     }
@@ -229,7 +250,14 @@ fn a_blank_submission_is_refused() {
 fn an_oversized_submission_is_truncated_and_the_model_is_told() {
     let mut w = win();
     let huge = "x".repeat(leviath_core::output::MAX_FINAL_OUTPUT_BYTES + 10);
-    let (ack, output) = handle_output_tool(&json!({ "content": huge }), None, "summary", 0, &mut w);
+    let (ack, output) = handle_output_tool(
+        &json!({ "content": huge }),
+        None,
+        "summary",
+        0,
+        None,
+        &mut w,
+    );
     let output = output.expect("accepted, just shortened");
     assert!(output.truncated);
     assert_eq!(
@@ -244,9 +272,23 @@ fn an_oversized_submission_is_truncated_and_the_model_is_told() {
 #[test]
 fn a_second_submission_replaces_the_first() {
     let mut w = win();
-    let (_, first) = handle_output_tool(&json!({"content": "draft"}), None, "summary", 1, &mut w);
+    let (_, first) = handle_output_tool(
+        &json!({"content": "draft"}),
+        None,
+        "summary",
+        1,
+        None,
+        &mut w,
+    );
     assert_eq!(first.expect("accepted").content, "draft");
-    let (_, second) = handle_output_tool(&json!({"content": "final"}), None, "summary", 2, &mut w);
+    let (_, second) = handle_output_tool(
+        &json!({"content": "final"}),
+        None,
+        "summary",
+        2,
+        None,
+        &mut w,
+    );
     assert_eq!(second.expect("accepted").content, "final");
     assert_eq!(region_text(&w), "final", "the region holds one answer");
 }
@@ -257,8 +299,92 @@ fn a_second_submission_replaces_the_first() {
 fn a_window_without_the_region_still_records_the_output() {
     let mut bare = ContextWindow::new(10_000);
     bare.add_region(Region::new("task".to_string(), RegionKind::Pinned, 1_000));
-    let (_, output) =
-        handle_output_tool(&json!({"content": "done"}), None, "summary", 0, &mut bare);
+    let (_, output) = handle_output_tool(
+        &json!({"content": "done"}),
+        None,
+        "summary",
+        0,
+        None,
+        &mut bare,
+    );
     assert_eq!(output.expect("accepted").content, "done");
     assert!(bare.get_region(FINAL_OUTPUT_REGION).is_none());
+}
+
+// ── Artifacts ────────────────────────────────────────────────────────────────
+
+/// An answer is one model response, so anything larger is a file. The artifact
+/// list is how a consumer finds it without parsing prose.
+#[test]
+fn artifacts_inside_the_workdir_are_recorded() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("results.csv"), "a,b\n1,2\n").expect("write");
+    let mut w = win();
+    let (_, output) = handle_output_tool(
+        &json!({
+            "content": "2 rows gathered, written to results.csv",
+            "artifacts": ["results.csv", "notes/summary.md"],
+        }),
+        None,
+        "present",
+        0,
+        Some(dir.path()),
+        &mut w,
+    );
+    let output = output.expect("accepted");
+    // A file that does not exist yet is fine: the check is where a path lands,
+    // not whether the agent has finished writing it.
+    assert_eq!(output.artifacts, vec!["results.csv", "notes/summary.md"]);
+}
+
+/// A path that escapes the workdir is refused outright rather than dropped from
+/// the list, which would send the caller looking for a file that was named and
+/// then quietly forgotten.
+#[test]
+fn an_artifact_outside_the_workdir_refuses_the_whole_submission() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut w = win();
+    let (message, output) = handle_output_tool(
+        &json!({ "content": "done", "artifacts": ["../../etc/passwd"] }),
+        None,
+        "present",
+        0,
+        Some(dir.path()),
+        &mut w,
+    );
+    assert!(output.is_none(), "nothing recorded");
+    assert!(message.starts_with("[error]"), "{message}");
+    assert!(message.contains("../../etc/passwd"), "{message}");
+}
+
+#[test]
+fn no_artifacts_argument_records_an_empty_list() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut w = win();
+    let (_, output) = handle_output_tool(
+        &json!({ "content": "done" }),
+        None,
+        "present",
+        0,
+        Some(dir.path()),
+        &mut w,
+    );
+    assert!(output.expect("accepted").artifacts.is_empty());
+}
+
+/// Unreachable for a real run, since every one carries its metadata. Loud
+/// rather than silent if it ever is.
+#[test]
+fn artifacts_with_no_workdir_are_refused() {
+    let mut w = win();
+    let (message, output) = handle_output_tool(
+        &json!({ "content": "done", "artifacts": ["results.csv"] }),
+        None,
+        "present",
+        0,
+        None,
+        &mut w,
+    );
+    assert!(output.is_none());
+    assert!(message.contains("working directory"), "{message}");
 }

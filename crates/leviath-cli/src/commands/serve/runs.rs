@@ -345,12 +345,7 @@ fn known_meta_fields() -> HashSet<String> {
         0,
     );
     probe.read_paths = Some(Default::default());
-    probe.final_output = Some(leviath_core::output::FinalOutput::new(
-        "",
-        None,
-        String::new(),
-        0,
-    ));
+    probe.final_output = Some(Default::default());
     probe.output_request = Some(Default::default());
     // `RunMeta` is a struct, so this is always an object; `as_object` keeps
     // that assumption in one place instead of adding a match arm nothing can

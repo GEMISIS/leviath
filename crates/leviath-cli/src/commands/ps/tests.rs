@@ -775,12 +775,10 @@ async fn send_list_all_survives_an_unreachable_daemon() {
 #[test]
 fn offline_runs_report_whether_an_answer_is_waiting() {
     let mut answered = on_disk("run-answered", RunStatus::Complete, 100);
-    answered.final_output = Some(leviath_core::output::FinalOutput::new(
-        "the answer",
-        None,
-        "summary".to_string(),
-        0,
-    ));
+    answered.final_output = Some(
+        leviath_core::output::FinalOutput::new("the answer", None, "summary".to_string(), 0)
+            .descriptor(),
+    );
     let silent = on_disk("run-silent", RunStatus::Complete, 100);
 
     let rows = offline_runs(vec![answered, silent], Some(&Default::default()), 200);

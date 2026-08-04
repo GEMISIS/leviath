@@ -330,7 +330,7 @@ pub fn build_run_meta(
         flags,
         yolo: md.unattended,
         read_paths: md.read_paths,
-        final_output: final_output.map(|o| o.0.clone()),
+        final_output: final_output.map(|o| o.0.descriptor()),
         output_request: md.output_request.clone(),
     }
 }
@@ -775,9 +775,11 @@ mod tests {
             Some(&submitted),
         );
         let carried = meta.final_output.expect("the submission reached meta.json");
+        // The descriptor, not the bytes: `meta.json` is parsed for every run on
+        // every listing, so the answer itself lives in a sidecar beside it.
         assert_eq!(
-            carried.content,
-            "Renamed two helpers and updated their callers."
+            carried.bytes,
+            "Renamed two helpers and updated their callers.".len()
         );
         assert_eq!(carried.format.as_deref(), Some("markdown"));
         assert_eq!(carried.stage, "summary");

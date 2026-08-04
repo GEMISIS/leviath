@@ -57,6 +57,7 @@ pub fn handle_output_tool(
     spec: Option<&OutputSpec>,
     stage: &str,
     now: i64,
+    workdir: Option<&std::path::Path>,
     window: &mut ContextWindow,
 ) -> (String, Option<FinalOutput>) {
     let Some(content) = args.get("content").and_then(|v| v.as_str()) else {
@@ -90,12 +91,21 @@ pub fn handle_output_tool(
         }
     }
 
+    // Refused rather than silently dropped: an answer whose artifact list
+    // quietly lost an entry sends the caller looking for a file that was named
+    // and then forgotten.
+    let artifacts = match resolve_artifacts(args, workdir) {
+        Ok(paths) => paths,
+        Err(message) => return (message, None),
+    };
+
     let output = FinalOutput::new(
         content,
         spec.and_then(|s| s.format.clone()),
         stage.to_string(),
         now,
-    );
+    )
+    .with_artifacts(artifacts);
     mirror_into_region(window, &output.content);
 
     let mut ack = "Recorded as this run's final output.".to_string();
@@ -107,6 +117,52 @@ pub fn handle_output_tool(
         ));
     }
     (ack, Some(output))
+}
+
+/// Split the `artifacts` argument into paths that resolve inside `workdir` and
+/// paths that do not.
+///
+/// The same containment rule the files endpoint enforces when serving one, so a
+/// path that survives here is a path a consumer can actually fetch. A missing
+/// file is fine: an agent may name something it is about to finish writing, and
+/// `resolves_within` checks where a path lands rather than whether it exists.
+fn resolve_artifacts(
+    args: &serde_json::Value,
+    workdir: Option<&std::path::Path>,
+) -> Result<Vec<String>, String> {
+    let listed: Vec<&str> = args
+        .get("artifacts")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .filter(|p| !p.trim().is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if listed.is_empty() {
+        return Ok(Vec::new());
+    }
+    // No workdir means nothing to resolve against, so nothing can be verified.
+    // Unreachable for a real run (every one carries its metadata); loud rather
+    // than silent if it ever is.
+    let Some(workdir) = workdir else {
+        return Err(
+            "[error] cannot record artifacts: this run has no working directory to resolve \
+             them against"
+                .to_string(),
+        );
+    };
+    let (kept, rejected): (Vec<&str>, Vec<&str>) = listed
+        .into_iter()
+        .partition(|p| leviath_core::resolves_within(&workdir.join(p), workdir));
+    match rejected.is_empty() {
+        true => Ok(kept.into_iter().map(str::to_string).collect()),
+        false => Err(format!(
+            "[error] these artifact paths do not resolve inside the working directory: {}",
+            rejected.join(", ")
+        )),
+    }
 }
 
 /// Mirror the submission into the pinned `final_output` region, replacing
