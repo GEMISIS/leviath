@@ -267,6 +267,7 @@ pub fn lint_manifest(content: &str, blueprint: &Blueprint, env: &LintEnv) -> Vec
     findings.extend(lint_safe_commands(blueprint, env));
     findings.extend(lint_held_checkpoints(blueprint));
     findings.extend(lint_graph(blueprint));
+    findings.extend(lint_output_reachable(blueprint));
 
     let agent_permissions = blueprint.agent_tool_permissions();
 
@@ -277,6 +278,7 @@ pub fn lint_manifest(content: &str, blueprint: &Blueprint, env: &LintEnv) -> Vec
         findings.extend(lint_blocking_tools(stage));
         findings.extend(lint_tool_policies(stage, &agent_permissions));
         findings.extend(lint_models(stage, env));
+        findings.extend(lint_output_stage(stage));
     }
 
     // Worst first, stable within a severity so the order a check ran in is the
@@ -508,6 +510,147 @@ fn lint_blocking_tools(stage: &leviath_core::Stage) -> Vec<LintFinding> {
             )
         })
         .collect()
+}
+
+/// A stage's own output declarations: a demand it cannot meet, a shape nothing
+/// will read, or a reporting stage that can also change the workspace.
+fn lint_output_stage(stage: &leviath_core::Stage) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    let grants_submit = stage
+        .available_tools
+        .iter()
+        .any(|t| canonical_tool_name(t) == leviath_core::blueprint::SUBMIT_OUTPUT_TOOL);
+
+    // `Stage::validate` already refuses this outright, so reaching it here means
+    // the manifest never loaded. Reported anyway because `lev validate` runs the
+    // linter over a blueprint it *did* load, and a future path that relaxes the
+    // hard error should still surface it.
+    if stage.require_output && !grants_submit {
+        findings.push(
+            LintFinding::new(
+                LintSeverity::Error,
+                "output-missing-submit-tool",
+                format!(
+                    "must produce a final output but does not grant '{}'",
+                    leviath_core::blueprint::SUBMIT_OUTPUT_TOOL
+                ),
+            )
+            .in_stage(&stage.name)
+            .with_fix(format!(
+                "add '{}' to available_tools, or use mode = \"output\", which grants it",
+                leviath_core::blueprint::SUBMIT_OUTPUT_TOOL
+            )),
+        );
+    }
+
+    // A declared shape nobody is obliged to produce is a wish, not a contract:
+    // the tool description carries it, and the agent may still finish without
+    // calling the tool at all.
+    if stage.output.is_some() && !stage.require_output {
+        findings.push(
+            LintFinding::new(
+                LintSeverity::Warning,
+                "output-shape-not-required",
+                "declares an output shape but is not required to produce one, so the run may \
+                 finish with nothing"
+                    .to_string(),
+            )
+            .in_stage(&stage.name)
+            .with_fix("set require_output = true, or move the shape to the stage that submits"),
+        );
+    }
+
+    // An output stage summarizes work; one that can also change files invites
+    // the model to keep working where it was meant to report.
+    if stage.mode == StageMode::Output {
+        let modifying: Vec<&String> = stage
+            .available_tools
+            .iter()
+            .filter(|t| leviath_core::blueprint::MODIFYING_TOOLS.contains(&canonical_tool_name(t)))
+            .collect();
+        for tool in modifying {
+            findings.push(
+                LintFinding::new(
+                    LintSeverity::Warning,
+                    "output-stage-can-modify",
+                    format!("is an output stage but grants '{tool}', which changes the workspace"),
+                )
+                .in_stage(&stage.name)
+                .with_fix(
+                    "drop the tool: an output stage reports what happened, and work done here \
+                     lands after the review that was meant to check it",
+                ),
+            );
+        }
+    }
+    findings
+}
+
+/// Output stages nothing can reach, and the upstream `allow_complete` that is
+/// the usual reason.
+///
+/// The second half is the one that fails quietly. `allow_complete` offers the
+/// model a "DONE" it may pick instead of routing onward, and it is appended even
+/// to a stage's custom `transition_prompt` - so a stage can offer an exit its own
+/// prompt never mentions. A run that takes it ends with no answer and looks
+/// exactly like success.
+fn lint_output_reachable(blueprint: &Blueprint) -> Vec<LintFinding> {
+    let outputs: Vec<&leviath_core::Stage> = blueprint
+        .stages
+        .iter()
+        .filter(|s| s.mode == StageMode::Output)
+        .collect();
+    if outputs.is_empty() {
+        return Vec::new();
+    }
+    let mut findings = Vec::new();
+
+    for output in &outputs {
+        let reached = blueprint.stages.iter().any(|s| {
+            s.name != output.name
+                && s.transitions
+                    .iter()
+                    .flat_map(|edges| edges.values())
+                    .any(|e| e.target == output.name)
+        });
+        let is_entry = blueprint.entry_stage.as_deref() == Some(output.name.as_str())
+            || blueprint.stages.first().map(|s| s.name.as_str()) == Some(output.name.as_str());
+        if !reached && !is_entry {
+            findings.push(
+                LintFinding::new(
+                    LintSeverity::Error,
+                    "output-unreachable",
+                    "is an output stage no edge routes to, so the run can never produce one"
+                        .to_string(),
+                )
+                .in_stage(&output.name)
+                .with_fix(format!(
+                    "add a transition to '{}' from whichever stage finishes the work",
+                    output.name
+                )),
+            );
+        }
+    }
+
+    for stage in &blueprint.stages {
+        if stage.allow_complete && stage.mode != StageMode::Output {
+            findings.push(
+                LintFinding::new(
+                    LintSeverity::Warning,
+                    "allow-complete-skips-output",
+                    "may end the run itself, so the model can finish here and never reach the \
+                     output stage"
+                        .to_string(),
+                )
+                .in_stage(&stage.name)
+                .with_fix(
+                    "drop allow_complete and route to the output stage instead - the run then \
+                     still explains what it did",
+                ),
+            );
+        }
+    }
+    findings
 }
 
 /// Permissions that do not land on the tool they look like they land on, and

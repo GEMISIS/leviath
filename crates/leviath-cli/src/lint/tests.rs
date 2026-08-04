@@ -1325,3 +1325,136 @@ available_tools = ["read_file", "bash", "ask_user_text", "raed_file"]
     assert_eq!(findings.iter().filter(|f| f.is_error()).count(), 1);
     assert_eq!(findings.len(), 6, "{:?}", codes(&findings));
 }
+
+// ─── Final-output stages ──────────────────────────────────────────────────────
+
+/// The env every output fixture needs: `submit_output` is a real built-in, so
+/// the unknown-tool check must not also fire and drown the finding under test.
+fn output_env() -> LintEnv {
+    LintEnv {
+        known_tools: known_tools(&["read_file", "write_file", "edit_file", "submit_output"]),
+        ..LintEnv::default()
+    }
+}
+
+const REACHABLE_OUTPUT: &str = r#"
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+description = "Main"
+max_iterations = 10
+available_tools = ["read_file"]
+
+[stages.main.transitions.summary]
+hint = "done"
+
+[stages.summary]
+mode = "output"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+description = "Report"
+max_iterations = 4
+
+[stages.summary.transitions]
+"#;
+
+#[test]
+fn a_reachable_output_stage_reports_nothing() {
+    let findings = lint(&manifest(REACHABLE_OUTPUT), &output_env());
+    assert!(findings.is_empty(), "{:?}", codes(&findings));
+}
+
+/// An output stage nothing routes to means the run can never produce one - and
+/// the blueprint still validates, because the graph is otherwise well-formed.
+#[test]
+fn an_output_stage_no_edge_reaches_is_an_error() {
+    let toml = REACHABLE_OUTPUT.replace("[stages.main.transitions.summary]\nhint = \"done\"\n", "");
+    let findings = lint(&manifest(&toml), &output_env());
+    let unreachable = with_code(&findings, "output-unreachable");
+    assert_eq!(unreachable.len(), 1, "{:?}", codes(&findings));
+    assert_eq!(unreachable[0].severity, LintSeverity::Error);
+}
+
+/// The quiet one. `allow_complete` offers the model a DONE it may pick instead
+/// of routing onward - and it is appended even to a custom transition_prompt,
+/// so a stage can offer an exit its own prompt never mentions.
+#[test]
+fn an_upstream_allow_complete_that_could_skip_the_output_stage_is_flagged() {
+    let toml = REACHABLE_OUTPUT.replace(
+        "available_tools = [\"read_file\"]\n",
+        "available_tools = [\"read_file\"]\nallow_complete = true\n",
+    );
+    let findings = lint(&manifest(&toml), &output_env());
+    let skipped = with_code(&findings, "allow-complete-skips-output");
+    assert_eq!(skipped.len(), 1, "{:?}", codes(&findings));
+    assert_eq!(skipped[0].stage.as_deref(), Some("main"));
+}
+
+/// The output stage's own `allow_complete` (set for it by the mode) is the
+/// point, not a defect.
+#[test]
+fn the_output_stages_own_allow_complete_is_not_flagged() {
+    let findings = lint(&manifest(REACHABLE_OUTPUT), &output_env());
+    assert!(with_code(&findings, "allow-complete-skips-output").is_empty());
+}
+
+/// A blueprint with no output stage at all is not nagged: plenty of agents
+/// legitimately produce files and nothing else.
+#[test]
+fn a_blueprint_with_no_output_stage_is_left_alone() {
+    let toml = CLEAN_STAGE.replace(
+        "available_tools = [\"read_file\"]\n",
+        "available_tools = [\"read_file\"]\nallow_complete = true\n",
+    );
+    let findings = lint(&manifest(&toml), &LintEnv::default());
+    assert!(with_code(&findings, "allow-complete-skips-output").is_empty());
+    assert!(with_code(&findings, "output-unreachable").is_empty());
+}
+
+/// An output stage that can also write files invites the model to keep working
+/// where it was meant to report.
+#[test]
+fn an_output_stage_that_can_modify_files_is_flagged() {
+    let toml = REACHABLE_OUTPUT.replace(
+        "description = \"Report\"",
+        "description = \"Report\"\navailable_tools = [\"write_file\"]",
+    );
+    let findings = lint(&manifest(&toml), &output_env());
+    let modifies = with_code(&findings, "output-stage-can-modify");
+    assert_eq!(modifies.len(), 1, "{:?}", codes(&findings));
+    assert_eq!(modifies[0].stage.as_deref(), Some("summary"));
+}
+
+/// A declared shape nobody is obliged to produce is a wish, not a contract.
+#[test]
+fn a_declared_shape_without_require_output_is_flagged() {
+    let toml = CLEAN_STAGE.to_string() + "\n[stages.main.output]\nformat = \"a2ui\"\n";
+    let findings = lint(&manifest(&toml), &output_env());
+    let unrequired = with_code(&findings, "output-shape-not-required");
+    assert_eq!(unrequired.len(), 1, "{:?}", codes(&findings));
+}
+
+/// The same shape on a stage that must submit is exactly right.
+#[test]
+fn a_declared_shape_on_a_requiring_stage_reports_nothing() {
+    let toml = REACHABLE_OUTPUT.to_string()
+        + "\n[stages.summary.output]\nformat = \"a2ui\"\ninstructions = \"one card per finding\"\n";
+    let findings = lint(&manifest(&toml), &output_env());
+    assert!(findings.is_empty(), "{:?}", codes(&findings));
+}
+
+/// `require_output` by hand, without the tool. The manifest parser's hard error
+/// normally catches this first; the check exists so `lev validate` still says
+/// something useful if a blueprint reaches it another way.
+#[test]
+fn requiring_an_output_without_the_submit_tool_is_an_error() {
+    let mut stage = leviath_core::Stage::new(
+        "summary".to_string(),
+        leviath_core::blueprint::ModelConfig::new("anthropic".to_string(), "m".to_string()),
+    );
+    stage.available_tools = vec!["read_file".to_string()];
+    stage.require_output = true;
+    let findings = lint_output_stage(&stage);
+    let missing = with_code(&findings, "output-missing-submit-tool");
+    assert_eq!(missing.len(), 1, "{:?}", codes(&findings));
+    assert_eq!(missing[0].severity, LintSeverity::Error);
+}
