@@ -9488,3 +9488,215 @@ fn stage_setup_from_demands_an_output_even_with_no_declared_shape() {
     .expect("the demand stands on its own");
     assert!(prompt.contains("submit_output"), "{prompt}");
 }
+
+// ── Required-output gate ─────────────────────────────────────────────────────
+
+/// A blueprint whose single stage owes a final output.
+fn owing_bp(max_revisits: Option<usize>) -> AgentBlueprint {
+    let mut stage = stage_named("summary", None, true, max_revisits);
+    stage.available_tools = vec![leviath_tools::SUBMIT_OUTPUT_TOOL.to_string()];
+    stage.require_output = true;
+    let layout = leviath_core::layout::ContextLayout::new(vec![], 10_000);
+    AgentBlueprint(leviath_core::Blueprint::new(
+        "t".to_string(),
+        "d".to_string(),
+        vec![stage],
+        layout,
+    ))
+}
+
+fn owing_state() -> AgentState {
+    let mut s = agent_state();
+    s.current_stage = "summary".to_string();
+    s
+}
+
+fn conversation_window() -> ContextWindow {
+    let mut w = ContextWindow::new(100_000);
+    w.add_region(Region::new(
+        "conversation".to_string(),
+        RegionKind::Clearable,
+        10_000,
+    ));
+    w
+}
+
+fn submitted_in(stage: &str) -> crate::persistence::FinalOutput {
+    crate::persistence::FinalOutput(leviath_core::output::FinalOutput::new(
+        "the answer",
+        None,
+        stage.to_string(),
+        0,
+    ))
+}
+
+fn run_require_output(world: &mut World) {
+    let mut s = Schedule::default();
+    s.add_systems(require_final_output);
+    s.run(world);
+}
+
+#[test]
+fn a_stage_that_owes_an_output_and_gave_none_is_nudged_and_re_run() {
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            owing_bp(None),
+            StageCursor { index: 0 },
+            owing_state(),
+            conversation_window(),
+            ResolveTransition,
+        ))
+        .id();
+    run_require_output(&mut world);
+    assert!(world.get::<ReadyToInfer>(e).is_some(), "sent back to work");
+    assert!(world.get::<ResolveTransition>(e).is_none(), "not advancing");
+    assert_eq!(world.get::<OutputReentries>(e).expect("counted").0, 1);
+    assert!(
+        world
+            .get::<ContextWindow>(e)
+            .expect("window")
+            .get_region("conversation")
+            .expect("region")
+            .current_tokens
+            > 0,
+        "the nudge reached the model"
+    );
+}
+
+#[test]
+fn a_stage_that_submitted_transitions_untouched() {
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            owing_bp(None),
+            StageCursor { index: 0 },
+            owing_state(),
+            conversation_window(),
+            ResolveTransition,
+            submitted_in("summary"),
+        ))
+        .id();
+    run_require_output(&mut world);
+    assert!(world.get::<ResolveTransition>(e).is_some());
+    assert!(world.get::<OutputReentries>(e).is_none());
+}
+
+/// An answer submitted by an earlier stage does not discharge this stage's
+/// obligation, or a blueprint whose worker submits would let its summary stage
+/// coast on the worker's answer.
+#[test]
+fn an_output_from_an_earlier_stage_does_not_satisfy_this_one() {
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            owing_bp(None),
+            StageCursor { index: 0 },
+            owing_state(),
+            conversation_window(),
+            ResolveTransition,
+            submitted_in("some_earlier_stage"),
+        ))
+        .id();
+    run_require_output(&mut world);
+    assert!(world.get::<ReadyToInfer>(e).is_some(), "still owes its own");
+}
+
+#[test]
+fn a_stage_that_owes_nothing_is_never_held() {
+    let mut world = World::new();
+    let mut bp = owing_bp(None);
+    bp.0.stages[0].require_output = false;
+    let e = world
+        .spawn((
+            bp,
+            StageCursor { index: 0 },
+            owing_state(),
+            conversation_window(),
+            ResolveTransition,
+        ))
+        .id();
+    run_require_output(&mut world);
+    assert!(world.get::<ResolveTransition>(e).is_some());
+}
+
+/// A missing output never strands a run. When the budget is spent the
+/// transition proceeds and the run says so, the way a forced edge gate does.
+#[test]
+fn an_exhausted_budget_proceeds_and_records_that_it_was_forced() {
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            owing_bp(Some(2)),
+            StageCursor { index: 0 },
+            owing_state(),
+            conversation_window(),
+            ResolveTransition,
+            OutputReentries(2),
+            crate::persistence::RunOutcomeFlags::default(),
+        ))
+        .id();
+    run_require_output(&mut world);
+    assert!(
+        world.get::<ResolveTransition>(e).is_some(),
+        "the run finishes rather than hanging"
+    );
+    assert_eq!(
+        world
+            .get::<crate::persistence::RunOutcomeFlags>(e)
+            .expect("flags")
+            .0
+            .output_forced,
+        1,
+        "and the run explains itself afterwards"
+    );
+}
+
+/// An agent that already failed should follow its error edge, not be told to
+/// summarise.
+#[test]
+fn an_errored_or_capped_stage_is_left_to_its_own_transition() {
+    for outcome in [
+        StageOutcome::Errored("boom".to_string()),
+        StageOutcome::MaxIterations,
+    ] {
+        let mut world = World::new();
+        let e = world
+            .spawn((
+                owing_bp(None),
+                StageCursor { index: 0 },
+                owing_state(),
+                conversation_window(),
+                ResolveTransition,
+                outcome,
+            ))
+            .id();
+        run_require_output(&mut world);
+        assert!(world.get::<ResolveTransition>(e).is_some());
+        assert!(world.get::<OutputReentries>(e).is_none());
+    }
+}
+
+/// Entering a new stage re-arms the gate: each stage owes its own output and
+/// gets its own budget of attempts.
+#[test]
+fn entering_a_stage_clears_the_output_reentry_count() {
+    let mut world = World::new();
+    let bp = owing_bp(None);
+    let setup = stage_setup_from(&bp.0.stages[0], hints(true), Default::default(), None);
+    let e = world.spawn((OutputReentries(3),)).id();
+    let inf = StageInference {
+        provider_name: "p".to_string(),
+        model: "m".to_string(),
+        tools: vec![],
+        tool_filter: None,
+        fallbacks: vec![],
+        output: None,
+    };
+    {
+        let mut commands = world.commands();
+        attach_stage_components(commands.entity(e), inf, &setup, 0, "summary".to_string());
+    }
+    world.flush();
+    assert!(world.get::<OutputReentries>(e).is_none());
+}
