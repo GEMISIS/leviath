@@ -111,7 +111,12 @@ pub enum ServerEvent {
         agent_id: String,
         run_id: String,
         status: String,
+        /// The run's *error*, if it failed. Named `result` since before a run
+        /// could produce one; kept for the consumers that read it.
         result: Option<String>,
+        /// What the run handed back. This is the answer.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        final_output: Option<FinalOutputResp>,
     },
     Tokens {
         agent_id: String,
@@ -434,6 +439,50 @@ pub(super) struct SpawnAgentReq {
     /// Optional shared secret; when set, completion webhooks carry an
     /// `X-Leviath-Signature: sha256=<hex>` HMAC of the body keyed on this secret.
     pub(super) callback_secret: Option<String>,
+    /// Ask for the run's final output in a particular shape, overriding what the
+    /// blueprint declares. Any label works - `markdown`, `xml`, `a2ui`, a media
+    /// type, your own - because nothing converts between shapes: the label and
+    /// instructions are handed to the model, which produces the bytes.
+    pub(super) output_format: Option<String>,
+    /// Extra guidance about that shape. This is how an unusual format gets
+    /// explained to the model.
+    pub(super) output_instructions: Option<String>,
+    /// A JSON Schema the final output must satisfy. The only thing that ever
+    /// inspects the answer's contents, and only because you asked: a submission
+    /// that fails is refused back to the agent to correct.
+    ///
+    /// Naming `output_format` without this drops a schema the blueprint
+    /// declared, since a check written for one shape says nothing about another.
+    pub(super) output_schema: Option<serde_json::Value>,
+}
+
+/// A run's final output as the API serves it.
+///
+/// `content` is exactly what the agent submitted - nothing re-serializes or
+/// reformats it - and `format` is the label it was asked for. A UI that renders
+/// a2ui differently from markdown matches on that string; the server never does.
+#[derive(Serialize, Debug, Clone)]
+pub struct FinalOutputResp {
+    pub content: String,
+    pub format: Option<String>,
+    /// The stage that produced it.
+    pub stage: String,
+    /// Unix seconds at submission.
+    pub submitted_at: i64,
+    /// Whether the answer hit the size cap and was cut short.
+    pub truncated: bool,
+}
+
+impl From<leviath_core::output::FinalOutput> for FinalOutputResp {
+    fn from(o: leviath_core::output::FinalOutput) -> Self {
+        Self {
+            content: o.content,
+            format: o.format,
+            stage: o.stage,
+            submitted_at: o.submitted_at,
+            truncated: o.truncated,
+        }
+    }
 }
 
 #[derive(Serialize, Debug)]
@@ -474,7 +523,13 @@ pub(super) fn status_matches(status: &crate::runstate::RunStatus, filter: &str) 
 pub(super) struct AgentResultResp {
     pub(super) run_id: String,
     pub(super) status: String,
+    /// The tail of the last stage's log. Kept as-is: it predates
+    /// `final_output`, callers depend on it, and it answers a different
+    /// question - what the run *did*, rather than what it concluded.
     pub(super) output: String,
+    /// What the agent handed back, when it submitted anything. This is the
+    /// run's answer; prefer it over `output` when present.
+    pub(super) final_output: Option<FinalOutputResp>,
     pub(super) error: Option<String>,
     pub(super) prompt_tokens: usize,
     pub(super) completion_tokens: usize,
@@ -1006,6 +1061,7 @@ mod tests {
             run_id: "run-123".to_string(),
             status: "complete".to_string(),
             result: Some("success".to_string()),
+            final_output: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"type\":\"agent_completed\""));
@@ -1247,6 +1303,7 @@ mod tests {
                     run_id: "r6".to_string(),
                     status: "complete".to_string(),
                     result: None,
+                    final_output: None,
                 },
                 "r6",
             ),

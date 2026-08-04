@@ -433,6 +433,7 @@ mod tests {
                 run_id: "run-match".to_string(),
                 status: "complete".to_string(),
                 result: None,
+                final_output: None,
             },
             ServerEvent::Tokens {
                 agent_id: "a".to_string(),
@@ -848,6 +849,7 @@ mod tests {
                     run_id: "run-done".to_string(),
                     status: "complete".to_string(),
                     result: None,
+                    final_output: None,
                 },
                 "run-done",
             ),

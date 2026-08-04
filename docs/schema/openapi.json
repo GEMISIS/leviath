@@ -644,6 +644,18 @@
             "additionalProperties": { "type": "string" },
             "description": "Seed content per named context region."
           },
+          "output_format": {
+            "type": "string",
+            "description": "Ask for the final output in this shape, overriding the blueprint's. Any label works - nothing converts between shapes; the label reaches the model, which produces the bytes. Naming this without output_schema drops a schema the blueprint declared."
+          },
+          "output_instructions": {
+            "type": "string",
+            "description": "Extra guidance about that shape. How an unusual format gets explained."
+          },
+          "output_schema": {
+            "type": "object",
+            "description": "A JSON Schema the final output must satisfy. The only thing that inspects the answer's contents, and only because you asked: a failing submission is refused back to the agent to correct."
+          },
           "metadata": { "type": "object", "additionalProperties": { "type": "string" } },
           "callback_url": {
             "type": "string",
@@ -669,10 +681,36 @@
         "properties": {
           "run_id": { "type": "string" },
           "status": { "type": "string" },
-          "output": { "type": "string" },
+          "output": {
+            "type": "string",
+            "description": "The tail of the last stage's log: what the run did. Prefer final_output for what it concluded."
+          },
+          "final_output": {
+            "oneOf": [{ "$ref": "#/components/schemas/FinalOutput" }, { "type": "null" }],
+            "description": "The answer the agent submitted, if any."
+          },
           "error": { "type": ["string", "null"] },
           "prompt_tokens": { "type": "integer", "minimum": 0 },
           "completion_tokens": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "FinalOutput": {
+        "type": "object",
+        "description": "What an agent handed back. `content` is byte-for-byte what it submitted; nothing re-serializes it. `format` is an opaque label the server never interprets - match on it to decide how to render.",
+        "required": ["content", "stage", "submitted_at"],
+        "properties": {
+          "content": { "type": "string" },
+          "format": {
+            "type": ["string", "null"],
+            "description": "Whatever shape was asked for: \"markdown\", \"json\", \"a2ui\", a media type, anything. Not a closed set."
+          },
+          "stage": { "type": "string", "description": "The stage that produced it." },
+          "submitted_at": { "type": "integer", "description": "Unix seconds." },
+          "truncated": {
+            "type": "boolean",
+            "default": false,
+            "description": "The answer hit the 256 KiB cap and was cut short."
+          }
         }
       },
       "ValidateResponse": {

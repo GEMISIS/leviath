@@ -131,13 +131,18 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
             run_id,
             agent_id,
             status,
+            final_output,
         } => ServerEvent::AgentCompleted {
             agent_id,
             run_id: run_id.clone(),
             status,
-            // The result text is served by `/api/agents/{id}/result`; the run's
-            // error (if any) rides the webhook payload below.
+            // Named `result` since before there was one; it carries the run's
+            // *error*. The answer is `final_output`, beside it.
             result: runstate::read_meta(&run_id).ok().and_then(|m| m.error),
+            // Taken from the event rather than re-read from disk: the event
+            // fires the moment the run goes terminal, and the persist tick that
+            // writes `meta.json` has not necessarily run yet.
+            final_output: final_output.map(Into::into),
         },
         WorldEvent::Log {
             run_id,
@@ -424,7 +429,8 @@ mod tests {
             mapped_tag(WorldEvent::Completed {
                 run_id: "r".into(),
                 agent_id: "a".into(),
-                status: "complete".into()
+                status: "complete".into(),
+                final_output: None,
             }),
             "agent_completed"
         );
@@ -533,6 +539,7 @@ mod tests {
                         run_id: "run-done".into(),
                         agent_id: "a".into(),
                         status: "error".into(),
+                        final_output: None,
                     },
                 );
                 // The completion is broadcast with the run's error as the result.
