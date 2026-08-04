@@ -11,6 +11,7 @@ pub mod logging;
 pub mod read_path_report;
 pub mod render;
 pub mod runstate;
+pub mod shell_keys;
 #[cfg(test)]
 mod test_support;
 pub mod tools;
