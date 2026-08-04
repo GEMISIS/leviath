@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use axum::extract::Path as AxumPath;
+use axum::extract::Query;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Json;
@@ -136,8 +137,141 @@ pub(super) fn read_blueprint_info(manifest_path: &Path, dir: &Path) -> Option<Bl
     })
 }
 
-pub(super) async fn list_blueprints(State(state): State<AppState>) -> Json<Vec<BlueprintInfo>> {
-    Json(discover_blueprints(&state.config))
+/// Default page size. Comfortably more blueprints than anyone installs, so the
+/// common case is one request.
+const DEFAULT_LIMIT: usize = 50;
+/// Largest page served.
+const MAX_LIMIT: usize = 200;
+
+/// `GET /api/blueprints`: the installed agent catalog, paginated and filterable.
+///
+/// **Breaking change**, taken deliberately in the same release as the rest of
+/// this work: the response is now the envelope every paginated route here
+/// returns, rather than a bare array. Announced through the `capabilities` list
+/// on `GET /api/config` so a client can tell before it asks.
+///
+/// Worth being plain about the tradeoff: **pagination buys nothing here.**
+/// `discover_blueprints` scans every configured directory and TOML-parses every
+/// manifest on every request regardless of page size, so a page of ten costs
+/// what the whole list costs. The saving is wire bytes on a handful of small
+/// objects. The envelope is worth taking for one consistent shape across the
+/// API, and `q` is the part with real value - but the catalog is bounded by
+/// what a person installs, and this is not what makes it scale.
+pub(super) async fn list_blueprints(
+    State(state): State<AppState>,
+    Query(query): Query<BlueprintsQuery>,
+) -> Result<Json<Page<BlueprintInfo>>, (StatusCode, Json<ErrorResponse>)> {
+    let descending = match query.order.as_deref() {
+        None | Some("asc") => false,
+        Some("desc") => true,
+        Some(other) => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                format!("Unknown order '{other}': expected asc or desc"),
+            ));
+        }
+    };
+    let sort_name = match query.sort.as_deref() {
+        None | Some("name") => "name",
+        Some("version") => "version",
+        Some(other) => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                format!("Unknown sort '{other}': expected name or version"),
+            ));
+        }
+    };
+    let limit = match query.limit {
+        None => DEFAULT_LIMIT,
+        Some(0) => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "`limit` must be at least 1; omit it for the default".to_string(),
+            ));
+        }
+        Some(n) => n.min(MAX_LIMIT),
+    };
+
+    let digest = super::cursor::filter_digest(&[query.q.as_deref().unwrap_or("")]);
+    let order_name = if descending { "desc" } else { "asc" };
+    let cursor = match query.cursor.as_deref() {
+        None => None,
+        Some(raw) => Some(
+            super::cursor::decode(raw, sort_name, order_name, &digest)
+                .map_err(|e| err(StatusCode::BAD_REQUEST, e.message()))?,
+        ),
+    };
+
+    let mut found = discover_blueprints(&state.config);
+
+    // `q` shares the search primitive but not the framework: three in-memory
+    // string fields do not need sources, phases or highlights.
+    if let Some(needle) = query.q.as_deref().filter(|s| !s.is_empty()) {
+        found.retain(|bp| {
+            super::search::find_ignore_ascii_case(&bp.name, needle).is_some()
+                || super::search::find_ignore_ascii_case(&bp.description, needle).is_some()
+                || bp
+                    .stages
+                    .iter()
+                    .any(|stage| super::search::find_ignore_ascii_case(stage, needle).is_some())
+        });
+    }
+
+    // `discover_blueprints` already sorts by (name, path); re-sort only when
+    // something other than that default was asked for.
+    let key = |bp: &BlueprintInfo| match sort_name {
+        "version" => (bp.version.clone(), bp.name.clone()),
+        _ => (bp.name.clone(), bp.path.clone()),
+    };
+    found.sort_by(|a, b| {
+        if descending {
+            key(b).cmp(&key(a))
+        } else {
+            key(a).cmp(&key(b))
+        }
+    });
+
+    let total = found.len();
+    let mut remaining: Vec<BlueprintInfo> = match cursor {
+        None => found,
+        Some(ref cursor) => found
+            .into_iter()
+            .filter(|bp| {
+                cursor.precedes(
+                    &super::cursor::CursorKey::Text(key(bp).0),
+                    &key(bp).1,
+                    descending,
+                )
+            })
+            .collect(),
+    };
+
+    let has_more = remaining.len() > limit;
+    remaining.truncate(limit);
+    let next_cursor = has_more.then(|| remaining.last()).flatten().map(|last| {
+        let (primary, tiebreak) = key(last);
+        super::cursor::encode(
+            sort_name,
+            order_name,
+            &digest,
+            super::cursor::CursorKey::Text(primary),
+            &tiebreak,
+        )
+    });
+
+    Ok(Json(Page::new(
+        remaining,
+        next_cursor,
+        Some(total),
+        now_secs(),
+    )))
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 pub(super) async fn get_blueprint(
@@ -305,6 +439,217 @@ fn validate_manifest_text(manifest: &str) -> ValidateResponse {
 }
 
 #[cfg(test)]
+mod listing_tests {
+    use super::*;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::routing::get;
+    use std::sync::Arc;
+    use tokio::sync::broadcast;
+    use tower::ServiceExt;
+
+    use crate::config::Config;
+
+    fn manifest(name: &str, description: &str) -> String {
+        format!(
+            r#"
+[agent]
+name = "{name}"
+version = "1.0.0"
+description = "{description}"
+
+[stages.zzstage-work]
+prompt = "do it"
+"#
+        )
+    }
+
+    /// A catalog directory holding the named blueprints, each name prefixed so
+    /// it cannot be confused with an installed one.
+    fn catalog(entries: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, description) in entries {
+            let name = format!("{FIXTURE_PREFIX}{name}");
+            let sub = dir.path().join(&name);
+            std::fs::create_dir_all(&sub).unwrap();
+            std::fs::write(sub.join("agent.leviath"), manifest(&name, description)).unwrap();
+        }
+        dir
+    }
+
+    /// A fixture's full name.
+    fn fx(name: &str) -> String {
+        format!("{FIXTURE_PREFIX}{name}")
+    }
+
+    /// Fixture names all start with this, so assertions can pick them out of a
+    /// catalog that also contains whatever the developer running the tests has
+    /// installed.
+    ///
+    /// `discover_blueprints` always scans the installed agents dir on top of
+    /// `agent_paths`, and redirecting `LEVIATH_HOME` to hide it would mutate
+    /// process-global env and break every concurrently-running test that
+    /// resolves an agents path. So these assert invariants over the discovered
+    /// catalog instead of pinning its exact contents - which is the house rule
+    /// for agent tests anyway.
+    const FIXTURE_PREFIX: &str = "zzfixture-";
+
+    async fn page(dir: &tempfile::TempDir, extra: &str) -> (StatusCode, serde_json::Value) {
+        let (tx, _) = broadcast::channel(64);
+        let state = AppState {
+            config: Arc::new(Config {
+                agent_paths: vec![dir.path().to_path_buf()],
+                ..Default::default()
+            }),
+            event_tx: tx,
+            control: crate::commands::serve::testutil::no_daemon_client(),
+            mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            limits: Arc::new(crate::commands::serve::types::ServeLimits::default()),
+        };
+        let app = Router::new()
+            .route("/api/blueprints", get(list_blueprints))
+            .with_state(state);
+        let req = Request::builder()
+            .uri(format!("/api/blueprints{extra}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// Just this test's fixtures, in the order the page returned them.
+    fn fixture_names(page: &serde_json::Value) -> Vec<String> {
+        names(page)
+            .into_iter()
+            .filter(|n| n.starts_with(FIXTURE_PREFIX))
+            .collect()
+    }
+
+    fn names(page: &serde_json::Value) -> Vec<String> {
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_catalog_pages_through_every_blueprint_exactly_once() {
+        let dir = catalog(&[
+            ("alpha", "first"),
+            ("bravo", "second"),
+            ("charlie", "third"),
+            ("delta", "fourth"),
+        ]);
+
+        let mut seen: Vec<String> = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..10 {
+            let extra = match cursor {
+                None => "?limit=2".to_string(),
+                Some(ref c) => format!("?limit=2&cursor={c}"),
+            };
+            let (status, body) = page(&dir, &extra).await;
+            assert_eq!(status, StatusCode::OK);
+            seen.extend(names(&body));
+            match body["next_cursor"].as_str() {
+                Some(c) => cursor = Some(c.to_string()),
+                None => break,
+            }
+        }
+        // Every fixture, once, in order - regardless of what else the catalog
+        // holds, and regardless of which page each landed on.
+        let got: Vec<String> = seen
+            .iter()
+            .filter(|n| n.starts_with(FIXTURE_PREFIX))
+            .cloned()
+            .collect();
+        assert_eq!(
+            got,
+            vec![fx("alpha"), fx("bravo"), fx("charlie"), fx("delta")]
+        );
+        let mut unique = seen.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), seen.len(), "a blueprint was returned twice");
+    }
+
+    /// The part of this change with real value: the catalog is small, so
+    /// filtering is what a person actually wants from it.
+    #[tokio::test]
+    async fn q_matches_name_description_and_stage_names() {
+        let dir = catalog(&[
+            ("researcher", "digs through papers"),
+            ("coder", "writes zzrust"),
+        ]);
+
+        // The prefix makes the needle unique to this test's fixtures.
+        let (_, by_name) = page(&dir, "?q=ZZFIXTURE-RESEARCH").await;
+        assert_eq!(names(&by_name), vec![fx("researcher")]);
+
+        let (_, by_description) = page(&dir, "?q=writes+zzrust").await;
+        assert_eq!(names(&by_description), vec![fx("coder")]);
+
+        // Both fixtures declare a stage named after the prefix.
+        let (_, by_stage) = page(&dir, "?q=zzstage").await;
+        assert_eq!(fixture_names(&by_stage).len(), 2);
+
+        let (_, nothing) = page(&dir, "?q=nothing-like-this-at-all").await;
+        assert!(names(&nothing).is_empty());
+        assert_eq!(nothing["total"], 0);
+    }
+
+    #[tokio::test]
+    async fn the_catalog_can_be_ordered_backwards() {
+        let dir = catalog(&[("alpha", "a"), ("bravo", "b")]);
+        let (_, body) = page(&dir, "?order=desc&limit=200").await;
+        assert_eq!(fixture_names(&body), vec![fx("bravo"), fx("alpha")]);
+    }
+
+    #[tokio::test]
+    async fn a_bad_sort_order_or_limit_is_refused() {
+        let dir = catalog(&[("alpha", "a")]);
+        for extra in [
+            "?sort=whenever",
+            "?order=sideways",
+            "?limit=0",
+            "?cursor=zz",
+        ] {
+            let (status, _) = page(&dir, extra).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "expected {extra} to be rejected"
+            );
+        }
+    }
+
+    /// A cursor names a position in one filtered list; changing the filter
+    /// under it cannot produce a meaningful continuation.
+    #[tokio::test]
+    async fn a_cursor_is_bound_to_the_query_that_minted_it() {
+        let dir = catalog(&[("alpha", "a"), ("bravo", "b"), ("charlie", "c")]);
+        let (_, first) = page(&dir, "?limit=1").await;
+        let cursor = first["next_cursor"].as_str().unwrap().to_string();
+
+        let (ok, _) = page(&dir, &format!("?limit=1&cursor={cursor}")).await;
+        assert_eq!(ok, StatusCode::OK);
+
+        let (changed, _) = page(&dir, &format!("?limit=1&q=alpha&cursor={cursor}")).await;
+        assert_eq!(changed, StatusCode::BAD_REQUEST);
+    }
+}
+
+#[cfg(test)]
 mod canonicalize_tests {
     use super::*;
 
@@ -414,9 +759,12 @@ prompt = "Plan the work"
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
-        let blueprints: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
-        // No blueprints in the empty temp dir (ignoring ~/.leviath/agents)
-        let _ = blueprints;
+        // The envelope, not a bare array - the breaking change this release
+        // takes deliberately.
+        let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(page["items"].is_array());
+        assert!(page["total"].is_number());
+        assert!(page["next_cursor"].is_null());
     }
 
     #[tokio::test]
@@ -439,7 +787,8 @@ prompt = "Plan the work"
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
-        let blueprints: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let blueprints = page["items"].as_array().unwrap().clone();
         assert_test_bp_listed(&blueprints);
     }
 

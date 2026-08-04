@@ -379,6 +379,22 @@ mod tests {
     /// The published OpenAPI spec for this API.
     const OPENAPI: &str = include_str!("../../../../../docs/schema/openapi.json");
 
+    /// `GET /api/config` reports an `api_version`, and it has to mean
+    /// something. A version a client can read that disagrees with the document
+    /// describing that version is worse than publishing no version at all - the
+    /// client trusts it, and it is silently wrong.
+    ///
+    /// The same spirit as the route-drift test below: the spec is only a
+    /// contract while something holds the code to it.
+    #[test]
+    fn the_api_version_matches_the_spec_it_names() {
+        let spec: serde_json::Value = serde_json::from_str(OPENAPI).expect("the spec is JSON");
+        let documented = spec["info"]["version"]
+            .as_str()
+            .expect("the spec declares a version");
+        assert_eq!(documented, types::API_VERSION);
+    }
+
     /// Every `(path, METHOD)` the spec documents.
     fn documented_routes() -> Vec<(String, String)> {
         let spec: serde_json::Value = serde_json::from_str(OPENAPI).expect("the spec is JSON");

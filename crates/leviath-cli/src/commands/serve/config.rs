@@ -19,6 +19,9 @@ fn redact(c: &Config) -> RedactedConfig {
         ollama_base_url: c.ollama_base_url.clone(),
         agent_paths: c.agent_paths.clone(),
         mcp_server_count: c.mcp_servers.len(),
+        api_version: API_VERSION.to_string(),
+        capabilities: API_CAPABILITIES.iter().map(|c| c.to_string()).collect(),
+        limits: ApiLimits::current(),
     }
 }
 
@@ -207,6 +210,55 @@ mod tests {
         assert!(config.ollama_base_url.is_none());
     }
 
+    /// The console used to feature-detect by calling a route and reading a 404
+    /// as "unsupported" - which is also what a missing run looks like, and
+    /// costs one round trip per feature.
+    #[tokio::test]
+    async fn get_config_advertises_the_api_version_capabilities_and_limits() {
+        let app = Router::new()
+            .route("/api/config", get(get_config))
+            .with_state(test_state());
+        let req = Request::builder()
+            .uri("/api/config")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let config: RedactedConfig = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(config.api_version, API_VERSION);
+        for expected in [
+            "runs.envelope",
+            "runs.search",
+            "runs.files.listing",
+            "blueprints.envelope",
+            "context.history.page",
+        ] {
+            assert!(
+                config.capabilities.iter().any(|c| c == expected),
+                "missing capability {expected}"
+            );
+        }
+
+        // The numbers are what make this useful rather than decorative: a
+        // client that knows a feature exists still has to know its caps, and
+        // every one it guesses would be hardcoded and eventually wrong.
+        assert_eq!(
+            config.limits.max_limit,
+            crate::commands::serve::runs::MAX_LIMIT
+        );
+        assert_eq!(
+            config.limits.max_file_bytes,
+            crate::commands::serve::agents::MAX_FILE_READ_BYTES
+        );
+        assert_eq!(
+            config.limits.max_tracked_modified_files,
+            leviath_core::run_meta::MAX_TRACKED_MODIFIED_FILES
+        );
+    }
+
     #[tokio::test]
     async fn get_config_with_keys_shows_has_key_true() {
         let app = Router::new()
@@ -341,6 +393,9 @@ mod tests {
             ollama_base_url: None,
             agent_paths: vec![],
             mcp_server_count: 2,
+            api_version: API_VERSION.to_string(),
+            capabilities: API_CAPABILITIES.iter().map(|c| c.to_string()).collect(),
+            limits: ApiLimits::current(),
         };
         let json = serde_json::to_string(&config).unwrap();
         // Must NOT contain actual key values
@@ -361,6 +416,9 @@ mod tests {
             ollama_base_url: Some("http://localhost:11434".to_string()),
             agent_paths: vec![],
             mcp_server_count: 0,
+            api_version: API_VERSION.to_string(),
+            capabilities: API_CAPABILITIES.iter().map(|c| c.to_string()).collect(),
+            limits: ApiLimits::current(),
         };
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("\"ollama_base_url\":\"http://localhost:11434\""));

@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Leviath HTTP API",
-    "version": "0.1.2",
+    "version": "0.3.0",
     "description": "The REST and WebSocket surface `lev serve` puts in front of the shared-world daemon. Every route requires a bearer token. Paths here are checked against the router in crates/leviath-cli/src/commands/serve/mod.rs by a test in that file, so a route added without a spec entry fails the build. See https://leviath.dev/docs/api.",
     "license": { "name": "MIT" }
   },
@@ -23,7 +23,43 @@
       "get": {
         "tags": ["blueprints"],
         "summary": "List installed blueprints",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "description": "**Breaking change in 0.3.0**: returns the same paginated envelope as /api/runs rather than a bare array. Check `blueprints.envelope` in the `capabilities` list on GET /api/config.\n\nNote that pagination saves the server nothing here - discovery parses every manifest on every request regardless of page size, and the catalog is bounded by what a person installs. `q` is the parameter with real value.",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 },
+            "description": "Page size. Larger values are clamped rather than refused."
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": { "type": "string" },
+            "description": "Continuation token from a previous page's next_cursor. Opaque; bound to the query that minted it."
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "schema": { "type": "string" },
+            "description": "Case-insensitive substring over name, description and stage names."
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "schema": { "type": "string", "enum": ["name", "version"], "default": "name" },
+            "description": "Ordering key."
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "schema": { "type": "string", "enum": ["asc", "desc"], "default": "asc" },
+            "description": "Sort direction. Ascending by name is the order a person reads a catalog in."
+          }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/Ok" },
+          "400": { "$ref": "#/components/responses/Error" }
+        }
       },
       "post": {
         "tags": ["blueprints"],
@@ -248,7 +284,32 @@
       "get": {
         "tags": ["agents"],
         "summary": "How the context window changed over the run",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "description": "**Breaking change in 0.3.0**: paginated, returning the shared envelope rather than every recorded point as one array. Each point carries a full context window with untruncated region text, on a journal that grows for as long as the run does, so the unpaged form was comfortably the largest response in the API.\n\nThe cursor is the point index. The journal is append-only, so an index is stable once written and new points only ever arrive at the end.",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 },
+            "description": "Points per page. Capped lower than the run listing because each item carries a whole context window."
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": { "type": "string" },
+            "description": "Continuation token from the previous page's next_cursor."
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "schema": { "type": "string", "enum": ["asc", "desc"], "default": "asc" },
+            "description": "`asc` is chronological, and matches what the unpaged response gave. `desc` starts from the most recent point, which is what a view tailing a live run wants."
+          }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/Ok" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
       }
     },
     "/api/agents/{id}/files": {

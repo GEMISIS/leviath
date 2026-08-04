@@ -165,19 +165,152 @@ pub(super) async fn agent_context(
         })
 }
 
+/// Default number of history points returned when the client does not ask.
+pub(super) const HISTORY_DEFAULT_LIMIT: usize = 50;
+/// Largest history page. Lower than the run listing's cap because each item
+/// carries a whole context window rather than one struct of scalars.
+pub(super) const HISTORY_MAX_LIMIT: usize = 100;
+
+/// `GET /api/agents/{id}/context/history`: the run's context window over time.
+///
+/// This returned **every** recorded point, each carrying a full
+/// `ContextSnapshot` with untruncated region text - comfortably the largest
+/// response in the API, with no window and no cap, on a journal that grows for
+/// as long as the run does.
+///
+/// Now paged, through the same envelope the run listing uses. The cursor is the
+/// point index: the journal is append-only, so an index is stable once written
+/// and new points only ever arrive at the end - the strongest keyset of any
+/// route here. `order=asc` stays the default, which is both chronological and
+/// what the previous unpaged response gave.
+///
+/// The replay itself goes through `visit_points`, so points outside the window
+/// are folded but never materialized. Materializing means deep-copying an
+/// entire context window per point, and this endpoint's whole problem was doing
+/// that for the full history on every request.
 pub(super) async fn agent_context_history(
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<Vec<leviath_core::run_archive::RunPoint>>, (StatusCode, Json<ErrorResponse>)> {
-    let history = runstate::context_history(&id);
-    if history.is_empty() {
-        return Err((
+    Query(query): Query<HistoryQuery>,
+) -> Result<Json<Page<leviath_core::run_archive::RunPoint>>, (StatusCode, Json<ErrorResponse>)> {
+    use std::ops::ControlFlow;
+
+    let ascending = match query.order.as_deref() {
+        None | Some("asc") => true,
+        Some("desc") => false,
+        Some(other) => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                format!("Unknown order '{other}': expected asc or desc"),
+            ));
+        }
+    };
+    let limit = match query.limit {
+        None => HISTORY_DEFAULT_LIMIT,
+        Some(0) => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "`limit` must be at least 1; omit it for the default".to_string(),
+            ));
+        }
+        Some(n) => n.min(HISTORY_MAX_LIMIT),
+    };
+
+    let digest = super::cursor::filter_digest(&[&id]);
+    let order_name = if ascending { "asc" } else { "desc" };
+    let cursor = match query.cursor.as_deref() {
+        None => None,
+        Some(raw) => Some(
+            super::cursor::decode(raw, "index", order_name, &digest)
+                .map_err(|e| err(StatusCode::BAD_REQUEST, e.message()))?,
+        ),
+    };
+
+    let Some(records) = runstate::read_run_archive(&id) else {
+        return Err(err(
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("No context history for run '{}'", id),
-            }),
+            format!("No context history for run '{id}'"),
+        ));
+    };
+
+    // One pass to count, so `total` is honest and a descending window knows
+    // where to start. Counting folds the deltas but materializes nothing.
+    let mut total = 0usize;
+    leviath_core::run_archive::visit_points(&records, &mut |_| {
+        total += 1;
+        ControlFlow::Continue(())
+    });
+    if total == 0 && query.cursor.is_none() {
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            format!("No context history for run '{id}'"),
         ));
     }
-    Ok(Json(history))
+
+    // Which indices this page wants, given the direction and where the cursor
+    // left off. Computed up front so the replay can skip everything else.
+    let after = cursor.as_ref().and_then(|c| match c.key {
+        super::cursor::CursorKey::Int(i) => usize::try_from(i).ok(),
+        super::cursor::CursorKey::Text(_) => None,
+    });
+    let wanted: Vec<usize> = if ascending {
+        let start = after.map(|i| i + 1).unwrap_or(0);
+        (start..total).take(limit + 1).collect()
+    } else {
+        let start = after
+            .map(|i| i.saturating_sub(1))
+            .unwrap_or_else(|| total.saturating_sub(1));
+        (0..=start).rev().take(limit + 1).collect()
+    };
+    let stop_at = wanted.iter().copied().max();
+
+    let mut collected: Vec<(usize, leviath_core::run_archive::RunPoint)> = Vec::new();
+    leviath_core::run_archive::visit_points(&records, &mut |point| {
+        if wanted.contains(&point.index) {
+            collected.push((
+                point.index,
+                leviath_core::run_archive::RunPoint {
+                    // Redacted for the same reason `runstate::context_history`
+                    // redacts: the journal stores RunMeta whole, secret and all.
+                    meta: point.meta.redacted(),
+                    context: point.context.clone(),
+                    at: point.at,
+                },
+            ));
+        }
+        match stop_at {
+            Some(last) if point.index >= last => ControlFlow::Break(()),
+            _ => ControlFlow::Continue(()),
+        }
+    });
+
+    if !ascending {
+        collected.sort_by_key(|(index, _)| std::cmp::Reverse(*index));
+    }
+
+    let has_more = collected.len() > limit;
+    collected.truncate(limit);
+    let next_cursor = has_more
+        .then(|| collected.last())
+        .flatten()
+        .map(|(index, _)| {
+            super::cursor::encode(
+                "index",
+                order_name,
+                &digest,
+                super::cursor::CursorKey::Int(*index as i64),
+                "",
+            )
+        });
+
+    let items = collected.into_iter().map(|(_, point)| point).collect();
+    Ok(Json(Page::new(items, next_cursor, Some(total), now_secs())))
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// `GET /api/agents/{id}/logs`: what a run has written, by stage.
@@ -1335,7 +1468,16 @@ prompt = "Plan the work"
 
     /// Write a minimal `run.lvr` (Header + one ContextCheckpoint) for `run_id`.
     fn write_archive_fixture(run_id: &str) {
+        write_archive_with_points(run_id, 1, None);
+    }
+
+    /// A journal with `points` context checkpoints, so history paging has
+    /// something to page over. `secret` plants a webhook key in the header, for
+    /// the redaction test.
+    fn write_archive_with_points(run_id: &str, points: usize, secret: Option<&str>) {
         use leviath_core::run_archive::{self, RunIdentity, RunRecord};
+        let mut meta = make_run(run_id);
+        meta.callback_secret = secret.map(str::to_string);
         let mut buf = Vec::new();
         run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION).unwrap();
         run_archive::write_record(
@@ -1347,24 +1489,51 @@ prompt = "Plan the work"
                     world_id: "w".to_string(),
                     created_at: 0,
                 },
-                meta: Box::new(make_run(run_id)),
+                meta: Box::new(meta),
             },
         )
         .unwrap();
-        run_archive::write_record(
-            &mut buf,
-            &RunRecord::ContextCheckpoint {
-                snapshot: runstate::ContextSnapshot {
-                    stage_name: "plan".to_string(),
-                    total_tokens: 7,
-                    max_tokens: 100,
-                    regions: vec![],
+        for i in 0..points {
+            run_archive::write_record(
+                &mut buf,
+                &RunRecord::ContextCheckpoint {
+                    snapshot: runstate::ContextSnapshot {
+                        // Named by index so a test can tell which point it got.
+                        stage_name: if points == 1 {
+                            "plan".to_string()
+                        } else {
+                            format!("stage-{i}")
+                        },
+                        total_tokens: 7,
+                        max_tokens: 100,
+                        regions: vec![],
+                    },
+                    at: 1 + i as i64,
                 },
-                at: 1,
-            },
-        )
-        .unwrap();
+            )
+            .unwrap();
+        }
         std::fs::write(runstate::run_dir(run_id).join("run.lvr"), &buf).unwrap();
+    }
+
+    /// Call the history route and return the decoded page.
+    async fn history_page(run_id: &str, extra: &str) -> serde_json::Value {
+        let app = Router::new()
+            .route(
+                "/api/agents/{id}/context/history",
+                get(agent_context_history),
+            )
+            .with_state(test_state());
+        let req = Request::builder()
+            .uri(format!("/api/agents/{run_id}/context/history{extra}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
     }
 
     #[tokio::test]
@@ -1376,6 +1545,116 @@ prompt = "Plan the work"
                 create_run(&make_run(&run_id)).unwrap();
                 write_archive_fixture(&run_id);
 
+                let page = history_page(&run_id, "").await;
+                assert_eq!(page["items"].as_array().unwrap().len(), 1);
+                assert_eq!(page["items"][0]["context"]["stage_name"], "plan");
+                assert_eq!(page["total"], 1);
+                assert!(page["next_cursor"].is_null());
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
+    }
+
+    /// This route returned every recorded point, each carrying a full context
+    /// window, on a journal that grows for as long as the run does.
+    #[tokio::test]
+    async fn context_history_pages_through_every_point_exactly_once() {
+        crate::runstate::with_isolated_runs_dir_async("ctx-hist-pages", |_d| async move {
+            let run_id = unique_run_id("ctx-page");
+            create_run(&make_run(&run_id)).unwrap();
+            write_archive_with_points(&run_id, 7, None);
+
+            let mut seen: Vec<String> = Vec::new();
+            let mut cursor: Option<String> = None;
+            for _ in 0..10 {
+                let extra = match cursor {
+                    None => "?limit=3".to_string(),
+                    Some(ref c) => format!("?limit=3&cursor={c}"),
+                };
+                let page = history_page(&run_id, &extra).await;
+                assert_eq!(page["total"], 7);
+                for item in page["items"].as_array().unwrap() {
+                    seen.push(item["context"]["stage_name"].as_str().unwrap().to_string());
+                }
+                match page["next_cursor"].as_str() {
+                    Some(c) => cursor = Some(c.to_string()),
+                    None => break,
+                }
+            }
+
+            // Chronological by default, complete, and nothing repeated.
+            assert_eq!(
+                seen,
+                (0..7).map(|i| format!("stage-{i}")).collect::<Vec<_>>()
+            );
+
+            let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        })
+        .await;
+    }
+
+    /// Descending is what a UI tailing a run wants: the latest window without
+    /// paging through the whole history to reach it.
+    #[tokio::test]
+    async fn context_history_can_start_from_the_most_recent_point() {
+        crate::runstate::with_isolated_runs_dir_async("ctx-hist-desc", |_d| async move {
+            let run_id = unique_run_id("ctx-desc");
+            create_run(&make_run(&run_id)).unwrap();
+            write_archive_with_points(&run_id, 5, None);
+
+            let page = history_page(&run_id, "?order=desc&limit=2").await;
+            let names: Vec<&str> = page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["context"]["stage_name"].as_str().unwrap())
+                .collect();
+            assert_eq!(names, vec!["stage-4", "stage-3"]);
+
+            // And it continues downwards.
+            let cursor = page["next_cursor"].as_str().unwrap();
+            let next = history_page(&run_id, &format!("?order=desc&limit=2&cursor={cursor}")).await;
+            let names: Vec<&str> = next["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["context"]["stage_name"].as_str().unwrap())
+                .collect();
+            assert_eq!(names, vec!["stage-2", "stage-1"]);
+
+            let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        })
+        .await;
+    }
+
+    /// The journal stores `RunMeta` whole, so every point carries the webhook
+    /// signing key unless this route strips it. It did not, which is how the
+    /// key was reachable by any token holder.
+    #[tokio::test]
+    async fn context_history_never_serves_the_webhook_secret() {
+        crate::runstate::with_isolated_runs_dir_async("ctx-hist-secret", |_d| async move {
+            let run_id = unique_run_id("ctx-secret");
+            create_run(&make_run(&run_id)).unwrap();
+            write_archive_with_points(&run_id, 2, Some("super-secret-signing-key"));
+
+            let page = history_page(&run_id, "").await;
+            assert!(!page.to_string().contains("super-secret-signing-key"));
+
+            let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn context_history_rejects_a_bad_order_or_limit() {
+        crate::runstate::with_isolated_runs_dir_async("ctx-hist-bad", |_d| async move {
+            let run_id = unique_run_id("ctx-bad");
+            create_run(&make_run(&run_id)).unwrap();
+            write_archive_fixture(&run_id);
+
+            for extra in ["?order=sideways", "?limit=0", "?cursor=zzz"] {
                 let app = Router::new()
                     .route(
                         "/api/agents/{id}/context/history",
@@ -1383,22 +1662,19 @@ prompt = "Plan the work"
                     )
                     .with_state(test_state());
                 let req = Request::builder()
-                    .uri(format!("/api/agents/{}/context/history", run_id))
+                    .uri(format!("/api/agents/{run_id}/context/history{extra}"))
                     .body(Body::empty())
                     .unwrap();
                 let resp = app.oneshot(req).await.unwrap();
-                assert_eq!(resp.status(), axum::http::StatusCode::OK);
-                let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-                    .await
-                    .unwrap();
-                let got: Vec<leviath_core::run_archive::RunPoint> =
-                    serde_json::from_slice(&body).unwrap();
-                assert_eq!(got.len(), 1);
-                assert_eq!(got[0].context.stage_name, "plan");
+                assert_eq!(
+                    resp.status(),
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "expected {extra} to be rejected"
+                );
+            }
 
-                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
-            },
-        )
+            let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        })
         .await;
     }
 
