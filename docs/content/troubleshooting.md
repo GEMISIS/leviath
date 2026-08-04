@@ -153,7 +153,7 @@ own prompt will still ask for them; that text has to change in the blueprint. Se
 ## Console windows keep flashing on my Windows desktop
 
 Every child process Leviath starts is asked for no console window, so this
-should not happen on 0.1.3 or later. Before that, each `shell` call, each MCP
+should not happen on 0.2 or later. Before that, each `shell` call, each MCP
 server, and each provider that shells out could pop a `cmd.exe` window on the
 desktop, which a fleet of agents turned into a steady flicker.
 
