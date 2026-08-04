@@ -1403,6 +1403,45 @@ mod tests {
         assert_eq!(folded.context.regions[0].entries.len(), 2);
     }
 
+    /// A submitted answer needs no record type of its own: `Progress` and
+    /// `Checkpoint` both replace the whole `RunMeta`, so it folds along with
+    /// everything else and a crash-resume finds the answer already there.
+    #[test]
+    fn fold_carries_a_submitted_final_output_through_progress() {
+        let mut answered = meta();
+        answered.final_output = Some(crate::output::FinalOutput::new(
+            "renamed two helpers",
+            Some("markdown".to_string()),
+            "summary".to_string(),
+            9,
+        ));
+        answered.output_request = Some(crate::output::OutputSpec {
+            format: Some("a2ui".to_string()),
+            ..Default::default()
+        });
+        let records = vec![
+            header(),
+            RunRecord::Progress {
+                meta: Box::new(answered),
+                delta: ContextDelta {
+                    stage_name: "summary".to_string(),
+                    total_tokens: 0,
+                    max_tokens: 10_000,
+                    regions: vec![],
+                },
+                at: 2,
+            },
+        ];
+        let folded = fold(&records).unwrap();
+        let output = folded.meta.final_output.expect("the answer folded through");
+        assert_eq!(output.content, "renamed two helpers");
+        assert_eq!(output.stage, "summary");
+        assert_eq!(
+            folded.meta.output_request.and_then(|s| s.format).as_deref(),
+            Some("a2ui")
+        );
+    }
+
     // ── pending tool batch (fold) ──
 
     fn call(id: &str, result: Option<&str>) -> ToolCallRecord {
