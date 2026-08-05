@@ -54,6 +54,11 @@ pub fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
 /// place. Directory permissions do not survive a copy though, and `tar`, `rsync`
 /// or a backup tool preserves the per-file mode while dropping the protection
 /// the directory was providing.
+/// On Windows the restriction is best-effort: a failed ACL call still yields an
+/// open file. [`write_private`] guards secrets and fails instead, but these are
+/// a run's own files, which until now were created at the default and never
+/// restricted at all. Refusing to open one because `icacls` did not run would
+/// trade "less protected than intended" for "the run cannot record anything".
 pub fn open_private_append(path: &Path) -> io::Result<std::fs::File> {
     crate::platform::open_append_with_mode(path, 0o600)
 }
@@ -65,6 +70,8 @@ pub fn open_private_append(path: &Path) -> io::Result<std::fs::File> {
 /// [`secure_dir_perms`] fixes that afterwards, leaving a window; this closes it
 /// and is the right call for a directory created on a hot path, where the
 /// after-the-fact `chmod` is easy to forget.
+/// Best-effort on the restriction on Windows, for the reason
+/// [`open_private_append`] gives.
 pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
     crate::platform::create_dir_all_with_mode(path, 0o700)
 }
@@ -226,6 +233,24 @@ mod tests {
 
     /// Called on every stage line, so it has to be idempotent rather than
     /// failing once the directory is there.
+    /// A failed create has to be reported, not swallowed. The caller decides
+    /// whether it can carry on without the directory; it cannot decide that if
+    /// it was told the directory is there.
+    #[test]
+    fn create_private_dir_all_propagates_a_path_it_cannot_create() {
+        #[cfg(windows)]
+        let _env = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        // A file where a parent directory would have to be.
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, b"x").unwrap();
+
+        assert!(create_private_dir_all(&blocker.join("child")).is_err());
+        // And a file sitting exactly where the directory should be. Reported
+        // rather than mistaken for "it is already there".
+        assert!(create_private_dir_all(&blocker).is_err());
+    }
+
     #[test]
     fn create_private_dir_all_is_idempotent() {
         #[cfg(windows)]

@@ -662,26 +662,34 @@ mod tests {
         )
         .await;
 
-        let mut checked = 0;
-        for entry in walkdir(&run) {
-            checked += 1;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mode = std::fs::metadata(&entry).unwrap().permissions().mode() & 0o777;
-                let expected = if entry.is_dir() { 0o700 } else { 0o600 };
-                let shown = entry.display().to_string();
-                assert_eq!(
-                    mode, expected,
-                    "{shown} is {mode:o}, and a copy of this tree would carry that"
-                );
-            }
+        let walked = walkdir(&run);
+
+        // Asserted on every platform: a walk that found nothing would pass the
+        // mode check below vacuously, and on Windows there are no mode bits to
+        // check at all. Naming the files also pins *what* this test covers, so
+        // a new writer added to the lane and left out of it is visible here.
+        for name in ["meta.json", "run.lvr", "stages"] {
+            assert!(
+                walked.iter().any(|p| p.ends_with(name)),
+                "the lane did not write {name}: {walked:?}"
+            );
         }
-        // The walk finding nothing would pass the loop above vacuously.
         assert!(
-            checked >= 4,
-            "expected a populated run dir, walked {checked}"
+            walked.iter().any(|p| p.ends_with("output.log")),
+            "the stage logs are missing: {walked:?}"
         );
+
+        #[cfg(unix)]
+        for entry in &walked {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(entry).unwrap().permissions().mode() & 0o777;
+            let expected = if entry.is_dir() { 0o700 } else { 0o600 };
+            let shown = entry.display().to_string();
+            assert_eq!(
+                mode, expected,
+                "{shown} is {mode:o}, and a copy of this tree would carry that"
+            );
+        }
     }
 
     /// The three writers all hand their blocking work to the pool, and a task
