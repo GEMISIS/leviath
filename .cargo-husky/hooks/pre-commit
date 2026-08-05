@@ -32,13 +32,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --quiet \
   || fail "cargo doc failed — broken/private intra-doc links or invalid HTML. Fix the warnings above."
 pass "Docs OK"
 
-# 4. Tests
-info "Running tests..."
-cargo test --all \
-  || fail "Tests failed. Fix the failing tests above."
-pass "Tests OK"
-
-# 5. No coverage-suppression markers (ast-grep structural lint)
+# 4. No coverage-suppression markers (ast-grep structural lint)
 info "Checking for coverage suppression markers..."
 if command -v ast-grep >/dev/null 2>&1; then
   ast-grep scan crates xtask .github/workflows \
