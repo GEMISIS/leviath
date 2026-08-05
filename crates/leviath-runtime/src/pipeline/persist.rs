@@ -38,6 +38,12 @@ pub struct PersistWatermark {
     /// holds. Without it the heartbeat would rewrite a quarter-megabyte file
     /// every thirty seconds for the whole life of a long run, to no effect.
     last_output: Option<(i64, usize)>,
+    /// The taint audit already on disk, as `(stage index, event count)`.
+    ///
+    /// The audit file is only rewritten when the gate recorded a new event.
+    /// Without it every snapshot re-serialized the whole (append-only) log,
+    /// an O(events) allocation per tick that grew with the run.
+    last_taint: Option<(usize, usize)>,
 }
 
 impl PersistWatermark {
@@ -237,11 +243,6 @@ pub fn dispatch_persistence(
         if !watermark_changed && !has_appends && !due_for_heartbeat {
             continue; // nothing meaningful changed, nothing buffered, beat not due
         }
-        if watermark_changed {
-            watermark.last = Some(current);
-            watermark.last_progress_at = Some(now);
-        }
-        watermark.last_written_at = Some(now);
 
         // Stream each buffered line to WS subscribers as a `Log` event (in
         // addition to the disk append below). No-op in worlds without the sink
@@ -256,6 +257,26 @@ pub fn dispatch_persistence(
                 });
             }
         }
+
+        // Buffered lines with no real progress and no heartbeat due: journal
+        // just the lines. The full path below deep-clones the whole context
+        // window per snapshot, and tool activity buffers lines several times
+        // per iteration - snapshotting on each batch multiplied the lane's
+        // biggest allocation by the run's tool traffic for no new state.
+        if !watermark_changed && !due_for_heartbeat {
+            let _ = stage.0.send(PersistMsg::StageLines {
+                run_id: md.run_id.clone(),
+                output_appends,
+                log_appends,
+            });
+            continue;
+        }
+
+        if watermark_changed {
+            watermark.last = Some(current);
+            watermark.last_progress_at = Some(now);
+        }
+        watermark.last_written_at = Some(now);
 
         // Tree links, for a deterministic restart-time rebuild of the graph.
         let depth = parent_ref.map(|p| p.depth).unwrap_or(0);
@@ -280,15 +301,26 @@ pub fn dispatch_persistence(
         );
         let context = build_context_snapshot(window, &state.current_stage);
         let stages = ledger.as_deref().map(|l| l.0.clone()).unwrap_or_default();
-        // Persist the taint gate's audit log (per-stage) when it has events, so
-        // security decisions are inspectable after the fact.
-        let taint_audit = taint_gate.filter(|g| !g.audit_log().is_empty()).map(|g| {
-            (
-                cursor.index,
-                serde_json::to_string_pretty(g.audit_log())
-                    .expect("GateEvent slice always serializes"),
-            )
-        });
+        // Persist the taint gate's audit log (per-stage) when it gained events
+        // since the last write, so security decisions are inspectable after
+        // the fact. The log is append-only, so an unchanged (stage, count)
+        // means the file on disk is already current - re-serializing the whole
+        // log every heartbeat was an O(events) allocation that grew with the
+        // run.
+        let taint_audit = taint_gate
+            .filter(|g| !g.audit_log().is_empty())
+            .and_then(|g| {
+                let key = (cursor.index, g.audit_log().len());
+                if watermark.last_taint == Some(key) {
+                    return None;
+                }
+                watermark.last_taint = Some(key);
+                Some((
+                    cursor.index,
+                    serde_json::to_string(g.audit_log())
+                        .expect("GateEvent slice always serializes"),
+                ))
+            });
         // A parent parked mid fan-out: persist its waiting state so the
         // split/merge resumes after a restart (removed once it's no longer
         // waiting - see the writer).

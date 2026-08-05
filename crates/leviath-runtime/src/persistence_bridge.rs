@@ -11,6 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
+use leviath_core::run_archive;
 use leviath_core::run_meta::{ContextSnapshot, RunMeta, StageRecord};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -75,6 +76,20 @@ pub enum PersistMsg {
         /// (per-call results).
         ack: Option<tokio::sync::oneshot::Sender<()>>,
     },
+    /// Buffered per-stage output/log lines with nothing else to report. The
+    /// dispatch system sends this instead of a full [`PersistMsg::Snapshot`]
+    /// when lines were buffered but the run's watermark did not move - tool
+    /// activity between iterations used to force a whole-window snapshot
+    /// (context deep-clone, meta/context rewrite, archive record) per batch of
+    /// log lines, several times per iteration.
+    StageLines {
+        /// The run id (its directory name under the runs dir).
+        run_id: String,
+        /// Readable output lines to append to `stages/<idx>/output.log`.
+        output_appends: Vec<(usize, String)>,
+        /// Operational log lines to append to `stages/<idx>/logs.log`.
+        log_appends: Vec<(usize, String)>,
+    },
 }
 
 /// The single-lane persistence worker: writes each [`PersistJob`]'s files under
@@ -105,34 +120,75 @@ pub async fn persistence_worker(
     };
     let machine_id = load_or_create_machine_id(&runs_dir);
     let world_id = generate_id();
-    // The last context window archived per run, so the next write can be stored
-    // as a compact diff rather than a full snapshot.
-    let mut last_context: std::collections::HashMap<String, ContextSnapshot> =
+    // The fingerprint of the last context window archived per run, so the next
+    // write can be stored as a compact diff rather than a full snapshot. A
+    // digest, not the snapshot itself: retaining a full copy of every live
+    // run's context doubled the lane's resident cost.
+    let mut last_context: std::collections::HashMap<String, run_archive::ContextDigest> =
         std::collections::HashMap::new();
-    while let Some(msg) = jobs.recv().await {
-        match msg {
-            PersistMsg::Snapshot(job) => {
-                let prev = last_context.get(&job.run_id);
-                write_snapshot(&runs_dir, &job, &machine_id, &world_id, prev).await;
-                // Drop a fully-terminal run's cached context (it won't be written
-                // again), so the map stays bounded by the set of *live* runs
-                // rather than every run the daemon has ever seen.
-                if is_terminal_run(&job.meta.status) {
-                    last_context.remove(&job.run_id);
-                } else {
-                    last_context.insert(job.run_id.clone(), job.context.clone());
-                }
+    while let Some(first) = jobs.recv().await {
+        // Drain whatever else is already queued and process it as one batch,
+        // keeping only the NEWEST snapshot per run: each snapshot carries the
+        // whole window, so writing a superseded one is pure disk and memory
+        // churn. On a slow disk this is what stops queued full-window
+        // snapshots from piling up unboundedly. Appends and stage lines keep
+        // their order and are never dropped.
+        let mut batch = vec![first];
+        while let Ok(msg) = jobs.try_recv() {
+            batch.push(msg);
+        }
+        let mut newest_snapshot: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (i, msg) in batch.iter().enumerate() {
+            if let PersistMsg::Snapshot(job) = msg {
+                newest_snapshot.insert(job.run_id.clone(), i);
             }
-            PersistMsg::Append {
-                run_id,
-                record,
-                ack,
-            } => {
-                append_record(&runs_dir, &run_id, &record).await;
-                // Ack unconditionally - persistence is best-effort and the
-                // dispatch-side barrier must never stall on a failed append.
-                if let Some(ack) = ack {
-                    let _ = ack.send(());
+        }
+        for (i, msg) in batch.into_iter().enumerate() {
+            match msg {
+                PersistMsg::Snapshot(job) => {
+                    if newest_snapshot.get(job.run_id.as_str()) != Some(&i) {
+                        continue; // superseded by a newer snapshot in this batch
+                    }
+                    let prev = last_context.get(&job.run_id);
+                    write_snapshot(&runs_dir, &job, &machine_id, &world_id, prev).await;
+                    // Drop a fully-terminal run's cached digest (it won't be
+                    // written again), so the map stays bounded by the set of
+                    // *live* runs rather than every run the daemon has ever
+                    // seen.
+                    if is_terminal_run(&job.meta.status) {
+                        last_context.remove(&job.run_id);
+                    } else {
+                        last_context.insert(
+                            job.run_id.clone(),
+                            run_archive::digest_context(&job.context),
+                        );
+                    }
+                }
+                PersistMsg::Append {
+                    run_id,
+                    record,
+                    ack,
+                } => {
+                    append_record(&runs_dir, &run_id, &record).await;
+                    // Ack unconditionally - persistence is best-effort and the
+                    // dispatch-side barrier must never stall on a failed append.
+                    if let Some(ack) = ack {
+                        let _ = ack.send(());
+                    }
+                }
+                PersistMsg::StageLines {
+                    run_id,
+                    output_appends,
+                    log_appends,
+                } => {
+                    let dir = runs_dir.join(&run_id);
+                    for (idx, line) in &output_appends {
+                        append_stage_line(&dir, *idx, "output.log", line, &run_id).await;
+                    }
+                    for (idx, line) in &log_appends {
+                        append_stage_line(&dir, *idx, "logs.log", line, &run_id).await;
+                    }
                 }
             }
         }
@@ -257,7 +313,7 @@ async fn write_snapshot(
     job: &PersistJob,
     machine_id: &str,
     world_id: &str,
-    prev_context: Option<&ContextSnapshot>,
+    prev_context: Option<&run_archive::ContextDigest>,
 ) {
     let dir = runs_dir.join(&job.run_id);
     if let Err(e) = create_private_dir(&dir).await {
@@ -266,17 +322,24 @@ async fn write_snapshot(
     }
     append_run_archive(&dir, job, machine_id, world_id, prev_context).await;
     let meta_json = serde_json::to_string_pretty(&job.meta).expect("RunMeta always serializes");
-    write_bytes_atomic(&dir.join("meta.json"), meta_json.as_bytes(), &job.run_id).await;
-    let ctx_json =
-        serde_json::to_string_pretty(&job.context).expect("ContextSnapshot always serializes");
-    write_bytes_atomic(&dir.join("context.json"), ctx_json.as_bytes(), &job.run_id).await;
+    write_bytes_atomic(&dir.join("meta.json"), meta_json.into_bytes(), &job.run_id).await;
+    // Compact, not pretty: the context is the largest file the lane writes and
+    // every consumer parses it; pretty-printing only inflated the write (and
+    // its transient allocation) by half.
+    let ctx_json = serde_json::to_string(&job.context).expect("ContextSnapshot always serializes");
+    write_bytes_atomic(
+        &dir.join("context.json"),
+        ctx_json.into_bytes(),
+        &job.run_id,
+    )
+    .await;
 
     // The answer's bytes, beside the descriptor `meta.json` carries. Written
     // raw, so serving it is a read and `lev result --raw` is a copy.
     if let Some(content) = &job.final_output {
         write_bytes_atomic(
             &dir.join(leviath_core::FINAL_OUTPUT_FILE),
-            content.as_bytes(),
+            content.clone().into_bytes(),
             &job.run_id,
         )
         .await;
@@ -288,7 +351,7 @@ async fn write_snapshot(
             serde_json::to_string_pretty(&job.stages).expect("StageRecord slice always serializes");
         write_bytes_atomic(
             &dir.join("stages.json"),
-            stages_json.as_bytes(),
+            stages_json.into_bytes(),
             &job.run_id,
         )
         .await;
@@ -306,7 +369,7 @@ async fn write_snapshot(
         let _ = create_private_dir(&stage_dir).await;
         write_bytes_atomic(
             &stage_dir.join("taint_audit.json"),
-            json.as_bytes(),
+            json.clone().into_bytes(),
             &job.run_id,
         )
         .await;
@@ -315,7 +378,9 @@ async fn write_snapshot(
     // parent is no longer parked on a fan-out.
     let fanout_path = dir.join("fanout.json");
     match &job.fanout {
-        Some(json) => write_bytes_atomic(&fanout_path, json.as_bytes(), &job.run_id).await,
+        Some(json) => {
+            write_bytes_atomic(&fanout_path, json.clone().into_bytes(), &job.run_id).await
+        }
         None => {
             let _ = tokio::fs::remove_file(&fanout_path).await;
         }
@@ -324,7 +389,9 @@ async fn write_snapshot(
     // agent is no longer parked at a stage-boundary interaction point.
     let interactions_path = dir.join("interactions.json");
     match &job.interactions {
-        Some(json) => write_bytes_atomic(&interactions_path, json.as_bytes(), &job.run_id).await,
+        Some(json) => {
+            write_bytes_atomic(&interactions_path, json.clone().into_bytes(), &job.run_id).await
+        }
         None => {
             let _ = tokio::fs::remove_file(&interactions_path).await;
         }
@@ -349,9 +416,9 @@ async fn append_run_archive(
     job: &PersistJob,
     machine_id: &str,
     world_id: &str,
-    prev_context: Option<&ContextSnapshot>,
+    prev_context: Option<&run_archive::ContextDigest>,
 ) {
-    use leviath_core::run_archive::{self, RunIdentity, RunRecord};
+    use leviath_core::run_archive::{RunIdentity, RunRecord};
 
     let path = dir.join("run.lvr");
     let file_exists = tokio::fs::try_exists(&path).await.unwrap_or(false);
@@ -364,7 +431,7 @@ async fn append_run_archive(
         Some(prev) => {
             let progress = RunRecord::Progress {
                 meta: Box::new(job.meta.clone()),
-                delta: run_archive::diff_context(prev, &job.context),
+                delta: run_archive::diff_context_digest(prev, &job.context),
                 at,
             };
             run_archive::write_record(&mut buf, &progress).expect("writing to a Vec never fails");
@@ -438,7 +505,7 @@ async fn append_stage_line(run_dir: &Path, stage_idx: usize, file: &str, line: &
 
 /// Write `bytes` to `path` via a sibling temp file + rename (atomic on the same
 /// filesystem, so a reader never sees a half-written file). Best-effort.
-async fn write_bytes_atomic(path: &Path, bytes: &[u8], run_id: &str) {
+async fn write_bytes_atomic(path: &Path, bytes: Vec<u8>, run_id: &str) {
     let tmp = path.with_extension("json.tmp");
     // `write_private`, not a plain write: these files carry the run's task
     // prompt, its conversation, its tool output, and - in `meta.json` - the
@@ -451,7 +518,9 @@ async fn write_bytes_atomic(path: &Path, bytes: &[u8], run_id: &str) {
     // Blocking, so it goes to a blocking thread rather than stalling the
     // persistence lane. The alternative is a per-platform mode dance here, and
     // `leviath-sys` already owns that (including the Windows `icacls` path).
-    let (tmp_for_write, bytes) = (tmp.clone(), bytes.to_vec());
+    // Owned bytes in, so a multi-hundred-KB context serialization is written
+    // from the one buffer it was serialized into instead of being copied again.
+    let tmp_for_write = tmp.clone();
     let written =
         tokio::task::spawn_blocking(move || leviath_sys::write_private(&tmp_for_write, &bytes))
             .await;
@@ -761,7 +830,14 @@ mod tests {
         let first = job_with_context("run-1", 1);
         let second = job_with_context("run-1", 3); // grew by 2 entries
         write_snapshot(dir.path(), &first, "m", "w", None).await;
-        write_snapshot(dir.path(), &second, "m", "w", Some(&first.context)).await;
+        write_snapshot(
+            dir.path(),
+            &second,
+            "m",
+            "w",
+            Some(&run_archive::digest_context(&first.context)),
+        )
+        .await;
 
         let bytes = std::fs::read(dir.path().join("run-1").join("run.lvr")).unwrap();
         let (_v, records) = read_archive(&mut bytes.as_slice()).unwrap();
@@ -827,6 +903,83 @@ mod tests {
         assert!(!is_terminal_run(&RunStatus::CompleteInteractive));
     }
 
+    /// Snapshots queued behind a slow write are coalesced latest-wins per run:
+    /// three queued snapshots produce ONE write carrying the newest context,
+    /// not three full-window writes.
+    #[tokio::test]
+    async fn worker_coalesces_queued_snapshots_to_the_newest_per_run() {
+        use leviath_core::run_archive::{RunRecord, read_archive};
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(PersistMsg::Snapshot(Box::new(job_with_context("run-1", 1))))
+            .unwrap();
+        tx.send(PersistMsg::Snapshot(Box::new(job_with_context("run-1", 2))))
+            .unwrap();
+        tx.send(PersistMsg::Snapshot(Box::new(job_with_context("run-1", 3))))
+            .unwrap();
+        // A different run's snapshot is not swallowed by run-1's coalescing.
+        tx.send(PersistMsg::Snapshot(Box::new(job_with_context("run-2", 1))))
+            .unwrap();
+        drop(tx);
+        persistence_worker(Some(dir.path().to_path_buf()), rx).await;
+
+        let bytes = std::fs::read(dir.path().join("run-1").join("run.lvr")).unwrap();
+        let (_v, records) = read_archive(&mut bytes.as_slice()).unwrap();
+        let checkpoints: Vec<_> = records
+            .iter()
+            .filter_map(|r| match r {
+                RunRecord::ContextCheckpoint { snapshot, .. } => Some(snapshot),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(checkpoints.len(), 1, "one write for three queued snapshots");
+        assert_eq!(
+            checkpoints[0].regions[0].entries.len(),
+            3,
+            "and it carries the NEWEST context"
+        );
+        // Header + one ContextCheckpoint and nothing else: no superseded
+        // snapshot produced a Progress record.
+        assert_eq!(records.len(), 2);
+        assert!(dir.path().join("run-2").join("meta.json").exists());
+    }
+
+    /// `StageLines` appends output/log lines without rewriting `meta.json` or
+    /// `context.json` - the whole point of the lines-only fast path.
+    #[tokio::test]
+    async fn worker_appends_stage_lines_without_a_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        // Establish the run dir with one snapshot first (like the spawn tick).
+        tx.send(PersistMsg::Snapshot(Box::new(job("run-1"))))
+            .unwrap();
+        tx.send(PersistMsg::StageLines {
+            run_id: "run-1".to_string(),
+            output_appends: vec![(0, "an output line".to_string())],
+            log_appends: vec![(0, "[tool] shell: ls".to_string())],
+        })
+        .unwrap();
+        drop(tx);
+
+        let meta_before = {
+            // The worker hasn't run yet; nothing exists.
+            !dir.path().join("run-1").join("meta.json").exists()
+        };
+        assert!(meta_before);
+        persistence_worker(Some(dir.path().to_path_buf()), rx).await;
+
+        let run = dir.path().join("run-1");
+        let out = std::fs::read_to_string(run.join("stages/0/output.log")).unwrap();
+        assert!(out.contains("an output line"));
+        let log = std::fs::read_to_string(run.join("stages/0/logs.log")).unwrap();
+        assert!(log.contains("[tool] shell: ls"));
+        // meta.json exists from the snapshot, and was not rewritten by the
+        // lines message (same content as the snapshot wrote).
+        let meta: RunMeta =
+            serde_json::from_str(&std::fs::read_to_string(run.join("meta.json")).unwrap()).unwrap();
+        assert_eq!(meta.run_id, "run-1");
+    }
+
     #[tokio::test]
     async fn worker_drops_terminal_runs_from_the_context_cache() {
         // A terminal job exercises the cache-cleanup branch; the run is still
@@ -881,7 +1034,14 @@ mod tests {
         write_snapshot(dir.path(), &fo_job, "m", "w", None).await;
         assert!(path.exists());
         // A later job without fan-out state removes the now-stale file.
-        write_snapshot(dir.path(), &job("run-1"), "m", "w", Some(&fo_job.context)).await;
+        write_snapshot(
+            dir.path(),
+            &job("run-1"),
+            "m",
+            "w",
+            Some(&run_archive::digest_context(&fo_job.context)),
+        )
+        .await;
         assert!(!path.exists());
     }
 
