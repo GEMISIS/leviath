@@ -394,6 +394,11 @@ impl PipelineWorld {
                 // same tick rather than waiting for the next one.
                 fail_wedged_runs,
                 dispatch_persistence,
+                // After persistence: a merged fan-out worker is only slimmed
+                // once its terminal snapshot has been dispatched to the lane,
+                // and running behind `dispatch_persistence` means the check
+                // reads this tick's watermark, not last tick's.
+                crate::fanout::slim_merged_workers,
             )
                 .chain()
                 .after(crate::interaction_points::collect_interaction_point),

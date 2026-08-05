@@ -281,12 +281,24 @@ pub fn fan_out_collect(world: &mut World) {
             .take::<FanOutWaiting>()
             .expect("a Waiting fan-out parent still holds FanOutWaiting");
 
-        // 1. Reap workers that have reached a terminal state.
+        // 1. Reap workers that have reached a terminal state. A consumed
+        // worker's result now lives in `w.summaries`/`w.failures`, so its heavy
+        // components are dead weight - mark it for `slim_merged_workers`, which
+        // drops them once the terminal snapshot has reached the persistence
+        // lane. The entity itself stays (the host only despawns it when the
+        // parent goes terminal), but without its context window: previously
+        // every finished fan-out worker kept a full window resident for the
+        // whole remainder of the parent's run.
         let mut still_active = Vec::with_capacity(w.active.len());
         for aw in std::mem::take(&mut w.active) {
             match worker_terminal_result(world, aw.entity) {
-                Some(Ok(content)) => w.summaries.push((aw.item_id, content)),
-                Some(Err(message)) => w.failures.push((aw.item_id, message)),
+                Some(result) => {
+                    match result {
+                        Ok(content) => w.summaries.push((aw.item_id, content)),
+                        Err(message) => w.failures.push((aw.item_id, message)),
+                    }
+                    world.entity_mut(aw.entity).insert(MergedWorker);
+                }
                 None => still_active.push(aw),
             }
         }
@@ -320,6 +332,49 @@ pub fn fan_out_collect(world: &mut World) {
         } else {
             world.entity_mut(parent).insert(w);
         }
+    }
+}
+
+/// A fan-out worker whose terminal result the parent has already consumed.
+/// Set by [`fan_out_collect`]; consumed by [`slim_merged_workers`].
+#[derive(Component)]
+pub struct MergedWorker;
+
+/// Drop a merged worker's heavy components once its terminal snapshot has
+/// reached the persistence lane.
+///
+/// Ordering makes this safe on both sides: the marker is only set after the
+/// parent consumed the worker's result (so the merge no longer reads the
+/// worker), and the watermark gate (`PersistWatermark::persisted_status`)
+/// holds the slim back until the terminal state is on its way to disk (so
+/// nothing readable is lost - the entity's remaining metadata still identifies
+/// the run, and its full final state is in the run dir).
+pub fn slim_merged_workers(
+    workers: Query<(Entity, &crate::pipeline::PersistWatermark), With<MergedWorker>>,
+    mut commands: Commands,
+) {
+    crate::tick_scope::clear();
+    for (entity, watermark) in workers.iter() {
+        crate::tick_scope::enter(entity);
+        let terminal_persisted = matches!(
+            watermark.persisted_status(),
+            Some(
+                leviath_core::run_meta::RunStatus::Complete
+                    | leviath_core::run_meta::RunStatus::Error
+                    | leviath_core::run_meta::RunStatus::Cancelled
+            )
+        );
+        if !terminal_persisted {
+            continue; // the terminal snapshot has not been dispatched yet
+        }
+        commands.entity(entity).remove::<(
+            ContextWindow,
+            InferenceResult,
+            crate::pipeline::StageInferences,
+            crate::pipeline::StageSetups,
+            AgentBlueprint,
+            MergedWorker,
+        )>();
     }
 }
 
@@ -1030,6 +1085,56 @@ mod tests {
                 .current_tokens
                 > 0
         );
+    }
+
+    /// Run the slim system once over `world`.
+    fn run_slim(world: &mut World) {
+        let mut schedule = bevy_ecs::schedule::Schedule::default();
+        schedule.add_systems(slim_merged_workers);
+        schedule.run(world);
+    }
+
+    /// A merged worker keeps its heavy components until its terminal snapshot
+    /// has been dispatched, then sheds them - previously every finished
+    /// fan-out worker kept a full context window resident until the parent
+    /// went terminal.
+    #[test]
+    fn merged_workers_are_slimmed_once_their_terminal_state_is_persisted() {
+        let mut world = World::new();
+        install(&mut world, TestSpawner::ok());
+        let e = spawn_parent(
+            &mut world,
+            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue)),
+            r#"[{"id":"a"}]"#,
+        );
+        fan_out_split(&mut world);
+        fan_out_collect(&mut world);
+        let worker = world.get::<SubAgentChildren>(e).unwrap().children[0];
+        // Give the worker a context window so there is something to shed.
+        world
+            .entity_mut(worker)
+            .insert((window(), crate::pipeline::PersistWatermark::default()));
+        complete_worker(&mut world, worker, "done");
+        fan_out_collect(&mut world);
+
+        // Consumed by the merge and marked - but its terminal snapshot has not
+        // been dispatched, so it keeps its state.
+        assert!(world.get::<MergedWorker>(worker).is_some());
+        run_slim(&mut world);
+        assert!(
+            world.get::<ContextWindow>(worker).is_some(),
+            "unpersisted terminal state stays resident"
+        );
+
+        // Stamp the watermark terminal, and the worker sheds its heavy parts.
+        let mut wm = crate::pipeline::PersistWatermark::default();
+        wm.stamp_status(leviath_core::run_meta::RunStatus::Complete);
+        world.entity_mut(worker).insert(wm);
+        run_slim(&mut world);
+        assert!(world.get::<ContextWindow>(worker).is_none());
+        assert!(world.get::<MergedWorker>(worker).is_none());
+        // The entity itself survives for the host's bookkeeping.
+        assert!(world.get::<AgentState>(worker).is_some());
     }
 
     #[test]

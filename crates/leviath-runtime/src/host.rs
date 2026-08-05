@@ -685,6 +685,13 @@ pub struct WorldHost {
     /// How long an unloaded run stays in [`Self::finished`]. `0` keeps none.
     /// See [`Self::set_finished_retention_secs`].
     finished_retention_secs: u64,
+    /// Paused runs the host has paged out of the world, by run id, each holding
+    /// its last listing row. A parked run's full state is on disk; `Resume`,
+    /// `Message` and `Cancel` all page it back through
+    /// [`Self::resolve_or_reload`], and [`Self::list`] keeps reporting it so an
+    /// operator's `lev ps` view does not change just because the daemon stopped
+    /// spending memory on a run nobody is driving.
+    parked: HashMap<String, RunListEntry>,
 }
 
 /// How often the serve loop re-drives the world on its own.
@@ -769,6 +776,7 @@ impl WorldHost {
             events,
             emitted: HashMap::new(),
             emitted_interactions: HashSet::new(),
+            parked: HashMap::new(),
             subagent_tx,
             subagent_rx,
             redrive: DEFAULT_REDRIVE_INTERVAL,
@@ -1079,6 +1087,7 @@ impl WorldHost {
         // daemon's reap hook has already had the world and is free to have taken
         // the components it reads.
         let mut to_reap: Vec<(String, Entity, RunListEntry)> = Vec::new();
+        let mut to_park: Vec<(String, Entity, RunListEntry)> = Vec::new();
         let now = chrono::Utc::now().timestamp();
         for (run_id, entity) in pairs {
             let Some(state) = self.world.world().get::<AgentState>(entity) else {
@@ -1211,13 +1220,25 @@ impl WorldHost {
                 let entry = self.entry_for(&run_id, entity, state);
                 to_reap.push((run_id.clone(), entity, entry));
             }
+            // Page a paused run out of the world once its paused state is on
+            // its way to disk. Unlike `Waiting` (see the NOTE below), `Paused`
+            // carries no live continuation - it is the one non-terminal state
+            // whose whole meaning is "nothing is driving this" - and Resume,
+            // Message and Cancel all page an unloaded run back in through
+            // `resolve_or_reload`, exactly as a daemon restart would. Scoped
+            // to standalone roots: a run with tree links or an open prompt
+            // keeps the restart-equivalence question open and stays resident.
+            if self.parkable(entity, &state.status) {
+                let entry = self.entry_for(&run_id, entity, state);
+                to_park.push((run_id.clone(), entity, entry));
+            }
             // NOTE: non-terminal `Waiting` agents are intentionally NOT unloaded.
             // Every `Waiting` state carries a live, unpersisted continuation - a
             // blocked `ask` future (`AwaitingInteraction`), running fan-out workers
             // (`FanOutWaiting`), or pending children (`WaitingForChildren`) - so
             // flushing one to disk and paging it back cannot resume it (in-flight
             // interactions aren't persisted; the blocked future is gone). Only
-            // terminal agents, whose full state is on disk, are safe to reap.
+            // terminal agents (fully on disk) are reaped, and paused ones parked.
 
             self.emitted.insert(run_id, cur);
         }
@@ -1228,6 +1249,7 @@ impl WorldHost {
         // is safe. The reaper is moved out for the loop to avoid borrowing `self`
         // twice, then restored.
         let mut reaper = self.reaper.take();
+        let reaped_any = !to_reap.is_empty();
         for (run_id, entity, entry) in to_reap {
             if let Some(reaper) = reaper.as_mut() {
                 reaper(&mut self.world, entity);
@@ -1239,8 +1261,35 @@ impl WorldHost {
             // still say how it ended, which is the whole of issue #205.
             self.record_finished(entry, now);
         }
+        // Park paused runs: same teardown as a reap (the reap hook drops the
+        // agent's tool state and sandbox, which a page-in rebuilds the way a
+        // daemon restart does), but the listing row moves to `parked` rather
+        // than `finished` - the run is not over, it is just not resident.
+        for (run_id, entity, entry) in to_park {
+            if let Some(reaper) = reaper.as_mut() {
+                reaper(&mut self.world, entity);
+            }
+            self.world.world_mut().despawn(entity);
+            self.by_run_id.remove(&run_id);
+            self.emitted.remove(&run_id);
+            self.parked.insert(run_id, entry);
+        }
         self.reaper = reaper;
         self.prune_finished(now);
+        // Reaped runs answer no further prompts: drop their request ids from
+        // the emitted-interaction set, which otherwise grows for the daemon's
+        // life (the set is keyed by request id, so prune by what is still
+        // pending - the same shape `cancel_tree` uses).
+        if reaped_any {
+            let still_open: std::collections::HashSet<String> = self
+                .interactions
+                .pending()
+                .into_iter()
+                .map(|(_, req)| req.id)
+                .collect();
+            self.emitted_interactions
+                .retain(|id| still_open.contains(id));
+        }
 
         for (agent_id, request) in self.interactions.pending() {
             if self.emitted_interactions.insert(request.id.clone()) {
@@ -1278,6 +1327,41 @@ impl WorldHost {
                 self.by_run_id.insert(run_id, entity);
             }
         }
+    }
+
+    /// Whether a paused agent is safe to page out of the world.
+    ///
+    /// Conservative on purpose - this is the restart-equivalence question, and
+    /// only shapes where the answer is a settled "yes" qualify:
+    /// - status is `Paused`, and the *persisted* status is too (the watermark
+    ///   proves the paused snapshot was dispatched, so disk can rebuild it);
+    /// - it is a standalone root: no parent that might address it by entity,
+    ///   no children whose links a page-in would have to rebuild;
+    /// - no open interaction and no fan-out in flight (a pause that landed
+    ///   mid-prompt or mid-split keeps its live machinery).
+    fn parkable(&self, entity: Entity, status: &AgentStatus) -> bool {
+        if !matches!(status, AgentStatus::Paused) {
+            return false;
+        }
+        // No reloader, no parking: a host that cannot page a run back in
+        // (an embedded world, a bare test host) must keep it resident, or
+        // "paused" silently becomes "gone".
+        if self.reloader.is_none() {
+            return false;
+        }
+        let world = self.world.world();
+        let paused_persisted = world
+            .get::<crate::pipeline::PersistWatermark>(entity)
+            .and_then(|w| w.persisted_status())
+            == Some(leviath_core::run_meta::RunStatus::Paused);
+        paused_persisted
+            && world.get::<crate::components::ParentRef>(entity).is_none()
+            && world.get::<SubAgentChildren>(entity).is_none()
+            && world.get::<crate::fanout::FanOutWaiting>(entity).is_none()
+            && world
+                .get::<crate::interaction_points::AwaitingInteractionPoint>(entity)
+                .is_none()
+            && world.get::<AwaitingInteraction>(entity).is_none()
     }
 
     /// Whether a terminal agent is safe to unload: it has no **live** parent that
@@ -1339,6 +1423,8 @@ impl WorldHost {
         }
         let entity = (self.reloader.as_mut()?)(&mut self.world, run_id)?;
         self.by_run_id.insert(run_id.to_string(), entity);
+        // Live again: its listing row comes off the entity, not the parked map.
+        self.parked.remove(run_id);
         Some(entity)
     }
 
@@ -1354,7 +1440,9 @@ impl WorldHost {
 
     /// Record the run-id → entity mapping for a freshly-spawned agent.
     pub fn register(&mut self, run_id: impl Into<String>, entity: Entity) {
-        self.by_run_id.insert(run_id.into(), entity);
+        let run_id = run_id.into();
+        self.parked.remove(&run_id);
+        self.by_run_id.insert(run_id, entity);
     }
 
     /// Resolve a run id to a **live** entity (one that still exists in the world).
@@ -1694,6 +1782,9 @@ impl WorldHost {
                 let state = world.get::<AgentState>(entity)?;
                 Some(self.entry_for(run_id, entity, state))
             })
+            // Parked (paused, paged-out) runs are still the daemon's runs; an
+            // operator must not lose sight of one just because it left memory.
+            .chain(self.parked.values().cloned())
             .collect()
     }
 
@@ -1770,6 +1861,7 @@ impl WorldHost {
                 let status = self
                     .live_entity(&run_id)
                     .and_then(|e| self.world.agent_status(e))
+                    .or_else(|| self.parked.get(&run_id).map(|e| e.status.clone()))
                     .or_else(|| {
                         self.finished
                             .iter()
@@ -2926,6 +3018,105 @@ mod tests {
             })
             .await,
             None
+        );
+    }
+
+    /// A paused standalone root whose paused snapshot has been dispatched is
+    /// paged out of the world: the entity is gone, but the listing and the
+    /// Status op still report it, and a Resume pages it back in.
+    #[tokio::test]
+    async fn a_persisted_paused_root_is_parked_and_pages_back_in() {
+        let mut host = host_with(vec![]);
+        // A reloader that restores the run the way `reload_run` does: paused,
+        // ready to be resumed.
+        host.set_reloader(Box::new(|world, run_id| {
+            let mut state = agent_state(run_id);
+            state.status = AgentStatus::Paused;
+            Some(world.spawn_agent((state,)))
+        }));
+        let e = spawn(&mut host, "run-a", "agent-a");
+        assert!(
+            ask(&mut host, |reply| ControlOp::Pause {
+                run_id: "run-a".to_string(),
+                reply
+            })
+            .await
+        );
+        // Stamp the watermark as though the paused snapshot was dispatched.
+        let mut wm = crate::pipeline::PersistWatermark::default();
+        wm.stamp_status(leviath_core::run_meta::RunStatus::Paused);
+        host.world_mut().world_mut().entity_mut(e).insert(wm);
+
+        host.emit_events();
+
+        // Paged out: the entity is despawned and the run id unmapped.
+        assert!(host.world.world().get::<AgentState>(e).is_none());
+        assert!(!host.by_run_id.contains_key("run-a"));
+        // But not lost: the listing still carries the paused row...
+        let listing = ask(&mut host, |reply| ControlOp::List { reply }).await;
+        let row = listing
+            .runs
+            .iter()
+            .find(|r| r.run_id == "run-a")
+            .expect("a parked run stays listed");
+        assert_eq!(row.status, AgentStatus::Paused);
+        // ...and Status answers from the parked map.
+        let status = ask(&mut host, |reply| ControlOp::Status {
+            run_id: "run-a".to_string(),
+            reply,
+        })
+        .await;
+        assert_eq!(status, Some(AgentStatus::Paused));
+
+        // Resume pages the run back in through the reloader and unparks it.
+        assert!(
+            ask(&mut host, |reply| ControlOp::Resume {
+                run_id: "run-a".to_string(),
+                reply
+            })
+            .await
+        );
+        assert!(host.parked.is_empty(), "resumed run left the parked map");
+        let e2 = host.by_run_id["run-a"];
+        assert_eq!(host.world.agent_status(e2), Some(AgentStatus::Active));
+    }
+
+    /// The park gate holds until the paused state is known to be on its way to
+    /// disk, and never fires for a run with tree links.
+    #[tokio::test]
+    async fn a_paused_run_stays_resident_until_persisted_and_when_linked() {
+        let mut host = host_with(vec![]);
+        host.set_reloader(paging_reloader());
+        let e = spawn(&mut host, "run-a", "agent-a");
+        assert!(
+            ask(&mut host, |reply| ControlOp::Pause {
+                run_id: "run-a".to_string(),
+                reply
+            })
+            .await
+        );
+
+        // Paused, but no watermark proof the paused snapshot was dispatched.
+        host.emit_events();
+        assert!(
+            host.world.world().get::<AgentState>(e).is_some(),
+            "an unpersisted pause stays resident"
+        );
+
+        // Persisted now, but carrying a child link: still resident.
+        let mut wm = crate::pipeline::PersistWatermark::default();
+        wm.stamp_status(leviath_core::run_meta::RunStatus::Paused);
+        host.world_mut().world_mut().entity_mut(e).insert((
+            wm,
+            SubAgentChildren {
+                children: vec![],
+                max_child_depth: 1,
+            },
+        ));
+        host.emit_events();
+        assert!(
+            host.world.world().get::<AgentState>(e).is_some(),
+            "a run with tree links keeps the restart question open"
         );
     }
 
