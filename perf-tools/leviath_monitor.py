@@ -23,15 +23,26 @@ Memory metrics, precisely (see also perf-tools/README.md):
   pages, so it has the same ratchet as RSS.
 - ``uss_mb``: unique (private) pages. Linux: ``Private_Clean+Private_Dirty``
   from ``smaps_rollup``; Windows: psutil's USS. Same lazy-free caveat on Linux.
-- ``lazy_free_mb`` (Linux only): the ``LazyFree`` field - pages the process
-  freed via ``MADV_FREE`` that the kernel has not reclaimed yet. This is the
+- ``lazy_free_mb``: pages the process freed lazily that the kernel has not
+  reclaimed yet. Linux: the ``LazyFree`` field of ``smaps_rollup``
+  (``MADV_FREE``). macOS: the ``Reclaimable`` column of ``/usr/bin/footprint``
+  (``MADV_FREE_REUSABLE``) - measured on a settled post-burst daemon, the
+  physical footprint still counts these pages (50 MB dirty of which 48 MB
+  reclaimable) until the kernel repossesses them under pressure. This is the
   correction term that turns the ratcheting counters into a live figure.
 - ``live_mb``: the headline series - the memory the process actually holds:
-  macOS: the kernel's physical footprint (``/usr/bin/footprint``; what
-  Activity Monitor's "Memory" column and ``vmmap`` report - it already
-  excludes lazily-freed pages). Linux: ``pss - LazyFree``, floored at 0.
-  Windows: USS (Windows has no lazy-free equivalent; ``VirtualFree`` decommits
-  immediately, so no correction is needed).
+  macOS: physical footprint minus its reclaimable portion, floored at 0.
+  Linux: ``pss - LazyFree``, floored at 0. Windows: USS (Windows has no
+  lazy-free equivalent; ``VirtualFree`` decommits immediately, so no
+  correction is needed).
+
+Session counts come from two sources. While running, each sample counts runs
+whose ``meta.json`` status is active - accurate for long runs but blind to
+runs shorter than the sample interval. On stop, the monitor also reconstructs
+the exact concurrency curve from each run directory's creation time and its
+``meta.json``'s last-write time, which have sub-second precision even for
+runs the sampler never saw; the graph shows both, and the reconstruction is
+written next to the CSV as ``*_runs.csv``.
 
 Every panel title carries the metric's average and peak, and a dashed line
 marks the average. Because both output names carry a ``YYYYmmdd_HHMMSS``
@@ -95,6 +106,10 @@ __all__ = [
     "sample_memory",
     "default_runs_dir",
     "ActiveRunCounter",
+    "RunInterval",
+    "collect_run_intervals",
+    "concurrency_steps",
+    "write_runs_csv",
     "sample_process",
     "build_output_paths",
     "init_csv",
@@ -140,6 +155,15 @@ _TOP_MEM_RE = re.compile(r"^(\d+(?:\.\d+)?)([BKMG])[+-]?$")
 #: Matches the summary line of ``/usr/bin/footprint``, e.g.
 #: ``lev [6994]: 64-bit    Footprint: 22 MB (16384 bytes per page)``.
 _FOOTPRINT_RE = re.compile(r"Footprint:\s+(\d+(?:\.\d+)?)\s*([BKMG])B?\b")
+
+#: Matches the TOTAL row of ``/usr/bin/footprint``'s category table, whose
+#: first three sized columns are Dirty, Clean, and Reclaimable, e.g.
+#: ``50 MB    9360 KB        48 MB       2789    TOTAL``.
+_FOOTPRINT_TOTAL_RE = re.compile(
+    r"^\s*(\d+(?:\.\d+)?)\s*([BKMG])B?\s+"
+    r"(\d+(?:\.\d+)?)\s*([BKMG])B?\s+"
+    r"(\d+(?:\.\d+)?)\s*([BKMG])B?\s+\d+\s+TOTAL\b"
+)
 
 
 class MemorySample(NamedTuple):
@@ -228,19 +252,28 @@ def find_leviath_process(
 _UNIT_TO_MB = {"B": 1 / _BYTES_PER_MB, "K": 1 / 1024, "M": 1.0, "G": 1024.0}
 
 
-def _footprint_darwin(pid: int) -> Optional[float]:
-    """macOS: physical footprint, in MB.
+def _footprint_darwin(pid: int) -> Tuple[Optional[float], Optional[float]]:
+    """macOS: ``(physical footprint, reclaimable portion)`` in MB.
 
     Physical footprint is the figure ``vmmap``, Activity Monitor, and the
     kernel's own memory accounting report, and unlike psutil's
-    ``memory_full_info`` it needs no elevated privileges. It already excludes
-    lazily-freed (``MADV_FREE``) pages, which RSS keeps counting - measured on
-    an idle daemon: 292.8 MB RSS over a 21.7 MB footprint, the difference
-    being exactly ``vmmap``'s ``MALLOC_SMALL (empty)`` regions.
+    ``memory_full_info`` it needs no elevated privileges. It excludes the
+    empty allocator regions RSS keeps counting - measured on an idle daemon:
+    292.8 MB RSS over a 21.7 MB footprint - but it still counts pages the
+    allocator returned via ``MADV_FREE_REUSABLE``: they stay in the footprint,
+    flagged in the ``Reclaimable`` column of the category table, until the
+    kernel repossesses them under pressure. The reclaimable figure is the
+    macOS twin of Linux's ``LazyFree``, so callers subtract it for ``live``.
+
+    Beware attribution when reading that table yourself: mimalloc tags its
+    arenas with VM tag 100, which Apple's tools label ``IOAccelerator`` as if
+    it were GPU memory. Retagging via ``MIMALLOC_OS_TAG=240`` relabels the
+    same regions ``app-specific tag 1``, proving they are heap pages.
 
     ``/usr/bin/footprint`` answers in ~30ms; ``top`` is the fallback because
     it is always present but costs over a second of system time per call (it
-    scans the whole process table even when pinned to one pid).
+    scans the whole process table even when pinned to one pid). ``top`` knows
+    nothing about reclaimable pages, so the fallback reports ``None`` for it.
     """
     try:
         out = subprocess.run(
@@ -251,7 +284,16 @@ def _footprint_darwin(pid: int) -> Optional[float]:
         ).stdout
         match = _FOOTPRINT_RE.search(out)
         if match:
-            return float(match.group(1)) * _UNIT_TO_MB[match.group(2)]
+            footprint = float(match.group(1)) * _UNIT_TO_MB[match.group(2)]
+            reclaimable = None
+            for line in out.splitlines():
+                total = _FOOTPRINT_TOTAL_RE.match(line)
+                if total:
+                    reclaimable = (
+                        float(total.group(5)) * _UNIT_TO_MB[total.group(6)]
+                    )
+                    break
+            return footprint, reclaimable
     except (OSError, subprocess.SubprocessError):
         pass
     try:
@@ -262,13 +304,13 @@ def _footprint_darwin(pid: int) -> Optional[float]:
             timeout=10,
         ).stdout
     except (OSError, subprocess.SubprocessError):
-        return None
+        return None, None
     for line in reversed(out.splitlines()):
         token = line.strip().split()[0] if line.strip() else ""
         match = _TOP_MEM_RE.match(token)
         if match:
-            return float(match.group(1)) * _UNIT_TO_MB[match.group(2)]
-    return None
+            return float(match.group(1)) * _UNIT_TO_MB[match.group(2)], None
+    return None, None
 
 
 def _smaps_rollup_kb(pid: int) -> Dict[str, int]:
@@ -337,8 +379,11 @@ def sample_memory(proc: psutil.Process) -> MemorySample:
     """
     if sys.platform == "darwin":
         rss = proc.memory_info().rss / _BYTES_PER_MB
-        footprint = _footprint_darwin(proc.pid)
-        return MemorySample(rss, None, None, None, footprint)
+        footprint, reclaimable = _footprint_darwin(proc.pid)
+        live = footprint
+        if footprint is not None and reclaimable is not None:
+            live = max(footprint - reclaimable, 0.0)
+        return MemorySample(rss, None, None, reclaimable, live)
     if sys.platform.startswith("linux"):
         return _memory_linux(proc)
     return _memory_windows_or_fallback(proc)
@@ -413,6 +458,140 @@ class ActiveRunCounter:
             return None
         status = meta.get("status")
         return status if isinstance(status, str) else None
+
+
+class RunInterval(NamedTuple):
+    """One run's lifetime in wall-clock epoch seconds."""
+
+    run_id: str
+    start: float
+    end: float
+
+
+def collect_run_intervals(
+    runs_dir: Path, wall_start: float, wall_end: float
+) -> List[RunInterval]:
+    """Reconstruct each run's exact lifetime from its on-disk artifacts.
+
+    Sampling ``meta.json`` statuses undercounts whenever a run starts and
+    finishes inside one sample interval - and ``meta.json``'s own
+    ``started_at``/``updated_at`` are whole seconds, so a sub-second run
+    collapses to a zero-length interval there too. The filesystem does better:
+    the run *directory* is created once at spawn and never renamed over, so
+    its birth time is the start, and ``meta.json``'s last write lands with the
+    terminal status, so its mtime is the end. Both carry sub-second precision
+    on APFS/NTFS/ext4.
+
+    Runs still active (or unreadable) at *wall_end* are treated as ending
+    there. On filesystems without birth times (some Linux setups) the
+    directory mtime would move with every write, so the whole-second
+    ``started_at`` from ``meta.json`` is the fallback start.
+
+    Args:
+        runs_dir: The runs directory the daemon persists to.
+        wall_start: Epoch seconds when monitoring began; intervals that ended
+            before this are dropped.
+        wall_end: Epoch seconds when monitoring stopped; open intervals are
+            clamped here.
+
+    Returns:
+        Overlapping-window intervals, clipped to the monitoring window and
+        sorted by start time.
+    """
+    intervals: List[RunInterval] = []
+    try:
+        entries = list(runs_dir.iterdir())
+    except OSError:
+        return intervals
+    for entry in entries:
+        meta_path = entry / "meta.json"
+        try:
+            dir_stat = entry.stat()
+            meta_stat = meta_path.stat()
+            with open(meta_path, encoding="utf-8") as handle:
+                meta = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        start = getattr(dir_stat, "st_birthtime", None)
+        if start is None:
+            started_at = meta.get("started_at")
+            if not isinstance(started_at, (int, float)):
+                continue
+            start = float(started_at)
+        status = meta.get("status")
+        if isinstance(status, str) and status not in ACTIVE_STATUSES:
+            end = meta_stat.st_mtime
+        else:
+            end = wall_end
+        end = max(end, start)
+        if end < wall_start or start > wall_end:
+            continue
+        intervals.append(
+            RunInterval(entry.name, max(start, wall_start), min(end, wall_end))
+        )
+    intervals.sort(key=lambda item: item.start)
+    return intervals
+
+
+def concurrency_steps(
+    intervals: Sequence[RunInterval], wall_start: float, wall_end: float
+) -> Tuple[List[float], List[float]]:
+    """Turn run intervals into an exact concurrency step function.
+
+    Args:
+        intervals: Output of :func:`collect_run_intervals`.
+        wall_start: Epoch seconds of monitoring start; x values are elapsed
+            seconds relative to this, matching the sampled series.
+        wall_end: Epoch seconds of monitoring stop; the curve is closed here.
+
+    Returns:
+        ``(xs, ys)`` suitable for a ``step(where="post")`` plot; empty lists
+        when there were no intervals.
+    """
+    if not intervals:
+        return [], []
+    events: List[Tuple[float, int]] = []
+    for interval in intervals:
+        events.append((interval.start, 1))
+        events.append((interval.end, -1))
+    # At identical timestamps let ends land before starts so a back-to-back
+    # handoff does not read as a moment of double concurrency.
+    events.sort(key=lambda event: (event[0], event[1]))
+    xs: List[float] = [0.0]
+    ys: List[float] = [0]
+    count = 0
+    for when, delta in events:
+        count += delta
+        elapsed = when - wall_start
+        if xs[-1] == elapsed:
+            ys[-1] = count
+        else:
+            xs.append(elapsed)
+            ys.append(count)
+    xs.append(wall_end - wall_start)
+    ys.append(0)
+    return xs, ys
+
+
+def write_runs_csv(
+    path: Path | str, intervals: Sequence[RunInterval], wall_start: float
+) -> None:
+    """Write the reconstructed intervals next to the sample CSV.
+
+    Columns are elapsed seconds relative to monitoring start, so they line up
+    with the main CSV's x-axis directly.
+    """
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(("run_id", "start_seconds", "end_seconds"))
+        for interval in intervals:
+            writer.writerow(
+                (
+                    interval.run_id,
+                    f"{interval.start - wall_start:.3f}",
+                    f"{interval.end - wall_start:.3f}",
+                )
+            )
 
 
 def sample_process(
@@ -543,6 +722,7 @@ def generate_graph(
     samples: Sequence[Sample],
     png_path: Path | str,
     label: str = DEFAULT_PROCESS_NAME,
+    concurrency: Optional[Tuple[Sequence[float], Sequence[float]]] = None,
 ) -> Path:
     """Render *samples* to a three-panel PNG at *png_path*.
 
@@ -555,6 +735,10 @@ def generate_graph(
             placeholder image rather than an error.
         png_path: Where to write the PNG.
         label: Process name used in the figure title.
+        concurrency: Optional exact concurrency step data from
+            :func:`concurrency_steps`, drawn on the sessions panel alongside
+            the sampled counts; the sampled series alone misses runs shorter
+            than the sample interval.
 
     Returns:
         The path that was written.
@@ -570,12 +754,27 @@ def generate_graph(
             samples,
             lambda s: None if s.active_runs is None else float(s.active_runs),
             color="tab:green",
+            label="sampled",
             step=True,
         )
-        if runs:
-            runs_axes.set_title(
-                _stats_label("Active sessions", runs, "runs"), fontsize=10
+        exact_peak: Optional[float] = None
+        if concurrency is not None and concurrency[0]:
+            xs, ys = concurrency
+            runs_axes.step(
+                xs,
+                ys,
+                where="post",
+                color="tab:orange",
+                linewidth=1.2,
+                label="exact (run files)",
             )
+            exact_peak = max(ys)
+        if runs or exact_peak is not None:
+            title = _stats_label("Active sessions", runs, "runs")
+            if exact_peak is not None:
+                title += f" - exact peak {exact_peak:.0f}"
+            runs_axes.set_title(title, fontsize=10)
+            runs_axes.legend(loc="upper right", fontsize=8)
         else:
             runs_axes.set_title("Active sessions (no data)", fontsize=10)
 
@@ -643,6 +842,7 @@ def watch_loop(
     sleep_fn: Callable[[float], None] = time.sleep,
     on_sample: Optional[Callable[[Sample], None]] = None,
     run_counter: Optional[ActiveRunCounter] = None,
+    start_time: Optional[float] = None,
 ) -> List[Sample]:
     """Sample *proc* every *interval* seconds until told to stop.
 
@@ -663,12 +863,16 @@ def watch_loop(
         sleep_fn: Callable used to wait between samples.
         on_sample: Called with each sample; defaults to a one-line status print.
         run_counter: Optional session counter shared across samples.
+        start_time: ``time.time()`` origin for the elapsed x-axis; defaults to
+            now. Callers that also reconstruct run intervals pass the same
+            origin to both so the series line up.
 
     Returns:
         Every sample collected, in order.
     """
     samples: List[Sample] = []
-    start_time = time.time()
+    if start_time is None:
+        start_time = time.time()
     report = on_sample if on_sample is not None else _print_sample
 
     while True:
@@ -836,15 +1040,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"  png: {png_path}")
     print("Press Ctrl-C to stop.\n")
 
+    wall_start = time.time()
     samples = watch_loop(
         proc,
         args.interval,
         csv_path,
         max_samples=args.max_samples,
         run_counter=run_counter,
+        start_time=wall_start,
     )
+    wall_end = time.time()
 
-    generate_graph(samples, png_path, label=name)
+    concurrency: Optional[Tuple[List[float], List[float]]] = None
+    if run_counter is not None:
+        intervals = collect_run_intervals(
+            run_counter.runs_dir, wall_start, wall_end
+        )
+        if intervals:
+            runs_csv = csv_path.with_name(csv_path.stem + "_runs.csv")
+            write_runs_csv(runs_csv, intervals, wall_start)
+            concurrency = concurrency_steps(intervals, wall_start, wall_end)
+            print(f"\nRun intervals ({len(intervals)}): {runs_csv}")
+
+    generate_graph(samples, png_path, label=name, concurrency=concurrency)
 
     print(f"\nCollected {len(samples)} sample(s).")
     print(f"Data:  {csv_path}")
