@@ -434,8 +434,23 @@ pub(super) async fn agent_file(
         }
     };
 
+    // Where in the file to start. A run's artifact can be far larger than one
+    // response - a dataset is the whole point of some agents - so a caller pages
+    // through with `offset` rather than being stuck with the first megabyte.
+    let offset = query.offset.unwrap_or(0);
+    if offset > size {
+        return Err(err(
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            format!("offset {offset} is past the end of '{requested_path}' ({size} bytes)"),
+        ));
+    }
+
     let mut bytes = Vec::new();
     if let Err(e) = std::fs::File::open(&resolved)
+        .and_then(|mut f| {
+            std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(offset))?;
+            Ok(f)
+        })
         .map(|f| std::io::Read::take(f, MAX_FILE_READ_BYTES))
         .and_then(|mut f| std::io::Read::read_to_end(&mut f, &mut bytes))
     {
@@ -444,15 +459,29 @@ pub(super) async fn agent_file(
             format!("could not read '{requested_path}': {e}"),
         ));
     }
-    let truncated = size > MAX_FILE_READ_BYTES;
     let read_len = bytes.len();
+    let next_offset = offset + read_len as u64;
+    let truncated = next_offset < size;
+
+    // A byte offset can land mid-character at either end. Trimming a partial
+    // character off the front keeps the window aligned so the *next* page starts
+    // on a boundary, which is what makes concatenating pages give back the file.
+    let leading_partial = bytes
+        .iter()
+        .take(4)
+        .position(|b| !is_utf8_continuation(*b))
+        .filter(|_| offset > 0)
+        .unwrap_or(0);
+    let bytes = bytes.split_off(leading_partial);
+    let read_len = read_len - leading_partial;
+
     let content = match String::from_utf8(bytes) {
         Ok(s) => s,
-        // The 1 MiB cap can land mid-character in a file that is otherwise
-        // valid UTF-8. That is the cap's doing, not the file's: drop the
-        // split character's leading bytes rather than calling a text file
-        // binary. (`valid_up_to` is at most 3 bytes short of the cap when
-        // the only problem is the cut.)
+        // The cap can land mid-character in a file that is otherwise valid
+        // UTF-8. That is the cap's doing, not the file's: drop the split
+        // character's leading bytes rather than calling a text file binary.
+        // (`valid_up_to` is at most 3 bytes short of the end when the only
+        // problem is the cut.)
         Err(e) if truncated && e.utf8_error().valid_up_to() + 4 > read_len => {
             let valid = e.utf8_error().valid_up_to();
             let mut prefix = e.into_bytes();
@@ -470,9 +499,22 @@ pub(super) async fn agent_file(
     Ok(Json(FileOrListing::File(FileContentResp {
         path: resolved.to_string_lossy().into_owned(),
         size,
+        // Where this window actually started and ended, so a caller can ask for
+        // the next one without guessing what the UTF-8 trim did.
+        offset: offset + leading_partial as u64,
+        next_offset: match truncated {
+            true => Some(offset + leading_partial as u64 + content.len() as u64),
+            false => None,
+        },
         content,
         truncated,
     })))
+}
+
+/// Whether `b` is a UTF-8 continuation byte (`10xxxxxx`), i.e. the middle of a
+/// character rather than the start of one.
+fn is_utf8_continuation(b: u8) -> bool {
+    (b & 0b1100_0000) == 0b1000_0000
 }
 
 /// Most entries one directory listing returns.
@@ -1927,6 +1969,18 @@ prompt = "Plan the work"
         meta
     }
 
+    /// GET the file with an explicit byte offset.
+    async fn get_file_at(id: &str, path: &str, offset: u64) -> (StatusCode, Vec<u8>) {
+        let uri = format!("/api/agents/{id}/files?path={path}&offset={offset}");
+        let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        let resp = files_app().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, body.to_vec())
+    }
+
     /// GET `/api/agents/{id}/files?path=<path>`, returning status and body.
     /// (`path` goes into the query string verbatim - every path these tests
     /// use is query-safe as-is.)
@@ -3107,5 +3161,115 @@ prompt = "Plan the work"
         };
         let json = serde_json::to_string(&err).unwrap();
         assert!(json.contains("\"error\":\"not found\""));
+    }
+
+    /// A dataset can be far larger than one response, and the whole point of the
+    /// artifact story is that a caller can actually get it. Reading it back a
+    /// window at a time must reconstruct the file exactly.
+    #[tokio::test]
+    async fn a_large_artifact_can_be_paged_back_in_full() {
+        crate::runstate::with_isolated_runs_dir_async("files_paging", |_d| async move {
+            let work = tempfile::tempdir().unwrap();
+            // Comfortably past the per-response cap.
+            let original: String = (0..300_000).map(|i| format!("row {i}\n")).collect();
+            assert!(
+                original.len() as u64 > MAX_FILE_READ_BYTES * 2,
+                "needs 3+ pages"
+            );
+            std::fs::write(work.path().join("data.csv"), &original).unwrap();
+            let run_id = unique_run_id("files-paging");
+            create_run_in(&run_id, work.path());
+
+            let mut assembled = String::new();
+            let mut offset = 0u64;
+            let mut pages = 0;
+            loop {
+                let (status, body) = get_file_at(&run_id, "data.csv", offset).await;
+                assert_eq!(status, StatusCode::OK);
+                let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assembled.push_str(v["content"].as_str().unwrap());
+                assert_eq!(v["size"].as_u64().unwrap(), original.len() as u64);
+                pages += 1;
+                match v["next_offset"].as_u64() {
+                    Some(next) => offset = next,
+                    None => {
+                        assert!(!v["truncated"].as_bool().unwrap(), "last page is complete");
+                        break;
+                    }
+                }
+                assert!(pages < 20, "should not take this many pages");
+            }
+            assert!(
+                pages >= 3,
+                "the fixture must actually span pages, got {pages}"
+            );
+            assert_eq!(assembled, original, "the pages reassemble the file exactly");
+
+            let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        })
+        .await;
+    }
+
+    /// A window boundary can land inside a multi-byte character. The next page
+    /// must resume on a boundary, or concatenating pages would corrupt the text.
+    #[tokio::test]
+    async fn paging_does_not_split_a_multi_byte_character() {
+        crate::runstate::with_isolated_runs_dir_async("files_paging_utf8", |_d| async move {
+            let work = tempfile::tempdir().unwrap();
+            // Three-byte characters, so most offsets land mid-character.
+            let original = "日本語".repeat(20);
+            std::fs::write(work.path().join("t.txt"), &original).unwrap();
+            let run_id = unique_run_id("files-utf8");
+            create_run_in(&run_id, work.path());
+
+            // Offset 1 is inside the first character.
+            let (status, body) = get_file_at(&run_id, "t.txt", 1).await;
+            assert_eq!(status, StatusCode::OK);
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            // The window was moved forward to the next boundary and says so, so
+            // the caller is never handed half a character.
+            assert_eq!(v["offset"].as_u64().unwrap(), 3);
+            assert!(v["content"].as_str().unwrap().starts_with('本'));
+
+            let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_offset_past_the_end_is_refused_rather_than_returning_nothing() {
+        crate::runstate::with_isolated_runs_dir_async("files_paging_past_end", |_d| async move {
+            let work = tempfile::tempdir().unwrap();
+            std::fs::write(work.path().join("s.txt"), "short").unwrap();
+            let run_id = unique_run_id("files-past-end");
+            create_run_in(&run_id, work.path());
+
+            let (status, _) = get_file_at(&run_id, "s.txt", 9_999).await;
+            assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+
+            let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        })
+        .await;
+    }
+
+    /// A small file reads whole with no offset, exactly as before.
+    #[tokio::test]
+    async fn a_small_file_still_reads_in_one_request() {
+        crate::runstate::with_isolated_runs_dir_async("files_paging_small", |_d| async move {
+            let work = tempfile::tempdir().unwrap();
+            std::fs::write(work.path().join("s.txt"), "a,b\n1,2\n").unwrap();
+            let run_id = unique_run_id("files-small");
+            create_run_in(&run_id, work.path());
+
+            let (status, body) = get_file(&run_id, "s.txt").await;
+            assert_eq!(status, StatusCode::OK);
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["content"].as_str().unwrap(), "a,b\n1,2\n");
+            assert!(!v["truncated"].as_bool().unwrap());
+            assert!(v["next_offset"].is_null(), "nothing more to fetch");
+
+            let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        })
+        .await;
     }
 }

@@ -274,6 +274,10 @@ flowchart LR
 | Answer | The findings, the summary, the verdict | One model response | `lev result` |
 | Artifact | The dataset, the long report, the generated file | Unbounded | `GET /api/agents/{id}/files?path=` |
 
+A file larger than one response is read a window at a time. Pass `offset`, then continue from the
+`next_offset` each response carries until it comes back null. Concatenating the windows gives you the
+file back exactly, including through multi-byte characters.
+
 Name your files in `artifacts` when you submit:
 
 ```
