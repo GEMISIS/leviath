@@ -93,8 +93,17 @@ approximated from another column.
 - `rss` far above `live`, both flat: allocator-retained lazily-freed pages.
   Not a leak. The gap disappears under system memory pressure.
 - `live` climbing while runs are active, dropping when they finish: normal.
-- `live` staying at its peak after every run has finished: that would be
-  retention - file an issue with the CSV.
+- `live` settling at a flat 20-45 MB floor after a burst, well below its
+  peak: freed pages whose purge mimalloc deferred to each worker thread and
+  a fully idle daemon never executes (measured: flat for 10 minutes idle,
+  then partially flushed by a single follow-up run; the reachable heap at
+  that moment is ~2 MB). The pages are reused by the next burst, so the
+  floor does not stack across bursts. Launching the daemon with
+  `MIMALLOC_PURGE_DELAY=0` purges at free time instead and roughly halves
+  the floor at no measured throughput cost.
+- `live` staying at its full peak after every run has finished, or a floor
+  that grows burst over burst: that would be retention - file an issue with
+  the CSV.
 
 ## The deterministic burst benchmark
 
