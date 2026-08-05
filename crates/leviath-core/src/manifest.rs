@@ -3482,6 +3482,82 @@ split_prompt = "go"
         assert_eq!(bp.find_stage("parallel").unwrap().mode, expected);
     }
 
+    /// `results_region` names where the workers' reports land, and `max_items`
+    /// caps how many slices the split may produce. The cap matters because each
+    /// worker's share of the region is the region's budget divided by how many
+    /// there are: past some count every share is too small to carry rows, and a
+    /// stated ceiling says so instead of letting the shares shrink to nothing.
+    #[test]
+    fn parse_manifest_fan_out_results_region_and_max_items() {
+        let toml = r#"
+[agent]
+name = "fanout-region"
+
+[stages.parallel]
+mode = "fan_out"
+worker_agent = "w"
+split_prompt = "go"
+results_region = "worker_rows"
+max_items = 12
+"#;
+        // The whole mode, so there is no never-taken match arm left behind.
+        let bp = parse_manifest(toml).unwrap();
+        let expected = crate::blueprint::StageMode::FanOut {
+            config: crate::blueprint::FanOutConfig {
+                worker_agent: Some("w".to_string()),
+                worker_stage: None,
+                worker_query: None,
+                merge_stage: None,
+                max_workers: 4,
+                on_worker_failure: crate::blueprint::WorkerFailurePolicy::Continue,
+                split_prompt: "go".to_string(),
+                results_region: Some("worker_rows".to_string()),
+                max_items: Some(12),
+            },
+        };
+        assert_eq!(bp.find_stage("parallel").unwrap().mode, expected);
+    }
+
+    /// A cap of zero or below would mean "no work items at all", which is not
+    /// something anyone writes on purpose. Reading it as "no cap" matches an
+    /// absent key rather than producing a fan-out that can never run.
+    #[test]
+    fn parse_manifest_fan_out_rejects_a_non_positive_max_items() {
+        for value in ["0", "-3", "\"twelve\""] {
+            let toml = format!(
+                r#"
+[agent]
+name = "fanout-cap"
+
+[stages.parallel]
+mode = "fan_out"
+worker_agent = "w"
+split_prompt = "go"
+max_items = {value}
+"#
+            );
+            let bp = parse_manifest(&toml).unwrap();
+            let expected = crate::blueprint::StageMode::FanOut {
+                config: crate::blueprint::FanOutConfig {
+                    worker_agent: Some("w".to_string()),
+                    worker_stage: None,
+                    worker_query: None,
+                    merge_stage: None,
+                    max_workers: 4,
+                    on_worker_failure: crate::blueprint::WorkerFailurePolicy::Continue,
+                    split_prompt: "go".to_string(),
+                    results_region: None,
+                    max_items: None,
+                },
+            };
+            assert_eq!(
+                bp.find_stage("parallel").unwrap().mode,
+                expected,
+                "max_items = {value}"
+            );
+        }
+    }
+
     #[test]
     fn parse_manifest_stage_allow_complete_defaults_false() {
         let toml = r#"

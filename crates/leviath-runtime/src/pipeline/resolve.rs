@@ -1102,6 +1102,28 @@ mod tests {
         .remove(0)
     }
 
+    /// A stage can require an output without saying anything about its shape.
+    /// There is nothing to paste into the description then, and the generic
+    /// wording is what the model should read: an invented sentence about a
+    /// format nobody declared would be worse than none.
+    #[test]
+    fn a_spec_that_says_nothing_leaves_the_description_generic() {
+        let generic = leviath_tools::submit_output_description("");
+        let bp = output_stage_blueprint(None, Some(leviath_core::output::OutputSpec::default()));
+
+        let resolved = resolve_one(&bp, None);
+
+        assert_eq!(
+            resolved
+                .tools
+                .iter()
+                .find(|t| t.name == leviath_tools::SUBMIT_OUTPUT_TOOL)
+                .expect("the stage offers the tool")
+                .description,
+            generic
+        );
+    }
+
     /// The whole mechanism for arbitrary formats: a label this crate has never
     /// heard of is pasted into the description the model reads, with no parsing
     /// and no per-format branch anywhere.

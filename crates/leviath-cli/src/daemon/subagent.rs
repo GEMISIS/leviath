@@ -1172,6 +1172,23 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         assert!(!out.contains("final output"), "{out}");
     }
 
+    /// A child whose answer hit the size limit says so, so the parent reads a
+    /// partial answer as partial rather than as everything the child had.
+    #[tokio::test]
+    async fn a_truncated_child_answer_is_marked_as_cut() {
+        let mut cut = answer("the first part of a very long report");
+        cut.truncated = true;
+        let (h, _seen, _t) = fake_host_with_output(vec![Some(AgentStatus::Complete)], Some(cut));
+
+        let out = handle(&h, &tc("wait_for_agent", json!({"agent_id": "child-1"}))).await;
+
+        assert!(
+            out.contains("the first part of a very long report"),
+            "{out}"
+        );
+        assert!(out.contains("truncated at the size limit"), "{out}");
+    }
+
     /// "produced no final output" is actionable - the parent can ask, or route
     /// around it. A bare status line reads as success.
     #[tokio::test]

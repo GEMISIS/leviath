@@ -243,6 +243,79 @@ pub fn extract_region_flags(argv: Vec<String>) -> (Vec<String>, HashMap<String, 
 
 #[cfg(test)]
 mod tests {
+
+    /// The format label is passed through untouched and never matched against a
+    /// known set, which is what lets `--output-format a2ui` work with no
+    /// a2ui-specific code anywhere.
+    #[test]
+    fn an_output_request_carries_an_unrecognized_format_through() {
+        let spec = output_request(
+            Some("a2ui".to_string()),
+            Some("One card per finding.".to_string()),
+            None,
+        )
+        .expect("no schema to parse")
+        .expect("something was asked for");
+
+        assert_eq!(spec.format.as_deref(), Some("a2ui"));
+        assert_eq!(spec.instructions.as_deref(), Some("One card per finding."));
+        assert!(spec.schema.is_none());
+    }
+
+    /// `--output-schema @path` reads the schema from a file, which is how a
+    /// schema of any real size gets onto a command line at all. A path that is
+    /// not there fails here rather than at the end of the run.
+    #[test]
+    fn an_output_schema_can_be_read_from_a_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("schema.json");
+        std::fs::write(&path, r#"{"type":"object","required":["summary"]}"#).expect("write");
+
+        let spec = output_request(None, None, Some(format!("@{}", path.display())))
+            .expect("the file parses")
+            .expect("something was asked for");
+        assert_eq!(
+            spec.schema,
+            Some(serde_json::json!({"type": "object", "required": ["summary"]}))
+        );
+
+        let err = output_request(
+            None,
+            None,
+            Some(format!("@{}", dir.path().join("gone.json").display())),
+        )
+        .expect_err("a file that is not there");
+        assert!(
+            err.to_string().contains("Failed to read region file"),
+            "{err}"
+        );
+    }
+
+    /// Nothing asked for is nothing requested, so the blueprint's own declared
+    /// shape is what applies.
+    #[test]
+    fn no_output_flags_request_nothing() {
+        assert!(
+            output_request(None, None, None)
+                .expect("nothing to parse")
+                .is_none()
+        );
+    }
+
+    /// The schema is the one flag that is interpreted, because it is the one
+    /// thing the runtime will actually check. Bad JSON has to fail here, at the
+    /// command line, rather than at the end of a long run.
+    #[test]
+    fn an_output_schema_is_parsed_and_a_broken_one_is_refused() {
+        let spec = output_request(None, None, Some(r#"{"type":"object"}"#.to_string()))
+            .expect("valid JSON")
+            .expect("something was asked for");
+        assert_eq!(spec.schema, Some(serde_json::json!({"type": "object"})));
+
+        let err = output_request(None, None, Some("{not json".to_string()))
+            .expect_err("broken JSON is refused");
+        assert!(err.to_string().contains("not valid JSON"), "{err}");
+    }
     use super::*;
 
     fn argv(parts: &[&str]) -> Vec<String> {

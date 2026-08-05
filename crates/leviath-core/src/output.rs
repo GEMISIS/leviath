@@ -327,6 +327,39 @@ mod tests {
         }
     }
 
+    /// The artifacts list is how an answer points at what it could never
+    /// contain: a dataset, a report, a directory of generated files. It travels
+    /// with the descriptor so a caller can fetch them without parsing paths back
+    /// out of prose.
+    #[test]
+    fn artifacts_attach_to_a_submission_and_reach_the_descriptor() {
+        let output = FinalOutput::new(
+            "the summary",
+            Some("markdown".to_string()),
+            "present".to_string(),
+            42,
+        )
+        .with_artifacts(vec![
+            "data/dataset.csv".to_string(),
+            "report.pdf".to_string(),
+        ]);
+
+        assert_eq!(output.artifacts, ["data/dataset.csv", "report.pdf"]);
+        assert_eq!(output.descriptor().artifacts, output.artifacts);
+        // The bytes stay out of the descriptor: it goes in `meta.json`, which is
+        // read for every run in a listing.
+        assert_eq!(output.descriptor().bytes, "the summary".len());
+    }
+
+    #[test]
+    fn a_submission_carries_no_artifacts_unless_given_some() {
+        assert!(
+            FinalOutput::new("x", None, "present".to_string(), 0)
+                .artifacts
+                .is_empty()
+        );
+    }
+
     #[test]
     fn empty_spec_constrains_nothing() {
         assert!(OutputSpec::default().is_empty());

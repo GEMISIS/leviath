@@ -221,14 +221,18 @@ fn resolve_artifacts(
 /// region exists so the answer stays in the agent's own context (a later stage
 /// can revise it) and so it appears in `context.json`.
 fn mirror_into_region(window: &mut ContextWindow, content: &str) {
-    let Some(budget) = window.get_region(FINAL_OUTPUT_REGION).map(|r| r.max_tokens) else {
-        return;
+    // Read the budget and clear in one borrow. Asking for the region twice
+    // leaves a second "what if it is missing" branch that the first check has
+    // already ruled out, so nothing can ever take it.
+    let budget = {
+        let Some(region) = window.get_region_mut(FINAL_OUTPUT_REGION) else {
+            return;
+        };
+        region.clear();
+        region.max_tokens
     };
     let mirrored = fit_to_region(content, budget);
     let tokens = leviath_core::estimate_tokens(&mirrored);
-    if let Some(region) = window.get_region_mut(FINAL_OUTPUT_REGION) {
-        region.clear();
-    }
     window.current_tokens = window.calculate_tokens();
     // Through the window method rather than the region directly, so a custom
     // region's `on_write` hook fires - the same reason `context_write` does it.

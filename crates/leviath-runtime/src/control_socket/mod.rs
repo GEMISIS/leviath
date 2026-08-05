@@ -921,6 +921,9 @@ mod tests {
                     ControlOp::Status { reply, .. } => {
                         let _ = reply.send(Some(AgentStatus::Active));
                     }
+                    // Embed-only today: no `ControlRequest` builds one, so this
+                    // arm exists to keep the double answering every op rather
+                    // than to serve a socket path.
                     ControlOp::Result { reply, .. } => {
                         let _ = reply.send(None);
                     }
@@ -985,6 +988,32 @@ mod tests {
         let mut lines = BufReader::new(read_half).lines();
         let resp_line = lines.next_line().await.unwrap().unwrap();
         serde_json::from_str(&resp_line).unwrap()
+    }
+
+    /// Every op this double receives has to be answered. A caller waits on a
+    /// oneshot, so an unhandled op is not a wrong answer, it is a hang - and
+    /// `ControlOp::Result` is the one op no `ControlRequest` builds, so nothing
+    /// else here would ever exercise it.
+    #[tokio::test]
+    async fn the_fake_host_answers_every_op_including_the_embed_only_one() {
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        spawn_fake_host(op_rx);
+
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        op_tx
+            .send(ControlOp::Result {
+                run_id: "run-a".to_string(),
+                reply,
+            })
+            .expect("the fake host is listening");
+
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), answer)
+                .await
+                .expect("an unanswered op hangs its caller")
+                .expect("the reply channel stays open"),
+            None
+        );
     }
 
     #[tokio::test]

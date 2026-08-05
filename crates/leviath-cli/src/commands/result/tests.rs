@@ -91,3 +91,135 @@ fn an_unrecognized_format_is_printed_verbatim() {
         shown(Some(&answer(doc, Some("vnd.acme+xml"))), false, true).expect("there is an answer");
     assert_eq!(out, format!("{doc}\n"));
 }
+
+/// The answer points at what it could never contain, so the files it names are
+/// listed rather than left for the reader to find in the prose.
+#[test]
+fn artifacts_are_listed_under_the_answer() {
+    let answer = leviath_core::output::FinalOutput::new(
+        "Revenue grew 12% over the period.",
+        Some("markdown".to_string()),
+        "present".to_string(),
+        42,
+    )
+    .with_artifacts(vec![
+        "data/dataset.csv".to_string(),
+        "charts/trend.svg".to_string(),
+    ]);
+
+    let out = shown(Some(&answer), false, false).expect("there is an answer");
+
+    assert!(out.contains("Files produced (2):"), "{out}");
+    assert!(out.contains("  data/dataset.csv\n"), "{out}");
+    assert!(out.contains("  charts/trend.svg\n"), "{out}");
+}
+
+/// `--raw` is for a shell pipeline, so it is the answer and nothing else: no
+/// heading, and no file list to parse back off.
+#[test]
+fn raw_output_carries_no_file_list() {
+    let answer =
+        leviath_core::output::FinalOutput::new("just the answer", None, "present".to_string(), 42)
+            .with_artifacts(vec!["data/dataset.csv".to_string()]);
+
+    let out = shown(Some(&answer), false, true).expect("there is an answer");
+
+    assert_eq!(out, "just the answer\n");
+}
+
+/// End to end over the real files: `meta.json` says there is an answer, the
+/// sidecar beside it holds the bytes. Both have to line up, because a run whose
+/// descriptor says yes and whose sidecar is missing reads as no answer at all.
+#[tokio::test]
+async fn execute_prints_an_answer_written_to_a_run_directory() {
+    crate::runstate::with_isolated_runs_dir_async("result-execute", |_| async {
+        let mut meta = crate::runstate::RunMeta::new(
+            "run-answered".to_string(),
+            "agent".to_string(),
+            "/p".to_string(),
+            "t".to_string(),
+            None,
+            "/w".to_string(),
+            1,
+        );
+        let answer = leviath_core::output::FinalOutput::new(
+            "the answer",
+            Some("markdown".to_string()),
+            "present".to_string(),
+            42,
+        );
+        meta.final_output = Some(answer.descriptor());
+        crate::runstate::create_run(&meta).expect("run dir");
+        crate::runstate::write_final_output(
+            &crate::runstate::run_dir("run-answered"),
+            &answer.content,
+        )
+        .expect("sidecar");
+
+        execute(ResultArgs {
+            run_id: "run-answered".to_string(),
+            json: false,
+            raw: true,
+        })
+        .await
+        .expect("the answer is there to print");
+    })
+    .await;
+}
+
+/// A run that never submitted exits non-zero rather than printing nothing, so
+/// `lev result <id> > answer.txt` does not silently write an empty file.
+#[tokio::test]
+async fn execute_fails_when_the_run_never_answered() {
+    crate::runstate::with_isolated_runs_dir_async("result-no-answer", |_| async {
+        let meta = crate::runstate::RunMeta::new(
+            "run-silent".to_string(),
+            "agent".to_string(),
+            "/p".to_string(),
+            "t".to_string(),
+            None,
+            "/w".to_string(),
+            1,
+        );
+        crate::runstate::create_run(&meta).expect("run dir");
+
+        let err = execute(ResultArgs {
+            run_id: "run-silent".to_string(),
+            json: false,
+            raw: false,
+        })
+        .await
+        .expect_err("no answer is a failure exit");
+        assert!(
+            err.to_string().contains("produced no final output"),
+            "{err}"
+        );
+    })
+    .await;
+}
+
+/// And an unknown run says so, rather than reporting it as answerless.
+#[tokio::test]
+async fn execute_fails_for_a_run_that_does_not_exist() {
+    crate::runstate::with_isolated_runs_dir_async("result-missing", |_| async {
+        let err = execute(ResultArgs {
+            run_id: "no-such-run".to_string(),
+            json: false,
+            raw: false,
+        })
+        .await
+        .expect_err("an unknown run is an error");
+        assert!(err.to_string().contains("no run 'no-such-run'"), "{err}");
+    })
+    .await;
+}
+
+/// An answer that already ends in a newline is not given a second one, or every
+/// `lev result` would print a blank line the agent never wrote.
+#[test]
+fn an_answer_ending_in_a_newline_is_not_given_another() {
+    let out = shown(Some(&answer("already terminated\n", None)), false, false)
+        .expect("there is an answer");
+    assert!(out.ends_with("already terminated\n"), "{out:?}");
+    assert!(!out.ends_with("\n\n"), "{out:?}");
+}

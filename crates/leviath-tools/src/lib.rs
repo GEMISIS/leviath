@@ -207,6 +207,40 @@ mod tests {
         }
     }
 
+    /// `submit_output` writes an ECS component and a context region, neither of
+    /// which the built-in executor can reach. Refused here so the runtime stays
+    /// the only path that can record an answer: a second path would let a
+    /// submission land somewhere no consumer reads.
+    #[tokio::test]
+    async fn submit_output_is_not_handled_by_builtin_execute() {
+        let dir = std::env::temp_dir();
+        let tools = make_tools(&dir);
+        let result = tools
+            .execute(
+                crate::SUBMIT_OUTPUT_TOOL,
+                serde_json::json!({"content": "the answer"}),
+            )
+            .await;
+        assert!(
+            result.contains("submit_output must be handled by the runtime"),
+            "{result}"
+        );
+    }
+
+    /// The description is the whole mechanism for arbitrary formats, so a stage
+    /// that declares nothing gets the generic wording rather than an invented
+    /// sentence about a format nobody asked for.
+    #[test]
+    fn the_submit_description_carries_a_declared_shape_and_nothing_otherwise() {
+        let generic = submit_output_description("");
+        assert!(generic.contains("artifacts"), "{generic}");
+        assert!(!generic.contains("a2ui"));
+
+        let shaped = submit_output_description("Return it in this format: a2ui.");
+        assert!(shaped.starts_with(&generic), "the generic part is kept");
+        assert!(shaped.ends_with("Return it in this format: a2ui."));
+    }
+
     #[tokio::test]
     async fn ask_user_tools_not_handled_by_builtin_execute() {
         // ask_user_* tools are intercepted upstream (worker.rs/foreground.rs),

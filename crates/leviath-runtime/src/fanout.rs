@@ -897,6 +897,52 @@ mod tests {
         assert_eq!(w.pending.len(), 2);
     }
 
+    /// `max_items` is a ceiling on slices, not just on concurrency. A split that
+    /// returns five hundred items would otherwise spawn five hundred runs, and
+    /// each worker's share of the results region is the region's budget divided
+    /// by how many there are: past some count every section is too small to say
+    /// anything.
+    #[test]
+    fn split_keeps_only_the_first_max_items() {
+        let mut world = World::new();
+        let mut config = cfg(Some("merge"), 2, WorkerFailurePolicy::Continue);
+        config.max_items = Some(3);
+        let items: Vec<String> = (0..10).map(|i| format!(r#"{{"id":"w{i}"}}"#)).collect();
+        let e = spawn_parent(
+            &mut world,
+            fanout_blueprint(config),
+            &format!("[{}]", items.join(",")),
+        );
+
+        fan_out_split(&mut world);
+
+        let w = world.get::<FanOutWaiting>(e).expect("parked");
+        assert_eq!(w.pending.len(), 3, "kept the cap, not the ten produced");
+        let kept: Vec<&str> = w.pending.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(kept, ["w0", "w1", "w2"], "and kept the first of them");
+    }
+
+    /// Under the cap nothing is dropped, so a fan-out that sets one does not pay
+    /// for it on every ordinary split.
+    #[test]
+    fn split_keeps_everything_under_the_cap() {
+        let mut world = World::new();
+        let mut config = cfg(Some("merge"), 2, WorkerFailurePolicy::Continue);
+        config.max_items = Some(9);
+        let e = spawn_parent(
+            &mut world,
+            fanout_blueprint(config),
+            r#"[{"id":"a"},{"id":"b"}]"#,
+        );
+
+        fan_out_split(&mut world);
+
+        assert_eq!(
+            world.get::<FanOutWaiting>(e).expect("parked").pending.len(),
+            2
+        );
+    }
+
     #[test]
     fn split_errors_on_non_array_output() {
         let mut world = World::new();
@@ -1343,13 +1389,13 @@ mod tests {
         let mut world = World::new();
         let worker = spawn_required_output_worker(&mut world);
 
-        match worker_terminal_result(&world, worker) {
-            Some(Err(reason)) => assert!(
-                reason.contains("without the final output"),
-                "the merge has to be told why: {reason}"
-            ),
-            other => panic!("expected a failure, got {other:?}"),
-        }
+        assert_eq!(
+            worker_terminal_result(&world, worker),
+            Some(Err(
+                "worker finished without the final output its stage requires".to_string()
+            )),
+            "the merge has to be told a worker failed, and why"
+        );
     }
 
     /// The same worker, having actually submitted: its answer is what it
@@ -1375,6 +1421,37 @@ mod tests {
             worker_terminal_result(&world, worker),
             Some(Ok("the rows".to_string()))
         );
+    }
+
+    /// A worker with a blueprint but no cursor cannot be placed in a stage, so
+    /// there is no stage to read a requirement off. It keeps the fallback rather
+    /// than being called a failure for a question that was never asked.
+    #[test]
+    fn a_worker_with_no_stage_to_read_owes_nothing() {
+        let mut world = World::new();
+        let bp = fanout_blueprint(cfg(None, 1, WorkerFailurePolicy::Continue));
+
+        // No blueprint at all.
+        let bare = world.spawn(parent_state()).id();
+        assert!(!worker_requires_output(&world, bare));
+
+        // A blueprint, but no cursor saying which stage it is in.
+        let no_cursor = world.spawn((parent_state(), AgentBlueprint(bp))).id();
+        assert!(!worker_requires_output(&world, no_cursor));
+
+        // A cursor pointing past the end of the stage list.
+        let past_end = world
+            .spawn((
+                parent_state(),
+                AgentBlueprint(fanout_blueprint(cfg(
+                    None,
+                    1,
+                    WorkerFailurePolicy::Continue,
+                ))),
+                StageCursor { index: 99 },
+            ))
+            .id();
+        assert!(!worker_requires_output(&world, past_end));
     }
 
     /// A blueprint that never opted in keeps the old fallback, empty text and
@@ -1485,6 +1562,66 @@ mod tests {
         // it was cut rather than pretending to be whole.
         assert!(landed.contains("100 succeeded"), "header survives");
         assert!(landed.contains("truncated"), "and says it was cut");
+        assert!(region.current_tokens <= region.max_tokens, "within budget");
+    }
+
+    /// Dividing the region between the workers makes the report fit an *empty*
+    /// region, which is the easy case. A region already carrying something has
+    /// less room than that, and the report-level trim is what keeps the write
+    /// from being rejected outright: `add_entry` refuses an over-budget entry
+    /// rather than shortening it, so without this the merge stage receives
+    /// nothing at all.
+    #[test]
+    fn a_report_larger_than_what_is_left_of_the_region_is_trimmed_not_dropped() {
+        const REGION_TOKENS: usize = 2_000;
+        let mut world = World::new();
+        let mut window = ContextWindow::new(100_000);
+        window.add_region(leviath_core::Region::new(
+            "worker_results".to_string(),
+            leviath_core::RegionKind::Clearable,
+            REGION_TOKENS,
+        ));
+        // Most of the region is already spoken for.
+        let filler = "f".repeat(REGION_TOKENS * 4 * 8 / 10);
+        let filler_tokens = leviath_core::estimate_tokens(&filler);
+        window
+            .add_typed_entry(
+                "worker_results",
+                leviath_core::EntryKind::UserMessage,
+                filler,
+                filler_tokens,
+            )
+            .expect("the filler fits");
+        let parent = world.spawn((parent_state(), window)).id();
+
+        // A report sized for the whole region, landing in what is left of it.
+        let long = "x".repeat(5_000);
+        let summaries: Vec<(String, String)> =
+            (0..8).map(|i| (format!("w{i}"), long.clone())).collect();
+        let report = build_report(&summaries, &[], Some(REGION_TOKENS));
+        assert!(report.len() > REGION_TOKENS * 4 / 5, "the report is big");
+        inject_results(&mut world, parent, "worker_results", &report);
+
+        let region = world
+            .get::<ContextWindow>(parent)
+            .expect("window")
+            .get_region("worker_results")
+            .expect("region")
+            .clone();
+        assert_eq!(
+            region.content.len(),
+            2,
+            "the report landed beside the filler"
+        );
+        let landed = &region.content[1].content;
+        assert!(
+            landed.contains("8 succeeded"),
+            "the header survives the cut"
+        );
+        assert!(
+            landed.contains(REPORT_TRUNCATION_MARKER.trim()),
+            "and it says it was cut"
+        );
         assert!(region.current_tokens <= region.max_tokens, "within budget");
     }
 

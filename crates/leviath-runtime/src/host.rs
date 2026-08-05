@@ -3965,6 +3965,63 @@ mod tests {
         assert_eq!(status_str(&AgentStatus::Cancelled), "cancelled");
     }
 
+    /// The `Completed` event carries the answer, read off the live entity rather
+    /// than off disk: the event fires the moment the run goes terminal, and the
+    /// persist tick that writes `meta.json` has not necessarily run yet. A
+    /// subscriber that had to poll for the file would see the completion first
+    /// and the answer some time later, or never.
+    #[tokio::test]
+    async fn a_completed_event_carries_the_answer() {
+        let mut host = host_with(vec![text("done")]);
+        let mut rx = host.subscribe();
+        let entity = spawn(&mut host, "run-out", "agent-out");
+        host.world_mut()
+            .world_mut()
+            .entity_mut(entity)
+            .insert(crate::persistence::FinalOutput(
+                leviath_core::output::FinalOutput::new(
+                    "what the run concluded",
+                    Some("markdown".to_string()),
+                    "summary".to_string(),
+                    7,
+                ),
+            ));
+
+        host.world_mut().run_until_idle(20).await;
+        host.emit_events();
+
+        let answer = std::iter::from_fn(|| rx.try_recv().ok())
+            .find_map(|e| match e {
+                WorldEvent::Completed { final_output, .. } => Some(final_output),
+                _ => None,
+            })
+            .expect("the run completed");
+        assert_eq!(
+            answer.expect("and it had an answer").content,
+            "what the run concluded"
+        );
+    }
+
+    /// A run that never submitted carries no answer, rather than an empty one a
+    /// subscriber would have to tell apart from a real empty answer.
+    #[tokio::test]
+    async fn a_completed_event_without_an_answer_carries_none() {
+        let mut host = host_with(vec![text("done")]);
+        let mut rx = host.subscribe();
+        spawn(&mut host, "run-silent", "agent-silent");
+
+        host.world_mut().run_until_idle(20).await;
+        host.emit_events();
+
+        let answer = std::iter::from_fn(|| rx.try_recv().ok())
+            .find_map(|e| match e {
+                WorldEvent::Completed { final_output, .. } => Some(final_output),
+                _ => None,
+            })
+            .expect("the run completed");
+        assert!(answer.is_none());
+    }
+
     #[tokio::test]
     async fn emit_events_broadcasts_agent_changes() {
         let mut host = host_with(vec![text("done")]);

@@ -66,13 +66,15 @@ pub(crate) fn write_with_mode(path: &Path, contents: &[u8], mode: u32) -> io::Re
 pub(crate) fn open_append_with_mode(path: &Path, mode: u32) -> io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
 
+    // Chained rather than a second `?`, for the reason `write_with_mode` gives:
+    // a `chmod` on a file this call just opened for writing has no reachable
+    // error branch.
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .mode(mode)
         .open(path)?;
-    set_mode(path, mode)?;
-    Ok(file)
+    set_mode(path, mode).map(|()| file)
 }
 
 /// Create `path` and any missing parents with `mode` already applied.
