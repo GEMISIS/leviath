@@ -4,65 +4,123 @@
     "title": "Leviath HTTP API",
     "version": "0.3.0",
     "description": "The REST and WebSocket surface `lev serve` puts in front of the shared-world daemon. Every route requires a bearer token. Paths here are checked against the router in crates/leviath-cli/src/commands/serve/mod.rs by a test in that file, so a route added without a spec entry fails the build. See https://leviath.dev/docs/api.",
-    "license": { "name": "MIT" }
+    "license": {
+      "name": "MIT"
+    }
   },
-  "servers": [{ "url": "http://127.0.0.1:3000", "description": "The default `lev serve` bind." }],
-  "security": [{ "bearerAuth": [] }],
+  "servers": [
+    {
+      "url": "http://127.0.0.1:3000",
+      "description": "The default `lev serve` bind."
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
   "tags": [
-    { "name": "runs" },
-    { "name": "blueprints" },
-    { "name": "agents" },
-    { "name": "interactions" },
-    { "name": "mcp" },
-    { "name": "config" },
-    { "name": "diagnostics" },
-    { "name": "events" }
+    {
+      "name": "runs"
+    },
+    {
+      "name": "blueprints"
+    },
+    {
+      "name": "agents"
+    },
+    {
+      "name": "interactions"
+    },
+    {
+      "name": "mcp"
+    },
+    {
+      "name": "config"
+    },
+    {
+      "name": "diagnostics"
+    },
+    {
+      "name": "events"
+    }
   ],
   "paths": {
     "/api/blueprints": {
       "get": {
-        "tags": ["blueprints"],
+        "tags": [
+          "blueprints"
+        ],
         "summary": "List installed blueprints",
         "description": "**Breaking change in 0.3.0**: returns the same paginated envelope as /api/runs rather than a bare array. Check `blueprints.envelope` in the `capabilities` list on GET /api/config.\n\nNote that pagination saves the server nothing here - discovery parses every manifest on every request regardless of page size, and the catalog is bounded by what a person installs. `q` is the parameter with real value.",
         "parameters": [
           {
             "name": "limit",
             "in": "query",
-            "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 },
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            },
             "description": "Page size. Larger values are clamped rather than refused."
           },
           {
             "name": "cursor",
             "in": "query",
-            "schema": { "type": "string" },
+            "schema": {
+              "type": "string"
+            },
             "description": "Continuation token from a previous page's next_cursor. Opaque; bound to the query that minted it."
           },
           {
             "name": "q",
             "in": "query",
-            "schema": { "type": "string" },
+            "schema": {
+              "type": "string"
+            },
             "description": "Case-insensitive substring over name, description and stage names."
           },
           {
             "name": "sort",
             "in": "query",
-            "schema": { "type": "string", "enum": ["name", "version"], "default": "name" },
+            "schema": {
+              "type": "string",
+              "enum": [
+                "name",
+                "version"
+              ],
+              "default": "name"
+            },
             "description": "Ordering key."
           },
           {
             "name": "order",
             "in": "query",
-            "schema": { "type": "string", "enum": ["asc", "desc"], "default": "asc" },
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "default": "asc"
+            },
             "description": "Sort direction. Ascending by name is the order a person reads a catalog in."
           }
         ],
         "responses": {
-          "200": { "$ref": "#/components/responses/Ok" },
-          "400": { "$ref": "#/components/responses/Error" }
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       },
       "post": {
-        "tags": ["blueprints"],
+        "tags": [
+          "blueprints"
+        ],
         "summary": "Install a blueprint from a manifest string",
         "requestBody": {
           "required": true,
@@ -70,21 +128,35 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["name", "manifest"],
+                "required": [
+                  "name",
+                  "manifest"
+                ],
                 "properties": {
-                  "name": { "type": "string" },
-                  "manifest": { "type": "string", "description": "The agent.leviath text." }
+                  "name": {
+                    "type": "string"
+                  },
+                  "manifest": {
+                    "type": "string",
+                    "description": "The agent.leviath text."
+                  }
                 }
               }
             }
           }
         },
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       }
     },
     "/api/blueprints/validate": {
       "post": {
-        "tags": ["blueprints"],
+        "tags": [
+          "blueprints"
+        ],
         "summary": "Validate a manifest without installing it",
         "requestBody": {
           "required": true,
@@ -92,8 +164,14 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["manifest"],
-                "properties": { "manifest": { "type": "string" } }
+                "required": [
+                  "manifest"
+                ],
+                "properties": {
+                  "manifest": {
+                    "type": "string"
+                  }
+                }
               }
             }
           }
@@ -102,52 +180,89 @@
           "200": {
             "description": "The verdict. Note an invalid manifest is still a 200 with `valid: false`.",
             "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/ValidateResponse" } }
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidateResponse"
+                }
+              }
             }
           }
         }
       }
     },
     "/api/blueprints/{name}": {
-      "parameters": [{ "$ref": "#/components/parameters/Name" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Name"
+        }
+      ],
       "get": {
-        "tags": ["blueprints"],
+        "tags": [
+          "blueprints"
+        ],
         "summary": "Fetch one blueprint",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       },
       "put": {
-        "tags": ["blueprints"],
+        "tags": [
+          "blueprints"
+        ],
         "summary": "Replace a blueprint's manifest",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       },
       "delete": {
-        "tags": ["blueprints"],
+        "tags": [
+          "blueprints"
+        ],
         "summary": "Uninstall a blueprint",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       }
     },
     "/api/runs": {
       "get": {
-        "tags": ["runs"],
+        "tags": [
+          "runs"
+        ],
         "summary": "List runs, paginated and searchable",
         "description": "Supersedes the GET half of /api/agents, which returns every run ever recorded as one unbounded array.\n\nPagination is keyset, not offset: runs are created and deleted while a client walks the list, and an offset into a shifting list silently skips and repeats items. Pass `next_cursor` back verbatim and loop until it is null.\n\n`sort=started_at` is the only immutable sort key, and it is the default. `updated_at` also advances on the daemon's 30-second persistence heartbeat, so every live run moves under a walk, and a run whose sort value changes mid-walk may be skipped or repeated. Use started_at for a stable walk, and `since=` with no cursor to poll for what changed.",
         "parameters": [
           {
             "name": "limit",
             "in": "query",
-            "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 },
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            },
             "description": "Page size. Larger values are clamped rather than refused; the live cap is in GET /api/config."
           },
           {
             "name": "cursor",
             "in": "query",
-            "schema": { "type": "string" },
+            "schema": {
+              "type": "string"
+            },
             "description": "Continuation token from a previous page's next_cursor. Opaque - do not parse or construct it. Presenting one against a different sort, order or filter set is a 400, not a quietly different result."
           },
           {
             "name": "status",
             "in": "query",
-            "schema": { "type": "string" },
+            "schema": {
+              "type": "string"
+            },
             "description": "Comma-separated statuses to keep. Matched loosely: waiting_input, waitinginput and Waiting-Input are all accepted."
           },
           {
@@ -155,7 +270,11 @@
             "in": "query",
             "schema": {
               "type": "string",
-              "enum": ["started_at", "updated_at", "last_progress_at"],
+              "enum": [
+                "started_at",
+                "updated_at",
+                "last_progress_at"
+              ],
               "default": "started_at"
             },
             "description": "Ordering key. last_progress_at falls back to started_at where it is absent."
@@ -163,49 +282,73 @@
           {
             "name": "order",
             "in": "query",
-            "schema": { "type": "string", "enum": ["desc", "asc"], "default": "desc" },
+            "schema": {
+              "type": "string",
+              "enum": [
+                "desc",
+                "asc"
+              ],
+              "default": "desc"
+            },
             "description": "Sort direction."
           },
           {
             "name": "q",
             "in": "query",
-            "schema": { "type": "string" },
+            "schema": {
+              "type": "string"
+            },
             "description": "Case-insensitive substring to search for. Not a regex; no boolean operators or phrase quoting, and ASCII case folding only."
           },
           {
             "name": "q_in",
             "in": "query",
-            "schema": { "type": "string", "default": "meta,files" },
+            "schema": {
+              "type": "string",
+              "default": "meta,files"
+            },
             "description": "Comma-separated search sources: meta, files, context, logs, journal. The last three read files, so they are opt-in and subject to a scan cap - see scan_truncated in the response. They also match the raw JSON on disk, so a query containing a quote, backslash or newline may not match text that does contain it."
           },
           {
             "name": "fields",
             "in": "query",
-            "schema": { "type": "string" },
+            "schema": {
+              "type": "string"
+            },
             "description": "Comma-separated top-level RunMeta fields to return. run_id is always included. Nested paths are not supported."
           },
           {
             "name": "ids",
             "in": "query",
-            "schema": { "type": "string" },
+            "schema": {
+              "type": "string"
+            },
             "description": "Comma-separated run ids to fetch directly, bypassing the scan. Cannot be combined with cursor, q, status or since. Ids that no longer exist come back in `missing` rather than failing the request."
           },
           {
             "name": "since",
             "in": "query",
-            "schema": { "type": "integer" },
+            "schema": {
+              "type": "integer"
+            },
             "description": "Keep only runs whose sort field is at or after this unix-seconds value. Inclusive, so a client polling with the previous response's server_time re-receives same-second items rather than losing them."
           }
         ],
         "responses": {
-          "200": { "$ref": "#/components/responses/Ok" },
-          "400": { "$ref": "#/components/responses/Error" }
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
     "/api/agents": {
       "get": {
-        "tags": ["agents"],
+        "tags": [
+          "agents"
+        ],
         "summary": "List runs",
         "description": "Deprecated: use GET /api/runs, which paginates and supports search. This route returns every run ever recorded as one array, and is kept unchanged for existing clients.",
         "deprecated": true,
@@ -213,214 +356,406 @@
           {
             "name": "status",
             "in": "query",
-            "schema": { "type": "string" },
+            "schema": {
+              "type": "string"
+            },
             "description": "Filter to one status."
           }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       },
       "post": {
-        "tags": ["agents"],
+        "tags": [
+          "agents"
+        ],
         "summary": "Spawn a run",
         "description": "Returns as soon as the daemon accepts the run. Poll GET /api/agents/{id} or subscribe to /ws for what happens next.",
         "requestBody": {
           "required": true,
           "content": {
-            "application/json": { "schema": { "$ref": "#/components/schemas/SpawnAgentReq" } }
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpawnAgentReq"
+              }
+            }
           }
         },
         "responses": {
           "200": {
             "description": "The new run's identifiers.",
             "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/SpawnAgentResp" } }
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpawnAgentResp"
+                }
+              }
             }
           },
-          "400": { "$ref": "#/components/responses/Error" }
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
     "/api/agents/tree": {
       "get": {
-        "tags": ["agents"],
+        "tags": [
+          "agents"
+        ],
         "summary": "The full sub-agent tree",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       }
     },
     "/api/agents/{id}": {
-      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
       "get": {
-        "tags": ["agents"],
+        "tags": [
+          "agents"
+        ],
         "summary": "One run's metadata, with secrets redacted",
         "responses": {
-          "200": { "$ref": "#/components/responses/Ok" },
-          "404": { "$ref": "#/components/responses/Error" }
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       },
       "delete": {
-        "tags": ["agents"],
+        "tags": [
+          "agents"
+        ],
         "summary": "Cancel a run",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       }
     },
     "/api/agents/{id}/children": {
-      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
       "get": {
-        "tags": ["agents"],
+        "tags": [
+          "agents"
+        ],
         "summary": "This run's direct children",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       }
     },
     "/api/agents/{id}/context": {
-      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
       "get": {
-        "tags": ["agents"],
+        "tags": [
+          "agents"
+        ],
         "summary": "The run's current context window",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       }
     },
     "/api/agents/{id}/context/history": {
-      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
       "get": {
-        "tags": ["agents"],
+        "tags": [
+          "agents"
+        ],
         "summary": "How the context window changed over the run",
         "description": "**Breaking change in 0.3.0**: paginated, returning the shared envelope rather than every recorded point as one array. Each point carries a full context window with untruncated region text, on a journal that grows for as long as the run does, so the unpaged form was comfortably the largest response in the API.\n\nThe cursor is the point index. The journal is append-only, so an index is stable once written and new points only ever arrive at the end.",
         "parameters": [
           {
             "name": "limit",
             "in": "query",
-            "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 },
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            },
             "description": "Points per page. Capped lower than the run listing because each item carries a whole context window."
           },
           {
             "name": "cursor",
             "in": "query",
-            "schema": { "type": "string" },
+            "schema": {
+              "type": "string"
+            },
             "description": "Continuation token from the previous page's next_cursor."
           },
           {
             "name": "order",
             "in": "query",
-            "schema": { "type": "string", "enum": ["asc", "desc"], "default": "asc" },
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "default": "asc"
+            },
             "description": "`asc` is chronological, and matches what the unpaged response gave. `desc` starts from the most recent point, which is what a view tailing a live run wants."
           }
         ],
         "responses": {
-          "200": { "$ref": "#/components/responses/Ok" },
-          "400": { "$ref": "#/components/responses/Error" },
-          "404": { "$ref": "#/components/responses/Error" }
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
     "/api/agents/{id}/files": {
-      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        },
+        {
+          "name": "offset",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "description": "Byte offset to start reading at. An offset landing mid-character is moved forward to the next boundary, and the response's `offset` says where the window actually began, so concatenating pages reproduces the file. Past the end returns 416."
+        }
+      ],
       "get": {
-        "tags": ["agents"],
+        "tags": [
+          "agents"
+        ],
         "summary": "Read a file inside the run's workdir, or list files",
-        "description": "With `path`, reads that file: confined to the run's working directory and capped at 1 MiB. Without `path`, lists instead, and the response carries `kind: \"listing\"` so the two shapes can be told apart. Reading a file returns exactly the shape it always has.\n\n`source=modified` lists what the run recorded changing - free, but capped when it was recorded, so check `modified_files_truncated`. `source=workdir` reads the filesystem, **one directory level per request**; pass a directory as `path` to descend. Note `modifying_tool_calls` counts modifying tool calls and not distinct files, so subtracting it from the entry count does not give \"how many more files\".",
+        "description": "With `path`, reads that file: confined to the run's working directory, 1 MiB per request. A larger file is read a window at a time - pass `offset` and continue from the `next_offset` each response carries, which is how an agent's dataset artifact is fetched in full. Without `path`, lists instead, and the response carries `kind: \"listing\"` so the two shapes can be told apart. Reading a file returns exactly the shape it always has.\n\n`source=modified` lists what the run recorded changing - free, but capped when it was recorded, so check `modified_files_truncated`. `source=workdir` reads the filesystem, **one directory level per request**; pass a directory as `path` to descend. Note `modifying_tool_calls` counts modifying tool calls and not distinct files, so subtracting it from the entry count does not give \"how many more files\".",
         "parameters": [
           {
             "name": "path",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" },
+            "schema": {
+              "type": "string"
+            },
             "description": "Workdir-relative path. A file is read; a directory is listed; absent lists the run's files."
           },
           {
             "name": "source",
             "in": "query",
-            "schema": { "type": "string", "enum": ["modified", "workdir"], "default": "modified" },
+            "schema": {
+              "type": "string",
+              "enum": [
+                "modified",
+                "workdir"
+              ],
+              "default": "modified"
+            },
             "description": "`modified` lists what the run recorded changing; `workdir` reads one directory level of the filesystem."
           },
           {
             "name": "hidden",
             "in": "query",
-            "schema": { "type": "boolean", "default": false },
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
             "description": "Include dot-prefixed entries when listing a directory."
           }
         ],
         "responses": {
-          "200": { "$ref": "#/components/responses/Ok" },
-          "403": { "$ref": "#/components/responses/Error" },
-          "404": { "$ref": "#/components/responses/Error" }
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "416": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
     "/api/agents/{id}/logs": {
-      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
       "get": {
-        "tags": ["agents"],
+        "tags": [
+          "agents"
+        ],
         "summary": "The run's logs",
         "description": "A run's logs, by stage. Output is recorded per stage under stages/<idx>/, and the two streams are kept separate rather than interleaved because they share no ordering.",
         "parameters": [
           {
             "name": "tail",
             "in": "query",
-            "schema": { "type": "integer", "minimum": 1, "default": 32768 },
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 32768
+            },
             "description": "Return only the last N bytes (not lines)."
           },
           {
             "name": "stage",
             "in": "query",
-            "schema": { "type": "string" },
+            "schema": {
+              "type": "string"
+            },
             "description": "Stage index to read, or `all` to join every stage oldest first. Defaults to the stage the run is on now."
           },
           {
             "name": "stream",
             "in": "query",
-            "schema": { "type": "string", "enum": ["output", "logs"], "default": "output" },
+            "schema": {
+              "type": "string",
+              "enum": [
+                "output",
+                "logs"
+              ],
+              "default": "output"
+            },
             "description": "`output` for the assistant's readable output, `logs` for the operational stream: tool calls, token counts and errors."
           }
         ],
         "responses": {
-          "200": { "$ref": "#/components/responses/Ok" },
-          "400": { "$ref": "#/components/responses/Error" }
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
     "/api/agents/{id}/result": {
-      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
       "get": {
-        "tags": ["agents"],
+        "tags": [
+          "agents"
+        ],
         "summary": "The run's output and token usage",
         "responses": {
           "200": {
             "description": "The result so far. Check `status` before trusting `output`.",
             "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/AgentResultResp" } }
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentResultResp"
+                }
+              }
             }
           }
         }
       }
     },
     "/api/agents/{id}/tree-status": {
-      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
       "get": {
-        "tags": ["agents"],
+        "tags": [
+          "agents"
+        ],
         "summary": "Token roll-ups across this run and its descendants",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       }
     },
     "/api/agents/{id}/pause": {
-      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
       "post": {
-        "tags": ["agents"],
+        "tags": [
+          "agents"
+        ],
         "summary": "Pause a run after its in-flight step",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       }
     },
     "/api/agents/{id}/resume": {
-      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
       "post": {
-        "tags": ["agents"],
+        "tags": [
+          "agents"
+        ],
         "summary": "Un-pause a run",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       }
     },
     "/api/agents/{id}/message": {
-      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
       "post": {
-        "tags": ["agents"],
+        "tags": [
+          "agents"
+        ],
         "summary": "Inject a message into a running agent's context",
         "requestBody": {
           "required": true,
@@ -428,119 +763,235 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["content"],
-                "properties": { "content": { "type": "string" } }
+                "required": [
+                  "content"
+                ],
+                "properties": {
+                  "content": {
+                    "type": "string"
+                  }
+                }
               }
             }
           }
         },
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       }
     },
     "/api/agents/{id}/interaction": {
-      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
       "get": {
-        "tags": ["interactions"],
+        "tags": [
+          "interactions"
+        ],
         "summary": "The question this run is waiting on, if any",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       },
       "post": {
-        "tags": ["interactions"],
+        "tags": [
+          "interactions"
+        ],
         "summary": "Answer the pending question",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       }
     },
     "/api/mcp/servers": {
       "get": {
-        "tags": ["mcp"],
+        "tags": [
+          "mcp"
+        ],
         "summary": "Configured MCP servers",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       },
       "post": {
-        "tags": ["mcp"],
+        "tags": [
+          "mcp"
+        ],
         "summary": "Add an MCP server",
         "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed, because adding a stdio server is arbitrary code execution by construction.",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       }
     },
     "/api/mcp/servers/{name}": {
-      "parameters": [{ "$ref": "#/components/parameters/Name" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Name"
+        }
+      ],
       "delete": {
-        "tags": ["mcp"],
+        "tags": [
+          "mcp"
+        ],
         "summary": "Remove an MCP server",
         "description": "Admin only. See POST /api/mcp/servers.",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       }
     },
     "/api/mcp/servers/{name}/status": {
-      "parameters": [{ "$ref": "#/components/parameters/Name" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Name"
+        }
+      ],
       "get": {
-        "tags": ["mcp"],
+        "tags": [
+          "mcp"
+        ],
         "summary": "Whether this server is authenticated",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       }
     },
     "/api/mcp/servers/{name}/login": {
-      "parameters": [{ "$ref": "#/components/parameters/Name" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Name"
+        }
+      ],
       "post": {
-        "tags": ["mcp"],
+        "tags": [
+          "mcp"
+        ],
         "summary": "Begin the OAuth flow for this server",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       }
     },
     "/api/mcp/servers/{name}/test": {
-      "parameters": [{ "$ref": "#/components/parameters/Name" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Name"
+        }
+      ],
       "post": {
-        "tags": ["mcp"],
+        "tags": [
+          "mcp"
+        ],
         "summary": "Connect and list this server's tools",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       }
     },
     "/api/doctor": {
       "get": {
-        "tags": ["diagnostics"],
+        "tags": [
+          "diagnostics"
+        ],
         "summary": "The `lev doctor` checks, as data",
         "description": "A failing check is reported inside a 200 with `ok: false`, not as an HTTP error: the request succeeded, the install is what did not.",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       }
     },
     "/api/fs/dirs": {
       "get": {
-        "tags": ["diagnostics"],
+        "tags": [
+          "diagnostics"
+        ],
         "summary": "One directory level, for a folder picker",
         "parameters": [
-          { "name": "path", "in": "query", "schema": { "type": "string" } },
+          {
+            "name": "path",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "hidden",
             "in": "query",
-            "schema": { "type": "boolean" },
+            "schema": {
+              "type": "boolean"
+            },
             "description": "Include dot-directories."
           }
         ],
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       }
     },
     "/api/config": {
       "get": {
-        "tags": ["config"],
+        "tags": [
+          "config"
+        ],
         "summary": "The active configuration, with credentials redacted",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       },
       "put": {
-        "tags": ["config"],
+        "tags": [
+          "config"
+        ],
         "summary": "Replace the configuration",
         "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed.",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       }
     },
     "/api/config/validate": {
       "post": {
-        "tags": ["config"],
+        "tags": [
+          "config"
+        ],
         "summary": "Validate one configuration key",
         "responses": {
           "200": {
             "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/ValidateResponse" } }
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidateResponse"
+                }
+              }
             },
             "description": "Whether the key and value are usable."
           }
@@ -549,32 +1000,68 @@
     },
     "/api/models": {
       "get": {
-        "tags": ["config"],
+        "tags": [
+          "config"
+        ],
         "summary": "Models this install can reach",
-        "responses": { "200": { "$ref": "#/components/responses/Ok" } }
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
       }
     },
     "/ws": {
       "get": {
-        "tags": ["events"],
+        "tags": [
+          "events"
+        ],
         "summary": "Event stream for every run",
         "description": "A WebSocket upgrade, not a JSON response. Authenticate with `?token=` since a browser cannot set a header on the handshake. Each frame is a ServerEvent.",
         "parameters": [
-          { "name": "token", "in": "query", "required": true, "schema": { "type": "string" } }
+          {
+            "name": "token",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
         ],
-        "responses": { "101": { "description": "Switching protocols." } }
+        "responses": {
+          "101": {
+            "description": "Switching protocols."
+          }
+        }
       }
     },
     "/ws/agents/{id}": {
-      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
       "get": {
-        "tags": ["events"],
+        "tags": [
+          "events"
+        ],
         "summary": "Event stream for one run",
         "description": "As /ws, filtered to a single run.",
         "parameters": [
-          { "name": "token", "in": "query", "required": true, "schema": { "type": "string" } }
+          {
+            "name": "token",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
         ],
-        "responses": { "101": { "description": "Switching protocols." } }
+        "responses": {
+          "101": {
+            "description": "Switching protocols."
+          }
+        }
       }
     }
   },
@@ -591,57 +1078,89 @@
         "name": "id",
         "in": "path",
         "required": true,
-        "schema": { "type": "string" },
+        "schema": {
+          "type": "string"
+        },
         "description": "A run id, as returned by `lev run --json` or POST /api/agents."
       },
       "Name": {
         "name": "name",
         "in": "path",
         "required": true,
-        "schema": { "type": "string" }
+        "schema": {
+          "type": "string"
+        }
       }
     },
     "responses": {
       "Ok": {
         "description": "Success.",
-        "content": { "application/json": { "schema": { "type": "object" } } }
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object"
+            }
+          }
+        }
       },
       "Error": {
         "description": "The request failed.",
         "content": {
-          "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } }
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
         }
       }
     },
     "schemas": {
       "SpawnAgentReq": {
         "type": "object",
-        "required": ["blueprint", "task"],
+        "required": [
+          "blueprint",
+          "task"
+        ],
         "properties": {
           "blueprint": {
             "type": "string",
             "description": "An installed blueprint name, or a path to one."
           },
-          "task": { "type": "string" },
+          "task": {
+            "type": "string"
+          },
           "model": {
             "type": "string",
             "description": "\"provider/model\", or a bare model id."
           },
-          "max_depth": { "type": "integer", "minimum": 0 },
+          "max_depth": {
+            "type": "integer",
+            "minimum": 0
+          },
           "yolo": {
             "type": "boolean",
             "default": false,
             "description": "Run unattended. Refused when the server was started with --no-remote-yolo."
           },
-          "allow": { "type": "array", "items": { "type": "string" } },
-          "no_seed_commands": { "type": "boolean", "default": false },
+          "allow": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "no_seed_commands": {
+            "type": "boolean",
+            "default": false
+          },
           "workdir": {
             "type": "string",
             "description": "Confined to --workdir-root when the server sets one."
           },
           "regions": {
             "type": "object",
-            "additionalProperties": { "type": "string" },
+            "additionalProperties": {
+              "type": "string"
+            },
             "description": "Seed content per named context region."
           },
           "output_format": {
@@ -656,7 +1175,12 @@
             "type": "object",
             "description": "A JSON Schema the final output must satisfy. The only thing that inspects the answer's contents, and only because you asked: a failing submission is refused back to the agent to correct."
           },
-          "metadata": { "type": "object", "additionalProperties": { "type": "string" } },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
           "callback_url": {
             "type": "string",
             "description": "POSTed on completion or error."
@@ -669,43 +1193,93 @@
       },
       "SpawnAgentResp": {
         "type": "object",
-        "required": ["agent_id", "run_id"],
+        "required": [
+          "agent_id",
+          "run_id"
+        ],
         "properties": {
-          "agent_id": { "type": "string" },
-          "run_id": { "type": "string" }
+          "agent_id": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          }
         }
       },
       "AgentResultResp": {
         "type": "object",
-        "required": ["run_id", "status", "output", "prompt_tokens", "completion_tokens"],
+        "required": [
+          "run_id",
+          "status",
+          "output",
+          "prompt_tokens",
+          "completion_tokens"
+        ],
         "properties": {
-          "run_id": { "type": "string" },
-          "status": { "type": "string" },
+          "run_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
           "output": {
             "type": "string",
             "description": "The tail of the last stage's log: what the run did. Prefer final_output for what it concluded."
           },
           "final_output": {
-            "oneOf": [{ "$ref": "#/components/schemas/FinalOutput" }, { "type": "null" }],
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/FinalOutput"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "description": "The answer the agent submitted, if any."
           },
-          "error": { "type": ["string", "null"] },
-          "prompt_tokens": { "type": "integer", "minimum": 0 },
-          "completion_tokens": { "type": "integer", "minimum": 0 }
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "prompt_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "minimum": 0
+          }
         }
       },
       "FinalOutput": {
         "type": "object",
         "description": "What an agent handed back. `content` is byte-for-byte what it submitted; nothing re-serializes it. `format` is an opaque label the server never interprets - match on it to decide how to render.",
-        "required": ["content", "stage", "submitted_at"],
+        "required": [
+          "content",
+          "stage",
+          "submitted_at"
+        ],
         "properties": {
-          "content": { "type": "string" },
+          "content": {
+            "type": "string"
+          },
           "format": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Whatever shape was asked for: \"markdown\", \"json\", \"a2ui\", a media type, anything. Not a closed set."
           },
-          "stage": { "type": "string", "description": "The stage that produced it." },
-          "submitted_at": { "type": "integer", "description": "Unix seconds." },
+          "stage": {
+            "type": "string",
+            "description": "The stage that produced it."
+          },
+          "submitted_at": {
+            "type": "integer",
+            "description": "Unix seconds."
+          },
           "truncated": {
             "type": "boolean",
             "default": false,
@@ -713,24 +1287,52 @@
           },
           "artifacts": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "description": "Files the run produced, as workdir-relative paths. An answer is one model response, so anything larger is a file named here. Fetch one with GET /api/agents/{id}/files?path=."
           }
         }
       },
       "ValidateResponse": {
         "type": "object",
-        "required": ["valid"],
+        "required": [
+          "valid"
+        ],
         "properties": {
-          "valid": { "type": "boolean" },
-          "errors": { "type": ["array", "null"], "items": { "type": "string" } },
-          "warnings": { "type": ["array", "null"], "items": { "type": "string" } }
+          "valid": {
+            "type": "boolean"
+          },
+          "errors": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "warnings": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
         }
       },
       "ErrorResponse": {
         "type": "object",
-        "required": ["error"],
-        "properties": { "error": { "type": "string" } }
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        }
       }
     }
   }

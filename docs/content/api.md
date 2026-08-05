@@ -70,7 +70,7 @@ Base path `/api`; all JSON unless noted.
 | `GET /api/agents/{id}/result` · `/context` | The run's answer and log tail · current context window |
 | `GET /api/agents/{id}/logs?stage=&stream=&tail=` | A run's logs. `stage` takes an index or `all`, defaulting to the current stage; `stream` is `output` (the assistant's text) or `logs` (tool calls, token counts, errors); `tail` is a byte budget |
 | `GET /api/agents/{id}/context/history` | How the context window changed over the run, paginated |
-| `GET /api/agents/{id}/files` | List a run's files, or read one with `?path=`. See [below](#a-runs-files) |
+| `GET /api/agents/{id}/files` | List a run's files, or read one with `?path=`. `offset` pages a large one. See [below](#a-runs-files) |
 | `GET /api/agents/tree` · `/{id}/tree-status` · `/{id}/children` | Sub-agent tree + token roll-ups |
 | `POST /api/agents/{id}/pause` · `/resume` | Pause a run · resume it |
 | `POST /api/agents/{id}/message` | Steer a running agent |
@@ -163,6 +163,25 @@ enumerated in one response, so walk it the way a file tree does.
 
 With `?path=<file>` the response is the file's contents, unchanged from earlier versions. A listing
 carries `"kind": "listing"`, so check that field rather than guessing from the shape.
+
+### Reading a file larger than one response
+
+One request returns at most 1 MiB. A run's dataset can be far larger than that, so read it a window
+at a time with `offset`:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:3000/api/agents/$RUN/files?path=data/dataset.csv&offset=0"
+```
+
+Each response carries `next_offset`. Ask again from there until it comes back `null`, and
+concatenate the windows to get the file back exactly.
+
+An offset landing inside a multi-byte character is moved forward to the next boundary, and `offset`
+in the response says where the window actually began. That is what keeps the pieces lining up. An
+offset past the end of the file returns 416 rather than an empty window, so a loop cannot spin.
+
+A whole-file read serializes exactly as it always has. `offset` is omitted when it is zero.
 
 ## Feature detection
 

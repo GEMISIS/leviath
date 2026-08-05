@@ -614,6 +614,17 @@ pub(super) struct FileQuery {
     /// mirroring `DirsQuery`.
     #[serde(default)]
     pub(super) hidden: bool,
+    /// Byte offset to start reading at. Absent means the beginning.
+    ///
+    /// A run's artifact can be far larger than one response, so a caller pages
+    /// through it: read a window, then ask again from the `next_offset` the
+    /// response carries.
+    pub(super) offset: Option<u64>,
+}
+
+/// Whether a count is zero, for `skip_serializing_if`.
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// Which question a listing answers.
@@ -708,11 +719,24 @@ pub(super) struct FileContentResp {
     pub(super) path: String,
     /// The file's full size in bytes - larger than `content` when `truncated`.
     pub(super) size: u64,
-    /// The file's bytes as UTF-8, capped at
+    /// Where this window starts, in bytes. Not always the `offset` that was
+    /// asked for: an offset landing mid-character is moved forward to the next
+    /// character boundary, so the pages of a file line up.
+    ///
+    /// Omitted when it is zero, which keeps a whole-file read serializing
+    /// exactly as it did before paging existed. Adding a key to that response
+    /// would be harmless for most clients and is still not worth doing to all
+    /// of them for a field only a paging caller reads.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(super) offset: u64,
+    /// Where to start the next request to continue reading. `null` when this
+    /// window reached the end of the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) next_offset: Option<u64>,
+    /// This window's bytes as UTF-8, capped at
     /// [`MAX_FILE_READ_BYTES`](super::agents::MAX_FILE_READ_BYTES).
     pub(super) content: String,
-    /// Whether `content` is only the first
-    /// [`MAX_FILE_READ_BYTES`](super::agents::MAX_FILE_READ_BYTES) of the file.
+    /// Whether the file continues past this window. Read on from `next_offset`.
     pub(super) truncated: bool,
 }
 
@@ -1184,6 +1208,8 @@ mod tests {
         let resp = FileContentResp {
             path: "/work/report.md".to_string(),
             size: 9,
+            offset: 0,
+            next_offset: None,
             content: "# Report\n".to_string(),
             truncated: false,
         };
