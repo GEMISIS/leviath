@@ -19,6 +19,19 @@ pub(crate) fn write_with_mode(path: &Path, contents: &[u8], _mode: u32) -> io::R
     std::fs::write(path, contents)
 }
 
+/// A plain append-open, for the same reason `write_with_mode` is a plain write.
+pub(crate) fn open_append_with_mode(path: &Path, _mode: u32) -> io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+}
+
+/// A plain recursive create: no permission model to apply here either.
+pub(crate) fn create_dir_all_with_mode(path: &Path, _mode: u32) -> io::Result<()> {
+    std::fs::create_dir_all(path)
+}
+
 pub(crate) fn ensure_private(_path: &Path, _mode: u32) -> io::Result<Option<u32>> {
     Ok(None)
 }

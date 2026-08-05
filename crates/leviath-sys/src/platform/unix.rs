@@ -51,6 +51,40 @@ pub(crate) fn write_with_mode(path: &Path, contents: &[u8], mode: u32) -> io::Re
         .and_then(|()| set_mode(path, mode))
 }
 
+/// Open `path` for appending, creating it with `mode` already applied.
+///
+/// A run's archive and its stage logs are appended to over the life of the run,
+/// so they cannot go through `write_with_mode`. Opened plainly they are created
+/// at the umask default, which is how `run.lvr` - every context snapshot, the
+/// whole conversation, every tool result - ended up world-readable while the far
+/// smaller answer sidecar beside it was owner-only.
+///
+/// As with `write_with_mode` the mode applies only on creation, so `set_mode`
+/// covers a file that already exists at looser permissions. Appending is the
+/// common case and the extra `chmod` is one syscall on a path that already does
+/// file IO, so it is not worth branching on whether the file was new.
+pub(crate) fn open_append_with_mode(path: &Path, mode: u32) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(mode)
+        .open(path)?;
+    set_mode(path, mode)?;
+    Ok(file)
+}
+
+/// Create `path` and any missing parents with `mode` already applied.
+pub(crate) fn create_dir_all_with_mode(path: &Path, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(mode)
+        .create(path)
+}
+
 /// Set the exact permission bits on `path`.
 pub(crate) fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))

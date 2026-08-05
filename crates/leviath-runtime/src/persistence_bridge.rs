@@ -139,6 +139,38 @@ pub async fn persistence_worker(
     }
 }
 
+/// Create a run directory and any missing parents, owner-only, off the async
+/// runtime.
+///
+/// The run directory is normally staked out by the CLI, which makes it `0o700`.
+/// The persistence lane can get there first though (a run reloaded on daemon
+/// restart, an embedded world with no CLI in front of it), and
+/// `create_dir_all` makes it at the umask default. Everything under a run
+/// directory is owner-only, so the directory holding it has to be too - it is
+/// what stops another local user walking in.
+async fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    let owned = path.to_path_buf();
+    tokio::task::spawn_blocking(move || leviath_sys::create_private_dir_all(&owned))
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))
+        .and_then(|r| r)
+}
+
+/// Open a run file for appending, owner-only, off the async runtime.
+///
+/// `leviath-sys` owns the per-platform mode handling (including the Windows
+/// `icacls` path), and it is a blocking API, so the open happens on the blocking
+/// pool the same way the atomic writer's does. Best-effort like the rest of the
+/// lane: a failure is reported to the caller, which logs and moves on.
+async fn open_private_append(path: &Path) -> std::io::Result<tokio::fs::File> {
+    let owned = path.to_path_buf();
+    tokio::task::spawn_blocking(move || leviath_sys::open_private_append(&owned))
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))
+        .and_then(|r| r)
+        .map(tokio::fs::File::from_std)
+}
+
 /// Append a single record to an *existing* run archive. A run whose first
 /// snapshot hasn't landed yet has no `run.lvr` (and no preamble/Header), so the
 /// append is skipped rather than corrupting the file - the single-worker lane
@@ -158,7 +190,7 @@ async fn append_record(
     let mut buf: Vec<u8> = Vec::new();
     leviath_core::run_archive::write_record(&mut buf, record)
         .expect("writing to a Vec never fails");
-    match tokio::fs::OpenOptions::new().append(true).open(&path).await {
+    match open_private_append(&path).await {
         Ok(mut file) => {
             let _ = file.write_all(&buf).await;
             let _ = file.flush().await;
@@ -220,7 +252,7 @@ async fn write_snapshot(
     prev_context: Option<&ContextSnapshot>,
 ) {
     let dir = runs_dir.join(&job.run_id);
-    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+    if let Err(e) = create_private_dir(&dir).await {
         tracing::warn!(run_id = %job.run_id, error = %e, "persistence: create run dir failed");
         return;
     }
@@ -263,7 +295,7 @@ async fn write_snapshot(
     // Per-stage taint audit (whole-file, atomic).
     if let Some((idx, json)) = &job.taint_audit {
         let stage_dir = dir.join("stages").join(idx.to_string());
-        let _ = tokio::fs::create_dir_all(&stage_dir).await;
+        let _ = create_private_dir(&stage_dir).await;
         write_bytes_atomic(
             &stage_dir.join("taint_audit.json"),
             json.as_bytes(),
@@ -363,12 +395,7 @@ async fn append_run_archive(
         }
     }
 
-    match tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .await
-    {
+    match open_private_append(&path).await {
         Ok(mut file) => {
             let _ = file.write_all(&buf).await;
             let _ = file.flush().await;
@@ -385,13 +412,8 @@ async fn append_run_archive(
 /// result is intentionally ignored - persistence must never stall the world.
 async fn append_stage_line(run_dir: &Path, stage_idx: usize, file: &str, line: &str, run_id: &str) {
     let stage_dir = run_dir.join("stages").join(stage_idx.to_string());
-    let _ = tokio::fs::create_dir_all(&stage_dir).await;
-    match tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(stage_dir.join(file))
-        .await
-    {
+    let _ = create_private_dir(&stage_dir).await;
+    match open_private_append(&stage_dir.join(file)).await {
         Ok(mut handle) => {
             let mut bytes = line.as_bytes().to_vec();
             bytes.push(b'\n');
@@ -605,6 +627,76 @@ mod tests {
                 .join(leviath_core::FINAL_OUTPUT_FILE)
                 .exists()
         );
+    }
+
+    /// The invariant, over everything a run writes rather than the one file that
+    /// happened to be looked at. `run.lvr` held every context snapshot, the whole
+    /// conversation and every tool result, and was created at the umask default
+    /// while the far smaller answer sidecar beside it was owner-only.
+    ///
+    /// The containing run directory is `0o700`, so these were not reachable in
+    /// place. A directory's mode does not survive a copy though: `tar`, `rsync`
+    /// or a backup tool preserves the per-file mode and drops the protection the
+    /// directory was providing.
+    #[tokio::test]
+    async fn every_file_a_run_writes_is_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run-perms");
+
+        write_snapshot(dir.path(), &job("run-perms"), "m", "w", None).await;
+        append_stage_line(&run, 0, "output.log", "a line of agent output", "run-perms").await;
+        append_stage_line(&run, 0, "logs.log", "a line of tool activity", "run-perms").await;
+        append_record(
+            dir.path(),
+            "run-perms",
+            &leviath_core::run_archive::RunRecord::OwnershipChanged {
+                machine_id: "m2".to_string(),
+                world_id: "w2".to_string(),
+                at: 1,
+            },
+        )
+        .await;
+
+        let mut checked = 0;
+        for entry in walkdir(&run) {
+            checked += 1;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&entry).unwrap().permissions().mode() & 0o777;
+                let expected = if entry.is_dir() { 0o700 } else { 0o600 };
+                assert_eq!(
+                    mode,
+                    expected,
+                    "{} is {mode:o}, and a copy of this tree would carry that",
+                    entry.display()
+                );
+            }
+        }
+        // The walk finding nothing would pass the loop above vacuously.
+        assert!(
+            checked >= 4,
+            "expected a populated run dir, walked {checked}"
+        );
+    }
+
+    /// Every file and directory under `root`, `root` itself included.
+    fn walkdir(root: &Path) -> Vec<PathBuf> {
+        let mut found = vec![root.to_path_buf()];
+        let mut queue = vec![root.to_path_buf()];
+        while let Some(dir) = queue.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    queue.push(path.clone());
+                }
+                found.push(path);
+            }
+        }
+        found
     }
 
     #[tokio::test]
