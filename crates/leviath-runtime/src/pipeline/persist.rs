@@ -73,12 +73,28 @@ impl PersistWatermark {
         self.last_progress_at
     }
 
+    /// The run status the last dispatched snapshot carried, if any - the proof
+    /// that a given status has reached the persistence lane. Unloading
+    /// decisions key on this: an entity may only be slimmed or paged out once
+    /// the state being dropped is known to be on its way to disk.
+    pub(crate) fn persisted_status(&self) -> Option<leviath_core::run_meta::RunStatus> {
+        self.last.as_ref().map(|(_, _, status)| status.clone())
+    }
+
     /// Move both stamps back to `at`, so a test can reach the heartbeat window
     /// without sleeping through it.
     #[cfg(test)]
     pub(crate) fn backdate(&mut self, at: i64) {
         self.last_written_at = Some(at);
         self.last_progress_at = Some(at);
+    }
+
+    /// Stamp the watermark as though a snapshot with `status` was dispatched,
+    /// so unload tests can drive [`Self::persisted_status`] without running the
+    /// full persistence schedule.
+    #[cfg(test)]
+    pub(crate) fn stamp_status(&mut self, status: leviath_core::run_meta::RunStatus) {
+        self.last = Some((0, 0, status));
     }
 }
 
