@@ -746,7 +746,11 @@ impl WorldHost {
     /// Wrap a world with a specific interaction hub - the daemon shares one hub
     /// between the tool service's per-agent backends and this host.
     pub fn with_interactions(mut world: PipelineWorld, interactions: InteractionHub) -> Self {
-        let (events, _) = broadcast::channel(1024);
+        // 256, not more: a tokio broadcast ring never shrinks, so every slot a
+        // busy period fills stays allocated (holding its event's strings) for
+        // the daemon's life. Consumers here are live relays, not replayers -
+        // one that falls a full ring behind gets a Lagged skip either way.
+        let (events, _) = broadcast::channel(256);
         // Let ECS systems (the persistence drain) push events - per-agent log
         // lines - into the same stream the control transport serves.
         world

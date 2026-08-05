@@ -1761,6 +1761,40 @@ fn dispatch_persistence_broadcasts_buffered_lines_as_log_events() {
     assert!(sink_rx.try_recv().is_err(), "no extra events");
 }
 
+/// Broadcast log lines are truncated (the never-shrinking ring retains every
+/// slot's strings); the on-disk stage log keeps the full line.
+#[test]
+fn dispatch_persistence_truncates_long_broadcast_lines_but_not_disk_appends() {
+    use crate::host::{WorldEvent, WorldEventSink};
+    let (mut world, mut rx) = world_with_persistence();
+    let (sink_tx, mut sink_rx) = tokio::sync::broadcast::channel(16);
+    world.insert_resource(WorldEventSink(sink_tx));
+    let long_line = "y".repeat(BROADCAST_LOG_LINE_MAX_BYTES + 100);
+    let mut buf = StageIoBuffer::default();
+    buf.output.push((0, long_line.clone()));
+    world.spawn((
+        run_metadata(),
+        agent_state(),
+        conv_window(),
+        StageCursor { index: 0 },
+        TokenTotals::default(),
+        PersistWatermark::default(),
+        buf,
+    ));
+
+    run_dispatch_persistence(&mut world);
+
+    let event = sink_rx.try_recv().expect("log event");
+    let WorldEvent::Log { line, .. } = event else {
+        panic!("expected a Log event");
+    };
+    assert!(line.len() < long_line.len(), "broadcast copy is truncated");
+    assert!(line.ends_with("[truncated 100 bytes]"), "got: {line}");
+    // The disk append still carries the whole line.
+    let job = snapshot_job(rx.try_recv().expect("persist job"));
+    assert_eq!(job.output_appends, vec![(0, long_line)]);
+}
+
 #[test]
 fn dispatch_persistence_emits_no_log_events_without_a_sink() {
     use crate::host::WorldEventSink;

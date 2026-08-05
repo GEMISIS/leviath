@@ -7,6 +7,24 @@ use tokio::sync::broadcast;
 
 use super::types::*;
 
+/// How often the server pings an idle-or-not connection. A peer that has not
+/// ponged by the NEXT ping is declared dead. Browsers answer pings
+/// automatically, so a live client never trips this.
+const WS_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// How long one outbound frame may take to send+flush before the peer is
+/// declared dead. A peer that stopped reading without closing (a backgrounded
+/// tab, a sleeping laptop, a NAT that dropped the mapping) leaves `send()`
+/// pending forever otherwise - the task then never polls `recv()` either, so
+/// it holds its broadcast receiver and ~256 KB of frame buffers until TCP
+/// keepalive fires hours later.
+const WS_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Cap tungstenite's outbound frame buffering per connection. Without it a
+/// wedged peer's connection buffers frames without bound while waiting for
+/// the send timeout to notice.
+const WS_MAX_WRITE_BUFFER: usize = 256 * 1024;
+
 pub(super) async fn ws_global(
     State(state): State<AppState>,
     ws: WebSocketUpgrade,
@@ -16,7 +34,8 @@ pub(super) async fn ws_global(
     // channel becomes Closed and rx.recv() returns Err(Closed) immediately,
     // making that match arm reachable in tests.
     let rx = state.event_tx.subscribe();
-    ws.on_upgrade(move |socket| handle_ws(socket, rx, None))
+    ws.max_write_buffer_size(WS_MAX_WRITE_BUFFER)
+        .on_upgrade(move |socket| handle_ws(socket, rx, None))
 }
 
 pub(super) async fn ws_agent(
@@ -25,17 +44,47 @@ pub(super) async fn ws_agent(
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     let rx = state.event_tx.subscribe();
-    ws.on_upgrade(move |socket| handle_ws(socket, rx, Some(id)))
+    ws.max_write_buffer_size(WS_MAX_WRITE_BUFFER)
+        .on_upgrade(move |socket| handle_ws(socket, rx, Some(id)))
 }
 
 async fn handle_ws(
+    socket: WebSocket,
+    rx: broadcast::Receiver<ServerEvent>,
+    filter_run_id: Option<String>,
+) {
+    handle_ws_with(socket, rx, filter_run_id, WS_PING_INTERVAL, WS_SEND_TIMEOUT).await
+}
+
+/// Core of the WS relay, with the ping cadence and send deadline injected so
+/// tests can drive the dead-peer branches without real multi-second waits.
+///
+/// The `select!` is deliberately **unbiased**: the old `biased;` variant
+/// polled the event branch first every iteration, so under a busy run the
+/// inbound half (`socket.recv()` - the only place Close frames and pongs are
+/// seen) could be starved indefinitely.
+async fn handle_ws_with(
     mut socket: WebSocket,
     mut rx: broadcast::Receiver<ServerEvent>,
     filter_run_id: Option<String>,
+    ping_every: std::time::Duration,
+    send_timeout: std::time::Duration,
 ) {
+    // First ping only after a full interval - a fresh connection is known
+    // live, and pinging in the handshake's shadow confuses simple clients.
+    let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + ping_every, ping_every);
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut awaiting_pong = false;
     loop {
         tokio::select! {
-            biased;
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Pong(_))) => awaiting_pong = false,
+                    Some(Err(_)) => break,
+                    _ => {} // Ignore other client messages
+                }
+            }
             event = rx.recv() => {
                 match event {
                     Ok(ev) => {
@@ -49,8 +98,13 @@ async fn handle_ws(
                         // ServerEvent always serializes; a failure is a bug.
                         let json = serde_json::to_string(&ev)
                             .expect("ServerEvent serialization must not fail");
-                        if socket.send(Message::Text(json.into())).await.is_err() {
-                            break;
+                        let sent = tokio::time::timeout(
+                            send_timeout,
+                            socket.send(Message::Text(json.into())),
+                        )
+                        .await;
+                        if !matches!(sent, Ok(Ok(()))) {
+                            break; // dead or wedged peer either way
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -59,10 +113,20 @@ async fn handle_ws(
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
-            msg = socket.recv() => {
-                match msg {
-                    Some(Ok(Message::Close(_))) | None => break,
-                    _ => {} // Ignore other client messages
+            _ = ping.tick() => {
+                if awaiting_pong {
+                    // The previous ping was never answered: the peer is gone
+                    // without a Close (sleep, kill, dropped NAT mapping).
+                    break;
+                }
+                awaiting_pong = true;
+                let pinged = tokio::time::timeout(
+                    send_timeout,
+                    socket.send(Message::Ping(Vec::new().into())),
+                )
+                .await;
+                if !matches!(pinged, Ok(Ok(()))) {
+                    break;
                 }
             }
         }
@@ -262,6 +326,138 @@ mod tests {
     #[should_panic(expected = "expected a text frame")]
     fn assert_text_frame_panics_on_non_text_opcode() {
         assert_text_frame(0x2);
+    }
+
+    /// A server whose WS route uses injected ping/send deadlines, so the
+    /// dead-peer branches can be driven in tens of milliseconds.
+    async fn spawn_ping_test_server(
+        state: AppState,
+        ping_every: std::time::Duration,
+        send_timeout: std::time::Duration,
+    ) -> std::net::SocketAddr {
+        let app = Router::new()
+            .route(
+                "/ws",
+                get(
+                    move |State(state): State<AppState>, ws: WebSocketUpgrade| async move {
+                        let rx = state.event_tx.subscribe();
+                        ws.on_upgrade(move |socket| {
+                            handle_ws_with(socket, rx, None, ping_every, send_timeout)
+                        })
+                    },
+                ),
+            )
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        addr
+    }
+
+    /// Wait until the broadcast subscriber count reaches `expected` (the
+    /// handler task subscribing or dropping its receiver), or panic.
+    async fn wait_for_receiver_count(tx: &broadcast::Sender<ServerEvent>, expected: usize) {
+        for _ in 0..100 {
+            if tx.receiver_count() == expected {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!(
+            "receiver count never reached {expected} (still {})",
+            tx.receiver_count()
+        );
+    }
+
+    /// A peer that never answers pings is declared dead after one unanswered
+    /// interval: the handler drops its receiver instead of holding it (plus
+    /// its frame buffers) until TCP keepalive fires hours later.
+    #[tokio::test]
+    async fn ws_closes_a_client_that_never_pongs() {
+        let state = test_state();
+        let tx = state.event_tx.clone();
+        let addr = spawn_ping_test_server(
+            state,
+            std::time::Duration::from_millis(80),
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        // The raw test client ignores pings entirely.
+        let _client = WsTestClient::connect(addr, "/ws").await;
+        wait_for_receiver_count(&tx, 1).await;
+        // First interval sends the ping; the second finds it unanswered.
+        wait_for_receiver_count(&tx, 0).await;
+    }
+
+    /// A peer that answers pings stays connected across many intervals.
+    #[tokio::test]
+    async fn ws_stays_alive_when_client_pongs() {
+        let state = test_state();
+        let tx = state.event_tx.clone();
+        let addr = spawn_ping_test_server(
+            state,
+            std::time::Duration::from_millis(60),
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let mut client = WsTestClient::connect(addr, "/ws").await;
+        wait_for_receiver_count(&tx, 1).await;
+
+        // Answer pings for ~5 intervals.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
+        while std::time::Instant::now() < deadline {
+            let (opcode, payload) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), client.recv_frame())
+                    .await
+                    .expect("expected a ping before the deadline");
+            if opcode == 0x9 {
+                client.send_frame(0xA, &payload).await; // masked pong
+            }
+        }
+        assert_eq!(
+            tx.receiver_count(),
+            1,
+            "a ponging client must not be disconnected"
+        );
+        client.send_close().await;
+        wait_for_receiver_count(&tx, 0).await;
+    }
+
+    /// A peer that stopped reading without closing wedges `send()`; the send
+    /// deadline breaks the connection instead of parking the task forever.
+    #[tokio::test]
+    async fn ws_send_timeout_disconnects_a_wedged_peer() {
+        let state = test_state();
+        let tx = state.event_tx.clone();
+        let addr = spawn_ping_test_server(
+            state,
+            std::time::Duration::from_secs(3600), // pings out of the picture
+            std::time::Duration::from_millis(100),
+        )
+        .await;
+
+        // Connect and then never read: the kernel buffers fill and the
+        // server's flush pends.
+        let _client = WsTestClient::connect(addr, "/ws").await;
+        wait_for_receiver_count(&tx, 1).await;
+
+        let big_line = "x".repeat(256 * 1024);
+        for _ in 0..64 {
+            if tx.receiver_count() == 0 {
+                break; // already disconnected
+            }
+            let _ = tx.send(ServerEvent::Log {
+                agent_id: "a".to_string(),
+                run_id: "run-1".to_string(),
+                line: big_line.clone(),
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        wait_for_receiver_count(&tx, 0).await;
     }
 
     #[tokio::test]

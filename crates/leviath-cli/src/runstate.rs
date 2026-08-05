@@ -70,12 +70,54 @@ pub fn read_context_snapshot(run_id: &str) -> Option<ContextSnapshot> {
 
 /// Read + parse a run's portable archive (`<run_dir>/run.lvr`), returning its
 /// records, or `None` if the archive is missing or unreadable.
+///
+/// Materializes the whole journal. For anything that only walks the timeline
+/// (the history API, journal search highlights), prefer [`visit_run_archive`]:
+/// a mature run's journal is tens of MB, and parsing it whole per request was
+/// the API's single largest transient allocation.
 pub fn read_run_archive(run_id: &str) -> Option<Vec<leviath_core::run_archive::RunRecord>> {
     let path = run_dir(run_id).join("run.lvr");
     let bytes = std::fs::read(&path).ok()?;
     leviath_core::run_archive::read_archive(&mut bytes.as_slice())
         .ok()
         .map(|(_version, records)| records)
+}
+
+/// Stream a run's raw journal records through `visit`, one at a time, without
+/// materializing the archive. Same lenient tail handling as
+/// [`visit_run_archive`]. For consumers that inspect records rather than
+/// replayed points (journal search).
+pub fn visit_run_records(
+    run_id: &str,
+    visit: &mut dyn FnMut(&leviath_core::run_archive::RunRecord) -> std::ops::ControlFlow<()>,
+) -> Option<()> {
+    let path = run_dir(run_id).join("run.lvr");
+    let file = std::fs::File::open(&path).ok()?;
+    let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
+    leviath_core::run_archive::read_archive_start(&mut reader).ok()?;
+    while let Ok(Some(record)) = leviath_core::run_archive::read_record(&mut reader) {
+        if visit(&record).is_break() {
+            break;
+        }
+    }
+    Some(())
+}
+
+/// Stream a run's archive through a [`visit_points`] visitor without ever
+/// materializing the journal: one buffered pass over `run.lvr`, one record and
+/// one running window in memory. Returns `None` if the archive is missing or
+/// its preamble is invalid; a torn tail (a live run mid-append) just ends the
+/// walk with the points already visited.
+///
+/// [`visit_points`]: leviath_core::run_archive::visit_points
+pub fn visit_run_archive(
+    run_id: &str,
+    visit: &mut dyn FnMut(leviath_core::run_archive::PointRef<'_>) -> std::ops::ControlFlow<()>,
+) -> Option<()> {
+    let path = run_dir(run_id).join("run.lvr");
+    let file = std::fs::File::open(&path).ok()?;
+    let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
+    leviath_core::run_archive::visit_archive_points(&mut reader, visit).ok()
 }
 
 /// A run's context-window history: the full window (+ metadata) at each recorded
@@ -1587,6 +1629,57 @@ mod tests {
             let history = context_history(run_id);
             assert_eq!(history.len(), 1);
             assert_eq!(history[0].context.stage_name, "plan");
+
+            // The streaming visitors see the same journal without ever
+            // materializing it.
+            let mut streamed_points = Vec::new();
+            visit_run_archive(run_id, &mut |p| {
+                streamed_points.push((p.index, p.context.stage_name.to_string()));
+                std::ops::ControlFlow::Continue(())
+            })
+            .expect("streamed replay");
+            assert_eq!(streamed_points, vec![(0, "plan".to_string())]);
+
+            let mut streamed_records = 0usize;
+            visit_run_records(run_id, &mut |_| {
+                streamed_records += 1;
+                std::ops::ControlFlow::Continue(())
+            })
+            .expect("streamed records");
+            assert_eq!(streamed_records, 2);
+
+            // And a visitor can stop early.
+            let mut first_only = 0usize;
+            visit_run_records(run_id, &mut |_| {
+                first_only += 1;
+                std::ops::ControlFlow::Break(())
+            })
+            .expect("streamed records with break");
+            assert_eq!(first_only, 1);
+        });
+    }
+
+    #[test]
+    fn streaming_visitors_return_none_when_the_archive_is_missing() {
+        with_isolated_runs_dir("streaming-visitors-missing", |_d| {
+            assert!(
+                visit_run_archive("no-such-run", &mut |_| std::ops::ControlFlow::Continue(()))
+                    .is_none()
+            );
+            assert!(
+                visit_run_records("no-such-run", &mut |_| std::ops::ControlFlow::Continue(()))
+                    .is_none()
+            );
+            // A file that is not an archive fails the preamble check.
+            let run_id = "bad-preamble";
+            std::fs::create_dir_all(run_dir(run_id)).unwrap();
+            std::fs::write(run_dir(run_id).join("run.lvr"), b"junk").unwrap();
+            assert!(
+                visit_run_archive(run_id, &mut |_| std::ops::ControlFlow::Continue(())).is_none()
+            );
+            assert!(
+                visit_run_records(run_id, &mut |_| std::ops::ControlFlow::Continue(())).is_none()
+            );
         });
     }
 

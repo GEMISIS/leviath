@@ -822,33 +822,99 @@ pub struct PointRef<'a> {
 /// serve module.
 pub fn visit_points(records: &[RunRecord], visit: &mut dyn FnMut(PointRef<'_>) -> ControlFlow<()>) {
     let mut iter = records.iter();
-    let mut meta = match iter.next() {
-        Some(RunRecord::Header { meta, .. }) => (**meta).clone(),
-        _ => return,
+    let Some(mut folder) = (match iter.next() {
+        Some(first) => PointFolder::start(first),
+        None => None,
+    }) else {
+        return;
     };
-    let mut context = ContextSnapshot {
-        stage_name: String::new(),
-        total_tokens: 0,
-        max_tokens: 0,
-        regions: Vec::new(),
-    };
-    let mut index = 0usize;
     for record in iter {
+        if folder.push(record, visit).is_break() {
+            return;
+        }
+    }
+}
+
+/// Streaming [`visit_points`] over a framed archive: validate the preamble,
+/// then read one record at a time and fold it into the running window - so a
+/// multi-megabyte `run.lvr` is walked holding one record and one window in
+/// memory, instead of the whole parsed journal (`read_archive` materializes
+/// every record first, typically 2-4x the file's bytes as structs).
+///
+/// Errors only on a bad preamble. Like [`read_archive_lenient`], a torn or
+/// unreadable frame ends the walk with the points already visited: the tail of
+/// a live run's journal can legitimately be mid-append.
+pub fn visit_archive_points(
+    r: &mut dyn Read,
+    visit: &mut dyn FnMut(PointRef<'_>) -> ControlFlow<()>,
+) -> io::Result<()> {
+    read_archive_start(r)?;
+    let mut folder = match read_record(r) {
+        Ok(Some(first)) => match PointFolder::start(&first) {
+            Some(folder) => folder,
+            None => return Ok(()),
+        },
+        _ => return Ok(()),
+    };
+    while let Ok(Some(record)) = read_record(r) {
+        if folder.push(&record, visit).is_break() {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+/// The running state of a point replay: the metadata and window in effect,
+/// folded record by record. Shared by [`visit_points`] (in-memory records) and
+/// [`visit_archive_points`] (streamed records) so the two can never disagree
+/// about what a record means.
+struct PointFolder {
+    meta: RunMeta,
+    context: ContextSnapshot,
+    index: usize,
+}
+
+impl PointFolder {
+    /// Start a replay from the first record, which must be the Header -
+    /// anything else means this isn't a run journal, and the replay visits
+    /// nothing (`None`).
+    fn start(first: &RunRecord) -> Option<Self> {
+        match first {
+            RunRecord::Header { meta, .. } => Some(Self {
+                meta: (**meta).clone(),
+                context: ContextSnapshot {
+                    stage_name: String::new(),
+                    total_tokens: 0,
+                    max_tokens: 0,
+                    regions: Vec::new(),
+                },
+                index: 0,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Fold one record; when it produces a timeline point, lend it to `visit`.
+    fn push(
+        &mut self,
+        record: &RunRecord,
+        visit: &mut dyn FnMut(PointRef<'_>) -> ControlFlow<()>,
+    ) -> ControlFlow<()> {
         let at = match record {
             RunRecord::Header { meta: m, .. } => {
-                meta = (**m).clone();
-                continue;
+                self.meta = (**m).clone();
+                return ControlFlow::Continue(());
             }
             RunRecord::StatusChanged { status, .. } => {
-                meta.status = status.clone();
-                continue;
+                self.meta.status = status.clone();
+                return ControlFlow::Continue(());
             }
             RunRecord::ContextCheckpoint { snapshot, at } => {
-                context = snapshot.clone();
+                self.context = snapshot.clone();
                 *at
             }
             RunRecord::ContextDiff { delta, at } => {
-                apply_delta(&mut context, delta);
+                apply_delta(&mut self.context, delta);
                 *at
             }
             RunRecord::Checkpoint {
@@ -856,13 +922,13 @@ pub fn visit_points(records: &[RunRecord], visit: &mut dyn FnMut(PointRef<'_>) -
                 context: c,
                 at,
             } => {
-                meta = (**m).clone();
-                context = c.clone();
+                self.meta = (**m).clone();
+                self.context = c.clone();
                 *at
             }
             RunRecord::Progress { meta: m, delta, at } => {
-                meta = (**m).clone();
-                apply_delta(&mut context, delta);
+                self.meta = (**m).clone();
+                apply_delta(&mut self.context, delta);
                 *at
             }
             // Non-context records don't add a timeline point.
@@ -870,18 +936,16 @@ pub fn visit_points(records: &[RunRecord], visit: &mut dyn FnMut(PointRef<'_>) -
             | RunRecord::Inference { .. }
             | RunRecord::ToolBatch { .. }
             | RunRecord::ToolCallDone { .. }
-            | RunRecord::Message { .. } => continue,
+            | RunRecord::Message { .. } => return ControlFlow::Continue(()),
         };
         let flow = visit(PointRef {
-            index,
+            index: self.index,
             at,
-            meta: &meta,
-            context: &context,
+            meta: &self.meta,
+            context: &self.context,
         });
-        index += 1;
-        if flow.is_break() {
-            return;
-        }
+        self.index += 1;
+        flow
     }
 }
 
@@ -1071,6 +1135,119 @@ mod tests {
         let delta = diff_context(&a, &b);
         assert_eq!(region_delta_kind(&delta.regions[0]), "set");
         assert_diff_roundtrip(&a, &b);
+    }
+
+    // ── streaming point replay ──
+
+    /// Frame `records` exactly as `run.lvr` stores them.
+    fn framed(records: &[RunRecord]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        write_archive_start(&mut buf, RUN_ARCHIVE_VERSION).unwrap();
+        for record in records {
+            write_record(&mut buf, record).unwrap();
+        }
+        buf
+    }
+
+    /// Collect `(index, at, total_tokens)` per visited point.
+    fn collect_streamed(bytes: &[u8]) -> Vec<(usize, i64, usize)> {
+        let mut seen = Vec::new();
+        visit_archive_points(&mut &bytes[..], &mut |p| {
+            seen.push((p.index, p.at, p.context.total_tokens));
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+        seen
+    }
+
+    #[test]
+    fn visit_archive_points_matches_visit_points() {
+        let records = vec![
+            header(),
+            RunRecord::ContextCheckpoint {
+                snapshot: snapshot("s1", vec![region("conv", vec![entry("hi", 1)])]),
+                at: 10,
+            },
+            RunRecord::StatusChanged {
+                status: RunStatus::Running,
+                at: 11,
+            },
+            RunRecord::Progress {
+                meta: Box::new(meta()),
+                delta: diff_context(
+                    &snapshot("s1", vec![region("conv", vec![entry("hi", 1)])]),
+                    &snapshot(
+                        "s1",
+                        vec![region("conv", vec![entry("hi", 1), entry("more", 2)])],
+                    ),
+                ),
+                at: 12,
+            },
+        ];
+        let mut in_memory = Vec::new();
+        visit_points(&records, &mut |p| {
+            in_memory.push((p.index, p.at, p.context.total_tokens));
+            ControlFlow::Continue(())
+        });
+        assert_eq!(collect_streamed(&framed(&records)), in_memory);
+        assert_eq!(in_memory.len(), 2, "checkpoint + progress = two points");
+    }
+
+    #[test]
+    fn visit_archive_points_rejects_a_bad_preamble() {
+        let mut bogus: &[u8] = b"not an archive at all";
+        let result = visit_archive_points(&mut bogus, &mut |_| ControlFlow::Continue(()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn visit_archive_points_is_lenient_about_a_torn_tail() {
+        let records = vec![
+            header(),
+            RunRecord::ContextCheckpoint {
+                snapshot: snapshot("s1", vec![region("conv", vec![entry("hi", 1)])]),
+                at: 10,
+            },
+        ];
+        let mut bytes = framed(&records);
+        // A torn frame: a length prefix promising more than exists.
+        bytes.extend_from_slice(&1000u64.to_be_bytes());
+        bytes.extend_from_slice(b"partial");
+        assert_eq!(collect_streamed(&bytes).len(), 1, "points before the tear");
+    }
+
+    #[test]
+    fn visit_archive_points_visits_nothing_without_a_header() {
+        let records = vec![RunRecord::ContextCheckpoint {
+            snapshot: snapshot("s1", vec![region("conv", vec![entry("hi", 1)])]),
+            at: 10,
+        }];
+        assert!(collect_streamed(&framed(&records)).is_empty());
+        // And an archive with no records at all visits nothing.
+        assert!(collect_streamed(&framed(&[])).is_empty());
+    }
+
+    #[test]
+    fn visit_archive_points_stops_on_break() {
+        let records = vec![
+            header(),
+            RunRecord::ContextCheckpoint {
+                snapshot: snapshot("s1", vec![region("conv", vec![entry("a", 1)])]),
+                at: 10,
+            },
+            RunRecord::ContextCheckpoint {
+                snapshot: snapshot("s1", vec![region("conv", vec![entry("b", 2)])]),
+                at: 11,
+            },
+        ];
+        let bytes = framed(&records);
+        let mut seen = 0;
+        visit_archive_points(&mut &bytes[..], &mut |_| {
+            seen += 1;
+            ControlFlow::Break(())
+        })
+        .unwrap();
+        assert_eq!(seen, 1);
     }
 
     // ── digest-based diffing ──

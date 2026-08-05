@@ -723,8 +723,18 @@ fn journal_highlights(meta: &RunMeta, q: &str) -> Option<Highlight> {
         }
     }
 
-    let records = runstate::read_run_archive(&meta.run_id)?;
-    records.iter().find_map(|record| in_record(record, q))
+    // Streamed, stopping at the first matching record: parsing the whole
+    // journal per returned item multiplied the history endpoint's biggest
+    // allocation by the page size.
+    let mut found = None;
+    runstate::visit_run_records(&meta.run_id, &mut |record| match in_record(record, q) {
+        Some(hit) => {
+            found = Some(hit);
+            std::ops::ControlFlow::Break(())
+        }
+        None => std::ops::ControlFlow::Continue(()),
+    })?;
+    found
 }
 
 /// Take this page's runs and mint the cursor for the next one.

@@ -238,7 +238,9 @@ async fn execute_with_shutdown(
         tracing::warn!("{}", warning);
     }
 
-    let (event_tx, _) = broadcast::channel::<ServerEvent>(1024);
+    // Sized like the daemon's WorldEvent ring (see WorldHost): the ring never
+    // shrinks, so its capacity is a permanent memory floor once filled.
+    let (event_tx, _) = broadcast::channel::<ServerEvent>(256);
 
     let state = AppState {
         config: Arc::new(cfg),
