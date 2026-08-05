@@ -265,10 +265,17 @@ const RUN_ID_ENTROPY_BITS: u32 = 48;
 /// The `<name>-<secs>-<hex>` shape is preserved: the timestamp keeps IDs sorting
 /// and reading chronologically, and the dashboard's short-ID display
 /// (`split('-').next_back()`) still lands on the unique component.
+///
+/// The name is folded to **ASCII** alphanumerics, which is stricter than it
+/// looks necessary. The id becomes a directory name, and [`run_dir`] resolves an
+/// id that is not a safe path component to `<invalid>`. A Unicode fold let an
+/// agent named `café` mint `café-...`: the daemon created that directory
+/// happily, and then every CLI read of the run looked in `<invalid>` and found
+/// nothing. The minter has to satisfy the rule the readers enforce.
 pub fn new_run_id(agent_name: &str) -> String {
     use rand::RngExt as _;
     let entropy: u64 = rand::rng().random::<u64>() >> (u64::BITS - RUN_ID_ENTROPY_BITS);
-    let safe_name = agent_name.replace(|c: char| !c.is_alphanumeric() && c != '-', "-");
+    let safe_name = agent_name.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "-");
     format!("{}-{}-{:012x}", safe_name, now_secs(), entropy)
 }
 
@@ -1312,6 +1319,31 @@ mod tests {
         let id = new_run_id("agent with spaces!");
         assert!(!id.contains(' '));
         assert!(!id.contains('!'));
+    }
+
+    /// The id becomes a directory name, and every reader resolves it through
+    /// `is_safe_path_component`. A minted id that fails that check spawns a run
+    /// the CLI can never read back, so the two rules have to agree whatever the
+    /// blueprint calls itself.
+    #[test]
+    fn every_minted_run_id_is_a_safe_path_component() {
+        for name in [
+            "café",
+            "日本語",
+            "agent with spaces!",
+            "../escape",
+            "a/b",
+            "..",
+            "",
+            "emoji-🚀-agent",
+            "Ünïcödé",
+        ] {
+            let id = new_run_id(name);
+            assert!(
+                leviath_core::is_safe_path_component(&id),
+                "agent {name:?} minted {id:?}, which run_dir resolves to <invalid>"
+            );
+        }
     }
 
     #[test]
