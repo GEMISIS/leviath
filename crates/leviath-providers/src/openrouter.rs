@@ -161,14 +161,14 @@ impl OpenRouterProvider {
 
 #[async_trait]
 impl Provider for OpenRouterProvider {
-    async fn infer(&self, request: InferenceRequest) -> Result<InferenceResponse> {
+    async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
         tracing::debug!(model = %request.model, "Calling OpenRouter API");
 
         if let Some(limiter) = &self.rate_limiter {
             limiter.acquire().await?;
         }
 
-        let body = self.build_request_body(&request);
+        let body = self.build_request_body(request);
         let url = format!("{}/chat/completions", self.base_url);
 
         let response = send_chat_request(
@@ -206,7 +206,7 @@ impl Provider for OpenRouterProvider {
 
     async fn infer_stream(
         &self,
-        request: InferenceRequest,
+        request: &InferenceRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
         tracing::debug!(model = %request.model, "Calling OpenRouter API (streaming)");
 
@@ -214,7 +214,7 @@ impl Provider for OpenRouterProvider {
             limiter.acquire().await?;
         }
 
-        let mut body = self.build_request_body(&request);
+        let mut body = self.build_request_body(request);
         body["stream"] = serde_json::Value::Bool(true);
         let url = format!("{}/chat/completions", self.base_url);
 
@@ -1018,7 +1018,7 @@ mod tests {
         let body = br#"{"choices":[{"message":{"content":"hi there"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}"#;
         let url = spawn_mock_server(200, "OK", body).await;
         let provider = provider_with_url(url);
-        let resp = provider.infer(simple_request()).await.unwrap();
+        let resp = provider.infer(&simple_request()).await.unwrap();
         assert_eq!(resp.content, "hi there");
     }
 
@@ -1027,14 +1027,14 @@ mod tests {
     #[tokio::test]
     async fn infer_connection_refused_returns_error() {
         let provider = provider_with_url("http://127.0.0.1:19997".to_string());
-        let err = provider.infer(simple_request()).await.unwrap_err();
+        let err = provider.infer(&simple_request()).await.unwrap_err();
         assert!(err.to_string().contains("Request failed:"));
     }
 
     #[tokio::test]
     async fn infer_stream_connection_refused_returns_error() {
         let provider = provider_with_url("http://127.0.0.1:19997".to_string());
-        let result = provider.infer_stream(simple_request()).await;
+        let result = provider.infer_stream(&simple_request()).await;
         assert!(
             result
                 .err()
@@ -1063,7 +1063,7 @@ mod tests {
     async fn infer_non_success_status_returns_api_error() {
         let url = spawn_mock_server(500, "Internal Server Error", b"boom").await;
         let provider = provider_with_url(url);
-        let err = provider.infer(simple_request()).await.unwrap_err();
+        let err = provider.infer(&simple_request()).await.unwrap_err();
         assert!(err.to_string().contains("API error:"));
     }
 
@@ -1071,7 +1071,7 @@ mod tests {
     async fn infer_malformed_json_returns_invalid_response() {
         let url = spawn_mock_server(200, "OK", b"not json").await;
         let provider = provider_with_url(url);
-        let err = provider.infer(simple_request()).await.unwrap_err();
+        let err = provider.infer(&simple_request()).await.unwrap_err();
         assert!(err.to_string().contains("Invalid response:"));
     }
 
@@ -1079,7 +1079,7 @@ mod tests {
     async fn infer_stream_non_success_status_returns_api_error() {
         let url = spawn_mock_server(503, "Service Unavailable", b"down").await;
         let provider = provider_with_url(url);
-        let result = provider.infer_stream(simple_request()).await;
+        let result = provider.infer_stream(&simple_request()).await;
         assert!(result.is_err());
         assert!(result.err().unwrap().to_string().contains("API error:"));
     }
@@ -1093,7 +1093,7 @@ mod tests {
             b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
         let url = spawn_mock_server(200, "OK", sse_body).await;
         let provider = provider_with_url(url);
-        let mut stream = provider.infer_stream(simple_request()).await.unwrap();
+        let mut stream = provider.infer_stream(&simple_request()).await.unwrap();
         use tokio_stream::StreamExt;
         let chunk = stream.next().await.unwrap().unwrap();
         assert_eq!(chunk.delta, "hi");

@@ -275,10 +275,10 @@ impl Default for OllamaProvider {
 
 #[async_trait]
 impl Provider for OllamaProvider {
-    async fn infer(&self, request: InferenceRequest) -> Result<InferenceResponse> {
+    async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
         tracing::debug!(model = %request.model, "Calling Ollama API");
 
-        let mut body = self.build_request_body(&request);
+        let mut body = self.build_request_body(request);
         body["stream"] = serde_json::Value::Bool(false);
         let url = format!("{}/api/chat", self.base_url);
 
@@ -330,11 +330,11 @@ impl Provider for OllamaProvider {
 
     async fn infer_stream(
         &self,
-        request: InferenceRequest,
+        request: &InferenceRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
         tracing::debug!(model = %request.model, "Calling Ollama API (streaming)");
 
-        let mut body = self.build_request_body(&request);
+        let mut body = self.build_request_body(request);
         body["stream"] = serde_json::Value::Bool(true);
         let url = format!("{}/api/chat", self.base_url);
 
@@ -1379,7 +1379,7 @@ mod tests {
             extra: serde_json::Value::Null,
             request_timeout_secs: None,
         };
-        let result = provider.infer(request).await;
+        let result = provider.infer(&request).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("Request failed:"));
@@ -1402,7 +1402,7 @@ mod tests {
             extra: serde_json::Value::Null,
             request_timeout_secs: None,
         };
-        let result = provider.infer_stream(request).await;
+        let result = provider.infer_stream(&request).await;
         assert!(
             result
                 .err()
@@ -1927,7 +1927,7 @@ mod tests {
     async fn infer_non_success_status_returns_api_error() {
         let url = spawn_mock_server(500, "Internal Server Error", b"boom").await;
         let provider = OllamaProvider::with_base_url(url);
-        let err = provider.infer(mock_request()).await.unwrap_err();
+        let err = provider.infer(&mock_request()).await.unwrap_err();
         assert!(err.to_string().contains("API error:"));
     }
 
@@ -1937,7 +1937,7 @@ mod tests {
         // error for it. The status is what matters and must survive.
         let url = spawn_mock_server_truncated_error_body(500, "Internal Server Error").await;
         let provider = OllamaProvider::with_base_url(url);
-        let err = provider.infer(mock_request()).await.unwrap_err();
+        let err = provider.infer(&mock_request()).await.unwrap_err();
         assert!(err.to_string().contains("500"), "{err}");
     }
 
@@ -1945,7 +1945,7 @@ mod tests {
     async fn infer_malformed_json_returns_invalid_response() {
         let url = spawn_mock_server(200, "OK", b"not json").await;
         let provider = OllamaProvider::with_base_url(url);
-        let err = provider.infer(mock_request()).await.unwrap_err();
+        let err = provider.infer(&mock_request()).await.unwrap_err();
         assert!(err.to_string().contains("Invalid response:"));
     }
 
@@ -1953,7 +1953,7 @@ mod tests {
     async fn infer_stream_non_success_status_returns_api_error() {
         let url = spawn_mock_server(503, "Service Unavailable", b"down").await;
         let provider = OllamaProvider::with_base_url(url);
-        let result = provider.infer_stream(mock_request()).await;
+        let result = provider.infer_stream(&mock_request()).await;
         assert!(result.is_err());
         assert!(result.err().unwrap().to_string().contains("API error:"));
     }
@@ -1962,7 +1962,7 @@ mod tests {
     async fn infer_stream_non_success_status_body_read_error_still_reports_the_status() {
         let url = spawn_mock_server_truncated_error_body(503, "Service Unavailable").await;
         let provider = OllamaProvider::with_base_url(url);
-        let result = provider.infer_stream(mock_request()).await;
+        let result = provider.infer_stream(&mock_request()).await;
         let err = result
             .err()
             .expect("a truncated error body is still an error");
@@ -1975,7 +1975,7 @@ mod tests {
             b"{\"message\":{\"content\":\"hi\"},\"done\":true,\"eval_count\":1,\"prompt_eval_count\":1}\n";
         let url = spawn_mock_server(200, "OK", ndjson_body).await;
         let provider = OllamaProvider::with_base_url(url);
-        let mut stream = provider.infer_stream(mock_request()).await.unwrap();
+        let mut stream = provider.infer_stream(&mock_request()).await.unwrap();
         use tokio_stream::StreamExt;
         let chunk = stream.next().await.unwrap().unwrap();
         assert_eq!(chunk.delta, "hi");
@@ -2003,7 +2003,7 @@ mod tests {
             let _ = socket.shutdown().await;
         });
         let provider = OllamaProvider::with_base_url(format!("http://{}", addr));
-        let mut stream = provider.infer_stream(mock_request()).await.unwrap();
+        let mut stream = provider.infer_stream(&mock_request()).await.unwrap();
         use tokio_stream::StreamExt;
         let mut saw_error = false;
         while let Some(item) = stream.next().await {

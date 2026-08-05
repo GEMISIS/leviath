@@ -174,13 +174,13 @@ impl ClaudeCodeProvider {
     /// failure branches without a real 5-minute wait or a full disk.
     async fn infer_with_timeout(
         &self,
-        request: InferenceRequest,
+        request: &InferenceRequest,
         temp_dir: &std::path::Path,
         timeout_duration: std::time::Duration,
     ) -> Result<InferenceResponse> {
         // The system prompt goes via a file (it routinely exceeds Linux's 128 KB
         // cap on a single argv entry), and the transcript via stdin (same reason).
-        let prompt_file = stage_prompt_file(temp_dir, &Self::build_system_prompt(&request))
+        let prompt_file = stage_prompt_file(temp_dir, &Self::build_system_prompt(request))
             .map_err(prompt_file_error)?;
 
         let mut cmd = tokio::process::Command::new(&self.binary_path);
@@ -432,7 +432,7 @@ async fn retry_etxtbsy<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io
 
 #[async_trait]
 impl Provider for ClaudeCodeProvider {
-    async fn infer(&self, request: InferenceRequest) -> Result<InferenceResponse> {
+    async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
         // Honor a per-stage `request_timeout_secs`; fall back to the shared
         // default so this provider is bounded the same way as the HTTP ones.
         let timeout = std::time::Duration::from_secs(
@@ -990,7 +990,7 @@ mod tests {
             "echo {\"result\": \"hello from stub\", \"usage\": {\"input_tokens\": 3, \"output_tokens\": 2}}",
         );
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
-        let resp = provider.infer(make_request()).await.unwrap();
+        let resp = provider.infer(&make_request()).await.unwrap();
         assert_eq!(resp.content, "hello from stub");
         let _ = std::fs::remove_file(&script);
     }
@@ -1045,7 +1045,7 @@ mod tests {
         assert!(argv.contains("--system-prompt-file"));
         assert!(argv.contains("--effort medium"));
         // And the provider itself still completes against the same stub.
-        assert_eq!(provider.infer(make_request()).await.unwrap().content, "ok");
+        assert_eq!(provider.infer(&make_request()).await.unwrap().content, "ok");
         let _ = std::fs::remove_file(&script);
     }
 
@@ -1059,7 +1059,7 @@ mod tests {
             "set /p P=\r\necho {\"result\": \"saw:%P%\"}",
         );
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
-        let resp = provider.infer(make_request()).await.unwrap();
+        let resp = provider.infer(&make_request()).await.unwrap();
         assert!(resp.content.contains("User: hi"), "got {:?}", resp.content);
         let _ = std::fs::remove_file(&script);
     }
@@ -1078,7 +1078,7 @@ mod tests {
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
         let err = provider
             .infer_with_timeout(
-                make_request(),
+                &make_request(),
                 &std::env::temp_dir(),
                 std::time::Duration::from_millis(100),
             )
@@ -1101,7 +1101,7 @@ mod tests {
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
         let mut request = make_request();
         request.request_timeout_secs = Some(1);
-        let err = provider.infer(request).await.unwrap_err();
+        let err = provider.infer(&request).await.unwrap_err();
         assert!(err.to_string().contains("timed out"), "{err}");
         let _ = std::fs::remove_file(&script);
     }
@@ -1114,7 +1114,7 @@ mod tests {
         let provider = ClaudeCodeProvider::new();
         let missing = std::env::temp_dir().join("lev-cc-infer-no-dir-7z8y9");
         let err = provider
-            .infer_with_timeout(make_request(), &missing, std::time::Duration::from_secs(5))
+            .infer_with_timeout(&make_request(), &missing, std::time::Duration::from_secs(5))
             .await
             .unwrap_err();
         assert!(
@@ -1142,7 +1142,7 @@ mod tests {
         let mut req = make_request();
         // >1 MiB so the write cannot be swallowed whole by the pipe buffer.
         req.messages[0].content = "x".repeat(2 * 1024 * 1024).into();
-        let err = provider.infer(req).await.unwrap_err();
+        let err = provider.infer(&req).await.unwrap_err();
         assert!(
             err.to_string().contains("boom"),
             "the child's stderr must survive an undrained stdin; got: {err}"
@@ -1158,7 +1158,7 @@ mod tests {
             "echo {\"is_error\": true, \"result\": \"bad request\"}",
         );
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
-        let err = provider.infer(make_request()).await.unwrap_err();
+        let err = provider.infer(&make_request()).await.unwrap_err();
         assert!(err.to_string().contains("bad request"));
         let _ = std::fs::remove_file(&script);
     }
@@ -1171,7 +1171,7 @@ mod tests {
             "echo boom 1>&2\r\nexit /b 1",
         );
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
-        let err = provider.infer(make_request()).await.unwrap_err();
+        let err = provider.infer(&make_request()).await.unwrap_err();
         assert!(err.to_string().contains("boom"));
         let _ = std::fs::remove_file(&script);
     }
@@ -1184,7 +1184,7 @@ mod tests {
             "echo not json at all",
         );
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
-        let err = provider.infer(make_request()).await.unwrap_err();
+        let err = provider.infer(&make_request()).await.unwrap_err();
         assert!(err.to_string().starts_with("Invalid response:"), "{err}");
         assert!(!err.is_transient());
         let _ = std::fs::remove_file(&script);
@@ -1242,7 +1242,7 @@ mod tests {
         let provider = ClaudeCodeProvider::with_binary_path(
             "/nonexistent/definitely/not/a/real/binary".to_string(),
         );
-        let err = provider.infer(make_request()).await.unwrap_err();
+        let err = provider.infer(&make_request()).await.unwrap_err();
         assert!(err.to_string().contains("Is Claude Code installed?"));
         assert!(
             !err.is_transient(),
@@ -1269,7 +1269,7 @@ mod tests {
             description: "read a file".to_string(),
             parameters: serde_json::json!({"type": "object"}),
         }];
-        let resp = provider.infer(req).await.unwrap();
+        let resp = provider.infer(&req).await.unwrap();
         assert_eq!(resp.content, "On it.");
         assert_eq!(resp.tool_calls.len(), 1);
         assert_eq!(resp.tool_calls[0].name, "read_file");
@@ -1298,7 +1298,7 @@ mod tests {
             drop(holder);
         });
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
-        let resp = provider.infer(make_request()).await.unwrap();
+        let resp = provider.infer(&make_request()).await.unwrap();
         assert_eq!(resp.content, "hello from stub");
         release.await.unwrap();
         let _ = std::fs::remove_file(&script);
@@ -1317,7 +1317,7 @@ mod tests {
             "echo {\"result\": \"streamed\"}",
         );
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
-        let mut stream = provider.infer_stream(make_request()).await.unwrap();
+        let mut stream = provider.infer_stream(&make_request()).await.unwrap();
         let chunk = stream.next().await.unwrap().unwrap();
         assert_eq!(chunk.delta, "streamed");
         assert!(stream.next().await.is_none());

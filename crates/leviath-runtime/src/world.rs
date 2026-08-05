@@ -1039,7 +1039,7 @@ mod tests {
     impl Provider for Script {
         async fn infer(
             &self,
-            _req: InferenceRequest,
+            _req: &InferenceRequest,
         ) -> leviath_providers::Result<InferenceResponse> {
             let next = self.responses.lock().unwrap().pop_front();
             next.ok_or_else(|| ProviderError::Other("script exhausted".to_string()))

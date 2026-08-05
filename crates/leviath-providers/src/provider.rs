@@ -656,7 +656,7 @@ pub fn build_http_client(timeout_secs: Option<u64>) -> reqwest::Client {
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Execute inference with the given request.
-    async fn infer(&self, request: InferenceRequest) -> Result<InferenceResponse>;
+    async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse>;
 
     /// Execute streaming inference with the given request.
     ///
@@ -664,7 +664,7 @@ pub trait Provider: Send + Sync {
     /// Default implementation collects the full response from `infer()`.
     async fn infer_stream(
         &self,
-        request: InferenceRequest,
+        request: &InferenceRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
         let response = self.infer(request).await?;
         let chunk = StreamChunk {
@@ -1262,7 +1262,7 @@ mod tests {
 
     #[async_trait]
     impl Provider for MinimalProvider {
-        async fn infer(&self, _request: InferenceRequest) -> Result<InferenceResponse> {
+        async fn infer(&self, _request: &InferenceRequest) -> Result<InferenceResponse> {
             Ok(InferenceResponse {
                 content: "hello".to_string(),
                 tool_calls: vec![ToolCall {
@@ -1314,7 +1314,7 @@ mod tests {
             extra: serde_json::Value::Null,
             request_timeout_secs: None,
         };
-        let mut stream = provider.infer_stream(request).await.unwrap();
+        let mut stream = provider.infer_stream(&request).await.unwrap();
         let chunk = stream.next().await.unwrap().unwrap();
         assert_eq!(chunk.delta, "hello");
         assert_eq!(chunk.tool_calls.len(), 1);

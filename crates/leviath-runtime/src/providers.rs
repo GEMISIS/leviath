@@ -79,7 +79,7 @@ mod tests {
     impl Provider for StubProvider {
         async fn infer(
             &self,
-            _request: InferenceRequest,
+            _request: &InferenceRequest,
         ) -> Result<InferenceResponse, ProviderError> {
             Err(ProviderError::ApiError("stub".to_string()))
         }
@@ -170,6 +170,6 @@ mod tests {
             extra: serde_json::Value::Null,
             request_timeout_secs: None,
         };
-        assert!(p.infer(request).await.is_err());
+        assert!(p.infer(&request).await.is_err());
     }
 }

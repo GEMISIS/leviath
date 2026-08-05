@@ -59,7 +59,7 @@ impl StubProvider {
 impl Provider for StubProvider {
     async fn infer(
         &self,
-        _request: InferenceRequest,
+        _request: &InferenceRequest,
     ) -> leviath_providers::Result<InferenceResponse> {
         match &self.reply {
             Ok(content) => Ok(InferenceResponse {

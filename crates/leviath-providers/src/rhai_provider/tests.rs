@@ -161,7 +161,7 @@ fn from_source_initialize_receives_config() {
         no_env_allowlist(),
     )
     .unwrap();
-    let out = tokio_block(p.infer(request("ignored")));
+    let out = tokio_block(p.infer(&request("ignored")));
     assert_eq!(out.unwrap().content, "cfg-model");
 }
 
@@ -223,7 +223,7 @@ async fn infer_no_http() {
     );
     let exec = FakeExecutor::new();
     let p = build(&src, exec.clone()).unwrap();
-    let r = p.infer(request("m")).await.unwrap();
+    let r = p.infer(&request("m")).await.unwrap();
     assert_eq!(r.content, "hello");
     assert_eq!(r.tokens_used.total_tokens, 5);
     assert_eq!(r.finish_reason, FinishReason::Complete);
@@ -240,7 +240,7 @@ async fn infer_single_http_post() {
     );
     let exec = FakeExecutor::with_responses(vec![Ok("{\"text\":\"hi\",\"n\":7}".to_string())]);
     let p = build(&src, exec.clone()).unwrap();
-    let r = p.infer(request("gpt-x")).await.unwrap();
+    let r = p.infer(&request("gpt-x")).await.unwrap();
     assert_eq!(r.content, "hi");
     assert_eq!(r.tokens_used.total_tokens, 7);
     // The broker performed exactly one request with our header + body.
@@ -265,7 +265,7 @@ async fn infer_uses_two_arg_http_overloads() {
         Ok("{\"y\":\"2\"}".to_string()),
     ]);
     let p = build(&src, exec.clone()).unwrap();
-    let r = p.infer(request("m")).await.unwrap();
+    let r = p.infer(&request("m")).await.unwrap();
     assert_eq!(r.content, "12");
     let calls = exec.calls.lock().unwrap();
     assert_eq!(calls[0].headers.get("H").unwrap(), "v");
@@ -282,7 +282,7 @@ async fn infer_rate_limited_without_limiter() {
     let exec =
         FakeExecutor::with_responses(vec![Err(HostHttpError::RateLimited { retry_after: None })]);
     let p = build(&src, exec).unwrap();
-    let err = p.infer(request("m")).await.err().unwrap();
+    let err = p.infer(&request("m")).await.err().unwrap();
     assert!(matches!(err, ProviderError::RateLimitExceeded));
 }
 
@@ -299,7 +299,7 @@ async fn infer_multiple_http_calls() {
         Ok("{\"v\":\"y\"}".to_string()),
     ]);
     let p = build(&src, exec.clone()).unwrap();
-    let r = p.infer(request("m")).await.unwrap();
+    let r = p.infer(&request("m")).await.unwrap();
     assert_eq!(r.content, "xy");
     assert_eq!(exec.call_count(), 2);
 }
@@ -310,7 +310,7 @@ async fn infer_script_throw_maps_transient() {
         "{NOOP_INIT}fn inference(s, r) {{ throw #{{ message: \"upstream down\", transient: true }}; }}"
     );
     let p = build(&src, FakeExecutor::new()).unwrap();
-    let err = p.infer(request("m")).await.err().unwrap();
+    let err = p.infer(&request("m")).await.err().unwrap();
     assert!(err.is_transient());
     assert!(matches!(err, ProviderError::RequestFailed(m) if m == "upstream down"));
 }
@@ -331,7 +331,7 @@ async fn infer_http_429_maps_to_rate_limit() {
             tokens_per_minute: 100_000,
         }),
     );
-    let err = p.infer(request("m")).await.err().unwrap();
+    let err = p.infer(&request("m")).await.err().unwrap();
     assert!(matches!(err, ProviderError::RateLimitExceeded));
 }
 
@@ -351,7 +351,7 @@ async fn infer_http_api_error_propagates() {
             tokens_per_minute: 100_000,
         }),
     );
-    let err = p.infer(request("m")).await.err().unwrap();
+    let err = p.infer(&request("m")).await.err().unwrap();
     assert!(matches!(err, ProviderError::ApiError(_)));
 }
 
@@ -372,7 +372,7 @@ async fn infer_records_tokens_and_resets_backoff() {
             tokens_per_minute: 100_000,
         }),
     );
-    let r = p.infer(request("m")).await.unwrap();
+    let r = p.infer(&request("m")).await.unwrap();
     assert_eq!(r.tokens_used.total_tokens, 11);
 }
 
@@ -380,7 +380,7 @@ async fn infer_records_tokens_and_resets_backoff() {
 async fn infer_rejects_non_map_return() {
     let src = format!("{NOOP_INIT}fn inference(s, r) {{ [1, 2, 3] }}");
     let p = build(&src, FakeExecutor::new()).unwrap();
-    let err = p.infer(request("m")).await.err().unwrap();
+    let err = p.infer(&request("m")).await.err().unwrap();
     assert!(matches!(err, ProviderError::InvalidResponse(_)));
 }
 
@@ -514,7 +514,7 @@ async fn collect_stream(
     p: &RhaiProvider,
     req: InferenceRequest,
 ) -> Vec<Result<crate::provider::StreamChunk>> {
-    let mut s = p.infer_stream(req).await.unwrap();
+    let mut s = p.infer_stream(&req).await.unwrap();
     let mut out = Vec::new();
     while let Some(item) = s.next().await {
         out.push(item);
@@ -601,7 +601,7 @@ async fn stream_fallback_propagates_infer_error() {
         "{NOOP_INIT}fn inference(s, r) {{ throw #{{ message: \"nope\", transient: false }}; }}"
     );
     let p = build(&src, FakeExecutor::new()).unwrap();
-    let err = p.infer_stream(request("m")).await.err().unwrap();
+    let err = p.infer_stream(&request("m")).await.err().unwrap();
     assert!(matches!(err, ProviderError::Other(m) if m == "nope"));
 }
 
@@ -709,6 +709,6 @@ fn tokio_block_helper_used() {
     // freshly-built current-thread runtime).
     let src = format!("{NOOP_INIT}fn inference(s, r) {{ #{{ content: \"z\" }} }}");
     let p = build(&src, FakeExecutor::new()).unwrap();
-    let out = tokio_block(p.infer(request("m"))).unwrap();
+    let out = tokio_block(p.infer(&request("m"))).unwrap();
     assert_eq!(out.content, "z");
 }

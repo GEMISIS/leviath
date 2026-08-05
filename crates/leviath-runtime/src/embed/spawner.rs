@@ -442,7 +442,7 @@ mod tests {
     impl leviath_providers::Provider for StubProvider {
         async fn infer(
             &self,
-            _request: leviath_providers::InferenceRequest,
+            _request: &leviath_providers::InferenceRequest,
         ) -> Result<leviath_providers::InferenceResponse, leviath_providers::ProviderError>
         {
             Err(leviath_providers::ProviderError::ApiError(
@@ -472,7 +472,7 @@ mod tests {
         assert_eq!(p.max_context_tokens("m"), 8192);
         let _ = p.capabilities("m");
         assert!(
-            p.infer(leviath_providers::InferenceRequest {
+            p.infer(&leviath_providers::InferenceRequest {
                 system: vec![],
                 messages: vec![],
                 model: "m".to_string(),

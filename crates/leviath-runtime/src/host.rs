@@ -1946,7 +1946,7 @@ mod tests {
     impl Provider for Script {
         async fn infer(
             &self,
-            _req: InferenceRequest,
+            _req: &InferenceRequest,
         ) -> leviath_providers::Result<InferenceResponse> {
             self.responses
                 .lock()
@@ -2138,7 +2138,7 @@ mod tests {
     impl Provider for Hangs {
         async fn infer(
             &self,
-            _req: InferenceRequest,
+            _req: &InferenceRequest,
         ) -> leviath_providers::Result<InferenceResponse> {
             if self.hang {
                 std::future::pending().await
@@ -2183,13 +2183,13 @@ mod tests {
         assert_eq!(p.max_context_tokens("m"), 100_000);
         let _ = p.capabilities("m");
         assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), p.infer(request()))
+            tokio::time::timeout(std::time::Duration::from_millis(20), p.infer(&request()))
                 .await
                 .is_err(),
             "hanging: the whole point is that the call never lands"
         );
         // ...and the answering arm, so the call has a reachable way out.
-        assert!(Hangs { hang: false }.infer(request()).await.is_err());
+        assert!(Hangs { hang: false }.infer(&request()).await.is_err());
     }
 
     /// A host whose only provider hangs, with model `m` capped at `limit`
@@ -4545,7 +4545,7 @@ mod tests {
             extra: serde_json::Value::Null,
             request_timeout_secs: None,
         };
-        assert!(p.infer(req).await.is_err()); // exhausted
+        assert!(p.infer(&req).await.is_err()); // exhausted
 
         let exec = NoTools.exec_for(
             Entity::from_raw_u32(1).expect("a small literal index is always a valid entity id"),

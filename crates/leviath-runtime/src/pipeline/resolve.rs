@@ -410,7 +410,7 @@ mod tests {
     impl leviath_providers::Provider for FakeProvider {
         async fn infer(
             &self,
-            _r: leviath_providers::InferenceRequest,
+            _r: &leviath_providers::InferenceRequest,
         ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
             Err(leviath_providers::ProviderError::Other(
                 "test provider".to_string(),
@@ -446,7 +446,7 @@ mod tests {
                 "extra": null,
             }))
             .unwrap();
-        assert!(p.infer(request).await.is_err());
+        assert!(p.infer(&request).await.is_err());
         assert_eq!(p.count_tokens("x", "m").await, 1);
         assert_eq!(p.max_context_tokens("m"), 1000);
         assert_eq!(p.name(), "fake");
