@@ -13,8 +13,8 @@ supply a JSON Schema. Neither helps with a format it has never heard of. If your
 [a2ui](https://a2ui.org/), a house report layout, or a dialect of CSV nobody else uses, nothing knows
 what a good answer looks like.
 
-So write it down. A `.rhai` file beside your blueprint says what valid means, and a bad answer goes
-back to the agent to fix instead of reaching whoever asked.
+So write it down. A `.rhai` file beside your blueprint says what valid means. A bad answer then goes
+back to the agent to fix, instead of reaching whoever asked.
 
 > [!NOTE]
 > **Before this page:** [Final outputs](/docs/outputs).
@@ -70,8 +70,8 @@ A validator that throws, loops forever, or returns something that is neither `()
 treated as **broken, not as a rejection**. The submission is recorded and a warning is logged.
 
 That distinction matters. If a script bug read as "this answer is wrong", the agent would retry
-against a validator that can never pass, burn its whole budget, and the run would end with no answer
-at all. A bug in your validator should cost you a warning, not the agent's work.
+against a validator that can never pass. It would burn its whole budget and end with no answer at
+all. A bug in your validator should cost you a warning, not the agent's work.
 
 ## When it runs
 
@@ -101,7 +101,7 @@ flowchart TB
 A validator is compiled when the agent spawns, not when it is first used. A missing file, a syntax
 error, or a `validate` with the wrong number of parameters stops the run before any tokens are spent.
 
-This is deliberate. The only other time the script would be read is at the end of the run, which is
-the worst possible moment to learn the agent cannot hand back its work.
+This is deliberate. The only other time the script gets read is at the end of the run. That is the
+worst possible moment to learn the agent cannot hand back its work.
 
 `lev validate <path>` compiles them too, so you can check without starting anything.
