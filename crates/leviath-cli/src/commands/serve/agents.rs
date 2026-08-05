@@ -447,10 +447,9 @@ pub(super) async fn agent_file(
 
     let mut bytes = Vec::new();
     if let Err(e) = std::fs::File::open(&resolved)
-        .and_then(|mut f| {
-            std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(offset))?;
-            Ok(f)
-        })
+        // Chained rather than `?`: the offset is already bounded by the file's
+        // size above, so a seek into it has no reachable failure of its own.
+        .and_then(|mut f| std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(offset)).map(|_| f))
         .map(|f| std::io::Read::take(f, MAX_FILE_READ_BYTES))
         .and_then(|mut f| std::io::Read::read_to_end(&mut f, &mut bytes))
     {

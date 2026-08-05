@@ -781,6 +781,47 @@ mod tests {
     }
 
     /// Reload one run from `runs_dir` and hand back the world plus its entity.
+    /// A descriptor with no sidecar beside it is no answer. That is a run
+    /// written before the answer moved out of `meta.json`, or one whose
+    /// directory was pruned, and restoring half of it would be worse than
+    /// restoring none: the next persist tick would write the half back.
+    #[test]
+    fn a_descriptor_without_its_sidecar_restores_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut meta = RunMeta::new(
+            "run-1".to_string(),
+            "a".to_string(),
+            "/p".to_string(),
+            "t".to_string(),
+            None,
+            "/w".to_string(),
+            1,
+        );
+
+        // No descriptor at all.
+        assert!(read_final_output_from(dir.path(), &meta).is_none());
+
+        // A descriptor, but nothing on disk to go with it.
+        let answer = leviath_core::output::FinalOutput::new(
+            "already answered",
+            Some("markdown".to_string()),
+            "implement".to_string(),
+            777,
+        );
+        meta.final_output = Some(answer.descriptor());
+        assert!(read_final_output_from(dir.path(), &meta).is_none());
+
+        // And with both, the answer comes back whole.
+        std::fs::write(
+            dir.path().join(leviath_core::FINAL_OUTPUT_FILE),
+            &answer.content,
+        )
+        .unwrap();
+        let restored = read_final_output_from(dir.path(), &meta).expect("both halves");
+        assert_eq!(restored.content, "already answered");
+        assert_eq!(restored.stage, "implement");
+    }
+
     async fn reload_single(runs: &Path, run_id: &str) -> (PipelineWorld, Entity) {
         let (mut world, cli) = test_world();
         let restored = reload_persisted_agents(

@@ -246,6 +246,54 @@ mod tests {
         window
     }
 
+    /// The infra region is added when the layout does not already declare it. A
+    /// blueprint that names `final_output` itself keeps its own definition,
+    /// budget and all, rather than being silently overwritten with the default.
+    #[test]
+    fn a_layout_that_declares_final_output_keeps_its_own() {
+        const DECLARED_TOKENS: usize = 12_345;
+        let bp = blueprint_with(vec![
+            RegionDefinition::new("task".to_string(), RegionKind::Pinned, 1_000),
+            RegionDefinition::new(
+                crate::output_tool::FINAL_OUTPUT_REGION.to_string(),
+                RegionKind::Pinned,
+                DECLARED_TOKENS,
+            ),
+        ]);
+
+        let window = seeded_window(&bp, "t");
+
+        assert_eq!(
+            window
+                .get_region(crate::output_tool::FINAL_OUTPUT_REGION)
+                .expect("the region is there")
+                .max_tokens,
+            DECLARED_TOKENS,
+            "the blueprint's own budget survives"
+        );
+    }
+
+    /// And a layout that says nothing about it gets the default, so an agent
+    /// never has to declare a region it did not ask for.
+    #[test]
+    fn a_layout_without_final_output_gets_the_default_one() {
+        let bp = blueprint_with(vec![RegionDefinition::new(
+            "task".to_string(),
+            RegionKind::Pinned,
+            1_000,
+        )]);
+
+        let window = seeded_window(&bp, "t");
+
+        assert_eq!(
+            window
+                .get_region(crate::output_tool::FINAL_OUTPUT_REGION)
+                .expect("added for us")
+                .max_tokens,
+            crate::output_tool::FINAL_OUTPUT_REGION_TOKENS
+        );
+    }
+
     #[test]
     fn init_window_seeded_fills_multiple_named_regions_and_ignores_unknown() {
         let bp = blueprint_with(vec![

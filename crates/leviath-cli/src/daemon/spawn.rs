@@ -1615,6 +1615,101 @@ system = { kind = "pinned", max_tokens = 1000 }
          [stages.main.context.regions.stage_view]\nkind = \"custom\"\nscript = \"hooks/stage.rhai\"\nmax_tokens = 2000\n"
     }
 
+    // ── output validators ──
+
+    fn validator_blueprint(agent_script: Option<&str>, stage_script: Option<&str>) -> Blueprint {
+        let mut bp = leviath_core::manifest::parse_manifest(
+            "[agent]\nname = \"v\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+        let spec = |script: &str| leviath_core::output::OutputSpec {
+            validator: Some(script.to_string()),
+            ..leviath_core::output::OutputSpec::default()
+        };
+        bp.output = agent_script.map(spec);
+        bp.stages[0].output = stage_script.map(spec);
+        bp
+    }
+
+    /// Compiled at spawn, so a broken validator stops the run before any tokens
+    /// are spent. The only other time the script is read is at the end, which is
+    /// the worst possible moment to learn the agent cannot hand back its work.
+    #[test]
+    fn resolve_output_validators_compiles_each_distinct_script_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::create_dir(dir.path().join("validators")).unwrap();
+        std::fs::write(
+            dir.path().join("validators/shape.rhai"),
+            "fn validate(content) { () }",
+        )
+        .unwrap();
+
+        // The same script named by both the agent default and the stage: one
+        // compile, one entry.
+        let bp = validator_blueprint(Some("validators/shape.rhai"), Some("validators/shape.rhai"));
+        let compiled =
+            resolve_output_validators(&bp, &manifest.to_string_lossy()).expect("it compiles");
+
+        assert_eq!(compiled.len(), 1);
+        assert!(compiled.contains_key("validators/shape.rhai"));
+    }
+
+    /// A stage can declare a shape without a validator, which is the common
+    /// case: a format label and some instructions, checked by nothing.
+    #[test]
+    fn resolve_output_validators_is_empty_without_any() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+
+        // No output block at all.
+        let bp = validator_blueprint(None, None);
+        assert!(
+            resolve_output_validators(&bp, &manifest.to_string_lossy())
+                .unwrap()
+                .is_empty()
+        );
+
+        // An output block that names no validator.
+        let mut shaped = validator_blueprint(None, None);
+        shaped.stages[0].output = Some(leviath_core::output::OutputSpec {
+            format: Some("a2ui".to_string()),
+            ..leviath_core::output::OutputSpec::default()
+        });
+        assert!(
+            resolve_output_validators(&shaped, &manifest.to_string_lossy())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn resolve_output_validators_reports_a_missing_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        let bp = validator_blueprint(None, Some("validators/gone.rhai"));
+
+        let err = resolve_output_validators(&bp, &manifest.to_string_lossy())
+            .expect_err("a script that is not there");
+
+        assert!(err.contains("cannot read output validator"), "{err}");
+        assert!(err.contains("gone.rhai"), "{err}");
+    }
+
+    #[test]
+    fn resolve_output_validators_reports_one_that_does_not_compile() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(dir.path().join("broken.rhai"), "fn validate(a, b) { () }").unwrap();
+        let bp = validator_blueprint(None, Some("broken.rhai"));
+
+        let err =
+            resolve_output_validators(&bp, &manifest.to_string_lossy()).expect_err("wrong arity");
+
+        assert!(err.contains("failed to compile"), "{err}");
+    }
+
     #[test]
     fn resolve_region_scripts_empty_without_custom_regions() {
         let dir = tempfile::tempdir().unwrap();
@@ -2205,6 +2300,124 @@ system = { kind = "pinned", max_tokens = 1000 }
     /// tool state with that tool in hand: the cut takes it out of the advertised
     /// set, and this set is what puts a call to it back in front of a person
     /// instead of the auto-answering backend (issue #204).
+    /// A validator that will not compile stops the spawn, before any tokens are
+    /// spent. The only other time the script is read is at the end of the run,
+    /// which is the worst possible moment to learn the agent cannot hand back
+    /// its work.
+    #[tokio::test]
+    async fn build_agent_refuses_a_validator_that_does_not_compile() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(dir.path().join("shape.rhai"), "fn validate(a, b) { () }").unwrap();
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"v\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
+             available_tools = [\"submit_output\"]\n\n\
+             [stages.main.output]\nformat = \"a2ui\"\nvalidator = \"shape.rhai\"\n",
+        )
+        .unwrap();
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let args = spawn_args(&manifest.to_string_lossy());
+        let err = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &args,
+            100,
+            sub_tx(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("failed to compile"), "got: {err}");
+        assert!(err.contains("exactly one parameter"), "and says why: {err}");
+    }
+
+    /// Compiling a validator at spawn is only half of it: it has to reach the
+    /// entity, or the script is checked and then never runs, and the run hands
+    /// back an answer nothing looked at.
+    #[tokio::test]
+    async fn build_agent_carries_output_validators_onto_the_entity() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(dir.path().join("shape.rhai"), "fn validate(content) { () }").unwrap();
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"v\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
+             available_tools = [\"submit_output\"]\n\n\
+             [stages.main.output]\nformat = \"a2ui\"\nvalidator = \"shape.rhai\"\n",
+        )
+        .unwrap();
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let args = spawn_args(&manifest.to_string_lossy());
+        let entity = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &args,
+            100,
+            sub_tx(),
+        )
+        .expect("spawns");
+
+        let validators = world
+            .world()
+            .get::<leviath_runtime::components::OutputValidators>(entity)
+            .expect("the compiled validator reaches the entity");
+        assert!(validators.0.contains_key("shape.rhai"));
+    }
+
+    /// And an agent that names none carries none, rather than an empty
+    /// component every consumer then has to check.
+    #[tokio::test]
+    async fn build_agent_carries_no_validators_when_none_are_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"v\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let args = spawn_args(&manifest.to_string_lossy());
+        let entity = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &args,
+            100,
+            sub_tx(),
+        )
+        .expect("spawns");
+
+        assert!(
+            world
+                .world()
+                .get::<leviath_runtime::components::OutputValidators>(entity)
+                .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn build_agent_carries_required_tools_into_the_tool_state() {
         let dir = tempfile::tempdir().unwrap();

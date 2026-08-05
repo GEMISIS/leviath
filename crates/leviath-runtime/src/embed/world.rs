@@ -668,6 +668,45 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         assert_eq!(err, EmbedError::NoProviders);
     }
 
+    /// The embedder's side of the format rule: the label is carried through
+    /// untouched, so a program can ask for a shape this crate has never heard of
+    /// without any code here knowing what it is.
+    #[test]
+    fn a_spawn_spec_carries_the_requested_output_shape() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let spec = SpawnSpec::new(
+            BlueprintSource::Toml("[agent]\nname = \"x\"".to_string()),
+            "do the thing",
+            dir.path(),
+        )
+        .output("a2ui", Some("One card per finding.".to_string()));
+
+        let requested = spec.output.expect("the spec carries it");
+        assert_eq!(requested.format.as_deref(), Some("a2ui"));
+        assert_eq!(
+            requested.instructions.as_deref(),
+            Some("One card per finding.")
+        );
+        // The embed builder sets the shape, not a schema or a validator: those
+        // belong to a blueprint, which is what ships them alongside the agent.
+        assert!(requested.schema.is_none());
+        assert!(requested.validator.is_none());
+        assert!(requested.example.is_none());
+    }
+
+    /// A spec that never asked for one requests nothing, so a blueprint's own
+    /// declared shape is what applies.
+    #[test]
+    fn a_spawn_spec_requests_no_shape_by_default() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let spec = SpawnSpec::new(
+            BlueprintSource::Toml("[agent]\nname = \"x\"".to_string()),
+            "do the thing",
+            dir.path(),
+        );
+        assert!(spec.output.is_none());
+    }
+
     #[test]
     fn build_outside_a_tokio_runtime_is_refused() {
         let err = AgentWorld::builder()
@@ -921,6 +960,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         let world = mock_world(vec![]);
         let ghost = RunId("no-such-run".to_string());
         assert_eq!(world.status(&ghost).await, None);
+        assert_eq!(world.result(&ghost).await, None);
         assert!(!world.pause(&ghost).await);
         assert!(!world.resume(&ghost).await);
         assert!(!world.cancel(&ghost).await);

@@ -3196,6 +3196,173 @@ async fn dispatch_tools_applies_all_context_inline() {
     );
 }
 
+fn submit_call(id: &str, content: &str) -> crate::components::ToolCall {
+    crate::components::ToolCall {
+        tool_id: id.to_string(),
+        name: leviath_tools::SUBMIT_OUTPUT_TOOL.to_string(),
+        arguments: serde_json::json!({ "content": content }),
+        thought_signature: None,
+    }
+}
+
+fn output_window() -> ContextWindow {
+    let mut w = conv_window();
+    w.add_region(Region::new(
+        crate::output_tool::FINAL_OUTPUT_REGION.to_string(),
+        RegionKind::Pinned,
+        crate::output_tool::FINAL_OUTPUT_REGION_TOKENS,
+    ));
+    w
+}
+
+/// `submit_output` is applied inline for the same reason the context tools are:
+/// it writes the live window and an ECS component, neither of which the async
+/// tool lane can reach.
+#[tokio::test]
+async fn dispatch_records_a_submitted_output_inline() {
+    let (jtx, mut jrx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    let e = world
+        .spawn((
+            agent_state(),
+            infer_with(vec![submit_call("o1", "the answer")]),
+            output_window(),
+            ReadyForTools,
+        ))
+        .id();
+
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    // Nothing reached the lane, and the agent goes back to work rather than
+    // ending: no tool in this codebase terminates a run.
+    assert!(jrx.try_recv().is_err());
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+
+    let recorded = world
+        .get::<crate::persistence::FinalOutput>(e)
+        .expect("the submission became the run's answer");
+    assert_eq!(recorded.0.content, "the answer");
+    assert_eq!(recorded.0.stage, agent_state().current_stage);
+
+    // And it is mirrored where the model can see what it committed to.
+    assert!(
+        world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .get_region(crate::output_tool::FINAL_OUTPUT_REGION)
+            .unwrap()
+            .current_tokens
+            > 0
+    );
+}
+
+/// Artifacts are resolved against the run's working directory, so a submission
+/// naming one only means something when the agent has a workdir to resolve it
+/// in. A path that escapes it is refused, because the answer is handed to a
+/// caller who will fetch what it names.
+#[tokio::test]
+async fn artifacts_are_checked_against_the_run_workdir() {
+    let (jtx, _jrx) = mpsc::unbounded_channel();
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("dataset.csv"), "a,b\n1,2\n").expect("write");
+
+    for (artifact, recorded) in [("dataset.csv", true), ("../outside.csv", false)] {
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+        world.insert_resource(ToolStage::detached(jtx.clone()));
+        let call = crate::components::ToolCall {
+            tool_id: "o1".to_string(),
+            name: leviath_tools::SUBMIT_OUTPUT_TOOL.to_string(),
+            arguments: serde_json::json!({
+                "content": "the answer",
+                "artifacts": [artifact],
+            }),
+            thought_signature: None,
+        };
+        let e = world
+            .spawn((
+                agent_state(),
+                infer_with(vec![call]),
+                output_window(),
+                ReadyForTools,
+                RunMetadata {
+                    workdir: dir.path().to_string_lossy().to_string(),
+                    ..run_metadata()
+                },
+            ))
+            .id();
+
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_tools);
+        s.run(&mut world);
+
+        assert_eq!(
+            world.get::<crate::persistence::FinalOutput>(e).is_some(),
+            recorded,
+            "artifact {artifact:?}"
+        );
+    }
+}
+
+/// A refused submission must not erase a good answer already recorded. The
+/// model correcting itself into something invalid is exactly when the previous
+/// answer matters most.
+#[tokio::test]
+async fn a_refused_submission_leaves_an_earlier_answer_alone() {
+    let (jtx, _jrx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+
+    // A stage whose answers must be JSON, and a batch that submits a good one
+    // and then a bad one.
+    let mut offers = offering(&[leviath_tools::SUBMIT_OUTPUT_TOOL]);
+    offers.output = Some(leviath_core::output::OutputSpec {
+        format: Some("json".to_string()),
+        ..leviath_core::output::OutputSpec::default()
+    });
+    let e = world
+        .spawn((
+            agent_state(),
+            offers,
+            crate::components::InferenceResult {
+                response: "r".to_string(),
+                tool_calls: vec![
+                    submit_call("o1", r#"{"answer":"good"}"#),
+                    submit_call("o2", "not json at all"),
+                ],
+                tokens_used: 0,
+                timestamp: 0,
+            },
+            output_window(),
+            ReadyForTools,
+        ))
+        .id();
+
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    assert_eq!(
+        world
+            .get::<crate::persistence::FinalOutput>(e)
+            .expect("the good answer survives")
+            .0
+            .content,
+        r#"{"answer":"good"}"#
+    );
+    // And the model is told why the second one was refused, so it can fix it.
+    assert!(
+        conversation_text(&world, e).contains("not valid json"),
+        "the refusal reaches the model: {}",
+        conversation_text(&world, e)
+    );
+}
+
 /// The text dispatch left in the agent's conversation for the model to read.
 /// A batch with no lane work is applied inline, so there is no
 /// `ContextToolResults` to inspect - the window is the only record.
@@ -9721,6 +9888,29 @@ fn an_exhausted_budget_proceeds_and_records_that_it_was_forced() {
             .output_forced,
         1,
         "and the run explains itself afterwards"
+    );
+}
+
+/// The flags are optional on the entity, and an agent without them still has to
+/// finish. Recording the outcome is a courtesy to whoever reads the run
+/// afterwards; it is not what keeps the run moving.
+#[test]
+fn an_exhausted_budget_proceeds_even_with_nowhere_to_record_it() {
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            owing_bp(Some(2)),
+            StageCursor { index: 0 },
+            owing_state(),
+            conversation_window(),
+            ResolveTransition,
+            OutputReentries(2),
+        ))
+        .id();
+    run_require_output(&mut world);
+    assert!(
+        world.get::<ResolveTransition>(e).is_some(),
+        "the run finishes rather than hanging on a missing component"
     );
 }
 

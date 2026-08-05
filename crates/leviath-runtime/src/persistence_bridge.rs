@@ -152,8 +152,16 @@ async fn create_private_dir(path: &Path) -> std::io::Result<()> {
     let owned = path.to_path_buf();
     tokio::task::spawn_blocking(move || leviath_sys::create_private_dir_all(&owned))
         .await
-        .map_err(|e| std::io::Error::other(e.to_string()))
+        .map_err(vanished_task)
         .and_then(|r| r)
+}
+
+/// A blocking-pool task that never came back: it panicked, or the runtime was
+/// shutting down. Named rather than inlined at each call site so the three of
+/// them share one branch, and so a test can reach it with a real
+/// [`tokio::task::JoinError`] instead of never at all.
+fn vanished_task(e: tokio::task::JoinError) -> std::io::Error {
+    std::io::Error::other(e.to_string())
 }
 
 /// Open a run file for appending, owner-only, off the async runtime.
@@ -166,7 +174,7 @@ async fn open_private_append(path: &Path) -> std::io::Result<tokio::fs::File> {
     let owned = path.to_path_buf();
     tokio::task::spawn_blocking(move || leviath_sys::open_private_append(&owned))
         .await
-        .map_err(|e| std::io::Error::other(e.to_string()))
+        .map_err(vanished_task)
         .and_then(|r| r)
         .map(tokio::fs::File::from_std)
 }
@@ -447,10 +455,7 @@ async fn write_bytes_atomic(path: &Path, bytes: &[u8], run_id: &str) {
     let written =
         tokio::task::spawn_blocking(move || leviath_sys::write_private(&tmp_for_write, &bytes))
             .await;
-    if let Err(e) = written
-        .map_err(|e| std::io::Error::other(e.to_string()))
-        .and_then(|r| r)
-    {
+    if let Err(e) = written.map_err(vanished_task).and_then(|r| r) {
         tracing::warn!(run_id = %run_id, error = %e, "persistence: temp write failed");
         return;
     }
@@ -665,11 +670,10 @@ mod tests {
                 use std::os::unix::fs::PermissionsExt;
                 let mode = std::fs::metadata(&entry).unwrap().permissions().mode() & 0o777;
                 let expected = if entry.is_dir() { 0o700 } else { 0o600 };
+                let shown = entry.display().to_string();
                 assert_eq!(
-                    mode,
-                    expected,
-                    "{} is {mode:o}, and a copy of this tree would carry that",
-                    entry.display()
+                    mode, expected,
+                    "{shown} is {mode:o}, and a copy of this tree would carry that"
                 );
             }
         }
@@ -680,15 +684,30 @@ mod tests {
         );
     }
 
+    /// The three writers all hand their blocking work to the pool, and a task
+    /// that panics there comes back as a `JoinError` rather than as the io error
+    /// the caller is written against. Reached with a real one, because
+    /// `JoinError` cannot be constructed by hand.
+    #[tokio::test]
+    async fn a_vanished_blocking_task_becomes_an_io_error() {
+        let joined = tokio::task::spawn_blocking(|| panic!("the pool task died"))
+            .await
+            .expect_err("a panicking task joins as an error");
+
+        let mapped = vanished_task(joined);
+        assert_eq!(mapped.kind(), std::io::ErrorKind::Other);
+        assert!(
+            mapped.to_string().contains("panic"),
+            "the reason has to survive: {mapped}"
+        );
+    }
+
     /// Every file and directory under `root`, `root` itself included.
     fn walkdir(root: &Path) -> Vec<PathBuf> {
         let mut found = vec![root.to_path_buf()];
         let mut queue = vec![root.to_path_buf()];
         while let Some(dir) = queue.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
                 let path = entry.path();
                 if path.is_dir() {
                     queue.push(path.clone());

@@ -636,3 +636,28 @@ fn a_named_validator_with_nothing_compiled_is_skipped() {
     );
     assert!(output.is_some());
 }
+
+/// A region too small even for the marker cannot hold a preview at all, and a
+/// bare marker would say "this was cut" about nothing. An empty mirror is the
+/// honest result; the answer itself is on the component either way.
+#[test]
+fn a_region_smaller_than_the_marker_mirrors_nothing() {
+    // One token of room is four bytes, and the marker is far longer.
+    assert_eq!(fit_to_region("a long answer that will not fit", 1), "");
+}
+
+#[test]
+fn a_region_with_room_keeps_what_it_can_and_says_it_was_cut() {
+    let fitted = fit_to_region(&"x".repeat(10_000), 100);
+    assert!(fitted.starts_with("xxxx"), "the answer's front survives");
+    assert!(fitted.ends_with(MIRROR_TRUNCATION_MARKER), "and it says so");
+    assert!(
+        fitted.len() <= 400,
+        "within the region's four-bytes-a-token"
+    );
+}
+
+#[test]
+fn an_answer_that_fits_is_mirrored_whole() {
+    assert_eq!(fit_to_region("short", 100), "short");
+}

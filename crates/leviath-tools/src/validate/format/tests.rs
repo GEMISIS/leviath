@@ -183,3 +183,49 @@ fn a_failure_says_what_was_wrong() {
         );
     }
 }
+
+/// The sigil scanner decides whether a document is skipped rather than parsed,
+/// so it has to see an anchor wherever YAML allows one. Missing a position
+/// means the parser is handed a document the skip was meant to keep away from
+/// it, which is where the expansion cost lives.
+#[test]
+fn an_anchor_is_recognised_in_every_value_position() {
+    for content in [
+        "&a x",           // the very start of the document
+        "k: &a x",        // after a space
+        "k:\t&a x",       // after a tab
+        "k:\n  &a x",     // after a newline
+        "k:\r\n  &a x",   // after a carriage return
+        "k: [&a, b]",     // opening a flow sequence
+        "k: {v: &a}",     // opening a flow mapping
+        "k: [b, &a]",     // after a comma
+        "- &a x",         // a block sequence entry
+        "k: *a",          // an alias, not an anchor
+        "k: &_private x", // a name starting with an underscore
+        "k: &a1 x",       // and one with a digit in it
+    ] {
+        assert!(
+            uses_anchors_or_aliases(content),
+            "missed the sigil in {content:?}"
+        );
+    }
+}
+
+/// And it must not fire on an ampersand that is ordinary text, or every
+/// document mentioning one would skip the check it was supposed to get.
+#[test]
+fn an_ampersand_that_is_not_a_sigil_is_left_alone() {
+    for content in [
+        "k: R&D",          // mid-word
+        "k: rock & roll",  // followed by a space
+        "k: value &",      // at the very end, with no name after it
+        "k: 2 * 3",        // multiplication, followed by a space
+        "k: a&&b",         // doubled, so neither is preceded by a separator
+        "plain: document", // no sigil at all
+    ] {
+        assert!(
+            !uses_anchors_or_aliases(content),
+            "false positive on {content:?}"
+        );
+    }
+}

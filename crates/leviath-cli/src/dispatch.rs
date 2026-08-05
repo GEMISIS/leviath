@@ -584,6 +584,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_result_variant_is_routed() {
+        // A run that is not there → the command errors, which is what shows the
+        // routing reached it.
+        let args = commands::result::ResultArgs {
+            run_id: "no-such-run-xyzzy".to_string(),
+            json: false,
+            raw: false,
+        };
+        let result = dispatch(Commands::Result(args), &MockRisky).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
     async fn dispatch_approvals_variant_is_routed() {
         // A temp home means an empty config, so the report is the shipped
         // defaults and nothing touches the user's own file.

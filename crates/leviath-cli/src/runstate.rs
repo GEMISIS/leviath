@@ -1294,6 +1294,61 @@ mod tests {
         assert!(result.ends_with('\n'));
     }
 
+    // ─── read_final_output ──────────────────────────────────────────────────
+
+    /// The descriptor in `meta.json` and the sidecar beside it have to agree.
+    /// Each way they can disagree reads as "no answer", which is the only safe
+    /// reading: half an answer is worse than none.
+    #[test]
+    fn read_final_output_needs_both_the_descriptor_and_the_sidecar() {
+        with_isolated_runs_dir("read-final-output", |_| {
+            // No run at all.
+            assert!(read_final_output("no-such-run").is_none());
+
+            // A run with no answer recorded.
+            let meta = RunMeta::new(
+                "run-silent".to_string(),
+                "a".to_string(),
+                "/p".to_string(),
+                "t".to_string(),
+                None,
+                "/w".to_string(),
+                1,
+            );
+            create_run(&meta).expect("run dir");
+            assert!(read_final_output("run-silent").is_none());
+
+            // A descriptor saying there is one, with the sidecar missing: a run
+            // written by a build that stored the answer inline, or one whose
+            // directory was pruned.
+            let answer = leviath_core::output::FinalOutput::new(
+                "the answer",
+                Some("markdown".to_string()),
+                "present".to_string(),
+                42,
+            );
+            let mut claimed = RunMeta::new(
+                "run-claimed".to_string(),
+                "a".to_string(),
+                "/p".to_string(),
+                "t".to_string(),
+                None,
+                "/w".to_string(),
+                1,
+            );
+            claimed.final_output = Some(answer.descriptor());
+            create_run(&claimed).expect("run dir");
+            assert!(read_final_output("run-claimed").is_none());
+
+            // And both together: the answer comes back whole.
+            write_final_output(&run_dir("run-claimed"), &answer.content).expect("sidecar");
+            let read = read_final_output("run-claimed").expect("both halves are there");
+            assert_eq!(read.content, "the answer");
+            assert_eq!(read.format.as_deref(), Some("markdown"));
+            assert_eq!(read.stage, "present");
+        });
+    }
+
     // ─── new_run_id ─────────────────────────────────────────────────────────
 
     #[test]
