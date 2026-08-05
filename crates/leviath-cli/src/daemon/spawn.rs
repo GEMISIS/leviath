@@ -761,6 +761,23 @@ fn build_agent_inner(
     subagent_tx: UnboundedSender<SubAgentOp>,
     enforce_seeds: bool,
 ) -> Result<Entity, String> {
+    // 0a. The run id becomes a directory name, and everything this run writes
+    // lands under it: `meta.json`, the context snapshot, the answer sidecar. The
+    // persistence lane joins it to the runs directory without checking, so a
+    // component holding `..` would place a run's files outside it.
+    //
+    // Not reachable from the API, which mints its own id (`new_run_id` replaces
+    // every character that is not alphanumeric or a hyphen), and a control
+    // socket client is already the same user. It is one comparison to make the
+    // property hold where the request is accepted rather than resting on both of
+    // those staying true.
+    if !leviath_core::is_safe_path_component(&args.run_id) {
+        return Err(format!(
+            "run id '{}' is not a usable directory name",
+            args.run_id
+        ));
+    }
+
     // 0. The working directory must exist before anything is built over it.
     // `ToolContext::new` silently keeps a path it can't canonicalize, so without
     // this a bogus workdir spawns a healthy-looking agent whose every tool call
@@ -1709,6 +1726,40 @@ system = { kind = "pinned", max_tokens = 1000 }
         .unwrap_err();
         assert!(err.contains("region 'brain'"), "got: {err}");
         assert!(err.contains("hooks/brain.rhai"), "got: {err}");
+    }
+
+    /// The run id becomes a directory name and everything a run writes lands
+    /// under it. The persistence lane joins it to the runs directory without
+    /// checking, so the check belongs at the boundary that accepts the request.
+    ///
+    /// The blueprint path here points at nothing, which is the point: the error
+    /// must be about the run id, proving the guard runs before anything is read
+    /// off disk.
+    #[tokio::test]
+    async fn build_agent_rejects_a_run_id_that_is_not_a_directory_name() {
+        for bad in ["../escape", "a/b", "..", ".", ""] {
+            let (mut world, cli) = test_world();
+            let hub = InteractionHub::new();
+            let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+            let mut args = spawn_args("/nonexistent/agent.leviath");
+            args.run_id = bad.to_string();
+            let err = build_agent(
+                world.world_mut(),
+                cli.as_ref(),
+                &Config::default(),
+                mcp,
+                &[],
+                &hub,
+                &args,
+                100,
+                sub_tx(),
+            )
+            .unwrap_err();
+            assert!(
+                err.contains("run id"),
+                "run id {bad:?} names a directory and must be refused, got: {err}"
+            );
+        }
     }
 
     #[tokio::test]
