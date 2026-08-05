@@ -46,6 +46,13 @@ list_dir   = "landscape"
 hint = "Landscape mapped - ready to compare approaches"
 transform = "direct"
 
+# Un-exhaustible escape (lint: dead-end-possible): when every looping
+# target has spent its max_revisits budget, the run can still move forward
+# to the deliverable instead of dead-ending.
+[stages.survey.transitions.summarize]
+hint = "Comparison is out of revisits - write the overview from the survey"
+transform = "compact"
+
 [stages.survey.transitions.error_recovery]
 condition = "error"
 transform = "direct"
@@ -122,6 +129,13 @@ read_file  = "landscape"
 hint = "Thread explored - resume comparing"
 transform = "compact"
 
+# Un-exhaustible escape (lint: dead-end-possible): when every looping
+# target has spent its max_revisits budget, the run can still move forward
+# to the deliverable instead of dead-ending.
+[stages.deep_dive.transitions.summarize]
+hint = "Comparison is out of revisits - write the overview with this depth"
+transform = "compact"
+
 [stages.deep_dive.transitions.error_recovery]
 condition = "error"
 transform = "direct"
@@ -163,6 +177,13 @@ A call failed during the survey. The `error_report` region holds the error text
 the runtime captured - read it first, note the gap it leaves, and return to
 compare to continue with the coverage you have.
 """
+
+# Un-exhaustible escape (lint: dead-end-possible): when every looping
+# target has spent its max_revisits budget, the run can still move forward
+# to the deliverable instead of dead-ending.
+[stages.error_recovery.transitions.summarize]
+hint = "Recovery is not converging - write the overview from what exists"
+transform = "compact"
 
 [stages.error_recovery.transitions.compare]
 hint = "Recovered - continue comparing"

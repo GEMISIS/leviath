@@ -1142,7 +1142,7 @@ a = "true"
 }
 
 #[test]
-fn a_cycle_with_max_revisits_is_fine() {
+fn a_capped_cycle_no_longer_trips_the_cycle_lint_but_can_dead_end() {
     let toml = manifest(
         r#"
 [stages.a]
@@ -1163,7 +1163,13 @@ max_revisits = 3
 a = "true"
 "#,
     );
-    assert!(lint(&toml, &LintEnv::default()).is_empty());
+    // Capping both ends satisfies the cycle lint - but now EVERY exit of each
+    // stage is exhaustible, so once both budgets are spent the run dead-ends
+    // (an error at runtime). The dead-end lint says so for both stages.
+    assert_eq!(
+        codes(&lint(&toml, &LintEnv::default())),
+        ["dead-end-possible", "dead-end-possible"]
+    );
 }
 
 /// A self-loop is not a two-stage cycle, and a terminal stage has an empty
@@ -1263,7 +1269,12 @@ fn the_graph_walk_steps_over_names_that_are_not_stages() {
         vec![dangling],
         ContextLayout::new(Vec::new(), 1000),
     );
-    assert!(lint_manifest("", &bp, &LintEnv::default()).is_empty());
+    // The cycle walk has nothing to say, but an edge nothing can ever follow
+    // is a guaranteed strand, which the dead-end lint reports.
+    assert_eq!(
+        codes(&lint_manifest("", &bp, &LintEnv::default())),
+        ["dead-end-possible"]
+    );
 }
 
 // ─── Finding rendering ────────────────────────────────────────────────────────

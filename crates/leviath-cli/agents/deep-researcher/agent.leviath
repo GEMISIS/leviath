@@ -51,6 +51,13 @@ list_dir   = "sources"
 hint = "Enough primary sources gathered for meaningful analysis"
 transform = "direct"
 
+# Un-exhaustible escape (lint: dead-end-possible): when every looping
+# target has spent its max_revisits budget, the run can still move forward
+# to the deliverable instead of dead-ending.
+[stages.gather.transitions.synthesize]
+hint = "Analysis is out of revisits - synthesize from the material in hand"
+transform = "compact"
+
 [stages.gather.transitions.error_recovery]
 condition = "error"
 transform = "direct"
@@ -137,6 +144,13 @@ read_file  = "sources"
 hint = "Cited sources read - resume analysis"
 transform = "compact"
 
+# Un-exhaustible escape (lint: dead-end-possible): when every looping
+# target has spent its max_revisits budget, the run can still move forward
+# to the deliverable instead of dead-ending.
+[stages.follow_citations.transitions.synthesize]
+hint = "Analysis is out of revisits - synthesize from the material in hand"
+transform = "compact"
+
 [stages.follow_citations.transitions.error_recovery]
 condition = "error"
 transform = "direct"
@@ -179,6 +193,13 @@ A call failed mid-research. The `error_report` region holds the error text the
 runtime captured - read it first. Record which source is unavailable and why (as
 a gap), and hand back to analyze to continue with the material you do have.
 """
+
+# Un-exhaustible escape (lint: dead-end-possible): when every looping
+# target has spent its max_revisits budget, the run can still move forward
+# to the deliverable instead of dead-ending.
+[stages.error_recovery.transitions.synthesize]
+hint = "Recovery is not converging - synthesize what was gathered"
+transform = "compact"
 
 [stages.error_recovery.transitions.analyze]
 hint = "Recovered - continue analysis"

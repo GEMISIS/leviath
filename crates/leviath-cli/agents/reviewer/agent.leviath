@@ -87,6 +87,13 @@ list_dir  = "findings"
 hint = "First pass complete - scrutinize the flagged areas"
 transform = "direct"
 
+# Un-exhaustible escape (lint: dead-end-possible): when every looping
+# target has spent its max_revisits budget, the run can still move forward
+# to the deliverable instead of dead-ending.
+[stages.scan.transitions.report]
+hint = "Deep review is out of revisits - report the scan findings"
+transform = "compact"
+
 [stages.scan.transitions.error_handler]
 condition = "error"
 transform = "direct"
@@ -179,6 +186,13 @@ An error occurred during review. The `error_report` region holds the error text
 the runtime captured - read it first, note a workaround (e.g. skip an unreadable
 file and record why), then return to deep_review to continue with the rest.
 """
+
+# Un-exhaustible escape (lint: dead-end-possible): when every looping
+# target has spent its max_revisits budget, the run can still move forward
+# to the deliverable instead of dead-ending.
+[stages.error_handler.transitions.report]
+hint = "Recovery is not converging - report what was reviewed"
+transform = "compact"
 
 [stages.error_handler.transitions.deep_review]
 hint = "Recovered - resume the deep review"

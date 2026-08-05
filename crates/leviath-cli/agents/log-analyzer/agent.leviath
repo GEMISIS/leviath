@@ -41,6 +41,13 @@ bash      = "logs"
 hint = "Log format identified, ready to analyze"
 transform = "direct"
 
+# Un-exhaustible escape (lint: dead-end-possible): when every looping
+# target has spent its max_revisits budget, the run can still move forward
+# to the deliverable instead of dead-ending.
+[stages.ingest.transitions.report]
+hint = "Analysis is out of revisits - report what ingestion established"
+transform = "compact"
+
 [stages.ingest.transitions.error_recovery]
 condition = "error"
 transform = "direct"
@@ -133,6 +140,13 @@ transform = "direct"
 hint = "Script results ready - return to analysis"
 transform = "compact"
 
+# Un-exhaustible escape (lint: dead-end-possible): when every looping
+# target has spent its max_revisits budget, the run can still move forward
+# to the deliverable instead of dead-ending.
+[stages.script.transitions.report]
+hint = "Analysis is out of revisits - report the findings so far"
+transform = "compact"
+
 [stages.script.transitions.error_recovery]
 condition = "error"
 transform = "direct"
@@ -178,6 +192,13 @@ text the runtime captured - read it first, diagnose it (a malformed log line, a
 script bug, a missing file), note a workaround, then return to analyze to
 continue with the data available.
 """
+
+# Un-exhaustible escape (lint: dead-end-possible): when every looping
+# target has spent its max_revisits budget, the run can still move forward
+# to the deliverable instead of dead-ending.
+[stages.error_recovery.transitions.report]
+hint = "Recovery is not converging - report the findings so far"
+transform = "compact"
 
 [stages.error_recovery.transitions.analyze]
 hint = "Recovered - resume analysis"
