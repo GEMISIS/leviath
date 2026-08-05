@@ -305,6 +305,36 @@ pub fn spawn_report(spawned: &SpawnedRun, json: bool) -> String {
     }
 }
 
+/// Render a batch spawn outcome: a JSON array when `json`, else one
+/// `spawned <id>` sentence per line. The single-run report keeps its own
+/// object/sentence shape via [`spawn_report`], so existing `--json` callers
+/// parse exactly what they always did.
+pub fn batch_report(spawned: &[SpawnedRun], json: bool) -> String {
+    match json {
+        true => serde_json::to_string_pretty(spawned).expect("spawn reports serialize"),
+        false => spawned
+            .iter()
+            .map(|s| format!("spawned {}", s.run_id))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
+/// A fresh run id for the same agent as `previous`.
+///
+/// Ids are minted `<stem>-<secs>-<hex12>` (see [`crate::runstate::new_run_id`]),
+/// so the stem is everything before the last two dash-separated components.
+/// The stem itself may contain dashes (`wide-researcher`), which is why this
+/// strips from the right. An id that does not have the minted shape is used as
+/// the stem wholesale - a fresh unique id still comes out.
+fn respawned_run_id(previous: &str) -> String {
+    let mut parts = previous.rsplitn(3, '-');
+    let _entropy = parts.next();
+    let _secs = parts.next();
+    let stem = parts.next().unwrap_or(previous);
+    crate::runstate::new_run_id(stem)
+}
+
 /// Send a resolved spawn request to the daemon and report the outcome, printing
 /// the new run id on success.
 ///
@@ -316,20 +346,67 @@ pub async fn send_spawn(
 ) -> anyhow::Result<()> {
     warn_ungranted_read_paths(&spawn_args);
     warn_held_checkpoints(&spawn_args);
+    let spawned = spawn_once(client, spawn_args).await?;
+    println!("{}", spawn_report(&spawned, json));
+    Ok(())
+}
+
+/// Send `count` copies of a resolved spawn request - the same agent, task, and
+/// flags, each under its own fresh run id - and print one combined report.
+///
+/// This exists because spawn throughput from the CLI is otherwise bounded by
+/// process startup: each `lev run` invocation pays binary launch plus a socket
+/// round trip (~60 spawns/second in measurement), while the daemon itself
+/// accepts spawns as fast as they arrive. One invocation carrying the whole
+/// batch removes that bound without introducing any daemon-side cap.
+///
+/// `count == 1` defers to [`send_spawn`], keeping today's single-run output
+/// shapes. A mid-batch failure stops the batch and says how many runs had
+/// already started - those runs keep running; `lev ps` lists them.
+pub async fn send_spawn_batch(
+    client: &ControlClient,
+    spawn_args: SpawnArgs,
+    count: usize,
+    json: bool,
+) -> anyhow::Result<()> {
+    if count == 0 {
+        bail!("--count must be at least 1");
+    }
+    if count == 1 {
+        return send_spawn(client, spawn_args, json).await;
+    }
+    // The warnings describe the blueprint, not the individual run: once.
+    warn_ungranted_read_paths(&spawn_args);
+    warn_held_checkpoints(&spawn_args);
+    let mut spawned = Vec::with_capacity(count);
+    for _ in 0..count {
+        let mut args = spawn_args.clone();
+        args.run_id = respawned_run_id(&spawn_args.run_id);
+        match spawn_once(client, args).await {
+            Ok(run) => spawned.push(run),
+            Err(e) => bail!(
+                "batch stopped after {} of {count} runs started (those keep \
+                 running; see `lev ps`): {e}",
+                spawned.len()
+            ),
+        }
+    }
+    println!("{}", batch_report(&spawned, json));
+    Ok(())
+}
+
+/// One spawn exchange with the daemon, warnings and printing left to callers.
+async fn spawn_once(client: &ControlClient, spawn_args: SpawnArgs) -> anyhow::Result<SpawnedRun> {
     let blueprint_path = spawn_args.blueprint_path.clone();
     let workdir = spawn_args.workdir.clone();
     let yolo = spawn_args.yolo;
     match client.spawn(spawn_args).await {
-        Ok(ControlResponse::Spawned { run_id }) => {
-            let spawned = SpawnedRun {
-                run_id,
-                blueprint_path,
-                workdir,
-                yolo,
-            };
-            println!("{}", spawn_report(&spawned, json));
-            Ok(())
-        }
+        Ok(ControlResponse::Spawned { run_id }) => Ok(SpawnedRun {
+            run_id,
+            blueprint_path,
+            workdir,
+            yolo,
+        }),
         Ok(ControlResponse::Error { message }) => bail!("spawn failed: {message}"),
         Ok(other) => bail!("unexpected daemon response: {other:?}"),
         Err(e) => bail!("the leviath daemon is not reachable ({e}); start it with `lev daemon`"),
@@ -778,6 +855,142 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         let result = send_spawn(&ControlClient::new(id), SpawnArgs::default(), false).await;
         server.await.unwrap();
         result
+    }
+
+    /// Like [`fake_daemon`], but serves one canned response per connection, in
+    /// order - the shape a batch spawn produces, since the client dials the
+    /// socket once per request.
+    fn fake_daemon_serving(
+        dir: &std::path::Path,
+        responses: Vec<&'static str>,
+    ) -> (ControlId, JoinHandle<()>) {
+        let id = control_id(dir);
+        let mut listener = bind_control_listener(&id).unwrap();
+        let handle = tokio::spawn(async move {
+            for response_line in responses {
+                let stream = listener
+                    .accept()
+                    .await
+                    .expect("accept succeeds")
+                    .expect("our own connection is admitted");
+                let (read_half, mut write_half) = tokio::io::split(stream);
+                let mut lines = BufReader::new(read_half).lines();
+                let _request = lines.next_line().await.unwrap();
+                write_half
+                    .write_all(response_line.as_bytes())
+                    .await
+                    .unwrap();
+                write_half.write_all(b"\n").await.unwrap();
+            }
+        });
+        (id, handle)
+    }
+
+    #[tokio::test]
+    async fn a_batch_spawn_starts_count_runs_and_reports_them_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let (id, server) = fake_daemon_serving(
+            dir.path(),
+            vec![
+                r#"{"result":"spawned","run_id":"a-1-000000000001"}"#,
+                r#"{"result":"spawned","run_id":"a-1-000000000002"}"#,
+                r#"{"result":"spawned","run_id":"a-1-000000000003"}"#,
+            ],
+        );
+        let args = SpawnArgs {
+            run_id: "wide-researcher-1785900000-0123456789ab".to_string(),
+            ..SpawnArgs::default()
+        };
+        send_spawn_batch(&ControlClient::new(id), args, 3, false)
+            .await
+            .expect("all three spawn");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_batch_stopped_mid_way_says_how_many_runs_already_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let (id, server) = fake_daemon_serving(
+            dir.path(),
+            vec![
+                r#"{"result":"spawned","run_id":"a-1-000000000001"}"#,
+                r#"{"result":"error","message":"the world is full"}"#,
+            ],
+        );
+        let err = send_spawn_batch(&ControlClient::new(id), SpawnArgs::default(), 3, false)
+            .await
+            .expect_err("the second spawn fails");
+        // Asserts before the server join: a wrong error path makes fewer
+        // connections than the server expects, and joining first would turn
+        // that mismatch into a hang instead of a failure message.
+        let text = err.to_string();
+        assert!(text.contains("after 1 of 3"), "got: {text}");
+        assert!(text.contains("the world is full"), "got: {text}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_batch_of_one_is_exactly_a_single_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let (id, server) = fake_daemon(dir.path(), r#"{"result":"spawned","run_id":"solo-1-0"}"#);
+        send_spawn_batch(&ControlClient::new(id), SpawnArgs::default(), 1, false)
+            .await
+            .expect("the single spawn succeeds");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_batch_of_zero_is_refused_before_any_daemon_contact() {
+        let dir = tempfile::tempdir().unwrap();
+        // No listener bound: reaching the daemon at all would error differently.
+        let id = control_id(dir.path());
+        let err = send_spawn_batch(&ControlClient::new(id), SpawnArgs::default(), 0, false)
+            .await
+            .expect_err("zero runs is a refusal");
+        assert!(err.to_string().contains("at least 1"), "got: {err}");
+    }
+
+    /// The stem survives its own dashes: only the minted `-<secs>-<hex>` tail
+    /// is replaced.
+    #[test]
+    fn a_respawned_id_keeps_the_dashed_agent_stem() {
+        let id = respawned_run_id("wide-researcher-1785900000-0123456789ab");
+        assert!(id.starts_with("wide-researcher-"), "got: {id}");
+        assert_ne!(id, "wide-researcher-1785900000-0123456789ab");
+        // The minted shape holds: stem + seconds + 12 hex chars.
+        let tail: Vec<&str> = id.rsplitn(3, '-').collect();
+        assert_eq!(tail[0].len(), 12, "got: {id}");
+        assert!(tail[1].chars().all(|c| c.is_ascii_digit()), "got: {id}");
+    }
+
+    /// An id without the minted tail is used as the stem wholesale - the
+    /// result is still fresh and unique.
+    #[test]
+    fn a_respawned_id_falls_back_to_the_whole_previous_id_as_stem() {
+        let id = respawned_run_id("x");
+        assert!(id.starts_with("x-"), "got: {id}");
+    }
+
+    #[test]
+    fn a_batch_report_lists_one_sentence_per_run() {
+        let runs = vec![
+            SpawnedRun {
+                run_id: "a-1-1".into(),
+                blueprint_path: "/b".into(),
+                workdir: "/w".into(),
+                yolo: false,
+            },
+            SpawnedRun {
+                run_id: "a-1-2".into(),
+                blueprint_path: "/b".into(),
+                workdir: "/w".into(),
+                yolo: false,
+            },
+        ];
+        assert_eq!(batch_report(&runs, false), "spawned a-1-1\nspawned a-1-2");
+        let parsed: Vec<SpawnedRun> =
+            serde_json::from_str(&batch_report(&runs, true)).expect("a JSON array");
+        assert_eq!(parsed, runs);
     }
 
     fn spawned() -> SpawnedRun {

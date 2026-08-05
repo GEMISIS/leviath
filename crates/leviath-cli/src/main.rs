@@ -229,7 +229,13 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
     // verified a third of an hour ago. It also stops a run that was never going
     // to happen (a bad path, a typo'd region) from auto-starting a daemon.
     ensure_daemon_running().await?;
-    leviath_cli::daemon::client::send_spawn(&control_client()?, spawn_args, args.json).await
+    leviath_cli::daemon::client::send_spawn_batch(
+        &control_client()?,
+        spawn_args,
+        args.count,
+        args.json,
+    )
+    .await
 }
 
 /// `lev doctor`: run the wiring checks, starting the daemon first so the fourth
