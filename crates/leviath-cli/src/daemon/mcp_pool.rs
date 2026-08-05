@@ -838,6 +838,79 @@ for line in sys.stdin:
         .await;
     }
 
+    /// Outside a runtime (a sync harness driving the reap hook directly), a
+    /// release is bookkeeping only: there is nowhere to spawn the grace
+    /// timer, and that must be a quiet no-op rather than a panic.
+    #[test]
+    fn release_run_without_a_runtime_is_bookkeeping_only() {
+        let pool = Arc::new(pool());
+        pool.release_run("no-runtime-run");
+    }
+
+    /// The scheduled path end to end: a real release on a live runtime spawns
+    /// the grace timer, and after the window the server is gone. With the
+    /// grace set to zero, releasing schedules nothing and the connection
+    /// stays.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn release_run_schedules_the_grace_disconnect() {
+        with_tracing(|| {});
+        with_temp_home(|| async {
+            let (_sd, stub) = stub_py();
+            let (_bd, bp) = blueprint_declaring("timedserver", &stub);
+            let timed = Arc::new(pool().with_idle_disconnect_secs(1));
+            let servers = parse_blueprint_mcp_servers(&std::fs::read_to_string(&bp).unwrap());
+            assert_eq!(timed.ensure(&servers[0]).await.len(), 1);
+            timed.lease_blueprint(&bp, "run-a");
+            timed.release_run("run-a");
+            // Within the grace window the connection survives...
+            assert!(!timed.cached_defs_for(&servers).is_empty());
+            // ...and after it, the timer has torn it down.
+            tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+            assert!(timed.cached_defs_for(&servers).is_empty());
+
+            // Grace zero: releasing disconnects nothing, ever.
+            let keeper = Arc::new(pool().with_idle_disconnect_secs(0));
+            assert_eq!(keeper.ensure(&servers[0]).await.len(), 1);
+            keeper.lease_blueprint(&bp, "run-b");
+            keeper.release_run("run-b");
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            assert!(!keeper.cached_defs_for(&servers).is_empty());
+        })
+        .await;
+    }
+
+    /// The defensive arms: a lease that never connected disconnects to a
+    /// no-op (no client in the executor), and a run entry pointing at a
+    /// server the table no longer holds is skipped rather than panicking.
+    #[tokio::test]
+    async fn disconnect_without_a_client_and_a_dangling_lease_are_noops() {
+        with_tracing(|| {});
+        with_temp_home(|| async {
+            let (_sd, stub) = stub_py();
+            let (_bd, bp) = blueprint_declaring("neverconnected", &stub);
+            let pool = Arc::new(pool());
+            // Leased but never `ensure`d: nothing in the executor to remove.
+            pool.lease_blueprint(&bp, "run-a");
+            let zeroed = pool.release_run_bookkeeping("run-a");
+            let (sig, name, generation) = zeroed[0].clone();
+            assert!(
+                !pool.disconnect_if_still_idle(&sig, &name, generation).await,
+                "no client to remove is a no-op, not an error"
+            );
+
+            // A runs-map entry whose server row is gone (cannot happen through
+            // the public API, which mutates both under one lock) is skipped.
+            pool.lease_blueprint(&bp, "run-b");
+            pool.leases
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .servers
+                .clear();
+            assert!(pool.release_run_bookkeeping("run-b").is_empty());
+        })
+        .await;
+    }
+
     /// Global (seeded) servers belong to the daemon: they are never leased,
     /// and releasing runs never schedules them for disconnection. A missing
     /// manifest and an unknown run are no-ops.

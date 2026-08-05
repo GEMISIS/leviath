@@ -110,7 +110,9 @@ impl<T> StatCache<T> {
             self.entries.remove(path);
             return None;
         };
-        let stamp = (meta.modified().ok()?, meta.len());
+        // A filesystem with no mtimes degrades to epoch (so length changes
+        // still refresh) rather than growing an unreachable error arm.
+        let stamp = (meta.modified().unwrap_or(std::time::UNIX_EPOCH), meta.len());
         if let Some((mtime, len, value)) = self.entries.get(path)
             && (*mtime, *len) == stamp
         {
@@ -1891,11 +1893,34 @@ mod tests {
             let again = read_context_snapshot_cached("cached-run", &mut contexts).unwrap();
             assert!(Arc::ptr_eq(&cached_ctx, &again));
 
+            // A second run makes the listing's ordering real: newest first,
+            // same as the uncached listing.
+            let mut second = RunMeta::new(
+                "cached-run-2".to_string(),
+                "agent".to_string(),
+                "/p".to_string(),
+                "t".to_string(),
+                None,
+                "/w".to_string(),
+                1,
+            );
+            second.started_at += 100;
+            create_run(&second).unwrap();
+            let listed = list_runs_cached(&mut metas);
+            assert_eq!(listed.len(), 2);
+            assert_eq!(listed[0].run_id, "cached-run-2", "newest first");
+
             // A run whose dir disappears falls out of the cached listing.
             std::fs::remove_dir_all(run_dir("cached-run")).unwrap();
+            std::fs::remove_dir_all(run_dir("cached-run-2")).unwrap();
             assert!(list_runs_cached(&mut metas).is_empty());
             assert!(read_stages_index_cached("cached-run", &mut stages).is_empty());
             assert!(read_context_snapshot_cached("cached-run", &mut contexts).is_none());
+
+            // And a missing runs DIRECTORY altogether lists nothing (the
+            // read_dir-failed arm).
+            std::fs::remove_dir_all(runs_dir()).unwrap();
+            assert!(list_runs_cached(&mut metas).is_empty());
         });
     }
 

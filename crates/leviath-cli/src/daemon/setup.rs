@@ -329,13 +329,7 @@ pub fn build_host(
             now_secs(),
             &reload_tx,
         );
-        // A paged-in run holds its blueprint's servers again, exactly like a
-        // fresh spawn (its reap released them when it was parked/unloaded).
-        if entity.is_some()
-            && let Ok(meta) = crate::runstate::read_meta(run_id)
-        {
-            reload_pool.lease_blueprint(&meta.agent_path, run_id);
-        }
+        lease_reloaded(&reload_pool, run_id, entity.is_some());
         entity
     }));
 
@@ -464,6 +458,19 @@ fn write_placeholder_meta(runs_dir: &std::path::Path, args: &leviath_runtime::ho
     }
 }
 
+/// Re-lease a paged-in run's per-agent MCP servers, exactly like a fresh
+/// spawn (its reap released them when it was parked or unloaded). A declined
+/// reload, or a run whose metadata cannot be read back, leases nothing.
+/// Extracted from the reloader closure so its arms are unit-testable.
+fn lease_reloaded(pool: &crate::daemon::mcp_pool::McpPool, run_id: &str, reloaded: bool) {
+    if !reloaded {
+        return;
+    }
+    if let Ok(meta) = crate::runstate::read_meta(run_id) {
+        pool.lease_blueprint(&meta.agent_path, run_id);
+    }
+}
+
 /// The spawn-preprocessor body: connect the blueprint's declared `[[mcp_servers]]`
 /// into `pool` (lazy, deduped by signature). A missing/unreadable manifest is a
 /// no-op. Extracted from the closure so its body is unit-testable.
@@ -576,6 +583,30 @@ mod tests {
             .expect("a small literal index is always a valid entity id");
         reaper(&mut world, entity);
         assert!(tool_service.take(entity).is_none());
+
+        // An entity that carries run metadata also releases its MCP leases on
+        // reap (a run that never leased releases nothing - the pool's own
+        // tested no-op arm).
+        let with_meta = world.spawn_agent((leviath_runtime::persistence::RunMetadata {
+            run_id: "reaped-run".to_string(),
+            agent_name: "a".to_string(),
+            agent_path: "/p".to_string(),
+            task: "t".to_string(),
+            model: None,
+            workdir: "/w".to_string(),
+            num_stages: 1,
+            started_at: 0,
+            parent_run_id: None,
+            metadata: std::collections::HashMap::new(),
+            callback_url: None,
+            callback_secret: None,
+            title: None,
+            unattended: false,
+            read_paths: None,
+            output_request: None,
+        },));
+        reaper(&mut world, with_meta);
+        assert!(tool_service.take(with_meta).is_none());
     }
 
     struct FakeProvider;
@@ -936,6 +967,31 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
             Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             Default::default(),
         )
+    }
+
+    /// Every arm of the reloader's re-lease: a declined reload consults
+    /// nothing, a reload with no readable metadata leases nothing, and a
+    /// reload with metadata routes through the pool's lease.
+    #[test]
+    fn lease_reloaded_leases_only_on_a_successful_reload() {
+        crate::runstate::with_isolated_runs_dir("lease-reloaded", |_d| {
+            let pool = empty_pool();
+            lease_reloaded(&pool, "any-run", false);
+            lease_reloaded(&pool, "ghost-run", true);
+            let meta = leviath_core::run_meta::RunMeta::new(
+                "reloaded-run".to_string(),
+                "agent".to_string(),
+                "/no/such/agent.leviath".to_string(),
+                "t".to_string(),
+                None,
+                "/w".to_string(),
+                1,
+            );
+            crate::runstate::create_run(&meta).unwrap();
+            // The manifest path is consulted; an unreadable one leases nothing,
+            // which is the pool's own (tested) arm.
+            lease_reloaded(&pool, "reloaded-run", true);
+        });
     }
 
     #[tokio::test]
