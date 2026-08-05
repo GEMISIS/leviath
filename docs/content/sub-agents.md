@@ -60,6 +60,8 @@ Those keys sit directly on the stage next to `mode = "fan_out"`, not in a sub-ta
 | `worker_stage` | unset | A stage in *this* blueprint, which must set `allow_as_worker = true` |
 | `worker_query` | unset | A hint matched against installed agent types |
 | `merge_stage` | unset | Stage that reconciles worker results before the parent moves on |
+| `results_region` | `conversation` | Where the consolidated worker report lands |
+| `max_items` | unset | Most work items the split may produce |
 | `max_workers` | `4` | How many workers run at once |
 | `on_worker_failure` | `"continue"` | `continue` merges what succeeded. `fail_all` fails the whole fan-out if any worker fails |
 | `split_prompt` | `""` | Added to the stage's system prompt. Its reply is parsed as the list of work items |
@@ -86,6 +88,40 @@ require_output = true
 
 A worker that finishes without submitting is nudged and re-run a few times first. It never strands
 the fan-out: after that the merge proceeds anyway, and the run records `output_forced`.
+
+## Where the results land, and how they share the space
+
+The merge stage reads one consolidated report holding every worker's answer. That report has to fit
+a context region, so each worker gets an equal share of it.
+
+Equal is the important word. Each worker's section is the region's budget divided by the number of
+workers, so all of them appear. A section that had to be cut says so, and the worker's own run still
+has the whole thing.
+
+```toml
+[stages.split]
+mode = "fan_out"
+worker_stage = "gather_worker"
+merge_stage = "build"
+results_region = "worker_rows"   # default: conversation
+max_items = 12                   # default: however many the split produces
+```
+
+Name a `results_region` when the results are bulky. The default is `conversation`, which is also
+carrying the message history, so a large report competes with the turns around it. A region of its
+own has a budget of its own, and that budget is what the shares divide.
+
+`max_items` caps how many work items the split may produce. This is not `max_workers`, which caps how
+many run at the same time:
+
+| | Caps | Why you set it |
+|---|---|---|
+| `max_workers` | How many run at once | Rate limits, machine load |
+| `max_items` | How many exist at all | Cost, and each worker's share of the region |
+
+Split a hundred ways and every worker gets a hundredth of the space. Past some point each section is
+too small to be worth reading, and `max_items` is how you stop the split getting there. Without it,
+whatever the split produces is what runs.
 
 ## `max_workers` is not the knob you might think
 

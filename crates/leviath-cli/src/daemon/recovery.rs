@@ -1534,6 +1534,8 @@ mod tests {
                 max_workers: 1,
                 on_worker_failure: WorkerFailurePolicy::Continue,
                 split_prompt: "s".to_string(),
+                results_region: None,
+                max_items: None,
             },
             max_workers: 1,
             pending: vec![],

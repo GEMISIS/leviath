@@ -261,7 +261,16 @@
         "worker_stage": { "type": "string" },
         "worker_query": { "type": "string" },
         "merge_stage": { "type": "string" },
-        "split_prompt": { "type": "string" }
+        "split_prompt": { "type": "string" },
+        "results_region": {
+          "type": "string",
+          "description": "Context region the consolidated worker report is written to. Defaults to conversation, which is also carrying the message history. Worth naming when the results are bulky: the region's budget is what each worker's share is divided from."
+        },
+        "max_items": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Most work items the split may produce. Distinct from max_workers, which caps how many run at once. This caps how many exist at all, bounding both the run's cost and each worker's share of the results region."
+        }
       }
     },
 

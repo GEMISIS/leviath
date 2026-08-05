@@ -1504,6 +1504,8 @@ fn dispatch_persistence_serializes_fan_out_waiting() {
                 max_workers: 1,
                 on_worker_failure: WorkerFailurePolicy::Continue,
                 split_prompt: "s".to_string(),
+                results_region: None,
+                max_items: None,
             },
             max_workers: 1,
             pending: vec![],
@@ -5279,6 +5281,8 @@ fn stage_setup_from_folds_fanout_split_prompt() {
             max_workers: 4,
             on_worker_failure: WorkerFailurePolicy::Continue,
             split_prompt: split.to_string(),
+            results_region: None,
+            max_items: None,
         },
     };
 

@@ -310,6 +310,12 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                                 .unwrap_or(4),
                             on_worker_failure,
                             split_prompt: str_field("split_prompt").unwrap_or_default(),
+                            results_region: str_field("results_region"),
+                            max_items: stage_value
+                                .get("max_items")
+                                .and_then(|v| v.as_integer())
+                                .filter(|n| *n > 0)
+                                .map(|n| n as usize),
                         };
                         stage.with_mode(StageMode::FanOut { config })
                     }
@@ -3438,6 +3444,8 @@ mode = "autonomous"
                 max_workers: 7,
                 on_worker_failure: crate::blueprint::WorkerFailurePolicy::FailAll,
                 split_prompt: "split the work".to_string(),
+                results_region: None,
+                max_items: None,
             },
         };
         assert_eq!(bp.find_stage("parallel").unwrap().mode, expected);
@@ -3467,6 +3475,8 @@ split_prompt = "go"
                 max_workers: 4, // default
                 on_worker_failure: crate::blueprint::WorkerFailurePolicy::Continue,
                 split_prompt: "go".to_string(),
+                results_region: None,
+                max_items: None,
             },
         };
         assert_eq!(bp.find_stage("parallel").unwrap().mode, expected);
