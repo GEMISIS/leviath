@@ -566,8 +566,13 @@ fn timeout_for(req: &ControlRequest) -> std::time::Duration {
 #[derive(Clone)]
 pub struct ControlClient {
     id: ControlId,
-    token: Option<ControlToken>,
-    /// Where the token was looked for, so a refusal can name the file.
+    /// The token to present, shared across clones so a refresh (see
+    /// [`Self::refresh_token`]) reaches every handler holding a clone. A `std`
+    /// mutex held only for reads/writes of the option, never across `.await`.
+    token: std::sync::Arc<std::sync::Mutex<Option<ControlToken>>>,
+    /// Where the token was looked for, so a refusal can name the file - and so
+    /// a refusal can re-read it: the daemon mints a fresh token on every start,
+    /// which is exactly when a long-lived client's cached copy goes stale.
     token_dir: Option<PathBuf>,
 }
 
@@ -580,14 +585,14 @@ impl ControlClient {
     pub fn new(id: impl Into<ControlId>) -> Self {
         Self {
             id: id.into(),
-            token: None,
+            token: std::sync::Arc::new(std::sync::Mutex::new(None)),
             token_dir: None,
         }
     }
 
     /// Present `token` on every connection this client opens.
-    pub fn with_token(mut self, token: ControlToken) -> Self {
-        self.token = Some(token);
+    pub fn with_token(self, token: ControlToken) -> Self {
+        *self.token.lock().expect("token lock never poisoned") = Some(token);
         self
     }
 
@@ -607,14 +612,46 @@ impl ControlClient {
     pub fn for_home(id: impl Into<ControlId>, dir: &Path) -> Self {
         Self {
             id: id.into(),
-            token: ControlToken::load(dir).ok(),
+            token: std::sync::Arc::new(std::sync::Mutex::new(ControlToken::load(dir).ok())),
             token_dir: Some(dir.to_path_buf()),
         }
     }
 
+    /// The token to present right now, if any.
+    fn current_token(&self) -> Option<ControlToken> {
+        self.token
+            .lock()
+            .expect("token lock never poisoned")
+            .clone()
+    }
+
+    /// Re-read the token file after a refusal. Returns `true` when the file
+    /// held a *different* token than the cached one - the daemon restarted and
+    /// minted afresh, so a retry with the new token can succeed. `false` (file
+    /// missing, unreadable, or unchanged) means a retry would be refused the
+    /// same way.
+    ///
+    /// This is what lets a long-lived client (`lev serve`, `lev dash`, the ACP
+    /// bridge) survive a daemon restart: tokens are per-daemon-start by design,
+    /// and before this the only recovery was restarting the client too.
+    fn refresh_token(&self) -> bool {
+        let Some(dir) = &self.token_dir else {
+            return false;
+        };
+        let Ok(fresh) = ControlToken::load(dir) else {
+            return false;
+        };
+        let mut cached = self.token.lock().expect("token lock never poisoned");
+        let changed = cached.as_ref().is_none_or(|t| !t.matches(fresh.expose()));
+        if changed {
+            *cached = Some(fresh);
+        }
+        changed
+    }
+
     /// Why the daemon refused us, said in terms of what the user can do.
     fn refused(&self) -> std::io::Error {
-        let detail = match (&self.token, &self.token_dir) {
+        let detail = match (self.current_token(), &self.token_dir) {
             (None, Some(dir)) => format!(
                 "no control token was found at {}. If a daemon is running, it was \
                  started by a different user or before this file existed - restart \
@@ -638,7 +675,7 @@ impl ControlClient {
         // error, nothing to act on. A timeout turns that into a failure the
         // caller can fall back from.
         let deadline = timeout_for(req);
-        tokio::time::timeout(deadline, self.request_uncapped(req))
+        tokio::time::timeout(deadline, self.request_with_refresh(req))
             .await
             .unwrap_or_else(|_| {
                 Err(std::io::Error::new(
@@ -648,41 +685,28 @@ impl ControlClient {
             })
     }
 
+    /// [`Self::request_uncapped`], retried once with a re-read token when the
+    /// daemon refuses the cached one. The daemon mints a fresh token every
+    /// start, so a refusal is most often not an intruder but a restart this
+    /// long-lived client slept through - `lev serve` held one client for its
+    /// whole life, and a single daemon restart (a crash, `lev daemon restart`,
+    /// or `ensure_daemon_running` replacing a stale build) bricked every
+    /// control op it made from then on until someone restarted serve too.
+    async fn request_with_refresh(&self, req: &ControlRequest) -> std::io::Result<ControlResponse> {
+        match self.request_uncapped(req).await {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && self.refresh_token() => {
+                self.request_uncapped(req).await
+            }
+            other => other,
+        }
+    }
+
     /// [`Self::request`] without the deadline.
     async fn request_uncapped(&self, req: &ControlRequest) -> std::io::Result<ControlResponse> {
         let stream = connect(&self.id).await?;
         let (read_half, mut write_half) = tokio::io::split(stream);
         let mut lines = BufReader::new(read_half).lines();
-
-        // Authenticate first, on every connection: the client opens a fresh one
-        // per request, so there is no session to carry the proof across. With no
-        // token we send nothing and go straight to the request - a daemon that
-        // predates tokens serves it, and one that requires them refuses, which
-        // is the outcome we want to report either way.
-        if let Some(token) = &self.token {
-            let hello = ControlRequest::Authenticate {
-                token: token.expose().to_string(),
-            };
-            let mut line = serde_json::to_string(&hello).expect("ControlRequest serializes");
-            line.push('\n');
-            let _ = write_half.write_all(line.as_bytes()).await;
-
-            // `.ok().flatten()`: a read error and a clean EOF are the same fact
-            // here - the daemon did not answer the handshake - and giving the
-            // error its own `?` arm leaves a branch no test can drive.
-            match lines.next_line().await.ok().flatten() {
-                Some(resp) => match serde_json::from_str::<ControlResponse>(&resp) {
-                    Ok(ControlResponse::Ok { ok: true }) => {}
-                    _ => return Err(self.refused()),
-                },
-                None => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "control connection closed during authentication",
-                    ));
-                }
-            }
-        }
+        self.authenticate(&mut write_half, &mut lines).await?;
 
         let mut line = serde_json::to_string(req).expect("ControlRequest serializes");
         line.push('\n');
@@ -707,6 +731,42 @@ impl ControlClient {
             None => Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "control connection closed before a response",
+            )),
+        }
+    }
+
+    /// Authenticate a fresh connection: send the token (when there is one) and
+    /// read the daemon's verdict. On every connection, because the client opens
+    /// a fresh one per request, so there is no session to carry the proof
+    /// across. With no token nothing is sent - a daemon that predates tokens
+    /// serves the request, and one that requires them refuses it, which is the
+    /// outcome to report either way.
+    async fn authenticate(
+        &self,
+        write_half: &mut tokio::io::WriteHalf<ClientStream>,
+        lines: &mut tokio::io::Lines<BufReader<tokio::io::ReadHalf<ClientStream>>>,
+    ) -> std::io::Result<()> {
+        let Some(token) = self.current_token() else {
+            return Ok(());
+        };
+        let hello = ControlRequest::Authenticate {
+            token: token.expose().to_string(),
+        };
+        let mut line = serde_json::to_string(&hello).expect("ControlRequest serializes");
+        line.push('\n');
+        let _ = write_half.write_all(line.as_bytes()).await;
+
+        // `.ok().flatten()`: a read error and a clean EOF are the same fact
+        // here - the daemon did not answer the handshake - and giving the
+        // error its own `?` arm leaves a branch no test can drive.
+        match lines.next_line().await.ok().flatten() {
+            Some(resp) => match serde_json::from_str::<ControlResponse>(&resp) {
+                Ok(ControlResponse::Ok { ok: true }) => Ok(()),
+                _ => Err(self.refused()),
+            },
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "control connection closed during authentication",
             )),
         }
     }
@@ -737,12 +797,32 @@ impl ControlClient {
         self.request(&ControlRequest::Shutdown).await
     }
 
-    /// Open a pushed event stream: connect, send `Subscribe`, and return a reader
-    /// that yields [`WorldEvent`]s until the daemon closes the connection. The
-    /// HTTP/WS gateway uses this instead of polling.
+    /// Open a pushed event stream: connect, authenticate, send `Subscribe`, and
+    /// return a reader that yields [`WorldEvent`]s until the daemon closes the
+    /// connection. The HTTP/WS gateway uses this instead of polling.
+    ///
+    /// Authenticated like every other request - it was not, which meant a
+    /// production daemon (they all require a token) refused every subscription
+    /// before it began: the serve gateway's event loop read the refusal as a
+    /// closed stream and silently re-subscribed twice a second forever, and no
+    /// live event ever reached a WebSocket. Only tokenless test daemons ever
+    /// saw the stream work. Retried once with a re-read token on refusal, same
+    /// as [`Self::request`].
     pub async fn subscribe(&self) -> std::io::Result<WorldEventStream> {
+        match self.subscribe_uncapped().await {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && self.refresh_token() => {
+                self.subscribe_uncapped().await
+            }
+            other => other,
+        }
+    }
+
+    /// One subscribe attempt with the currently-cached token.
+    async fn subscribe_uncapped(&self) -> std::io::Result<WorldEventStream> {
         let stream = connect(&self.id).await?;
         let (read_half, mut write_half) = tokio::io::split(stream);
+        let mut lines = BufReader::new(read_half).lines();
+        self.authenticate(&mut write_half, &mut lines).await?;
         let mut line =
             serde_json::to_string(&ControlRequest::Subscribe).expect("ControlRequest serializes");
         line.push('\n');
@@ -750,7 +830,7 @@ impl ControlClient {
         // EOF and `next` returns `None`, so the write needs no separate handling.
         let _ = write_half.write_all(line.as_bytes()).await;
         Ok(WorldEventStream {
-            lines: BufReader::new(read_half).lines(),
+            lines,
             _write: write_half,
         })
     }
@@ -766,9 +846,19 @@ pub struct WorldEventStream {
 
 impl WorldEventStream {
     /// The next event, or `None` once the connection closes.
+    ///
+    /// A line that does not parse as a [`WorldEvent`] is skipped, not treated
+    /// as end-of-stream: the daemon may be a newer build whose event enum grew
+    /// a variant this client does not know, and ending the stream on the first
+    /// such event would put the consumer into a reconnect loop that tears the
+    /// subscription down once per unknown event.
     pub async fn next(&mut self) -> Option<WorldEvent> {
-        let line = self.lines.next_line().await.ok().flatten()?;
-        serde_json::from_str(&line).ok()
+        loop {
+            let line = self.lines.next_line().await.ok().flatten()?;
+            if let Ok(event) = serde_json::from_str(&line) {
+                return Some(event);
+            }
+        }
     }
 }
 
@@ -1476,6 +1566,165 @@ mod tests {
             "expected a run list: {rendered}"
         );
         // The client closes after its one request, ending the server task.
+        server.await.unwrap();
+    }
+
+    /// The regression that mattered in production: every real daemon requires
+    /// a token, and `subscribe` used to skip the handshake entirely - so the
+    /// serve gateway's event stream was refused on every connect, read the
+    /// refusal as a closed stream, and re-subscribed twice a second forever
+    /// while no live event ever reached a WebSocket.
+    #[tokio::test]
+    async fn subscribe_authenticates_against_a_tokened_daemon() {
+        let (events, _r) = broadcast::channel::<WorldEvent>(16);
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        spawn_fake_host(op_rx);
+        let (mut listener, id, dir) = test_listener();
+        let token = ControlToken::create(dir.path()).unwrap();
+
+        let server_events = events.clone();
+        let server = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap().unwrap();
+            let _ = handle_connection(stream, op_tx, server_events, Some(token)).await;
+        });
+
+        let client = ControlClient::for_home(id, dir.path());
+        let mut stream = client.subscribe().await.expect("tokened subscribe works");
+        // Emit until the server-side subscription is registered and delivers.
+        let event = loop {
+            let _ = events.send(completed("tokened-run"));
+            tokio::select! {
+                e = stream.next() => break e,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {}
+            }
+        };
+        let rendered = format!("{:?}", event.expect("the event arrives"));
+        assert!(rendered.contains("tokened-run"), "{rendered}");
+        drop(stream);
+        drop(events);
+        server.await.unwrap();
+    }
+
+    /// A daemon accepting `connections` sequential connections, each served by
+    /// `handle_connection` with `token`. For the stale-token tests, where the
+    /// first attempt is refused (closing its connection) and the retry opens a
+    /// second one.
+    fn tokened_daemon(
+        mut listener: ControlListener,
+        token: ControlToken,
+        connections: usize,
+    ) -> (broadcast::Sender<WorldEvent>, tokio::task::JoinHandle<()>) {
+        let (events, _r) = broadcast::channel::<WorldEvent>(16);
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        spawn_fake_host(op_rx);
+        let server_events = events.clone();
+        let handle = tokio::spawn(async move {
+            for _ in 0..connections {
+                let stream = listener.accept().await.unwrap().unwrap();
+                let op_tx = op_tx.clone();
+                let events = server_events.clone();
+                let token = token.clone();
+                tokio::spawn(async move {
+                    let _ = handle_connection(stream, op_tx, events, Some(token)).await;
+                });
+            }
+        });
+        (events, handle)
+    }
+
+    /// The daemon mints a fresh token every start. A long-lived client that
+    /// cached the previous one must re-read the file and retry, not stay
+    /// bricked until IT is restarted too - `lev serve` had to be manually
+    /// restarted after every daemon restart because of exactly this.
+    #[tokio::test]
+    async fn a_stale_token_is_refreshed_and_the_request_retried() {
+        let (listener, id, dir) = test_listener();
+        // The client caches the token of the "previous" daemon...
+        let _stale = ControlToken::create(dir.path()).unwrap();
+        let client = ControlClient::for_home(id, dir.path());
+        // ...then the daemon restarts and mints a fresh one.
+        let fresh = ControlToken::create(dir.path()).unwrap();
+        let (_events, server) = tokened_daemon(listener, fresh, 2);
+
+        let response = client
+            .list()
+            .await
+            .expect("refused once, refreshed, retried, served");
+        let rendered = format!("{response:?}");
+        assert!(rendered.starts_with("List"), "{rendered}");
+        server.await.unwrap();
+    }
+
+    /// And the same recovery for the event stream.
+    #[tokio::test]
+    async fn subscribe_retries_with_a_refreshed_token() {
+        let (listener, id, dir) = test_listener();
+        let _stale = ControlToken::create(dir.path()).unwrap();
+        let client = ControlClient::for_home(id, dir.path());
+        let fresh = ControlToken::create(dir.path()).unwrap();
+        let (events, server) = tokened_daemon(listener, fresh, 2);
+
+        let mut stream = client
+            .subscribe()
+            .await
+            .expect("refused once, refreshed, retried, streaming");
+        // Emit until the server-side subscription is registered and delivers.
+        let event = loop {
+            let _ = events.send(completed("post-restart-run"));
+            tokio::select! {
+                e = stream.next() => break e,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {}
+            }
+        };
+        assert!(format!("{:?}", event.expect("the event arrives")).contains("post-restart-run"));
+        drop(stream);
+        drop(events);
+        server.await.unwrap();
+    }
+
+    /// When the file has not changed, a refusal stays a refusal - the retry
+    /// only happens when there is a genuinely different token to present.
+    #[tokio::test]
+    async fn an_unchanged_token_file_is_not_retried() {
+        let (listener, id, dir) = test_listener();
+        // The client's dir holds a token, but the daemon wants a different one
+        // (minted into another dir), and the client's file never changes.
+        let _mine = ControlToken::create(dir.path()).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let daemons = ControlToken::create(other.path()).unwrap();
+        let (_events, server) = tokened_daemon(listener, daemons, 1);
+
+        let err = ControlClient::for_home(id, dir.path())
+            .list()
+            .await
+            .expect_err("an unchanged token cannot get in");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        server.await.unwrap();
+    }
+
+    /// A line that is not a `WorldEvent` is skipped, not treated as the end of
+    /// the stream: a newer daemon may push variants this client cannot parse,
+    /// and ending the stream per unknown event would tear the subscription
+    /// down over and over.
+    #[tokio::test]
+    async fn the_event_stream_skips_lines_it_cannot_parse() {
+        let (mut listener, id, _dir) = test_listener();
+        let server = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap().unwrap();
+            let (read_half, mut write_half) = tokio::io::split(stream);
+            let mut lines = BufReader::new(read_half).lines();
+            let _subscribe = lines.next_line().await.unwrap();
+            let mut payload = String::from("this is not an event\n");
+            payload.push_str(&serde_json::to_string(&completed("after-junk")).unwrap());
+            payload.push('\n');
+            write_half.write_all(payload.as_bytes()).await.unwrap();
+            // Drop → EOF after the two lines.
+        });
+
+        let mut stream = ControlClient::new(id).subscribe().await.unwrap();
+        let event = stream.next().await.expect("the parseable event arrives");
+        assert!(format!("{event:?}").contains("after-junk"));
+        assert!(stream.next().await.is_none(), "then a clean end");
         server.await.unwrap();
     }
 
