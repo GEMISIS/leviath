@@ -27,6 +27,10 @@ path = "src/main.rs"
 debug-http = ["leviath-providers/debug-http"]
 
 [dependencies]
+# The binary's global allocator (see main.rs). Kept out of the workspace dep
+# table on purpose: only the composition-root binary should pick an allocator,
+# never a library crate.
+mimalloc = "0.1"
 leviath-core = { workspace = true }
 leviath-agent-client = { workspace = true }
 leviath-runtime = { workspace = true, features = ["control-socket"] }
