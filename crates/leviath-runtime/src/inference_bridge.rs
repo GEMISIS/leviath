@@ -163,10 +163,14 @@ pub async fn run_inference_job(
     // exponential backoff, holding the permit across the backoff; a permanent
     // error fails immediately. The whole thing is bounded by `job_timeout` so a
     // never-completing (stalled-stream) call cannot hold the pool slot forever.
+    //
+    // `infer` borrows the request, so every attempt reuses the one assembled
+    // copy. It used to be cloned per attempt, which doubled the live footprint
+    // of every in-flight request for the whole (possibly minutes-long) call.
     let attempts = async {
         let mut attempt = 1u32;
         loop {
-            match provider.infer(request.clone()).await {
+            match provider.infer(&request).await {
                 Ok(response) => break Ok(response),
                 Err(e) if e.is_transient() && attempt < retry.max_attempts => {
                     tokio::time::sleep(retry.base_delay * 2u32.pow(attempt - 1)).await;
@@ -255,7 +259,7 @@ mod tests {
     impl Provider for Fixed {
         async fn infer(
             &self,
-            _req: InferenceRequest,
+            _req: &InferenceRequest,
         ) -> leviath_providers::Result<InferenceResponse> {
             match self {
                 Fixed::Ok(r) => Ok(r.clone()),
@@ -443,7 +447,7 @@ mod tests {
     impl Provider for Counter {
         async fn infer(
             &self,
-            _req: InferenceRequest,
+            _req: &InferenceRequest,
         ) -> leviath_providers::Result<InferenceResponse> {
             Ok(response("ok"))
         }
@@ -625,7 +629,7 @@ mod tests {
     impl Provider for Scripted {
         async fn infer(
             &self,
-            _req: InferenceRequest,
+            _req: &InferenceRequest,
         ) -> leviath_providers::Result<InferenceResponse> {
             *self.calls.lock().unwrap() += 1;
             // Pop before matching so the mutex guard is not held across the

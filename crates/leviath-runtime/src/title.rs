@@ -219,7 +219,7 @@ mod tests {
     impl Provider for Scripted {
         async fn infer(
             &self,
-            _r: InferenceRequest,
+            _r: &InferenceRequest,
         ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
             match self.0 {
                 Ok(reply) => Ok(leviath_providers::InferenceResponse {
@@ -326,7 +326,7 @@ mod tests {
         impl Provider for Hang {
             async fn infer(
                 &self,
-                _r: InferenceRequest,
+                _r: &InferenceRequest,
             ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
                 std::future::pending().await
             }

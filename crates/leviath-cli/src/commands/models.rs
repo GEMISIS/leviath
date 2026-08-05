@@ -1544,7 +1544,7 @@ mod tests {
     impl leviath_providers::Provider for MockProvider {
         async fn infer(
             &self,
-            _request: leviath_providers::InferenceRequest,
+            _request: &leviath_providers::InferenceRequest,
         ) -> Result<leviath_providers::InferenceResponse, leviath_providers::ProviderError>
         {
             Err(leviath_providers::ProviderError::Other(
@@ -2016,7 +2016,7 @@ mod tests {
             extra: serde_json::Value::Null,
             request_timeout_secs: None,
         };
-        let result = provider.infer(request).await;
+        let result = provider.infer(&request).await;
         assert!(result.is_err());
     }
 

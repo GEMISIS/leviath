@@ -540,14 +540,14 @@ impl AnthropicProvider {
 
 #[async_trait]
 impl Provider for AnthropicProvider {
-    async fn infer(&self, request: InferenceRequest) -> Result<InferenceResponse> {
+    async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
         tracing::debug!(model = %request.model, "Calling Anthropic API");
 
         if let Some(limiter) = &self.rate_limiter {
             limiter.acquire().await?;
         }
 
-        let body = self.build_request_body(&request);
+        let body = self.build_request_body(request);
         maybe_dump_request(&body);
         let url = format!("{}/messages", self.base_url);
 
@@ -614,7 +614,7 @@ impl Provider for AnthropicProvider {
 
     async fn infer_stream(
         &self,
-        request: InferenceRequest,
+        request: &InferenceRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
         tracing::debug!(model = %request.model, "Calling Anthropic API (streaming)");
 
@@ -622,7 +622,7 @@ impl Provider for AnthropicProvider {
             limiter.acquire().await?;
         }
 
-        let mut body = self.build_request_body(&request);
+        let mut body = self.build_request_body(request);
         body["stream"] = serde_json::Value::Bool(true);
         maybe_dump_request(&body);
         let url = format!("{}/messages", self.base_url);
@@ -2317,7 +2317,7 @@ mod tests {
             extra: serde_json::Value::Null,
             request_timeout_secs: None,
         };
-        let result = provider.infer(request).await;
+        let result = provider.infer(&request).await;
         assert!(result.is_err());
         assert!(
             result
@@ -2351,7 +2351,7 @@ mod tests {
             extra: serde_json::Value::Null,
             request_timeout_secs: None,
         };
-        assert!(provider.infer_stream(request).await.is_err());
+        assert!(provider.infer_stream(&request).await.is_err());
     }
 
     #[tokio::test]
@@ -2535,7 +2535,7 @@ mod tests {
         }"#;
         let url = spawn_mock_server(200, "OK", body).await;
         let provider = provider_with_url(url);
-        let resp = provider.infer(simple_request()).await.unwrap();
+        let resp = provider.infer(&simple_request()).await.unwrap();
         assert_eq!(resp.content, "hello there");
         assert_eq!(resp.tokens_used.prompt_tokens, 10);
         assert_eq!(resp.tokens_used.completion_tokens, 5);
@@ -2545,7 +2545,7 @@ mod tests {
     async fn infer_rate_limited_returns_rate_limit_error() {
         let url = spawn_mock_server(429, "Too Many Requests", b"{}").await;
         let provider = provider_with_url(url);
-        let err = provider.infer(simple_request()).await.unwrap_err();
+        let err = provider.infer(&simple_request()).await.unwrap_err();
         assert_eq!(
             std::mem::discriminant(&err),
             std::mem::discriminant(&ProviderError::RateLimitExceeded)
@@ -2558,7 +2558,7 @@ mod tests {
             spawn_mock_server_with_headers(429, "Too Many Requests", "retry-after: 5\r\n", b"{}")
                 .await;
         let provider = provider_with_url(url);
-        let err = provider.infer(simple_request()).await.unwrap_err();
+        let err = provider.infer(&simple_request()).await.unwrap_err();
         assert_eq!(
             std::mem::discriminant(&err),
             std::mem::discriminant(&ProviderError::RateLimitExceeded)
@@ -2570,7 +2570,7 @@ mod tests {
         let url = spawn_mock_server(500, "Internal Server Error", b"boom").await;
         let provider = provider_with_url(url);
         let msg = provider
-            .infer(simple_request())
+            .infer(&simple_request())
             .await
             .unwrap_err()
             .to_string();
@@ -2593,7 +2593,7 @@ mod tests {
         let url = spawn_mock_server_truncated_error_body(500, "Internal Server Error").await;
         let provider = provider_with_url(url);
         let msg = provider
-            .infer(simple_request())
+            .infer(&simple_request())
             .await
             .unwrap_err()
             .to_string();
@@ -2604,7 +2604,7 @@ mod tests {
     async fn infer_malformed_json_returns_invalid_response() {
         let url = spawn_mock_server(200, "OK", b"not json").await;
         let provider = provider_with_url(url);
-        let err = provider.infer(simple_request()).await.unwrap_err();
+        let err = provider.infer(&simple_request()).await.unwrap_err();
         assert!(err.to_string().starts_with("Invalid response:"));
     }
 
@@ -2612,7 +2612,7 @@ mod tests {
     async fn infer_stream_rate_limited_returns_error() {
         let url = spawn_mock_server(429, "Too Many Requests", b"{}").await;
         let provider = provider_with_url(url);
-        assert!(provider.infer_stream(simple_request()).await.is_err());
+        assert!(provider.infer_stream(&simple_request()).await.is_err());
     }
 
     #[tokio::test]
@@ -2621,14 +2621,14 @@ mod tests {
             spawn_mock_server_with_headers(429, "Too Many Requests", "retry-after: 5\r\n", b"{}")
                 .await;
         let provider = provider_with_url(url);
-        assert!(provider.infer_stream(simple_request()).await.is_err());
+        assert!(provider.infer_stream(&simple_request()).await.is_err());
     }
 
     #[tokio::test]
     async fn infer_stream_non_success_status_returns_api_error() {
         let url = spawn_mock_server(503, "Service Unavailable", b"down").await;
         let provider = provider_with_url(url);
-        let result = provider.infer_stream(simple_request()).await;
+        let result = provider.infer_stream(&simple_request()).await;
         assert!(result.is_err());
         assert!(result.err().unwrap().to_string().contains("503"));
     }
@@ -2637,7 +2637,7 @@ mod tests {
     async fn infer_stream_non_success_status_body_read_error_falls_back_to_unknown_error() {
         let url = spawn_mock_server_truncated_error_body(503, "Service Unavailable").await;
         let provider = provider_with_url(url);
-        let result = provider.infer_stream(simple_request()).await;
+        let result = provider.infer_stream(&simple_request()).await;
         assert!(result.is_err());
         assert!(result.err().unwrap().to_string().contains("503"));
     }
@@ -2650,7 +2650,7 @@ mod tests {
         let sse_body = b"event: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n";
         let url = spawn_mock_server(200, "OK", sse_body).await;
         let provider = provider_with_url(url);
-        let mut stream = provider.infer_stream(simple_request()).await.unwrap();
+        let mut stream = provider.infer_stream(&simple_request()).await.unwrap();
         use tokio_stream::StreamExt;
         let chunk = stream.next().await.unwrap().unwrap();
         assert_eq!(chunk.delta, "hi");
@@ -2809,7 +2809,7 @@ mod tests {
         });
 
         let provider = provider_with_url(format!("http://{}", addr));
-        let mut stream = provider.infer_stream(simple_request()).await.unwrap();
+        let mut stream = provider.infer_stream(&simple_request()).await.unwrap();
         use tokio_stream::StreamExt;
         let result = stream.next().await;
         assert!(result.is_some());

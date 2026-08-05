@@ -513,7 +513,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Provider for Mock {
-        async fn infer(&self, _r: InferenceRequest) -> Result<InferenceResponse, ProviderError> {
+        async fn infer(&self, _r: &InferenceRequest) -> Result<InferenceResponse, ProviderError> {
             self.responses
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -568,7 +568,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Provider for Recorder {
-        async fn infer(&self, r: InferenceRequest) -> Result<InferenceResponse, ProviderError> {
+        async fn infer(&self, r: &InferenceRequest) -> Result<InferenceResponse, ProviderError> {
             self.seen
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -1408,7 +1408,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         let _ = recorder.capabilities("m");
         assert!(
             mock.infer(
-                serde_json::from_value(serde_json::json!({
+                &serde_json::from_value(serde_json::json!({
                     "messages": [],
                     "model": "m",
                     "max_tokens": 1,

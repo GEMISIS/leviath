@@ -17,7 +17,7 @@ struct Cfg {
 impl Provider for Cfg {
     async fn infer(
         &self,
-        _r: InferenceRequest,
+        _r: &InferenceRequest,
     ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
         Ok(leviath_providers::InferenceResponse {
             content: "ok".to_string(),
@@ -593,7 +593,7 @@ struct Exploding;
 impl Provider for Exploding {
     async fn infer(
         &self,
-        _r: InferenceRequest,
+        _r: &InferenceRequest,
     ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
         panic!("provider adapter blew up")
     }

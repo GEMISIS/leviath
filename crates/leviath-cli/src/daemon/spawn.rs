@@ -1538,7 +1538,7 @@ system = { kind = "pinned", max_tokens = 1000 }
     impl leviath_providers::Provider for FakeProvider {
         async fn infer(
             &self,
-            _r: leviath_providers::InferenceRequest,
+            _r: &leviath_providers::InferenceRequest,
         ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
             Err(leviath_providers::ProviderError::Other(
                 "test provider".to_string(),
@@ -2948,7 +2948,7 @@ system = { kind = "pinned", max_tokens = 1000 }
         assert_eq!(p.max_context_tokens("m"), 1000);
         let _ = p.capabilities("m");
         assert!(
-            p.infer(leviath_providers::InferenceRequest {
+            p.infer(&leviath_providers::InferenceRequest {
                 system: vec![],
                 messages: vec![],
                 model: "m".to_string(),

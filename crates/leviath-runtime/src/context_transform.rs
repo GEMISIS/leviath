@@ -526,7 +526,7 @@ mod tests {
     impl Provider for FakeProvider {
         async fn infer(
             &self,
-            _req: InferenceRequest,
+            _req: &InferenceRequest,
         ) -> leviath_providers::Result<InferenceResponse> {
             if self.fail {
                 return Err(ProviderError::Other("boom".to_string()));

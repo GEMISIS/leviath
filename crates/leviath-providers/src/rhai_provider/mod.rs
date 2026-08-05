@@ -311,12 +311,12 @@ fn collapse_chunk(response: InferenceResponse) -> StreamChunk {
 
 #[async_trait]
 impl Provider for RhaiProvider {
-    async fn infer(&self, request: InferenceRequest) -> Result<InferenceResponse> {
+    async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
         if let Some(rl) = &self.rate_limiter {
             rl.acquire().await?;
         }
-        let timeout = self.effective_timeout(&request);
-        let request_dyn = request_to_dynamic(&request);
+        let timeout = self.effective_timeout(request);
+        let request_dyn = request_to_dynamic(request);
         let state_dyn = (*self.state).clone();
         let ast = self.ast.clone();
 
@@ -341,7 +341,7 @@ impl Provider for RhaiProvider {
 
     async fn infer_stream(
         &self,
-        request: InferenceRequest,
+        request: &InferenceRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
         if !self.has_stream {
             // No native `stream` fn: collapse a full inference into one chunk.
@@ -352,8 +352,8 @@ impl Provider for RhaiProvider {
         if let Some(rl) = &self.rate_limiter {
             rl.acquire().await?;
         }
-        let timeout = self.effective_timeout(&request);
-        let request_dyn = request_to_dynamic(&request);
+        let timeout = self.effective_timeout(request);
+        let request_dyn = request_to_dynamic(request);
         let state_dyn = (*self.state).clone();
         let ast = self.ast.clone();
 

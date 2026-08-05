@@ -358,7 +358,7 @@ async fn inference_check(provider: &dyn Provider, model: &str) -> Check {
     };
 
     let started = Instant::now();
-    match provider.infer(request).await {
+    match provider.infer(&request).await {
         Ok(response) => {
             let usage = response.tokens_used;
             let echo = match response.content.contains(PROBE_EXPECTED) {

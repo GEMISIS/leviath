@@ -67,7 +67,7 @@ pub async fn run_compaction_job(
     let mut summaries = Vec::new();
     let mut result = Ok(());
     for (region, request) in requests {
-        match tokio::time::timeout(deadline, provider.infer(request)).await {
+        match tokio::time::timeout(deadline, provider.infer(&request)).await {
             Ok(Ok(response)) => summaries.push((region, response.content)),
             Ok(Err(e)) => {
                 result = Err(e);
@@ -122,7 +122,7 @@ mod tests {
     impl Provider for Script {
         async fn infer(
             &self,
-            _req: InferenceRequest,
+            _req: &InferenceRequest,
         ) -> leviath_providers::Result<InferenceResponse> {
             match self.out.lock().unwrap().pop_front() {
                 Some(Ok(text)) => Ok(InferenceResponse {
@@ -163,7 +163,7 @@ mod tests {
     impl Provider for Hang {
         async fn infer(
             &self,
-            _req: InferenceRequest,
+            _req: &InferenceRequest,
         ) -> leviath_providers::Result<InferenceResponse> {
             std::future::pending().await
         }

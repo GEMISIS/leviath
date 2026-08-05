@@ -353,7 +353,7 @@ async fn run_test_case(
     };
 
     let response = provider
-        .infer(request)
+        .infer(&request)
         .await
         .map_err(|e| anyhow::anyhow!("Inference failed: {}", e))?;
 
@@ -1168,7 +1168,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     impl Provider for MockProvider {
         async fn infer(
             &self,
-            _request: InferenceRequest,
+            _request: &InferenceRequest,
         ) -> leviath_providers::Result<InferenceResponse> {
             Ok(InferenceResponse {
                 content: self.content.clone(),
@@ -1209,7 +1209,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     impl Provider for NoTemperatureProvider {
         async fn infer(
             &self,
-            _request: InferenceRequest,
+            _request: &InferenceRequest,
         ) -> leviath_providers::Result<InferenceResponse> {
             Ok(InferenceResponse {
                 content: "cold hello".to_string(),
@@ -1252,7 +1252,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     impl Provider for ErrorProvider {
         async fn infer(
             &self,
-            _request: InferenceRequest,
+            _request: &InferenceRequest,
         ) -> leviath_providers::Result<InferenceResponse> {
             Err(leviath_providers::ProviderError::ApiError(
                 "simulated inference error".to_string(),
@@ -1319,9 +1319,9 @@ max_tokens = 5000
     impl Provider for RecordingProvider {
         async fn infer(
             &self,
-            request: InferenceRequest,
+            request: &InferenceRequest,
         ) -> leviath_providers::Result<InferenceResponse> {
-            *self.seen.lock().unwrap() = Some(request);
+            *self.seen.lock().unwrap() = Some(request.clone());
             Ok(InferenceResponse {
                 content: "recorded".to_string(),
                 tool_calls: vec![],

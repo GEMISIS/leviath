@@ -60,7 +60,7 @@ pub async fn run_title_job(
         permit,
     } = job;
 
-    let result = match tokio::time::timeout(deadline, provider.infer(request)).await {
+    let result = match tokio::time::timeout(deadline, provider.infer(&request)).await {
         Ok(outcome) => outcome.map(|r| r.content),
         Err(_) => Err(leviath_providers::ProviderError::Other(format!(
             "title generation exceeded the {}s deadline and was aborted to free the pool slot",
