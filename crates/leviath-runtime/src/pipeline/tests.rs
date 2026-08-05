@@ -9749,6 +9749,75 @@ fn an_errored_or_capped_stage_is_left_to_its_own_transition() {
     }
 }
 
+/// The stage still follows its own transition, but the run has to say the
+/// requirement went unmet.
+///
+/// This is the ordinary way a required output goes missing, not an edge case: a
+/// model that cannot satisfy its validator retries until its iterations run out
+/// and leaves on the max-iterations path. Left unrecorded the run reports
+/// `output_forced: 0`, which reads as "nothing was required" rather than "the
+/// requirement went unmet", and a fan-out parent counts that worker as a
+/// success.
+#[test]
+fn an_errored_or_capped_stage_still_records_the_missing_output() {
+    for outcome in [
+        StageOutcome::Errored("boom".to_string()),
+        StageOutcome::MaxIterations,
+    ] {
+        let mut world = World::new();
+        let e = world
+            .spawn((
+                owing_bp(None),
+                StageCursor { index: 0 },
+                owing_state(),
+                conversation_window(),
+                ResolveTransition,
+                outcome.clone(),
+                crate::persistence::RunOutcomeFlags::default(),
+            ))
+            .id();
+        run_require_output(&mut world);
+        assert_eq!(
+            world
+                .get::<crate::persistence::RunOutcomeFlags>(e)
+                .expect("flags")
+                .0
+                .output_forced,
+            1,
+            "{outcome:?} left the stage owing an output and the run must say so"
+        );
+    }
+}
+
+/// A stage that owes nothing is not flagged just because it errored, or every
+/// failed run would claim a missing output it never promised.
+#[test]
+fn an_errored_stage_that_owes_nothing_is_not_flagged() {
+    let mut world = World::new();
+    let mut bp = owing_bp(None);
+    bp.0.stages[0].require_output = false;
+    let e = world
+        .spawn((
+            bp,
+            StageCursor { index: 0 },
+            owing_state(),
+            conversation_window(),
+            ResolveTransition,
+            StageOutcome::MaxIterations,
+            crate::persistence::RunOutcomeFlags::default(),
+        ))
+        .id();
+    run_require_output(&mut world);
+    assert_eq!(
+        world
+            .get::<crate::persistence::RunOutcomeFlags>(e)
+            .expect("flags")
+            .0
+            .output_forced,
+        0
+    );
+}
+
 /// Entering a new stage re-arms the gate: each stage owes its own output and
 /// gets its own budget of attempts.
 #[test]
