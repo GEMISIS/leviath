@@ -1662,25 +1662,83 @@ mod tests {
     #[test]
     fn streaming_visitors_return_none_when_the_archive_is_missing() {
         with_isolated_runs_dir("streaming-visitors-missing", |_d| {
-            assert!(
-                visit_run_archive("no-such-run", &mut |_| std::ops::ControlFlow::Continue(()))
-                    .is_none()
-            );
-            assert!(
-                visit_run_records("no-such-run", &mut |_| std::ops::ControlFlow::Continue(()))
-                    .is_none()
-            );
+            // One visitor closure of each kind, shared across every call in
+            // this test - the last pair of calls (on a real archive) executes
+            // them, so a missing/invalid archive is proven by the counters
+            // staying put, not by never-run closures.
+            let points_seen = std::cell::Cell::new(0usize);
+            let mut on_point = |_: leviath_core::run_archive::PointRef<'_>| {
+                points_seen.set(points_seen.get() + 1);
+                std::ops::ControlFlow::Continue(())
+            };
+            let records_seen = std::cell::Cell::new(0usize);
+            let mut on_record = |_: &leviath_core::run_archive::RunRecord| {
+                records_seen.set(records_seen.get() + 1);
+                std::ops::ControlFlow::Continue(())
+            };
+
+            assert!(visit_run_archive("no-such-run", &mut on_point).is_none());
+            assert!(visit_run_records("no-such-run", &mut on_record).is_none());
             // A file that is not an archive fails the preamble check.
             let run_id = "bad-preamble";
             std::fs::create_dir_all(run_dir(run_id)).unwrap();
             std::fs::write(run_dir(run_id).join("run.lvr"), b"junk").unwrap();
-            assert!(
-                visit_run_archive(run_id, &mut |_| std::ops::ControlFlow::Continue(())).is_none()
-            );
-            assert!(
-                visit_run_records(run_id, &mut |_| std::ops::ControlFlow::Continue(())).is_none()
-            );
+            assert!(visit_run_archive(run_id, &mut on_point).is_none());
+            assert!(visit_run_records(run_id, &mut on_record).is_none());
+            assert_eq!((points_seen.get(), records_seen.get()), (0, 0));
+
+            // The same closures over a real archive do run.
+            let real = "streaming-visitors-real";
+            std::fs::create_dir_all(run_dir(real)).unwrap();
+            write_minimal_archive(real);
+            assert!(visit_run_archive(real, &mut on_point).is_some());
+            assert!(visit_run_records(real, &mut on_record).is_some());
+            assert_eq!(points_seen.get(), 1);
+            assert_eq!(records_seen.get(), 2);
         });
+    }
+
+    /// Write a two-record archive (Header + one ContextCheckpoint) for `run_id`.
+    fn write_minimal_archive(run_id: &str) {
+        use leviath_core::run_archive::{self, RunIdentity, RunRecord};
+        let mut buf = Vec::new();
+        run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION).unwrap();
+        let meta = RunMeta::new(
+            run_id.to_string(),
+            "a".to_string(),
+            "/p".to_string(),
+            "t".to_string(),
+            None,
+            "/w".to_string(),
+            1,
+        );
+        run_archive::write_record(
+            &mut buf,
+            &RunRecord::Header {
+                identity: RunIdentity {
+                    run_id: run_id.to_string(),
+                    machine_id: "m".to_string(),
+                    world_id: "w".to_string(),
+                    created_at: 0,
+                },
+                meta: Box::new(meta),
+            },
+        )
+        .unwrap();
+        run_archive::write_record(
+            &mut buf,
+            &RunRecord::ContextCheckpoint {
+                snapshot: ContextSnapshot {
+                    stage_name: "plan".to_string(),
+                    total_tokens: 3,
+                    max_tokens: 100,
+                    regions: vec![],
+                },
+                at: 1,
+            },
+        )
+        .unwrap();
+        std::fs::write(run_dir(run_id).join("run.lvr"), &buf).unwrap();
     }
 
     /// The journal keeps `callback_secret` (the daemon re-signs webhooks for a
