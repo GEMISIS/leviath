@@ -3,8 +3,9 @@ flowchart TD
     analyze{{analyze}}
     prototype{{prototype}}
     implement(implement)
-    review(review)
+    review{{review}}
     reassess(reassess)
+    summary(summary)
     discover --> analyze
     analyze --> implement
     analyze --> prototype
@@ -13,6 +14,7 @@ flowchart TD
     prototype -. stuck .-> reassess
     implement --> review
     implement -. stuck .-> reassess
+    review --> summary
     review --> implement
     reassess --> implement
     classDef entry stroke-width:3px

@@ -177,7 +177,7 @@ Ten agents ship out of the box, each a multi-stage directed graph with structure
 </table>
 
 <details>
-<summary><b>The other seven</b>: coder, reviewer, parallel-fixer, researcher, log-analyzer, daily-briefer, writing-assistant</summary>
+<summary><b>The other seven</b>: coder, reviewer, data-analyst, researcher, log-analyzer, daily-briefer, writing-assistant</summary>
 
 <br/>
 
@@ -198,10 +198,10 @@ Ten agents ship out of the box, each a multi-stage directed graph with structure
 </picture></td>
 </tr>
 <tr>
-<td valign="middle" width="30%"><b>parallel-fixer</b><br>Fixes many failing tests at once: one sub-agent worker per failure, merged and re-verified</td>
+<td valign="middle" width="30%"><b>data-analyst</b><br>Gathers data on a subject in parallel, builds one clean CSV, and says what the numbers show</td>
 <td><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agents/parallel-fixer-dark.svg">
-  <img src="docs/assets/agents/parallel-fixer.svg" alt="parallel-fixer workflow graph">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agents/data-analyst-dark.svg">
+  <img src="docs/assets/agents/data-analyst.svg" alt="data-analyst workflow graph">
 </picture></td>
 </tr>
 <tr>

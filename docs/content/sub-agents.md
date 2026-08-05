@@ -20,8 +20,8 @@ run at the same time, each with a clean context, and the parent gets the results
 > **In one line:** a fan-out stage splits a task into items, runs one sub-agent per item, and merges
 > what they produce.
 
-This is how the bundled `parallel-fixer` agent repairs many failing tests at once, one worker per
-failure, and how a wide research sweep covers many sub-topics in parallel. See the
+This is how the bundled `data-analyst` agent gathers a broad subject at once, one worker per slice
+of it, and how a wide research sweep covers many sub-topics in parallel. See the
 [agent catalog](/docs/agent-catalog) for both.
 
 Sub-agents cost very little here. They are more entities in the same [world](/docs/engine), so there

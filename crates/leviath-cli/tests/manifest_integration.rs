@@ -359,7 +359,7 @@ fn builtin_error_edges_have_a_pinned_error_report_region() {
             .map(|(target, _)| target.as_str())
             .collect();
         if error_targets.is_empty() {
-            continue; // e.g. parallel-fixer, which declares no error edge
+            continue; // a stage may legitimately declare no error edge
         }
 
         let pinned: Vec<&str> = bp

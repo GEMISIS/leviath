@@ -102,30 +102,36 @@ lev run reviewer --task "Review the changes on the feature/auth branch"
 The two-pass split is deliberate: `scan` runs on Sonnet to flag areas, then `deep_review`
 escalates to Opus to scrutinize only what was flagged, which keeps the expensive model focused.
 
-## parallel-fixer
+## data-analyst
 
-Fixes failing tests in parallel, one [sub-agent](/docs/sub-agents) worker per failure, then merges
-and re-runs until the suite is green. Reach for it for a broad "make the tests pass" sweep.
+Searches the web for data on a subject, builds a clean CSV of it, and hands back a summary of what
+the numbers say. Reach for it when you want a dataset you can open, not a paragraph about one.
 
 ```mermaid
 flowchart TD
-    discover --> validate
-    validate --> parallel_fix
-    parallel_fix -->|fan out| fix_worker
-    fix_worker --> merge_fixes
-    merge_fixes --> verify
-    verify -->|failures remain| validate
-    verify --> complete["Suite green"]
+    scope --> split
+    split -->|fan out| gather_worker
+    gather_worker --> build
+    build --> present
+    present --> done["Summary + dataset.csv"]
 ```
 
 ```bash
-lev run parallel-fixer --task "Get the test suite passing"
+lev run data-analyst --task "EV registrations by country, 2015 to 2024"
+lev result <run-id>                       # what the numbers say
 ```
 
-`parallel_fix` runs in `fan_out` mode: it splits the diagnosed failures into work items (up to five
-workers), each `fix_worker` touches only its own source file, and `merge_stage` reconciles the
-results. See [Sub-agents and fan-out](/docs/sub-agents). `verify` decides between done and another
-round back through `validate`.
+`scope` decides the table's columns before anything is gathered, which is what keeps a hundred rows
+from drifting into a hundred shapes. `split` runs in `fan_out` mode, one worker per slice of the
+subject, so a broad question is gathered in parallel rather than one source at a time. See
+[Sub-agents and fan-out](/docs/sub-agents).
+
+Each worker hands back CSV rows through [`submit_output`](/docs/outputs), and `require_output` makes
+that a guarantee rather than a hope. Because the worker declares `format = "csv"`, a worker whose
+rows do not parse is told so and retries before the merge ever sees them.
+
+`present` names `data/dataset.csv` in its `artifacts`, so a caller fetches the file rather than
+parsing its path out of prose.
 
 ## researcher
 

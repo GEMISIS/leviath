@@ -1,12 +1,14 @@
-flowchart LR
+flowchart TD
     discover(discover)
     scan(scan)
     deep_review(deep review)
     report(report)
     error_handler(error handler)
+    summary(summary)
     discover --> scan
     scan --> deep_review
     deep_review --> report
+    report --> summary
     error_handler --> deep_review
     classDef entry stroke-width:3px
     class discover entry

@@ -2,8 +2,10 @@ flowchart LR
     gather(gather)
     analyze{{analyze}}
     summarize(summarize)
+    summary(summary)
     gather --> analyze
     analyze --> gather
     analyze --> summarize
+    summarize --> summary
     classDef entry stroke-width:3px
     class gather entry

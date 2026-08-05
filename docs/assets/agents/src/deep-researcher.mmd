@@ -3,10 +3,12 @@ flowchart LR
     analyze{{analyze}}
     follow_citations(follow citations)
     synthesize(synthesize)
+    summary(summary)
     gather --> analyze
     analyze --> gather
     analyze --> follow_citations
     analyze --> synthesize
     follow_citations --> analyze
+    synthesize --> summary
     classDef entry stroke-width:3px
     class gather entry

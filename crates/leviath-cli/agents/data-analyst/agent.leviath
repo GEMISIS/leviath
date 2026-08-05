@@ -1,0 +1,244 @@
+[agent]
+name = "data-analyst"
+version = "0.0.1"
+description = "Data analyst - searches the web for data on a subject, builds a clean CSV of it, and hands back a ready-to-use summary of what the numbers say"
+entry_stage = "scope"
+
+# Gathers from the web and writes one dataset. `write_file` is asked for rather
+# than allowed: the whole point of this agent is the file it produces, so its
+# creation is worth a person seeing once.
+[tool_permissions]
+read_file  = "allow"
+read_files = "allow"
+list_dir   = "allow"
+web_search = "allow"
+web_fetch  = "allow"
+write_file = "ask"
+bash       = "ask"
+
+# ─── Stage 1: Scope ───────────────────────────────────────────────────────────
+# Decide what the table is before gathering anything. A dataset whose columns
+# were invented row by row is the usual way this work goes wrong.
+[stages.scope]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Decide the table's columns before gathering anything"
+available_tools = ["web_search", "context_write"]
+max_iterations = 8
+system_prompt = """
+Decide what table would answer the question in the `subject` region, honouring
+anything in `constraints`.
+
+Run two or three searches to learn what data actually exists on this subject.
+Then write the schema to the `schema` region with context_write, as one line per
+column:
+
+    column_name | type (number/text/date) | what it means | unit or format
+
+Rules that save the dataset later:
+- Name a unit in the column name when there is one: `revenue_usd_millions`,
+  not `revenue`.
+- One fact per column. Never `population_and_area`.
+- Include a `source_ref` column. Every row must be traceable.
+
+Keep it to the columns the question needs. A table nobody can fill is worse
+than a narrow one.
+"""
+
+[stages.scope.transitions.split]
+hint = "The schema is decided"
+transform = "direct"
+
+[stages.scope.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# ─── Stage 2: Split ───────────────────────────────────────────────────────────
+# One worker per slice of the subject, so a hundred things can be gathered at
+# once instead of one after another. Each worker returns its rows; the merge
+# stage assembles them into a single table.
+[stages.split]
+mode = "fan_out"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Split the subject into slices, one worker each"
+available_tools = []
+max_iterations = 4
+# split ↔ error_recovery is a cycle, so it needs a ceiling. One retry is enough
+# to route around a transient failure; a second means the subject is not
+# gatherable and the run should say so rather than keep splitting.
+max_revisits = 1
+worker_stage = "gather_worker"
+merge_stage = "build"
+max_workers = 4
+split_prompt = """
+Split the `subject` into slices that can be gathered independently, one work
+item each. A slice is a country, a company, a year range, a category - whatever
+divides this subject without two workers collecting the same rows.
+
+Output ONLY a JSON array, starting with '[' and ending with ']'. No prose, no
+markdown fences. Each item:
+
+[{"id": "<short-slug>", "context": {"slice": "<what to gather>", "schema": "<the columns, verbatim from the schema region>"}}]
+
+Every item MUST carry the schema: workers do not share this agent's context, so
+the work item is all they get. A worker with no schema cannot produce rows that
+line up with anyone else's.
+
+Prefer a handful of substantial slices over many thin ones. One slice is fine
+for a narrow subject.
+"""
+
+[stages.split.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# ─── Worker: gather one slice ────────────────────────────────────────────────
+# Entered as a sub-agent, one per work item. It hands back CSV rows, which the
+# merge stage reads. `require_output` is what makes that a guarantee rather than
+# a hope.
+[stages.gather_worker]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Gather the rows for one slice of the subject"
+available_tools = ["web_search", "web_fetch", "submit_output"]
+allow_as_worker = true
+require_output = true
+max_iterations = 25
+system_prompt = """
+Gather data for ONE slice. Your work item holds the slice and the column schema
+every worker is using - it is all the context you get, so work from it.
+
+1. Search for the data, then fetch the pages that actually carry numbers.
+   Statistical agencies, filings, and dataset publishers beat articles quoting
+   them.
+2. Submit your rows with submit_output, as CSV: a header line matching the
+   schema's columns in order, then one line per row.
+3. Put a short source note in the `source_ref` column so a row can be traced.
+
+Record what you find, not what you expect. A value you could not source is an
+empty field, never an estimate: an invented number is worse than a missing one,
+because nobody downstream can tell which it was.
+
+Only your submitted rows reach the merge. Anything else you write is lost.
+"""
+
+[stages.gather_worker.output]
+format = "csv"
+instructions = "A header line matching the schema's columns in order, then one row per line. Quote any field containing a comma. Leave a field empty when you could not source it."
+
+[stages.gather_worker.transitions]
+
+# ─── Stage 3: Build ───────────────────────────────────────────────────────────
+# Writes the artifact. The gate keeps the stage from claiming a dataset it never
+# wrote.
+[stages.build]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Assemble the workers' rows into one dataset"
+available_tools = ["write_file", "read_file", "context_read", "context_write"]
+max_iterations = 15
+system_prompt = """
+The workers' submitted rows are in your conversation, one block per slice. Write
+them to `data/dataset.csv` as a single table.
+
+- One header line, exactly the column names from `schema`, in order. The workers
+  each sent their own header; keep one and drop the rest.
+- Every row has the same number of fields as the header. A ragged CSV is the one
+  failure that breaks whoever opens it.
+- Quote any field containing a comma, quote, or newline. Double an inner quote.
+- An unknown value is an empty field, never "N/A", "unknown", or 0.
+- Drop exact duplicate rows. Keep near-duplicates and note them.
+
+A worker that failed or returned nothing is a gap, not a reason to stop: write
+what you have and record the gap in `caveats` with context_write.
+
+Then read the file back and check the header and a few rows survived the write.
+"""
+
+[stages.build.transitions.present]
+hint = "The CSV is written and checked"
+transform = "compact"
+gate = { require_modifications = true, message = "No file was written. The dataset is this agent's whole product: write data/dataset.csv with write_file before moving on." }
+
+[stages.build.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# ─── Stage 4: Present ─────────────────────────────────────────────────────────
+# Terminal. The answer is what the numbers say; the dataset itself is an
+# artifact, named so a caller can fetch it rather than parse the path out of
+# prose.
+[stages.present]
+mode = "output"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Say what the data shows"
+max_iterations = 8
+system_prompt = """
+Say what this dataset shows, for whoever asked.
+
+Lead with the answer to their question in two or three sentences. Then:
+- The three or four things the numbers actually say, each with the figure.
+- How many rows, over what range, from how many sources.
+- What is missing or shaky, from `caveats`. Say this plainly rather than
+  burying it.
+
+Name `data/dataset.csv` in `artifacts` so they can open it.
+
+Do not paste the table. They have the file; what they cannot get from it is
+which numbers matter and which to distrust.
+"""
+
+[stages.present.output]
+format = "markdown"
+instructions = "Use a short `## Findings` list. Put figures inline, not in a table - the table is the CSV."
+
+[stages.present.transitions]
+
+# ─── Error recovery ───────────────────────────────────────────────────────────
+[stages.error_recovery]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "google", model = "gemini-3.5-flash" }, { provider = "openrouter", model = "deepseek/deepseek-v4-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Recover from a failed fetch, parse, or write"
+available_tools = ["read_file", "context_read", "context_write"]
+max_iterations = 8
+max_revisits = 1
+system_prompt = """
+Something failed while gathering or building. The `error_report` region holds
+the error the runtime captured. Read it, work out what went wrong, and note a
+workaround in `caveats`.
+
+A source that will not load is not a reason to stop: record the gap and hand
+back so the dataset can be finished from what is reachable.
+"""
+
+[stages.error_recovery.transitions.split]
+hint = "Recovered - split and gather again"
+transform = "compact"
+
+[compaction]
+provider = "anthropic"
+model = "claude-sonnet-5"
+
+# ─── Context layout ───────────────────────────────────────────────────────────
+[context.regions]
+# The subject - required. Supplied via --task (or the API/ACP task field).
+subject       = { kind = "pinned", budget = "1%", max_tokens = 1000, required = true, seed = "task", required_message = "Say what to gather data on via --task." }
+# Optional caller bounds: --constraints "US only, since 2015".
+constraints   = { kind = "pinned", budget = "1%", max_tokens = 1000, seed = "constraints" }
+# The table's columns, decided in scope and followed by every later stage.
+schema        = { kind = "pinned", budget = "2%", max_tokens = 2000, required = true, required_message = "Write the table's columns to `schema` (context_write) before gathering: one line per column, as name | type | meaning | unit." }
+# Bibliography, one line per source actually used.
+sources_index = { kind = "pinned", budget = "3%", max_tokens = 3000 }
+# What to distrust in the result. Read by the present stage.
+caveats       = { kind = "pinned", budget = "2%", max_tokens = 2000 }
+
+# Raw pages and search results (bulk, evictable).
+raw_sources   = { kind = "temporary", budget = "25%", max_tokens = 30000 }
+# Holds the workers' consolidated rows on the way into the merge, so it gets a
+# far larger share than a conversation region usually needs.
+conversation  = { kind = "sliding_window", max_items = 40, budget = "45%", max_tokens = 50000, strategy = "bulk", overflow = 10 }
+
+# Written by the runtime on an abnormal stage ending: the failed inference's
+# error text, or a note that a stage hit its iteration cap. Pinned so it
+# survives the edge transform into the stage that acts on it.
+error_report  = { kind = "pinned", budget = "1%", max_tokens = 2000 }
