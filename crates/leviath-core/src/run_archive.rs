@@ -1149,15 +1149,21 @@ mod tests {
         buf
     }
 
-    /// Collect `(index, at, total_tokens)` per visited point.
-    fn collect_streamed(bytes: &[u8]) -> Vec<(usize, i64, usize)> {
+    /// Collect `(index, at, total_tokens)` per visited point, or the stream
+    /// error. One closure shared by every streamed test, including the
+    /// bad-preamble one whose visitor never runs.
+    fn try_collect_streamed(bytes: &[u8]) -> io::Result<Vec<(usize, i64, usize)>> {
         let mut seen = Vec::new();
         visit_archive_points(&mut &bytes[..], &mut |p| {
             seen.push((p.index, p.at, p.context.total_tokens));
             ControlFlow::Continue(())
-        })
-        .unwrap();
-        seen
+        })?;
+        Ok(seen)
+    }
+
+    /// Collect `(index, at, total_tokens)` per visited point.
+    fn collect_streamed(bytes: &[u8]) -> Vec<(usize, i64, usize)> {
+        try_collect_streamed(bytes).unwrap()
     }
 
     #[test]
@@ -1195,9 +1201,7 @@ mod tests {
 
     #[test]
     fn visit_archive_points_rejects_a_bad_preamble() {
-        let mut bogus: &[u8] = b"not an archive at all";
-        let result = visit_archive_points(&mut bogus, &mut |_| ControlFlow::Continue(()));
-        assert!(result.is_err());
+        assert!(try_collect_streamed(b"not an archive at all").is_err());
     }
 
     #[test]

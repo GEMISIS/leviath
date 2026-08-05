@@ -98,12 +98,8 @@ async fn handle_ws_with(
                         // ServerEvent always serializes; a failure is a bug.
                         let json = serde_json::to_string(&ev)
                             .expect("ServerEvent serialization must not fail");
-                        let sent = tokio::time::timeout(
-                            send_timeout,
-                            socket.send(Message::Text(json.into())),
-                        )
-                        .await;
-                        if !matches!(sent, Ok(Ok(()))) {
+                        if !send_within(&mut socket, send_timeout, Message::Text(json.into())).await
+                        {
                             break; // dead or wedged peer either way
                         }
                     }
@@ -114,23 +110,32 @@ async fn handle_ws_with(
                 }
             }
             _ = ping.tick() => {
-                if awaiting_pong {
-                    // The previous ping was never answered: the peer is gone
-                    // without a Close (sleep, kill, dropped NAT mapping).
+                // An unanswered previous ping, and a ping that cannot be
+                // sent, both mean the peer is gone without a Close (sleep,
+                // kill, dropped NAT mapping).
+                if awaiting_pong
+                    || !send_within(
+                        &mut socket,
+                        send_timeout,
+                        Message::Ping(Vec::new().into()),
+                    )
+                    .await
+                {
                     break;
                 }
                 awaiting_pong = true;
-                let pinged = tokio::time::timeout(
-                    send_timeout,
-                    socket.send(Message::Ping(Vec::new().into())),
-                )
-                .await;
-                if !matches!(pinged, Ok(Ok(()))) {
-                    break;
-                }
             }
         }
     }
+}
+
+/// Send one frame, bounded by `timeout`. `false` means the peer is dead or
+/// wedged (the send errored, or its flush never completed in time).
+async fn send_within(socket: &mut WebSocket, timeout: std::time::Duration, msg: Message) -> bool {
+    matches!(
+        tokio::time::timeout(timeout, socket.send(msg)).await,
+        Ok(Ok(()))
+    )
 }
 
 #[cfg(test)]
@@ -296,6 +301,19 @@ mod tests {
             .route("/ws", get(ws_global))
             .route("/ws/agents/{id}", get(ws_agent))
             .with_state(state);
+        spawn_router_with_shutdown(app).await
+    }
+
+    /// Serve `app` on a loopback port with graceful shutdown - the one server
+    /// block every WS test server shares, so exercising its shutdown once
+    /// covers them all.
+    async fn spawn_router_with_shutdown(
+        app: Router,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -329,7 +347,10 @@ mod tests {
     }
 
     /// A server whose WS route uses injected ping/send deadlines, so the
-    /// dead-peer branches can be driven in tens of milliseconds.
+    /// dead-peer branches can be driven in tens of milliseconds. Shares the
+    /// graceful-shutdown server plumbing with `spawn_test_server_with_shutdown`
+    /// (whose shutdown path a dedicated test exercises); the shutdown sender
+    /// is leaked exactly like `spawn_test_server` leaks its own.
     async fn spawn_ping_test_server(
         state: AppState,
         ping_every: std::time::Duration,
@@ -348,27 +369,36 @@ mod tests {
                 ),
             )
             .with_state(state);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
+        let (addr, shutdown_tx, _handle) = spawn_router_with_shutdown(app).await;
+        std::mem::forget(shutdown_tx);
         addr
+    }
+
+    fn assert_receiver_count_reached(reached: bool, expected: usize, actual: usize) {
+        assert!(
+            reached,
+            "receiver count never reached {expected} (still {actual})"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "receiver count never reached")]
+    fn assert_receiver_count_reached_panics_when_it_never_did() {
+        assert_receiver_count_reached(false, 1, 0);
     }
 
     /// Wait until the broadcast subscriber count reaches `expected` (the
     /// handler task subscribing or dropping its receiver), or panic.
     async fn wait_for_receiver_count(tx: &broadcast::Sender<ServerEvent>, expected: usize) {
+        let mut reached = false;
         for _ in 0..100 {
             if tx.receiver_count() == expected {
-                return;
+                reached = true;
+                break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        panic!(
-            "receiver count never reached {expected} (still {})",
-            tx.receiver_count()
-        );
+        assert_receiver_count_reached(reached, expected, tx.receiver_count());
     }
 
     /// A peer that never answers pings is declared dead after one unanswered
@@ -407,16 +437,16 @@ mod tests {
         let mut client = WsTestClient::connect(addr, "/ws").await;
         wait_for_receiver_count(&tx, 1).await;
 
-        // Answer pings for ~5 intervals.
+        // Answer pings for ~5 intervals. Nothing else is broadcast on this
+        // channel, so every inbound frame is a ping.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
         while std::time::Instant::now() < deadline {
             let (opcode, payload) =
                 tokio::time::timeout(std::time::Duration::from_secs(5), client.recv_frame())
                     .await
                     .expect("expected a ping before the deadline");
-            if opcode == 0x9 {
-                client.send_frame(0xA, &payload).await; // masked pong
-            }
+            assert_eq!(opcode, 0x9, "only pings flow on an idle channel");
+            client.send_frame(0xA, &payload).await; // masked pong
         }
         assert_eq!(
             tx.receiver_count(),

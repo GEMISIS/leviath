@@ -3034,6 +3034,13 @@ mod tests {
             state.status = AgentStatus::Paused;
             Some(world.spawn_agent((state,)))
         }));
+        // Parking runs the same teardown hook a reap does (sandbox + tool
+        // state); record that it fired.
+        let reaped = Arc::new(Mutex::new(0usize));
+        let reaped_in_hook = reaped.clone();
+        host.set_reaper(Box::new(move |_world, _entity| {
+            *reaped_in_hook.lock().unwrap() += 1;
+        }));
         let e = spawn(&mut host, "run-a", "agent-a");
         assert!(
             ask(&mut host, |reply| ControlOp::Pause {
@@ -3049,9 +3056,11 @@ mod tests {
 
         host.emit_events();
 
-        // Paged out: the entity is despawned and the run id unmapped.
+        // Paged out: the entity is despawned, the run id unmapped, and the
+        // reap hook tore the agent's state down first.
         assert!(host.world.world().get::<AgentState>(e).is_none());
         assert!(!host.by_run_id.contains_key("run-a"));
+        assert_eq!(*reaped.lock().unwrap(), 1);
         // But not lost: the listing still carries the paused row...
         let listing = ask(&mut host, |reply| ControlOp::List { reply }).await;
         let row = listing
@@ -3118,6 +3127,19 @@ mod tests {
             host.world.world().get::<AgentState>(e).is_some(),
             "a run with tree links keeps the restart question open"
         );
+
+        // Links gone: it parks - and this host has no reap hook installed, so
+        // the park teardown's no-reaper path is exercised too.
+        host.world_mut()
+            .world_mut()
+            .entity_mut(e)
+            .remove::<SubAgentChildren>();
+        host.emit_events();
+        assert!(
+            host.world.world().get::<AgentState>(e).is_none(),
+            "unlinked and persisted: parked without a reaper"
+        );
+        assert!(host.parked.contains_key("run-a"));
     }
 
     #[tokio::test]
