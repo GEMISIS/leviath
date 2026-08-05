@@ -24,6 +24,17 @@ use leviath_cli::commands;
 use leviath_cli::commands::dashboard::{CrosstermEventSource, DashboardArgs, TerminalSetup};
 use leviath_cli::dispatch::{Commands, RiskyExecutors, apply_region_flags, dispatch};
 
+/// mimalloc instead of the platform allocator. The daemon's workload is a
+/// stream of large, variably-sized, short-lived allocations (assembled
+/// inference requests, context snapshots, tool results) interleaved with
+/// long-lived small ones; the system allocator strands the freed spans behind
+/// the live objects and RSS never comes back down (measured: a 22 MB live
+/// footprint under 293 MB of retained RSS after a five-agent burst). mimalloc
+/// returns freed pages to the OS aggressively, so RSS tracks what the process
+/// actually holds.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// Leviath CLI - Agent framework with structured context windows
 #[derive(Parser)]
 #[command(name = "lev")]
