@@ -85,6 +85,55 @@ fn yaml_accepts_valid_and_refuses_broken_indentation() {
     assert!(check(Some("yaml"), "a: [1, 2\nb: 3").is_err());
 }
 
+/// YAML alias expansion is exponential and this parser cannot bound it. The
+/// check runs inline on the daemon's tick loop over content an agent produced,
+/// and an agent can be talked into producing anything by a page it fetched - so
+/// a crafted answer would stall every agent in the shared world.
+///
+/// A document using aliases is skipped rather than rejected: being unable to
+/// check something is not evidence it is wrong.
+#[test]
+fn an_alias_bomb_is_skipped_rather_than_expanded() {
+    // Six levels of nine-way aliasing: ~9^6 nodes if expanded. Under 300 bytes.
+    let mut bomb = String::from("a: &a [x,x,x,x,x,x,x,x,x]\n");
+    let mut prev = "a".to_string();
+    for name in ["b", "c", "d", "e", "f", "g"] {
+        let refs = vec![format!("*{prev}"); 9].join(",");
+        bomb.push_str(&format!("{name}: &{name} [{refs}]\n"));
+        prev = name.to_string();
+    }
+    assert!(bomb.len() < 300, "the input is small; the expansion is not");
+
+    let started = std::time::Instant::now();
+    assert!(check(Some("yaml"), &bomb).is_ok(), "skipped, not rejected");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(250),
+        "the document must not be expanded at all, took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn ordinary_yaml_without_aliases_is_still_checked() {
+    // The skip must not swallow the check for documents that never risked it.
+    assert!(check(Some("yaml"), "a: [1, 2\nb: 3").is_err());
+    assert!(check(Some("yaml"), "findings:\n  - severity: high\n").is_ok());
+}
+
+/// Over-eager on purpose: mistaking `3 * 4` for an alias costs a skipped check,
+/// missing a real one costs the daemon.
+#[test]
+fn anchor_and_alias_detection_errs_toward_skipping() {
+    assert!(uses_anchors_or_aliases("base: &defaults\n  a: 1\n"));
+    assert!(uses_anchors_or_aliases("copy: *defaults\n"));
+    assert!(uses_anchors_or_aliases("list: [*a, *b]\n"));
+    // A multiplication in a scalar reads as an alias here, and that is fine.
+    assert!(uses_anchors_or_aliases("note: 3 *4\n"));
+    // Nothing that looks like a sigil in a value position.
+    assert!(!uses_anchors_or_aliases("findings:\n  - severity: high\n"));
+    assert!(!uses_anchors_or_aliases("note: 3 * 4\n"));
+}
+
 // ── csv ──────────────────────────────────────────────────────────────────────
 
 #[test]
