@@ -1654,15 +1654,67 @@ fn dispatch_persistence_flushes_buffered_io_without_a_watermark_change() {
     run_dispatch_persistence(&mut world);
     let _ = rx.try_recv().expect("first job");
 
-    // Watermark unchanged, but new buffered content ⇒ still flushed.
+    // Watermark unchanged and no heartbeat due, but new buffered content ⇒
+    // the lines are journaled WITHOUT a whole-window snapshot. Snapshotting
+    // per log-line batch deep-cloned the context several times per iteration.
     world
         .get_mut::<StageIoBuffer>(e)
         .unwrap()
         .logs
         .push((0, "late log".to_string()));
     run_dispatch_persistence(&mut world);
-    let job = snapshot_job(rx.try_recv().expect("append-triggered job"));
-    assert_eq!(job.log_appends, vec![(0, "late log".to_string())]);
+    match rx.try_recv().expect("append-triggered message") {
+        PersistMsg::StageLines {
+            run_id,
+            output_appends,
+            log_appends,
+        } => {
+            assert_eq!(run_id, "run-1");
+            assert!(output_appends.is_empty());
+            assert_eq!(log_appends, vec![(0, "late log".to_string())]);
+        }
+        PersistMsg::Snapshot(_) | PersistMsg::Append { .. } => {
+            panic!("buffered lines alone must not force a whole-window snapshot")
+        }
+    }
+    // The buffer was drained in place either way.
+    assert!(world.get::<StageIoBuffer>(e).unwrap().logs.is_empty());
+}
+
+/// Buffered lines when the heartbeat IS due ride the full snapshot rather
+/// than a lines-only message, so `updated_at` still advances.
+#[test]
+fn dispatch_persistence_appends_ride_the_snapshot_when_heartbeat_is_due() {
+    let (mut world, mut rx) = world_with_persistence();
+    let e = world
+        .spawn((
+            run_metadata(),
+            agent_state(),
+            conv_window(),
+            StageCursor { index: 0 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+            StageIoBuffer::default(),
+        ))
+        .id();
+
+    run_dispatch_persistence(&mut world);
+    let _ = rx.try_recv().expect("first job");
+
+    // Age the watermark past the heartbeat window, then buffer a line.
+    let stale = chrono::Utc::now().timestamp() - (PERSIST_HEARTBEAT_SECS + 1);
+    world
+        .get_mut::<PersistWatermark>(e)
+        .unwrap()
+        .backdate(stale);
+    world
+        .get_mut::<StageIoBuffer>(e)
+        .unwrap()
+        .logs
+        .push((0, "heartbeat log".to_string()));
+    run_dispatch_persistence(&mut world);
+    let job = snapshot_job(rx.try_recv().expect("heartbeat job"));
+    assert_eq!(job.log_appends, vec![(0, "heartbeat log".to_string())]);
 }
 
 #[test]
@@ -1762,6 +1814,50 @@ fn dispatch_persistence_persists_taint_audit_when_the_gate_has_events() {
     let (idx, json) = job.taint_audit.expect("taint audit persisted");
     assert_eq!(idx, 1);
     assert!(json.contains("shell"));
+}
+
+/// An unchanged audit log is not re-serialized on the next snapshot: the file
+/// on disk is already current, and rewriting it every heartbeat was an
+/// O(events) allocation that grew with the run.
+#[test]
+fn dispatch_persistence_taint_audit_is_not_rewritten_when_unchanged() {
+    let (mut world, mut prx) = world_with_persistence();
+    let (jtx, _jrx) = mpsc::unbounded_channel();
+    world.insert_resource(ToolServiceRes(std::sync::Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    let e = world
+        .spawn((
+            run_metadata(),
+            agent_state(),
+            infer_with(vec![tc("c_shell", "shell")]),
+            tainted_conv_window(),
+            ReadyForTools,
+            enabled_gate(),
+            StageCursor { index: 1 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+        ))
+        .id();
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+    run_dispatch_persistence(&mut world);
+    let first = snapshot_job(prx.try_recv().expect("first job"));
+    assert!(first.taint_audit.is_some(), "first write carries the audit");
+
+    // Force a heartbeat snapshot with no new gate events: the audit rides
+    // along exactly once.
+    let stale = chrono::Utc::now().timestamp() - (PERSIST_HEARTBEAT_SECS + 1);
+    world
+        .get_mut::<PersistWatermark>(e)
+        .unwrap()
+        .backdate(stale);
+    run_dispatch_persistence(&mut world);
+    let second = snapshot_job(prx.try_recv().expect("heartbeat job"));
+    assert!(
+        second.taint_audit.is_none(),
+        "an unchanged audit log is not re-serialized"
+    );
 }
 
 #[test]
@@ -2877,7 +2973,9 @@ fn append_msg(
             record,
             ack,
         } => (run_id, *record, ack),
-        PersistMsg::Snapshot(_) => panic!("expected an append on the lane"),
+        PersistMsg::Snapshot(_) | PersistMsg::StageLines { .. } => {
+            panic!("expected an append on the lane")
+        }
     }
 }
 
@@ -8372,7 +8470,9 @@ fn world_with_persistence() -> (World, mpsc::UnboundedReceiver<PersistMsg>) {
 fn snapshot_job(msg: PersistMsg) -> PersistJob {
     match msg {
         PersistMsg::Snapshot(job) => *job,
-        PersistMsg::Append { .. } => panic!("expected a snapshot on the lane"),
+        PersistMsg::Append { .. } | PersistMsg::StageLines { .. } => {
+            panic!("expected a snapshot on the lane")
+        }
     }
 }
 

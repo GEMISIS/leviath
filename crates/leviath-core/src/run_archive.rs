@@ -342,6 +342,137 @@ pub fn diff_context(prev: &ContextSnapshot, next: &ContextSnapshot) -> ContextDe
     }
 }
 
+// ─── digest-based diffing ───────────────────────────────────────────────────
+//
+// `diff_context` needs the previous snapshot only to answer two questions per
+// region: "did anything change?" and "did it change by appending at the tail?".
+// A per-entry fingerprint answers both, so the writer can retain this digest
+// instead of a full copy of every live run's context window (which doubled the
+// per-run resident cost of the persistence lane).
+
+/// Fingerprint of one region: everything `diff_context` compares except the
+/// entry contents themselves, which are folded into per-entry hashes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegionDigest {
+    /// The region name.
+    pub name: String,
+    /// The region's stringified kind.
+    pub kind: String,
+    /// The region's token count at digest time.
+    pub current_tokens: usize,
+    /// The region's token budget at digest time.
+    pub max_tokens: usize,
+    /// One hash per entry, in order.
+    pub entries: Vec<u64>,
+}
+
+/// Fingerprint of a whole context window, cheap to retain per live run.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ContextDigest {
+    /// Per-region fingerprints, in snapshot order.
+    pub regions: Vec<RegionDigest>,
+}
+
+/// Hash one region entry. Every field participates: two entries that differ
+/// anywhere must digest differently, or a real change would be recorded as
+/// "unchanged" and the folded archive would silently drift from the run.
+fn entry_digest(entry: &RegionEntrySnapshot) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    entry.content.hash(&mut hasher);
+    entry.tokens.hash(&mut hasher);
+    entry.key.hash(&mut hasher);
+    // kind / metadata / taint are small enums and values without a Hash impl;
+    // their serialized form is tiny next to `content` and hashes faithfully.
+    serde_json::to_string(&entry.kind)
+        .expect("EntryKind always serializes")
+        .hash(&mut hasher);
+    serde_json::to_string(&entry.metadata)
+        .expect("entry metadata always serializes")
+        .hash(&mut hasher);
+    serde_json::to_string(&entry.taint)
+        .expect("taint always serializes")
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Compute the retained fingerprint of `snapshot`.
+pub fn digest_context(snapshot: &ContextSnapshot) -> ContextDigest {
+    ContextDigest {
+        regions: snapshot
+            .regions
+            .iter()
+            .map(|r| RegionDigest {
+                name: r.name.clone(),
+                kind: r.kind.clone(),
+                current_tokens: r.current_tokens,
+                max_tokens: r.max_tokens,
+                entries: r.entries.iter().map(entry_digest).collect(),
+            })
+            .collect(),
+    }
+}
+
+/// Whether `prev`'s entry hashes are a prefix of `next`'s entries.
+fn is_prefix_digest(prev: &[u64], next: &[RegionEntrySnapshot]) -> bool {
+    prev.len() <= next.len()
+        && prev
+            .iter()
+            .zip(next)
+            .all(|(hash, entry)| *hash == entry_digest(entry))
+}
+
+/// [`diff_context`] against a retained [`ContextDigest`] instead of a full
+/// previous snapshot. Produces the same delta shapes for the same changes:
+/// unchanged regions emit nothing, tail growth becomes `Append`, everything
+/// else `Set`/`Clear`/`Remove`.
+pub fn diff_context_digest(prev: &ContextDigest, next: &ContextSnapshot) -> ContextDelta {
+    let mut regions = Vec::new();
+    for nr in &next.regions {
+        match prev.regions.iter().find(|r| r.name == nr.name) {
+            None => regions.push(RegionDelta::Set(nr.clone())),
+            Some(pr) => {
+                let unchanged = pr.kind == nr.kind
+                    && pr.max_tokens == nr.max_tokens
+                    && pr.current_tokens == nr.current_tokens
+                    && pr.entries.len() == nr.entries.len()
+                    && is_prefix_digest(&pr.entries, &nr.entries);
+                if unchanged {
+                    // emit nothing
+                } else if nr.entries.is_empty() && !pr.entries.is_empty() {
+                    regions.push(RegionDelta::Clear {
+                        name: nr.name.clone(),
+                    });
+                } else if pr.kind == nr.kind
+                    && pr.max_tokens == nr.max_tokens
+                    && is_prefix_digest(&pr.entries, &nr.entries)
+                {
+                    regions.push(RegionDelta::Append {
+                        name: nr.name.clone(),
+                        entries: nr.entries[pr.entries.len()..].to_vec(),
+                        current_tokens: nr.current_tokens,
+                    });
+                } else {
+                    regions.push(RegionDelta::Set(nr.clone()));
+                }
+            }
+        }
+    }
+    for pr in &prev.regions {
+        if !next.regions.iter().any(|r| r.name == pr.name) {
+            regions.push(RegionDelta::Remove {
+                name: pr.name.clone(),
+            });
+        }
+    }
+    ContextDelta {
+        stage_name: next.stage_name.clone(),
+        total_tokens: next.total_tokens,
+        max_tokens: next.max_tokens,
+        regions,
+    }
+}
+
 /// Apply a [`ContextDelta`] to `base` in place. Lenient: a delta referencing a
 /// region that isn't present is skipped rather than erroring, so folding never
 /// fails on a malformed diff.
@@ -940,6 +1071,128 @@ mod tests {
         let delta = diff_context(&a, &b);
         assert_eq!(region_delta_kind(&delta.regions[0]), "set");
         assert_diff_roundtrip(&a, &b);
+    }
+
+    // ── digest-based diffing ──
+    //
+    // `diff_context_digest(digest(a), b)` must produce the same delta as
+    // `diff_context(a, b)` for every shape: the persistence lane retains only
+    // the digest, and any divergence would silently corrupt the archive.
+
+    fn assert_digest_matches_full_diff(a: &ContextSnapshot, b: &ContextSnapshot) {
+        let via_digest = diff_context_digest(&digest_context(a), b);
+        assert_eq!(via_digest, diff_context(a, b));
+        // And the digest-produced delta still round-trips.
+        let mut base = a.clone();
+        apply_delta(&mut base, &via_digest);
+        assert_eq!(&base, b);
+    }
+
+    #[test]
+    fn digest_diff_append_only_growth_is_compact() {
+        let a = snapshot("s1", vec![region("conv", vec![entry("hi", 1)])]);
+        let b = snapshot(
+            "s1",
+            vec![region("conv", vec![entry("hi", 1), entry("there", 2)])],
+        );
+        let delta = diff_context_digest(&digest_context(&a), &b);
+        assert_eq!(region_delta_kind(&delta.regions[0]), "append");
+        assert_digest_matches_full_diff(&a, &b);
+    }
+
+    #[test]
+    fn digest_diff_new_cleared_removed_and_rewritten_regions() {
+        let a = snapshot(
+            "s1",
+            vec![
+                region("conv", vec![entry("hi", 1)]),
+                region("gone", vec![entry("bye", 1)]),
+                region("wiped", vec![entry("w", 1)]),
+                region("rewritten", vec![entry("old", 1)]),
+            ],
+        );
+        let b = snapshot(
+            "s1",
+            vec![
+                region("conv", vec![entry("hi", 1)]),
+                region("wiped", vec![]),
+                region("rewritten", vec![entry("new", 1)]),
+                region("fresh", vec![entry("f", 2)]),
+            ],
+        );
+        let delta = diff_context_digest(&digest_context(&a), &b);
+        let kinds: Vec<_> = delta.regions.iter().map(region_delta_kind).collect();
+        assert_eq!(kinds, vec!["clear", "set", "set", "remove"]);
+        assert_digest_matches_full_diff(&a, &b);
+    }
+
+    #[test]
+    fn digest_diff_unchanged_region_emits_nothing() {
+        let a = snapshot("s1", vec![region("conv", vec![entry("hi", 1)])]);
+        let delta = diff_context_digest(&digest_context(&a), &a.clone());
+        assert!(delta.regions.is_empty());
+        assert_digest_matches_full_diff(&a, &a.clone());
+    }
+
+    #[test]
+    fn digest_diff_kind_change_is_set_not_append() {
+        let a = snapshot("s1", vec![region("conv", vec![entry("hi", 1)])]);
+        let mut grown = region("conv", vec![entry("hi", 1), entry("more", 1)]);
+        grown.kind = "sliding".to_string();
+        let b = snapshot("s1", vec![grown]);
+        let delta = diff_context_digest(&digest_context(&a), &b);
+        assert_eq!(region_delta_kind(&delta.regions[0]), "set");
+        assert_digest_matches_full_diff(&a, &b);
+    }
+
+    /// A token-count change with identical entries is still an (empty) Append
+    /// carrying the new count, exactly as the full diff records it.
+    #[test]
+    fn digest_diff_token_recount_is_an_empty_append() {
+        let a = snapshot("s1", vec![region("conv", vec![entry("hi", 1)])]);
+        let mut recounted = region("conv", vec![entry("hi", 1)]);
+        recounted.current_tokens = 42;
+        let b = snapshot("s1", vec![recounted]);
+        let delta = diff_context_digest(&digest_context(&a), &b);
+        assert_eq!(region_delta_kind(&delta.regions[0]), "append");
+        assert_digest_matches_full_diff(&a, &b);
+    }
+
+    /// Every field of an entry participates in its digest: a change anywhere
+    /// must change the hash, or a real edit would fold as "unchanged".
+    #[test]
+    fn entry_digest_covers_every_field() {
+        let base = entry("text", 1);
+        let variants = [
+            entry("other", 1),
+            entry("text", 2),
+            RegionEntrySnapshot {
+                key: Some("k".to_string()),
+                ..entry("text", 1)
+            },
+            RegionEntrySnapshot {
+                metadata: Some(serde_json::json!({"a": 1})),
+                ..entry("text", 1)
+            },
+            RegionEntrySnapshot {
+                kind: crate::region::EntryKind::ToolResult {
+                    tool_call_id: "c1".to_string(),
+                    tool_name: "shell".to_string(),
+                    is_error: false,
+                },
+                ..entry("text", 1)
+            },
+        ];
+        let base_hash = entry_digest(&base);
+        for variant in &variants {
+            assert_ne!(
+                entry_digest(variant),
+                base_hash,
+                "field change must change the digest: {variant:?}"
+            );
+        }
+        // And digesting the same entry twice is stable.
+        assert_eq!(entry_digest(&base), entry_digest(&entry("text", 1)));
     }
 
     #[test]
