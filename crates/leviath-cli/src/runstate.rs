@@ -1910,7 +1910,15 @@ mod tests {
             assert_eq!(listed.len(), 2);
             assert_eq!(listed[0].run_id, "cached-run-2", "newest first");
 
+            // A run dir with a garbled meta.json is skipped, not fatal - and
+            // skipped cheaply on every later tick (the negative result is
+            // cached until the file changes).
+            std::fs::create_dir_all(run_dir("garbled-run")).unwrap();
+            std::fs::write(run_dir("garbled-run").join("meta.json"), "not json {{").unwrap();
+            assert_eq!(list_runs_cached(&mut metas).len(), 2);
+
             // A run whose dir disappears falls out of the cached listing.
+            std::fs::remove_dir_all(run_dir("garbled-run")).unwrap();
             std::fs::remove_dir_all(run_dir("cached-run")).unwrap();
             std::fs::remove_dir_all(run_dir("cached-run-2")).unwrap();
             assert!(list_runs_cached(&mut metas).is_empty());
