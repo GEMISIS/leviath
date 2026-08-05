@@ -451,25 +451,50 @@ fn start_worker(
 /// The fallback stays because it costs nothing and an existing blueprint that
 /// happens to end on a text turn keeps working. A blueprint that wants the
 /// guarantee sets `require_output` on its worker stage.
+///
+/// A worker whose stage set `require_output` and that finished without one is
+/// reported as a **failure**, not as a success with empty content. It reached
+/// `Complete` either way - the enforcement loop proceeds rather than stranding
+/// the run, and a worker that burns its iterations against a validator it cannot
+/// satisfy ends the same way. Counting that as success is how a fan-out reports
+/// "10 succeeded, 0 failed" over ten empty sections, which is worse than an
+/// error: the merge stage cannot tell an empty answer from a missing one, so it
+/// writes a confident merge of nothing.
 fn worker_terminal_result(world: &World, worker: Entity) -> Option<Result<String, String>> {
     match agent_status(world, worker) {
         None => Some(Err("worker vanished".to_string())),
         Some(AgentStatus::Complete) => {
-            let submitted = world
+            match world
                 .get::<crate::persistence::FinalOutput>(worker)
-                .map(|o| o.0.content.clone());
-            let content = submitted.unwrap_or_else(|| {
-                world
+                .map(|o| o.0.content.clone())
+            {
+                Some(content) => Some(Ok(content)),
+                None if worker_requires_output(world, worker) => Some(Err(
+                    "worker finished without the final output its stage requires".to_string(),
+                )),
+                None => Some(Ok(world
                     .get::<InferenceResult>(worker)
                     .map(|r| r.response.clone())
-                    .unwrap_or_default()
-            });
-            Some(Ok(content))
+                    .unwrap_or_default())),
+            }
         }
         Some(AgentStatus::Error { message }) => Some(Err(message)),
         Some(AgentStatus::Cancelled) => Some(Err("worker cancelled".to_string())),
         Some(_) => None,
     }
+}
+
+/// Whether the stage this worker is sitting in demands a final output.
+fn worker_requires_output(world: &World, worker: Entity) -> bool {
+    let Some(bp) = world.get::<AgentBlueprint>(worker) else {
+        return false;
+    };
+    let Some(cursor) = world.get::<StageCursor>(worker) else {
+        return false;
+    };
+    bp.0.stages
+        .get(cursor.index)
+        .is_some_and(|s| s.require_output)
 }
 
 /// Smallest per-worker share worth writing, in bytes.
@@ -1279,6 +1304,91 @@ mod tests {
         assert_eq!(
             worker_terminal_result(&world, worker),
             Some(Ok("the old behaviour".to_string()))
+        );
+    }
+
+    /// Spawn a worker sitting in a stage that demands a final output.
+    fn spawn_required_output_worker(world: &mut World) -> Entity {
+        let mut stage = Stage::new(
+            "w".to_string(),
+            ModelConfig::new("script".to_string(), "m".to_string()),
+        );
+        stage.require_output = true;
+        let layout = ContextLayout::new(
+            vec![RegionDefinition::new(
+                "conversation".to_string(),
+                RegionKind::Clearable,
+                10_000,
+            )],
+            12_000,
+        );
+        let bp = Blueprint::new("w".to_string(), "d".to_string(), vec![stage], layout);
+        let worker = world
+            .spawn((parent_state(), AgentBlueprint(bp), StageCursor { index: 0 }))
+            .id();
+        set_status(world, worker, AgentStatus::Complete);
+        worker
+    }
+
+    /// The fan-out reported "10 succeeded, 0 failed" over ten empty sections,
+    /// because a worker that reached `Complete` without its required output was
+    /// read as a success with nothing to say. The merge stage cannot tell those
+    /// apart, so it writes a confident merge of nothing.
+    ///
+    /// This is the ordinary way it happens, not an edge case: a worker that
+    /// cannot satisfy its validator retries until its iterations run out and
+    /// leaves on the max-iterations path, which ends at `Complete`.
+    #[test]
+    fn a_worker_that_owes_an_output_and_has_none_is_a_failure() {
+        let mut world = World::new();
+        let worker = spawn_required_output_worker(&mut world);
+
+        match worker_terminal_result(&world, worker) {
+            Some(Err(reason)) => assert!(
+                reason.contains("without the final output"),
+                "the merge has to be told why: {reason}"
+            ),
+            other => panic!("expected a failure, got {other:?}"),
+        }
+    }
+
+    /// The same worker, having actually submitted: its answer is what it
+    /// contributes, and the requirement is discharged.
+    #[test]
+    fn a_worker_that_owes_an_output_and_has_one_contributes_it() {
+        let mut world = World::new();
+        let worker = spawn_required_output_worker(&mut world);
+        world
+            .entity_mut(worker)
+            .insert(crate::persistence::FinalOutput(
+                leviath_core::output::FinalOutput {
+                    content: "the rows".to_string(),
+                    format: Some("csv".to_string()),
+                    stage: "w".to_string(),
+                    submitted_at: 0,
+                    truncated: false,
+                    artifacts: vec![],
+                },
+            ));
+
+        assert_eq!(
+            worker_terminal_result(&world, worker),
+            Some(Ok("the rows".to_string()))
+        );
+    }
+
+    /// A blueprint that never opted in keeps the old fallback, empty text and
+    /// all. Turning that into a failure would break every fan-out written before
+    /// `require_output` existed.
+    #[test]
+    fn a_worker_that_owes_nothing_keeps_the_last_turn_fallback() {
+        let mut world = World::new();
+        let worker = world.spawn(parent_state()).id();
+        set_status(&mut world, worker, AgentStatus::Complete);
+
+        assert_eq!(
+            worker_terminal_result(&world, worker),
+            Some(Ok(String::new()))
         );
     }
 

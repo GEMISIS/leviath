@@ -776,9 +776,6 @@ pub fn require_final_output(
         agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
-        if outcome.is_some() {
-            continue; // error / max-iterations transition takes precedence
-        }
         let stage = &bp.0.stages[cursor.index];
         if !stage.require_output {
             continue;
@@ -786,6 +783,23 @@ pub fn require_final_output(
         // An output carried in from an earlier stage does not discharge this
         // stage's obligation.
         if submitted.is_some_and(|o| o.0.stage == state.current_stage) {
+            continue;
+        }
+        // An error or max-iterations transition takes precedence over the nudge:
+        // the stage is already ending and holding it here would fight that. The
+        // *flag* still has to be honest though. A model that cannot satisfy its
+        // validator burns every iteration retrying and leaves on that path, so
+        // this is the ordinary way a required output goes missing, not an edge
+        // case. Left unrecorded the run reports `output_forced: 0`, which reads
+        // as "nothing was required" rather than "the requirement went unmet".
+        if outcome.is_some() {
+            tracing::warn!(
+                stage = %stage.name,
+                "stage ended without its required final output"
+            );
+            if let Some(flags) = flags.as_mut() {
+                flags.0.output_forced += 1;
+            }
             continue;
         }
         let cap = stage
