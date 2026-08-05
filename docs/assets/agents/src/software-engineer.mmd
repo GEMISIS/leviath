@@ -3,8 +3,9 @@ flowchart TD
     plan{{plan}}
     prototype{{prototype}}
     implement{{implement}}
-    review(review)
+    review{{review}}
     reassess(reassess)
+    summary(summary)
     discover --> plan
     plan --> implement
     plan --> prototype
@@ -15,6 +16,7 @@ flowchart TD
     implement --> review
     implement --> plan
     implement -. stuck .-> reassess
+    review --> summary
     review --> implement
     reassess --> implement
     classDef entry stroke-width:3px

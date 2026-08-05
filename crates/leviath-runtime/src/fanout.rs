@@ -417,8 +417,8 @@ fn start_worker(
 /// Otherwise this falls back to the text of its last assistant message, which is
 /// what every worker used to contribute and is usually wrong: a worker whose
 /// final turn was a tool call has no trailing text, so the merge stage received
-/// an empty string. The shipped `parallel-fixer` blueprint tells its worker to
-/// "report exactly which file(s) you changed", into that same channel.
+/// an empty string, which is silently indistinguishable from a worker that had
+/// nothing to say.
 ///
 /// The fallback stays because it costs nothing and an existing blueprint that
 /// happens to end on a text turn keeps working. A blueprint that wants the
@@ -1153,8 +1153,8 @@ mod tests {
     /// The bug this feature exists to fix. A worker's contribution used to be
     /// the text of its last assistant message, so a worker whose final turn was
     /// a tool call contributed an empty string - and the shipped
-    /// `parallel-fixer` tells its worker to "report exactly which file(s) you
-    /// changed" into exactly that channel.
+    /// a worker told to report what it did writes that report into exactly that
+    /// channel.
     #[test]
     fn a_submitted_answer_beats_the_last_assistant_text() {
         let mut world = World::new();

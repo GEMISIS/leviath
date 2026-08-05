@@ -3,10 +3,12 @@ flowchart LR
     analyze{{analyze}}
     script{{script}}
     report(report)
+    summary(summary)
     ingest --> analyze
     analyze --> script
     analyze --> report
     script --> script
     script --> analyze
+    report --> summary
     classDef entry stroke-width:3px
     class ingest entry
