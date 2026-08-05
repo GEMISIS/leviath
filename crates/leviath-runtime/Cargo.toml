@@ -16,7 +16,7 @@ readme = "README.md"
 # The daemon's control transport (unix socket / named pipe, auth token, pid
 # file). Off by default so embedders compile a runtime with no daemon
 # machinery; the CLI turns it on.
-control-socket = ["dep:rand", "dep:leviath-sys"]
+control-socket = ["dep:rand"]
 
 [dependencies]
 leviath-core = { workspace = true }
@@ -26,9 +26,11 @@ leviath-scripting = { workspace = true }
 # Control-channel token generation (control-socket only).
 rand = { workspace = true, optional = true }
 leviath-providers = { workspace = true }
-# For the control socket's file permissions and peer-uid check. `leviath-sys`
-# has no leviath dependencies of its own, so this adds no cycle.
-leviath-sys = { workspace = true, optional = true }
+# File permissions (the persistence lane writes every run file 0600) and the
+# control socket's peer-uid check. Not optional: persistence is compiled into
+# every build, including an embedder's. `leviath-sys` has no leviath
+# dependencies of its own, so this adds no cycle.
+leviath-sys = { workspace = true }
 leviath-tools = { workspace = true }
 bevy_ecs = { workspace = true }
 bevy_tasks = { workspace = true }

@@ -410,7 +410,25 @@ async fn append_stage_line(run_dir: &Path, stage_idx: usize, file: &str, line: &
 /// filesystem, so a reader never sees a half-written file). Best-effort.
 async fn write_bytes_atomic(path: &Path, bytes: &[u8], run_id: &str) {
     let tmp = path.with_extension("json.tmp");
-    if let Err(e) = tokio::fs::write(&tmp, bytes).await {
+    // `write_private`, not a plain write: these files carry the run's task
+    // prompt, its conversation, its tool output, and - in `meta.json` - the
+    // webhook signing secret. A plain write lands them at the umask default,
+    // usually 0644, leaving the 0700 on the enclosing run directory as the only
+    // thing between them and any other user. The CLI's writer was fixed for
+    // exactly this reason; the daemon's, which is what actually writes these
+    // files during a run, was missed.
+    //
+    // Blocking, so it goes to a blocking thread rather than stalling the
+    // persistence lane. The alternative is a per-platform mode dance here, and
+    // `leviath-sys` already owns that (including the Windows `icacls` path).
+    let (tmp_for_write, bytes) = (tmp.clone(), bytes.to_vec());
+    let written =
+        tokio::task::spawn_blocking(move || leviath_sys::write_private(&tmp_for_write, &bytes))
+            .await;
+    if let Err(e) = written
+        .map_err(|e| std::io::Error::other(e.to_string()))
+        .and_then(|r| r)
+    {
         tracing::warn!(run_id = %run_id, error = %e, "persistence: temp write failed");
         return;
     }
@@ -520,6 +538,73 @@ mod tests {
             context: ctx,
             ..job(run_id)
         }
+    }
+
+    /// Every file the persistence lane writes is private to this user.
+    ///
+    /// These carry the run's task prompt, its conversation, its tool output, and
+    /// - in `meta.json` - the webhook signing secret. A plain write lands them
+    /// at the umask default, usually 0644, leaving the 0700 on the run directory
+    /// as the only thing between them and another user. Defence in depth is the
+    /// point of a mode on the file itself.
+    ///
+    /// The assertion is Unix-only because that is where modes exist; the write
+    /// path itself runs on every platform, and on Windows `leviath-sys` applies
+    /// the equivalent ACL.
+    #[tokio::test]
+    async fn every_persisted_run_file_is_private_to_this_user() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut j = job("run-perms");
+        j.final_output = Some("the answer".to_string());
+        write_snapshot(dir.path(), &j, "m", "w", None).await;
+
+        let run_dir = dir.path().join("run-perms");
+        for name in ["meta.json", "context.json", leviath_core::FINAL_OUTPUT_FILE] {
+            let path = run_dir.join(name);
+            assert!(path.exists(), "{name} was written");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&path)
+                    .expect("written file")
+                    .permissions()
+                    .mode()
+                    & 0o777;
+                assert_eq!(mode, 0o600, "{name} should be private, got {mode:o}");
+            }
+        }
+    }
+
+    /// The sidecar holds the answer's bytes verbatim, with no wrapper, so
+    /// serving it is a read.
+    #[tokio::test]
+    async fn the_final_output_sidecar_holds_the_answer_verbatim() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut j = job("run-answer");
+        j.final_output = Some("metric,value\nrows,2\n".to_string());
+        write_snapshot(dir.path(), &j, "m", "w", None).await;
+
+        let written = std::fs::read_to_string(
+            dir.path()
+                .join("run-answer")
+                .join(leviath_core::FINAL_OUTPUT_FILE),
+        )
+        .expect("sidecar written");
+        assert_eq!(written, "metric,value\nrows,2\n");
+    }
+
+    /// A job with no answer writes no sidecar, rather than an empty file that
+    /// would read as "the agent answered with nothing".
+    #[tokio::test]
+    async fn no_answer_writes_no_sidecar() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        write_snapshot(dir.path(), &job("run-silent"), "m", "w", None).await;
+        assert!(
+            !dir.path()
+                .join("run-silent")
+                .join(leviath_core::FINAL_OUTPUT_FILE)
+                .exists()
+        );
     }
 
     #[tokio::test]
