@@ -11,7 +11,11 @@ metrics on both sides or the comparison is meaningless.
 - `leviath_monitor.py` - samples one process (CPU, every memory metric the OS
   provides, active session count) on an interval, writes a CSV per sample and
   a three-panel PNG on exit. `--pid` pins an exact process; the default finds
-  the daemon by name.
+  the daemon by name. On exit it also reconstructs the *exact* session
+  concurrency from each run directory's creation time and its `meta.json`'s
+  last write (sub-second precision), because interval sampling misses any run
+  shorter than the interval; the graph shows both curves and the intervals
+  land in a `*_runs.csv`.
 - `ws_churn_test.py` - opens batches of WebSocket connections against
   `lev serve` and drops them abruptly (SO_LINGER 0, like a killed browser
   tab), printing the server's RSS between batches. A per-connection leak shows
@@ -42,6 +46,13 @@ folklore:
 - **macOS**: an idle leviath daemon measured 292.8 MB RSS while
   `vmmap --summary` reported a 21.7 MB physical footprint - the difference
   was exactly the `MALLOC_SMALL (empty)` reclaimable regions.
+- **macOS, second layer**: physical footprint itself still counts pages the
+  allocator returned via `MADV_FREE_REUSABLE`. A settled post-burst daemon
+  measured 50 MB footprint of which the `/usr/bin/footprint` category table
+  flagged 48 MB as `Reclaimable` - pages the kernel repossesses under
+  pressure, holding no data (the in-process reachable heap at that moment was
+  ~2 MB). So on macOS the reclaimable column is the twin of Linux's
+  `LazyFree` and gets subtracted the same way.
 
 The monitor therefore records every raw metric and one corrected series:
 
@@ -50,20 +61,29 @@ The monitor therefore records every raw metric and one corrected series:
 | `rss_mb` | psutil RSS | psutil RSS | psutil RSS (working set) |
 | `pss_mb` | - | `smaps_rollup` `Pss` | - |
 | `uss_mb` | - | `Private_Clean + Private_Dirty` | psutil USS |
-| `lazy_free_mb` | - | `smaps_rollup` `LazyFree` | - |
-| `live_mb` | physical footprint (`/usr/bin/footprint`) | `Pss - LazyFree` | USS |
+| `lazy_free_mb` | `footprint` `Reclaimable` | `smaps_rollup` `LazyFree` | - |
+| `live_mb` | footprint minus reclaimable | `Pss - LazyFree` | USS |
 
 `live_mb` is the headline series: the memory the process actually holds.
 
 - macOS physical footprint is the kernel's own accounting (what Activity
-  Monitor's Memory column shows) and already excludes lazily-freed pages.
-  psutil cannot provide USS/PSS on macOS without root, and `top` costs over
-  a second of system time per query; `/usr/bin/footprint` answers in ~30 ms
-  unprivileged.
+  Monitor's Memory column shows); subtracting its reclaimable portion removes
+  the lazily-freed pages it still counts. psutil cannot provide USS/PSS on
+  macOS without root, and `top` costs over a second of system time per query;
+  `/usr/bin/footprint` answers in ~30 ms unprivileged.
 - On Linux, `LazyFree` pages are private to the freeing process, so
   subtracting the field from PSS is exact, not an estimate.
 - Windows decommits freed heap immediately (no lazy-free mechanism), so USS
   needs no correction.
+
+One attribution trap worth knowing when you point Apple's tools at `lev`
+yourself: mimalloc (the default allocator) tags its arena mappings with VM
+tag 100, which `vmmap`, `footprint`, and Instruments all label
+`IOAccelerator` as if the process held GPU driver memory. It does not - a
+headless daemon never loads the AGX Metal driver. Launching with
+`MIMALLOC_OS_TAG=240` relabels the very same regions `app-specific tag 1`,
+which is how we proved the post-burst "IOAccelerator" residue is just empty,
+reclaimable heap pages.
 
 An empty CSV cell means the OS cannot provide that metric. Nothing is ever
 approximated from another column.
