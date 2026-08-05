@@ -84,6 +84,20 @@ pub struct AwaitingInteraction;
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct GateAutoApprove;
 
+/// The output validators this agent's blueprint names, compiled, keyed by the
+/// path written in the blueprint.
+///
+/// Compiled once at spawn (a broken script is a spawn error, not a surprise at
+/// the end of a long run) and looked up when a submission arrives. Absent when
+/// the blueprint names none, which is nearly every agent.
+#[derive(Component, Clone, Default)]
+pub struct OutputValidators(
+    pub  std::collections::HashMap<
+        String,
+        std::sync::Arc<leviath_scripting::output_validator::OutputValidator>,
+    >,
+);
+
 /// `--yolo`'s counterpart for blueprint-declared interaction points: approve
 /// them without opening a prompt.
 ///

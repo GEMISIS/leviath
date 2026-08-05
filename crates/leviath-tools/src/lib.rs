@@ -17,7 +17,7 @@ mod context;
 mod defs;
 mod exec;
 mod platform;
-mod validate;
+pub mod validate;
 pub use context::*;
 pub use defs::{SUBAGENT_TOOLS, is_subagent_tool, submit_output_description};
 pub use platform::*;

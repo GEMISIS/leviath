@@ -103,6 +103,7 @@ impl SpawnSpec {
             instructions,
             example: None,
             schema: None,
+            validator: None,
         });
         self
     }

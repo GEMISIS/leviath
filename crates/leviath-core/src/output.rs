@@ -69,16 +69,30 @@ pub struct OutputSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub example: Option<String>,
 
-    /// A JSON Schema. **The only machine check in this module.** When present,
-    /// a submission is parsed as JSON and validated against it, and a failure is
-    /// refused back to the model so it can correct itself. When absent - the
-    /// common case - the content is never inspected at all.
+    /// A JSON Schema describing the answer's shape. When present, a submission
+    /// is parsed as JSON and validated against it, and a failure is refused back
+    /// to the model so it can correct itself.
     ///
-    /// Note this is a separate key rather than something inferred from
-    /// `format`. Setting `format = "json"` validates nothing; supplying a schema
-    /// does.
+    /// Separate from `format` because they answer different questions.
+    /// `format = "json"` asks "does this parse as JSON"; a schema asks "does the
+    /// parsed document have the fields I need". A format check comes free for
+    /// the handful of formats the engine can parse; shape is only ever checked
+    /// when someone writes a schema down.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<serde_json::Value>,
+
+    /// A `.rhai` script that decides whether an answer is valid, as a path
+    /// relative to the blueprint directory.
+    ///
+    /// For a format the engine cannot parse and a shape a JSON Schema cannot
+    /// describe. The script defines `fn validate(content)` and returns `()` when
+    /// the answer is fine or a string saying what is wrong; the string goes back
+    /// to the agent as the same refusal a schema failure produces.
+    ///
+    /// Written for the format it accompanies, so a caller who overrides the
+    /// format retires it along with the schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validator: Option<String>,
 }
 
 impl OutputSpec {
@@ -89,6 +103,7 @@ impl OutputSpec {
             && self.instructions.is_none()
             && self.example.is_none()
             && self.schema.is_none()
+            && self.validator.is_none()
     }
 }
 
@@ -243,19 +258,29 @@ pub fn resolve_output_spec(
             .or_else(|| agent.and_then(&get))
     }
 
-    // A caller-named format retires a schema the caller did not also supply.
-    let caller_reshaped = request.is_some_and(|r| r.format.is_some() && r.schema.is_none());
-    let schema = if caller_reshaped {
-        None
-    } else {
-        field(agent, stage, request, |s| s.schema.clone())
+    // A shape check is written for one format. When a caller asks for a
+    // different one, a check the blueprint declared no longer describes what is
+    // being produced, so it is retired rather than applied to something it was
+    // never about. A caller who wants their new shape checked supplies their own.
+    let declared_format = field(agent, stage, None, |s| s.format.clone());
+    let requested_format = request.and_then(|r| r.format.clone());
+    let reshaped = requested_format.is_some() && requested_format != declared_format;
+
+    let shape_field = |get: fn(&OutputSpec) -> Option<serde_json::Value>| match reshaped {
+        true => request.and_then(get),
+        false => field(agent, stage, request, get),
+    };
+    let validator = match reshaped {
+        true => request.and_then(|r| r.validator.clone()),
+        false => field(agent, stage, request, |s| s.validator.clone()),
     };
 
     Some(OutputSpec {
         format: field(agent, stage, request, |s| s.format.clone()),
         instructions: field(agent, stage, request, |s| s.instructions.clone()),
         example: field(agent, stage, request, |s| s.example.clone()),
-        schema,
+        schema: shape_field(|s| s.schema.clone()),
+        validator,
     })
 }
 
@@ -335,6 +360,7 @@ mod tests {
             instructions: Some("agent guidance".to_string()),
             example: Some("agent example".to_string()),
             schema: None,
+            validator: None,
         };
         let stage = OutputSpec {
             instructions: Some("stage guidance".to_string()),
@@ -354,6 +380,59 @@ mod tests {
         let resolved =
             resolve_output_spec(None, Some(&stage), None).expect("the stage asked for one");
         assert_eq!(resolved.format.as_deref(), Some("a2ui"));
+    }
+
+    /// The bug this replaced: naming the format the blueprint already declared
+    /// dropped the schema, so a caller who asked for exactly what was on offer
+    /// lost the check that came with it.
+    #[test]
+    fn re_stating_the_declared_format_keeps_its_shape_checks() {
+        let agent = OutputSpec {
+            format: Some("json".to_string()),
+            schema: Some(json!({"type": "object"})),
+            validator: Some("v.rhai".to_string()),
+            ..OutputSpec::default()
+        };
+        let request = spec(Some("json"), None);
+        let resolved = resolve_output_spec(Some(&agent), None, Some(&request))
+            .expect("the agent asked for one");
+        assert_eq!(resolved.schema, Some(json!({"type": "object"})));
+        assert_eq!(resolved.validator.as_deref(), Some("v.rhai"));
+    }
+
+    /// A Rhai validator is written for one format, so it retires with the schema
+    /// when a caller asks for a different one.
+    #[test]
+    fn reshaping_retires_the_validator_too() {
+        let agent = OutputSpec {
+            format: Some("a2ui".to_string()),
+            validator: Some("a2ui.rhai".to_string()),
+            ..OutputSpec::default()
+        };
+        let request = spec(Some("xml"), None);
+        let resolved = resolve_output_spec(Some(&agent), None, Some(&request))
+            .expect("the agent asked for one");
+        assert_eq!(resolved.format.as_deref(), Some("xml"));
+        assert_eq!(resolved.validator, None);
+    }
+
+    /// A caller that brings its own checks keeps them.
+    #[test]
+    fn a_caller_can_supply_shape_checks_with_its_own_format() {
+        let agent = OutputSpec {
+            format: Some("a2ui".to_string()),
+            validator: Some("a2ui.rhai".to_string()),
+            ..OutputSpec::default()
+        };
+        let request = OutputSpec {
+            format: Some("json".to_string()),
+            schema: Some(json!({"type": "array"})),
+            ..OutputSpec::default()
+        };
+        let resolved = resolve_output_spec(Some(&agent), None, Some(&request))
+            .expect("the agent asked for one");
+        assert_eq!(resolved.schema, Some(json!({"type": "array"})));
+        assert_eq!(resolved.validator, None, "the agent's own is still retired");
     }
 
     #[test]
@@ -430,6 +509,7 @@ mod tests {
             instructions: Some("One card per finding.".to_string()),
             example: Some("{\"root\": {}}".to_string()),
             schema: Some(json!({"type": "object"})),
+            validator: None,
         });
         assert!(described.contains("Return it in this format: a2ui."));
         assert!(described.contains("One card per finding."));

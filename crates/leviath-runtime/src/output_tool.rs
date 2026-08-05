@@ -63,6 +63,7 @@ pub fn is_output_tool(name: &str) -> bool {
 pub fn handle_output_tool(
     args: &serde_json::Value,
     spec: Option<&OutputSpec>,
+    validators: Option<&crate::components::OutputValidators>,
     stage: &str,
     now: i64,
     workdir: Option<&std::path::Path>,
@@ -79,8 +80,22 @@ pub fn handle_output_tool(
         );
     }
 
-    // The only inspection of the content anywhere, and only because an author
-    // asked for it by supplying a schema. A format label never reaches here.
+    // Is it the format it claims to be? Well-formedness only, and only for the
+    // handful of formats this crate can parse - a label it has never seen is
+    // carried through unchecked, which is the whole point of an opaque label.
+    // Runs before the schema check because "this is not even JSON" is a more
+    // useful thing to hear than a list of missing properties.
+    if let Some(format) = spec.and_then(|s| s.format.as_deref())
+        && let Err(reason) = leviath_tools::validate::format::check(Some(format), content)
+    {
+        return (
+            format!("[error] the final output is not valid {format}: {reason}"),
+            None,
+        );
+    }
+
+    // Does it have the shape the author asked for? Only when they supplied a
+    // schema to check against.
     if let Some(schema) = spec.and_then(|s| s.schema.as_ref()) {
         match leviath_tools::validate_output(schema, content) {
             leviath_tools::ArgValidation::Invalid(message) => return (message, None),
@@ -96,6 +111,31 @@ pub fn handle_output_tool(
                 );
             }
             leviath_tools::ArgValidation::Valid => {}
+        }
+    }
+
+    // An agent's own validator, for a format nothing here can parse and a shape
+    // no JSON Schema can describe. A broken script is reported as broken rather
+    // than treated as a rejection: reading it as "the answer is wrong" would
+    // burn the retry budget on a script bug and end the run with nothing.
+    if let Some(script) = spec.and_then(|s| s.validator.as_deref())
+        && let Some(validator) = validators.and_then(|v| v.0.get(script))
+    {
+        match leviath_scripting::output_validator::validate(validator, content) {
+            leviath_scripting::output_validator::Verdict::Invalid(reason) => {
+                return (
+                    format!("[error] the final output was rejected: {reason}"),
+                    None,
+                );
+            }
+            leviath_scripting::output_validator::Verdict::Unusable(reason) => {
+                tracing::warn!(
+                    stage = %stage,
+                    error = %reason,
+                    "output validator failed to run; recording the submission unchecked"
+                );
+            }
+            leviath_scripting::output_validator::Verdict::Valid => {}
         }
     }
 

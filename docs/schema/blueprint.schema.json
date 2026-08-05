@@ -151,7 +151,7 @@
       "properties": {
         "format": {
           "type": "string",
-          "description": "An opaque label, carried to the model and recorded beside the answer. Deliberately not an enum: \"markdown\", \"json\", \"a2ui\", a media type, and a format invented next week are all equally valid, because nothing in the engine interprets it. Consumers that render differently per format match on this string."
+          "description": "A label for the shape, carried to the model and recorded beside the answer. Deliberately not an enum: any value is valid, and one the engine has never seen is simply not parsed. json, xml, yaml, csv and toml get a free well-formedness check; anything else needs a validator to be checked at all."
         },
         "instructions": {
           "type": "string",
@@ -163,7 +163,11 @@
         },
         "schema": {
           "type": "object",
-          "description": "A JSON Schema. The only thing that ever inspects a submission, and only because you asked for it: setting format = \"json\" on its own validates nothing. A failing submission is refused back to the model to correct."
+          "description": "A JSON Schema describing the answer's shape. Separate from format, which asks only whether the answer parses. A failing submission is refused back to the model to correct."
+        },
+        "validator": {
+          "type": "string",
+          "description": "A .rhai script deciding whether an answer is valid, as a path relative to the blueprint directory. For a format the engine cannot parse and a shape a JSON Schema cannot describe. Defines fn validate(content), returning () when fine or a string saying what is wrong. Compiled at spawn, so a broken script fails fast."
         }
       }
     },

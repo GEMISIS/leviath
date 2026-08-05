@@ -54,6 +54,7 @@ fn a_submission_is_recorded_verbatim_and_mirrored_into_the_region() {
     let (ack, output) = handle_output_tool(
         &json!({"content": "Renamed two helpers and updated their callers."}),
         Some(&spec(Some("markdown"), None)),
+        None,
         "summary",
         1234,
         None,
@@ -81,6 +82,7 @@ fn an_unrecognized_format_is_carried_through_without_inspection() {
     let (_, output) = handle_output_tool(
         &json!({ "content": a2ui }),
         Some(&spec(Some("a2ui"), None)),
+        None,
         "summary",
         0,
         None,
@@ -99,6 +101,7 @@ fn a_format_with_no_schema_never_parses_the_content() {
     let (_, output) = handle_output_tool(
         &json!({"content": "<report><finding>one</finding></report>"}),
         Some(&spec(Some("xml"), None)),
+        None,
         "summary",
         0,
         None,
@@ -110,19 +113,36 @@ fn a_format_with_no_schema_never_parses_the_content() {
     );
 }
 
-/// Naming a format is not asking for validation. Only a schema is.
+/// Naming a format asks for well-formedness, not shape. `json` means "this must
+/// parse as JSON"; it does not mean "this must have the fields I wanted", which
+/// is what a schema is for.
 #[test]
-fn format_json_alone_validates_nothing() {
+fn a_format_checks_well_formedness_but_not_shape() {
     let mut w = win();
+    // Parses, but has nothing anyone asked for. Accepted: no schema was given.
     let (_, output) = handle_output_tool(
-        &json!({"content": "this is not JSON at all"}),
+        &json!({"content": r#"{"totally":"unexpected"}"#}),
         Some(&spec(Some("json"), None)),
+        None,
         "summary",
         0,
         None,
         &mut w,
     );
-    assert!(output.is_some(), "no schema means no check");
+    assert!(output.is_some(), "shape is not the format check's business");
+
+    // Does not parse. Refused, with no schema involved.
+    let (message, refused) = handle_output_tool(
+        &json!({"content": "this is not JSON at all"}),
+        Some(&spec(Some("json"), None)),
+        None,
+        "summary",
+        0,
+        None,
+        &mut w,
+    );
+    assert!(refused.is_none());
+    assert!(message.contains("not valid json"), "{message}");
 }
 
 #[test]
@@ -130,6 +150,7 @@ fn no_spec_at_all_still_records_an_answer() {
     let mut w = win();
     let (_, output) = handle_output_tool(
         &json!({"content": "done"}),
+        None,
         None,
         "summary",
         0,
@@ -152,6 +173,7 @@ fn a_submission_matching_its_schema_is_accepted() {
     let (_, output) = handle_output_tool(
         &json!({"content": r#"{"summary":"two files changed"}"#}),
         Some(&spec(Some("json"), Some(schema))),
+        None,
         "summary",
         0,
         None,
@@ -171,6 +193,7 @@ fn a_submission_violating_its_schema_is_refused_and_records_nothing() {
     let (message, output) = handle_output_tool(
         &json!({"content": r#"{"nope":1}"#}),
         Some(&spec(Some("json"), Some(schema))),
+        None,
         "summary",
         0,
         None,
@@ -193,6 +216,7 @@ fn content_that_is_not_json_fails_a_schema_check_with_a_readable_reason() {
     let (message, output) = handle_output_tool(
         &json!({"content": "plain prose"}),
         Some(&spec(None, Some(json!({"type": "object"})))),
+        None,
         "summary",
         0,
         None,
@@ -212,6 +236,7 @@ fn an_uncompilable_schema_records_the_submission_unchecked() {
         // A misspelled `type` is the schema this workspace already uses to mean
         // "will not compile" (a typo'd Rhai `@param n strng` produces exactly it).
         Some(&spec(None, Some(json!({"type": "strng"})))),
+        None,
         "summary",
         0,
         None,
@@ -223,7 +248,7 @@ fn an_uncompilable_schema_records_the_submission_unchecked() {
 #[test]
 fn a_missing_content_argument_is_refused() {
     let mut w = win();
-    let (message, output) = handle_output_tool(&json!({}), None, "summary", 0, None, &mut w);
+    let (message, output) = handle_output_tool(&json!({}), None, None, "summary", 0, None, &mut w);
     assert!(output.is_none());
     assert!(message.starts_with("[error]"), "{message}");
     assert!(message.contains("content"), "{message}");
@@ -235,6 +260,7 @@ fn a_blank_submission_is_refused() {
     for blank in ["", "   ", "\n\t "] {
         let (message, output) = handle_output_tool(
             &json!({ "content": blank }),
+            None,
             None,
             "summary",
             0,
@@ -252,6 +278,7 @@ fn an_oversized_submission_is_truncated_and_the_model_is_told() {
     let huge = "x".repeat(leviath_core::output::MAX_FINAL_OUTPUT_BYTES + 10);
     let (ack, output) = handle_output_tool(
         &json!({ "content": huge }),
+        None,
         None,
         "summary",
         0,
@@ -275,6 +302,7 @@ fn a_second_submission_replaces_the_first() {
     let (_, first) = handle_output_tool(
         &json!({"content": "draft"}),
         None,
+        None,
         "summary",
         1,
         None,
@@ -283,6 +311,7 @@ fn a_second_submission_replaces_the_first() {
     assert_eq!(first.expect("accepted").content, "draft");
     let (_, second) = handle_output_tool(
         &json!({"content": "final"}),
+        None,
         None,
         "summary",
         2,
@@ -301,6 +330,7 @@ fn a_window_without_the_region_still_records_the_output() {
     bare.add_region(Region::new("task".to_string(), RegionKind::Pinned, 1_000));
     let (_, output) = handle_output_tool(
         &json!({"content": "done"}),
+        None,
         None,
         "summary",
         0,
@@ -326,6 +356,7 @@ fn artifacts_inside_the_workdir_are_recorded() {
             "artifacts": ["results.csv", "notes/summary.md"],
         }),
         None,
+        None,
         "present",
         0,
         Some(dir.path()),
@@ -347,6 +378,7 @@ fn an_artifact_outside_the_workdir_refuses_the_whole_submission() {
     let (message, output) = handle_output_tool(
         &json!({ "content": "done", "artifacts": ["../../etc/passwd"] }),
         None,
+        None,
         "present",
         0,
         Some(dir.path()),
@@ -364,6 +396,7 @@ fn no_artifacts_argument_records_an_empty_list() {
     let (_, output) = handle_output_tool(
         &json!({ "content": "done" }),
         None,
+        None,
         "present",
         0,
         Some(dir.path()),
@@ -379,6 +412,7 @@ fn artifacts_with_no_workdir_are_refused() {
     let mut w = win();
     let (message, output) = handle_output_tool(
         &json!({ "content": "done", "artifacts": ["results.csv"] }),
+        None,
         None,
         "present",
         0,
@@ -400,6 +434,7 @@ fn a_long_answer_is_mirrored_as_a_bounded_preview() {
     let (_, output) = handle_output_tool(
         &json!({ "content": long }),
         None,
+        None,
         "summary",
         0,
         None,
@@ -418,4 +453,186 @@ fn a_long_answer_is_mirrored_as_a_bounded_preview() {
         region.content[0].content.contains("not in context"),
         "and says where the rest is"
     );
+}
+
+// ── Built-in format checks ───────────────────────────────────────────────────
+
+/// A format this crate can parse is checked for well-formedness, with no schema
+/// involved. The failure it catches is the one that happens: fences.
+#[test]
+fn a_submission_that_is_not_the_format_it_claims_is_refused() {
+    let mut w = win();
+    let (message, output) = handle_output_tool(
+        &json!({ "content": "```json\n{\"a\":1}\n```" }),
+        Some(&spec(Some("json"), None)),
+        None,
+        "summary",
+        0,
+        None,
+        &mut w,
+    );
+    assert!(output.is_none(), "nothing recorded");
+    assert!(message.contains("not valid json"), "{message}");
+}
+
+#[test]
+fn a_well_formed_submission_in_a_known_format_is_accepted() {
+    let mut w = win();
+    let (_, output) = handle_output_tool(
+        &json!({ "content": "<report><finding/></report>" }),
+        Some(&spec(Some("xml"), None)),
+        None,
+        "summary",
+        0,
+        None,
+        &mut w,
+    );
+    assert!(output.is_some());
+}
+
+/// The label stays opaque. A format this crate has never parsed is carried
+/// through unchecked, which is what lets a2ui work with no engine support.
+#[test]
+fn an_unknown_format_is_still_never_inspected() {
+    let mut w = win();
+    let (_, output) = handle_output_tool(
+        &json!({ "content": "anything at all, really" }),
+        Some(&spec(Some("a2ui"), None)),
+        None,
+        "summary",
+        0,
+        None,
+        &mut w,
+    );
+    assert!(output.is_some());
+}
+
+/// "This is not even JSON" is more useful than a list of missing properties, so
+/// the format check runs first.
+#[test]
+fn the_format_check_reports_before_the_schema_check() {
+    let mut w = win();
+    let (message, output) = handle_output_tool(
+        &json!({ "content": "not json at all" }),
+        Some(&spec(
+            Some("json"),
+            Some(json!({"type": "object", "required": ["summary"]})),
+        )),
+        None,
+        "summary",
+        0,
+        None,
+        &mut w,
+    );
+    assert!(output.is_none());
+    assert!(message.contains("not valid json"), "{message}");
+    assert!(!message.contains("required property"), "{message}");
+}
+
+// ── Agent-supplied validators ────────────────────────────────────────────────
+
+fn validators_with(source: &str) -> crate::components::OutputValidators {
+    let compiled =
+        leviath_scripting::output_validator::compile("v.rhai", source).expect("fixture compiles");
+    crate::components::OutputValidators(std::collections::HashMap::from([(
+        "v.rhai".to_string(),
+        std::sync::Arc::new(compiled),
+    )]))
+}
+
+fn spec_with_validator(format: &str) -> OutputSpec {
+    OutputSpec {
+        format: Some(format.to_string()),
+        validator: Some("v.rhai".to_string()),
+        ..OutputSpec::default()
+    }
+}
+
+/// The point of the seam: a format nothing in this codebase can parse, checked
+/// by the person whose format it is.
+#[test]
+fn an_agent_supplied_validator_rejects_a_bad_answer() {
+    let vals = validators_with(
+        r#"
+        fn validate(content) {
+            let doc = parse_json(content);
+            if doc.root == () { return "an a2ui document needs a `root` node"; }
+            ()
+        }
+        "#,
+    );
+    let mut w = win();
+    let (message, output) = handle_output_tool(
+        &json!({"content": r#"{"nope":1}"#}),
+        Some(&spec_with_validator("a2ui")),
+        Some(&vals),
+        "summary",
+        0,
+        None,
+        &mut w,
+    );
+    assert!(output.is_none(), "nothing recorded");
+    assert!(message.contains("needs a `root` node"), "{message}");
+}
+
+#[test]
+fn an_agent_supplied_validator_accepts_a_good_answer() {
+    let vals = validators_with(
+        r#"
+        fn validate(content) {
+            let doc = parse_json(content);
+            if doc.root == () { return "missing root"; }
+            ()
+        }
+        "#,
+    );
+    let mut w = win();
+    let (_, output) = handle_output_tool(
+        &json!({"content": r#"{"root":{"component":"Card"}}"#}),
+        Some(&spec_with_validator("a2ui")),
+        Some(&vals),
+        "summary",
+        0,
+        None,
+        &mut w,
+    );
+    assert!(output.is_some());
+}
+
+/// A broken validator must not read as "every answer is wrong". That would burn
+/// the retry budget on a script bug and end the run with nothing at all.
+#[test]
+fn a_broken_validator_records_the_submission_unchecked() {
+    let vals = validators_with(r#"fn validate(content) { throw "the script is broken" }"#);
+    let mut w = win();
+    let (_, output) = handle_output_tool(
+        &json!({"content": "the agent's perfectly good answer"}),
+        Some(&spec_with_validator("a2ui")),
+        Some(&vals),
+        "summary",
+        0,
+        None,
+        &mut w,
+    );
+    assert!(
+        output.is_some(),
+        "a script bug must not cost the agent its answer"
+    );
+}
+
+/// A blueprint naming a validator that was never compiled (a caller overrode
+/// the format, so it was retired) simply does not run one.
+#[test]
+fn a_named_validator_with_nothing_compiled_is_skipped() {
+    let mut w = win();
+    let (_, output) = handle_output_tool(
+        &json!({"content": "anything"}),
+        Some(&spec_with_validator("a2ui")),
+        None,
+        "summary",
+        0,
+        None,
+        &mut w,
+    );
+    assert!(output.is_some());
 }

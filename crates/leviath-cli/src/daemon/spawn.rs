@@ -100,6 +100,46 @@ fn script_scan_dirs(
 /// before any tokens are spent): a hook that silently never ran would change
 /// every inference with no signal. Runtime hook *eval* failures, by contrast,
 /// warn and fall back per hook.
+/// Compile every output validator the blueprint names, keyed by path.
+///
+/// A hard spawn error for the same reason a region script is: the moment to
+/// discover an agent cannot check its own answer is not the end of a long run,
+/// which is the only other time this script would ever be read.
+///
+/// Paths resolve against the blueprint directory, the same convention script
+/// tools and region hooks use, so a validator travels with the agent that needs
+/// it.
+pub(crate) fn resolve_output_validators(
+    blueprint: &Blueprint,
+    blueprint_path: &str,
+) -> Result<HashMap<String, Arc<leviath_scripting::output_validator::OutputValidator>>, String> {
+    let base = std::path::Path::new(blueprint_path)
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+    let mut compiled = HashMap::new();
+
+    let specs = blueprint
+        .output
+        .iter()
+        .chain(blueprint.stages.iter().filter_map(|s| s.output.as_ref()));
+    for spec in specs {
+        let Some(script) = spec.validator.as_deref() else {
+            continue;
+        };
+        if compiled.contains_key(script) {
+            continue;
+        }
+        let path = base.join(script);
+        let source = std::fs::read_to_string(&path)
+            .map_err(|e| format!("cannot read output validator '{}': {e}", path.display()))?;
+        let validator = leviath_scripting::output_validator::compile(script, &source)
+            .map_err(|e| format!("output validator failed to compile: {e}"))?;
+        compiled.insert(script.to_string(), Arc::new(validator));
+    }
+    Ok(compiled)
+}
+
 pub(crate) fn resolve_region_scripts(
     blueprint: &Blueprint,
     blueprint_path: &str,
@@ -982,6 +1022,7 @@ fn build_agent_inner(
     // AND reloads (the hooks must work after a restart), and a broken script
     // is a hard error either way.
     let region_scripts = resolve_region_scripts(&blueprint, &args.blueprint_path)?;
+    let output_validators = resolve_output_validators(&blueprint, &args.blueprint_path)?;
 
     // Whether any stage can produce a file change the framework would see -
     // asked here, while the blueprint is still in hand, because it cannot
@@ -1029,6 +1070,11 @@ fn build_agent_inner(
     };
     {
         let mut entity_mut = world.entity_mut(entity);
+        if !output_validators.is_empty() {
+            entity_mut.insert(leviath_runtime::components::OutputValidators(
+                output_validators,
+            ));
+        }
         entity_mut.insert((
             metadata,
             TokenTotals::default(),

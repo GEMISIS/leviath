@@ -54,8 +54,8 @@ requires the stage to call it, and it lets the run end there.
 
 ## Any shape you like
 
-Leviath never interprets the format. There is no list of supported formats and no parser. You name a
-shape, and the model produces it.
+You name a shape, and the model produces it. There is no fixed list: the label reaches the model, and
+nothing converts between formats.
 
 ```toml
 [stages.summary.output]
@@ -68,10 +68,34 @@ example = """
 
 `format` is a label. Markdown, XML, CSV, [a2ui](https://a2ui.org/), a media type, or a format you
 invent this afternoon all work the same way. The label, your instructions, and your example go into
-the `submit_output` tool description and the stage's system prompt. Nothing else happens to them.
+the `submit_output` tool description and the stage's system prompt.
 
 The label travels with the answer so a reader can act on it. A browser console that renders a2ui
-differently from markdown matches on that string. Leviath itself never does.
+differently from markdown matches on that string.
+
+## Checking the answer
+
+Two different questions get asked about a submission, and it is worth keeping them apart.
+
+**Is it the format it claims to be?** Leviath checks this for free, for formats it can parse:
+
+| Label | Checked |
+|---|---|
+| `json`, `xml`, `yaml` (or `yml`), `csv`, `toml` | The answer parses |
+| anything else | Nothing |
+
+That catches the failure that actually happens. The model wraps its answer in ``` fences, adds a
+sentence of preamble, or hands back JSON when you asked for XML. All three fail to parse, and the
+agent is told so and tries again.
+
+A label with no built-in is carried through unchecked. That is the honest outcome: `a2ui` and
+`text/vnd.acme+xml` are not formats this code knows, and pretending otherwise would mean owning every
+format's parser.
+
+**Does it have the shape you wanted?** That is a schema, and only happens if you write one.
+
+For JSON, use a JSON Schema. For anything else, ship a [Rhai validator](/docs/rhai-validators) with
+your agent.
 
 ## Asking for a shape at launch
 
@@ -146,9 +170,7 @@ One rule breaks that pattern on purpose. If you name a `format` and supply no sc
 blueprint declared is dropped. A check written for one shape says nothing about another. Supply your
 own schema alongside your format when you want the answer validated.
 
-## Validating an answer
-
-A JSON Schema is the one thing that inspects what an agent submitted.
+## Checking the shape, with a JSON Schema
 
 ```toml
 [stages.summary.output]
@@ -166,8 +188,8 @@ files_changed = { type = "array", items = { type = "string" } }
 A submission that fails goes back to the agent as an error, and it tries again. Nothing is recorded
 until one passes, so a bad correction never replaces a good answer.
 
-Setting `format = "json"` on its own validates nothing. The schema is a separate key because
-validation is a separate decision.
+A submission is checked for well-formedness first, so "this is not even JSON" comes back before a
+list of missing properties. That is the more useful thing to hear.
 
 ## Requiring one
 

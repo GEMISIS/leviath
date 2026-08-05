@@ -9501,6 +9501,7 @@ fn stage_setup_from_folds_a_required_output_into_the_system_prompt() {
         instructions: Some("One card per finding.".to_string()),
         example: Some("{\"root\": {}}".to_string()),
         schema: None,
+        validator: None,
     };
     let mut s = stage_named("summary", None, false, None);
     s.require_output = true;

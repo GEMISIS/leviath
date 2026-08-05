@@ -39,6 +39,7 @@ fn output_request(body: &SpawnAgentReq) -> Option<leviath_core::output::OutputSp
         instructions: body.output_instructions.clone(),
         example: None,
         schema: body.output_schema.clone(),
+        validator: None,
     })
 }
 

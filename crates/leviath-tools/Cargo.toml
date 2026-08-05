@@ -18,6 +18,10 @@ leviath-providers = { workspace = true }
 leviath-sys = { workspace = true }
 serde_json = { workspace = true }
 jsonschema = { workspace = true }
+toml = { workspace = true }
+quick-xml = { workspace = true }
+yaml-rust2 = { workspace = true }
+csv = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 

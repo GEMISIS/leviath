@@ -1114,6 +1114,7 @@ mod tests {
                 instructions: Some("One card per finding.".to_string()),
                 example: Some("{\"root\": {}}".to_string()),
                 schema: None,
+                validator: None,
             }),
         );
         let resolved = resolve_one(&bp, None);
