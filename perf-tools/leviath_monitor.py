@@ -9,12 +9,29 @@ timestamped PNG graph with three aligned panels:
    (``starting``, ``running``, ``waiting_input``, ``paused``), sampled from the
    runs directory the daemon persists to.
 2. CPU percent.
-3. Memory - two lines. ``rss`` is what ``ps`` shows and includes freed pages
-   the allocator has not handed back to the OS, so it only ever ratchets up.
-   ``footprint`` is the process's live memory (macOS physical footprint, Linux
-   PSS, Windows USS) and is the number that actually tells you whether leviath
-   is holding onto memory. When the two diverge, the gap is allocator-retained
-   pages, not a leak.
+3. Memory - ``rss`` and ``live`` lines, plus ``pss`` where the OS provides it.
+
+Memory metrics, precisely (see also perf-tools/README.md):
+
+- ``rss_mb``: resident set size, what ``ps``/``top`` show. On BOTH macOS and
+  Linux this includes pages the allocator has already given back lazily
+  (``MADV_FREE``/``MADV_FREE_REUSABLE``): the kernel only reclaims them under
+  memory pressure, so RSS ratchets up and stays there even when the process
+  holds nothing. RSS alone overstates a busy-then-idle process on every Unix.
+- ``pss_mb`` (Linux only): proportional set size from ``smaps_rollup`` -
+  shared pages divided by their sharer count. Still includes lazily-freed
+  pages, so it has the same ratchet as RSS.
+- ``uss_mb``: unique (private) pages. Linux: ``Private_Clean+Private_Dirty``
+  from ``smaps_rollup``; Windows: psutil's USS. Same lazy-free caveat on Linux.
+- ``lazy_free_mb`` (Linux only): the ``LazyFree`` field - pages the process
+  freed via ``MADV_FREE`` that the kernel has not reclaimed yet. This is the
+  correction term that turns the ratcheting counters into a live figure.
+- ``live_mb``: the headline series - the memory the process actually holds:
+  macOS: the kernel's physical footprint (``/usr/bin/footprint``; what
+  Activity Monitor's "Memory" column and ``vmmap`` report - it already
+  excludes lazily-freed pages). Linux: ``pss - LazyFree``, floored at 0.
+  Windows: USS (Windows has no lazy-free equivalent; ``VirtualFree`` decommits
+  immediately, so no correction is needed).
 
 Every panel title carries the metric's average and peak, and a dashed line
 marks the average. Because both output names carry a ``YYYYmmdd_HHMMSS``
@@ -69,12 +86,13 @@ import matplotlib.pyplot as plt  # noqa: E402  (must follow matplotlib.use)
 
 __all__ = [
     "Sample",
+    "MemorySample",
     "DEFAULT_PROCESS_NAME",
     "DEFAULT_INTERVAL",
     "CSV_HEADER",
     "ACTIVE_STATUSES",
     "find_leviath_process",
-    "sample_live_memory_mb",
+    "sample_memory",
     "default_runs_dir",
     "ActiveRunCounter",
     "sample_process",
@@ -93,13 +111,17 @@ DEFAULT_PROCESS_NAME = "leviath"
 #: Seconds between samples.
 DEFAULT_INTERVAL = 1.0
 
-#: Column order of the emitted CSV.
+#: Column order of the emitted CSV. Cells whose metric the OS cannot provide
+#: are left empty rather than approximated.
 CSV_HEADER = (
     "elapsed_seconds",
     "timestamp",
     "cpu_percent",
     "rss_mb",
-    "footprint_mb",
+    "pss_mb",
+    "uss_mb",
+    "lazy_free_mb",
+    "live_mb",
     "active_runs",
 )
 
@@ -120,14 +142,27 @@ _TOP_MEM_RE = re.compile(r"^(\d+(?:\.\d+)?)([BKMG])[+-]?$")
 _FOOTPRINT_RE = re.compile(r"Footprint:\s+(\d+(?:\.\d+)?)\s*([BKMG])B?\b")
 
 
+class MemorySample(NamedTuple):
+    """Every memory figure one poll of the watched process yields.
+
+    ``None`` means the running OS cannot provide that metric (the CSV cell is
+    left empty); it is never approximated from another column.
+    """
+
+    rss_mb: float
+    pss_mb: Optional[float]
+    uss_mb: Optional[float]
+    lazy_free_mb: Optional[float]
+    live_mb: Optional[float]
+
+
 class Sample(NamedTuple):
     """One point-in-time measurement of the watched process."""
 
     elapsed: float
     timestamp: str
     cpu_percent: float
-    rss_mb: float
-    footprint_mb: Optional[float]
+    memory: MemorySample
     active_runs: Optional[int]
 
 
@@ -193,13 +228,15 @@ def find_leviath_process(
 _UNIT_TO_MB = {"B": 1 / _BYTES_PER_MB, "K": 1 / 1024, "M": 1.0, "G": 1024.0}
 
 
-def _live_memory_darwin(pid: int) -> Optional[float]:
+def _footprint_darwin(pid: int) -> Optional[float]:
     """macOS: physical footprint, in MB.
 
-    Physical footprint is the figure ``vmmap`` and Activity Monitor report,
-    and unlike psutil's ``memory_full_info`` it needs no elevated privileges.
-    RSS on macOS keeps counting MADV_FREE'd pages, so it can sit hundreds of
-    MB above the memory the process actually holds.
+    Physical footprint is the figure ``vmmap``, Activity Monitor, and the
+    kernel's own memory accounting report, and unlike psutil's
+    ``memory_full_info`` it needs no elevated privileges. It already excludes
+    lazily-freed (``MADV_FREE``) pages, which RSS keeps counting - measured on
+    an idle daemon: 292.8 MB RSS over a 21.7 MB footprint, the difference
+    being exactly ``vmmap``'s ``MALLOC_SMALL (empty)`` regions.
 
     ``/usr/bin/footprint`` answers in ~30ms; ``top`` is the fallback because
     it is always present but costs over a second of system time per call (it
@@ -234,43 +271,77 @@ def _live_memory_darwin(pid: int) -> Optional[float]:
     return None
 
 
-def _live_memory_linux(pid: int) -> Optional[float]:
-    """Linux: PSS from ``smaps_rollup``, in MB. Unprivileged for own processes."""
+def _smaps_rollup_kb(pid: int) -> Dict[str, int]:
+    """Linux: the ``smaps_rollup`` fields in kB, or empty on any failure.
+
+    Unprivileged for the user's own processes.
+    """
     try:
         text = Path(f"/proc/{pid}/smaps_rollup").read_text()
     except OSError:
-        return None
+        return {}
+    fields: Dict[str, int] = {}
     for line in text.splitlines():
-        if line.startswith("Pss:"):
-            parts = line.split()
-            if len(parts) >= 2 and parts[1].isdigit():
-                return int(parts[1]) / 1024
-    return None
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].endswith(":") and parts[1].isdigit():
+            fields[parts[0].rstrip(":")] = int(parts[1])
+    return fields
 
 
-def _live_memory_psutil(proc: psutil.Process) -> Optional[float]:
-    """Fallback: USS via psutil, in MB. Works unprivileged on Windows."""
+def _memory_linux(proc: psutil.Process) -> MemorySample:
+    """Linux memory sample from ``smaps_rollup``.
+
+    ``live = pss - LazyFree``: on Linux, RSS **and** PSS keep counting pages
+    the process already freed via ``MADV_FREE`` until the kernel reclaims them
+    under pressure - the same ratchet macOS RSS has. ``LazyFree`` is the
+    kernel's own count of those pages, so subtracting it is the accurate
+    correction, not an estimate. (Lazily-freed pages are private to the freeing
+    process, so the subtraction is not distorted by PSS's sharing division.)
+    """
+    rss = proc.memory_info().rss / _BYTES_PER_MB
+    fields = _smaps_rollup_kb(proc.pid)
+    if not fields:
+        return MemorySample(rss, None, None, None, None)
+    pss = fields.get("Pss")
+    lazy = fields.get("LazyFree", 0)
+    uss = None
+    if "Private_Clean" in fields or "Private_Dirty" in fields:
+        uss = (fields.get("Private_Clean", 0) + fields.get("Private_Dirty", 0)) / 1024
+    live = None
+    if pss is not None:
+        live = max(pss - lazy, 0) / 1024
+        pss = pss / 1024
+    return MemorySample(rss, pss, uss, lazy / 1024, live)
+
+
+def _memory_windows_or_fallback(proc: psutil.Process) -> MemorySample:
+    """USS via psutil - unprivileged on Windows for the user's own processes.
+
+    Windows needs no lazy-free correction: freed heap is decommitted (it
+    leaves the working set and the commit charge immediately), so USS is
+    already the live figure.
+    """
+    rss = proc.memory_info().rss / _BYTES_PER_MB
     try:
-        return proc.memory_full_info().uss / _BYTES_PER_MB
+        uss = proc.memory_full_info().uss / _BYTES_PER_MB
     except (psutil.Error, AttributeError):
-        return None
+        return MemorySample(rss, None, None, None, None)
+    return MemorySample(rss, None, uss, None, uss)
 
 
-def sample_live_memory_mb(proc: psutil.Process) -> Optional[float]:
-    """Return the process's live memory in MB, or ``None`` if unmeasurable.
+def sample_memory(proc: psutil.Process) -> MemorySample:
+    """Every memory metric the running OS can provide for *proc*.
 
-    "Live" means the memory the process is actually holding right now: macOS
-    physical footprint, Linux PSS, Windows USS. Where the platform refuses to
-    say (e.g. psutil's USS needs root on macOS), the sample is ``None`` and the
-    CSV cell is left empty rather than repeating the misleading RSS number.
+    Raises ``psutil.Error`` if the process vanished (matching ``cpu_percent``),
+    so the watch loop's exit path stays in one place.
     """
     if sys.platform == "darwin":
-        return _live_memory_darwin(proc.pid)
+        rss = proc.memory_info().rss / _BYTES_PER_MB
+        footprint = _footprint_darwin(proc.pid)
+        return MemorySample(rss, None, None, None, footprint)
     if sys.platform.startswith("linux"):
-        value = _live_memory_linux(proc.pid)
-        if value is not None:
-            return value
-    return _live_memory_psutil(proc)
+        return _memory_linux(proc)
+    return _memory_windows_or_fallback(proc)
 
 
 def default_runs_dir() -> Path:
@@ -365,15 +436,13 @@ def sample_process(
         psutil.Error: If the process vanished or is no longer readable.
     """
     cpu_percent = float(proc.cpu_percent(interval=None))
-    rss_mb = proc.memory_info().rss / _BYTES_PER_MB
-    footprint_mb = sample_live_memory_mb(proc)
+    memory = sample_memory(proc)
     active_runs = run_counter.count() if run_counter is not None else None
     return Sample(
         elapsed=time.time() - start_time,
         timestamp=datetime.now().isoformat(timespec="seconds"),
         cpu_percent=cpu_percent,
-        rss_mb=rss_mb,
-        footprint_mb=footprint_mb,
+        memory=memory,
         active_runs=active_runs,
     )
 
@@ -409,14 +478,21 @@ def append_csv_row(csv_path: Path | str, sample: Sample) -> None:
     data survives even if the monitor is killed outright instead of Ctrl-C'd.
     Unmeasurable values are left as empty cells.
     """
+    def cell(value: Optional[float]) -> str:
+        return "" if value is None else f"{value:.3f}"
+
+    memory = sample.memory
     with open(csv_path, "a", newline="", encoding="utf-8") as handle:
         csv.writer(handle).writerow(
             [
                 f"{sample.elapsed:.3f}",
                 sample.timestamp,
                 f"{sample.cpu_percent:.2f}",
-                f"{sample.rss_mb:.3f}",
-                "" if sample.footprint_mb is None else f"{sample.footprint_mb:.3f}",
+                f"{memory.rss_mb:.3f}",
+                cell(memory.pss_mb),
+                cell(memory.uss_mb),
+                cell(memory.lazy_free_mb),
+                cell(memory.live_mb),
                 "" if sample.active_runs is None else str(sample.active_runs),
             ]
         )
@@ -507,18 +583,27 @@ def generate_graph(
         cpu_axes.set_title(_stats_label("CPU", cpu, "%"), fontsize=10)
 
         rss = _plot_series(
-            memory_axes, samples, lambda s: s.rss_mb, "tab:blue", label="rss"
+            memory_axes, samples, lambda s: s.memory.rss_mb, "tab:blue", label="rss"
         )
-        footprint = _plot_series(
+        pss = _plot_series(
             memory_axes,
             samples,
-            lambda s: s.footprint_mb,
+            lambda s: s.memory.pss_mb,
+            "tab:cyan",
+            label="pss",
+        )
+        live = _plot_series(
+            memory_axes,
+            samples,
+            lambda s: s.memory.live_mb,
             "tab:purple",
-            label="footprint (live)",
+            label="live",
         )
         parts = [_stats_label("rss", rss, "MB")]
-        if footprint:
-            parts.append(_stats_label("footprint", footprint, "MB"))
+        if pss:
+            parts.append(_stats_label("pss", pss, "MB"))
+        if live:
+            parts.append(_stats_label("live", live, "MB"))
         memory_axes.set_title("Memory - " + ", ".join(parts), fontsize=10)
         memory_axes.legend(loc="upper left", fontsize=8)
     else:
@@ -608,16 +693,16 @@ def watch_loop(
 
 def _print_sample(sample: Sample) -> None:
     """Print a single live status line for *sample*."""
-    footprint = (
+    live = (
         "      n/a"
-        if sample.footprint_mb is None
-        else f"{sample.footprint_mb:9.1f}"
+        if sample.memory.live_mb is None
+        else f"{sample.memory.live_mb:9.1f}"
     )
     runs = "  ?" if sample.active_runs is None else f"{sample.active_runs:3d}"
     print(
         f"  [{sample.elapsed:7.1f}s] "
         f"runs {runs}   cpu {sample.cpu_percent:6.1f}%   "
-        f"rss {sample.rss_mb:9.1f} MB   live {footprint} MB"
+        f"rss {sample.memory.rss_mb:9.1f} MB   live {live} MB"
     )
 
 
