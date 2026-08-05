@@ -211,6 +211,9 @@ lev result agent-abc123 --json   # the answer plus its shape and stage
 A run that produced no answer exits non-zero rather than printing nothing. So
 `lev result <id> > answer.txt` in a script cannot quietly write an empty file.
 
+Files the run produced are listed under the answer. Fetch one however you normally would; the paths
+are relative to the run's working directory.
+
 Only an agent that calls `submit_output` has an answer to show. See
 [Final outputs](/docs/outputs) for how a blueprint asks for one.
 

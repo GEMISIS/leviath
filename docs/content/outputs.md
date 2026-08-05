@@ -84,7 +84,7 @@ Two different questions get asked about a submission, and it is worth keeping th
 | `json`, `xml`, `yaml` (or `yml`), `csv`, `toml` | The answer parses |
 | anything else | Nothing |
 
-That catches the failure that actually happens. The model wraps its answer in ``` fences, adds a
+That catches the failure that actually happens. The model wraps its answer in a code fence, adds a
 sentence of preamble, or hands back JSON when you asked for XML. All three fail to parse, and the
 agent is told so and tries again.
 
@@ -219,8 +219,8 @@ precedence, and the run records `max_iterations_hit` rather than `output_forced`
 
 | Surface | Where the answer appears |
 |---|---|
-| `lev result <run-id>` | The whole answer. `--raw` for pipelines, `--json` for its shape too |
-| `lev ps --json` | `has_final_output` only. The answer can be large, so fetch it separately |
+| `lev result <run-id>` | The whole answer, and the files it named. `--raw` for pipelines |
+| `lev ps --json` | `has_final_output` only. Fetch the answer itself with `lev result` |
 | `GET /api/agents/{id}/result` | `final_output`, beside the existing `output` log tail |
 | Completion webhook | `final_output`. The `result` field is the run's error, as it always was |
 | `wait_for_agent`, `check_agent` | The child's answer, with its status |
@@ -252,11 +252,57 @@ catch an agent that was supposed to write something and did not.
 A submitted answer clears it. A researcher, a reviewer, or a router produces its answer and nothing
 else, and reporting those runs as empty was wrong.
 
-## Size
+## Large results
 
-An answer is capped at 256 KiB. Past that it is cut at a character boundary and marked `truncated`,
-and the agent is told so it can shorten. An agent with more than that to return should write a file
-and say where it is.
+An answer is one model response. That is a hard ceiling, not a policy. `submit_output` takes its
+content as a tool-call argument, and the model writes that argument token by token in a single turn.
+The 256 KiB cap is roughly 65k tokens, about what a current frontier model can emit at most.
+
+A million-row CSV is around 25 million output tokens. It will never arrive this way, at any cap, for
+any budget. So an agent with a lot to hand back does not put it in the answer. It writes a file as it
+goes, and the answer describes it:
+
+```mermaid
+flowchart LR
+  A["the answer<br/>what the run concluded"] --> B["one model response"]
+  C["the artifact<br/>what the run produced"] --> D["a file, any size"]
+  A -.names.-> C
+```
+
+| | Holds | Size | Read it with |
+|---|---|---|---|
+| Answer | The findings, the summary, the verdict | One model response | `lev result` |
+| Artifact | The dataset, the long report, the generated file | Unbounded | `GET /api/agents/{id}/files?path=` |
+
+Name your files in `artifacts` when you submit:
+
+```
+submit_output(
+  content: "2.1M registrations across 14 countries. Norway leads per-capita ...",
+  artifacts: ["data/registrations.csv"]
+)
+```
+
+Paths must land inside the working directory, the same rule that governs serving one. A path that
+escapes refuses the whole submission rather than being quietly dropped, so a named file is always a
+file you can fetch.
+
+This is why there is no pagination. What a caller reads is bounded by what a model can say. What
+gets big is a file, and files are fetched by path.
+
+An answer that does hit the cap is cut at a character boundary and marked `truncated`, and the agent
+is told so it can shorten.
+
+### Many results at once
+
+Asking for a hundred things is a [fan-out](/docs/sub-agents), not a large answer. Each worker
+gathers its slice and submits its own bounded piece, and the merge stage assembles them. Set
+`require_output` on the worker stage so the merge is guaranteed something to merge.
+
+The consolidated report the merge stage receives is bounded per worker, so one verbose worker cannot
+crowd out the rest. A worker's full answer stays on its own run if you want it.
+
+The bundled `data-analyst` works exactly this way.
 
 ## Checking a blueprint
 
