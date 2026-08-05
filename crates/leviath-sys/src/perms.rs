@@ -41,6 +41,34 @@ pub fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
     crate::platform::write_with_mode(path, contents, 0o600)
 }
 
+/// Open `path` for appending, owner-only (`0o600` on Unix, an owner-only ACL on
+/// Windows, plain elsewhere).
+///
+/// [`write_private`] covers a file written in one shot. A file that is appended
+/// to over time cannot use it, and opening one plainly creates it at the umask
+/// default. That is how a run's archive (`run.lvr`) and its stage logs ended up
+/// world-readable: nobody chose `0o644` for them, they inherited it, while the
+/// answer sidecar written beside them through `write_private` was owner-only.
+///
+/// The containing run directory is `0o700`, so those files were not reachable in
+/// place. Directory permissions do not survive a copy though, and `tar`, `rsync`
+/// or a backup tool preserves the per-file mode while dropping the protection
+/// the directory was providing.
+pub fn open_private_append(path: &Path) -> io::Result<std::fs::File> {
+    crate::platform::open_append_with_mode(path, 0o600)
+}
+
+/// Create `path` and any missing parents, owner-only (`0o700` on Unix, an
+/// owner-only ACL on Windows, plain elsewhere).
+///
+/// `create_dir_all` makes directories at the umask default, typically `0o755`.
+/// [`secure_dir_perms`] fixes that afterwards, leaving a window; this closes it
+/// and is the right call for a directory created on a hot path, where the
+/// after-the-fact `chmod` is easy to forget.
+pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
+    crate::platform::create_dir_all_with_mode(path, 0o700)
+}
+
 // Cross-platform tests: they run on every OS so the public API (and, on
 // non-Unix, the `fallback` no-op impls) is covered everywhere. Only the
 // Unix-specific *assertions* about concrete mode bits are gated behind
@@ -115,6 +143,100 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("no-such-dir").join("secret");
         assert!(write_private(&path, b"x").is_err());
+    }
+
+    /// The gap this closes: a file opened plainly for append is created at the
+    /// umask default, typically `0o644`. `run.lvr` and the stage logs were
+    /// created that way while the answer sidecar beside them was owner-only.
+    #[test]
+    fn open_private_append_creates_an_owner_only_file() {
+        #[cfg(windows)]
+        let _env = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.lvr");
+
+        {
+            use std::io::Write;
+            let mut f = open_private_append(&path).unwrap();
+            f.write_all(b"first").unwrap();
+        }
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        #[cfg(unix)]
+        assert_eq!(mode_of(&path), 0o600);
+    }
+
+    /// Appending is the common case, and it must add to the file rather than
+    /// truncate it: the archive is built up record by record over a whole run.
+    #[test]
+    fn open_private_append_adds_to_an_existing_file() {
+        #[cfg(windows)]
+        let _env = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+
+        for chunk in [b"one", b"two"] {
+            use std::io::Write;
+            let mut f = open_private_append(&path).unwrap();
+            f.write_all(chunk).unwrap();
+        }
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"onetwo");
+    }
+
+    /// The mode passed to `open(2)` applies only on creation, so a file that
+    /// already exists at looser permissions has to be tightened. A run started
+    /// before this change has exactly that shape.
+    #[test]
+    fn open_private_append_retightens_an_existing_permissive_file() {
+        #[cfg(windows)]
+        let _env = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.lvr");
+        std::fs::write(&path, b"old").unwrap();
+        #[cfg(unix)]
+        set_mode(&path, 0o644);
+
+        drop(open_private_append(&path).unwrap());
+
+        #[cfg(unix)]
+        assert_eq!(mode_of(&path), 0o600);
+    }
+
+    #[test]
+    fn open_private_append_propagates_an_unwritable_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no-such-dir").join("log");
+        assert!(open_private_append(&path).is_err());
+    }
+
+    #[test]
+    fn create_private_dir_all_makes_owner_only_directories() {
+        #[cfg(windows)]
+        let _env = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("stages").join("0");
+
+        create_private_dir_all(&nested).unwrap();
+
+        assert!(nested.is_dir());
+        #[cfg(unix)]
+        assert_eq!(mode_of(&nested), 0o700);
+    }
+
+    /// Called on every stage line, so it has to be idempotent rather than
+    /// failing once the directory is there.
+    #[test]
+    fn create_private_dir_all_is_idempotent() {
+        #[cfg(windows)]
+        let _env = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("stages").join("0");
+
+        create_private_dir_all(&nested).unwrap();
+        create_private_dir_all(&nested).unwrap();
+
+        assert!(nested.is_dir());
     }
 
     #[test]

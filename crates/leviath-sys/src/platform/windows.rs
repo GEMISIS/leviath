@@ -53,6 +53,32 @@ pub(crate) fn write_with_mode(path: &Path, contents: &[u8], _mode: u32) -> io::R
     restrict_to_owner(path)
 }
 
+/// Open `path` for appending, restricting it to the owner.
+///
+/// `restrict_to_owner` spawns `icacls`, which is far too heavy to repeat on
+/// every appended line, so it runs only when this call is the one that creates
+/// the file. An existing file was already restricted when it was created.
+pub(crate) fn open_append_with_mode(path: &Path, _mode: u32) -> io::Result<std::fs::File> {
+    let existed = path.exists();
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    if !existed {
+        restrict_to_owner(path)?;
+    }
+    Ok(file)
+}
+
+/// Create `path` and any missing parents, restricting the leaf to the owner.
+pub(crate) fn create_dir_all_with_mode(path: &Path, _mode: u32) -> io::Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(path)?;
+    restrict_to_owner(path)
+}
+
 /// Tighten `path` if it exists, reporting whether anything changed.
 ///
 /// Windows exposes no cheap "is this permissive?" question comparable to

@@ -214,11 +214,7 @@ fn append_dashboard_log_capped(path: &Path, msg: &str, max_bytes: u64) {
         let _ = std::fs::create_dir_all(parent);
     }
     roll_log_if_over_cap(path, max_bytes);
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
+    if let Ok(mut file) = leviath_sys::open_private_append(path) {
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
         let _ = writeln!(file, "{} {}", timestamp, msg);
     }
@@ -628,7 +624,7 @@ pub fn read_stages_index(run_id: &str) -> Vec<StageRecord> {
 /// Ensure the per-stage directory exists (called before first write).
 fn ensure_stage_dir(run_id: &str, stage_idx: usize) {
     let dir = stage_dir(run_id, stage_idx);
-    let _ = std::fs::create_dir_all(&dir);
+    let _ = leviath_sys::create_private_dir_all(&dir);
 }
 
 /// Append a line of readable agent output to the per-stage output log.
@@ -636,11 +632,7 @@ pub fn append_stage_output(run_id: &str, stage_idx: usize, text: &str) {
     use std::io::Write;
     ensure_stage_dir(run_id, stage_idx);
     let path = stage_dir(run_id, stage_idx).join("output.log");
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
+    if let Ok(mut file) = leviath_sys::open_private_append(&path) {
         let _ = writeln!(file, "{}", text);
     }
 }
@@ -650,11 +642,7 @@ pub fn append_stage_log(run_id: &str, stage_idx: usize, text: &str) {
     use std::io::Write;
     ensure_stage_dir(run_id, stage_idx);
     let path = stage_dir(run_id, stage_idx).join("logs.log");
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
+    if let Ok(mut file) = leviath_sys::open_private_append(&path) {
         let _ = writeln!(file, "{}", text);
     }
 }
