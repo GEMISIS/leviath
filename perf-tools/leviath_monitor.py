@@ -659,6 +659,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="stop automatically after this many samples (default: unlimited)",
     )
     parser.add_argument(
+        "--pid",
+        type=int,
+        default=None,
+        help="watch this exact pid instead of searching by name",
+    )
+    parser.add_argument(
         "--runs-dir",
         default=None,
         help=(
@@ -694,7 +700,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("error: --max-samples must be greater than 0", file=sys.stderr)
         return 1
 
-    proc = find_leviath_process(args.name)
+    if args.pid is not None:
+        try:
+            proc = psutil.Process(args.pid)
+        except psutil.Error:
+            print(f"error: pid {args.pid} is not running", file=sys.stderr)
+            return 1
+    else:
+        proc = find_leviath_process(args.name)
     if proc is None:
         print(
             f"error: no running process matching {args.name!r} was found",
