@@ -5195,7 +5195,7 @@ fn transition_allow_complete_single_edge_awaits_choice() {
 }
 
 #[test]
-fn transition_visit_exhausted_edge_is_terminal() {
+fn transition_visit_exhausted_edge_is_a_dead_end_error() {
     use leviath_core::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
@@ -5213,11 +5213,54 @@ fn transition_visit_exhausted_edge_is_terminal() {
 
     run_transition(&mut world);
 
-    // Only edge exhausted ⇒ terminal.
-    assert_eq!(
-        world.get::<AgentState>(e).unwrap().status,
-        AgentStatus::Complete
-    );
+    // The stage declared a normal edge and every one of them is exhausted:
+    // the graph dead-ended mid-run, which is an ERROR, not a completion.
+    // This resolved to `Complete` before, which is how a run silently ended
+    // at stage 2 of 5 with the output stage still pending.
+    let status = world.get::<AgentState>(e).unwrap().status.clone();
+    let AgentStatus::Error { message } = status else {
+        panic!("a dead-ended graph must error, got {status:?}");
+    };
+    assert!(message.contains("dead-ended"), "{message}");
+    assert!(message.contains("'a'"), "{message}");
+}
+
+/// A dead end with an `error` edge in budget routes down it - exhaustion is
+/// now a failure mode `error_recovery` can actually catch.
+#[test]
+fn transition_dead_end_routes_down_the_error_edge_when_present() {
+    use leviath_core::blueprint::TransitionCondition;
+    let bp = blueprint(vec![
+        stage_named(
+            "a",
+            Some(vec![
+                edge("b", TransitionCondition::Always),
+                edge("rescue", TransitionCondition::Error),
+            ]),
+            false,
+            None,
+        ),
+        stage_named("b", None, false, Some(0)), // max_revisits 0
+        stage_named("rescue", None, false, None),
+    ]);
+    let mut visits = VisitCounts::default();
+    visits.0.insert("b".to_string(), 1); // b is out of budget
+    let mut world = World::new();
+    let e = spawn_transition_agent(&mut world, bp, vec![si("m0"), si("m1"), si("m2")], visits);
+
+    run_transition(&mut world);
+
+    let state = world.get::<AgentState>(e).unwrap();
+    assert_eq!(state.status, AgentStatus::Active, "recovering, not dead");
+    assert_eq!(state.current_stage, "rescue");
+    // And the recovery stage can read why it was entered.
+    let window = world.get::<ContextWindow>(e).unwrap();
+    let noted = window
+        .regions
+        .iter()
+        .flat_map(|r| r.content.iter())
+        .any(|entry| entry.content.contains("dead-ended"));
+    assert!(noted, "the dead-end reason is in the context");
 }
 
 #[test]
@@ -5251,7 +5294,7 @@ fn transition_non_choosable_edge_is_terminal() {
 }
 
 #[test]
-fn transition_unknown_target_edge_is_terminal() {
+fn transition_unknown_target_edge_is_a_dead_end_error() {
     use leviath_core::blueprint::TransitionCondition;
     let bp = blueprint(vec![stage_named(
         "a",
@@ -5264,11 +5307,13 @@ fn transition_unknown_target_edge_is_terminal() {
 
     run_transition(&mut world);
 
-    // Edge points at a nonexistent stage ⇒ filtered ⇒ terminal.
-    assert_eq!(
-        world.get::<AgentState>(e).unwrap().status,
-        AgentStatus::Complete
-    );
+    // The only declared edge points at a nonexistent stage: nothing can ever
+    // follow it, so completing here would be a silent lie.
+    let status = world.get::<AgentState>(e).unwrap().status.clone();
+    let AgentStatus::Error { message } = status else {
+        panic!("an unfollowable graph must error, got {status:?}");
+    };
+    assert!(message.contains("dead-ended"), "{message}");
 }
 
 // ── stage setup on entry ──

@@ -458,15 +458,14 @@ impl Blueprint {
                         return true;
                     }
                 }
-                // If all targets are exhaustible (already visited + have max_revisits),
-                // the stage will eventually have zero available edges → terminal
-                transitions.keys().all(|target| {
-                    self.stages
-                        .iter()
-                        .find(|s| s.name == *target)
-                        .map(|s| s.max_revisits.is_some())
-                        .unwrap_or(false)
-                })
+                // No target reaches a terminal stage. This used to fall back to
+                // "all targets are exhaustible, so the stage will eventually
+                // have zero available edges" and call THAT a terminal path -
+                // but running out of edges mid-graph is now a run *error*
+                // (StageResolution::DeadEnd in the runtime), not a completion,
+                // so certifying it here validated blueprints that could never
+                // finish successfully.
+                false
             }
         }
     }
@@ -2079,9 +2078,15 @@ mod tests {
         );
         stage.transitions = Some(transitions);
         let bp = Blueprint::new("t".into(), "".into(), vec![stage], make_layout());
-        // Should pass: self-loop has max_revisits, and the self-loop target
-        // will eventually exhaust, leaving zero edges → terminal
-        assert!(bp.validate().is_ok());
+        // Must FAIL now: this used to pass on the theory that the self-loop
+        // exhausts its max_revisits and "leaving zero edges" counts as
+        // terminal - but running out of edges mid-graph is a run error
+        // (StageResolution::DeadEnd), so a blueprint whose only ending is
+        // exhaustion can never finish successfully.
+        let err = bp
+            .validate()
+            .expect_err("an exhaustion-only graph is invalid");
+        assert!(err.to_string().contains("no terminal path"), "{err}");
     }
 
     #[test]

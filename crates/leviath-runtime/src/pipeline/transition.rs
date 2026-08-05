@@ -71,6 +71,12 @@ pub(crate) enum StageResolution {
     /// The stage errored and has no `error` edge - terminate the run as errored,
     /// preserving the error status the collect system already set.
     TerminalError,
+    /// The stage DECLARES normal outgoing transitions, but every one of them is
+    /// revisit-exhausted (or targets an unknown stage): the graph dead-ended in
+    /// the middle. Distinct from [`Self::Terminal`] because reporting this as
+    /// `Complete` is how a run silently ended at stage 2 of 5 with no output -
+    /// the resolver routes it down the stage's `error` edge, or fails the run.
+    DeadEnd,
     /// Advance to this stage index, applying the edge's context transform once
     /// the edge's gate (if any) is satisfied.
     Next(
@@ -481,7 +487,24 @@ pub(crate) fn resolve_transition_sync(
                 })
                 .collect();
             match choosable.len() {
-                0 => StageResolution::Terminal,
+                0 => {
+                    // No followable edge left. If the stage never declared a
+                    // normal (Always/LlmChoice) edge, this is a legitimate
+                    // terminal whose conditioned edges are alternates. If it
+                    // DID - and they were all filtered out above - the graph
+                    // dead-ended mid-run, which must not read as success.
+                    let declared_normal = transitions.values().any(|e| {
+                        matches!(
+                            e.condition,
+                            TransitionCondition::Always | TransitionCondition::LlmChoice
+                        )
+                    });
+                    if declared_normal {
+                        StageResolution::DeadEnd
+                    } else {
+                        StageResolution::Terminal
+                    }
+                }
                 1 if !stage.allow_complete => {
                     let idx = blueprint
                         .stages
@@ -1032,6 +1055,33 @@ pub fn resolve_transition(
             }
             None => resolve_transition_sync(&bp.0, stage, cursor.index, &visits.0),
         };
+        // A dead end resolves like a stage error: down the `error` edge when one
+        // has budget left (this is what finally makes `error_recovery` reachable
+        // for exhaustion, not just for provider failures), and otherwise the run
+        // FAILS. It used to resolve as `Terminal`, so a wide-researcher whose
+        // deep_dive ran `compare` out of revisits reported `complete` from the
+        // middle of its graph with the output stage still pending and nothing
+        // produced - success indistinguishable from the run that worked.
+        let resolution = match resolution {
+            StageResolution::DeadEnd => {
+                let message = format!(
+                    "stage '{}' dead-ended: every declared transition's target has spent \
+                     its max_revisits budget before an output or terminal stage was reached",
+                    stage.name
+                );
+                match find_conditioned_edge(&bp.0, stage, &visits.0, TransitionCondition::Error) {
+                    Some((i, t)) => {
+                        note_error(&mut window, &stage.name, &message);
+                        StageResolution::Next(i, t, None)
+                    }
+                    None => {
+                        state.status = AgentStatus::Error { message };
+                        StageResolution::TerminalError
+                    }
+                }
+            }
+            other => other,
+        };
         match resolution {
             StageResolution::Terminal => {
                 state.status = AgentStatus::Complete;
@@ -1040,8 +1090,11 @@ pub fn resolve_transition(
                     .remove::<ResolveTransition>()
                     .remove::<StageOutcome>();
             }
-            StageResolution::TerminalError => {
-                // Status was set to Error by the collect system; just stop.
+            // `DeadEnd` is in the pattern only for exhaustiveness: the
+            // conversion above always turns it into `Next` or `TerminalError`.
+            StageResolution::TerminalError | StageResolution::DeadEnd => {
+                // Status was set to Error by the collect system (or by the
+                // dead-end conversion above); just stop.
                 commands
                     .entity(entity)
                     .remove::<ResolveTransition>()

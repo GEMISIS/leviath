@@ -45,6 +45,13 @@ bash       = "raw_data"
 hint = "Sources checked - rank what was found"
 transform = "direct"
 
+# Un-exhaustible escape (lint: dead-end-possible): when every looping
+# target has spent its max_revisits budget, the run can still move forward
+# to the deliverable instead of dead-ending.
+[stages.collect.transitions.brief]
+hint = "Prioritization keeps looping - write the brief from what is collected"
+transform = "compact"
+
 [stages.collect.transitions.error_recovery]
 condition = "error"
 transform = "direct"
@@ -132,6 +139,13 @@ the runtime captured - read it first, note which source is unavailable, and
 record that gap so the briefing can flag it. Then return to prioritize with
 whatever was successfully collected.
 """
+
+# Un-exhaustible escape (lint: dead-end-possible): when every looping
+# target has spent its max_revisits budget, the run can still move forward
+# to the deliverable instead of dead-ending.
+[stages.error_recovery.transitions.brief]
+hint = "Recovery is not converging - brief on what was gathered"
+transform = "compact"
 
 [stages.error_recovery.transitions.prioritize]
 hint = "Recovered - triage what we have"

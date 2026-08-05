@@ -48,6 +48,13 @@ default_region = "raw_findings"
 hint = "Enough gathered for a first pass of analysis"
 transform = "direct"
 
+# Un-exhaustible escape (lint: dead-end-possible): when every looping
+# target has spent its max_revisits budget, the run can still move forward
+# to the deliverable instead of dead-ending.
+[stages.gather.transitions.summarize]
+hint = "Analysis is out of revisits - summarize from the material in hand"
+transform = "compact"
+
 [stages.gather.transitions.error_recovery]
 condition = "error"
 transform = "direct"
@@ -138,6 +145,13 @@ Something failed during research (a source fetch, a parse, etc.). The
 work out what went wrong, and note a workaround. Then hand back to analyze to
 continue with whatever material is available.
 """
+
+# Un-exhaustible escape (lint: dead-end-possible): when every looping
+# target has spent its max_revisits budget, the run can still move forward
+# to the deliverable instead of dead-ending.
+[stages.error_recovery.transitions.summarize]
+hint = "Recovery is not converging - summarize what was found"
+transform = "compact"
 
 [stages.error_recovery.transitions.analyze]
 hint = "Recovered - continue analysis"

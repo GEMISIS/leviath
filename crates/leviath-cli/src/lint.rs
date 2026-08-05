@@ -268,6 +268,7 @@ pub fn lint_manifest(content: &str, blueprint: &Blueprint, env: &LintEnv) -> Vec
     findings.extend(lint_held_checkpoints(blueprint));
     findings.extend(lint_graph(blueprint));
     findings.extend(lint_output_reachable(blueprint));
+    findings.extend(lint_dead_end_possible(blueprint));
 
     let agent_permissions = blueprint.agent_tool_permissions();
 
@@ -594,6 +595,65 @@ fn lint_output_stage(stage: &leviath_core::Stage) -> Vec<LintFinding> {
 /// to a stage's custom `transition_prompt` - so a stage can offer an exit its own
 /// prompt never mentions. A run that takes it ends with no answer and looks
 /// exactly like success.
+/// Stages whose every normal exit can run out of `max_revisits` budget.
+///
+/// A stage transitions along its `Always`/`LlmChoice` edges; an edge whose
+/// target has `max_revisits` stops being followable once the budget is spent.
+/// When EVERY normal edge is like that, a long enough run strands the stage
+/// with nowhere to go - which the engine now reports as a dead-end *error*
+/// (it used to read as `complete`, from the middle of the graph, with the
+/// output stage still pending). Observed live: a wide-researcher bounced
+/// deep_dive → compare until compare's budget ran out, then "completed" with
+/// nothing produced.
+///
+/// The fix is one un-exhaustible way forward: an edge to a stage without
+/// `max_revisits` (an output/terminal stage usually), or a
+/// `condition = "max_iterations"` escape.
+fn lint_dead_end_possible(blueprint: &Blueprint) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    for stage in &blueprint.stages {
+        let Some(transitions) = &stage.transitions else {
+            continue;
+        };
+        let normal: Vec<&leviath_core::blueprint::TransitionEdge> = transitions
+            .values()
+            .filter(|e| {
+                matches!(
+                    e.condition,
+                    leviath_core::blueprint::TransitionCondition::Always
+                        | leviath_core::blueprint::TransitionCondition::LlmChoice
+                )
+            })
+            .collect();
+        if normal.is_empty() {
+            continue; // terminal (or conditioned-only) stage: nothing to strand
+        }
+        let all_exhaustible = normal.iter().all(|e| {
+            blueprint
+                .find_stage(&e.target)
+                .is_none_or(|t| t.max_revisits.is_some())
+        });
+        if all_exhaustible {
+            findings.push(
+                LintFinding::new(
+                    LintSeverity::Warning,
+                    "dead-end-possible",
+                    "can strand the run: every normal transition's target has a max_revisits \
+                     budget, and once they are all spent the run errors as dead-ended"
+                        .to_string(),
+                )
+                .in_stage(&stage.name)
+                .with_fix(
+                    "add one un-exhaustible way forward - an edge to a stage without \
+                     max_revisits (the output stage, usually), or a condition = \
+                     \"max_iterations\" escape",
+                ),
+            );
+        }
+    }
+    findings
+}
+
 fn lint_output_reachable(blueprint: &Blueprint) -> Vec<LintFinding> {
     let outputs: Vec<&leviath_core::Stage> = blueprint
         .stages
