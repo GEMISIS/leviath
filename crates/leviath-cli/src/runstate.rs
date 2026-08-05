@@ -12,6 +12,7 @@
 //! - `~/.leviath/dashboard.log` - never cleared, appended across sessions
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // The plain run-state data types (RunMeta, RunStatus, the snapshot structs, and
@@ -66,6 +67,72 @@ pub fn read_context_snapshot(run_id: &str) -> Option<ContextSnapshot> {
     let path = run_dir(run_id).join("context.json");
     let json = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&json).ok()
+}
+
+/// A parse cache keyed by a file's `(mtime, len)`: the file is re-read and
+/// re-parsed only when its stat changes.
+///
+/// For pollers reading run state on a tick. The dashboard synced at 10Hz by
+/// re-parsing every run's `meta.json`, `stages.json`, and whole
+/// `context.json`; with 50 runs on disk that was on the order of 100 MB/s of
+/// allocate-and-parse-and-free for files that change at most once per persist
+/// tick. A `stat` costs microseconds; this turns the steady-state tick into
+/// stats plus clones of shared `Arc`s.
+///
+/// `(mtime, len)` rather than mtime alone: the persistence lane's atomic
+/// rename gives every update a fresh temp inode and mtime, but coarse mtime
+/// granularity on some filesystems can miss two updates in the same instant -
+/// the length check catches most of those, and a same-length same-instant
+/// rewrite is indistinguishable anyway one tick later.
+pub struct StatCache<T> {
+    entries: std::collections::HashMap<PathBuf, (std::time::SystemTime, u64, Option<Arc<T>>)>,
+}
+
+impl<T> Default for StatCache<T> {
+    fn default() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl<T> StatCache<T> {
+    /// The value parsed from `path`, re-reading only when the file's stat
+    /// changed since the last call. `None` when the file is missing,
+    /// unreadable, or `parse` rejects it - negative results are cached too, so
+    /// a persistently-bad file costs one stat per tick, not one parse.
+    pub fn get_with(
+        &mut self,
+        path: &Path,
+        parse: impl FnOnce(&str) -> Option<T>,
+    ) -> Option<Arc<T>> {
+        let Ok(meta) = std::fs::metadata(path) else {
+            self.entries.remove(path);
+            return None;
+        };
+        let stamp = (meta.modified().ok()?, meta.len());
+        if let Some((mtime, len, value)) = self.entries.get(path)
+            && (*mtime, *len) == stamp
+        {
+            return value.clone();
+        }
+        let value = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| parse(&text))
+            .map(Arc::new);
+        self.entries
+            .insert(path.to_path_buf(), (stamp.0, stamp.1, value.clone()));
+        value
+    }
+
+    /// Drop entries for files under runs that no longer exist, so a
+    /// long-lived poller's cache stays bounded by the live run set.
+    pub fn retain_under(&mut self, keep: &std::collections::HashSet<PathBuf>) {
+        self.entries.retain(|path, _| {
+            path.parent()
+                .is_some_and(|dir| keep.contains(&dir.to_path_buf()))
+        });
+    }
 }
 
 /// Read + parse a run's portable archive (`<run_dir>/run.lvr`), returning its
@@ -596,6 +663,52 @@ fn list_runs_in_dir(dir: PathBuf) -> Vec<RunMeta> {
 /// Silently skips any runs whose metadata cannot be read.
 pub fn list_runs() -> Vec<RunMeta> {
     list_runs_in_dir(runs_dir())
+}
+
+/// [`list_runs`] through a [`StatCache`], for pollers: each `meta.json` is
+/// re-parsed only when its stat changes, and cache entries for deleted runs
+/// are dropped. Same ordering and skip-unreadable behavior as `list_runs`.
+pub fn list_runs_cached(cache: &mut StatCache<RunMeta>) -> Vec<Arc<RunMeta>> {
+    let dir = runs_dir();
+    let mut runs = Vec::new();
+    let mut live_dirs = std::collections::HashSet::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            live_dirs.insert(entry.path());
+            let meta_path = entry.path().join("meta.json");
+            if let Some(meta) = cache.get_with(&meta_path, |json| {
+                serde_json::from_str::<RunMeta>(json).ok()
+            }) {
+                runs.push(meta);
+            }
+        }
+    }
+    cache.retain_under(&live_dirs);
+    runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
+    runs
+}
+
+/// [`read_stages_index`] through a [`StatCache`], for pollers.
+pub fn read_stages_index_cached(
+    run_id: &str,
+    cache: &mut StatCache<Vec<StageRecord>>,
+) -> Vec<StageRecord> {
+    let path = run_dir(run_id).join("stages.json");
+    cache
+        .get_with(&path, |json| serde_json::from_str(json).ok())
+        .map(|records| records.as_ref().clone())
+        .unwrap_or_default()
+}
+
+/// [`read_context_snapshot`] through a [`StatCache`], for pollers. The
+/// snapshot is shared, not cloned: a context window is the largest thing in a
+/// run dir, and handing out copies per tick is the churn this cache removes.
+pub fn read_context_snapshot_cached(
+    run_id: &str,
+    cache: &mut StatCache<ContextSnapshot>,
+) -> Option<Arc<ContextSnapshot>> {
+    let path = run_dir(run_id).join("context.json");
+    cache.get_with(&path, |json| serde_json::from_str(json).ok())
 }
 
 /// Read the last `max_bytes` of any file on disk, returning UTF-8 text.
@@ -1656,6 +1769,133 @@ mod tests {
             })
             .expect("streamed records with break");
             assert_eq!(first_only, 1);
+        });
+    }
+
+    /// The stat cache's contract: parse once, serve from cache while the stat
+    /// is unchanged, re-parse on change, cache negative results, and forget
+    /// files that disappear.
+    #[test]
+    fn stat_cache_parses_once_per_stat_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("value.json");
+        std::fs::write(&path, "41").unwrap();
+        let mut cache: StatCache<i64> = StatCache::default();
+        let mut parses = 0;
+        let get = |cache: &mut StatCache<i64>, path: &std::path::Path, parses: &mut usize| {
+            cache
+                .get_with(path, |text| {
+                    *parses += 1;
+                    text.trim().parse().ok()
+                })
+                .map(|v| *v)
+        };
+
+        assert_eq!(get(&mut cache, &path, &mut parses), Some(41));
+        assert_eq!(get(&mut cache, &path, &mut parses), Some(41));
+        assert_eq!(parses, 1, "the second read came from the cache");
+
+        // A same-length rewrite with a fresh mtime re-parses (the atomic-rename
+        // writer always produces a new inode+mtime; simulate with a bumped
+        // mtime via a rewrite of different content and length).
+        std::fs::write(&path, "1234").unwrap();
+        assert_eq!(get(&mut cache, &path, &mut parses), Some(1234));
+        assert_eq!(parses, 2);
+
+        // Unparseable content is cached as a miss - one parse attempt, then
+        // stat-only until the file changes again.
+        std::fs::write(&path, "not a number").unwrap();
+        assert_eq!(get(&mut cache, &path, &mut parses), None);
+        assert_eq!(get(&mut cache, &path, &mut parses), None);
+        assert_eq!(parses, 3, "the bad file was parsed once, not per tick");
+
+        // A deleted file is a miss and its entry is dropped.
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(get(&mut cache, &path, &mut parses), None);
+        assert_eq!(parses, 3);
+    }
+
+    #[test]
+    fn stat_cache_retain_under_drops_dead_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("live");
+        let dead = dir.path().join("dead");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::create_dir_all(&dead).unwrap();
+        std::fs::write(live.join("meta.json"), "1").unwrap();
+        std::fs::write(dead.join("meta.json"), "2").unwrap();
+        let mut cache: StatCache<i64> = StatCache::default();
+        cache.get_with(&live.join("meta.json"), |t| t.trim().parse().ok());
+        cache.get_with(&dead.join("meta.json"), |t| t.trim().parse().ok());
+        assert_eq!(cache.entries.len(), 2);
+
+        let keep: std::collections::HashSet<PathBuf> = [live.clone()].into_iter().collect();
+        cache.retain_under(&keep);
+        assert_eq!(cache.entries.len(), 1);
+        assert!(cache.entries.contains_key(&live.join("meta.json")));
+    }
+
+    /// The cached listing and per-run readers agree with their uncached
+    /// counterparts, and serve repeat calls without re-parsing.
+    #[test]
+    fn cached_run_readers_match_the_uncached_ones() {
+        with_isolated_runs_dir("cached-run-readers", |_d| {
+            let meta = RunMeta::new(
+                "cached-run".to_string(),
+                "agent".to_string(),
+                "/p".to_string(),
+                "t".to_string(),
+                None,
+                "/w".to_string(),
+                2,
+            );
+            create_run(&meta).unwrap();
+            write_stages_index(
+                "cached-run",
+                &[leviath_core::run_meta::StageRecord::new(
+                    "plan".to_string(),
+                    0,
+                )],
+            )
+            .unwrap();
+            write_context_snapshot(
+                "cached-run",
+                &ContextSnapshot {
+                    stage_name: "plan".to_string(),
+                    total_tokens: 3,
+                    max_tokens: 100,
+                    regions: vec![],
+                },
+            )
+            .unwrap();
+
+            let mut metas = StatCache::default();
+            let mut stages = StatCache::default();
+            let mut contexts = StatCache::default();
+
+            let listed = list_runs_cached(&mut metas);
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].run_id, list_runs()[0].run_id);
+
+            let cached_stages = read_stages_index_cached("cached-run", &mut stages);
+            let plain_stages = read_stages_index("cached-run");
+            assert_eq!(cached_stages.len(), plain_stages.len());
+            assert_eq!(cached_stages[0].name, plain_stages[0].name);
+            let cached_ctx =
+                read_context_snapshot_cached("cached-run", &mut contexts).expect("snapshot cached");
+            assert_eq!(
+                *cached_ctx,
+                read_context_snapshot("cached-run").expect("snapshot read")
+            );
+            // A repeat serves the SAME Arc - the whole point of the cache.
+            let again = read_context_snapshot_cached("cached-run", &mut contexts).unwrap();
+            assert!(Arc::ptr_eq(&cached_ctx, &again));
+
+            // A run whose dir disappears falls out of the cached listing.
+            std::fs::remove_dir_all(run_dir("cached-run")).unwrap();
+            assert!(list_runs_cached(&mut metas).is_empty());
+            assert!(read_stages_index_cached("cached-run", &mut stages).is_empty());
+            assert!(read_context_snapshot_cached("cached-run", &mut contexts).is_none());
         });
     }
 

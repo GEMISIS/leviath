@@ -32,6 +32,7 @@ use leviath_cli::dispatch::{Commands, RiskyExecutors, apply_region_flags, dispat
 /// footprint under 293 MB of retained RSS after a five-agent burst). mimalloc
 /// returns freed pages to the OS aggressively, so RSS tracks what the process
 /// actually holds.
+#[cfg(feature = "mimalloc-allocator")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

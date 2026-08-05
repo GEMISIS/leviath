@@ -75,6 +75,15 @@ pub(crate) struct Dashboard {
     pub(super) context_history_idx: Option<usize>,
     /// True after the first sync completes; suppresses startup toasts for pre-existing state.
     pub(super) initial_sync_done: bool,
+    // ── Poll caches ───────────────────────────────────────────────────────────
+    // The sync tick runs at 10Hz and used to re-read and re-parse every run's
+    // meta.json, stages.json, and whole context.json on every tick - ~100 MB/s
+    // of allocate-parse-free with 50 runs on disk, for files that change at
+    // most once per persist tick. These stat-gated caches reduce the steady
+    // state to stat calls.
+    pub(super) meta_cache: runstate::StatCache<runstate::RunMeta>,
+    pub(super) stages_cache: runstate::StatCache<Vec<leviath_core::run_meta::StageRecord>>,
+    pub(super) context_cache: runstate::StatCache<runstate::ContextSnapshot>,
     /// Monotonic tick counter for animations (spinner, toast timeouts)
     pub(super) tick_count: u64,
     /// Active toast notifications
@@ -238,6 +247,9 @@ impl Dashboard {
             stage_content_mode: StageContentMode::Output,
             context_history_idx: None,
             initial_sync_done: false,
+            meta_cache: runstate::StatCache::default(),
+            stages_cache: runstate::StatCache::default(),
+            context_cache: runstate::StatCache::default(),
             tick_count: 0,
             toasts: Vec::new(),
             show_help: false,
@@ -557,7 +569,7 @@ impl Dashboard {
         self.browsed_context_point()
             .map(|p| p.context.clone())
             .or_else(|| runstate::read_stage_context(&agent.id, self.selected_stage))
-            .or_else(|| agent.context_snapshot.clone())
+            .or_else(|| agent.context_snapshot.as_deref().cloned())
     }
 
     /// The Context view's interactive rows under the current fold state.
@@ -645,7 +657,20 @@ impl Dashboard {
 
     /// Sync agent list from on-disk run-state dir (background workers).
     pub(super) fn sync_from_run_state(&mut self) {
-        let runs = runstate::list_runs();
+        // Cached listing: metas re-parse only when their files change. Cloned
+        // out of the Arcs because the big match below reads fields by value;
+        // a meta is ~1KB, so the clone is noise next to the parses it avoids.
+        let runs: Vec<runstate::RunMeta> = runstate::list_runs_cached(&mut self.meta_cache)
+            .iter()
+            .map(|meta| (**meta).clone())
+            .collect();
+        // Prune the per-run caches down to runs that still exist.
+        let live_dirs: std::collections::HashSet<std::path::PathBuf> = runs
+            .iter()
+            .map(|run| runstate::run_dir(&run.run_id))
+            .collect();
+        self.stages_cache.retain_under(&live_dirs);
+        self.context_cache.retain_under(&live_dirs);
         for run in runs {
             // A live open prompt from the daemon's hub (populated each tick by
             // `sync_interactions`) is the authoritative signal that this agent is
@@ -688,8 +713,12 @@ impl Dashboard {
                 (None, None)
             };
 
-            // Read stages index
-            let stages = runstate::read_stages_index(&run.run_id);
+            // Read stages index + context snapshot through the poll caches,
+            // hoisted out of the per-agent branches below so the cache borrow
+            // does not overlap the `self.agents` borrow.
+            let stages = runstate::read_stages_index_cached(&run.run_id, &mut self.stages_cache);
+            let context_snapshot =
+                runstate::read_context_snapshot_cached(&run.run_id, &mut self.context_cache);
 
             if let Some(agent) = self.agents.iter_mut().find(|a| a.id == run.run_id) {
                 let prev_status_was_active = matches!(
@@ -770,7 +799,7 @@ impl Dashboard {
                 }
                 agent.status = status;
                 agent.workdir = run.workdir.clone();
-                agent.context_snapshot = runstate::read_context_snapshot(&run.run_id);
+                agent.context_snapshot = context_snapshot.clone();
                 agent.stages = stages;
                 agent.last_progress_at = run.last_progress_at;
 
@@ -853,7 +882,7 @@ impl Dashboard {
                     waiting_prompt,
                     pending_request,
                     last_answered_request_id: None,
-                    context_snapshot: runstate::read_context_snapshot(&run.run_id),
+                    context_snapshot,
                     stages,
                     workdir: run.workdir.clone(),
                     task: run.task.clone(),

@@ -226,7 +226,10 @@ pub struct DashboardAgent {
     /// re-showing the same prompt before the worker has consumed the response.
     pub last_answered_request_id: Option<String>,
     /// Live context window snapshot from context.json (background workers only)
-    pub context_snapshot: Option<runstate::ContextSnapshot>,
+    /// Shared, not owned: the live snapshot comes out of the sync tick's
+    /// stat-gated cache, and cloning a full context window per tick was the
+    /// churn that cache exists to remove.
+    pub context_snapshot: Option<std::sync::Arc<runstate::ContextSnapshot>>,
     /// Per-stage records from stages.json
     pub stages: Vec<StageRecord>,
     /// Working directory the agent ran in

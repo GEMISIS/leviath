@@ -105,6 +105,7 @@ pub async fn setup_daemon_host(
         &config.mcp_servers,
         config.security.credential_store,
         config.security.allow_env_vars.clone(),
+        config.limits.mcp_idle_disconnect_secs,
     );
     mcp_pool.warm_recovered(&runs_dir).await;
     build_host(
@@ -123,8 +124,22 @@ pub async fn setup_daemon_host(
 /// tears down its sandbox via [`CliToolService::reap`]. Factored out (rather than
 /// an inline closure) so its body is exercised by a unit test - the daemon itself
 /// only ever fires the reaper from the private `serve()` loop.
-fn make_reaper(tool_service: Arc<CliToolService>) -> leviath_runtime::host::Reaper {
-    Box::new(move |_world, entity| tool_service.reap(entity))
+fn make_reaper(
+    tool_service: Arc<CliToolService>,
+    mcp_pool: Arc<crate::daemon::mcp_pool::McpPool>,
+) -> leviath_runtime::host::Reaper {
+    Box::new(move |world, entity| {
+        // Release the run's MCP leases before the entity (and its metadata)
+        // goes away; servers nobody else holds get an idle-disconnect timer.
+        if let Some(md) = world
+            .world()
+            .get::<leviath_runtime::persistence::RunMetadata>(entity)
+        {
+            let run_id = md.run_id.clone();
+            mcp_pool.release_run(&run_id);
+        }
+        tool_service.reap(entity)
+    })
 }
 
 /// Build the daemon's [`WorldHost`]: one world hosting every agent, its tool
@@ -297,11 +312,12 @@ pub fn build_host(
     let reload_hub = hub.clone();
     let reload_tx = subagent_tx.clone();
     let reload_runs = runs_dir.clone();
+    let reload_pool = mcp_pool.clone();
     host.set_reloader(Box::new(move |world, run_id| {
         // Pages a run back in with the current on-disk config, matching what a
         // real restart would restore it with.
         let reload_config = reload_reloader.current();
-        crate::daemon::recovery::reload_run(
+        let entity = crate::daemon::recovery::reload_run(
             world,
             reload_tools.as_ref(),
             &reload_config,
@@ -312,7 +328,15 @@ pub fn build_host(
             &reload_runs,
             now_secs(),
             &reload_tx,
-        )
+        );
+        // A paged-in run holds its blueprint's servers again, exactly like a
+        // fresh spawn (its reap released them when it was parked/unloaded).
+        if entity.is_some()
+            && let Ok(meta) = crate::runstate::read_meta(run_id)
+        {
+            reload_pool.lease_blueprint(&meta.agent_path, run_id);
+        }
+        entity
     }));
 
     // Last resort for a cancel the world can't service: force the run's on-disk
@@ -329,7 +353,7 @@ pub fn build_host(
     // its per-agent tool state (the latter also fixing a prior leak where tool
     // state was never released). Factored into `make_reaper` so the closure body
     // is unit-testable - the daemon only ever drives it from `serve()`.
-    host.set_reaper(make_reaper(tool_service.clone()));
+    host.set_reaper(make_reaper(tool_service.clone(), mcp_pool.clone()));
 
     // The shared MCP pool (created + recovery-warmed by the caller). Per-agent
     // `[[mcp_servers]]` connect lazily through it.
@@ -366,6 +390,9 @@ pub fn build_host(
         // recovering run's own metadata.
         write_placeholder_meta(&spawn_runs_dir, args);
         let defs = per_agent_mcp_defs(&spawn_pool, &mcp_tool_defs, &args.blueprint_path);
+        // Hold the blueprint's per-agent servers open for this run's life;
+        // the reap hook releases them (idle-disconnect follows).
+        spawn_pool.lease_blueprint(&args.blueprint_path, &args.run_id);
         // Fresh config per spawn: a `config.toml` edit (a new `[read_paths]`
         // grant, a permission change) takes effect on the next `lev run`
         // without a daemon restart.
@@ -536,7 +563,13 @@ mod tests {
             None,
             Handle::current(),
         );
-        let mut reaper = make_reaper(tool_service.clone());
+        let mut reaper = make_reaper(
+            tool_service.clone(),
+            crate::daemon::mcp_pool::McpPool::for_daemon(
+                Arc::new(tokio::sync::Mutex::new(leviath_mcp::ToolExecutor::new())),
+                &[],
+            ),
+        );
         // No registered state for this entity → a clean no-op (the reap-branch
         // logic itself is covered by CliToolService::reap's own unit test).
         let entity = bevy_ecs::entity::Entity::from_raw_u32(1)

@@ -672,9 +672,12 @@ pub struct WorldHost {
     /// The progress fingerprint as of the previous re-drive, or `None` before
     /// the first one.
     last_progress: Option<u64>,
-    /// Extra tool-lane permits the relief valve has handed out over this
-    /// daemon's life.
+    /// Extra tool-lane permits the relief valve has handed out and not yet
+    /// reclaimed (see [`Self::decay_relief_if_healthy`]).
     relief_granted: usize,
+    /// Consecutive re-drives that found the lane healthy (no dead cycles, no
+    /// queue) while relief was outstanding - the decay countdown.
+    healthy_cycles: u32,
     /// Dead cycles the daemon tolerates before widening the tool lane. `0`
     /// disables relief. See [`Self::set_dead_cycles_before_relief`].
     dead_cycles_before_relief: u32,
@@ -693,6 +696,12 @@ pub struct WorldHost {
     /// spending memory on a run nobody is driving.
     parked: HashMap<String, RunListEntry>,
 }
+
+/// Consecutive healthy re-drives (no dead cycles, empty tool queue) before the
+/// relief-decay valve reclaims one granted permit. Each re-drive is seconds
+/// apart, so four of them is a comfortably-over margin - and each further
+/// healthy cycle reclaims one more, so a full lane's worth drains in minutes.
+const HEALTHY_CYCLES_BEFORE_DECAY: u32 = 4;
 
 /// How often the serve loop re-drives the world on its own.
 ///
@@ -783,6 +792,7 @@ impl WorldHost {
             dead_cycles: 0,
             last_progress: None,
             relief_granted: 0,
+            healthy_cycles: 0,
             dead_cycles_before_relief: DEFAULT_DEAD_CYCLES_BEFORE_RELIEF,
             finished: VecDeque::new(),
             finished_retention_secs: DEFAULT_FINISHED_RETENTION_SECS,
@@ -809,7 +819,43 @@ impl WorldHost {
         };
         self.log_lane_pressure(&snapshot);
         let relief = self.relieve_if_wedged(&snapshot);
+        self.decay_relief_if_healthy(&snapshot);
         self.observe_lanes(&snapshot, relief);
+    }
+
+    /// The relief valve's give-back half: once the lane has been demonstrably
+    /// healthy for [`HEALTHY_CYCLES_BEFORE_DECAY`] consecutive re-drives,
+    /// reclaim one granted permit per further healthy cycle until the lane is
+    /// back at its configured width.
+    ///
+    /// The guards are what keep this on the safe side of the wedge detection
+    /// that granted the relief in the first place (issue #191): nothing is
+    /// reclaimed while `dead_cycles` is non-zero (a wedge may be forming),
+    /// nothing is reclaimed while the extra capacity is in use (`narrow` only
+    /// takes *idle* permits), and the width can never drop below what the
+    /// config asked for, because only permits this valve granted are counted.
+    fn decay_relief_if_healthy(&mut self, snapshot: &LaneSnapshot) {
+        if self.relief_granted == 0 {
+            self.healthy_cycles = 0;
+            return;
+        }
+        let healthy = self.dead_cycles == 0 && snapshot.tools_queued == 0;
+        self.healthy_cycles = match healthy {
+            true => self.healthy_cycles.saturating_add(1),
+            false => 0,
+        };
+        if self.healthy_cycles < HEALTHY_CYCLES_BEFORE_DECAY {
+            return;
+        }
+        let narrowed = self.world.narrow_tool_lane(1);
+        if narrowed > 0 {
+            self.relief_granted -= narrowed;
+            tracing::info!(
+                narrowed,
+                relief_granted = self.relief_granted,
+                "the jam is over; reclaiming relief capacity from the tool lane"
+            );
+        }
     }
 
     /// Widen the tool lane if the daemon has been going nowhere long enough, and
@@ -2773,6 +2819,74 @@ mod tests {
             await_drained_queue(&mut host).await;
             assert_eq!(host.world_mut().lane_snapshot().tools_busy, 2);
             release_the_lane(&mut host, &[release]).await;
+        })
+        .await;
+    }
+
+    /// The give-back half: once the jam is over and the lane has been healthy
+    /// for the decay margin, the granted capacity is reclaimed - a historical
+    /// wedge no longer raises the daemon's concurrency ceiling (and with it,
+    /// its peak memory) for the rest of its life.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn relief_decays_back_once_the_lane_is_healthy_again() {
+        leviath_testkit::with_tracing(|| async {
+            let mut host = host_with_full_pool(1);
+            host.set_dead_cycles_before_relief(2);
+            let release = wedge_the_tool_lane(&mut host).await;
+            host.observe_redrive(); // baseline
+            host.observe_redrive(); // 1
+            host.observe_redrive(); // 2 → relief
+            assert_eq!(host.relief_granted, 1);
+            assert_eq!(host.health().tools_workers, 2);
+
+            // Unjam and drain, so the relief permit sits idle.
+            await_drained_queue(&mut host).await;
+            release_the_lane(&mut host, &[release]).await;
+
+            // Healthy cycles accumulate; nothing comes back inside the margin.
+            for _ in 0..(HEALTHY_CYCLES_BEFORE_DECAY - 1) {
+                host.observe_redrive();
+            }
+            assert_eq!(host.relief_granted, 1, "still inside the decay margin");
+            host.observe_redrive(); // margin reached → one permit reclaimed
+            assert_eq!(host.relief_granted, 0, "the extra permit went back");
+            assert_eq!(host.health().tools_workers, 1);
+
+            // And with nothing granted, further healthy cycles change nothing.
+            host.observe_redrive();
+            assert_eq!(host.healthy_cycles, 0, "the countdown is parked");
+        })
+        .await;
+    }
+
+    /// Decay only ever takes *idle* permits: a lane whose relief capacity is
+    /// genuinely in use keeps it, however healthy the queue looks, and the
+    /// reclaim happens later once the work finishes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn relief_decay_takes_only_idle_permits() {
+        leviath_testkit::with_tracing(|| async {
+            let mut host = host_with_full_pool(1);
+            host.set_dead_cycles_before_relief(1);
+            let release = wedge_the_tool_lane(&mut host).await;
+            host.observe_redrive();
+            host.observe_redrive(); // → relief
+            assert_eq!(host.relief_granted, 1);
+            await_drained_queue(&mut host).await;
+
+            // Both permits are now BUSY (the original wedge plus the queued
+            // batch that relief let in) and the queue is empty: healthy by the
+            // decay's measure, but there is nothing idle to take.
+            for _ in 0..(HEALTHY_CYCLES_BEFORE_DECAY + 2) {
+                host.observe_redrive();
+            }
+            assert_eq!(host.relief_granted, 1, "busy permits are never taken");
+            assert_eq!(host.health().tools_workers, 2);
+
+            // Once the work releases, the next healthy cycle reclaims it.
+            release_the_lane(&mut host, &[release]).await;
+            host.observe_redrive();
+            assert_eq!(host.relief_granted, 0);
+            assert_eq!(host.health().tools_workers, 1);
         })
         .await;
     }

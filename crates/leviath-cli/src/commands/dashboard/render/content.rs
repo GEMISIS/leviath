@@ -45,7 +45,7 @@ impl Dashboard {
             .browsed_context_point()
             .map(|p| p.context.clone())
             .or_else(|| runstate::read_stage_context(&agent.id, self.selected_stage))
-            .or_else(|| agent.context_snapshot.clone());
+            .or_else(|| agent.context_snapshot.as_deref().cloned());
 
         // The card title shows the browsed history position - which point, of
         // how many, in which stage, recorded when - or a plain " ctx ".
@@ -478,7 +478,7 @@ impl Dashboard {
             .browsed_context_point()
             .map(|p| p.context.clone())
             .or_else(|| runstate::read_stage_context(&agent.id, self.selected_stage))
-            .or_else(|| agent.context_snapshot.clone());
+            .or_else(|| agent.context_snapshot.as_deref().cloned());
         if let Some(snap) = snap_opt {
             let mut lines: Vec<Line> = Vec::new();
 
@@ -787,7 +787,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-ctx", AgentDisplayStatus::Active);
-        agent.context_snapshot = Some(make_context_snapshot(4000, 8000));
+        agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, 80, 5);
@@ -816,7 +816,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-high", AgentDisplayStatus::Active);
-        agent.context_snapshot = Some(make_context_snapshot(7500, 8000)); // 93% = red
+        agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(7500, 8000))); // 93% = red
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, 80, 5);
@@ -831,7 +831,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-med", AgentDisplayStatus::Active);
-        agent.context_snapshot = Some(make_context_snapshot(6000, 8000)); // 75% = yellow
+        agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(6000, 8000))); // 75% = yellow
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, 80, 5);
@@ -846,7 +846,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-multi", AgentDisplayStatus::Active);
-        agent.context_snapshot = Some(runstate::ContextSnapshot {
+        agent.context_snapshot = Some(std::sync::Arc::new(runstate::ContextSnapshot {
             stage_name: "main".to_string(),
             total_tokens: 5000,
             max_tokens: 8000,
@@ -873,7 +873,7 @@ mod tests {
                     entries: vec![],
                 },
             ],
-        });
+        }));
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, 80, 5);
@@ -1312,7 +1312,7 @@ mod tests {
     fn build_context_lines_with_snapshot() {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-bcl", AgentDisplayStatus::Active);
-        agent.context_snapshot = Some(make_context_snapshot(4000, 8000));
+        agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
         let (lines, _cursor) = dash.build_context_lines(&agent, 80);
         assert!(!lines.is_empty());
     }
@@ -1329,7 +1329,7 @@ mod tests {
     fn build_context_lines_with_graph_info() {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-graph", AgentDisplayStatus::Active);
-        agent.context_snapshot = Some(make_context_snapshot(4000, 8000));
+        agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
         let mut edges = std::collections::HashMap::new();
         edges.insert(
             "main".to_string(),
@@ -1369,7 +1369,7 @@ mod tests {
         // sel_name must fall back to graph.stage_names.get(selected_stage).
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-graph-fallback", AgentDisplayStatus::Active);
-        agent.context_snapshot = Some(make_context_snapshot(4000, 8000));
+        agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
         let edges = std::collections::HashMap::new();
         agent.graph_info = Some(crate::commands::dashboard::graph::GraphTransitionInfo {
             edges,
@@ -1390,7 +1390,7 @@ mod tests {
     fn build_context_lines_graph_info_shows_visited_count() {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-graph-visited", AgentDisplayStatus::Active);
-        agent.context_snapshot = Some(make_context_snapshot(4000, 8000));
+        agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
         agent.graph_info = Some(crate::commands::dashboard::graph::GraphTransitionInfo {
             edges: std::collections::HashMap::new(),
             entry_stage: "main".to_string(),
@@ -1421,7 +1421,7 @@ mod tests {
     fn build_context_lines_graph_info_edge_with_non_always_condition() {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-graph-cond", AgentDisplayStatus::Active);
-        agent.context_snapshot = Some(make_context_snapshot(4000, 8000));
+        agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
         let mut edges = std::collections::HashMap::new();
         edges.insert(
             "main".to_string(),
@@ -1469,7 +1469,7 @@ mod tests {
     fn build_context_lines_with_entries() {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-entries", AgentDisplayStatus::Active);
-        agent.context_snapshot = Some(runstate::ContextSnapshot {
+        agent.context_snapshot = Some(std::sync::Arc::new(runstate::ContextSnapshot {
             stage_name: "main".to_string(),
             total_tokens: 4000,
             max_tokens: 8000,
@@ -1487,7 +1487,7 @@ mod tests {
                     taint: Default::default(),
                 }],
             }],
-        });
+        }));
         let (lines, _cursor) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
@@ -1501,7 +1501,7 @@ mod tests {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-old", AgentDisplayStatus::Active);
         // Has tokens but no entries = old run
-        agent.context_snapshot = Some(runstate::ContextSnapshot {
+        agent.context_snapshot = Some(std::sync::Arc::new(runstate::ContextSnapshot {
             stage_name: "main".to_string(),
             total_tokens: 4000,
             max_tokens: 8000,
@@ -1512,7 +1512,7 @@ mod tests {
                 max_tokens: 4000,
                 entries: vec![],
             }],
-        });
+        }));
         let (lines, _cursor) = dash.build_context_lines(&agent, 80);
         let text: String = lines
             .iter()
@@ -1527,7 +1527,7 @@ mod tests {
     fn build_context_lines_with_graph_info_and_incoming_edges() {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-incoming", AgentDisplayStatus::Active);
-        agent.context_snapshot = Some(make_context_snapshot(4000, 8000));
+        agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
         let mut edges = std::collections::HashMap::new();
         // "plan" has edge to "implement"
         edges.insert(
@@ -1571,7 +1571,7 @@ mod tests {
     fn build_context_lines_with_terminal_stage_no_edges() {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-terminal", AgentDisplayStatus::Active);
-        agent.context_snapshot = Some(make_context_snapshot(4000, 8000));
+        agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
         let mut edges = std::collections::HashMap::new();
         // "implement" has no outgoing edges (terminal)
         edges.insert("plan".to_string(), vec![]);
@@ -1603,7 +1603,7 @@ mod tests {
         // Stage has no entry in edges map at all → shows "linear - no graph edges"
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-noedge", AgentDisplayStatus::Active);
-        agent.context_snapshot = Some(make_context_snapshot(4000, 8000));
+        agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
         let edges = std::collections::HashMap::new(); // empty
         agent.graph_info = Some(crate::commands::dashboard::graph::GraphTransitionInfo {
             edges,
@@ -1634,7 +1634,7 @@ mod tests {
     fn build_context_lines_all_region_kinds() {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-kinds", AgentDisplayStatus::Active);
-        agent.context_snapshot = Some(runstate::ContextSnapshot {
+        agent.context_snapshot = Some(std::sync::Arc::new(runstate::ContextSnapshot {
             stage_name: "main".to_string(),
             total_tokens: 6000,
             max_tokens: 8000,
@@ -1689,7 +1689,7 @@ mod tests {
                     entries: vec![],
                 },
             ],
-        });
+        }));
         let (lines, _cursor) = dash.build_context_lines(&agent, 80);
         assert!(!lines.is_empty());
     }
@@ -1700,7 +1700,7 @@ mod tests {
     fn build_context_lines_high_usage_region() {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-hiuse", AgentDisplayStatus::Active);
-        agent.context_snapshot = Some(runstate::ContextSnapshot {
+        agent.context_snapshot = Some(std::sync::Arc::new(runstate::ContextSnapshot {
             stage_name: "main".to_string(),
             total_tokens: 7500,
             max_tokens: 8000,
@@ -1711,7 +1711,7 @@ mod tests {
                 max_tokens: 8000,
                 entries: vec![],
             }],
-        });
+        }));
         let (lines, _cursor) = dash.build_context_lines(&agent, 80);
         assert!(!lines.is_empty());
     }
@@ -1722,7 +1722,7 @@ mod tests {
     fn build_context_lines_medium_usage_region() {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-meduse", AgentDisplayStatus::Active);
-        agent.context_snapshot = Some(runstate::ContextSnapshot {
+        agent.context_snapshot = Some(std::sync::Arc::new(runstate::ContextSnapshot {
             stage_name: "main".to_string(),
             total_tokens: 5800,
             max_tokens: 8000,
@@ -1733,7 +1733,7 @@ mod tests {
                 max_tokens: 8000,
                 entries: vec![],
             }],
-        });
+        }));
         let (lines, _cursor) = dash.build_context_lines(&agent, 80);
         assert!(!lines.is_empty());
     }
@@ -1744,7 +1744,7 @@ mod tests {
     fn build_context_lines_zero_usage_region() {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-zerouse", AgentDisplayStatus::Active);
-        agent.context_snapshot = Some(runstate::ContextSnapshot {
+        agent.context_snapshot = Some(std::sync::Arc::new(runstate::ContextSnapshot {
             stage_name: "main".to_string(),
             total_tokens: 0,
             max_tokens: 8000,
@@ -1755,7 +1755,7 @@ mod tests {
                 max_tokens: 8000,
                 entries: vec![],
             }],
-        });
+        }));
         let (lines, _cursor) = dash.build_context_lines(&agent, 80);
         assert!(!lines.is_empty());
     }
@@ -1774,7 +1774,7 @@ mod tests {
         dash.stage_content_mode = StageContentMode::Context;
         dash.search_query = "token".to_string();
         let mut agent = make_test_agent("run-sm2", AgentDisplayStatus::Active);
-        agent.context_snapshot = Some(runstate::ContextSnapshot {
+        agent.context_snapshot = Some(std::sync::Arc::new(runstate::ContextSnapshot {
             stage_name: "main".to_string(),
             total_tokens: 4000,
             max_tokens: 8000,
@@ -1792,7 +1792,7 @@ mod tests {
                     taint: Default::default(),
                 }],
             }],
-        });
+        }));
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, 100, 20);
@@ -1880,7 +1880,7 @@ mod tests {
                 taint: Default::default(),
             })
             .collect();
-        agent.context_snapshot = Some(runstate::ContextSnapshot {
+        agent.context_snapshot = Some(std::sync::Arc::new(runstate::ContextSnapshot {
             stage_name: "main".to_string(),
             total_tokens: 4000,
             max_tokens: 8000,
@@ -1891,7 +1891,7 @@ mod tests {
                 max_tokens: 8000,
                 entries,
             }],
-        });
+        }));
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, 100, 20);
@@ -1966,7 +1966,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-regions", AgentDisplayStatus::Active);
-        agent.context_snapshot = Some(runstate::ContextSnapshot {
+        agent.context_snapshot = Some(std::sync::Arc::new(runstate::ContextSnapshot {
             stage_name: "main".to_string(),
             total_tokens: 4000,
             max_tokens: 8000,
@@ -2021,7 +2021,7 @@ mod tests {
                     entries: vec![],
                 },
             ],
-        });
+        }));
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, 80, 5);
@@ -2039,7 +2039,7 @@ mod tests {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-rs-ctx", AgentDisplayStatus::Active);
         // is_run_state = true, context_snapshot as fallback
-        agent.context_snapshot = Some(make_context_snapshot(3000, 8000));
+        agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(3000, 8000)));
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, 80, 5);
@@ -2122,7 +2122,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-follow", AgentDisplayStatus::Active);
-        agent.context_snapshot = Some(make_context_snapshot(1000, 8000));
+        agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(1000, 8000)));
         dash.agents.push(agent.clone());
         dash.update_display_indices();
         dash.stage_content_mode = StageContentMode::Context;
@@ -2264,7 +2264,7 @@ mod tests {
         dash.stage_content_mode = StageContentMode::Context;
         dash.search_query = "xyznotfound".to_string();
         let mut agent = make_test_agent("run-nm", AgentDisplayStatus::Active);
-        agent.context_snapshot = Some(make_context_snapshot(4000, 8000));
+        agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, 100, 20);

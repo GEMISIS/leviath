@@ -493,6 +493,10 @@ fn default_dead_cycles_before_relief() -> u32 {
     leviath_runtime::host::DEFAULT_DEAD_CYCLES_BEFORE_RELIEF
 }
 
+fn default_mcp_idle_disconnect_secs() -> u64 {
+    crate::daemon::mcp_pool::DEFAULT_MCP_IDLE_DISCONNECT_SECS
+}
+
 fn default_finished_retention_secs() -> u64 {
     leviath_runtime::host::DEFAULT_FINISHED_RETENTION_SECS
 }
@@ -612,6 +616,17 @@ pub struct LimitsConfig {
     /// Read once at daemon start, so a change needs a daemon restart.
     #[serde(default = "default_finished_retention_secs")]
     pub finished_retention_secs: u64,
+    /// How long (seconds) a per-agent MCP server may sit with zero live runs
+    /// leasing it before the daemon disconnects it (ending a stdio server's
+    /// child process). Long enough that back-to-back runs of a blueprint reuse
+    /// the warm connection; the next run that declares the server reconnects
+    /// lazily. `0` keeps every server connected for the daemon's life, which
+    /// was the old behaviour. Global `[[mcp_servers]]` from config.toml are
+    /// never disconnected regardless.
+    ///
+    /// Read once at daemon start, so a change needs a daemon restart.
+    #[serde(default = "default_mcp_idle_disconnect_secs")]
+    pub mcp_idle_disconnect_secs: u64,
     /// How long (seconds) a run may sit in a state no part of the engine can
     /// reach before it is failed instead of left reported as running.
     ///
@@ -689,6 +704,7 @@ impl Default for LimitsConfig {
             stall_timeout_secs: default_stall_timeout_secs(),
             dead_cycles_before_relief: default_dead_cycles_before_relief(),
             finished_retention_secs: default_finished_retention_secs(),
+            mcp_idle_disconnect_secs: default_mcp_idle_disconnect_secs(),
             wedge_timeout_secs: default_wedge_timeout_secs(),
             provider_failures_before_open: default_provider_failures_before_open(),
             provider_circuit_cooldown_secs: default_provider_circuit_cooldown_secs(),
@@ -3218,6 +3234,7 @@ enabled = false
             rate_limits: HashMap::new(),
             taint_tracking: false,
             limits: LimitsConfig {
+                mcp_idle_disconnect_secs: default_mcp_idle_disconnect_secs(),
                 max_concurrent_inferences: Some(4),
                 max_concurrent_tools: 3,
                 default_max_iterations: Some(99),
