@@ -141,6 +141,7 @@ async fn spawn(h: &SubAgentHandle, args: &serde_json::Value) -> String {
                 instructions,
                 example: None,
                 schema: None,
+                validator: None,
             }),
         }
     };

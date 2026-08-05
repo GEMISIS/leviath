@@ -21,6 +21,8 @@
 //!   an external URI fails to compile (and is skipped, per the point above)
 //!   rather than fetching over the network or filesystem at validation time.
 
+pub mod format;
+
 use serde_json::Value;
 
 /// How many individual schema violations a refusal message reports before
@@ -75,10 +77,10 @@ pub fn validate_tool_args(tool_name: &str, schema: &Value, args: &Value) -> ArgV
 
 /// Validate a submitted final output against the schema its blueprint declared.
 ///
-/// **This is the only thing in the framework that looks inside a final
-/// output**, and it runs only when an author supplied a schema. A format label
-/// never triggers it: `format = "json"` on its own validates nothing, which is
-/// what keeps the engine free of per-format behavior.
+/// Shape, not well-formedness. Whether the answer parses as the format it claims
+/// is [`format::check`]'s job, and runs before this. This answers the narrower
+/// question of whether the parsed document has the fields the author asked for,
+/// and runs only when they supplied a schema to ask with.
 ///
 /// `content` is the agent's submission verbatim. Because a schema means the
 /// author wants JSON, content that will not parse as JSON is a violation in its

@@ -1356,6 +1356,7 @@ fn parse_output_spec(table: &toml::value::Table) -> crate::output::OutputSpec {
         schema: table
             .get("schema")
             .and_then(|v| serde_json::to_value(v).ok()),
+        validator: string_field("validator"),
     }
 }
 

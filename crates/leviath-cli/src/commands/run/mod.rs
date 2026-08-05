@@ -155,6 +155,7 @@ pub fn output_request(
         instructions,
         example: None,
         schema,
+        validator: None,
     }))
 }
 

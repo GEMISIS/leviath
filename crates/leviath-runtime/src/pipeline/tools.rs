@@ -294,6 +294,7 @@ pub fn dispatch_tools(
             Option<&InFlightWork>,
             Option<&StageCursor>,
             Option<&RunMetadata>,
+            Option<&crate::components::OutputValidators>,
         ),
         With<ReadyForTools>,
     >,
@@ -329,6 +330,7 @@ pub fn dispatch_tools(
         in_flight,
         cursor,
         metadata,
+        validators,
     ) in agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
@@ -403,6 +405,7 @@ pub fn dispatch_tools(
                 let (text, output) = crate::output_tool::handle_output_tool(
                     &c.arguments,
                     stage_inf.output.as_ref(),
+                    validators,
                     &state.current_stage,
                     chrono::Utc::now().timestamp(),
                     metadata.map(|m| std::path::Path::new(&m.workdir)),

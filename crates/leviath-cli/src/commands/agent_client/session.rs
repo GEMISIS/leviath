@@ -86,6 +86,7 @@ pub(super) fn spawn_args(
                 instructions: instructions.clone(),
                 example: None,
                 schema: None,
+                validator: None,
             }),
         },
     }
