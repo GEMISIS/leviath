@@ -89,6 +89,18 @@ require_output = true
 A worker that finishes without submitting is nudged and re-run a few times first. It never strands
 the fan-out: after that the merge proceeds anyway, and the run records `output_forced`.
 
+When it still hands back nothing, it is reported as a **failed** worker with the reason, rather than
+as a success with an empty section:
+
+```
+[fan_out results: 7 succeeded, 3 failed]
+
+## worker w4 FAILED
+worker finished without the final output its stage requires
+```
+
+The merge stage can act on that. An empty section it cannot even see.
+
 ## Where the results land, and how they share the space
 
 The merge stage reads one consolidated report holding every worker's answer. That report has to fit

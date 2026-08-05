@@ -244,6 +244,24 @@ allow_as_worker = true
 require_output = true
 ```
 
+Once you set it, a worker that finishes without an answer is counted as a **failed** worker, not as
+one that had nothing to say:
+
+```
+[fan_out results: 7 succeeded, 3 failed]
+
+## worker w4 FAILED
+worker finished without the final output its stage requires
+```
+
+That distinction is the reason to set it. A worker that cannot satisfy its format or its validator
+keeps retrying until its iterations run out, and that ends the worker normally. Counted as a success
+it contributes an empty section, and the merge stage cannot tell "nothing to report" from "never
+reported", so it merges confidently over a hole.
+
+The default `on_worker_failure` is `continue`, so the merge still runs on whatever did arrive. It now
+knows what it is missing.
+
 ## An answer counts as output
 
 A run that changes no files is normally reported as `complete (no output)`. That verdict exists to
