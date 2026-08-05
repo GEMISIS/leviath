@@ -58,6 +58,14 @@ pub(crate) fn write_with_mode(path: &Path, contents: &[u8], _mode: u32) -> io::R
 /// `restrict_to_owner` spawns `icacls`, which is far too heavy to repeat on
 /// every appended line, so it runs only when this call is the one that creates
 /// the file. An existing file was already restricted when it was created.
+///
+/// **The restriction is best-effort, unlike [`write_with_mode`]'s.** That one
+/// guards secrets - an API key written unprotected is worse than not written at
+/// all, so its failure propagates. These two are for a run's own files, which
+/// until now were created at the default and never restricted. Failing the
+/// create on a failed `icacls` would trade "less protected than intended" for
+/// "the run cannot record anything", which is the worse of the two, and it
+/// would make persistence depend on spawning a process.
 pub(crate) fn open_append_with_mode(path: &Path, _mode: u32) -> io::Result<std::fs::File> {
     let existed = path.exists();
     let file = std::fs::OpenOptions::new()
@@ -65,18 +73,26 @@ pub(crate) fn open_append_with_mode(path: &Path, _mode: u32) -> io::Result<std::
         .append(true)
         .open(path)?;
     if !existed {
-        restrict_to_owner(path)?;
+        let _ = restrict_to_owner(path);
     }
     Ok(file)
 }
 
 /// Create `path` and any missing parents, restricting the leaf to the owner.
+///
+/// Best-effort on the restriction, for the reason [`open_append_with_mode`]
+/// gives.
 pub(crate) fn create_dir_all_with_mode(path: &Path, _mode: u32) -> io::Result<()> {
-    if path.exists() {
+    // `is_dir`, not `exists`: a *file* sitting where the directory should be is
+    // an error, and `create_dir_all` is what reports it. Returning early on
+    // `exists` would call that a success here and fail on Unix, where the same
+    // call goes straight to the directory builder.
+    if path.is_dir() {
         return Ok(());
     }
     std::fs::create_dir_all(path)?;
-    restrict_to_owner(path)
+    let _ = restrict_to_owner(path);
+    Ok(())
 }
 
 /// Tighten `path` if it exists, reporting whether anything changed.
