@@ -173,6 +173,11 @@ impl ToolLaneStats {
         self.workers.fetch_add(extra, Ordering::Relaxed);
     }
 
+    /// Lower the cap by `taken`, to match permits forgotten from the semaphore.
+    fn narrowed(&self, taken: usize) {
+        self.workers.fetch_sub(taken, Ordering::Relaxed);
+    }
+
     /// Whether every unit of capacity is taken and batches are waiting behind
     /// them.
     #[must_use]
@@ -224,11 +229,14 @@ impl ToolLane {
         self.runtime.clone().spawn(serve_lane(lane, jobs))
     }
 
-    /// Add `extra` permits, widening the lane for good.
+    /// Add `extra` permits, widening the lane.
     ///
     /// The relief valve under a lane that has stopped draining: handing out more
     /// capacity lets the queued batches run without cancelling anything. Returns
-    /// how many were added.
+    /// how many were added. No longer "for good": once the jam is over,
+    /// [`Self::narrow`] hands the extra capacity back, so a single historical
+    /// wedge does not raise the daemon's peak concurrency (and with it, peak
+    /// memory) for the rest of its life.
     pub fn relieve(&self, extra: usize) -> usize {
         if extra == 0 {
             return 0;
@@ -236,6 +244,22 @@ impl ToolLane {
         self.permits.add_permits(extra);
         self.stats.widen(extra);
         extra
+    }
+
+    /// Take up to `upto` *idle* permits back out of the lane, returning how many
+    /// were reclaimed.
+    ///
+    /// `forget_permits` only removes permits that are currently available, so
+    /// this can never stall a batch that is running or block waiting for one to
+    /// finish - a busy lane just gives back fewer (possibly zero) permits, and
+    /// the caller tries again on a later healthy cycle.
+    pub fn narrow(&self, upto: usize) -> usize {
+        if upto == 0 {
+            return 0;
+        }
+        let taken = self.permits.forget_permits(upto);
+        self.stats.narrowed(taken);
+        taken
     }
 }
 
@@ -844,6 +868,51 @@ mod tests {
         release.notify_one();
         let held = h.next_outcome().await;
         assert_eq!(held.entity, entity(1));
+        h.drain().await;
+    }
+
+    /// `narrow` reclaims only *idle* permits: a busy lane gives back nothing,
+    /// an idle one gives back what was asked (bounded by availability), and
+    /// the cap tracks the permits in both directions.
+    #[tokio::test]
+    async fn narrow_reclaims_idle_permits_and_never_busy_ones() {
+        let mut h = Harness::new(1);
+        assert_eq!(h.lane.relieve(2), 2);
+        assert_eq!(h.stats.workers(), 3);
+
+        // All three permits idle: narrowing nothing is a no-op, narrowing one
+        // takes one.
+        assert_eq!(h.lane.narrow(0), 0, "narrowing nothing changes nothing");
+        assert_eq!(h.lane.narrow(1), 1);
+        assert_eq!(h.stats.workers(), 2);
+
+        // Occupy both remaining permits, then try to narrow: nothing is idle,
+        // so nothing is taken and the cap stays put.
+        let started_a = Arc::new(Notify::new());
+        let release_a = Arc::new(Notify::new());
+        h.submit(held_job(
+            1,
+            started_a.clone(),
+            release_a.clone(),
+            crate::cancel::CancelToken::new(),
+        ));
+        timeout(started_a.notified()).await;
+        let started_b = Arc::new(Notify::new());
+        let release_b = Arc::new(Notify::new());
+        h.submit(held_job(
+            2,
+            started_b.clone(),
+            release_b.clone(),
+            crate::cancel::CancelToken::new(),
+        ));
+        timeout(started_b.notified()).await;
+        assert_eq!(h.lane.narrow(1), 0, "a busy lane keeps its permits");
+        assert_eq!(h.stats.workers(), 2);
+
+        release_a.notify_one();
+        release_b.notify_one();
+        h.next_outcome().await;
+        h.next_outcome().await;
         h.drain().await;
     }
 

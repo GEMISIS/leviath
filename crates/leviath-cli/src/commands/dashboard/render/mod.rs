@@ -818,12 +818,12 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-cs", AgentDisplayStatus::Active);
-        agent.context_snapshot = Some(crate::runstate::ContextSnapshot {
+        agent.context_snapshot = Some(std::sync::Arc::new(crate::runstate::ContextSnapshot {
             stage_name: "main".to_string(),
             total_tokens: 4000,
             max_tokens: 8000,
             regions: vec![],
-        });
+        }));
         dash.agents.push(agent);
         dash.update_display_indices();
         terminal

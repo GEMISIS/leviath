@@ -603,13 +603,20 @@ impl PipelineWorld {
         }
     }
 
-    /// Widen the tool lane by `extra` batches, permanently.
+    /// Widen the tool lane by `extra` batches.
     ///
     /// The relief valve: when the lane has stopped draining, handing out more
     /// capacity lets the queued batches through without cancelling anything.
     /// Returns how many were added.
     pub fn relieve_tool_lane(&self, extra: usize) -> usize {
         self.tool_lane.relieve(extra)
+    }
+
+    /// Reclaim up to `upto` idle permits from the tool lane (the relief valve's
+    /// give-back half). Returns how many were reclaimed; never touches a permit
+    /// a running batch holds.
+    pub fn narrow_tool_lane(&self, upto: usize) -> usize {
+        self.tool_lane.narrow(upto)
     }
 
     /// The status of an agent, if it still exists.

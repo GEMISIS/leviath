@@ -113,6 +113,20 @@ impl ToolExecutor {
         advertised
     }
 
+    /// Take a server's client back out of the executor, dropping the aliases
+    /// that routed to it. The caller owns the returned client and is expected
+    /// to shut it down - removal alone does not kill a stdio server's child
+    /// process. `None` if no such server is registered.
+    ///
+    /// The pool's idle-disconnect uses this: a per-agent server whose last
+    /// leasing run ended has no caller left, and before this the connection
+    /// (and its child process) lived until the daemon exited.
+    pub fn remove_client(&mut self, server_name: &str) -> Option<MCPClient> {
+        let client = self.clients.remove(server_name)?;
+        self.aliases.retain(|_, (server, _)| server != server_name);
+        Some(client)
+    }
+
     /// Compute a unique, provider-safe advertised name for `original`.
     ///
     /// Prefers the sanitized name; on a clash with `reserved` or an existing
@@ -547,6 +561,25 @@ for line in sys.stdin:
         let client = spawn_ready_client().await;
         executor.add_client("server1".to_string(), client);
         assert_eq!(executor.server_count(), 1);
+    }
+
+    /// Removing a server takes back its client and drops the aliases that
+    /// routed to it, so a later `execute` of its tools misses cleanly - and an
+    /// unknown name removes nothing.
+    #[tokio::test]
+    async fn remove_client_takes_the_server_and_its_aliases() {
+        let mut executor = ToolExecutor::new();
+        let client = spawn_ready_client().await;
+        executor.add_client("server1".to_string(), client);
+        assert_eq!(executor.server_count(), 1);
+
+        assert!(executor.remove_client("nope").is_none());
+        let mut taken = executor.remove_client("server1").expect("was registered");
+        assert_eq!(executor.server_count(), 0);
+        let result = executor.execute("echo", serde_json::json!({})).await;
+        assert!(result.is_err(), "the removed server's tools route nowhere");
+        // The caller owns the shutdown; this is what ends the child process.
+        taken.shutdown().await.expect("shutdown is best-effort Ok");
     }
 
     #[tokio::test]

@@ -134,6 +134,10 @@ impl FanOutSpawner for DaemonFanOutSpawner {
         // the parent's - already warmed by the parent's preprocessor; the first
         // `worker_agent`/`worker_query` worker warms them here for its siblings).
         let mcp_defs = self.worker_mcp_defs(&args.blueprint_path);
+        // The worker holds its blueprint's per-agent servers open like any
+        // other run; the reap hook releases the lease when the worker ends.
+        self.mcp_pool
+            .lease_blueprint(&args.blueprint_path, &args.run_id);
 
         let config = self.config.current();
         let child = build_agent(

@@ -2370,7 +2370,7 @@ mod tests {
             key: None,
             taint: Default::default(),
         };
-        agent.context_snapshot = Some(crate::runstate::ContextSnapshot {
+        agent.context_snapshot = Some(std::sync::Arc::new(crate::runstate::ContextSnapshot {
             stage_name: "main".to_string(),
             total_tokens: 20,
             max_tokens: 100,
@@ -2390,7 +2390,7 @@ mod tests {
                     entries: vec![entry("gamma")],
                 },
             ],
-        });
+        }));
         agent
     }
 

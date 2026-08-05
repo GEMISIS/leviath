@@ -36,6 +36,40 @@ pub struct McpPool {
     /// `[security] allow_env_vars`: which credential-shaped variables an MCP
     /// server's `${VAR}` headers may interpolate.
     allow_env_vars: Vec<String>,
+    /// Per-run leases on per-agent servers (see [`Self::lease_blueprint`]).
+    /// Same `std` mutex discipline as `connected`: held briefly, never across
+    /// an `.await`.
+    leases: StdMutex<LeaseTable>,
+    /// How long a per-agent server may sit with zero leasing runs before its
+    /// connection (and, for stdio servers, its child process) is torn down.
+    /// Zero disables disconnection - the pre-lease behavior, where every
+    /// server any blueprint ever declared stayed connected for the daemon's
+    /// life.
+    idle_disconnect: std::time::Duration,
+}
+
+/// Which runs hold which per-agent servers open.
+#[derive(Default)]
+struct LeaseTable {
+    /// Signature → the server's lease state.
+    servers: HashMap<String, ServerLease>,
+    /// Run id → the signatures it holds, so a reap releases them all.
+    runs: HashMap<String, Vec<String>>,
+    /// Signatures of the global config servers, seeded at startup: their
+    /// lifecycle belongs to the daemon, never to a run, so they are exempt
+    /// from idle disconnection.
+    global: HashSet<String>,
+}
+
+/// One per-agent server's lease state.
+struct ServerLease {
+    /// The server's name - the key the executor stores its client under.
+    name: String,
+    /// The runs currently holding it open.
+    holders: HashSet<String>,
+    /// Bumped on every lease and release, so a disconnect scheduled when the
+    /// count hit zero is a no-op if anything touched the server since.
+    generation: u64,
 }
 
 /// A stable dedup key for a server config: its full serialized form. Two
@@ -47,6 +81,13 @@ fn signature(config: &MCPServerConfig) -> String {
     serde_json::to_string(config).unwrap_or_default()
 }
 
+/// Default for how long a per-agent MCP server may sit with zero leasing runs
+/// before its connection is torn down. Long enough that back-to-back runs of
+/// the same blueprint reuse the warm connection (and never re-trigger an OAuth
+/// flow between them); short enough that a one-off run's servers do not hold
+/// child processes and buffers for the daemon's remaining life.
+pub const DEFAULT_MCP_IDLE_DISCONNECT_SECS: u64 = 60;
+
 impl McpPool {
     /// Build a pool over `shared`, reserving `reserved` names from advertisement.
     pub fn new(shared: Arc<Mutex<ToolExecutor>>, reserved: HashSet<String>) -> Self {
@@ -56,7 +97,16 @@ impl McpPool {
             connected: StdMutex::new(HashMap::new()),
             credential_store: leviath_core::CredentialStoreKind::default(),
             allow_env_vars: Vec::new(),
+            leases: StdMutex::new(LeaseTable::default()),
+            idle_disconnect: std::time::Duration::from_secs(DEFAULT_MCP_IDLE_DISCONNECT_SECS),
         }
+    }
+
+    /// How long a per-agent server may sit unleased before disconnection.
+    /// `0` disables it.
+    pub fn with_idle_disconnect_secs(mut self, secs: u64) -> Self {
+        self.idle_disconnect = std::time::Duration::from_secs(secs);
+        self
     }
 
     /// Allow these credential-shaped variables in MCP `${VAR}` headers.
@@ -84,6 +134,7 @@ impl McpPool {
             config_servers,
             leviath_core::CredentialStoreKind::default(),
             Vec::new(),
+            DEFAULT_MCP_IDLE_DISCONNECT_SECS,
         )
     }
 
@@ -99,6 +150,7 @@ impl McpPool {
         config_servers: &[MCPServerConfig],
         credential_store: leviath_core::CredentialStoreKind,
         allow_env_vars: Vec<String>,
+        idle_disconnect_secs: u64,
     ) -> Arc<Self> {
         let mut reserved: HashSet<String> =
             leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(std::env::temp_dir()))
@@ -109,7 +161,8 @@ impl McpPool {
         let pool = Arc::new(
             Self::new(shared_mcp, reserved)
                 .with_credential_store(credential_store)
-                .with_env_allowlist(allow_env_vars),
+                .with_env_allowlist(allow_env_vars)
+                .with_idle_disconnect_secs(idle_disconnect_secs),
         );
         for server in config_servers {
             pool.seed(server, Vec::new());
@@ -119,11 +172,138 @@ impl McpPool {
 
     /// Seed the cache with an already-connected server's defs (used at startup for
     /// the global config servers, connected once by `ToolRegistry::build`).
+    /// Seeded servers are global: their lifecycle belongs to the daemon, so
+    /// they are exempt from lease-driven idle disconnection.
     pub fn seed(&self, config: &MCPServerConfig, defs: Vec<Tool>) {
+        let sig = signature(config);
+        self.leases
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .global
+            .insert(sig.clone());
         self.connected
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(signature(config), defs);
+            .insert(sig, defs);
+    }
+
+    /// Record `run_id` as holding every per-agent server `blueprint_path`
+    /// declares, so the connections stay up exactly as long as some run needs
+    /// them. Global (seeded) servers are skipped. A missing or unreadable
+    /// manifest leases nothing.
+    ///
+    /// Called from every path that brings a run into the world with a
+    /// blueprint: the spawner, the restart reloader, and the fan-out worker
+    /// spawner. The matching release is [`Self::release_run`], from the reap
+    /// hook.
+    pub fn lease_blueprint(&self, blueprint_path: &str, run_id: &str) {
+        let Ok(toml) = std::fs::read_to_string(blueprint_path) else {
+            return;
+        };
+        let mut table = self.leases.lock().unwrap_or_else(PoisonError::into_inner);
+        for server in parse_blueprint_mcp_servers(&toml) {
+            let sig = signature(&server);
+            if table.global.contains(&sig) {
+                continue;
+            }
+            let entry = table
+                .servers
+                .entry(sig.clone())
+                .or_insert_with(|| ServerLease {
+                    name: server.name.clone(),
+                    holders: HashSet::new(),
+                    generation: 0,
+                });
+            entry.generation += 1;
+            if entry.holders.insert(run_id.to_string()) {
+                table.runs.entry(run_id.to_string()).or_default().push(sig);
+            }
+        }
+    }
+
+    /// Release every lease `run_id` holds. Servers whose holder count reaches
+    /// zero get an idle-disconnect scheduled (when a runtime is available and
+    /// `idle_disconnect` is non-zero); a new lease during the grace window
+    /// bumps the generation and turns the pending disconnect into a no-op.
+    pub fn release_run(self: &Arc<Self>, run_id: &str) {
+        let zeroed = self.release_run_bookkeeping(run_id);
+        if self.idle_disconnect.is_zero() {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return; // no runtime (a sync test): bookkeeping only
+        };
+        for (sig, name, generation) in zeroed {
+            let pool = Arc::clone(self);
+            handle.spawn(async move {
+                tokio::time::sleep(pool.idle_disconnect).await;
+                pool.disconnect_if_still_idle(&sig, &name, generation).await;
+            });
+        }
+    }
+
+    /// The synchronous half of [`Self::release_run`]: drop the run's leases and
+    /// return the `(signature, name, generation)` of every server that now has
+    /// zero holders.
+    fn release_run_bookkeeping(&self, run_id: &str) -> Vec<(String, String, u64)> {
+        let mut table = self.leases.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(sigs) = table.runs.remove(run_id) else {
+            return Vec::new();
+        };
+        let mut zeroed = Vec::new();
+        for sig in sigs {
+            let Some(entry) = table.servers.get_mut(&sig) else {
+                continue;
+            };
+            entry.holders.remove(run_id);
+            entry.generation += 1;
+            if entry.holders.is_empty() {
+                zeroed.push((sig.clone(), entry.name.clone(), entry.generation));
+            }
+        }
+        zeroed
+    }
+
+    /// Tear a server down if nothing touched it since `generation`: forget its
+    /// cached defs (so the next spawn reconnects lazily), take its client out
+    /// of the shared executor, and shut it down - which is what actually ends
+    /// a stdio server's child process. Returns whether it disconnected.
+    pub async fn disconnect_if_still_idle(&self, sig: &str, name: &str, generation: u64) -> bool {
+        {
+            let mut table = self.leases.lock().unwrap_or_else(PoisonError::into_inner);
+            let still_idle = table
+                .servers
+                .get(sig)
+                .is_some_and(|e| e.holders.is_empty() && e.generation == generation);
+            if !still_idle {
+                return false;
+            }
+            table.servers.remove(sig);
+        }
+        self.connected
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(sig);
+        let client = self.shared.lock().await.remove_client(name);
+        match client {
+            Some(mut client) => {
+                let _ = client.shutdown().await;
+                tracing::info!(server = %name, "disconnected idle per-agent MCP server");
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The signatures currently holding leases, for tests and diagnostics.
+    #[cfg(test)]
+    fn leased_holders(&self, config: &MCPServerConfig) -> usize {
+        self.leases
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .servers
+            .get(&signature(config))
+            .map_or(0, |e| e.holders.len())
     }
 
     /// Ensure `config` is connected (idempotent by signature) and return its
@@ -587,6 +767,98 @@ for line in sys.stdin:
         let pool = pool();
         pool.warm_recovered(std::path::Path::new("/no/such/runs"))
             .await;
+    }
+
+    /// The lease lifecycle end to end: runs hold a server open, the last
+    /// release zeroes it, and the idle disconnect tears the connection down so
+    /// the next spawn reconnects lazily.
+    #[tokio::test]
+    async fn leases_hold_a_server_and_the_last_release_disconnects_it() {
+        with_tracing(|| {});
+        with_temp_home(|| async {
+            let (_sd, stub) = stub_py();
+            let (_bd, bp) = blueprint_declaring("leaseserver", &stub);
+            let pool = Arc::new(pool().with_idle_disconnect_secs(1));
+            let servers = parse_blueprint_mcp_servers(&std::fs::read_to_string(&bp).unwrap());
+            let cfg = &servers[0];
+            // Connect for real, so there is a live client to tear down.
+            assert_eq!(pool.ensure(cfg).await.len(), 1);
+
+            pool.lease_blueprint(&bp, "run-a");
+            pool.lease_blueprint(&bp, "run-b");
+            // Leasing twice from the same run holds once.
+            pool.lease_blueprint(&bp, "run-b");
+            assert_eq!(pool.leased_holders(cfg), 2);
+
+            // Releasing one run leaves the server held (nothing zeroed, no
+            // timer scheduled).
+            pool.release_run("run-a");
+            assert_eq!(pool.leased_holders(cfg), 1);
+            assert!(!pool.cached_defs_for(&servers).is_empty());
+
+            // The last release zeroes it; drive the disconnect directly (the
+            // scheduled timer runs the same call after the grace window).
+            let zeroed = pool.release_run_bookkeeping("run-b");
+            assert_eq!(zeroed.len(), 1);
+            let (sig, name, generation) = zeroed[0].clone();
+            assert!(pool.disconnect_if_still_idle(&sig, &name, generation).await);
+            // Defs are forgotten, so the next spawn reconnects lazily...
+            assert!(pool.cached_defs_for(&servers).is_empty());
+            // ...and a replayed disconnect finds nothing to do.
+            assert!(!pool.disconnect_if_still_idle(&sig, &name, generation).await);
+        })
+        .await;
+    }
+
+    /// A lease taken during the grace window outdates the scheduled
+    /// disconnect: the generation moved, so the timer's callback is a no-op.
+    #[tokio::test]
+    async fn a_lease_during_the_grace_window_cancels_the_disconnect() {
+        with_tracing(|| {});
+        with_temp_home(|| async {
+            let (_sd, stub) = stub_py();
+            let (_bd, bp) = blueprint_declaring("graceserver", &stub);
+            let pool = Arc::new(pool().with_idle_disconnect_secs(1));
+            let servers = parse_blueprint_mcp_servers(&std::fs::read_to_string(&bp).unwrap());
+            let cfg = &servers[0];
+            assert_eq!(pool.ensure(cfg).await.len(), 1);
+
+            pool.lease_blueprint(&bp, "run-a");
+            let zeroed = pool.release_run_bookkeeping("run-a");
+            let (sig, name, generation) = zeroed[0].clone();
+            // A new run leases before the timer would have fired.
+            pool.lease_blueprint(&bp, "run-b");
+            assert!(
+                !pool.disconnect_if_still_idle(&sig, &name, generation).await,
+                "a stale generation must not tear down a re-leased server"
+            );
+            assert_eq!(pool.leased_holders(cfg), 1);
+            assert!(!pool.cached_defs_for(&servers).is_empty());
+        })
+        .await;
+    }
+
+    /// Global (seeded) servers belong to the daemon: they are never leased,
+    /// and releasing runs never schedules them for disconnection. A missing
+    /// manifest and an unknown run are no-ops.
+    #[tokio::test]
+    async fn seeded_servers_are_exempt_and_bad_inputs_are_noops() {
+        with_tracing(|| {});
+        with_temp_home(|| async {
+            let (_sd, stub) = stub_py();
+            let (_bd, bp) = blueprint_declaring("globalserver", &stub);
+            let pool = Arc::new(pool());
+            let servers = parse_blueprint_mcp_servers(&std::fs::read_to_string(&bp).unwrap());
+            pool.seed(&servers[0], Vec::new());
+
+            pool.lease_blueprint(&bp, "run-a");
+            assert_eq!(pool.leased_holders(&servers[0]), 0, "global: no lease");
+            pool.release_run("run-a"); // nothing held → nothing zeroed
+            assert!(pool.release_run_bookkeeping("never-leased").is_empty());
+            pool.lease_blueprint("/no/such/agent.leviath", "run-b");
+            assert!(pool.release_run_bookkeeping("run-b").is_empty());
+        })
+        .await;
     }
 
     #[test]
