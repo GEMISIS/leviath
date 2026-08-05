@@ -70,6 +70,14 @@ max_revisits = 1
 worker_stage = "gather_worker"
 merge_stage = "build"
 max_workers = 4
+# Where the workers' rows land, and the budget their shares divide. A region of
+# its own rather than the conversation, which is carrying the message history
+# alongside them.
+results_region = "worker_rows"
+# A ceiling on slices, not just on concurrency. Twelve ways is enough breadth
+# for any subject, and past that each worker's share of the region is too small
+# to carry usable rows.
+max_items = 12
 split_prompt = """
 Split the `subject` into slices that can be gathered independently, one work
 item each. A slice is a country, a company, a year range, a category - whatever
@@ -138,8 +146,8 @@ description = "Assemble the workers' rows into one dataset"
 available_tools = ["write_file", "read_file", "context_read", "context_write"]
 max_iterations = 15
 system_prompt = """
-The workers' submitted rows are in your conversation, one block per slice. Write
-them to `data/dataset.csv` as a single table.
+The workers' submitted rows are in the `worker_rows` region, one block per
+slice. Write them to `data/dataset.csv` as a single table.
 
 - One header line, exactly the column names from `schema`, in order. The workers
   each sent their own header; keep one and drop the rest.
@@ -234,9 +242,11 @@ caveats       = { kind = "pinned", budget = "2%", max_tokens = 2000 }
 
 # Raw pages and search results (bulk, evictable).
 raw_sources   = { kind = "temporary", budget = "25%", max_tokens = 30000 }
-# Holds the workers' consolidated rows on the way into the merge, so it gets a
-# far larger share than a conversation region usually needs.
-conversation  = { kind = "sliding_window", max_items = 40, budget = "45%", max_tokens = 50000, strategy = "bulk", overflow = 10 }
+# The workers' consolidated rows, on the way into the merge. Its budget is what
+# each worker's share is divided from, so it gets the largest slice here.
+worker_rows   = { kind = "clearable", budget = "40%", max_tokens = 45000 }
+
+conversation  = { kind = "sliding_window", max_items = 30, budget = "12%", max_tokens = 15000, strategy = "bulk", overflow = 10 }
 
 # Written by the runtime on an abnormal stage ending: the failed inference's
 # error text, or a note that a stage hit its iteration cap. Pinned so it

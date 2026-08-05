@@ -233,6 +233,8 @@ mod tests {
             max_workers: 4,
             on_worker_failure: WorkerFailurePolicy::Continue,
             split_prompt: "split".to_string(),
+            results_region: None,
+            max_items: None,
         }
     }
 

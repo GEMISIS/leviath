@@ -631,6 +631,27 @@ pub struct FanOutConfig {
     /// Prompt that produces the JSON array of work items (one per worker).
     #[serde(default)]
     pub split_prompt: String,
+
+    /// Context region the consolidated worker report is written to. `None`
+    /// means `conversation`.
+    ///
+    /// Worth naming when the results are bulky. `conversation` is a sliding
+    /// window carrying the message history, so a large report competes with the
+    /// turns around it and can be evicted by them. A region of its own gets a
+    /// budget of its own, and that budget is what each worker's share is
+    /// divided from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results_region: Option<String>,
+
+    /// Most work items the split may produce. `None` means however many it
+    /// produces.
+    ///
+    /// Distinct from `max_workers`, which caps how many run *at once*. This
+    /// caps how many there are at all, which is what bounds both the run's cost
+    /// and each worker's share of the results region: split a hundred ways and
+    /// every worker's contribution is a hundredth of the space.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_items: Option<usize>,
 }
 
 /// Default `max_workers` when unspecified.
@@ -2611,6 +2632,8 @@ mod tests {
             max_workers: 3,
             on_worker_failure: WorkerFailurePolicy::Continue,
             split_prompt: "split".to_string(),
+            results_region: None,
+            max_items: None,
         }
     }
 

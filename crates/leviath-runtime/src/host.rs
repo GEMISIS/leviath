@@ -4751,6 +4751,8 @@ mod tests {
                         max_workers: 2,
                         on_worker_failure: Default::default(),
                         split_prompt: String::new(),
+                        results_region: None,
+                        max_items: None,
                     },
                     max_workers: 2,
                     pending: vec![

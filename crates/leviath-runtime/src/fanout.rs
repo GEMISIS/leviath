@@ -216,6 +216,22 @@ pub fn fan_out_split(world: &mut World) {
         match parse_work_items(&response) {
             Ok(items) => {
                 let max_workers = config.max_workers.max(1);
+                // A split decides its own item count, so without a cap a model
+                // that returns five hundred items spawns five hundred runs. The
+                // cap also fixes each worker's share of the results region: past
+                // some number of ways to divide it, every section is too small
+                // to say anything.
+                let items = match config.max_items {
+                    Some(cap) if items.len() > cap => {
+                        tracing::warn!(
+                            produced = items.len(),
+                            cap,
+                            "fan_out split produced more items than max_items; keeping the first"
+                        );
+                        items.into_iter().take(cap).collect::<Vec<_>>()
+                    }
+                    _ => items,
+                };
                 world.entity_mut(parent).insert(FanOutWaiting {
                     config,
                     max_workers,
@@ -323,8 +339,20 @@ fn finish_fan_out(world: &mut World, parent: Entity, w: FanOutWaiting) {
         return;
     }
 
-    let report = build_report(&w.summaries, &w.failures);
-    inject_conversation(world, parent, &report);
+    // Where the results land, and how much room they have there. A blueprint
+    // that names a region of its own gets that region's budget to divide; the
+    // default is the conversation region, which is also carrying the message
+    // history.
+    let region = w
+        .config
+        .results_region
+        .clone()
+        .unwrap_or_else(|| "conversation".to_string());
+    let budget = world
+        .get::<ContextWindow>(parent)
+        .and_then(|window| window.get_region(&region).map(|r| r.max_tokens));
+    let report = build_report(&w.summaries, &w.failures, budget);
+    inject_results(world, parent, &region, &report);
 
     // Ready the parent to run again, then jump to the merge stage (if any) or let
     // the fan-out stage's own transition resolve.
@@ -444,26 +472,44 @@ fn worker_terminal_result(world: &World, worker: Entity) -> Option<Result<String
     }
 }
 
-/// How much of one worker's answer the consolidated report carries, in bytes.
+/// Smallest per-worker share worth writing, in bytes.
 ///
-/// A fan-out of a hundred workers, each answering at the size limit, would build
-/// a 25 MB report - and `add_entry` *rejects* an over-budget entry rather than
-/// truncating it, while `inject_conversation` ignores the error. So the merge
-/// stage would receive nothing at all, silently, in exactly the case fan-out
-/// exists for. Each worker gets a bounded share instead, and the full answer
-/// stays on that worker's own run for anyone who wants it.
-const REPORT_BYTES_PER_WORKER: usize = 4_000;
+/// Below this a section says nothing useful, and the honest move is to tell the
+/// merge stage that the results are too many to carry rather than hand it a
+/// hundred fragments. That is what `max_items` on the fan-out config is for.
+const MIN_REPORT_BYTES_PER_WORKER: usize = 200;
+
+/// Per-worker share when the results region's budget cannot be read.
+const DEFAULT_REPORT_BYTES_PER_WORKER: usize = 4_000;
 
 /// Marker appended to a worker's section that was cut to fit the report.
 const REPORT_TRUNCATION_MARKER: &str =
     "\n[...truncated; read this worker's own run for the full answer]";
 
-/// One worker's contribution, trimmed to [`REPORT_BYTES_PER_WORKER`].
-fn fit_worker_section(content: &str) -> String {
-    if content.len() <= REPORT_BYTES_PER_WORKER {
+/// How many bytes each worker's section may use, given the region's token
+/// budget and how many workers there are.
+///
+/// An equal share, so every worker appears. The first cut at this capped each
+/// worker at a fixed size and then trimmed the finished report to fit, which
+/// meant the early workers got their full allowance and the late ones were cut
+/// off entirely - a hundred-way fan-out where only the first twenty were
+/// readable, with nothing saying so.
+fn bytes_per_worker(region_budget_tokens: Option<usize>, workers: usize) -> usize {
+    let Some(tokens) = region_budget_tokens.filter(|t| *t > 0) else {
+        return DEFAULT_REPORT_BYTES_PER_WORKER;
+    };
+    // The workspace's bytes-over-four estimate, minus a margin for the header
+    // and the per-worker `## worker <id>` lines.
+    let usable = tokens.saturating_mul(4).saturating_mul(9) / 10;
+    (usable / workers.max(1)).max(MIN_REPORT_BYTES_PER_WORKER)
+}
+
+/// One worker's contribution, trimmed to `budget` bytes.
+fn fit_worker_section(content: &str, budget: usize) -> String {
+    if content.len() <= budget {
         return content.to_string();
     }
-    let room = REPORT_BYTES_PER_WORKER.saturating_sub(REPORT_TRUNCATION_MARKER.len());
+    let room = budget.saturating_sub(REPORT_TRUNCATION_MARKER.len());
     format!(
         "{}{REPORT_TRUNCATION_MARKER}",
         leviath_core::truncate_at_boundary(content, room)
@@ -471,16 +517,33 @@ fn fit_worker_section(content: &str) -> String {
 }
 
 /// Build the consolidated `[fan_out results: …]` report from worker outcomes.
-fn build_report(summaries: &[(String, String)], failures: &[(String, String)]) -> String {
+///
+/// `region_budget_tokens` is the results region's budget, which the workers'
+/// sections divide equally between them.
+fn build_report(
+    summaries: &[(String, String)],
+    failures: &[(String, String)],
+    region_budget_tokens: Option<usize>,
+) -> String {
+    let sections = summaries.len().max(1);
+    let budget = bytes_per_worker(region_budget_tokens, sections);
     let mut report = format!(
         "[fan_out results: {} succeeded, {} failed]\n",
         summaries.len(),
         failures.len()
     );
+    // Say the share out loud when it is tight, so the merge stage knows it is
+    // reading extracts and can go to a worker's own run for the rest.
+    if summaries.iter().any(|(_, c)| c.len() > budget) {
+        report.push_str(&format!(
+            "[each worker's answer is shown up to {budget} characters; \
+             read a worker's own run for the whole thing]\n"
+        ));
+    }
     for (id, content) in summaries {
         report.push_str(&format!(
             "\n## worker {id}\n{}\n",
-            fit_worker_section(content)
+            fit_worker_section(content, budget)
         ));
     }
     for (id, err) in failures {
@@ -489,19 +552,32 @@ fn build_report(summaries: &[(String, String)], failures: &[(String, String)]) -
     report
 }
 
-/// Add `text` to the parent's `conversation` region, trimming it to fit.
+/// Add `text` to the parent's results region, trimming it to fit.
 ///
 /// The write used to be best-effort in the worst sense: `add_entry` rejects an
 /// over-budget entry outright, and the error was discarded, so a report too big
 /// for the region left the merge stage with nothing and said nothing about it.
 /// Trimming first means the merge always receives *something*, and a report that
 /// had to be cut says so where the model will read it.
-fn inject_conversation(world: &mut World, parent: Entity, text: &str) {
+fn inject_results(world: &mut World, parent: Entity, region: &str, text: &str) {
     let Some(mut window) = world.get_mut::<ContextWindow>(parent) else {
         return;
     };
+    // A named region the layout does not declare would silently swallow the
+    // whole report, so fall back to the one every agent has. `lev validate`
+    // catches the typo before a run gets here.
+    let region = match window.get_region(region).is_some() {
+        true => region,
+        false => {
+            tracing::warn!(
+                region = %region,
+                "fan-out results region is not in this agent's layout; using conversation"
+            );
+            "conversation"
+        }
+    };
     let budget = window
-        .get_region("conversation")
+        .get_region(region)
         .map(|r| r.max_tokens.saturating_sub(r.current_tokens))
         .unwrap_or(0);
     let allowed = budget.saturating_mul(4);
@@ -516,12 +592,7 @@ fn inject_conversation(world: &mut World, parent: Entity, text: &str) {
         }
     };
     let tokens = leviath_core::estimate_tokens(&fitted);
-    let _ = window.add_typed_entry(
-        "conversation",
-        leviath_core::EntryKind::UserMessage,
-        fitted,
-        tokens,
-    );
+    let _ = window.add_typed_entry(region, leviath_core::EntryKind::UserMessage, fitted, tokens);
 }
 
 /// An agent's status, if it still exists.
@@ -625,6 +696,8 @@ mod tests {
             max_workers,
             on_worker_failure: policy,
             split_prompt: "split".to_string(),
+            results_region: None,
+            max_items: None,
         }
     }
 
@@ -1285,8 +1358,8 @@ mod tests {
         let huge = "x".repeat(leviath_core::output::MAX_FINAL_OUTPUT_BYTES);
         let summaries: Vec<(String, String)> =
             (0..100).map(|i| (format!("w{i}"), huge.clone())).collect();
-        let report = build_report(&summaries, &[]);
-        inject_conversation(&mut world, parent, &report);
+        let report = build_report(&summaries, &[], Some(10_000));
+        inject_results(&mut world, parent, "conversation", &report);
 
         let region = world
             .get::<ContextWindow>(parent)
@@ -1305,6 +1378,129 @@ mod tests {
         assert!(region.current_tokens <= region.max_tokens, "within budget");
     }
 
+    /// The share is equal, so every worker appears. The first cut capped each
+    /// worker at a fixed size and trimmed the finished report to fit, which gave
+    /// the early workers their full allowance and cut the late ones off
+    /// entirely - a hundred-way fan-out where only the first twenty were
+    /// readable, with nothing saying so.
+    #[test]
+    fn every_worker_appears_in_a_large_fan_out() {
+        // End to end: building the report and landing it in the region. The
+        // unfairness was in the second half - a fixed per-worker size makes a
+        // report far too big, and trimming *that* keeps the front and drops the
+        // back.
+        const REGION_TOKENS: usize = 40_000;
+        let mut world = World::new();
+        let mut window = ContextWindow::new(400_000);
+        window.add_region(leviath_core::Region::new(
+            "worker_results".to_string(),
+            leviath_core::RegionKind::Clearable,
+            REGION_TOKENS,
+        ));
+        let parent = world.spawn((parent_state(), window)).id();
+
+        let long = "x".repeat(50_000);
+        let summaries: Vec<(String, String)> =
+            (0..100).map(|i| (format!("w{i}"), long.clone())).collect();
+        let report = build_report(&summaries, &[], Some(REGION_TOKENS));
+        inject_results(&mut world, parent, "worker_results", &report);
+
+        let landed = world
+            .get::<ContextWindow>(parent)
+            .expect("window")
+            .get_region("worker_results")
+            .expect("region")
+            .content[0]
+            .content
+            .clone();
+        for i in 0..100 {
+            assert!(
+                landed.contains(&format!("## worker w{i}\n")),
+                "worker w{i} never reached the merge stage"
+            );
+        }
+        // And it says the sections are extracts, so the merge stage knows to go
+        // to a worker's own run for the rest.
+        assert!(landed.contains("read a worker's own run"));
+    }
+
+    /// Each worker gets the same room, whatever the count.
+    #[test]
+    fn the_share_shrinks_as_the_worker_count_grows() {
+        assert!(bytes_per_worker(Some(40_000), 4) > bytes_per_worker(Some(40_000), 100));
+        // A bigger region means a bigger share for the same workers.
+        assert!(bytes_per_worker(Some(80_000), 10) > bytes_per_worker(Some(40_000), 10));
+        // Never so small a section says nothing at all.
+        assert_eq!(
+            bytes_per_worker(Some(10), 10_000),
+            MIN_REPORT_BYTES_PER_WORKER
+        );
+        // No readable budget falls back rather than dividing by nothing.
+        assert_eq!(bytes_per_worker(None, 4), DEFAULT_REPORT_BYTES_PER_WORKER);
+    }
+
+    /// A blueprint can send the results somewhere other than the conversation,
+    /// which is otherwise carrying the message history alongside them.
+    #[test]
+    fn results_go_to_the_named_region() {
+        let mut world = World::new();
+        let mut window = ContextWindow::new(100_000);
+        window.add_region(leviath_core::Region::new(
+            "conversation".to_string(),
+            leviath_core::RegionKind::Clearable,
+            10_000,
+        ));
+        window.add_region(leviath_core::Region::new(
+            "worker_results".to_string(),
+            leviath_core::RegionKind::Clearable,
+            20_000,
+        ));
+        let parent = world.spawn((parent_state(), window)).id();
+        inject_results(&mut world, parent, "worker_results", "the report");
+
+        let w = world.get::<ContextWindow>(parent).expect("window");
+        assert_eq!(
+            w.get_region("worker_results")
+                .expect("region")
+                .content
+                .len(),
+            1
+        );
+        assert!(
+            w.get_region("conversation")
+                .expect("region")
+                .content
+                .is_empty(),
+            "the default region is left alone"
+        );
+    }
+
+    /// A named region the layout does not declare falls back rather than
+    /// swallowing the whole report.
+    #[test]
+    fn an_unknown_results_region_falls_back_to_the_conversation() {
+        let mut world = World::new();
+        let mut window = ContextWindow::new(100_000);
+        window.add_region(leviath_core::Region::new(
+            "conversation".to_string(),
+            leviath_core::RegionKind::Clearable,
+            10_000,
+        ));
+        let parent = world.spawn((parent_state(), window)).id();
+        inject_results(&mut world, parent, "typo_region", "the report");
+
+        assert_eq!(
+            world
+                .get::<ContextWindow>(parent)
+                .expect("window")
+                .get_region("conversation")
+                .expect("region")
+                .content
+                .len(),
+            1
+        );
+    }
+
     /// A report that fits is passed through untouched, so the common case reads
     /// exactly as it did.
     #[test]
@@ -1317,8 +1513,12 @@ mod tests {
             10_000,
         ));
         let parent = world.spawn((parent_state(), window)).id();
-        let report = build_report(&[("a".to_string(), "did the thing".to_string())], &[]);
-        inject_conversation(&mut world, parent, &report);
+        let report = build_report(
+            &[("a".to_string(), "did the thing".to_string())],
+            &[],
+            Some(10_000),
+        );
+        inject_results(&mut world, parent, "conversation", &report);
         let landed = world
             .get::<ContextWindow>(parent)
             .expect("window")
@@ -1335,6 +1535,7 @@ mod tests {
         let report = build_report(
             &[("a".to_string(), "ok-a".to_string())],
             &[("b".to_string(), "boom".to_string())],
+            None,
         );
         assert!(report.contains("1 succeeded, 1 failed"));
         assert!(report.contains("## worker a\nok-a"));
@@ -1345,7 +1546,7 @@ mod tests {
     fn inject_conversation_is_a_noop_without_a_window() {
         let mut world = World::new();
         let has_window = world.spawn(window()).id();
-        inject_conversation(&mut world, has_window, "hello");
+        inject_results(&mut world, has_window, "conversation", "hello");
         assert!(
             world
                 .get::<ContextWindow>(has_window)
@@ -1357,7 +1558,7 @@ mod tests {
         );
         // Entity without a ContextWindow: silently ignored.
         let no_window = world.spawn(parent_state()).id();
-        inject_conversation(&mut world, no_window, "hello");
+        inject_results(&mut world, no_window, "conversation", "hello");
     }
 
     #[test]
