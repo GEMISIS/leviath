@@ -69,9 +69,18 @@ pub struct RunArgs {
     pub workdir: Option<std::path::PathBuf>,
 
     /// Print the spawned run as JSON instead of a sentence, for a caller that
-    /// has to parse the run id back out and poll `lev ps --json`.
+    /// has to parse the run id back out and poll `lev ps --json`. With
+    /// `--count` above 1 the JSON is an array, one object per run.
     #[arg(long)]
     pub json: bool,
+
+    /// Start this many runs of the same agent and task, each under its own run
+    /// id, from one invocation. One process launch and one socket dial per run
+    /// caps a shell loop near 60 spawns/second; the daemon itself has no run
+    /// cap, and a single invocation carrying the batch spawns as fast as the
+    /// daemon accepts.
+    #[arg(long, value_name = "N", default_value_t = 1)]
+    pub count: usize,
 
     /// Ask for the final output in a particular shape, overriding whatever the
     /// blueprint declares. Any label works - `markdown`, `json`, `xml`, `a2ui`,
@@ -120,6 +129,7 @@ const KNOWN_RUN_FLAGS: &[&str] = &[
     // parse error: the pre-scan silently reads it as a `--<region>` seed and
     // swallows the token after it.
     "json",
+    "count",
     "verbose",
     "help",
     "version",
