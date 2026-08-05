@@ -384,26 +384,44 @@ async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> Co
     }
 }
 
-/// Stream [`WorldEvent`]s to a subscribed client until it disconnects (a write
-/// fails) or the broadcast channel closes. Lagged events are skipped.
-async fn stream_events<W>(
+/// Stream [`WorldEvent`]s to a subscribed client until it disconnects or the
+/// broadcast channel closes. Lagged events are skipped.
+///
+/// The read half is watched alongside the writes: a subscriber that hangs up
+/// is otherwise only noticed when the *next* event's write fails, and an idle
+/// daemon may not produce one for hours - each such half-dead connection
+/// parked a task and a `broadcast::Receiver` here for the daemon's life
+/// (serve's polling loop re-subscribes every 500ms after a drop, and the ACP
+/// client subscribes once per prompt turn, so these accumulated fast).
+async fn stream_events<R, W>(
+    read: &mut tokio::io::Lines<BufReader<R>>,
     write: &mut W,
     mut rx: broadcast::Receiver<WorldEvent>,
 ) -> std::io::Result<()>
 where
+    R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
     loop {
-        match rx.recv().await {
-            Ok(event) => {
-                let mut line = serde_json::to_string(&event).expect("WorldEvent serializes");
-                line.push('\n');
-                if write.write_all(line.as_bytes()).await.is_err() {
-                    return Ok(()); // client hung up
+        tokio::select! {
+            event = rx.recv() => match event {
+                Ok(event) => {
+                    let mut line = serde_json::to_string(&event).expect("WorldEvent serializes");
+                    line.push('\n');
+                    if write.write_all(line.as_bytes()).await.is_err() {
+                        return Ok(()); // client hung up
+                    }
                 }
-            }
-            Err(broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(broadcast::error::RecvError::Closed) => return Ok(()),
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return Ok(()),
+            },
+            line = read.next_line() => match line {
+                // A subscriber has nothing left to say; any line it does send
+                // is ignored chatter, not a request.
+                Ok(Some(_)) => continue,
+                // EOF or a read error: the client is gone.
+                Ok(None) | Err(_) => return Ok(()),
+            },
         }
     }
 }
@@ -472,7 +490,7 @@ where
             Ok(ControlRequest::Subscribe) => {
                 let rx = events.subscribe();
                 drop(events);
-                return stream_events(&mut write_half, rx).await;
+                return stream_events(&mut lines, &mut write_half, rx).await;
             }
             // Already authenticated: a repeat is harmless, not an error.
             Ok(ControlRequest::Authenticate { .. }) => ControlResponse::Ok { ok: true },
@@ -1176,6 +1194,22 @@ mod tests {
         );
     }
 
+    /// A quiet inbound half for driving `stream_events` directly: the returned
+    /// guard keeps the peer's write side open so `next_line` stays pending.
+    fn quiet_read_half() -> (
+        tokio::io::Lines<BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>>,
+        tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    ) {
+        let (client, server) = tokio::io::duplex(4096);
+        let (server_read, _server_write) = tokio::io::split(server);
+        let (_client_read, client_write) = tokio::io::split(client);
+        // Leak the unused halves' drop by returning the write guard only; the
+        // client read half closing is invisible to the server's reader.
+        std::mem::forget(_server_write);
+        std::mem::forget(_client_read);
+        (BufReader::new(server_read).lines(), client_write)
+    }
+
     #[tokio::test]
     async fn stream_events_skips_lagged_writes_ok_and_stops_on_closed() {
         use tokio::io::AsyncReadExt;
@@ -1186,8 +1220,9 @@ mod tests {
         tx.send(completed("third")).unwrap();
         drop(tx); // no more senders → Closed once drained
 
+        let (mut lines, _keep_open) = quiet_read_half();
         let (mut w, mut r) = tokio::io::duplex(4096);
-        let server = tokio::spawn(async move { stream_events(&mut w, rx).await });
+        let server = tokio::spawn(async move { stream_events(&mut lines, &mut w, rx).await });
         let mut buf = String::new();
         r.read_to_string(&mut buf).await.unwrap();
         server.await.unwrap().unwrap();
@@ -1200,10 +1235,60 @@ mod tests {
     async fn stream_events_returns_when_the_client_hangs_up() {
         let (tx, rx) = broadcast::channel::<WorldEvent>(4);
         tx.send(completed("x")).unwrap();
+        let (mut lines, _keep_open) = quiet_read_half();
         let (mut w, r) = tokio::io::duplex(64);
         drop(r); // reader gone → the write fails, ending the stream
-        stream_events(&mut w, rx).await.unwrap();
+        stream_events(&mut lines, &mut w, rx).await.unwrap();
         drop(tx);
+    }
+
+    /// A subscriber that closes its half of the connection ends the stream
+    /// even when no event ever arrives - previously the daemon-side task (and
+    /// its broadcast receiver) lived until the next write failed, which on an
+    /// idle daemon is never.
+    #[tokio::test]
+    async fn stream_events_returns_on_client_eof_without_any_event() {
+        let (tx, rx) = broadcast::channel::<WorldEvent>(4);
+        let (client, server) = tokio::io::duplex(4096);
+        let (server_read, _server_write) = tokio::io::split(server);
+        let mut lines = BufReader::new(server_read).lines();
+        drop(client); // EOF on the read half, nothing was ever sent
+
+        let (mut w, _r) = tokio::io::duplex(4096);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream_events(&mut lines, &mut w, rx),
+        )
+        .await
+        .expect("EOF must end the stream promptly")
+        .unwrap();
+        drop(tx);
+    }
+
+    /// A line the subscriber sends mid-stream is chatter, not a request: the
+    /// stream keeps delivering events after it.
+    #[tokio::test]
+    async fn stream_events_ignores_subscriber_chatter() {
+        use tokio::io::AsyncReadExt;
+        let (tx, rx) = broadcast::channel::<WorldEvent>(4);
+        let (client, server) = tokio::io::duplex(4096);
+        let (server_read, _server_write) = tokio::io::split(server);
+        let (_client_read, mut client_write) = tokio::io::split(client);
+        std::mem::forget(_server_write);
+        std::mem::forget(_client_read);
+        let mut lines = BufReader::new(server_read).lines();
+
+        client_write.write_all(b"hello?\n").await.unwrap();
+        let (mut w, mut r) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move { stream_events(&mut lines, &mut w, rx).await });
+        // Give the chatter a chance to be read, then deliver a real event.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tx.send(completed("after-chatter")).unwrap();
+        drop(tx);
+        let mut buf = String::new();
+        r.read_to_string(&mut buf).await.unwrap();
+        server.await.unwrap().unwrap();
+        assert!(buf.contains("after-chatter"));
     }
 
     /// `create` reports rather than panicking when its directory cannot be

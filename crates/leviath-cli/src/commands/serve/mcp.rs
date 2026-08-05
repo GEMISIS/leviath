@@ -298,14 +298,23 @@ pub(super) async fn test_server(
 }
 
 /// Connect to `server` and return its tool names.
+///
+/// The client is shut down on EVERY path, not just success: `MCPClient` has no
+/// `Drop` and a stdio transport's child process does not die with the handle,
+/// so the early-return `?`s here each orphaned a spawned MCP server process
+/// per failed test request.
 async fn connect_and_list(
     server: &MCPServerConfig,
     auth_header: Option<(String, String)>,
 ) -> anyhow::Result<Vec<String>> {
     let mut client = MCPClient::from_config_with_auth(server, auth_header, &[]).await?;
-    client.connect().await?;
-    let tools = client.list_tools().await?;
+    let listed = async {
+        client.connect().await?;
+        client.list_tools().await
+    }
+    .await;
     let _ = client.shutdown().await;
+    let tools = listed?;
     Ok(tools.into_iter().map(|t| t.name).collect())
 }
 

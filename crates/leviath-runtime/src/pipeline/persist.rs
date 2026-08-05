@@ -14,6 +14,26 @@ use super::*;
 /// timestamp mean something.
 pub(crate) const PERSIST_HEARTBEAT_SECS: i64 = 30;
 
+/// Longest log line the event broadcast carries; the on-disk stage logs keep
+/// the full line. 8 KB shows any tool banner or error whole while keeping the
+/// (never-shrinking) broadcast ring's worst-case floor at ring-size x this.
+pub(crate) const BROADCAST_LOG_LINE_MAX_BYTES: usize = 8 * 1024;
+
+/// Clone `line` for the event broadcast, truncated to
+/// [`BROADCAST_LOG_LINE_MAX_BYTES`] on a char boundary with a marker so a
+/// reader knows to fetch the stage log for the rest.
+fn truncate_log_line(line: &str) -> String {
+    if line.len() <= BROADCAST_LOG_LINE_MAX_BYTES {
+        return line.to_string();
+    }
+    let cut = leviath_core::text::floor_char_boundary(line, BROADCAST_LOG_LINE_MAX_BYTES);
+    format!(
+        "{} [truncated {} bytes]",
+        line.split_at(cut).0,
+        line.len() - cut
+    )
+}
+
 /// Debounce watermark: the (iteration, stage index, status) last persisted for an
 /// agent. A snapshot is written only when one of these changes, so the world
 /// writes on meaningful progress rather than every tick. `None` until the first
@@ -247,13 +267,18 @@ pub fn dispatch_persistence(
         // Stream each buffered line to WS subscribers as a `Log` event (in
         // addition to the disk append below). No-op in worlds without the sink
         // (test / `lev run`); a zero-subscriber `send` error is ignored.
+        //
+        // Truncated for the broadcast only - the full line still reaches the
+        // stage log on disk. The ring retains every slot's strings until the
+        // slot is overwritten, so an assistant's whole multi-KB turn broadcast
+        // per line made the ring a multi-MB permanent floor after any busy run.
         if let Some(sink) = &sink {
             for (_idx, line) in output_appends.iter().chain(log_appends.iter()) {
                 // `Res<T>` derefs to `T` in bevy_ecs 0.19; it is not a tuple struct.
                 let _ = sink.0.send(crate::host::WorldEvent::Log {
                     run_id: md.run_id.clone(),
                     agent_id: state.agent_id.clone(),
-                    line: line.clone(),
+                    line: truncate_log_line(line),
                 });
             }
         }

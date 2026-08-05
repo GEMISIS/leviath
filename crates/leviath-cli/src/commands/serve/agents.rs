@@ -249,20 +249,25 @@ pub(super) async fn agent_context_history(
         ),
     };
 
-    let Some(records) = runstate::read_run_archive(&id) else {
+    // One streamed pass to count, so `total` is honest and a descending window
+    // knows where to start. Counting folds the deltas but materializes nothing
+    // - and streaming means the journal is never parsed whole into memory:
+    // `read_run_archive` materialized every record (tens of MB for a mature
+    // run, 2-4x that as parsed structs) per request, which was this API's
+    // single largest transient allocation and the reason a page refresh
+    // stair-stepped the server's RSS.
+    let mut total = 0usize;
+    if runstate::visit_run_archive(&id, &mut |_| {
+        total += 1;
+        ControlFlow::Continue(())
+    })
+    .is_none()
+    {
         return Err(err(
             StatusCode::NOT_FOUND,
             format!("No context history for run '{id}'"),
         ));
-    };
-
-    // One pass to count, so `total` is honest and a descending window knows
-    // where to start. Counting folds the deltas but materializes nothing.
-    let mut total = 0usize;
-    leviath_core::run_archive::visit_points(&records, &mut |_| {
-        total += 1;
-        ControlFlow::Continue(())
-    });
+    }
     if total == 0 && query.cursor.is_none() {
         return Err(err(
             StatusCode::NOT_FOUND,
@@ -291,7 +296,7 @@ pub(super) async fn agent_context_history(
     let stop_at = wanted.iter().copied().max();
 
     let mut collected: Vec<(usize, leviath_core::run_archive::RunPoint)> = Vec::new();
-    leviath_core::run_archive::visit_points(&records, &mut |point| {
+    runstate::visit_run_archive(&id, &mut |point| {
         if wanted.contains(&point.index) {
             collected.push((
                 point.index,
@@ -369,9 +374,16 @@ pub(super) async fn agent_logs(
         .log_stream()
         .map_err(|message| err(StatusCode::BAD_REQUEST, message))?;
 
-    let max_bytes = query.tail.unwrap_or(32_768);
+    // Clamped like every other limit in this API: `tail` is client-controlled
+    // and `stage=all` multiplies it by the stage count, so an unclamped value
+    // was an arbitrary-size allocation on request.
+    let max_bytes = query.tail.unwrap_or(32_768).min(LOGS_MAX_TAIL_BYTES);
     Ok(runstate::tail_run_logs(&id, selector, stream, max_bytes))
 }
+
+/// Largest per-stage byte window `GET /api/agents/{id}/logs?tail=` honors:
+/// 1 MiB, matching the file endpoint's cap.
+pub(super) const LOGS_MAX_TAIL_BYTES: u64 = 1024 * 1024;
 
 /// How much of a file `GET /api/agents/{id}/files` returns: 1 MiB, enough for
 /// any report a browser would render, small enough to hand out in one JSON body.
