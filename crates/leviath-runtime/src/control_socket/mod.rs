@@ -1682,6 +1682,29 @@ mod tests {
         server.await.unwrap();
     }
 
+    /// A client whose token file does not exist at all cannot refresh either:
+    /// the refusal stands, and the error names the missing file.
+    #[tokio::test]
+    async fn a_missing_token_file_cannot_refresh_and_stays_refused() {
+        let (listener, id, dir) = test_listener();
+        // No token is ever written into the client's dir; the daemon's token
+        // lives elsewhere.
+        let other = tempfile::tempdir().unwrap();
+        let daemons = ControlToken::create(other.path()).unwrap();
+        let (_events, server) = tokened_daemon(listener, daemons, 1);
+
+        let err = ControlClient::for_home(id, dir.path())
+            .list()
+            .await
+            .expect_err("no token and no file to refresh from");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            err.to_string().contains("no control token was found"),
+            "{err}"
+        );
+        server.await.unwrap();
+    }
+
     /// When the file has not changed, a refusal stays a refusal - the retry
     /// only happens when there is a genuinely different token to present.
     #[tokio::test]
