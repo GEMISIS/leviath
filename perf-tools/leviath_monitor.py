@@ -8,7 +8,11 @@ timestamped PNG graph with three aligned panels:
 1. Active sessions - runs whose ``meta.json`` status is non-terminal
    (``starting``, ``running``, ``waiting_input``, ``paused``), sampled from the
    runs directory the daemon persists to.
-2. CPU percent.
+2. CPU percent of the WHOLE machine: psutil's per-core figure (the
+   ``top``/``htop`` convention, where each core is worth 100%) divided by
+   the logical core count, so the axis runs 0-100 and reads as "share of
+   this machine's total compute". Cross-machine comparisons must note the
+   core count, since 10% of a 16-core machine is 1.6 cores of work.
 3. Memory - ``rss`` and ``live`` lines, plus ``pss`` where the OS provides it.
 
 Memory metrics, precisely (see also perf-tools/README.md):
@@ -614,7 +618,11 @@ def sample_process(
     Raises:
         psutil.Error: If the process vanished or is no longer readable.
     """
-    cpu_percent = float(proc.cpu_percent(interval=None))
+    # psutil reports percent-of-one-core (the top/htop convention); divide by
+    # the logical core count so the recorded figure is percent of the whole
+    # machine and the axis reads 0-100.
+    cores = psutil.cpu_count(logical=True) or 1
+    cpu_percent = float(proc.cpu_percent(interval=None)) / cores
     memory = sample_memory(proc)
     active_runs = run_counter.count() if run_counter is not None else None
     return Sample(
@@ -779,7 +787,9 @@ def generate_graph(
             runs_axes.set_title("Active sessions (no data)", fontsize=10)
 
         cpu = _plot_series(cpu_axes, samples, lambda s: s.cpu_percent, "tab:red")
-        cpu_axes.set_title(_stats_label("CPU", cpu, "%"), fontsize=10)
+        cpu_axes.set_title(
+            _stats_label("CPU, % of whole machine", cpu, "%"), fontsize=10
+        )
 
         rss = _plot_series(
             memory_axes, samples, lambda s: s.memory.rss_mb, "tab:blue", label="rss"
@@ -819,7 +829,7 @@ def generate_graph(
             )
 
     runs_axes.set_ylabel("Sessions")
-    cpu_axes.set_ylabel("CPU %")
+    cpu_axes.set_ylabel("CPU % (whole machine)")
     memory_axes.set_ylabel("Memory (MB)")
     memory_axes.set_xlabel("Elapsed time (seconds)")
     for axes in (runs_axes, cpu_axes, memory_axes):
