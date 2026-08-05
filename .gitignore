@@ -55,3 +55,8 @@ tarpaulin-report.json
 # run_with's tests produce xtask/coverage/ there, not just <repo-root>/coverage/.
 coverage/
 plans/
+
+# Ignore perf results
+perf-tools/*.csv
+perf-tools/*.png
+
