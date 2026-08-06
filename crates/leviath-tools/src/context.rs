@@ -40,9 +40,12 @@ pub struct ShellEnvPolicy {
 impl ShellEnvPolicy {
     /// Strip the variables this policy withholds from `cmd`.
     ///
-    /// Applied to a built `Command` rather than to an environment map, so it
-    /// covers the sandboxed branch as well as the host one - a container that
-    /// inherits the daemon's environment leaks exactly as much as a bare shell.
+    /// Applied to a built `Command` rather than to an environment map, so one
+    /// call covers however the caller decided to run the thing: the host shell,
+    /// a namespace sandbox (which isolates mounts and network but still
+    /// inherits the environment), and the fallback that runs on the host when
+    /// namespaces turn out to be unusable. A container exec inherits nothing,
+    /// so this is a no-op there.
     pub fn apply(&self, cmd: &mut tokio::process::Command) -> Vec<String> {
         // `inherit` is the "behave as before" escape hatch, so it should cost
         // what it did before: nothing. Without this it still walks and

@@ -527,9 +527,15 @@ impl BuiltinTools {
         cmd.kill_on_drop(true);
         own_process_group(&mut cmd);
         // Strip the credentials the daemon holds but this command has no use
-        // for. After the branch above, so a containerised command is covered
-        // too: a container that inherits the daemon's environment leaks exactly
-        // as much as a bare shell would.
+        // for.
+        //
+        // After the branch above rather than inside its host arm, so it also
+        // covers the namespace sandbox (which `unshare`s but still inherits the
+        // environment) and the warn-fallback that quietly runs on the host when
+        // namespaces turn out to be unusable - the arm most likely to be
+        // forgotten. A container exec is built with no `-e` flags and so never
+        // inherited the daemon's environment to begin with, which makes this a
+        // no-op there rather than a special case.
         self.ctx.shell_env.apply(&mut cmd);
         // An agent runs this dozens of times per run, and on Windows each spawn
         // would otherwise be given a console window. Applied here rather than in
