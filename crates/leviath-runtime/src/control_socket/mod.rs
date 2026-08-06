@@ -450,6 +450,24 @@ pub async fn handle_connection<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    handle_connection_capped(stream, op_tx, events, token, MAX_REQUEST_BYTES).await
+}
+
+/// [`handle_connection`] with the per-request cap injected.
+///
+/// The cap is a parameter purely so a test can cross it without pushing 8 MiB
+/// through a duplex - and crossing it is the only way to tell a per-request
+/// budget from a per-connection one.
+async fn handle_connection_capped<S>(
+    stream: S,
+    op_tx: UnboundedSender<ControlOp>,
+    events: broadcast::Sender<WorldEvent>,
+    token: Option<ControlToken>,
+    max_request_bytes: u64,
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let (read_half, mut write_half) = tokio::io::split(stream);
     // Capped rather than unbounded. On Unix the peer is same-uid and holds the
     // token, so this is only tidiness - but a Windows named pipe is created
@@ -457,12 +475,21 @@ where
     // allocation any local user can drive. `take` ends the stream at the cap,
     // so an oversized request reads as a truncated line and is refused by the
     // parse below rather than growing a buffer without limit.
-    let mut lines = BufReader::new(read_half.take(MAX_REQUEST_BYTES)).lines();
+    //
+    // The limit is reset after every request, because it bounds *a request*
+    // and this connection serves many. Left as a one-shot budget it bounded
+    // the connection instead: a long-lived caller - the dashboard holds one
+    // open and polls - would be cut off mid-protocol once its traffic summed
+    // past the cap, surfacing as a spurious `invalid request` on a perfectly
+    // ordinary line.
+    let mut lines = BufReader::new(read_half.take(max_request_bytes)).lines();
     // `None` means this daemon runs without a token and every caller is
     // accepted, which is only the case in tests that drive the protocol
     // directly. Production always passes one.
     let mut authenticated = token.is_none();
     while let Some(line) = lines.next_line().await? {
+        // Refill this request's budget for the next one.
+        lines.get_mut().get_mut().set_limit(max_request_bytes);
         if line.trim().is_empty() {
             continue;
         }
@@ -1109,6 +1136,72 @@ mod tests {
         let mut lines = BufReader::new(read_half).lines();
         let resp_line = lines.next_line().await.unwrap().unwrap();
         serde_json::from_str(&resp_line).unwrap()
+    }
+
+    /// The request cap bounds *a request*, and this connection serves many.
+    ///
+    /// Left as a one-shot budget the `take` bounded the whole connection, so a
+    /// long-lived caller - the dashboard holds one open and polls - would be cut
+    /// off mid-protocol once its traffic summed past the cap, surfacing as a
+    /// spurious refusal on a perfectly ordinary line. Driven with a cap small
+    /// enough to cross in three requests rather than by sending 8 MiB.
+    #[tokio::test]
+    async fn the_request_cap_refills_between_requests() {
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        spawn_fake_host(op_rx);
+        let (mut listener, id, _dir) = test_listener();
+        let server = tokio::spawn(async move {
+            let stream = listener
+                .accept()
+                .await
+                .expect("accept succeeds")
+                .expect("our own connection is admitted");
+            // A cap just over one request's length: three requests cross it,
+            // so a budget that never refills cuts the connection partway.
+            handle_connection_capped(stream, op_tx, no_events(), None, 40).await
+        });
+
+        let stream = connect(&id).await.unwrap();
+        let (read_half, mut write_half) = tokio::io::split(stream);
+        let mut lines = BufReader::new(read_half).lines();
+
+        // Several requests down one connection. Each is well under the cap, but
+        // together they exceed a budget that is never refilled - which is what
+        // the old shape did.
+        let req = ControlRequest::List;
+        let mut line = serde_json::to_string(&req).unwrap();
+        line.push('\n');
+        for _ in 0..3 {
+            write_half.write_all(line.as_bytes()).await.unwrap();
+            let resp = lines
+                .next_line()
+                .await
+                .expect("the connection stays readable")
+                .expect("the connection stays open for every request");
+            // The *success* shape specifically. Any error the daemon sends is
+            // still a well-formed `ControlResponse`, so merely parsing would
+            // have called a refusal a pass - which is exactly what it did on
+            // the first version of this test.
+            serde_json::from_str::<ControlResponse>(&resp)
+                .expect("the daemon answers with a response");
+            // Asserted on the wire form rather than `matches!` on the parsed
+            // variant: `matches!` leaves a `_ => false` arm nothing executes,
+            // and the refusal this test exists to catch is exactly
+            // `{"result":"error",...}`.
+            assert!(
+                !resp.contains(r#""result":"error""#),
+                "a request past the first was refused rather than answered"
+            );
+        }
+
+        // Close the client so the handler sees EOF and returns, rather than
+        // being dropped mid-await when the test ends.
+        drop(write_half);
+        drop(lines);
+        server
+            .await
+            .expect("the handler task joins")
+            .expect("it ends cleanly");
     }
 
     /// Every op this double receives has to be answered. A caller waits on a
