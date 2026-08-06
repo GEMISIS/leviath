@@ -283,6 +283,31 @@ name in the line describes: `trap`, and defining or aliasing a name with `functi
 `unalias`. A line containing one of those prompts every time and cannot be pre-approved. `set -euo
 pipefail` is unaffected, since shell options change nothing about which program a name resolves to.
 
+### Redirects
+
+`echo x > file` writes a file, and no tool name in the call says so. A shell call that redirects
+output is therefore held to the `write_file` policy as well as the shell's own: where `write_file`
+is `deny` the call is refused, and it is never quieter than a `write_file` call would have been.
+That is what stops a redirect being a spelling of `write_file` that a `deny` never sees.
+
+Each target is also its own key, so an approval names what is being written:
+
+```
+Allow cat notes.md, >/tmp/report.txt for this run
+```
+
+Unlike a program, a write cannot be pre-approved in a config file - `[safe_commands] shell` rejects
+any entry beginning with `>`. A write is approved by a person, per target, or not at all.
+
+Three shapes cost nothing, because they write nothing that outlives the call: `/dev/null`,
+`/dev/stdout`, `/dev/stderr`, `/dev/tty` and `/dev/fd/*`; descriptor duplications such as `2>&1`;
+and read redirects, since a program that can read a file could already read it. So `cargo build >
+/dev/null 2>&1` and `cat notes.md 2>/dev/null` are as quiet as they were.
+
+Two shapes cannot be granted at all. A target that only exists after expansion (`> $OUT`) names a
+different file on every run, and bash's `> /dev/tcp/host/port` is a socket rather than a file, which
+makes the redirect a network channel no program name describes. Both prompt every time.
+
 <a id="tool_script_permissions"></a>
 
 ## `[tool_script_permissions]`
