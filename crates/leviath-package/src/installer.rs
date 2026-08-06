@@ -230,6 +230,16 @@ impl AgentInstaller {
         //
         // A sibling of the destination, so the swap is a rename on the same
         // filesystem rather than a copy.
+        //
+        // That does put it inside the directory blueprint discovery scans, and
+        // discovery filters on `is_dir()` rather than skipping dotted names -
+        // so between the unpack and the rename (a directory walk, single-digit
+        // milliseconds) a concurrent `lev list` could show the agent twice.
+        // Left as-is deliberately: relocating staging outside the agents
+        // directory, or teaching all five scanners to skip hidden entries, is
+        // more moving parts than a transient duplicate listing is worth. What
+        // matters is that a *refused* bundle leaves nothing at all, which the
+        // teardown below guarantees.
         let staging = self
             .install_dir
             .join(format!(".staging-{name}-{}", std::process::id()));
