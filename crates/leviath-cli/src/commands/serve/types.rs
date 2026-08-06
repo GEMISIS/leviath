@@ -63,8 +63,11 @@ pub struct ServeArgs {
     #[arg(long)]
     pub workdir_root: Option<PathBuf>,
 
-    /// Refuse `"yolo": true` on spawn requests, so an API caller cannot waive
-    /// every approval prompt for an agent running on the host.
+    /// Refuse `"yolo": true` and `"allow": [...]` on spawn requests, so an API
+    /// caller cannot waive approval prompts for an agent running on the host.
+    ///
+    /// Both fields, because they are one lever: `"allow": ["*"]` reaches the
+    /// same wildcard override `"yolo": true` writes.
     #[arg(long)]
     pub no_remote_yolo: bool,
 }
@@ -187,7 +190,8 @@ pub struct AppState {
 pub(super) struct ServeLimits {
     /// `--workdir-root`: the directory agent workdirs must sit under.
     pub(super) workdir_root: Option<PathBuf>,
-    /// `--no-remote-yolo`: whether a spawn request may set `"yolo": true`.
+    /// `--no-remote-yolo`: whether a spawn request may waive approvals, with
+    /// either `"yolo": true` or an `"allow"` list.
     pub(super) no_remote_yolo: bool,
     /// `[security] allow_local_network`: whether a completion webhook may point
     /// at loopback, private or link-local addresses.
