@@ -10,6 +10,8 @@
 //! it is skipped entirely unless [`SeedCommandPolicy::allowed`] (the
 //!   `[security] allow_seed_commands` config switch and the `--no-seed-commands`
 //!   launch flag); -
+//! it must be covered by `[safe_commands]`, since a seed is precisely the case
+//!   where there is nobody to prompt - see [`SeedCommandPolicy::run`]; -
 //! it runs inside the entry stage's sandbox when the agent declares one,
 //!   using the same [`ShellExecutor::build_command`] routing as the built-in
 //!   `shell` tool, so a seed can't escape the isolation the stage asked for; -

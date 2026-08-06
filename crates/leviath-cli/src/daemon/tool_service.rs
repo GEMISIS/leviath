@@ -88,6 +88,10 @@ pub struct AgentToolState {
     pub agent_perms: Arc<HashMap<String, String>>,
     /// Config-level tool permissions.
     pub global_perms: Arc<HashMap<String, ToolPolicy>>,
+    /// `[security] allow_blueprint_permissions`: whether this manifest's
+    /// `[tool_permissions]` may exceed the built-in default for a tool the user
+    /// has not configured. See `BLUEPRINT_LOOSENABLE` in `crate::tools`.
+    pub blueprint_may_loosen: bool,
     /// The agent's interaction backend (ask_user + tool approvals).
     pub interaction: HubInteractionBackend,
     /// `--yolo`: nobody is watching this run, so the tools that block on a
@@ -371,6 +375,7 @@ pub async fn dispatch_tools(
             &stage_snap,
             &state.agent_perms,
             &state.global_perms,
+            state.blueprint_may_loosen,
         );
         // A shell redirect writes a file, and no tool name says so. Clamping by
         // the write tool's own policy is what stops `echo x > f` being a
@@ -386,6 +391,7 @@ pub async fn dispatch_tools(
                 &stage_snap,
                 &state.agent_perms,
                 &state.global_perms,
+                state.blueprint_may_loosen,
             ),
         );
         // A grant can only ever collapse `Ask` into `Allow`. It never reaches
@@ -713,6 +719,7 @@ mod tests {
             stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(global),
+            blueprint_may_loosen: false,
             interaction: hub.backend_for("agent-a"),
             unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
@@ -793,6 +800,7 @@ mod tests {
             stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(global),
+            blueprint_may_loosen: false,
             interaction: hub.backend_for("agent-a"),
             unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
@@ -892,6 +900,7 @@ mod tests {
             stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(allow),
+            blueprint_may_loosen: false,
             interaction: hub.backend_for("a"),
             unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
@@ -1146,6 +1155,7 @@ mod tests {
             stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(allow),
+            blueprint_may_loosen: false,
             interaction: hub.backend_for("a"),
             unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
@@ -1344,6 +1354,7 @@ mod tests {
             stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(global),
+            blueprint_may_loosen: false,
             interaction: hub.backend_for("agent-a"),
             unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
@@ -1444,6 +1455,7 @@ mod tests {
             ]),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(HashMap::new()),
+            blueprint_may_loosen: false,
             interaction: hub.backend_for("a"),
             unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),
@@ -2010,6 +2022,7 @@ mod tests {
             stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(HashMap::new()),
+            blueprint_may_loosen: false,
             interaction: hub.backend_for("agent-a"),
             unattended: false,
             stage_name: Arc::new(StdMutex::new("main".to_string())),

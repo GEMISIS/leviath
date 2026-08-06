@@ -342,6 +342,7 @@ fn build_tool_state(
         stage_required: Arc::new(StdMutex::new(entry_required)),
         stage_required_by_index: Arc::new(stage_required_by_index),
         agent_perms: Arc::new(agent_perms),
+        blueprint_may_loosen: config.security.allow_blueprint_permissions,
         // The ceiling a blueprint may tighten but not loosen: the user's global
         // `[tool_permissions]` plus any `[agent_tool_permissions.<name>]` grant
         // they made for this specific agent. Resolved once here so every later
@@ -1206,6 +1207,7 @@ fn build_agent_inner(
                 &entry_stage_perms,
                 &agent_perms,
                 &agent_scoped_perms,
+                config.security.allow_blueprint_permissions,
             )
         },
     );

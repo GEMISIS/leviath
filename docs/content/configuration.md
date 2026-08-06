@@ -174,6 +174,7 @@ allow_local_network        = false
 allow_env_vars             = ["MY_PROVIDER_KEY"]
 allow_blueprint_read_paths = false
 allow_blueprint_safe_commands = false
+allow_blueprint_permissions   = false
 read_paths                 = ["~/.leviath/runs", "glob:~/design-docs/**"]
 credential_store           = "file"   # file | keychain
 ```
@@ -185,6 +186,7 @@ credential_store           = "file"   # file | keychain
 | `allow_env_vars` | `[]` | Credential-shaped variable names a Rhai script may read through `env_var()`. Matching is exact and case-insensitive, and there is no wildcard |
 | `allow_blueprint_read_paths` | `false` | Honors every blueprint's `[read_paths]` as written. Prefer a per-agent grant for anything you did not author |
 | `allow_blueprint_safe_commands` | `false` | Honors every blueprint's `[safe_commands]` as written. Off, an installed agent cannot pre-approve its own shell |
+| `allow_blueprint_permissions` | `false` | Honors every blueprint's `[tool_permissions]` even where it exceeds the built-in default for a tool you have not configured. Off, a blueprint may still pre-approve `web_search` and `web_fetch`; anything else is clamped to the default. Name the tool under `[agent_tool_permissions.<agent>]` to grant it per agent instead |
 | `read_paths` | `[]` | Machine-wide read grants. A grant only applies to a path the blueprint also declares, so listing one here opens nothing by itself |
 | `credential_store` | `"file"` | `keychain` moves secrets to the OS credential store. Run `lev auth migrate` after changing it |
 
@@ -212,7 +214,10 @@ build where the blueprint allowlist stood on its own, read the
 ## Tool permissions
 
 `[tool_permissions]` sets a machine-wide ceiling. A blueprint's own `[tool_permissions]` may
-tighten it but never loosen it.
+tighten it but never loosen it. For a tool you have not listed here there is no ceiling to clamp
+against, so a blueprint may raise it no higher than the built-in default - except `web_search` and
+`web_fetch`, which read-only research agents pre-approve. To let a blueprint go further, name the
+tool under `[agent_tool_permissions.<agent>]`, or set `[security] allow_blueprint_permissions`.
 
 ```toml
 [tool_permissions]
