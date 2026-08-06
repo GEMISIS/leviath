@@ -175,6 +175,8 @@ allow_env_vars             = ["MY_PROVIDER_KEY"]
 allow_blueprint_read_paths = false
 allow_blueprint_safe_commands = false
 allow_blueprint_permissions   = false
+shell_env                  = "filtered"   # filtered | strict | custom | inherit
+shell_env_withhold         = []          # names withheld under shell_env = "custom"
 read_paths                 = ["~/.leviath/runs", "glob:~/design-docs/**"]
 credential_store           = "file"   # file | keychain
 ```
@@ -187,6 +189,8 @@ credential_store           = "file"   # file | keychain
 | `allow_blueprint_read_paths` | `false` | Honors every blueprint's `[read_paths]` as written. Prefer a per-agent grant for anything you did not author |
 | `allow_blueprint_safe_commands` | `false` | Honors every blueprint's `[safe_commands]` as written. Off, an installed agent cannot pre-approve its own shell |
 | `allow_blueprint_permissions` | `false` | Honors every blueprint's `[tool_permissions]` even where it exceeds the built-in default for a tool you have not configured. Off, a blueprint may still pre-approve `web_search` and `web_fetch`; anything else is clamped to the default. Name the tool under `[agent_tool_permissions.<agent>]` to grant it per agent instead |
+| `shell_env` | `"filtered"` | Which of the daemon's environment variables a shell command inherits. See below |
+| `shell_env_withhold` | `[]` | The names `shell_env = "custom"` withholds. Ignored under every other mode |
 | `read_paths` | `[]` | Machine-wide read grants. A grant only applies to a path the blueprint also declares, so listing one here opens nothing by itself |
 | `credential_store` | `"file"` | `keychain` moves secrets to the OS credential store. Run `lev auth migrate` after changing it |
 
@@ -237,6 +241,38 @@ shell = "allow"
 Resolution order, narrowest first: launch flag, stage, agent, this file, built-in default. A launch
 flag (`--allow`, `--yolo`) can turn `ask` into `allow` but can never lift a `deny`. The built-in
 defaults are in [Built-in tools](/docs/tools).
+
+### What a shell command inherits
+
+The daemon holds provider keys, `LEVIATH_API_TOKEN`, and whatever the person who started it had
+exported. Handing all of that to every shell command means one `env` in tool output leaks the lot.
+`shell_env` decides how much a `shell` tool call, a Rhai `shell()`, and a region's command seed
+inherit. All three answer to the same setting, so a script with `shell` is not a way around the
+`env_var` gate.
+
+| Mode | What it withholds |
+|---|---|
+| `filtered` (default) | Credential-shaped names, **except `SSH_AUTH_SOCK`** - so `git push` over agent keys still works |
+| `strict` | The same, plus `SSH_AUTH_SOCK`, `AWS_PROFILE`, `AWS_REGION`, `KUBECONFIG`, `NETRC`. Breaks `git push`, `aws` and `kubectl` in a shell tool until you list what you need |
+| `custom` | Exactly the names in `shell_env_withhold`, and nothing inferred |
+| `inherit` | Nothing |
+
+Toolchain variables pass through under every mode: `PATH`, `HOME`, `CARGO_HOME`, `JAVA_HOME`,
+`VIRTUAL_ENV`, `NVM_DIR`, `GOPATH`, `DOCKER_HOST`, `TERM`. `allow_env_vars` hands a specific name
+over under every mode too, so one list means one thing whichever surface asks.
+
+```toml
+[security]
+shell_env          = "custom"
+shell_env_withhold = ["MY_INTERNAL_TOKEN", "LEGACY_CRED"]
+allow_env_vars     = ["MY_PROVIDER_KEY"]
+```
+
+Be clear about what this buys. With `cat` and `grep` on the default safe list, a granted shell can
+read `~/.leviath/config.toml` and find the provider key anyway. This is defence in depth against
+accidental leakage - an `env` in tool output, a `printenv` in a log, a subprocess that phones home -
+and it closes the command-seed case, where nothing was ever approved. It is not a boundary. For one,
+use `[sandbox]`.
 
 ## `[safe_commands]` and `[agent_safe_commands.<agent>]`
 

@@ -52,6 +52,21 @@ pub(crate) fn model_defaults(config: &Config) -> ModelDefaults {
 /// typo in a *safety net* should not stop the daemon from starting, and the
 /// warning says which entry went nowhere. Splitting on the first `/` keeps
 /// model ids that contain one (`deepseek/deepseek-v4-flash`) intact.
+/// The `[security] shell_env` decision for this daemon, in the shape the tools
+/// layer wants.
+///
+/// One resolver rather than three: the built-in `shell` tool, a Rhai `shell()`,
+/// and a region's command seed all hand the daemon's environment to a child, so
+/// they answer to the same setting. A script that has `shell` would otherwise be
+/// the way around the `env_var` gate.
+fn shell_env_policy(config: &Config) -> leviath_tools::ShellEnvPolicy {
+    leviath_tools::ShellEnvPolicy {
+        mode: config.security.shell_env,
+        allow_env_vars: config.security.allow_env_vars.clone(),
+        withhold: config.security.shell_env_withhold.clone(),
+    }
+}
+
 fn parse_fallback_order(entries: &[String]) -> Vec<leviath_core::blueprint::ModelEntry> {
     entries
         .iter()
@@ -880,7 +895,8 @@ fn build_agent_inner(
     let read_path_counts =
         read_path_grant_counts(&blueprint, config, std::path::Path::new(&args.workdir));
     let tool_ctx = leviath_tools::ToolContext::new(std::path::PathBuf::from(&args.workdir))
-        .with_read_paths(read_path_policy);
+        .with_read_paths(read_path_policy)
+        .with_shell_env(shell_env_policy(config));
     let mut builtins = leviath_tools::BuiltinTools::new(tool_ctx);
     if let Some(mgr) = &sandbox {
         builtins =
@@ -1038,6 +1054,7 @@ fn build_agent_inner(
                     .collect(),
             ),
             sandbox.clone(),
+            shell_env_policy(config),
         );
         resolve_seeds(&blueprint, args, &args.workdir, &policy)?
     } else {
@@ -1222,6 +1239,7 @@ fn build_agent_inner(
         .with_shell(
             sandbox.clone(),
             std::time::Duration::from_secs(config.limits.script_shell_timeout_secs),
+            shell_env_policy(config),
         )
         // `[security] allow_local_network`. Off by default, so a `web_fetch` URL
         // the model picked out of attacker-influenced context cannot reach cloud

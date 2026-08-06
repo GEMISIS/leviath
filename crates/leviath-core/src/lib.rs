@@ -69,8 +69,8 @@ pub use region::{
 };
 pub use sandbox::{OnUnavailable, SandboxKind, ToolSandboxConfig, resolve_sandbox};
 pub use secrets::{
-    child_env_allowed, constant_time_eq, dotenv_var_allowed, is_secret_header,
-    is_sensitive_env_name, redact, script_env_allowed,
+    ShellEnvMode, child_env_allowed, constant_time_eq, dotenv_var_allowed, is_secret_header,
+    is_sensitive_env_name, redact, script_env_allowed, withheld_child_vars,
 };
 pub use taint::{
     GateDecision, GateDecisionSource, GateEvent, RegionTaint, SecurityConfig, TaintLevel,
