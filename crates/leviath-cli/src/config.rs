@@ -1022,13 +1022,24 @@ impl Config {
         // relocates the directories agent scripts are discovered from, and
         // `LEVIATH_API_TOKEN` sets a known credential on the agent-spawning API.
         //
-        // `from_filename` reads only `./.env`. Still the user's own working
-        // directory, so this is not a trust boundary on its own - but it is one
-        // directory the user chose rather than an unbounded walk up the tree.
+        // `from_filename` reads only `./.env`, one directory the user chose
+        // rather than an unbounded walk up the tree. That narrowed the blast
+        // radius without closing it: a cloned repository *is* the working
+        // directory, so `./.env` is still attacker-authored on any repo the user
+        // did not write.
+        //
+        // dotenvy does not override an already-set variable, which covers `PATH`
+        // and `HOME` in practice - but not a variable that is normally unset,
+        // and those are the ones that matter. A single line of
+        // `LEVIATH_CONFIG_PATH=./.leviath.toml` makes the next statement read an
+        // attacker's config: their `[mcp_servers]` commands, their
+        // `[tool_permissions]`, their provider `base_url`. So the names that
+        // steer the process are filtered out, and the credentials this feature
+        // exists to load are not. See `leviath_core::dotenv_var_allowed`.
         //
         // `LEVIATH_SKIP_DOTENV` lets tests isolate `Config::load()` completely.
         if std::env::var_os("LEVIATH_SKIP_DOTENV").is_none() {
-            let _ = dotenvy::from_filename(".env");
+            load_dotenv_filtered(".env");
         }
 
         let config = Self::load_from_path(&Self::config_path())?;
@@ -1312,6 +1323,59 @@ fn create_config_dir(dir: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Set every variable in `path` that a repository's `.env` is allowed to set,
+/// warning once about the rest.
+///
+/// Matches dotenvy's own precedence: a variable already present in the
+/// environment wins, because the person who exported it meant it and a file in
+/// a directory they happened to `cd` into did not.
+///
+/// A missing or unreadable `.env` is not an error - most working directories do
+/// not have one.
+fn load_dotenv_filtered(path: &str) {
+    let Ok(entries) = dotenvy::from_filename_iter(path) else {
+        return;
+    };
+    let (allowed, skipped): (Vec<_>, Vec<_>) = entries
+        .flatten()
+        .partition(|(key, _)| leviath_core::dotenv_var_allowed(key));
+
+    // The overwhelmingly common case is a file with nothing to filter, and it
+    // takes exactly the path it always did rather than a re-serialized
+    // approximation of itself.
+    if skipped.is_empty() {
+        let _ = dotenvy::from_filename(path);
+        return;
+    }
+
+    // Hand the survivors back to dotenvy rather than calling `set_var` here:
+    // the workspace forbids `unsafe`, and `std::env::set_var` is unsafe in
+    // edition 2024. Single quotes are literal to dotenvy's parser, so the only
+    // character needing care is the quote itself - closed, escaped through a
+    // double-quoted run, and reopened, which is the same trick a shell uses.
+    // Values were already `$VAR`-substituted by the parse above, so quoting
+    // them literally is also what stops a second substitution pass.
+    let doc: String = allowed
+        .iter()
+        .map(|(key, value)| format!("{key}='{}'\n", value.replace('\'', r#"'"'"'"#)))
+        .collect();
+    let _ = dotenvy::from_read(doc.as_bytes());
+
+    // Joined before the macro rather than inside it: `tracing` does not
+    // evaluate field expressions when no subscriber is interested, so an
+    // argument built in place reads as an unexecuted region even on the run
+    // that logged it.
+    let names = skipped
+        .iter()
+        .map(|(key, _)| key.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    tracing::warn!(
+        "Ignoring {names} from {path}: these decide where configuration is read from or what \
+         gets executed, so a repository may not set them. Export them yourself if you meant to."
+    );
+}
+
 /// Check permissions on the config file and auto-fix if too permissive.
 ///
 /// A no-op on non-Unix platforms - see [`leviath_sys::ensure_file_private`].
@@ -1550,6 +1614,116 @@ mod dotenv_tests {
                         std::env::var("LEV_DOTENV_PROBE").ok().as_deref(),
                         Some("seen"),
                         "the .env beside the working directory was read"
+                    );
+                },
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The escalation this filter exists for. A cloned repository is the
+    /// working directory, so its `.env` is attacker-authored content - and one
+    /// line of `LEVIATH_CONFIG_PATH` would have pointed the very next statement
+    /// in `Config::load` at a config file of the repository's choosing,
+    /// carrying its own `[mcp_servers]` commands and `[tool_permissions]`.
+    #[test]
+    fn a_dot_env_cannot_steer_where_config_comes_from() {
+        let dir = make_fake_config_dir("dotenv-steer");
+        std::fs::write(
+            dir.join(".env"),
+            "LEVIATH_CONFIG_PATH=/tmp/evil.toml\n\
+             LEVIATH_API_TOKEN=known\n\
+             EDITOR=/tmp/evil\n\
+             PATH=/tmp/evil\n\
+             LD_PRELOAD=/tmp/evil.so\n\
+             LEV_DOTENV_KEEPS=kept\n",
+        )
+        .unwrap();
+
+        {
+            let _cwd = isolate_cwd_for_test();
+            std::env::set_current_dir(&dir).unwrap();
+
+            temp_env::with_vars(
+                [
+                    (
+                        "LEVIATH_CONFIG_PATH",
+                        Some(dir.join("config.toml").into_os_string()),
+                    ),
+                    ("LEVIATH_SKIP_DOTENV", None),
+                    ("LEVIATH_API_TOKEN", None),
+                    ("EDITOR", None),
+                    ("LD_PRELOAD", None),
+                    ("LEV_DOTENV_KEEPS", None),
+                ],
+                || {
+                    Config::load().expect("a missing config file is not an error");
+                    for steering in ["LEVIATH_API_TOKEN", "EDITOR", "LD_PRELOAD"] {
+                        assert!(
+                            std::env::var(steering).is_err(),
+                            "{steering} must not be settable from a repository's .env"
+                        );
+                    }
+                    // The one already set by the harness keeps the harness's
+                    // value rather than the file's, which is dotenvy's own
+                    // precedence and the reason this is not a regression.
+                    assert_ne!(
+                        std::env::var("LEVIATH_CONFIG_PATH").ok(),
+                        Some("/tmp/evil.toml".to_string())
+                    );
+                    // And an ordinary variable still loads: the point is to
+                    // filter what steers the process, not to stop reading
+                    // `.env` files.
+                    assert_eq!(
+                        std::env::var("LEV_DOTENV_KEEPS").ok().as_deref(),
+                        Some("kept")
+                    );
+                },
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Most working directories have no `.env`, so that is the ordinary case
+    /// rather than a failure. Driven directly with an absolute path, since the
+    /// point is the file's absence and not the working directory.
+    #[test]
+    fn a_missing_dot_env_is_not_an_error() {
+        let dir = make_fake_config_dir("dotenv-missing");
+        load_dotenv_filtered(&dir.join("absent.env").to_string_lossy());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The filtered path re-serializes the survivors, so it has to hand back
+    /// exactly what the parser read - quotes, spaces and `#` included.
+    #[test]
+    fn filtering_preserves_an_awkward_value_verbatim() {
+        let dir = make_fake_config_dir("dotenv-quoting");
+        std::fs::write(
+            dir.join(".env"),
+            "PATH=/tmp/evil\n\
+             LEV_DOTENV_AWKWARD=\"it's a #value with 'quotes' and spaces\"\n",
+        )
+        .unwrap();
+
+        {
+            let _cwd = isolate_cwd_for_test();
+            std::env::set_current_dir(&dir).unwrap();
+
+            temp_env::with_vars(
+                [
+                    (
+                        "LEVIATH_CONFIG_PATH",
+                        Some(dir.join("config.toml").into_os_string()),
+                    ),
+                    ("LEVIATH_SKIP_DOTENV", None),
+                    ("LEV_DOTENV_AWKWARD", None),
+                ],
+                || {
+                    Config::load().expect("a missing config file is not an error");
+                    assert_eq!(
+                        std::env::var("LEV_DOTENV_AWKWARD").ok().as_deref(),
+                        Some("it's a #value with 'quotes' and spaces")
                     );
                 },
             );

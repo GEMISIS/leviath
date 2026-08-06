@@ -482,7 +482,16 @@ exports OTLP over **HTTP/protobuf**, so a collector's gRPC port (4317) will not 
 
 ## Environment variables
 
-Leviath reads a `.env` file from the working directory unless `LEVIATH_SKIP_DOTENV` is set.
+Leviath reads a `.env` file from the working directory unless `LEVIATH_SKIP_DOTENV` is set. Only
+that one file, never a walk up the tree, and a variable you have already exported always wins.
+
+A cloned repository *is* the working directory, so its `.env` is content somebody else wrote.
+Credentials from it load normally - that is what the feature is for - but the handful of names that
+decide where configuration comes from or what gets executed are ignored, with a warning naming them:
+the `LEVIATH_` namespace, `PATH`, `SHELL`, `EDITOR`, `VISUAL`, and the `LD_*` and `DYLD_*` loader
+variables. Without that, one line of `LEVIATH_CONFIG_PATH` in a repository you cloned would point
+Leviath at a config file of its choosing, with its own MCP server commands and tool permissions.
+Export those yourself if you meant them.
 
 | Variable | Effect |
 |---|---|

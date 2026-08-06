@@ -1,6 +1,6 @@
 //! Which environment variables agent-supplied code may see.
 //!
-//! Two different questions live here, and they want opposite shapes:
+//! Three different questions live here, and the first two want opposite shapes:
 //!
 //! 1. **What does a child process inherit?** ([`child_env_allowed`]) We are
 //!    *choosing what to hand over*, so an allowlist is right. A denylist here has
@@ -16,7 +16,15 @@
 //!    so the rule inverts: anything that *looks like* a credential is refused
 //!    unless the user allowlisted it, and everything else is fine.
 //!
-//! Neither is a substitute for the other, and both are shared rather than
+//! 3. **May a `.env` in the working directory set this variable?**
+//!    ([`dotenv_var_allowed`]) Neither shape above fits. The whole point of
+//!    loading a `.env` is to pick up credentials, so the credential test from
+//!    (2) would refuse exactly what the feature exists for; and the names worth
+//!    refusing are not secrets at all but the handful that *steer the process* -
+//!    where config is read from, what gets executed. So this one is a small,
+//!    closed denylist of process-steering names, and everything else passes.
+//!
+//! None is a substitute for the others, and all are shared rather than
 //! reimplemented per call site so a gap gets fixed once.
 
 /// Compare two secrets without leaking their contents through timing.
@@ -196,6 +204,51 @@ const SECRET_NAME_PREFIXES: &[&str] = &[
     "AWS_", "AZURE_", "GOOGLE_", "GCP_",
 ];
 
+/// Exact names a `./.env` may not set, because each one steers the process
+/// rather than configuring it.
+const DOTENV_DENY_EXACT: &[&str] = &[
+    // Split and spawned as a program by the editor flow.
+    "EDITOR", "VISUAL",
+    // Decide what a shell tool, an MCP server command, or a seed command
+    // resolves to.
+    "PATH", "SHELL",
+];
+
+/// Prefixes a `./.env` may not set.
+const DOTENV_DENY_PREFIXES: &[&str] = &[
+    // `LEVIATH_CONFIG_PATH` and `LEVIATH_HOME` relocate where config, agents and
+    // scripts are read from, so setting either replaces the whole trust base:
+    // `[mcp_servers]` commands, `[tool_permissions]`, `[sandbox]`, provider
+    // `base_url`. `LEVIATH_API_TOKEN` sets a known credential on the
+    // agent-spawning API. None of it is a repository's business.
+    "LEVIATH_", // Injected into every child the dynamic linker starts.
+    "LD_", "DYLD_",
+];
+
+/// Whether a `./.env` in the working directory may set `name`.
+///
+/// `lev` is designed to be run inside cloned repositories, so `./.env` is
+/// attacker-authored content on any repository the user did not write. dotenvy
+/// does not override an already-set variable, which protects `PATH` and `HOME`
+/// in practice - but not a variable that is normally *unset*, and the ones that
+/// matter most here are exactly those.
+///
+/// Deliberately **not** built on [`is_sensitive_env_name`]: that would refuse
+/// `ANTHROPIC_API_KEY`, which is the entire legitimate purpose of loading a
+/// `.env`. Credentials are what this feature is for; the denylist is only the
+/// names that decide where config comes from and what gets executed.
+///
+/// `OLLAMA_HOST` and `*_BASE_URL`-shaped names are a deliberate edge, left
+/// allowed: pointing your own inference endpoint from a repository's `.env` is
+/// something people do on purpose, and a repository that can already choose your
+/// model can already choose your outputs.
+#[must_use]
+pub fn dotenv_var_allowed(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    !DOTENV_DENY_EXACT.contains(&upper.as_str())
+        && !DOTENV_DENY_PREFIXES.iter().any(|p| upper.starts_with(p))
+}
+
 /// Whether `name` looks like it holds a credential.
 ///
 /// Used to decide whether an explicit `env_var("NAME")` read from an agent's
@@ -322,6 +375,52 @@ mod tests {
         ] {
             assert!(is_sensitive_env_name(name), "{name} should be sensitive");
             assert!(!child_env_allowed(name), "{name} must not reach a child");
+        }
+    }
+
+    /// The names a cloned repository must not be able to set. Each one decides
+    /// where configuration is read from or what gets executed, which is a
+    /// different question from whether it holds a secret.
+    #[test]
+    fn a_dot_env_may_not_steer_the_process() {
+        for name in [
+            "LEVIATH_CONFIG_PATH",
+            "LEVIATH_HOME",
+            "LEVIATH_API_TOKEN",
+            "LEVIATH_RUNS_DIR",
+            "PATH",
+            "SHELL",
+            "EDITOR",
+            "VISUAL",
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "DYLD_INSERT_LIBRARIES",
+        ] {
+            assert!(
+                !dotenv_var_allowed(name),
+                "{name} must not be settable from a repository's .env"
+            );
+            // Case is not a way around it.
+            assert!(!dotenv_var_allowed(&name.to_ascii_lowercase()));
+        }
+    }
+
+    /// The credentials this feature exists to load still load. Reusing
+    /// `is_sensitive_env_name` here would have refused every one of them and
+    /// made `.env` support pointless.
+    #[test]
+    fn a_dot_env_may_still_carry_credentials_and_ordinary_config() {
+        for name in [
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GITHUB_TOKEN",
+            "DATABASE_URL",
+            "AWS_SECRET_ACCESS_KEY",
+            "OLLAMA_HOST",
+            "MY_APP_REGION",
+            "RUST_LOG",
+        ] {
+            assert!(dotenv_var_allowed(name), "{name} should still load");
         }
     }
 
