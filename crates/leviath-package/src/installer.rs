@@ -13,14 +13,7 @@ use std::path::{Path, PathBuf};
 /// files) and far below "fills the disk".
 const MAX_UNPACKED_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Refuse an unpacked bundle that contains symlinks.
-///
-/// tar-rs blocks entries that *extract* outside the destination, but a symlink
-/// entry lands inside it perfectly legally - and then points wherever it likes.
-/// Since the installed tree is later scanned for `.rhai` tool scripts and read
-/// by the file tools, a link is a way to smuggle content in (or to have a later
-/// write follow it out). Nothing in a legitimate agent bundle needs one.
-/// What an entry is, as far as this check cares.
+/// What an entry is, as far as the symlink check cares.
 ///
 /// A three-way answer rather than a `FileType`, because `FileType` cannot be
 /// constructed without a real file of that kind - and a real symlink is exactly
@@ -47,6 +40,12 @@ fn classify(path: &Path) -> Entry {
 
 /// Refuse a bundle containing any symlink, at any depth, with the entry
 /// classifier injected.
+///
+/// tar-rs blocks entries that *extract* outside the destination, but a symlink
+/// entry lands inside it perfectly legally - and then points wherever it likes.
+/// Since the installed tree is later scanned for `.rhai` tool scripts and read
+/// by the file tools, a link is a way to smuggle content in (or to have a later
+/// write follow it out). Nothing in a legitimate agent bundle needs one.
 ///
 /// A `fn` pointer (not `impl Fn`) so there is one monomorphization, matching the
 /// seam idiom used elsewhere in the workspace. The seam exists because the
@@ -145,6 +144,61 @@ impl AgentInstaller {
         self.install_from_bytes_with(name, data, classify)
     }
 
+    /// Extract `data` into `dest` and validate what came out.
+    ///
+    /// `Read::take` bounds the *decompressed* stream. Without it a ~1 MB bundle
+    /// could expand to fill the disk - the classic decompression bomb - and
+    /// nothing downstream would notice until the write failed.
+    ///
+    /// `set_preserve_permissions(false)` and `set_unpack_xattrs(false)`:
+    /// otherwise an attacker-authored archive chooses the modes and extended
+    /// attributes of the files it drops into the user's home.
+    ///
+    /// tar-rs already rejects `..` components and validates every entry against
+    /// the destination (including hard links), so classic zip-slip is covered by
+    /// the dependency - which is a reason to keep `cargo audit` watching it, not
+    /// a reason to assume it always will.
+    fn unpack_into(dest: &Path, data: &[u8], classify: fn(&Path) -> Entry) -> anyhow::Result<()> {
+        let decoder = GzDecoder::new(data).take(MAX_UNPACKED_BYTES);
+        let mut archive = tar::Archive::new(decoder);
+        archive.set_preserve_permissions(false);
+        archive.set_unpack_xattrs(false);
+        archive.unpack(dest).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to extract package: {}. (Bundles are limited to {} MiB \
+                 uncompressed.)",
+                e,
+                MAX_UNPACKED_BYTES / (1024 * 1024)
+            )
+        })?;
+        reject_symlinks_with(dest, classify)
+    }
+
+    /// Move a validated staging directory over the install destination.
+    ///
+    /// Remove-then-rename rather than rename-over: Windows refuses to rename
+    /// onto an existing directory. That leaves a window where a previous
+    /// install is gone and the new one is not yet in place, so a failure here
+    /// says so plainly rather than reporting a generic install error.
+    fn swap_into_place(staging: &Path, dest: &Path) -> anyhow::Result<()> {
+        // One error arm for both steps: the remedy is the same either way, and
+        // splitting them would mean two messages saying "reinstall the agent".
+        let swap = || -> std::io::Result<()> {
+            if dest.exists() {
+                fs::remove_dir_all(dest)?;
+            }
+            fs::rename(staging, dest)
+        };
+        swap().map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to install into '{}': {}. Any previous install there has been removed - \
+                 reinstall the agent.",
+                dest.display(),
+                e
+            )
+        })
+    }
+
     /// Core of [`install_from_bytes`](Self::install_from_bytes) with the entry
     /// classifier injected - see [`reject_symlinks_with`] for why the seam
     /// exists. A `fn` pointer, so there is one monomorphization.
@@ -164,43 +218,37 @@ impl AgentInstaller {
         }
         let agent_dir = self.install_dir.join(name);
 
-        // Create installation directory
-        fs::create_dir_all(&agent_dir).map_err(|e| {
+        // Unpack into a staging directory and swap it in only once the contents
+        // have passed every check.
+        //
+        // Extracting straight into `agent_dir` meant a bundle that failed
+        // validation still left its files there - including the symlinks
+        // `reject_symlinks_with` had just refused, which `discover_blueprints`
+        // would then list as a runnable agent. And because this path
+        // `create_dir_all`s over an existing install, a failed *re-install*
+        // would leave a working agent half-overwritten.
+        //
+        // A sibling of the destination, so the swap is a rename on the same
+        // filesystem rather than a copy.
+        let staging = self
+            .install_dir
+            .join(format!(".staging-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&staging);
+        fs::create_dir_all(&staging).map_err(|e| {
             anyhow::anyhow!(
-                "Failed to create install directory '{}': {}",
-                agent_dir.display(),
+                "Failed to create staging directory '{}': {}",
+                staging.display(),
                 e
             )
         })?;
-
-        // Extract tar.gz archive.
-        //
-        // `Read::take` bounds the *decompressed* stream. Without it a ~1 MB
-        // bundle could expand to fill the disk - the classic decompression bomb -
-        // and nothing downstream would notice until the write failed.
-        //
-        // `set_preserve_permissions(false)` and `set_unpack_xattrs(false)`:
-        // otherwise an attacker-authored archive chooses the modes and extended
-        // attributes of the files it drops into the user's home.
-        //
-        // tar-rs already rejects `..` components and validates every entry
-        // against the destination (including hard links), so classic zip-slip is
-        // covered by the dependency - which is a reason to keep `cargo audit`
-        // watching it, not a reason to assume it always will.
-        let decoder = GzDecoder::new(data).take(MAX_UNPACKED_BYTES);
-        let mut archive = tar::Archive::new(decoder);
-        archive.set_preserve_permissions(false);
-        archive.set_unpack_xattrs(false);
-
-        archive.unpack(&agent_dir).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to extract package: {}. (Bundles are limited to {} MiB \
-                 uncompressed.)",
-                e,
-                MAX_UNPACKED_BYTES / (1024 * 1024)
-            )
-        })?;
-        reject_symlinks_with(&agent_dir, classify)?;
+        // Every early return from here on goes through this, so a refused
+        // bundle leaves nothing behind.
+        let staged = Self::unpack_into(&staging, data, classify);
+        let result = staged.and_then(|()| Self::swap_into_place(&staging, &agent_dir));
+        if let Err(e) = result {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(e);
+        }
 
         // Read agent.leviath to get metadata
         let manifest_path = agent_dir.join("agent.leviath");
@@ -826,8 +874,8 @@ description = "{}"
     #[test]
     fn install_from_bytes_create_dir_failure_returns_error() {
         let dir = tempfile::tempdir().unwrap();
-        // Make a plain file where a directory needs to exist, so
-        // create_dir_all(install_dir.join(name)) fails.
+        // Make a plain file where a directory needs to exist, so creating the
+        // staging directory under it fails.
         let blocker = dir.path().join("blocker");
         fs::write(&blocker, b"not a directory").unwrap();
 
@@ -838,7 +886,81 @@ description = "{}"
             .unwrap_err();
         assert!(
             err.to_string()
-                .contains("Failed to create install directory")
+                .contains("Failed to create staging directory"),
+            "got: {err}"
+        );
+    }
+
+    /// A bundle that fails validation must leave nothing on disk. Extracting
+    /// straight into the destination meant the symlinks `reject_symlinks_with`
+    /// had just refused stayed there, and `discover_blueprints` would list the
+    /// half-extracted tree as a runnable agent.
+    #[test]
+    fn a_rejected_bundle_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+        let bundle = make_bundle("evil", "1.0.0", "desc");
+
+        installer
+            .install_from_bytes_with("evil", &bundle, |_| Entry::Refused)
+            .expect_err("a bundle full of symlinks must be refused");
+
+        // Counted rather than named: the assertion is that there is nothing to
+        // name, so a closure building the names would never run.
+        let leftovers = fs::read_dir(dir.path()).unwrap().count();
+        assert_eq!(
+            leftovers, 0,
+            "a refused install left {leftovers} entries behind"
+        );
+    }
+
+    /// The swap can fail on its own - a stray *file* sitting where the agent
+    /// directory belongs cannot be removed as a directory. The message has to
+    /// say the install did not happen rather than reporting success.
+    #[test]
+    fn a_blocked_destination_reports_a_failed_install() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("blocked"), b"a file, not a directory").unwrap();
+
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+        let err = installer
+            .install_from_bytes("blocked", &make_bundle("blocked", "1.0.0", "desc"))
+            .expect_err("a file in the way must not be silently replaced");
+        assert!(err.to_string().contains("Failed to install into"), "{err}");
+
+        // And the staging directory is not left behind.
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".staging-"))
+            .collect();
+        assert!(leftovers.is_empty(), "left {leftovers:?} behind");
+    }
+
+    /// A failed re-install must not destroy the agent that was already there.
+    /// This is why the fix is a staged swap and not a `remove_dir_all` on the
+    /// error path - that would have introduced exactly this bug.
+    #[test]
+    fn a_failed_reinstall_keeps_the_previous_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+
+        installer
+            .install_from_bytes("keeper", &make_bundle("keeper", "1.0.0", "original"))
+            .expect("the first install succeeds");
+
+        installer
+            .install_from_bytes_with("keeper", &make_bundle("keeper", "2.0.0", "evil"), |_| {
+                Entry::Refused
+            })
+            .expect_err("the second install is refused");
+
+        let manifest = fs::read_to_string(dir.path().join("keeper").join("agent.leviath"))
+            .expect("the original install is still readable");
+        assert!(
+            manifest.contains("1.0.0"),
+            "the working install was replaced by a refused one: {manifest}"
         );
     }
 

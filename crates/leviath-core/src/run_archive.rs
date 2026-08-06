@@ -566,14 +566,34 @@ fn read_exact_or_eof(r: &mut dyn Read, buf: &mut [u8]) -> io::Result<bool> {
     Ok(true)
 }
 
+/// The largest a single archive frame may claim to be.
+///
+/// Generous by design - a record holds one context snapshot, and 256 MiB is far
+/// past anything a real run writes - because this is a sanity bound on a length
+/// prefix, not a size policy. What it rules out is a torn or corrupt prefix
+/// being taken at its word and turned straight into an allocation.
+const MAX_RECORD_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Read the next framed record, or `None` at a clean end-of-stream.
 pub fn read_record(r: &mut dyn Read) -> io::Result<Option<RunRecord>> {
     let mut len_bytes = [0u8; 8];
     if !read_exact_or_eof(r, &mut len_bytes)? {
         return Ok(None);
     }
-    let len = u64::from_be_bytes(len_bytes) as usize;
-    let mut payload = vec![0u8; len];
+    let len = u64::from_be_bytes(len_bytes);
+    // A torn tail is the reason `read_archive_lenient` exists, and a torn
+    // *length prefix* is exactly where a nonsense `u64` comes from. Allocating
+    // it first would abort the process on a crash-truncated archive - during
+    // daemon recovery, which is the one moment the lenient reader is there to
+    // survive. Rejecting it makes the frame an ordinary error, so recovery
+    // folds back to the last intact record instead.
+    if len > MAX_RECORD_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("run-archive frame claims {len} bytes, over the {MAX_RECORD_BYTES} cap"),
+        ));
+    }
+    let mut payload = vec![0u8; len as usize];
     if !read_exact_or_eof(r, &mut payload)? {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
@@ -1651,6 +1671,29 @@ mod tests {
         // Fail on the 8-byte length prefix, and (after it) on the payload.
         assert!(write_record(&mut FailAfter { remaining: 0 }, &rec).is_err());
         assert!(write_record(&mut FailAfter { remaining: 8 }, &rec).is_err());
+    }
+
+    /// A torn *length prefix* is where a nonsense `u64` comes from, and the
+    /// lenient reader exists precisely to survive a torn tail. Taking the
+    /// length at its word would turn a crash-truncated archive into an
+    /// allocation of that size - during daemon recovery, the one moment this
+    /// reader is there to keep working.
+    #[test]
+    fn an_absurd_frame_length_is_an_error_not_an_allocation() {
+        let mut buf = Vec::new();
+        write_archive_start(&mut buf, RUN_ARCHIVE_VERSION).unwrap();
+        write_record(&mut buf, &header()).unwrap();
+        // A crash mid-append that left a garbage length behind.
+        buf.extend_from_slice(&u64::MAX.to_be_bytes());
+
+        let err = read_archive(&mut buf.as_slice())
+            .expect_err("the strict reader must refuse an impossible frame");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+
+        // And the lenient reader folds back to the intact record before it,
+        // which is the behaviour recovery depends on.
+        let (_, records) = read_archive_lenient(&mut buf.as_slice()).unwrap();
+        assert_eq!(records, vec![header()]);
     }
 
     #[test]

@@ -13,6 +13,24 @@ same list.
 
 ## Unreleased
 
+- **Security.** A bundle that failed validation left its files on disk. `lev add`
+  extracted straight into the destination and only then checked for symlinks, so
+  a refused bundle's symlinks stayed there and `discover_blueprints` would list
+  the half-extracted tree as a runnable agent - and a failed *re-install* left a
+  working agent half-overwritten. Bundles now unpack into a staging directory
+  and are moved into place only after passing every check, so a refusal leaves
+  nothing behind and a working install survives a bad update.
+- Provider HTTP clients no longer follow a redirect off the origin the API key
+  was meant for. reqwest strips `Authorization` across origins on its own but
+  not a custom header, and the provider keys travel as `x-api-key` and
+  `x-goog-api-key`. Same-origin redirects are still followed, up to five hops.
+- A corrupt run archive is an error rather than an allocation. A crash-truncated
+  frame could leave a garbage 64-bit length prefix, which the reader took at its
+  word - during daemon recovery, the one moment the lenient reader exists to keep
+  working. It now folds back to the last intact record.
+- The control socket caps how much one connection may send. On Unix the peer is
+  already same-uid and token-authenticated; on Windows the named pipe carries a
+  default DACL, which made an unbounded read a pre-auth allocation.
 - **Security.** A shell tool inherited the daemon's entire environment, so every
   `shell` call, Rhai `shell()` and command seed could see `ANTHROPIC_API_KEY`,
   `GITHUB_TOKEN`, `LEVIATH_API_TOKEN` and whatever else the person who started

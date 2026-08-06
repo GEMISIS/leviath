@@ -20,7 +20,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{broadcast, oneshot};
 
@@ -50,6 +50,13 @@ pub use windows::{
 /// into an actionable error naming the token file, and a message the two ends
 /// spelled differently would silently stop being recognised.
 const AUTH_REQUIRED: &str = "authentication";
+
+/// The most one connection may send before the stream is cut.
+///
+/// A spawn request carries a task string and region seeds, so the cap has to be
+/// generous; 8 MiB is far past anything a real caller sends and still bounds
+/// what an unauthenticated peer can make the daemon buffer.
+const MAX_REQUEST_BYTES: u64 = 8 * 1024 * 1024;
 
 /// A shared secret that proves a control-channel caller is this same user.
 ///
@@ -444,7 +451,13 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let (read_half, mut write_half) = tokio::io::split(stream);
-    let mut lines = BufReader::new(read_half).lines();
+    // Capped rather than unbounded. On Unix the peer is same-uid and holds the
+    // token, so this is only tidiness - but a Windows named pipe is created
+    // with a default DACL, which makes an unbounded `lines()` a pre-auth
+    // allocation any local user can drive. `take` ends the stream at the cap,
+    // so an oversized request reads as a truncated line and is refused by the
+    // parse below rather than growing a buffer without limit.
+    let mut lines = BufReader::new(read_half.take(MAX_REQUEST_BYTES)).lines();
     // `None` means this daemon runs without a token and every caller is
     // accepted, which is only the case in tests that drive the protocol
     // directly. Production always passes one.
