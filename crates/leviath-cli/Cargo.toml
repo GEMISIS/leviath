@@ -30,13 +30,14 @@ debug-http = ["leviath-providers/debug-http"]
 # allocators can be benchmarked against each other on identical code
 # (`--no-default-features` builds on the system allocator), and so an
 # embedder-style build can opt out entirely.
-mimalloc-allocator = ["dep:mimalloc"]
+mimalloc-allocator = ["dep:mimalloc", "dep:leviath-alloc", "leviath-alloc/mimalloc"]
 
 [dependencies]
 # The binary's global allocator (see main.rs). Kept out of the workspace dep
 # table on purpose: only the composition-root binary should pick an allocator,
 # never a library crate.
 mimalloc = { version = "0.1", optional = true }
+leviath-alloc = { path = "../leviath-alloc", version = "0.2.0", optional = true }
 leviath-core = { workspace = true }
 leviath-agent-client = { workspace = true }
 leviath-runtime = { workspace = true, features = ["control-socket"] }

@@ -1,0 +1,24 @@
+# The ONE workspace crate that does not opt into `[lints] workspace = true`:
+# it exists to hold a single audited `unsafe` FFI call into mimalloc that has
+# no safe wrapper anywhere on crates.io (see src/lib.rs for the full audit
+# note). Everything else in the workspace stays under `unsafe_code = "forbid"`.
+[package]
+name = "leviath-alloc"
+description = "Allocator tuning for the leviath binary: one audited mimalloc option call"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+# Off by default so builds without the mimalloc global allocator (the
+# `--no-default-features` A/B benchmarking configuration of leviath-cli)
+# compile no FFI at all and the entry point is a no-op.
+mimalloc = ["dep:libmimalloc-sys"]
+
+[dependencies]
+libmimalloc-sys = { version = "0.1", features = ["extended"], optional = true }
+
+[dev-dependencies]
+temp-env = { workspace = true }
