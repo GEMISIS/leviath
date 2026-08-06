@@ -13,6 +13,12 @@ same list.
 
 ## Unreleased
 
+- **Security.** `lev serve --no-remote-yolo` refused `{"yolo": true}` on a
+  spawn request but not `{"allow": ["*"]}`, which reaches the same wildcard
+  override by another name. Both are refused now, as is any named `allow`:
+  `{"allow": ["shell"]}` is not meaningfully weaker on a server somebody
+  deliberately hardened. A caller who needs a per-agent grant has
+  `[agent_tool_permissions.<agent>]` in the operator's own config.
 - **Security.** A shell redirect was invisible to the approval machinery, so
   `write_file = "deny"` was bypassable with `echo x > file`. The redirect target
   never reached a grant key, which meant `cat notes.md > ~/.ssh/authorized_keys`
