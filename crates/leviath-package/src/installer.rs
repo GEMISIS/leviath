@@ -228,26 +228,44 @@ impl AgentInstaller {
         // `create_dir_all`s over an existing install, a failed *re-install*
         // would leave a working agent half-overwritten.
         //
-        // A sibling of the destination, so the swap is a rename on the same
-        // filesystem rather than a copy.
+        // Staged *beside* the agents directory, not inside it, and still on the
+        // same filesystem so the swap is a rename rather than a copy.
         //
-        // That does put it inside the directory blueprint discovery scans, and
-        // discovery filters on `is_dir()` rather than skipping dotted names -
-        // so between the unpack and the rename (a directory walk, single-digit
-        // milliseconds) a concurrent `lev list` could show the agent twice.
-        // Left as-is deliberately: relocating staging outside the agents
-        // directory, or teaching all five scanners to skip hidden entries, is
-        // more moving parts than a transient duplicate listing is worth. What
-        // matters is that a *refused* bundle leaves nothing at all, which the
-        // teardown below guarantees.
-        let staging = self
-            .install_dir
-            .join(format!(".staging-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&staging);
-        fs::create_dir_all(&staging).map_err(|e| {
+        // Inside would be simpler and is wrong. Blueprint discovery scans every
+        // subdirectory of the agents directory, filters on `is_dir()` rather
+        // than skipping dotted names, sorts, and keeps the *first* entry for a
+        // given blueprint name. `.staging-…` sorts before every letter, so a
+        // staging tree declaring `name = "coder"` does not appear alongside the
+        // real `coder` - it **shadows** it. And a crash or SIGKILL between the
+        // unpack and the rename leaves that tree behind permanently, holding
+        // pre-validation content: the symlinks `reject_symlinks_with` was about
+        // to refuse, still discoverable, still shadowing.
+        // Built by suffixing the agents directory's own name rather than by
+        // walking to its parent: `<...>/agents.staging-coder-123` is a sibling
+        // of `agents`, so it is outside what discovery scans, and there is no
+        // "what if there is no parent" branch nothing could ever exercise.
+        // `OsString` rather than `format!` on a `Display`, so a non-UTF-8 home
+        // survives the round trip.
+        let mut staging = self.install_dir.clone().into_os_string();
+        staging.push(format!(".staging-{name}-{}", std::process::id()));
+        let staging = PathBuf::from(staging);
+        // The agents directory itself may not exist on a first install. The
+        // previous shape created it implicitly by unpacking into it; now that
+        // staging happens beside it, the rename needs it to be there already.
+        // One fallible step and one error arm: staging is a sibling of the
+        // agents directory, so if that directory could be created this one can
+        // too - a second message would describe a failure nothing can reach.
+        let prepare = || -> std::io::Result<()> {
+            fs::create_dir_all(&self.install_dir)?;
+            // A same-pid leftover from a crashed run would otherwise be
+            // unpacked *into*, mixing two bundles.
+            let _ = fs::remove_dir_all(&staging);
+            fs::create_dir_all(&staging)
+        };
+        prepare().map_err(|e| {
             anyhow::anyhow!(
-                "Failed to create staging directory '{}': {}",
-                staging.display(),
+                "Failed to create install directory '{}': {}",
+                self.install_dir.display(),
                 e
             )
         })?;
@@ -885,7 +903,7 @@ description = "{}"
     fn install_from_bytes_create_dir_failure_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         // Make a plain file where a directory needs to exist, so creating the
-        // staging directory under it fails.
+        // agents directory under it fails.
         let blocker = dir.path().join("blocker");
         fs::write(&blocker, b"not a directory").unwrap();
 
@@ -896,7 +914,7 @@ description = "{}"
             .unwrap_err();
         assert!(
             err.to_string()
-                .contains("Failed to create staging directory"),
+                .contains("Failed to create install directory"),
             "got: {err}"
         );
     }
@@ -943,9 +961,52 @@ description = "{}"
             .unwrap()
             .filter_map(Result::ok)
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.starts_with(".staging-"))
+            .filter(|n| n.contains(".staging-"))
             .collect();
         assert!(leftovers.is_empty(), "left {leftovers:?} behind");
+    }
+
+    /// Staging must not land inside the directory blueprint discovery scans.
+    ///
+    /// Discovery filters on `is_dir()` rather than skipping dotted names, sorts,
+    /// and keeps the *first* entry per blueprint name - and `.` sorts before
+    /// every letter. So a staging tree inside the agents directory would not sit
+    /// alongside the real agent, it would shadow it; and a crash between the
+    /// unpack and the rename would leave that tree there permanently, holding
+    /// exactly the pre-validation content the symlink check was about to refuse.
+    #[test]
+    fn staging_never_lands_inside_the_scanned_agents_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let agents = home.path().join("agents");
+        let installer = AgentInstaller::with_install_dir(agents.clone());
+
+        installer
+            .install_from_bytes("coder", &make_bundle("coder", "1.0.0", "real"))
+            .expect("install succeeds");
+
+        // Only the agent itself is in the scanned directory - nothing dotted,
+        // nothing that would sort ahead of it.
+        let mut entries: Vec<String> = fs::read_dir(&agents)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        assert_eq!(entries, ["coder"]);
+
+        // And a refused install leaves nothing beside it either, so a crash
+        // window is the only way to strand a staging tree at all.
+        installer
+            .install_from_bytes_with("coder", &make_bundle("coder", "2.0.0", "evil"), |_| {
+                Entry::Refused
+            })
+            .expect_err("a symlink bundle is refused");
+        let stranded = fs::read_dir(home.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains(".staging-"))
+            .count();
+        assert_eq!(stranded, 0, "a refused install stranded a staging tree");
     }
 
     /// A failed re-install must not destroy the agent that was already there.
