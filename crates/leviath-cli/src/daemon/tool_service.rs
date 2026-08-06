@@ -380,10 +380,7 @@ pub async fn dispatch_tools(
         // A shell redirect writes a file, and no tool name says so. Clamping by
         // the write tool's own policy is what stops `echo x > f` being a
         // spelling of `write_file` that a `write_file = "deny"` never sees.
-        let policy = crate::tools::clamp_by_effect(
-            &tc.name,
-            &tc.arguments,
-            policy,
+        let policy = crate::tools::clamp_by_effect(&tc.name, &tc.arguments, policy, &|| {
             resolve_policy(
                 "write_file",
                 true,
@@ -392,8 +389,8 @@ pub async fn dispatch_tools(
                 &state.agent_perms,
                 &state.global_perms,
                 state.blueprint_may_loosen,
-            ),
-        );
+            )
+        });
         // A grant can only ever collapse `Ask` into `Allow`. It never reaches
         // `Deny`, and it never has to: a denied tool is not one the user was
         // ever offered a grant for.

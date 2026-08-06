@@ -282,13 +282,19 @@ fn stricter(a: ToolPolicy, b: ToolPolicy) -> ToolPolicy {
 /// who allows `write_file` gains nothing they did not already have, and a
 /// `shell = "deny"` still denies regardless of what the line writes.
 ///
-/// Takes the already-resolved policies rather than resolving `write_file`
-/// itself, so there is one place that knows the layering and this is not it.
+/// `write_policy` is a closure rather than a value because this runs on every
+/// tool call and almost none of them are a writing shell command: resolving the
+/// write policy eagerly meant a `read_file` paid for a lookup whose result was
+/// thrown away. `&dyn` rather than `impl` so there is one coverage-mapping
+/// instance, matching the seam idiom used elsewhere in the workspace.
+///
+/// Takes a resolver rather than resolving `write_file` itself, so there is one
+/// place that knows the layering and this is not it.
 pub fn clamp_by_effect(
     tool_name: &str,
     arguments: &serde_json::Value,
     policy: ToolPolicy,
-    write_policy: ToolPolicy,
+    write_policy: &dyn Fn() -> ToolPolicy,
 ) -> ToolPolicy {
     if leviath_tools::canonical_tool_name(tool_name) != "shell" {
         return policy;
@@ -297,7 +303,7 @@ pub fn clamp_by_effect(
         return policy;
     };
     if crate::shell_keys::writes_a_file(command) {
-        return stricter(policy, write_policy);
+        return stricter(policy, write_policy());
     }
     policy
 }
@@ -735,6 +741,17 @@ mod policy_tests {
         serde_json::json!({ "command": command })
     }
 
+    // Named rather than a closure per call site: one function has one
+    // coverage-mapping instance, so the tests where the resolver is
+    // deliberately never reached do not each leave an unexecuted body behind.
+    fn deny() -> ToolPolicy {
+        ToolPolicy::Deny
+    }
+
+    fn allow() -> ToolPolicy {
+        ToolPolicy::Allow
+    }
+
     /// The property this exists for: a model that finds `write_file` refused
     /// must not be able to reach for `>` instead.
     #[test]
@@ -744,7 +761,7 @@ mod policy_tests {
                 "shell",
                 &shell_call("echo pwn > /root/.bashrc"),
                 ToolPolicy::Allow,
-                ToolPolicy::Deny,
+                &deny,
             ),
             ToolPolicy::Deny
         );
@@ -754,7 +771,7 @@ mod policy_tests {
                 "bash",
                 &shell_call("echo pwn >> ~/.profile"),
                 ToolPolicy::Allow,
-                ToolPolicy::Deny,
+                &deny,
             ),
             ToolPolicy::Deny
         );
@@ -769,7 +786,7 @@ mod policy_tests {
                 "shell",
                 &shell_call("echo x > out"),
                 ToolPolicy::Ask,
-                ToolPolicy::Allow,
+                &allow,
             ),
             ToolPolicy::Ask
         );
@@ -778,7 +795,7 @@ mod policy_tests {
                 "shell",
                 &shell_call("echo x > out"),
                 ToolPolicy::Deny,
-                ToolPolicy::Allow,
+                &allow,
             ),
             ToolPolicy::Deny
         );
@@ -790,16 +807,50 @@ mod policy_tests {
     fn a_call_that_writes_nothing_is_untouched() {
         for command in ["ls -la", "cat a 2>/dev/null", "grep x f", "sort < in"] {
             assert_eq!(
-                clamp_by_effect(
-                    "shell",
-                    &shell_call(command),
-                    ToolPolicy::Allow,
-                    ToolPolicy::Deny,
-                ),
+                clamp_by_effect("shell", &shell_call(command), ToolPolicy::Allow, &deny,),
                 ToolPolicy::Allow,
                 "{command:?} writes nothing"
             );
         }
+    }
+
+    /// The write policy is resolved lazily, because this runs on *every* tool
+    /// call and almost none of them are a writing shell command. Resolving it
+    /// eagerly made a `read_file` pay for a lookup that was thrown away.
+    #[test]
+    fn the_write_policy_is_resolved_only_when_a_call_actually_writes() {
+        let calls = std::cell::Cell::new(0);
+        let resolve = || {
+            calls.set(calls.get() + 1);
+            ToolPolicy::Deny
+        };
+
+        clamp_by_effect(
+            "read_file",
+            &serde_json::json!({"path": "a"}),
+            ToolPolicy::Allow,
+            &resolve,
+        );
+        clamp_by_effect("shell", &shell_call("ls -la"), ToolPolicy::Allow, &resolve);
+        clamp_by_effect(
+            "shell",
+            &shell_call("cat a 2>/dev/null"),
+            ToolPolicy::Allow,
+            &resolve,
+        );
+        assert_eq!(
+            calls.get(),
+            0,
+            "nothing here writes, so nothing should resolve"
+        );
+
+        clamp_by_effect(
+            "shell",
+            &shell_call("echo x > f"),
+            ToolPolicy::Allow,
+            &resolve,
+        );
+        assert_eq!(calls.get(), 1, "a writing call resolves it exactly once");
     }
 
     /// Only the shell can spell a write this way, and a call with no readable
@@ -811,7 +862,7 @@ mod policy_tests {
                 "read_file",
                 &serde_json::json!({ "path": "a > b" }),
                 ToolPolicy::Allow,
-                ToolPolicy::Deny,
+                &deny,
             ),
             ToolPolicy::Allow
         );
@@ -820,7 +871,7 @@ mod policy_tests {
                 "shell",
                 &serde_json::json!({ "not_a_command": 1 }),
                 ToolPolicy::Allow,
-                ToolPolicy::Deny,
+                &deny,
             ),
             ToolPolicy::Allow
         );

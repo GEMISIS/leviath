@@ -44,6 +44,12 @@ impl ShellEnvPolicy {
     /// covers the sandboxed branch as well as the host one - a container that
     /// inherits the daemon's environment leaks exactly as much as a bare shell.
     pub fn apply(&self, cmd: &mut tokio::process::Command) -> Vec<String> {
+        // `inherit` is the "behave as before" escape hatch, so it should cost
+        // what it did before: nothing. Without this it still walks and
+        // allocates the whole environment to decide it wants none of it.
+        if self.mode == leviath_core::ShellEnvMode::Inherit {
+            return Vec::new();
+        }
         let names: Vec<String> = std::env::vars_os()
             .filter_map(|(k, _)| k.into_string().ok())
             .collect();
