@@ -388,7 +388,7 @@ Start the [REST and WebSocket API](/docs/api).
 | `--cors <ORIGIN>` | none | Allow browser requests from an origin. `*` is accepted and means any origin |
 | `--allow-admin` | off | Mount the MCP administration and config-write routes |
 | `--workdir-root <PATH>` | unset | Restrict agent working directories to this root |
-| `--no-remote-yolo` | off | Refuse `"yolo": true` on spawn requests |
+| `--no-remote-yolo` | off | Refuse `"yolo": true` and `"allow": [...]` on spawn requests |
 
 > [!WARNING]
 > Prefer `LEVIATH_API_TOKEN` over `--token`. A command-line argument is visible in `ps` to every

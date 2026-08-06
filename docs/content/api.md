@@ -35,7 +35,8 @@ lev serve --port 3000 --token "$(openssl rand -hex 16)" --cors https://leviath.d
   | `PUT /api/config` | 405, because `GET /api/config` is mounted |
   | `POST /api/mcp/servers` | 405, because `GET /api/mcp/servers` is mounted |
   | `DELETE /api/mcp/servers/{name}` | 404, because nothing else is mounted on that path |
-- **`--workdir-root`** confines agent workdirs; **`--no-remote-yolo`** forbids `"yolo": true` on spawn.
+- **`--workdir-root`** confines agent workdirs; **`--no-remote-yolo`** forbids `"yolo": true` and
+  `"allow": [...]` on spawn, which are one lever rather than two.
 
 > [!CAUTION]
 > `lev serve` runs LLM-driven tools with whatever permissions the blueprint grants. Treat it as
