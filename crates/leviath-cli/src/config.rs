@@ -540,6 +540,11 @@ pub struct LimitsConfig {
     /// Global fallback cap on concurrent inference requests for any model
     /// without its own per-model pool entry. Defaults to `Some(8)`; omit or set
     /// a large number to effectively unbound it.
+    ///
+    /// One physical bound sits behind this for *script* providers: each of
+    /// their in-flight calls occupies a blocking-pool thread, and the daemon's
+    /// runtime provisions 2048 of those. Pools above 2048 only run that wide
+    /// for HTTP providers, whose calls are fully async.
     #[serde(default = "default_max_concurrent_inferences")]
     pub max_concurrent_inferences: Option<usize>,
 
