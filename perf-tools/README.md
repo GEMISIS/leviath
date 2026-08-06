@@ -8,14 +8,14 @@ metrics on both sides or the comparison is meaningless.
 
 ## Tools
 
-- `leviath_monitor.py` - samples one process (CPU, every memory metric the OS
-  provides, active session count) on an interval, writes a CSV per sample and
-  a three-panel PNG on exit. `--pid` pins an exact process; the default finds
-  the daemon by name. On exit it also reconstructs the *exact* session
-  concurrency from each run directory's creation time and its `meta.json`'s
-  last write (sub-second precision), because interval sampling misses any run
-  shorter than the interval; the graph shows both curves and the intervals
-  land in a `*_runs.csv`.
+- The process monitor lives in the
+  [leviath-benchmarks](https://github.com/GEMISIS/leviath-benchmarks) repo
+  (`bench/monitor.py`) - one canonical home instead of a drifting copy
+  here. It samples one process (CPU as whole-machine share, every memory
+  metric the OS provides, active session count), writes a CSV per sample,
+  and reconstructs exact per-run concurrency from filesystem timestamps.
+  This directory keeps the methodology notes below plus the experiments
+  that verified them.
 - `ws_churn_test.py` - opens batches of WebSocket connections against
   `lev serve` and drops them abruptly (SO_LINGER 0, like a killed browser
   tab), printing the server's RSS between batches. A per-connection leak shows
