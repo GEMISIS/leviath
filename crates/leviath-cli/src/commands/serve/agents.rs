@@ -72,13 +72,13 @@ pub(super) async fn spawn_agent(
         .check_workdir(std::path::Path::new(&workdir))
         .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
     // Likewise `{"yolo": true}` waived every approval prompt for an agent
-    // running on the host, from a request. `--no-remote-yolo` refuses it.
-    if body.yolo && state.limits.no_remote_yolo {
-        return Err(err(
-            StatusCode::FORBIDDEN,
-            "this server refuses `yolo` on spawn requests (--no-remote-yolo)".to_string(),
-        ));
-    }
+    // running on the host, from a request - as did `{"allow": ["*"]}`, which
+    // reaches the same wildcard override by another name. `--no-remote-yolo`
+    // refuses both.
+    state
+        .limits
+        .check_launch_overrides(body.yolo, &body.allow)
+        .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
     // And a completion webhook is a request the daemon makes on the caller's
     // behalf, so it goes through the same SSRF policy as any model-supplied URL.
     if let Some(callback) = body.callback_url.as_deref() {
@@ -906,25 +906,84 @@ mod tests {
         assert_eq!(err.0, StatusCode::FORBIDDEN);
         assert!(err.1.0.error.contains("callback_url"), "{}", err.1.0.error);
 
-        // Inside the root, but asking for yolo.
-        let err = spawn_agent(
-            State(state),
-            Json(SpawnAgentReq {
-                blueprint: "probe".to_string(),
-                task: "t".to_string(),
-                workdir: Some(root.path().to_string_lossy().to_string()),
-                yolo: true,
-                ..Default::default()
-            }),
-        )
-        .await
-        .expect_err("remote yolo must be refused");
-        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        // Inside the root, but asking for yolo - spelled both ways. `allow`
+        // reaches the same wildcard override `yolo` writes, so guarding only
+        // the `yolo` field left the refusal bypassable by asking differently.
+        for (label, req) in [
+            (
+                "yolo",
+                SpawnAgentReq {
+                    yolo: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "a wildcard allow",
+                SpawnAgentReq {
+                    allow: vec!["*".to_string()],
+                    ..Default::default()
+                },
+            ),
+            (
+                "a named allow",
+                SpawnAgentReq {
+                    allow: vec!["shell".to_string()],
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let err = spawn_agent(
+                State(state.clone()),
+                Json(SpawnAgentReq {
+                    blueprint: "probe".to_string(),
+                    task: "t".to_string(),
+                    workdir: Some(root.path().to_string_lossy().to_string()),
+                    ..req
+                }),
+            )
+            .await
+            .expect_err("a waived approval must be refused under --no-remote-yolo");
+            assert_eq!(err.0, StatusCode::FORBIDDEN, "{label}");
+            assert!(
+                err.1.0.error.contains("no-remote-yolo"),
+                "{label}: {}",
+                err.1.0.error
+            );
+        }
+    }
+
+    /// The refusal is `--no-remote-yolo`'s alone. A server that did not ask for
+    /// it still honours both fields, or the flag would be doing something the
+    /// operator never requested.
+    #[test]
+    fn launch_overrides_are_only_refused_under_no_remote_yolo() {
+        let permissive = ServeLimits {
+            allow_local_network: false,
+            workdir_root: None,
+            no_remote_yolo: false,
+        };
         assert!(
-            err.1.0.error.contains("no-remote-yolo"),
-            "{}",
-            err.1.0.error
+            permissive
+                .check_launch_overrides(true, &["*".to_string()])
+                .is_ok()
         );
+
+        let hardened = ServeLimits {
+            no_remote_yolo: true,
+            ..permissive
+        };
+        assert!(hardened.check_launch_overrides(false, &[]).is_ok());
+        for (yolo, allow) in [
+            (true, vec![]),
+            (false, vec!["*".to_string()]),
+            (false, vec!["read_file".to_string()]),
+            (true, vec!["shell".to_string()]),
+        ] {
+            assert!(
+                hardened.check_launch_overrides(yolo, &allow).is_err(),
+                "yolo={yolo} allow={allow:?}"
+            );
+        }
     }
 
     /// `--workdir-root` bounds where an API caller may point an agent. Without

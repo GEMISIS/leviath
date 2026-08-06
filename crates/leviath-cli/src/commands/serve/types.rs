@@ -220,6 +220,34 @@ impl ServeLimits {
             .map_err(|e| format!("callback_url is not allowed: {e}"))
     }
 
+    /// Check the approval waivers a spawn request asked for against
+    /// `--no-remote-yolo`.
+    ///
+    /// `yolo` and `allow` are the same lever. `{"allow": ["*"]}` is read by
+    /// `resolve_policy` through the same wildcard entry `--yolo` writes, so
+    /// guarding only the `yolo` field left the operator's refusal bypassable by
+    /// spelling it the other way. Any `allow` is refused rather than just the
+    /// wildcard: `{"allow": ["shell"]}` is not meaningfully weaker on a server
+    /// somebody deliberately hardened, and "allow is yolo" is a rule an
+    /// operator can hold in their head. A per-agent grant belongs in the
+    /// operator's own config, under `[agent_tool_permissions.<agent>]`.
+    pub(super) fn check_launch_overrides(
+        &self,
+        yolo: bool,
+        allow: &[String],
+    ) -> Result<(), String> {
+        if !self.no_remote_yolo {
+            return Ok(());
+        }
+        match (yolo, allow.is_empty()) {
+            (false, true) => Ok(()),
+            _ => Err(
+                "this server refuses `yolo` and `allow` on spawn requests (--no-remote-yolo)"
+                    .to_string(),
+            ),
+        }
+    }
+
     pub(super) fn check_workdir(&self, workdir: &std::path::Path) -> Result<(), String> {
         let Some(root) = &self.workdir_root else {
             return Ok(());
