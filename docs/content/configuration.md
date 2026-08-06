@@ -293,7 +293,7 @@ allow_blueprint = true          # honour this agent's own [safe_commands]
 
 | Key | Default | Notes |
 |---|---|---|
-| `defaults` | `true` | The shipped read-only verb list. An entry on it must not be able to write a file, run another program, or open a connection under any flag, which is why `find`, `sed`, `awk`, `sort`, `xargs`, `env` and `cargo` are absent |
+| `defaults` | `true` | The shipped read-only verb list. An entry on it must not be able to write a file, run another program, or open a connection under any flag, which is why `find`, `sed`, `awk`, `sort`, `xargs`, `env` and `cargo` are absent - and why `uniq` (writes its second operand), `tree` (`-o`) and `rg` (`--pre` runs a command) were removed. Add any of them back by name if you want them unprompted |
 | `tools` | `[]` | Tools that never prompt whatever their arguments. Built-in names, or MCP names as advertised (`server__tool`) |
 | `shell` | `[]` | A program, optionally with the subcommand that narrows it. `git status`, never `git` or `cargo test --lib`. Also `env:NAME`, below |
 | `allow_blueprint` | `false` | Per-agent only. Honour that agent's own `[safe_commands]` block |

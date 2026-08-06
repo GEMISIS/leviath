@@ -13,6 +13,28 @@ same list.
 
 ## Unreleased
 
+- **Security.** `uniq`, `tree` and `rg` are no longer on the default safe-command
+  list. Each violated the rule that list states about itself - an entry "must
+  not be able to write a file, execute another program, or open a network
+  connection under any flag". `uniq IN OUT` writes its second operand, `tree -o`
+  writes a file, and `rg --pre` runs an arbitrary command over every input file.
+  The escapes are positional or unbounded, so no flag check could catch them.
+  Add any of them back by name in `[safe_commands] shell` if you want them
+  unprompted. `git diff --output=FILE` writes too, but read-only git is common
+  enough to keep: a `git` command carrying `--output` now prompts instead.
+- **Security.** A Rhai script tool's `shell()` did not answer to the `write_file`
+  policy, so an agent shipping its own `.rhai` tools could redirect a write past
+  a `write_file = "deny"`. A `tools` entry in `[safe_commands]` spelled with the
+  `shell:` prefix bypassed the validation the `shell` list gets, and could
+  pre-approve a write. `/dev/tty` was treated as a discarded write when it is the
+  user's actual terminal, and `<>` was treated as a read when it opens the target
+  read-write. The MCP transport followed cross-origin redirects carrying its
+  configured secret headers. `.env` filtering now also refuses
+  `GIT_EXTERNAL_DIFF` and its family (`git status` is safe-listed, so a cloned
+  repository could get unprompted execution from it), `BASH_ENV`, the pagers, and
+  the language-runtime loaders.
+- A `.env` value ending in a backslash silently discarded every variable after it
+  when filtering was in play. Fixed.
 - **Security.** A bundle that failed validation left its files on disk. `lev add`
   extracted straight into the destination and only then checked for symlinks, so
   a refused bundle's symlinks stayed there and `discover_blueprints` would list
