@@ -268,6 +268,40 @@ fn stricter(a: ToolPolicy, b: ToolPolicy) -> ToolPolicy {
     }
 }
 
+/// Clamp a resolved policy by what the call *does*, as opposed to what it is
+/// called.
+///
+/// A shell redirect writes a file. No tool name says so, so a `shell` call
+/// carrying `> file` was answering only to the shell's policy, and
+/// `write_file = "deny"` was bypassable with `echo x > file`. A model that
+/// finds one tool refused should not be able to reach for another spelling of
+/// it, so a call that writes is clamped by the write tool's own policy: denied
+/// where writing is denied, and never quieter than writing would have been.
+///
+/// The clamp is one-directional. It can only make a call stricter, so a user
+/// who allows `write_file` gains nothing they did not already have, and a
+/// `shell = "deny"` still denies regardless of what the line writes.
+///
+/// Takes the already-resolved policies rather than resolving `write_file`
+/// itself, so there is one place that knows the layering and this is not it.
+pub fn clamp_by_effect(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    policy: ToolPolicy,
+    write_policy: ToolPolicy,
+) -> ToolPolicy {
+    if leviath_tools::canonical_tool_name(tool_name) != "shell" {
+        return policy;
+    }
+    let Some(command) = arguments.get("command").and_then(|v| v.as_str()) else {
+        return policy;
+    };
+    if crate::shell_keys::writes_a_file(command) {
+        return stricter(policy, write_policy);
+    }
+    policy
+}
+
 /// Resolve the effective policy for a tool call.
 ///
 /// Scope order is narrowest-first - stage, then agent, then the user's global
@@ -652,6 +686,103 @@ for line in sys.stdin:
 #[cfg(test)]
 mod policy_tests {
     use super::*;
+
+    // ─── clamp_by_effect ──────────────────────────────────────────────────
+
+    fn shell_call(command: &str) -> serde_json::Value {
+        serde_json::json!({ "command": command })
+    }
+
+    /// The property this exists for: a model that finds `write_file` refused
+    /// must not be able to reach for `>` instead.
+    #[test]
+    fn a_denied_write_tool_denies_a_shell_redirect() {
+        assert_eq!(
+            clamp_by_effect(
+                "shell",
+                &shell_call("echo pwn > /root/.bashrc"),
+                ToolPolicy::Allow,
+                ToolPolicy::Deny,
+            ),
+            ToolPolicy::Deny
+        );
+        // Including under the alias, since that is the same tool.
+        assert_eq!(
+            clamp_by_effect(
+                "bash",
+                &shell_call("echo pwn >> ~/.profile"),
+                ToolPolicy::Allow,
+                ToolPolicy::Deny,
+            ),
+            ToolPolicy::Deny
+        );
+    }
+
+    /// The clamp only ever tightens. Allowing `write_file` grants nothing the
+    /// shell's own policy had not already granted.
+    #[test]
+    fn the_clamp_never_loosens_a_shell_call() {
+        assert_eq!(
+            clamp_by_effect(
+                "shell",
+                &shell_call("echo x > out"),
+                ToolPolicy::Ask,
+                ToolPolicy::Allow,
+            ),
+            ToolPolicy::Ask
+        );
+        assert_eq!(
+            clamp_by_effect(
+                "shell",
+                &shell_call("echo x > out"),
+                ToolPolicy::Deny,
+                ToolPolicy::Allow,
+            ),
+            ToolPolicy::Deny
+        );
+    }
+
+    /// A call that writes nothing is not the write tool's business, or every
+    /// `ls` would answer to `write_file`.
+    #[test]
+    fn a_call_that_writes_nothing_is_untouched() {
+        for command in ["ls -la", "cat a 2>/dev/null", "grep x f", "sort < in"] {
+            assert_eq!(
+                clamp_by_effect(
+                    "shell",
+                    &shell_call(command),
+                    ToolPolicy::Allow,
+                    ToolPolicy::Deny,
+                ),
+                ToolPolicy::Allow,
+                "{command:?} writes nothing"
+            );
+        }
+    }
+
+    /// Only the shell can spell a write this way, and a call with no readable
+    /// command has nothing to clamp against.
+    #[test]
+    fn a_non_shell_tool_and_a_malformed_call_are_untouched() {
+        assert_eq!(
+            clamp_by_effect(
+                "read_file",
+                &serde_json::json!({ "path": "a > b" }),
+                ToolPolicy::Allow,
+                ToolPolicy::Deny,
+            ),
+            ToolPolicy::Allow
+        );
+        assert_eq!(
+            clamp_by_effect(
+                "shell",
+                &serde_json::json!({ "not_a_command": 1 }),
+                ToolPolicy::Allow,
+                ToolPolicy::Deny,
+            ),
+            ToolPolicy::Allow
+        );
+    }
 
     #[test]
     fn test_default_policy_read_file() {

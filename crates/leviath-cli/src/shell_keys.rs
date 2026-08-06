@@ -105,6 +105,67 @@ struct Word {
     quoted: bool,
 }
 
+/// One command of a line: the words that decide what runs, and the targets it
+/// writes to through a redirect.
+///
+/// Redirects are held apart from the words because they are not arguments to
+/// the program - `cat a > b` runs `cat` and writes `b`, and the second half is
+/// invisible to any key that names only the first.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct Segment {
+    words: Vec<Word>,
+    writes: Vec<Word>,
+}
+
+/// What a redirect writes to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WriteTarget {
+    /// Nothing that outlives the call: `/dev/null` and the standard streams.
+    Discarded,
+    /// A path this can name, and so can key.
+    Path(String),
+    /// A target no key written today describes: a name that only exists after
+    /// expansion, or one of bash's `/dev/tcp` and `/dev/udp` sockets, where the
+    /// "file" is a connection to a host chosen at runtime.
+    Unreadable,
+}
+
+/// Targets that accept a write and keep nothing, so writing to one grants
+/// nothing and should cost no prompt. `2>/dev/null` opens a large share of the
+/// commands an agent writes.
+const DISCARDING_TARGETS: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"];
+
+/// Path prefixes that are a network connection rather than a file. Bash opens
+/// `> /dev/tcp/host/port` as a socket, which makes a redirect an egress channel
+/// that no program name in the line describes.
+const NETWORK_TARGET_PREFIXES: &[&str] = &["/dev/tcp/", "/dev/udp/"];
+
+/// Classify what a redirect's target word writes to.
+fn classify_write(target: &Word) -> WriteTarget {
+    if !target.literal {
+        return WriteTarget::Unreadable;
+    }
+    let text = target.text.as_str();
+    if DISCARDING_TARGETS.contains(&text) || text.starts_with("/dev/fd/") {
+        return WriteTarget::Discarded;
+    }
+    if NETWORK_TARGET_PREFIXES.iter().any(|p| text.starts_with(p)) {
+        return WriteTarget::Unreadable;
+    }
+    WriteTarget::Path(target.text.clone())
+}
+
+/// The key naming a write.
+///
+/// `is_valid_prefix` rejects anything starting with `>`, so there is no
+/// `[safe_commands] shell` entry that covers a write and none can be added. A
+/// write is approved by a person, per target, or not at all - which is what the
+/// safe list's own admission rule ("must not be able to write a file") has
+/// always said and could not previously enforce.
+fn write_key(path: &str) -> String {
+    format!(">{path}")
+}
+
 /// What one segment of a line contributes.
 ///
 /// Three states rather than an `Option`, because "nothing runs here" and "I
@@ -144,8 +205,8 @@ pub fn command_keys(command: &str) -> Vec<String> {
         return Vec::new();
     };
     let mut keys = BTreeSet::new();
-    for words in &segments {
-        match segment_key(words) {
+    for segment in &segments {
+        match segment_key(&segment.words) {
             SegmentKey::Keys(found) => {
                 keys.extend(found.into_iter().map(|k| format!("{KEY_PREFIX}{k}")));
             }
@@ -154,8 +215,40 @@ pub fn command_keys(command: &str) -> Vec<String> {
             // something this cannot name, and a grant must not cover it.
             SegmentKey::Unreadable => return Vec::new(),
         }
+        for target in &segment.writes {
+            match classify_write(target) {
+                WriteTarget::Discarded => {}
+                WriteTarget::Path(path) => {
+                    keys.insert(format!("{KEY_PREFIX}{}", write_key(&path)));
+                }
+                // Same rule as an unreadable program: a write this cannot name
+                // must not be covered by a grant that names something else.
+                WriteTarget::Unreadable => return Vec::new(),
+            }
+        }
     }
     keys.into_iter().collect()
+}
+
+/// Whether `command` writes a file through a shell redirect.
+///
+/// A redirect is a file write that no tool name describes, so the caller
+/// clamps the call by the write tool's policy rather than the shell's alone.
+/// Without that, `write_file = "deny"` was bypassable with `echo x > file`.
+///
+/// Conservative on an unparseable line: a line this cannot read is treated as
+/// writing, because the alternative is deciding it does not on evidence that
+/// was already too weak to name its programs.
+pub fn writes_a_file(command: &str) -> bool {
+    let Some(segments) = tokenize(command) else {
+        return true;
+    };
+    segments.iter().any(|segment| {
+        segment
+            .writes
+            .iter()
+            .any(|t| classify_write(t) != WriteTarget::Discarded)
+    })
 }
 
 /// The program half of a key, dropping any folded subcommand or argument.
@@ -180,10 +273,16 @@ pub fn program_of(key: &str) -> &str {
 ///
 /// Defined as "derives back to exactly itself", so there is one grammar rather
 /// than two: anything the matcher would read as more than one command, as a
-/// redirect, as a keyword, or as an expansion is rejected here without a second
+/// keyword, or as an expansion is rejected here without a second
 /// implementation that could drift from the first.
+///
+/// A write key is refused on top of that rule rather than by it, because a bare
+/// `>out` *does* derive back to itself and would otherwise become a
+/// pre-approvable write. A write is approved by a person, per target, or not at
+/// all - which is what the safe list's own admission rule has always said and
+/// could not previously enforce.
 pub fn is_valid_prefix(entry: &str) -> bool {
-    command_keys(entry) == [format!("{KEY_PREFIX}{entry}")]
+    !entry.starts_with('>') && command_keys(entry) == [format!("{KEY_PREFIX}{entry}")]
 }
 
 /// Split a line into its commands, or `None` when it cannot be read as a list
@@ -194,7 +293,7 @@ pub fn is_valid_prefix(entry: &str) -> bool {
 /// unterminated quote, an unterminated `$(`, a backtick (same idea as `$(`, but
 /// nesting is ambiguous), and a heredoc (whose body has its own delimiter
 /// grammar).
-fn tokenize(command: &str) -> Option<Vec<Vec<Word>>> {
+fn tokenize(command: &str) -> Option<Vec<Segment>> {
     let mut lex = Lexer::default();
     let mut chars = command.chars().peekable();
     while let Some(c) = chars.next() {
@@ -257,17 +356,28 @@ fn tokenize(command: &str) -> Option<Vec<Vec<Word>>> {
                 if chars.peek() == Some(&c) {
                     chars.next();
                 }
-                // `>&1` duplicates a descriptor; that `&` belongs to the
-                // target, not to a separator.
-                if chars.peek() == Some(&'&') {
+                // `>|` forces the truncation `noclobber` would refuse. Consuming
+                // the bar here is what stops it reading as a pipe, which made
+                // the target of `ls >| out` parse as a program named `out`.
+                if c == '>' && chars.peek() == Some(&'|') {
                     chars.next();
                 }
-                lex.swallow_next = true;
+                // `>&1` duplicates a descriptor; that `&` belongs to the
+                // target, not to a separator. A descriptor is not a file, so
+                // nothing is written that this has to name.
+                let dup = chars.peek() == Some(&'&');
+                if dup {
+                    chars.next();
+                }
+                lex.swallow = Some(match (c, dup) {
+                    ('>', false) => Swallow::Write,
+                    _ => Swallow::Other,
+                });
             }
             '&' if chars.peek() == Some(&'>') => {
                 chars.next();
                 lex.end_word();
-                lex.swallow_next = true;
+                lex.swallow = Some(Swallow::Write);
             }
             ';' | '&' | '|' | '\n' | '(' | ')' => {
                 // A doubled `&&` or `||` is one separator, and a subshell paren
@@ -295,14 +405,27 @@ fn tokenize(command: &str) -> Option<Vec<Vec<Word>>> {
 /// every call.
 #[derive(Default)]
 struct Lexer {
-    segments: Vec<Vec<Word>>,
+    segments: Vec<Segment>,
     current: Vec<Word>,
+    /// Write targets seen in the segment being accumulated.
+    writes: Vec<Word>,
     word: String,
     in_word: bool,
     literal: bool,
     quoted: bool,
     /// Set by a redirect operator: the next word names a file, not a program.
-    swallow_next: bool,
+    swallow: Option<Swallow>,
+}
+
+/// What the word a redirect claimed is going to be used for.
+///
+/// Only a write needs naming. A read redirect grants nothing a program could
+/// not already do - `cat` reads any file the user can - and a descriptor
+/// duplication names no file at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Swallow {
+    Write,
+    Other,
 }
 
 impl Lexer {
@@ -315,18 +438,19 @@ impl Lexer {
         }
     }
 
-    /// End the word being accumulated, appending it unless a redirect claimed
-    /// it as a filename.
+    /// End the word being accumulated, appending it to the segment's words -
+    /// or, when a redirect claimed it, to its write targets.
     fn end_word(&mut self) {
         if self.in_word {
-            if self.swallow_next {
-                self.swallow_next = false;
-            } else {
-                self.current.push(Word {
-                    text: std::mem::take(&mut self.word),
-                    literal: self.literal,
-                    quoted: self.quoted,
-                });
+            let word = Word {
+                text: std::mem::take(&mut self.word),
+                literal: self.literal,
+                quoted: self.quoted,
+            };
+            match self.swallow.take() {
+                Some(Swallow::Write) => self.writes.push(word),
+                Some(Swallow::Other) => {}
+                None => self.current.push(word),
             }
         }
         self.discard_word();
@@ -342,8 +466,14 @@ impl Lexer {
     }
 
     fn end_segment(&mut self) {
-        let words = std::mem::take(&mut self.current);
-        self.segments.push(words);
+        // A redirect operator with no word after it (`ls >`) is a malformed
+        // line; dropping the pending claim here keeps it from swallowing the
+        // first word of the next segment.
+        self.swallow = None;
+        self.segments.push(Segment {
+            words: std::mem::take(&mut self.current),
+            writes: std::mem::take(&mut self.writes),
+        });
     }
 
     /// Consume whatever follows a `$`.

@@ -13,6 +13,22 @@ same list.
 
 ## Unreleased
 
+- **Security.** A shell redirect was invisible to the approval machinery, so
+  `write_file = "deny"` was bypassable with `echo x > file`. The redirect target
+  never reached a grant key, which meant `cat notes.md > ~/.ssh/authorized_keys`
+  keyed a bare `cat` - and `cat` ships as safe, so the default configuration
+  wrote arbitrary files with no prompt, in direct contradiction of the rule the
+  safe list states about itself. A shell call that writes is now held to the
+  `write_file` policy as well as the shell's own, and each target is its own key
+  (`>/tmp/out`), so an approval names what is being written and covers only
+  that. A write cannot be pre-approved in a config file at all: `[safe_commands]
+  shell` rejects any entry beginning with `>`.
+  Writes that keep nothing still cost nothing - `/dev/null` and the standard
+  streams, descriptor duplications like `2>&1`, and read redirects - so
+  `cargo build > /dev/null 2>&1` is as quiet as it was. Two shapes can never be
+  granted: a target that only exists after expansion (`> $OUT`), and bash's
+  `> /dev/tcp/host/port`, which is a socket rather than a file and so an egress
+  channel no program name in the line describes.
 - **Security.** A shell command could reach the safe list under a name that did
   not describe what it ran. `PATH=/tmp/evil ls` keyed a bare `ls`, and `ls` ships
   as safe, so it ran a binary of the caller's choosing with no prompt; the same
