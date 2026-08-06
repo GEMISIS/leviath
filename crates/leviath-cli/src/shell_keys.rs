@@ -170,6 +170,21 @@ enum WriteTarget {
 /// captured pipes, so those really do go nowhere a person sees unprompted.
 const DISCARDING_TARGETS: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr"];
 
+/// Windows' null device, matched case-insensitively and on every platform.
+///
+/// `> NUL` is what `> /dev/null` is written as on Windows, and charging a
+/// prompt for one spelling while the other is free would make the same command
+/// behave differently depending on who ran it. CI caught exactly that: a test
+/// whose Windows arm silences output with `> NUL` started being refused.
+///
+/// Unconditional rather than `#[cfg(windows)]`, which would need a platform
+/// twin to satisfy the coverage gate and would buy almost nothing. On Unix
+/// `> NUL` really does create a file - but one named exactly `NUL`, in the
+/// workdir, with no path control at all. That is not a capability worth a
+/// prompt, and it is a different thing entirely from the arbitrary-path writes
+/// this module exists to catch.
+const NULL_DEVICE_NAMES: &[&str] = &["NUL"];
+
 /// Path prefixes that are a network connection rather than a file. Bash opens
 /// `> /dev/tcp/host/port` as a socket, which makes a redirect an egress channel
 /// that no program name in the line describes.
@@ -181,7 +196,12 @@ fn classify_write(target: &Word) -> WriteTarget {
         return WriteTarget::Unreadable;
     }
     let text = target.text.as_str();
-    if DISCARDING_TARGETS.contains(&text) || text.starts_with("/dev/fd/") {
+    if DISCARDING_TARGETS.contains(&text)
+        || text.starts_with("/dev/fd/")
+        || NULL_DEVICE_NAMES
+            .iter()
+            .any(|n| text.eq_ignore_ascii_case(n))
+    {
         return WriteTarget::Discarded;
     }
     if NETWORK_TARGET_PREFIXES.iter().any(|p| text.starts_with(p)) {

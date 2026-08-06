@@ -241,6 +241,13 @@ fn a_discarded_write_adds_no_key() {
     assert_eq!(keys("echo hi > /dev/stderr"), ["shell:echo"]);
     // A descriptor duplication names no file at all.
     assert_eq!(keys("ls 2>&1"), ["shell:ls"]);
+    // `NUL` is what `/dev/null` is called on Windows, in whatever case the
+    // caller wrote it. Without this the same command prompted or not depending
+    // on which platform ran it - which is how CI found it, through a test whose
+    // Windows arm silences output with `> NUL`.
+    assert_eq!(keys("ping -n 30 127.0.0.1 > NUL"), ["shell:ping"]);
+    assert_eq!(keys("ping -n 1 127.0.0.1 > nul"), ["shell:ping"]);
+    assert!(!writes_a_file("ping -n 30 127.0.0.1 > NUL"));
 }
 
 /// `/dev/tty` is the user's actual terminal, not a sink. Writing to it is how
