@@ -302,6 +302,39 @@ pub fn clamp_by_effect(
     policy
 }
 
+/// Tools a blueprint may declare *more* permissively than the built-in default
+/// without the user opting in.
+///
+/// A blueprint used to be able to set any tool the user had not configured, and
+/// saying nothing is the normal state: nobody writes `shell = "ask"` into their
+/// config, because that is already the default. So an `agent.leviath` from `lev
+/// add` could give itself `shell = "allow"` on a stock machine, which is the
+/// opposite of what SECURITY.md promised.
+///
+/// The justification for allowing *any* loosening is real but much narrower than
+/// the behaviour it justified: a shipped agent should be able to pre-approve the
+/// tools that are its whole point, so the researcher does not prompt for every
+/// page it reads. Checking the ten bundled agents, the only policies any of them
+/// loosens relative to the default are these two - the rest of their
+/// `[tool_permissions]` lines are `ask`, or `allow` on tools that already
+/// default to `allow`.
+///
+/// An allowlist rather than a denylist of dangerous tools, for the reason
+/// `secrets.rs` gives about the same choice: a denylist has to be complete to be
+/// correct, and loses the moment a new tool ships.
+///
+/// Anything else needs the user to say so: `[security]
+/// allow_blueprint_permissions` for every agent, or naming the tool under
+/// `[agent_tool_permissions.<name>]`, which makes it a ceiling that agent's
+/// blueprint may go up to. Same shape `[read_paths]` and `[safe_commands]`
+/// already use, where declaring is not granting.
+const BLUEPRINT_LOOSENABLE: &[&str] = &["web_search", "web_fetch"];
+
+/// Whether [`BLUEPRINT_LOOSENABLE`] names this tool, under any of its spellings.
+fn blueprint_loosenable(tool_name: &str) -> bool {
+    leviath_tools::tool_name_spellings(tool_name).any(|n| BLUEPRINT_LOOSENABLE.contains(&n))
+}
+
 /// Resolve the effective policy for a tool call.
 ///
 /// Scope order is narrowest-first - stage, then agent, then the user's global
@@ -312,11 +345,10 @@ pub fn clamp_by_effect(
 /// user explicitly wrote in `[tool_permissions]` is a ceiling on how permissive
 /// a manifest can be for that tool.
 ///
-/// Only an *explicitly configured* global entry acts as a ceiling. A tool the
-/// user has said nothing about falls through to [`default_tool_policy`], and a
-/// blueprint is free to set it - otherwise no shipped agent could pre-approve
-/// its own tools (the researcher's `web_fetch = "allow"` would stop working) and
-/// the model would become a wall rather than a floor.
+/// Only an *explicitly configured* global entry acts as a ceiling. For a tool
+/// the user has said nothing about there is no ceiling to clamp against, and
+/// what a blueprint may do then is bounded by `BLUEPRINT_LOOSENABLE` rather
+/// than unbounded - see there for why.
 ///
 /// A user who wants to grant one specific agent more than their global setting
 /// says so in their own config, keyed by agent name - see
@@ -335,6 +367,7 @@ pub fn resolve_policy(
     stage_permissions: &HashMap<String, String>,
     agent_permissions: &HashMap<String, String>,
     global_permissions: &HashMap<String, ToolPolicy>,
+    blueprint_may_loosen: bool,
 ) -> ToolPolicy {
     let ceiling = by_any_spelling(global_permissions, tool_name).copied();
 
@@ -345,7 +378,16 @@ pub fn resolve_policy(
 
     let configured = match (blueprint, ceiling) {
         (Some(b), Some(c)) => stricter(b, c),
-        (Some(b), None) => b,
+        // No ceiling to clamp against, so the built-in default is the floor a
+        // blueprint may not sink below unless the tool is one it is allowed to
+        // pre-approve, or the user opted this blueprint in.
+        (Some(b), None) => {
+            let default = default_tool_policy(tool_name, is_builtin);
+            match blueprint_may_loosen || blueprint_loosenable(tool_name) {
+                true => b,
+                false => stricter(b, default),
+            }
+        }
         (None, Some(c)) => c,
         (None, None) => default_tool_policy(tool_name, is_builtin),
     };
@@ -784,6 +826,154 @@ mod policy_tests {
         );
     }
 
+    // ─── what a blueprint may loosen ──────────────────────────────────────
+
+    /// One `agent.leviath` line, for a tool the user has said nothing about.
+    fn blueprint_says(tool: &str, policy: &str, may_loosen: bool) -> ToolPolicy {
+        let mut agent = HashMap::new();
+        agent.insert(tool.to_string(), policy.to_string());
+        resolve_policy(
+            tool,
+            true,
+            &HashMap::new(),
+            &HashMap::new(),
+            &agent,
+            &HashMap::new(),
+            may_loosen,
+        )
+    }
+
+    /// The vulnerability. Saying nothing about `shell` is the normal state -
+    /// nobody writes out a default - so "only an explicitly configured entry is
+    /// a ceiling" meant a downloaded manifest could pre-approve its own shell
+    /// on a stock machine.
+    #[test]
+    fn a_blueprint_cannot_loosen_a_tool_the_user_never_configured() {
+        for tool in ["shell", "write_file", "edit_file"] {
+            assert_eq!(
+                blueprint_says(tool, "allow", false),
+                ToolPolicy::Ask,
+                "{tool} must fall back to its built-in default"
+            );
+        }
+        // A tool whose default is already `Allow` is not being loosened by a
+        // blueprint that says `allow`, so nothing changes for it. The clamp is
+        // a floor, not a rule about what may be written.
+        assert_eq!(
+            blueprint_says("spawn_agent", "allow", false),
+            ToolPolicy::Allow
+        );
+    }
+
+    /// Tightening was never the problem and still works, so a blueprint that
+    /// wants to be more careful than the default can still say so.
+    #[test]
+    fn a_blueprint_may_still_tighten_anything() {
+        assert_eq!(blueprint_says("shell", "deny", false), ToolPolicy::Deny);
+        assert_eq!(blueprint_says("read_file", "ask", false), ToolPolicy::Ask);
+    }
+
+    /// The case the old behaviour existed to serve: an agent whose whole point
+    /// is reading the web should not prompt for every page.
+    #[test]
+    fn a_blueprint_may_preapprove_the_read_only_web_tools() {
+        assert_eq!(
+            blueprint_says("web_fetch", "allow", false),
+            ToolPolicy::Allow
+        );
+        assert_eq!(
+            blueprint_says("web_search", "allow", false),
+            ToolPolicy::Allow
+        );
+    }
+
+    /// The escape hatch, for a blueprint the user does trust.
+    #[test]
+    fn an_opted_in_blueprint_may_loosen_anything() {
+        assert_eq!(blueprint_says("shell", "allow", true), ToolPolicy::Allow);
+    }
+
+    /// A user-configured ceiling still governs, in both directions: a blueprint
+    /// may go up to it and no further.
+    #[test]
+    fn a_configured_ceiling_still_bounds_a_blueprint() {
+        let mut agent = HashMap::new();
+        agent.insert("shell".to_string(), "allow".to_string());
+        let mut global = HashMap::new();
+        global.insert("shell".to_string(), ToolPolicy::Allow);
+        assert_eq!(
+            resolve_policy(
+                "shell",
+                true,
+                &HashMap::new(),
+                &HashMap::new(),
+                &agent,
+                &global,
+                false,
+            ),
+            ToolPolicy::Allow,
+            "naming the tool in the user's own config is the per-agent grant"
+        );
+
+        global.insert("shell".to_string(), ToolPolicy::Deny);
+        assert_eq!(
+            resolve_policy(
+                "shell",
+                true,
+                &HashMap::new(),
+                &HashMap::new(),
+                &agent,
+                &global,
+                true,
+            ),
+            ToolPolicy::Deny,
+            "a configured deny is terminal even for an opted-in blueprint"
+        );
+    }
+
+    /// The regression guard that matters: every shipped agent must resolve
+    /// exactly as it did before. Driven from the bundled manifests rather than
+    /// a hand-copied table, so it stays true if either the agents or the
+    /// allowlist move.
+    #[test]
+    fn the_bundled_agents_resolve_unchanged() {
+        for agent in crate::bundled::BUNDLED_AGENTS {
+            let (_, manifest) = agent
+                .files
+                .iter()
+                .find(|(rel, _)| rel.ends_with("agent.leviath"))
+                .expect("every bundled agent ships a manifest");
+            let bp = leviath_core::manifest::parse_manifest(manifest)
+                .expect("every bundled agent's manifest parses");
+            let perms = bp.agent_tool_permissions();
+            for (tool, declared) in &perms {
+                let clamped = resolve_policy(
+                    tool,
+                    true,
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    &perms,
+                    &HashMap::new(),
+                    false,
+                );
+                let unclamped = resolve_policy(
+                    tool,
+                    true,
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    &perms,
+                    &HashMap::new(),
+                    true,
+                );
+                assert_eq!(
+                    clamped, unclamped,
+                    "{}'s {tool} = {declared:?} changed meaning under the allowlist",
+                    agent.name
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_default_policy_read_file() {
         assert_eq!(default_tool_policy("read_file", true), ToolPolicy::Allow);
@@ -830,6 +1020,7 @@ mod policy_tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            false,
         );
         assert_eq!(policy, ToolPolicy::Allow);
     }
@@ -845,6 +1036,7 @@ mod policy_tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            false,
         );
         assert_eq!(policy, ToolPolicy::Allow);
     }
@@ -863,6 +1055,7 @@ mod policy_tests {
             &stage,
             &HashMap::new(),
             &global,
+            false,
         );
         assert_eq!(policy, ToolPolicy::Deny);
     }
@@ -885,6 +1078,7 @@ mod policy_tests {
             &stage,
             &HashMap::new(),
             &global,
+            false,
         );
         assert_eq!(policy, ToolPolicy::Deny);
     }
@@ -903,6 +1097,7 @@ mod policy_tests {
             &HashMap::new(),
             &agent,
             &HashMap::new(),
+            false,
         );
         assert_eq!(policy, ToolPolicy::Allow);
     }
@@ -924,6 +1119,7 @@ mod policy_tests {
             &HashMap::new(),
             &HashMap::new(),
             &global,
+            false,
         );
         assert_eq!(policy, ToolPolicy::Deny);
     }
@@ -942,6 +1138,7 @@ mod policy_tests {
             &HashMap::new(),
             &HashMap::new(),
             &global,
+            false,
         );
         assert_eq!(policy, ToolPolicy::Deny);
     }
@@ -961,6 +1158,7 @@ mod policy_tests {
             &HashMap::new(),
             &agent,
             &HashMap::new(),
+            false,
         );
         assert_eq!(policy, ToolPolicy::Deny);
     }
@@ -979,6 +1177,7 @@ mod policy_tests {
             &HashMap::new(),
             &HashMap::new(),
             &global,
+            false,
         );
         assert_eq!(policy, ToolPolicy::Allow);
     }
@@ -992,6 +1191,7 @@ mod policy_tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            false,
         );
         assert_eq!(policy, ToolPolicy::Ask);
     }
@@ -1021,6 +1221,7 @@ mod policy_tests {
             &HashMap::new(),
             &agent,
             &global,
+            false,
         );
         assert_eq!(policy, ToolPolicy::Deny);
     }
@@ -1040,6 +1241,7 @@ mod policy_tests {
             &HashMap::new(),
             &agent,
             &global,
+            false,
         );
         assert_eq!(policy, ToolPolicy::Ask);
     }
@@ -1056,6 +1258,7 @@ mod policy_tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            false,
         );
         // Specific tool match checked before wildcard
         assert_eq!(policy, ToolPolicy::Deny);
@@ -1072,6 +1275,7 @@ mod policy_tests {
             &HashMap::new(),
             &HashMap::new(),
             &global,
+            false,
         );
         assert_eq!(policy, ToolPolicy::Deny);
     }
@@ -1087,6 +1291,7 @@ mod policy_tests {
             &stage,
             &HashMap::new(),
             &HashMap::new(),
+            false,
         );
         assert_eq!(policy, ToolPolicy::Deny);
     }
@@ -1102,6 +1307,7 @@ mod policy_tests {
             &stage,
             &HashMap::new(),
             &HashMap::new(),
+            false,
         );
         assert_eq!(policy, ToolPolicy::Ask);
     }
@@ -1117,6 +1323,7 @@ mod policy_tests {
             &stage,
             &HashMap::new(),
             &HashMap::new(),
+            false,
         );
         assert_eq!(policy, ToolPolicy::Ask);
     }
@@ -1224,6 +1431,7 @@ mod policy_tests {
             &stage,
             &HashMap::new(),
             &HashMap::new(),
+            false,
         );
         assert_eq!(policy, ToolPolicy::Allow);
     }
@@ -1243,6 +1451,7 @@ mod policy_tests {
             &stage,
             &HashMap::new(),
             &HashMap::new(),
+            false,
         );
         assert_eq!(policy, ToolPolicy::Deny);
     }
@@ -1260,6 +1469,7 @@ mod policy_tests {
             &stage,
             &agent,
             &HashMap::new(),
+            false,
         );
         assert_eq!(policy, ToolPolicy::Deny);
     }
@@ -1277,6 +1487,7 @@ mod policy_tests {
             &HashMap::new(),
             &agent,
             &global,
+            false,
         );
         assert_eq!(policy, ToolPolicy::Deny);
     }
@@ -1293,6 +1504,7 @@ mod policy_tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            false,
         );
         assert_eq!(policy, ToolPolicy::Allow);
     }
@@ -1306,6 +1518,7 @@ mod policy_tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            false,
         );
         assert_eq!(policy, ToolPolicy::Ask);
     }
@@ -1319,6 +1532,7 @@ mod policy_tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            false,
         );
         assert_eq!(policy, ToolPolicy::Allow);
     }
@@ -1332,6 +1546,7 @@ mod policy_tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            false,
         );
         assert_eq!(policy, ToolPolicy::Allow);
     }
@@ -1345,6 +1560,7 @@ mod policy_tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            false,
         );
         assert_eq!(policy, ToolPolicy::Ask);
     }
@@ -1358,6 +1574,7 @@ mod policy_tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            false,
         );
         assert_eq!(policy, ToolPolicy::Ask);
     }
@@ -1436,7 +1653,7 @@ mod policy_tests {
                     global.insert(spelling.to_string(), ToolPolicy::Deny);
                 }
             }
-            resolve_policy(called, true, &launch, &stage, &agent, &global)
+            resolve_policy(called, true, &launch, &stage, &agent, &global, false)
         };
 
         // Written as the alias, called canonically: the shape every real run has.
@@ -1496,6 +1713,7 @@ mod policy_tests {
             &HashMap::new(),
             &agent,
             &HashMap::new(),
+            false,
         );
         assert_eq!(policy, ToolPolicy::Deny);
     }
@@ -1513,6 +1731,7 @@ mod policy_tests {
             &HashMap::new(),
             &agent,
             &HashMap::new(),
+            false,
         );
         assert_eq!(policy, ToolPolicy::Ask);
     }
@@ -1530,6 +1749,7 @@ mod policy_tests {
             &HashMap::new(),
             &HashMap::new(),
             &global,
+            false,
         );
         assert_eq!(policy, ToolPolicy::Allow);
     }
@@ -1602,7 +1822,7 @@ mod policy_tests {
         let mut global = HashMap::new();
         global.insert("bash".to_string(), ToolPolicy::Deny);
 
-        let policy = resolve_policy("bash", true, &launch, &stage, &agent, &global);
+        let policy = resolve_policy("bash", true, &launch, &stage, &agent, &global, false);
         assert_eq!(policy, ToolPolicy::Deny);
     }
 
@@ -1619,7 +1839,7 @@ mod policy_tests {
         let mut global = HashMap::new();
         global.insert("bash".to_string(), ToolPolicy::Ask);
 
-        let policy = resolve_policy("bash", true, &launch, &stage, &agent, &global);
+        let policy = resolve_policy("bash", true, &launch, &stage, &agent, &global, false);
         assert_eq!(policy, ToolPolicy::Allow);
     }
 

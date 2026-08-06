@@ -25,7 +25,7 @@ Tool permissions are a fourth, and they live in [Built-in tools](/docs/tools).
 > [!NOTE]
 > **Before this page:** [Agent blueprints](/docs/agents).
 > **In one line:** everything here is opt-in, and an installed blueprint can tighten these settings
-> but never loosen them.
+> but never loosen them - beyond, for a tool you have not configured, Leviath's own default.
 
 ## Sandboxes
 

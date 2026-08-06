@@ -405,6 +405,24 @@ pub struct SecurityConfig {
     #[serde(default)]
     pub allow_blueprint_safe_commands: bool,
 
+    /// Honour a blueprint's `[tool_permissions]` even where it is *more*
+    /// permissive than the built-in default for a tool you have not configured.
+    ///
+    /// Off by default, for the same reason as the two switches around it:
+    /// declaring is not granting. Saying nothing about `shell` is the normal
+    /// state, so without this a downloaded manifest could give itself
+    /// `shell = "allow"` on a stock machine. With it off, a blueprint may still
+    /// pre-approve the read-only web tools that are some agents' whole point,
+    /// and anything beyond that is clamped to the built-in default.
+    ///
+    /// The per-agent grant needs no switch of its own: naming the tool under
+    /// `[agent_tool_permissions.<name>]` makes it a ceiling for that agent, and
+    /// a blueprint may go up to a ceiling. Prefer that for anything you did not
+    /// author yourself - it says which agent and which tool, where this says
+    /// "every agent, every tool".
+    #[serde(default)]
+    pub allow_blueprint_permissions: bool,
+
     /// Machine-wide read grants for agents that declare `[read_paths]`.
     ///
     /// Entries use the same three forms as a blueprint's `[read_paths] allow`:
@@ -459,6 +477,7 @@ impl Default for SecurityConfig {
             allow_env_vars: Vec::new(),
             allow_blueprint_read_paths: false,
             allow_blueprint_safe_commands: false,
+            allow_blueprint_permissions: false,
             read_paths: Vec::new(),
             credential_store: leviath_core::CredentialStoreKind::File,
         }
@@ -3468,6 +3487,7 @@ enabled = false
                 allow_blueprint_safe_commands: true,
                 read_paths: vec!["~/.leviath/runs".to_string()],
                 credential_store: leviath_core::CredentialStoreKind::Keychain,
+                allow_blueprint_permissions: false,
             },
             agent_read_paths: HashMap::from([(
                 "cto".to_string(),

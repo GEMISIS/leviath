@@ -13,6 +13,18 @@ same list.
 
 ## Unreleased
 
+- **Security.** An installed blueprint could pre-approve a tool you had never
+  configured, which is the normal state for most tools - nobody writes
+  `shell = "ask"` into their config, since that is already the default. So a
+  downloaded `agent.leviath` could give itself `shell = "allow"` on a stock
+  machine, contradicting the guarantee SECURITY.md and four other pages made.
+  A blueprint may now raise a tool no higher than the built-in default unless
+  you configured that tool yourself, with one named exception: `web_search` and
+  `web_fetch`, which read-only research agents pre-approve and which can neither
+  write nor execute. That exception is exactly what the ten bundled agents need,
+  so none of them changes behaviour. To go further, name the tool under
+  `[agent_tool_permissions.<agent>]`, or set the new
+  `[security] allow_blueprint_permissions` for every agent.
 - **Security.** A blueprint's `seed = { command = "..." }` runs a host command at
   spawn, before the first inference and therefore before any approval prompt
   exists. It now has to be covered by `[safe_commands]` as well as

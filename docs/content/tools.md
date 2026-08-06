@@ -242,8 +242,12 @@ default above.**
 Two rules constrain that:
 
 - A blueprint may only **tighten** what your config set. A downloaded agent cannot grant itself
-  `shell = "allow"` over your `ask`. To trust one agent with more, name it in
-  `[agent_tool_permissions.<agent>]` in your own [config](/docs/configuration#tool-permissions).
+  `shell = "allow"` over your `ask`. For a tool you have not configured there is nothing of yours
+  to clamp against, so a blueprint may raise it no higher than the built-in default - except
+  `web_search` and `web_fetch`, which research agents pre-approve and which can neither write nor
+  execute. To trust one agent with more, name the tool in
+  `[agent_tool_permissions.<agent>]` in your own [config](/docs/configuration#tool-permissions),
+  or set `[security] allow_blueprint_permissions` for every agent.
 - A launch flag (`--allow`, `--yolo`) can turn an `ask` into an `allow`, but it can **never** lift
   a `deny`.
 

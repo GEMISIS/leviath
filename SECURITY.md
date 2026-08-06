@@ -32,11 +32,17 @@ a vulnerability:
 
 - **A malicious or compromised agent package.** An `agent.leviath` you installed
   can only *tighten* what your `~/.leviath/config.toml` allows, never loosen it.
-  It cannot grant itself tools you denied, disable taint tracking, or weaken a
-  sandbox you configured - not by turning it off, and not by widening it: it
-  cannot add a bind-mount you did not grant, re-enable a network you isolated,
-  or replace the engine binary. `lev add` prints what a package asks for before
-  you run it.
+  For a tool you have not configured there is no setting of yours to clamp
+  against, so a package may raise it no higher than Leviath's own default - with
+  one named exception, `web_search` and `web_fetch`, which read-only research
+  agents pre-approve and which cannot write or execute. Anything beyond that
+  needs `[security] allow_blueprint_permissions`, or the tool named under
+  `[agent_tool_permissions.<agent>]`, which is you saying "I trust this one".
+  A package cannot grant itself tools you denied, run an unapproved command at
+  spawn through a region seed, disable taint tracking, or weaken a sandbox you
+  configured - not by turning it off, and not by widening it: it cannot add a
+  bind-mount you did not grant, re-enable a network you isolated, or replace the
+  engine binary. `lev add` prints what a package asks for before you run it.
 - **Prompt injection reaching an agent's tools.** A model told by a fetched web
   page to exfiltrate your keys should fail. Script tools cannot read
   credential-shaped environment variables without an explicit allowlist entry,
