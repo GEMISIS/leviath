@@ -10,6 +10,7 @@ members = [
     "crates/leviath-scripting",
     "crates/leviath-package",
     "crates/leviath-cli",
+    "crates/leviath-alloc",
     "crates/leviath-tools",
     "crates/leviath-sys",
     "crates/leviath-telemetry",
@@ -35,7 +36,9 @@ categories = ["development-tools"]
 # Lints applied to every workspace member that opts in with `[lints] workspace = true`.
 # `unsafe_code = "forbid"` is a hard compile error that cannot be re-enabled by a
 # local `#[allow(unsafe_code)]` -- the OS-level unsafe leviath needs lives in audited
-# dependencies (nix, temp-env), so none is written in our own crates.
+# dependencies (nix, temp-env) plus ONE audited in-repo exception: leviath-alloc,
+# a single-call crate that deliberately does not opt into these lints (its lib.rs
+# carries the audit note). Nothing else writes unsafe.
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

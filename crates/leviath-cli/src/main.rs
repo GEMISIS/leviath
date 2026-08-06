@@ -51,6 +51,14 @@ struct Cli {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Purge freed memory at free time (leviath-alloc has the full why): an
+    // idle daemon otherwise parks its burst memory as unflagged freed pages
+    // the OS keeps charging to it. Applied in-binary so every lev process
+    // behaves the same however it was started; a user-exported
+    // MIMALLOC_PURGE_DELAY always wins.
+    #[cfg(feature = "mimalloc-allocator")]
+    leviath_alloc::use_purge_at_free_unless_overridden();
+
     // An explicit runtime instead of `#[tokio::main]` for one number: script
     // providers execute every in-flight inference call on a blocking-pool
     // thread, and tokio's default cap of 512 silently gated
