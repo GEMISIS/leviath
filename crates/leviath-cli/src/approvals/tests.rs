@@ -151,3 +151,32 @@ fn a_safe_entry_covers_the_program_it_names() {
         "an ungrantable line is never safe"
     );
 }
+
+/// `tools` and `shell` land in one map, so a `tools` entry spelled with the
+/// shell prefix would enter the shell key space without passing
+/// `is_valid_prefix` - the only thing standing between a config file and a
+/// pre-approved write, `sh -c <anything>`, or a `PATH` override. Reachable
+/// from a *blueprint's* own block once the user opts in, where "declaring is
+/// not granting" is supposed to mean the grant is bounded.
+#[test]
+fn a_tools_entry_cannot_smuggle_a_shell_key() {
+    let config = SafeCommands {
+        tools: vec![
+            "shell:>/root/.bashrc".to_string(),
+            "shell:sh".to_string(),
+            "shell:env:PATH".to_string(),
+            // An ordinary tool name is untouched.
+            "read_files".to_string(),
+        ],
+        ..Default::default()
+    };
+    let keys = resolved(&config, None, None, false);
+
+    for smuggled in ["shell:>/root/.bashrc", "shell:sh", "shell:env:PATH"] {
+        assert!(
+            !keys.contains_key(smuggled),
+            "{smuggled:?} must not reach the shell key space through `tools`"
+        );
+    }
+    assert!(keys.contains_key("read_files"));
+}

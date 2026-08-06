@@ -36,13 +36,30 @@ use crate::shell_keys::{KEY_PREFIX, is_valid_prefix};
 /// binaries. Any of them can be added by name in `[safe_commands] shell`, which
 /// is the point of the setting.
 ///
+/// Three entries were removed after an audit found the list did not obey its
+/// own rule, which is worth recording because they read as harmless:
+/// - `uniq` takes an **output operand** (`uniq IN OUT`), so `uniq payload
+///   ~/.bashrc` wrote an arbitrary file with no prompt. Positional, so no flag
+///   check could have caught it.
+/// - `tree` takes `-o FILE`.
+/// - `rg` takes `--pre COMMAND`, which runs that command over every input file,
+///   and `-z`, which shells out to decompressors.
+///
+/// The `git` entries stay, because read-only git is most of what a coding agent
+/// does - but `--output` is a diff-machinery option accepted by `diff`, `log`
+/// and `show`, so a git segment carrying it is refused by
+/// [`crate::shell_keys`]. That is a patch on one known escape, not a claim that
+/// git has no others: `[sandbox]` is the durable answer, and this list is
+/// pre-decided convenience inside it.
+///
 /// Two consequences worth stating rather than burying. `cat`, `head` and `grep`
 /// being safe lets an agent read any file the user can, without the `read_paths`
 /// confinement `read_file` has - not a new capability, since approving the first
 /// `cat` for the run already granted it, but it is now pre-decided; set
 /// `defaults = false` to opt out. And the read-only `git` subcommands honour a
-/// repository's `core.pager` and `diff.external`, which is narrow because a
-/// pager does not run without a tty and the shell tool captures output.
+/// repository's `core.pager` and `diff.external`. A pager does not run without
+/// a tty, but `diff.external` does - reachable only via `git -c`, which keys as
+/// a bare `git` and so is not covered by any entry here.
 pub const DEFAULT_SAFE_SHELL: &[&str] = &[
     // Reading and listing.
     "ls",
@@ -52,18 +69,15 @@ pub const DEFAULT_SAFE_SHELL: &[&str] = &[
     "wc",
     "cut",
     "tr",
-    "uniq",
     "grep",
     "egrep",
     "fgrep",
-    "rg",
     "diff",
     "cmp",
     "file",
     "stat",
     "du",
     "df",
-    "tree",
     "jq",
     "column",
     "od",
@@ -221,6 +235,19 @@ fn add(
     source: SafeSource,
 ) {
     for tool in tools {
+        // `tools` and `shell` land in one map, so a `tools` entry spelled with
+        // the shell prefix would enter the shell key space without going
+        // through `is_valid_prefix` - which is the only thing standing between
+        // a config file and a pre-approved `shell:>/root/.bashrc`,
+        // `shell:sh`, or `shell:env:PATH`. A tool name never needs that
+        // prefix, so refusing it costs nothing and closes the back door.
+        if tool.starts_with(KEY_PREFIX) {
+            tracing::warn!(
+                "ignoring safe_commands tools entry {tool:?}: shell commands belong in the \
+                 `shell` list, where they are checked"
+            );
+            continue;
+        }
         keys.insert(tool.clone(), source);
     }
     for entry in shell {

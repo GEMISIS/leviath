@@ -243,6 +243,29 @@ fn a_discarded_write_adds_no_key() {
     assert_eq!(keys("ls 2>&1"), ["shell:ls"]);
 }
 
+/// `/dev/tty` is the user's actual terminal, not a sink. Writing to it is how
+/// OSC-52 clipboard writes and the rest of the escape-sequence family reach a
+/// person, so it is a write like any other - and `echo` is safe-listed, so
+/// treating it as discarded meant arbitrary bytes to the terminal, unprompted.
+#[test]
+fn the_controlling_terminal_is_a_write_not_a_sink() {
+    assert_eq!(
+        keys(r#"echo hi > /dev/tty"#),
+        ["shell:>/dev/tty", "shell:echo"]
+    );
+    assert!(!runs_unprompted_by_default("echo hi > /dev/tty"));
+    assert!(writes_a_file("echo hi > /dev/tty"));
+}
+
+/// `<>` opens the target read-write, so it is a write however it reads.
+#[test]
+fn a_read_write_redirect_is_a_write() {
+    assert_eq!(keys("cat <> /tmp/rw"), ["shell:>/tmp/rw", "shell:cat"]);
+    assert!(writes_a_file("cat <> /tmp/rw"));
+    // A plain read still grants nothing: `cat` could already read it.
+    assert!(!writes_a_file("sort < /tmp/in"));
+}
+
 /// A write this cannot name is refused outright, the same as a program it
 /// cannot name. `> $OUT` is a different file every run, and bash's `/dev/tcp`
 /// is not a file at all - it is a socket to a host chosen at runtime, which is
@@ -644,6 +667,49 @@ fn writes_a_file_agrees_with_the_write_keys() {
     // A line this cannot read is treated as writing: the evidence was already
     // too weak to name its programs, so it is too weak to rule a write out.
     assert!(writes_a_file("echo `cat x`"));
+}
+
+/// The redirect fix closed one *spelling* of a write. These are the others:
+/// programs that were on the default safe list and take an output operand or
+/// an output flag, so they wrote arbitrary files with no redirect and no
+/// prompt. `uniq payload ~/.bashrc` is the sharpest - a positional operand no
+/// flag check could ever have caught.
+///
+/// Verified against the real tools while writing this: `uniq IN OUT` and
+/// `git diff --output=F` both wrote the file.
+#[test]
+fn a_safe_program_cannot_write_through_an_operand_or_a_flag() {
+    for command in [
+        // Removed from the default list: the escape is positional or unbounded.
+        "uniq /tmp/payload /root/.bashrc",
+        "tree -o /root/.bashrc",
+        "rg --pre /tmp/evil x .",
+        // Kept on the list, but the escaping flag makes the segment ungrantable.
+        "git diff --output=/root/.bashrc",
+        "git log --output /root/.bashrc",
+        "git show --output=/root/.bashrc",
+    ] {
+        assert!(
+            !runs_unprompted_by_default(command),
+            "{command:?} must not run without a prompt"
+        );
+    }
+    // And ordinary read-only git is untouched, which is the whole reason those
+    // entries were kept rather than removed.
+    assert!(runs_unprompted_by_default("git diff HEAD~1"));
+    assert!(runs_unprompted_by_default("git status"));
+    assert!(runs_unprompted_by_default("git log --oneline -5"));
+}
+
+/// `git -c diff.external=…` runs an arbitrary program, and is safe only
+/// because it keys as a bare `git`, which no entry covers. Pinned so a future
+/// `git` entry cannot quietly make it reachable.
+#[test]
+fn a_bare_git_is_not_covered_by_any_subcommand_entry() {
+    assert_eq!(keys("git -c diff.external=/tmp/evil diff"), ["shell:git"]);
+    assert!(!runs_unprompted_by_default(
+        "git -c diff.external=/tmp/evil diff"
+    ));
 }
 
 /// The property behind the three tests above, stated once so the next person

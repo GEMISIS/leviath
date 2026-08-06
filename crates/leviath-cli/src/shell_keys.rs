@@ -72,6 +72,36 @@ const ENV_BINDING: &[&str] = &["export", "unset", "local", "readonly", "declare"
 /// segment describes what will actually execute.
 const CODE_INSTALLING: &[&str] = &["function", "trap", "alias", "unalias"];
 
+/// Flags that turn an otherwise read-only program into one that writes a file
+/// or runs another program, keyed by the program that accepts them.
+///
+/// This is a denylist, and a denylist has to be complete to be correct - so it
+/// is used for exactly one thing: keeping an entry on the default safe list
+/// that would otherwise have to be removed. `git`'s read-only subcommands are
+/// most of what a coding agent does, but `--output=<file>` is a diff-machinery
+/// option that `diff`, `log` and `show` all accept, and `git diff` is an exact
+/// safe entry. Refusing the segment is cheaper than losing read-only git.
+///
+/// A program whose escape *cannot* be spelled as a flag does not belong here
+/// and was removed from the safe list instead - see [`crate::approvals`], where
+/// `uniq`'s output operand is the worked example. When in doubt, remove the
+/// entry rather than extending this table: the entry is convenience, the rule
+/// is the guarantee.
+const ESCAPE_FLAGS: &[(&str, &[&str])] = &[("git", &["--output"])];
+
+/// Whether this segment hands a safe-listed program a flag that lets it escape.
+///
+/// Prefix-matched, so `--output=x` and a separated `--output x` both hit.
+fn carries_escape_flag(program: &str, words: &[Word]) -> bool {
+    ESCAPE_FLAGS.iter().any(|(name, flags)| {
+        *name == program
+            && words
+                .iter()
+                .skip(1)
+                .any(|w| flags.iter().any(|f| w.text.starts_with(f)))
+    })
+}
+
 /// Programs that run a command assembled at runtime, so nothing in the line
 /// names what will actually execute. A grant must never cover one of these.
 ///
@@ -133,7 +163,12 @@ enum WriteTarget {
 /// Targets that accept a write and keep nothing, so writing to one grants
 /// nothing and should cost no prompt. `2>/dev/null` opens a large share of the
 /// commands an agent writes.
-const DISCARDING_TARGETS: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"];
+/// `/dev/tty` is deliberately **not** here. It is the user's controlling
+/// terminal, not a sink: writing to it puts bytes on a real screen, which is
+/// how OSC-52 clipboard writes and the rest of the escape-sequence family
+/// reach a person. `/dev/stdout` and `/dev/stderr` are the shell tool's own
+/// captured pipes, so those really do go nowhere a person sees unprompted.
+const DISCARDING_TARGETS: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr"];
 
 /// Path prefixes that are a network connection rather than a file. Bash opens
 /// `> /dev/tcp/host/port` as a socket, which makes a redirect an egress channel
@@ -369,8 +404,16 @@ fn tokenize(command: &str) -> Option<Vec<Segment>> {
                 if dup {
                     chars.next();
                 }
-                lex.swallow = Some(match (c, dup) {
-                    ('>', false) => Swallow::Write,
+                // `<>` opens the target O_RDWR, so it is a write however it
+                // reads. Checked before the `<` arm, which is otherwise a read
+                // and grants nothing a safe program could not already do.
+                let read_write = c == '<' && chars.peek() == Some(&'>');
+                if read_write {
+                    chars.next();
+                }
+                lex.swallow = Some(match (c, dup, read_write) {
+                    (_, true, _) => Swallow::Other,
+                    ('>', _, _) | (_, _, true) => Swallow::Write,
                     _ => Swallow::Other,
                 });
             }
@@ -569,6 +612,9 @@ fn segment_key(words: &[Word]) -> SegmentKey {
     // same is true of a program whose whole job is running a command assembled
     // somewhere this cannot see.
     if !program.literal || UNREADABLE_PROGRAMS.contains(&program.text.as_str()) {
+        return SegmentKey::Unreadable;
+    }
+    if carries_escape_flag(&program.text, rest) {
         return SegmentKey::Unreadable;
     }
     match rest.get(1) {

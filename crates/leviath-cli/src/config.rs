@@ -1378,32 +1378,57 @@ fn create_config_dir(dir: &std::path::Path) -> anyhow::Result<()> {
 ///
 /// A missing or unreadable `.env` is not an error - most working directories do
 /// not have one.
+/// Re-quote an already-parsed value so dotenvy reads it back unchanged.
+///
+/// Double quotes, not single. Single quotes look right - dotenvy's *value*
+/// parser treats everything inside them literally - but its *line reader* is a
+/// separate state machine that honours `\` escapes inside single quotes. The
+/// two disagree, so a value ending in a backslash ate its own closing quote,
+/// swallowed the next line, and failed the whole document. Since the load
+/// result is discarded, every variable after it vanished with no warning.
+///
+/// Inside double quotes both layers agree on the same escape set, so escaping
+/// `\`, `"`, `$` and a newline round-trips exactly. Escaping `$` is also what
+/// stops a second substitution pass: these values were already `$VAR`-expanded
+/// by the parse that produced them.
+fn requote(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '$' => out.push_str("\\$"),
+            '\n' => out.push_str("\\n"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
 fn load_dotenv_filtered(path: &str) {
     let Ok(entries) = dotenvy::from_filename_iter(path) else {
         return;
     };
+    // A malformed line is skipped rather than ending the read, so one bad entry
+    // costs its own variable and not every variable after it.
     let (allowed, skipped): (Vec<_>, Vec<_>) = entries
         .flatten()
         .partition(|(key, _)| leviath_core::dotenv_var_allowed(key));
 
-    // The overwhelmingly common case is a file with nothing to filter, and it
-    // takes exactly the path it always did rather than a re-serialized
-    // approximation of itself.
-    if skipped.is_empty() {
-        let _ = dotenvy::from_filename(path);
-        return;
-    }
-
     // Hand the survivors back to dotenvy rather than calling `set_var` here:
     // the workspace forbids `unsafe`, and `std::env::set_var` is unsafe in
-    // edition 2024. Single quotes are literal to dotenvy's parser, so the only
-    // character needing care is the quote itself - closed, escaped through a
-    // double-quoted run, and reopened, which is the same trick a shell uses.
-    // Values were already `$VAR`-substituted by the parse above, so quoting
-    // them literally is also what stops a second substitution pass.
+    // edition 2024.
+    //
+    // One path, not a fast path plus a filtered one. Re-reading the file when
+    // nothing was filtered looked cheap, but it re-parsed content that could
+    // have changed since the decision was made and gave the two paths
+    // different error semantics for a malformed line. Always re-serializing
+    // means what gets set is exactly what was inspected.
     let doc: String = allowed
         .iter()
-        .map(|(key, value)| format!("{key}='{}'\n", value.replace('\'', r#"'"'"'"#)))
+        .map(|(key, value)| format!("{key}={}\n", requote(value)))
         .collect();
     let _ = dotenvy::from_read(doc.as_bytes());
 
@@ -1737,6 +1762,70 @@ mod dotenv_tests {
     fn a_missing_dot_env_is_not_an_error() {
         let dir = make_fake_config_dir("dotenv-missing");
         load_dotenv_filtered(&dir.join("absent.env").to_string_lossy());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The escape set has to match dotenvy's double-quoted parser exactly, so
+    /// each arm is checked here rather than only through a whole-file load.
+    #[test]
+    fn requote_escapes_what_both_dotenvy_layers_read() {
+        assert_eq!(requote("plain"), r#""plain""#);
+        assert_eq!(requote(r"C:\tools\"), r#""C:\\tools\\""#);
+        assert_eq!(requote(r#"say "hi""#), r#""say \"hi\"""#);
+        // `$` escaped so the value is not substituted a second time - it was
+        // already expanded by the parse that produced it.
+        assert_eq!(requote("cost $5 $HOME"), r#""cost \$5 \$HOME""#);
+        assert_eq!(requote("one\ntwo"), r#""one\ntwo""#);
+    }
+
+    /// A backslash is where the re-serialization nearly went wrong: dotenvy's
+    /// *value* parser treats single quotes as fully literal, but its *line*
+    /// reader honours `\` escapes inside them, so a value ending in a
+    /// backslash could eat the closing quote, swallow the following line, and
+    /// fail the whole document - silently, since the load result is discarded.
+    /// Every variable after it would vanish with no warning.
+    #[test]
+    fn filtering_survives_a_value_ending_in_a_backslash() {
+        let dir = make_fake_config_dir("dotenv-backslash");
+        // Double-quoted at source, because that is the only spelling in which a
+        // dotenv value can *end* in a backslash - which is exactly the value
+        // that broke the single-quoted re-serialization.
+        std::fs::write(
+            dir.join(".env"),
+            "PATH=/tmp/anything\n\
+             LEV_DOTENV_BACKSLASH=\"C:\\\\tools\\\\\"\n\
+             LEV_DOTENV_AFTER=survived\n",
+        )
+        .unwrap();
+
+        {
+            let _cwd = isolate_cwd_for_test();
+            std::env::set_current_dir(&dir).unwrap();
+
+            temp_env::with_vars(
+                [
+                    (
+                        "LEVIATH_CONFIG_PATH",
+                        Some(dir.join("config.toml").into_os_string()),
+                    ),
+                    ("LEVIATH_SKIP_DOTENV", None),
+                    ("LEV_DOTENV_BACKSLASH", None),
+                    ("LEV_DOTENV_AFTER", None),
+                ],
+                || {
+                    Config::load().expect("a missing config file is not an error");
+                    assert_eq!(
+                        std::env::var("LEV_DOTENV_BACKSLASH").ok().as_deref(),
+                        Some("C:\\tools\\")
+                    );
+                    assert_eq!(
+                        std::env::var("LEV_DOTENV_AFTER").ok().as_deref(),
+                        Some("survived"),
+                        "a later variable must not be swallowed by an unbalanced quote"
+                    );
+                },
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
