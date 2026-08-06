@@ -13,6 +13,16 @@ same list.
 
 ## Unreleased
 
+- **Security.** A `.env` in a cloned repository could replace Leviath's entire
+  configuration. `Config::load` read `./.env` into the process environment
+  before resolving the config path, and `LEVIATH_CONFIG_PATH` is normally unset,
+  so one line in a repository you cloned pointed the next statement at a config
+  file of its choosing - its `[mcp_servers]` commands, its `[tool_permissions]`,
+  its provider `base_url`. Credentials still load, since that is what `.env`
+  support is for; the names that steer the process are ignored with a warning
+  naming them: the `LEVIATH_` namespace, `PATH`, `SHELL`, `EDITOR`, `VISUAL`,
+  and `LD_*` / `DYLD_*`. A variable you exported yourself still wins over the
+  file, as before.
 - **Security.** `lev serve --no-remote-yolo` refused `{"yolo": true}` on a
   spawn request but not `{"allow": ["*"]}`, which reaches the same wildcard
   override by another name. Both are refused now, as is any named `allow`:
