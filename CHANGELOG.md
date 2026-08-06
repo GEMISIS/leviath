@@ -13,6 +13,20 @@ same list.
 
 ## Unreleased
 
+- **Security.** A shell command could reach the safe list under a name that did
+  not describe what it ran. `PATH=/tmp/evil ls` keyed a bare `ls`, and `ls` ships
+  as safe, so it ran a binary of the caller's choosing with no prompt; the same
+  hole was reachable through `export`, `unset`, `declare`, `trap`, `function` and
+  `alias`, each of which contributed no key at all while deciding what a later
+  program in the line resolved to. A grant key now names every variable a line
+  binds, spelled `env:NAME`, and a line that installs code to run later
+  (`trap`, `function`, `alias`, `unalias`) cannot be pre-approved at all.
+  Two visible consequences: `FOO=1 cargo test` prompts once per run until
+  `env:FOO` is granted, and `set -euo pipefail` is unaffected, since shell
+  options change nothing about which program a name resolves to. Grant an
+  assignment the same way as a program, with `[safe_commands] shell =
+  ["env:RUST_LOG"]`. Granting one variable grants exactly that one, and no
+  program name widens onto an `env:` key.
 - Approving tool calls no longer means approving one per shell invocation.
   Replaying a real 224-call run through the shipped approval machinery needed 46
   prompts; the same replay now needs 16. Three things changed. The parser that

