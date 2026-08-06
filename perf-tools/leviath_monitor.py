@@ -34,6 +34,11 @@ Memory metrics, precisely (see also perf-tools/README.md):
   physical footprint still counts these pages (50 MB dirty of which 48 MB
   reclaimable) until the kernel repossesses them under pressure. This is the
   correction term that turns the ratcheting counters into a live figure.
+- ``footprint_mb``: the raw, uncorrected charged total (macOS physical
+  footprint, Linux Pss again, Windows USS) - kept alongside the corrected
+  series so both components are always visible. ``live_mb`` clamps at 0
+  when the reclaimable portion covers the whole footprint; this column
+  preserves the actual total in that case.
 - ``live_mb``: the headline series - the memory the process actually holds:
   macOS: physical footprint minus its reclaimable portion, floored at 0.
   Linux: ``pss - LazyFree``, floored at 0. Windows: USS (Windows has no
@@ -139,6 +144,7 @@ CSV_HEADER = (
     "rss_mb",
     "pss_mb",
     "uss_mb",
+    "footprint_mb",
     "lazy_free_mb",
     "live_mb",
     "active_runs",
@@ -180,6 +186,7 @@ class MemorySample(NamedTuple):
     rss_mb: float
     pss_mb: Optional[float]
     uss_mb: Optional[float]
+    footprint_mb: Optional[float]
     lazy_free_mb: Optional[float]
     live_mb: Optional[float]
 
@@ -347,7 +354,7 @@ def _memory_linux(proc: psutil.Process) -> MemorySample:
     rss = proc.memory_info().rss / _BYTES_PER_MB
     fields = _smaps_rollup_kb(proc.pid)
     if not fields:
-        return MemorySample(rss, None, None, None, None)
+        return MemorySample(rss, None, None, None, None, None)
     pss = fields.get("Pss")
     lazy = fields.get("LazyFree", 0)
     uss = None
@@ -357,7 +364,9 @@ def _memory_linux(proc: psutil.Process) -> MemorySample:
     if pss is not None:
         live = max(pss - lazy, 0) / 1024
         pss = pss / 1024
-    return MemorySample(rss, pss, uss, lazy / 1024, live)
+    # The raw charged total on Linux is Pss itself; recorded in both columns
+    # so footprint_mb means "the uncorrected total" on every OS.
+    return MemorySample(rss, pss, uss, pss, lazy / 1024, live)
 
 
 def _memory_windows_or_fallback(proc: psutil.Process) -> MemorySample:
@@ -371,8 +380,8 @@ def _memory_windows_or_fallback(proc: psutil.Process) -> MemorySample:
     try:
         uss = proc.memory_full_info().uss / _BYTES_PER_MB
     except (psutil.Error, AttributeError):
-        return MemorySample(rss, None, None, None, None)
-    return MemorySample(rss, None, uss, None, uss)
+        return MemorySample(rss, None, None, None, None, None)
+    return MemorySample(rss, None, uss, uss, None, uss)
 
 
 def sample_memory(proc: psutil.Process) -> MemorySample:
@@ -387,7 +396,7 @@ def sample_memory(proc: psutil.Process) -> MemorySample:
         live = footprint
         if footprint is not None and reclaimable is not None:
             live = max(footprint - reclaimable, 0.0)
-        return MemorySample(rss, None, None, reclaimable, live)
+        return MemorySample(rss, None, None, footprint, reclaimable, live)
     if sys.platform.startswith("linux"):
         return _memory_linux(proc)
     return _memory_windows_or_fallback(proc)
@@ -678,6 +687,7 @@ def append_csv_row(csv_path: Path | str, sample: Sample) -> None:
                 f"{memory.rss_mb:.3f}",
                 cell(memory.pss_mb),
                 cell(memory.uss_mb),
+                cell(memory.footprint_mb),
                 cell(memory.lazy_free_mb),
                 cell(memory.live_mb),
                 "" if sample.active_runs is None else str(sample.active_runs),
