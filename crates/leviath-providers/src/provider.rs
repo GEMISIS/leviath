@@ -640,9 +640,38 @@ pub fn apply_request_timeout(
 /// (`ProviderConfig::request_timeout_secs`) still applies an optional
 /// client-level hard cap on total request duration for callers that set it; a
 /// per-request timeout, when present, overrides it.
+/// Whether a redirect keeps the request on the origin it started from.
+///
+/// Split out so the decision is a plain function the tests can drive, rather
+/// than a closure only reachable through a real redirect.
+fn same_origin_hop(attempt: &reqwest::redirect::Attempt<'_>) -> bool {
+    attempt.previous().last().is_some_and(|prev| {
+        prev.scheme() == attempt.url().scheme()
+            && prev.host_str() == attempt.url().host_str()
+            && prev.port_or_known_default() == attempt.url().port_or_known_default()
+    })
+}
+
 pub fn build_http_client(timeout_secs: Option<u64>) -> reqwest::Client {
     reqwest::Client::builder()
         .pool_max_idle_per_host(0)
+        // Follow a redirect only while it stays on the host the key was meant
+        // for. reqwest strips `Authorization` across origins by itself, but not
+        // a custom header - and the provider keys travel as `x-api-key`
+        // (Anthropic) and `x-goog-api-key` (Gemini), which it would carry
+        // straight to whatever a redirect named. `base_url` is user-configured
+        // and legitimately points at loopback for Ollama, so this is an origin
+        // check rather than `leviath_core::net`'s SSRF policy, which would
+        // refuse that.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            match same_origin_hop(&attempt) && attempt.previous().len() <= 5 {
+                true => attempt.follow(),
+                // `stop` rather than `error`: the 3xx comes back as an ordinary
+                // response and fails the status check downstream, which is one
+                // error path instead of two.
+                false => attempt.stop(),
+            }
+        }))
         .connect_timeout(std::time::Duration::from_secs(30))
         .tcp_keepalive(std::time::Duration::from_secs(30))
         .timeout(std::time::Duration::from_secs(
@@ -797,6 +826,83 @@ mod stream_once {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── redirect policy ──────────────────────────────────────────────────
+
+    /// Serve `responses` in order, one per connection, on one address, and
+    /// report how many requests arrived.
+    ///
+    /// The provider client sets `pool_max_idle_per_host(0)`, so each hop of a
+    /// redirect chain opens a fresh connection - a one-shot mock cannot follow
+    /// one.
+    async fn serve_sequence(
+        responses: Vec<String>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            for body in responses {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket.write_all(body.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    fn redirect_to(location: &str) -> String {
+        format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n")
+    }
+
+    const OK_BODY: &str = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi";
+
+    /// A redirect that stays on the host the key was meant for is ordinary and
+    /// must keep working - some gateways answer that way.
+    #[tokio::test]
+    async fn a_same_origin_redirect_is_followed() {
+        let (base, hits) = serve_sequence(vec![redirect_to("/second"), OK_BODY.to_string()]).await;
+        let response = build_http_client(Some(10))
+            .get(format!("{base}/first"))
+            .header("x-api-key", "super-secret")
+            .send()
+            .await
+            .expect("a same-origin redirect should be followed");
+        assert_eq!(response.status(), 200);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// reqwest strips `Authorization` across origins on its own, but not a
+    /// custom header - and the provider keys travel as `x-api-key` and
+    /// `x-goog-api-key`. Without a policy it would carry them to whatever a
+    /// redirect named.
+    #[tokio::test]
+    async fn a_cross_origin_redirect_is_not_followed() {
+        let (thief, thief_hits) = serve_sequence(vec![OK_BODY.to_string()]).await;
+        let (base, _) = serve_sequence(vec![redirect_to(&format!("{thief}/steal"))]).await;
+
+        let response = build_http_client(Some(10))
+            .get(format!("{base}/first"))
+            .header("x-api-key", "super-secret")
+            .send()
+            .await
+            .expect("stopping returns the 3xx rather than erroring");
+        assert_eq!(
+            response.status(),
+            302,
+            "the redirect is surfaced, not followed"
+        );
+        assert_eq!(
+            thief_hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no request carrying the api key may reach another origin"
+        );
+    }
 
     #[test]
     fn provider_error_is_transient_classification() {
