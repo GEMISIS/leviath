@@ -55,11 +55,27 @@ fn build_http_client() -> reqwest::Client {
         .connect_timeout(Duration::from_secs(30))
         .read_timeout(Duration::from_secs(READ_STALL_TIMEOUT_SECS))
         .tcp_keepalive(Duration::from_secs(30))
-        // Cap redirects, as `leviath_core::client_builder` does for every other
-        // outbound client. reqwest's default of ten hops let a hostile MCP
-        // server chain the daemon around the local network; five is enough for
-        // any legitimate endpoint move and bounds a redirect loop.
-        .redirect(reqwest::redirect::Policy::limited(5))
+        // Follow a redirect only while it stays on the origin the credentials
+        // were meant for, and no more than five hops.
+        //
+        // Capping alone was not enough. reqwest strips `Authorization` across
+        // origins by itself but not a custom header, and an MCP server's
+        // headers come from config with `${VAR}` expansion - `x-api-key` and
+        // friends. So a server could pass the endpoint-event origin check by
+        // naming its own `/messages`, then answer the POST with a 307 to
+        // another host and have reqwest replay the body and the secret headers
+        // there. Same reasoning, and same shape, as the provider client.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            let same_origin = attempt.previous().last().is_some_and(|prev| {
+                prev.scheme() == attempt.url().scheme()
+                    && prev.host_str() == attempt.url().host_str()
+                    && prev.port_or_known_default() == attempt.url().port_or_known_default()
+            });
+            match same_origin && attempt.previous().len() <= 5 {
+                true => attempt.follow(),
+                false => attempt.stop(),
+            }
+        }))
         .build()
         .expect("failed to build reqwest client")
 }
@@ -1244,6 +1260,86 @@ mod tests {
             .await
             .expect("the thief is listening");
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// A redirect that stays on the configured server is ordinary and must keep
+    /// working.
+    #[tokio::test]
+    async fn a_same_origin_redirect_is_followed() {
+        let app = Router::new()
+            .route(
+                "/first",
+                get(|| async {
+                    (
+                        AxumStatus::TEMPORARY_REDIRECT,
+                        [(axum::http::header::LOCATION, "/second")],
+                    )
+                        .into_response()
+                }),
+            )
+            .route("/second", get(|| async { "ok" }));
+        let base = serve(app).await;
+        let response = build_http_client()
+            .get(format!("{base}/first"))
+            .send()
+            .await
+            .expect("a same-origin redirect should be followed");
+        assert_eq!(response.status(), 200);
+    }
+
+    /// The endpoint-event origin check is not enough on its own: a server can
+    /// name its own `/messages`, pass that check, and then answer the POST with
+    /// a redirect elsewhere. reqwest strips `Authorization` across origins but
+    /// not the `${VAR}`-expanded custom headers an MCP server config carries.
+    #[tokio::test]
+    async fn a_cross_origin_redirect_does_not_carry_the_headers() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let thief = Router::new().fallback({
+            let hits = hits.clone();
+            move || {
+                hits.fetch_add(1, Ordering::SeqCst);
+                async { "stolen" }
+            }
+        });
+        let thief_base = serve(thief).await;
+
+        let target = format!("{thief_base}/steal");
+        let app = Router::new().route(
+            "/first",
+            get(move || {
+                let target = target.clone();
+                async move {
+                    (
+                        AxumStatus::TEMPORARY_REDIRECT,
+                        [(axum::http::header::LOCATION, target)],
+                    )
+                        .into_response()
+                }
+            }),
+        );
+        let base = serve(app).await;
+
+        let response = build_http_client()
+            .get(format!("{base}/first"))
+            .header("x-api-key", "super-secret")
+            .send()
+            .await
+            .expect("stopping surfaces the 3xx rather than erroring");
+        assert_eq!(response.status(), 307, "the redirect is not followed");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "no request carrying the configured headers may reach another origin"
+        );
+
+        // Positive control, so the zero above cannot be an artefact of a
+        // counter that never increments or a server that never started.
+        reqwest::Client::new()
+            .get(format!("{thief_base}/steal"))
+            .send()
+            .await
+            .expect("the thief is listening");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
     /// A plain-HTTP server is the user's own decision, so it is a warning

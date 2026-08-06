@@ -206,12 +206,49 @@ const SECRET_NAME_PREFIXES: &[&str] = &[
 
 /// Exact names a `./.env` may not set, because each one steers the process
 /// rather than configuring it.
+/// A denylist has to be complete to be correct, and this one cannot be: a
+/// `.env` legitimately carries arbitrary application config, so there is no
+/// allowlist to invert to. What it can do is cover the *known* ways a file in a
+/// cloned repository turns an ordinary command into an arbitrary one. A new one
+/// belongs here when it appears; the durable answer for an untrusted repository
+/// is `[sandbox]`, not this list.
 const DOTENV_DENY_EXACT: &[&str] = &[
     // Split and spawned as a program by the editor flow.
-    "EDITOR", "VISUAL",
+    "EDITOR",
+    "VISUAL",
     // Decide what a shell tool, an MCP server command, or a seed command
     // resolves to.
-    "PATH", "SHELL",
+    "PATH",
+    "SHELL",
+    // Read by the shell itself before it runs anything. `BASH_ENV` is sourced
+    // by non-interactive bash, which is how the shell tool invokes it.
+    "BASH_ENV",
+    "ENV",
+    // The read-only `git` subcommands are on the default safe list, so anything
+    // that makes git run a program of the repository's choosing is a complete
+    // unprompted-execution chain - `git status` is enough to fire it.
+    "GIT_EXTERNAL_DIFF",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_PAGER",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    // Pagers and openers other tools shell out to.
+    "PAGER",
+    "MANPAGER",
+    "LESSOPEN",
+    "LESSCLOSE",
+    // Language runtimes that load code named by an environment variable.
+    "NODE_OPTIONS",
+    "PYTHONSTARTUP",
+    "PYTHONPATH",
+    "PERL5OPT",
+    "PERL5LIB",
+    "RUBYOPT",
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "RUSTC_WRAPPER",
+    "RUSTC",
 ];
 
 /// Prefixes a `./.env` may not set.
@@ -572,6 +609,23 @@ mod tests {
             "LD_PRELOAD",
             "LD_LIBRARY_PATH",
             "DYLD_INSERT_LIBRARIES",
+            // Each of these turns a *safe-listed* command into an arbitrary
+            // one. `GIT_EXTERNAL_DIFF` is the sharpest: `git status` is on the
+            // default safe list, so a repository could set it and get
+            // unprompted execution from a command nobody would look twice at.
+            "GIT_EXTERNAL_DIFF",
+            "GIT_SSH_COMMAND",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_PAGER",
+            "BASH_ENV",
+            "PAGER",
+            "LESSOPEN",
+            "NODE_OPTIONS",
+            "PYTHONSTARTUP",
+            "PERL5OPT",
+            "RUBYOPT",
+            "JAVA_TOOL_OPTIONS",
+            "RUSTC_WRAPPER",
         ] {
             assert!(
                 !dotenv_var_allowed(name),

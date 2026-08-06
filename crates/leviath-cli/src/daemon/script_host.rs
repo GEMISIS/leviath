@@ -362,6 +362,15 @@ impl ScriptHost for DaemonScriptHost {
         if !self.allow.shell {
             return Err(denied("shell"));
         }
+        // The same clamp `clamp_by_effect` applies to a model's `shell` tool
+        // call. Without it this is the hole that clamp exists to close, just
+        // reached from a script instead of a tool call: an agent shipping its
+        // own `.rhai` tools could write through a redirect while `write_file`
+        // was denied. Resolved at spawn like the rest of `allow`, so this is a
+        // boolean check rather than a second policy lookup.
+        if !self.allow.write_file && crate::shell_keys::writes_a_file(command) {
+            return Err(denied("write_file (a shell redirect writes a file)"));
+        }
         let (shell, flag) = default_shell();
         // With a sandbox, build the command that runs inside the current stage's
         // container / namespace; otherwise run the shell directly on the host
@@ -1016,6 +1025,35 @@ mod tests {
             write_file: false,
             env_var: false,
         }
+    }
+
+    /// A script tool is the other spelling of "run a shell command", and it
+    /// bypassed `clamp_by_effect` entirely - that clamp lives in the tool
+    /// dispatcher, which a Rhai `shell()` never goes through. So an agent
+    /// shipping its own `.rhai` tools could write through a redirect while
+    /// `write_file` was denied, which is exactly what the clamp exists to stop.
+    #[test]
+    fn a_script_shell_redirect_answers_to_the_write_permission() {
+        let io = RecordingIo::arc();
+        let allow = ScriptAllow {
+            write_file: false,
+            ..all_allowed()
+        };
+        let host = DaemonScriptHost::with_io(allow, std::env::temp_dir(), io.clone());
+
+        let err = host
+            .shell("echo pwn > /root/.bashrc")
+            .expect_err("a redirect must answer to the write permission");
+        assert!(err.contains("write_file"), "got: {err}");
+
+        // The same command without the redirect still runs, so this is the
+        // write being refused rather than the shell.
+        host.shell("echo pwn").expect("a non-writing shell is fine");
+
+        // And with writes permitted, the redirect runs.
+        let host = DaemonScriptHost::with_io(all_allowed(), std::env::temp_dir(), io.clone());
+        host.shell("echo pwn > /tmp/x")
+            .expect("a permitted write is not clamped");
     }
 
     #[test]
