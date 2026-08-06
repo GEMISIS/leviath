@@ -310,12 +310,7 @@ async fn ensure_daemon_running() -> anyhow::Result<()> {
         let _ = control_client()?
             .request(&leviath_runtime::control_socket::ControlRequest::Shutdown)
             .await;
-        for _ in 0..100 {
-            if !is_daemon_running(&id) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
+        poll_until(|| !is_daemon_running(&id)).await;
     }
     let exe = std::env::current_exe()?;
     let mut cmd = std::process::Command::new(exe);
@@ -325,13 +320,28 @@ async fn ensure_daemon_running() -> anyhow::Result<()> {
         .stderr(std::process::Stdio::null());
     leviath_sys::process::configure_detached(&mut cmd);
     cmd.spawn()?;
-    for _ in 0..100 {
-        if is_daemon_running(&id) {
-            return Ok(());
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    if poll_until(|| is_daemon_running(&id)).await {
+        return Ok(());
     }
     anyhow::bail!("the leviath daemon did not start within 5s");
+}
+
+/// Poll `done` until it returns true or ~5s elapses, sleeping 2ms at first
+/// and doubling to a 50ms ceiling. The daemon boots in ~20ms, so the old
+/// fixed 50ms tick spent more time waiting than the daemon spent starting -
+/// it was most of the measured 97ms cold `lev run`. Backoff keeps the
+/// slow-path cost (a daemon that genuinely takes seconds) unchanged.
+async fn poll_until(mut done: impl FnMut() -> bool) -> bool {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut delay = std::time::Duration::from_millis(2);
+    while !done() {
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(std::time::Duration::from_millis(50));
+    }
+    true
 }
 
 /// `lev daemon start`: auto-start a detached daemon if none is running.
@@ -367,12 +377,9 @@ async fn real_daemon_stop() -> anyhow::Result<()> {
             None => return Err(e),
         }
     }
-    for _ in 0..100 {
-        if !is_daemon_running(&id) {
-            println!("daemon stopped");
-            return Ok(());
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    if poll_until(|| !is_daemon_running(&id)).await {
+        println!("daemon stopped");
+        return Ok(());
     }
     anyhow::bail!("the leviath daemon did not shut down within 5s");
 }
