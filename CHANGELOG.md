@@ -13,6 +13,15 @@ same list.
 
 ## Unreleased
 
+- **Security.** A blueprint's `seed = { command = "..." }` runs a host command at
+  spawn, before the first inference and therefore before any approval prompt
+  exists. It now has to be covered by `[safe_commands]` as well as
+  `allow_seed_commands`, because a seed is precisely the case where there is
+  nobody to ask. The shipped agents seed with `git ls-files`, which is a default
+  safe entry, so they are unaffected; a downloaded manifest no longer gets to
+  run `curl … | sh` at spawn. `lev validate` now says per seed whether it is
+  pre-approved or will be refused, so this is a one-line config fix found before
+  the run rather than a region that silently came up empty during it.
 - **Security.** A hostile MCP server could redirect Leviath's credentials to a
   host of its choosing. A legacy HTTP+SSE server announces where to POST through
   an `endpoint` event, and joining an *absolute* URL onto the base replaces the

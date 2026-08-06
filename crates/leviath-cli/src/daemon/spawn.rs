@@ -1027,6 +1027,15 @@ fn build_agent_inner(
         let policy = SeedCommandPolicy::new(
             config.security.allow_seed_commands && !args.no_seed_commands,
             std::time::Duration::from_secs(config.limits.script_shell_timeout_secs),
+            // The same pre-approval this run gives the `shell` tool. A seed runs
+            // before any prompt exists, so the safe list is the only thing that
+            // can have said yes to it.
+            Arc::new(
+                config
+                    .safe_keys_for_agent(&agent_name, blueprint.safe_commands.as_ref())
+                    .into_keys()
+                    .collect(),
+            ),
             sandbox.clone(),
         );
         resolve_seeds(&blueprint, args, &args.workdir, &policy)?
@@ -3485,12 +3494,24 @@ conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
         SeedCommandPolicy::disabled()
     }
 
+    /// Pre-approves the command the seed fixtures declare, so these tests
+    /// exercise the runner arms rather than the pre-approval refusal (which
+    /// `seed_command.rs` covers directly).
+    fn seed_safe_keys() -> std::sync::Arc<std::collections::HashSet<String>> {
+        std::sync::Arc::new(
+            ["shell:scan-repo".to_string()]
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>(),
+        )
+    }
+
     /// A policy whose runner is a stub returning `result`, for the command-seed
     /// arms (no real process, deterministic on every platform).
     fn stub_policy(result: Result<String, String>) -> SeedCommandPolicy {
         SeedCommandPolicy {
             allowed: true,
             timeout: std::time::Duration::from_secs(1),
+            safe_keys: seed_safe_keys(),
             runner: std::sync::Arc::new(move |_, _, _| result.clone()),
         }
     }
@@ -3678,6 +3699,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         let policy = SeedCommandPolicy {
             allowed: true,
             timeout: std::time::Duration::from_secs(9),
+            safe_keys: seed_safe_keys(),
             runner: std::sync::Arc::new(|command, workdir, timeout| {
                 Ok(format!(
                     "{command}@{}#{}",

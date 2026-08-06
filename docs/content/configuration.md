@@ -180,7 +180,7 @@ credential_store           = "file"   # file | keychain
 
 | Key | Default | Notes |
 |---|---|---|
-| `allow_seed_commands` | `true` | Whether a blueprint's `seed = { command = "..." }` regions may run. They execute at spawn, before the first approval prompt. `--no-seed-commands` refuses them for one run |
+| `allow_seed_commands` | `true` | Whether a blueprint's `seed = { command = "..." }` regions may run at all. They execute at spawn, before the first approval prompt, so a seed also has to be covered by `[safe_commands]` - there is nobody to ask in the moment. `--no-seed-commands` refuses them for one run |
 | `allow_local_network` | `false` | Whether agent fetches may reach loopback, private, and link-local addresses. Off, this blocks cloud metadata, your own `lev serve`, and the LAN |
 | `allow_env_vars` | `[]` | Credential-shaped variable names a Rhai script may read through `env_var()`. Matching is exact and case-insensitive, and there is no wildcard |
 | `allow_blueprint_read_paths` | `false` | Honors every blueprint's `[read_paths]` as written. Prefer a per-agent grant for anything you did not author |

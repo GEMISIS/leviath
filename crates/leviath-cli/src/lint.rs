@@ -774,7 +774,16 @@ fn lint_command_seeds(blueprint: &Blueprint) -> Vec<LintFinding> {
         .iter()
         .filter_map(|r| match &r.seed {
             Some(leviath_core::layout::RegionSeed::Command { command }) => {
-                Some(format!("{}: {command}", r.name))
+                // Whether it will actually run matters more than that it is
+                // declared. A seed runs before any prompt exists, so it only
+                // runs if the safe list already covers it - and finding that
+                // out here is a one-line config fix, where finding out at spawn
+                // is a region that silently came up empty.
+                let verdict = match default_safe_keys_cover(command) {
+                    true => "pre-approved",
+                    false => "NOT pre-approved by the default safe list, so it will be refused",
+                };
+                Some(format!("{}: {command} ({verdict})", r.name))
             }
             _ => None,
         })
@@ -794,10 +803,27 @@ fn lint_command_seeds(blueprint: &Blueprint) -> Vec<LintFinding> {
             ),
         )
         .with_fix(
-            "disable with `--no-seed-commands`, or machine-wide via \
+            "a refused seed needs its programs in `[safe_commands] shell`; disable seeds \
+             entirely with `--no-seed-commands`, or machine-wide via \
              `[security] allow_seed_commands = false`",
         ),
     ]
+}
+
+/// Whether the *default* safe list covers `command`.
+///
+/// Reports against the shipped defaults rather than the reader's own config:
+/// `lev validate` is most often run on a blueprint somebody is deciding whether
+/// to install, and "would this run on a stock machine" is the question that
+/// answers. A user who has added entries sees a false alarm, which is the safe
+/// direction for an audit line.
+fn default_safe_keys_cover(command: &str) -> bool {
+    let safe = crate::approvals::resolve_safe_keys(&Default::default(), None, None, false);
+    let keys = crate::shell_keys::command_keys(command);
+    !keys.is_empty()
+        && keys
+            .iter()
+            .all(|k| safe.contains_key(k) || safe.contains_key(crate::shell_keys::program_of(k)))
 }
 
 /// Checkpoints that hold a `--yolo` run for a person.
