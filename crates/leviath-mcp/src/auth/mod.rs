@@ -9,7 +9,11 @@
 //! `OAuthClient::login`; `OAuthClient::refresh` is non-interactive so a
 //! background process can keep a session alive without ever opening a browser.
 
-mod metadata;
+// `pub(crate)` so the transport can reuse `same_origin` and
+// `is_safe_discovery_url` rather than growing a second opinion about what "the
+// server's own origin" means. The OAuth chain and the transport have to agree:
+// they are guarding the same token against the same server.
+pub(crate) mod metadata;
 mod pkce;
 pub mod store;
 

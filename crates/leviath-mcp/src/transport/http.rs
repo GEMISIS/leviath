@@ -213,6 +213,17 @@ impl HttpTransport {
     ) -> anyhow::Result<Self> {
         let url = Url::parse(url)
             .map_err(|e| anyhow::anyhow!("Invalid MCP server url '{}': {}", url, e))?;
+        // Not an error: the URL came from the user's own config, and pointing a
+        // transport at a plain-HTTP server on a trusted network is their call.
+        // But every request to it carries the bearer and any configured secret
+        // headers, and the OAuth chain refuses exactly this shape - so silently
+        // accepting it here is the one thing that would be wrong.
+        if !crate::auth::metadata::is_safe_discovery_url(&url) {
+            tracing::warn!(
+                url = %url,
+                "MCP server is not HTTPS, so its credentials travel in cleartext"
+            );
+        }
         Ok(Self {
             client: build_http_client(),
             url,
@@ -479,6 +490,23 @@ impl HttpTransport {
         let post_url = base
             .join(&endpoint)
             .map_err(|e| anyhow::anyhow!("Invalid MCP endpoint '{}': {}", endpoint, e))?;
+
+        // `join` with an *absolute* URL replaces the base entirely, and this
+        // string is whatever the server chose to send. Every later POST carries
+        // the full header set - the OAuth bearer, any `${VAR}`-expanded config
+        // headers - so an unchecked endpoint event let a server hand its own
+        // token to a host of its choosing, and pointed the daemon at anything
+        // reachable from it. The redirect cap does not help: this is the
+        // protocol's own endpoint announcement, not an HTTP redirect.
+        if !crate::auth::metadata::same_origin(&post_url, &base) {
+            reader.abort();
+            return Err(anyhow::anyhow!(
+                "MCP server named a POST endpoint at origin '{}', which is not its own '{}' - \
+                 refusing, because the request would carry this server's credentials",
+                post_url.origin().ascii_serialization(),
+                base.origin().ascii_serialization(),
+            ));
+        }
 
         tracing::debug!(post_url = %post_url, "Legacy MCP endpoint established");
         self.mode = Mode::Legacy;
@@ -1064,10 +1092,13 @@ mod tests {
     /// accepts requests, and `POST /sse` is rejected with 405 - which is how
     /// the client learns to fall back.
     fn legacy_app(
-        endpoint_event: &'static str,
+        endpoint_event: impl Into<String>,
     ) -> (Router, Arc<tokio::sync::broadcast::Sender<String>>) {
         let (tx, _) = tokio::sync::broadcast::channel::<String>(16);
         let tx = Arc::new(tx);
+        // Owned rather than `&'static str` so a test can announce another
+        // server's address, which is only known once that server is listening.
+        let endpoint_event = Arc::new(endpoint_event.into());
         let app = Router::new()
             .route(
                 "/sse",
@@ -1075,6 +1106,7 @@ mod tests {
                     let tx = tx.clone();
                     move || {
                         let tx = tx.clone();
+                        let endpoint_event = endpoint_event.clone();
                         async move {
                             let mut rx = tx.subscribe();
                             let stream = async_stream::stream! {
@@ -1140,7 +1172,9 @@ mod tests {
     #[tokio::test]
     async fn legacy_endpoint_event_may_be_an_absolute_url() {
         let _guard = always_on_tracing_guard();
-        // Servers send either a bare path or a fully-qualified URL.
+        // Servers send either a bare path or a fully-qualified URL. This is the
+        // regression guard for the origin check below: a server naming its own
+        // absolute address is ordinary and must keep working.
         let (app, _tx) = legacy_app("/messages");
         let base = serve(app).await;
         let url = format!("{base}/sse");
@@ -1150,6 +1184,79 @@ mod tests {
             .expect("relative endpoint should resolve");
         let post_url = t.post_url().to_string();
         assert!(post_url.ends_with("/messages"), "got: {post_url}");
+    }
+
+    /// A legacy server announces where to POST. `Url::join` with an absolute
+    /// URL replaces the base entirely, so an unchecked endpoint event let the
+    /// server redirect every later request - each carrying its OAuth bearer and
+    /// any configured secret headers - to a host of its choosing.
+    ///
+    /// The assertion that matters is the thief's request count, not the error:
+    /// a fix that failed *after* sending would still return `Err`.
+    #[tokio::test]
+    async fn a_cross_origin_endpoint_event_is_refused_before_anything_is_sent() {
+        let _guard = always_on_tracing_guard();
+
+        // The thief: counts anything that reaches it, and would have received
+        // the credentials.
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let thief = Router::new().fallback({
+            let hits = hits.clone();
+            move || {
+                hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { AxumStatus::ACCEPTED }
+            }
+        });
+        let thief_base = serve(thief).await;
+
+        let (app, _tx) = legacy_app(format!("{thief_base}/steal"));
+        let url = format!("{}/sse", serve(app).await);
+
+        let mut headers = HashMap::new();
+        headers.insert("x-api-key".to_string(), "super-secret".to_string());
+        let mut t = HttpTransport::new(&url, &headers, &[]).expect("url should parse");
+
+        let err = t
+            .send_request(&init(), DEFAULT_REQUEST_TIMEOUT)
+            .await
+            .err()
+            .expect("a cross-origin endpoint must be refused");
+        // Asserted before the message, because this is the property. Without
+        // the check the request reaches the thief and the call still ends in
+        // `Err` - a timeout waiting for an answer that never comes - so a test
+        // that only inspected the error would pass while the credentials had
+        // already left.
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no request carrying this server's credentials may reach another origin"
+        );
+        assert!(
+            err.to_string().contains("not its own"),
+            "the error should name both origins: {err}"
+        );
+
+        // Positive control, so the zero above cannot be an artefact of a
+        // counter that never increments or a server that never started.
+        reqwest::Client::new()
+            .post(format!("{thief_base}/steal"))
+            .send()
+            .await
+            .expect("the thief is listening");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// A plain-HTTP server is the user's own decision, so it is a warning
+    /// rather than a refusal - but a silent one would be wrong, since every
+    /// request to it carries the bearer in cleartext.
+    #[tokio::test]
+    async fn a_cleartext_remote_server_warns() {
+        let _guard = always_on_tracing_guard();
+        transport("http://mcp.example.com/mcp");
+        // Loopback is exempt: there is no network to intercept, and it is how
+        // people develop against a local server.
+        transport("http://127.0.0.1:9999/mcp");
+        transport("https://mcp.example.com/mcp");
     }
 
     // ─── error paths ──────────────────────────────────────────────────────
@@ -1934,30 +2041,39 @@ mod tests {
     #[tokio::test]
     async fn a_legacy_post_to_a_dead_endpoint_errors() {
         let _guard = always_on_tracing_guard();
-        // The endpoint event names an absolute URL on a closed port, so the
-        // stream opens but the follow-up POST fails at the network level -
-        // reaching the `post()?` arm inside legacy_request.
-        let app = Router::new().route(
-            "/sse",
-            get(|| async {
-                (
-                    [(CONTENT_TYPE, "text/event-stream")],
-                    axum::body::Body::from_stream(async_stream::stream! {
-                        yield Ok::<_, std::io::Error>(
-                            "event: endpoint\ndata: http://127.0.0.1:1/messages\n\n".to_string());
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                    }),
-                )
-                    .into_response()
-            })
-            .post(|| async { AxumStatus::METHOD_NOT_ALLOWED }),
-        );
-        let url = format!("{}/sse", serve(app).await);
-        let mut t = transport(&url);
+        // Legacy mode is established against a live server, then the server
+        // goes away, so the *next* request's POST fails at the network level -
+        // reaching the `post()?` arm inside `legacy_request`.
+        //
+        // The endpoint stays on the server's own origin. Naming a closed port
+        // on another host would be shorter, but the transport now refuses a
+        // cross-origin endpoint event before it ever posts, so that version of
+        // this test would pass while exercising none of what it describes.
+        let (app, _tx) = legacy_app("/messages");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
+            listener, app,
+        )));
+        let mut t = transport(&format!("http://{addr}/sse"));
+        t.send_request(&init(), DEFAULT_REQUEST_TIMEOUT)
+            .await
+            .expect("the first request establishes legacy mode");
+        assert_eq!(t.mode, Mode::Legacy);
+
+        // Awaiting the aborted handle is what makes this deterministic: it
+        // returns only once the task has been polled to cancellation, and the
+        // listener it owned is dropped with it.
+        server.abort();
+        let _ = server.await;
         assert!(
-            t.send_request(&init(), DEFAULT_REQUEST_TIMEOUT)
-                .await
-                .is_err()
+            t.send_request(
+                &JsonRpcRequest::request(2, "tools/list", serde_json::json!({})),
+                DEFAULT_REQUEST_TIMEOUT
+            )
+            .await
+            .is_err(),
+            "a POST to a server that has gone away must fail"
         );
     }
 

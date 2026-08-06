@@ -13,6 +13,15 @@ same list.
 
 ## Unreleased
 
+- **Security.** A hostile MCP server could redirect Leviath's credentials to a
+  host of its choosing. A legacy HTTP+SSE server announces where to POST through
+  an `endpoint` event, and joining an *absolute* URL onto the base replaces the
+  base entirely - so every later request, each carrying the OAuth bearer and any
+  configured secret headers, went wherever the server said. The endpoint must
+  now share an origin with the server you configured; a relative path or the
+  server's own absolute URL still works. Leviath also warns when an MCP server
+  URL is plain `http://` to a non-loopback host, since its credentials travel in
+  cleartext.
 - **Security.** A `.env` in a cloned repository could replace Leviath's entire
   configuration. `Config::load` read `./.env` into the process environment
   before resolving the config path, and `LEVIATH_CONFIG_PATH` is normally unset,
