@@ -100,6 +100,8 @@
         "allow_blueprint_read_paths": { "type": "boolean", "default": false },
         "allow_blueprint_safe_commands": { "type": "boolean", "default": false, "description": "Honour every blueprint's own [safe_commands]. Off by default: declaring is not granting, so an installed agent cannot pre-approve its own shell." },
         "allow_blueprint_permissions": { "type": "boolean", "default": false, "description": "Honour every blueprint's own [tool_permissions] even where it exceeds the built-in default for a tool you have not configured. Off by default: a blueprint may still pre-approve web_search and web_fetch, and anything else is clamped to the default." },
+        "shell_env": { "type": "string", "enum": ["filtered", "strict", "custom", "inherit"], "default": "filtered", "description": "Which of the daemon's environment variables a shell tool call, a Rhai shell(), and a command seed inherit." },
+        "shell_env_withhold": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Names withheld under shell_env = \"custom\". Ignored under every other mode." },
         "read_paths": { "type": "array", "items": { "type": "string" } },
         "credential_store": { "enum": ["file", "keychain"], "default": "file" }
       }

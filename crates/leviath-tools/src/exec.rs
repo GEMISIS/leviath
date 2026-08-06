@@ -526,6 +526,11 @@ impl BuiltinTools {
         // signalling the group on drop takes the whole tree down with it.
         cmd.kill_on_drop(true);
         own_process_group(&mut cmd);
+        // Strip the credentials the daemon holds but this command has no use
+        // for. After the branch above, so a containerised command is covered
+        // too: a container that inherits the daemon's environment leaks exactly
+        // as much as a bare shell would.
+        self.ctx.shell_env.apply(&mut cmd);
         // An agent runs this dozens of times per run, and on Windows each spawn
         // would otherwise be given a console window. Applied here rather than in
         // either branch above so it covers the sandboxed command too.

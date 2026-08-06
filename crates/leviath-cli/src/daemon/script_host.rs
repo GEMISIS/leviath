@@ -206,6 +206,10 @@ pub struct DaemonScriptHost {
     /// `[security] allow_env_vars`: credential-shaped environment variables this
     /// agent's scripts may read. Empty by default.
     allow_env_vars: Vec<String>,
+    /// `[security] shell_env`: which of the daemon's variables a script's
+    /// `shell()` hands to the child. The same policy the built-in shell tool
+    /// applies, so `shell()` is not a way around the `env_var` gate.
+    shell_env: leviath_tools::ShellEnvPolicy,
 }
 
 impl DaemonScriptHost {
@@ -221,6 +225,7 @@ impl DaemonScriptHost {
             shell_timeout: Duration::from_secs(60),
             allow_local_network: false,
             allow_env_vars: Vec::new(),
+            shell_env: leviath_tools::ShellEnvPolicy::default(),
         }
     }
 
@@ -249,9 +254,11 @@ impl DaemonScriptHost {
         mut self,
         sandbox: Option<Arc<SandboxManager>>,
         shell_timeout: Duration,
+        shell_env: leviath_tools::ShellEnvPolicy,
     ) -> Self {
         self.sandbox = sandbox;
         self.shell_timeout = shell_timeout;
+        self.shell_env = shell_env;
         self
     }
 
@@ -359,10 +366,13 @@ impl ScriptHost for DaemonScriptHost {
         // With a sandbox, build the command that runs inside the current stage's
         // container / namespace; otherwise run the shell directly on the host
         // (both target the agent workdir). Same routing as the built-in shell tool.
-        let cmd = match &self.sandbox {
+        let mut cmd = match &self.sandbox {
             Some(sb) => sb.build_command(shell, flag, command, &self.workdir),
             None => host_shell_command(shell, flag, command, &self.workdir),
         };
+        // Same withholding the built-in shell tool applies. A script that has
+        // `shell` would otherwise be the way around the `env_var` gate above.
+        self.shell_env.apply(&mut cmd);
         self.io.run_shell(cmd, self.shell_timeout)
     }
 
@@ -1742,7 +1752,7 @@ mod tests {
         assert!(sb.is_some(), "namespace warn config yields a manager");
         let io = RecordingIo::arc();
         let host = DaemonScriptHost::with_io(all_allowed(), PathBuf::from("/w"), io.clone())
-            .with_shell(sb, Duration::from_secs(5));
+            .with_shell(sb, Duration::from_secs(5), Default::default());
         assert_eq!(host.shell("ls").unwrap(), "s");
         assert!(
             io.calls

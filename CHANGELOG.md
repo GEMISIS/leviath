@@ -13,6 +13,22 @@ same list.
 
 ## Unreleased
 
+- **Security.** A shell tool inherited the daemon's entire environment, so every
+  `shell` call, Rhai `shell()` and command seed could see `ANTHROPIC_API_KEY`,
+  `GITHUB_TOKEN`, `LEVIATH_API_TOKEN` and whatever else the person who started
+  the daemon had exported - one `env` in tool output leaked the lot, and a script
+  with `shell` was a way around the `env_var` gate. New `[security] shell_env`
+  decides what a child sees, defaulting to `filtered`: credential-shaped names
+  are withheld, `SSH_AUTH_SOCK` is deliberately kept so `git push` over agent
+  keys keeps working, and every toolchain variable (`PATH`, `CARGO_HOME`,
+  `JAVA_HOME`, `VIRTUAL_ENV`, `NVM_DIR`, `GOPATH`, `DOCKER_HOST`) passes
+  through. `strict` drops the `SSH_AUTH_SOCK` carve-out and also withholds
+  `AWS_PROFILE`, `KUBECONFIG` and friends; `custom` withholds exactly what
+  `shell_env_withhold` names and infers nothing; `inherit` is the old behaviour.
+  `allow_env_vars` hands a specific name over under every mode.
+  This is defence in depth against accidental leakage rather than a boundary: a
+  granted shell can still `cat ~/.leviath/config.toml`. Use `[sandbox]` for a
+  boundary.
 - **Security.** An installed blueprint could pre-approve a tool you had never
   configured, which is the normal state for most tools - nobody writes
   `shell = "ask"` into their config, since that is already the default. So a

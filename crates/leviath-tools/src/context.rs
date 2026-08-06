@@ -19,6 +19,45 @@ pub struct ToolContext {
     /// updates when two workers touch the same file. Different files never
     /// contend.
     file_locks: Arc<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Which of the daemon's environment variables a shell command inherits.
+    /// Resolved from `[security]` at spawn; the default withholds
+    /// credential-shaped names.
+    pub(crate) shell_env: ShellEnvPolicy,
+}
+
+/// The resolved `[security] shell_env` decision for one run.
+///
+/// Carried as data rather than consulted from config at each call, so the
+/// executor has no opinion about where the decision came from and the same
+/// struct serves the shell tool, a Rhai `shell()`, and a command seed.
+#[derive(Debug, Clone, Default)]
+pub struct ShellEnvPolicy {
+    pub mode: leviath_core::ShellEnvMode,
+    pub allow_env_vars: Vec<String>,
+    pub withhold: Vec<String>,
+}
+
+impl ShellEnvPolicy {
+    /// Strip the variables this policy withholds from `cmd`.
+    ///
+    /// Applied to a built `Command` rather than to an environment map, so it
+    /// covers the sandboxed branch as well as the host one - a container that
+    /// inherits the daemon's environment leaks exactly as much as a bare shell.
+    pub fn apply(&self, cmd: &mut tokio::process::Command) -> Vec<String> {
+        let names: Vec<String> = std::env::vars_os()
+            .filter_map(|(k, _)| k.into_string().ok())
+            .collect();
+        let withheld = leviath_core::withheld_child_vars(
+            names.iter().map(String::as_str),
+            self.mode,
+            &self.allow_env_vars,
+            &self.withhold,
+        );
+        for name in &withheld {
+            cmd.env_remove(name);
+        }
+        withheld
+    }
 }
 
 impl ToolContext {
@@ -29,6 +68,7 @@ impl ToolContext {
             workdir,
             read_paths: leviath_core::ReadPathPolicy::inactive(),
             file_locks: Arc::new(Mutex::new(HashMap::new())),
+            shell_env: ShellEnvPolicy::default(),
         }
     }
 
@@ -36,6 +76,12 @@ impl ToolContext {
     /// [`BuiltinTools::with_shell_executor`].
     pub fn with_read_paths(mut self, policy: leviath_core::ReadPathPolicy) -> Self {
         self.read_paths = policy;
+        self
+    }
+
+    /// Attach the `[security] shell_env` decision resolved at spawn.
+    pub fn with_shell_env(mut self, policy: ShellEnvPolicy) -> Self {
+        self.shell_env = policy;
         self
     }
 
@@ -127,4 +173,69 @@ pub fn tool_name_spellings(name: &str) -> impl Iterator<Item = &str> {
 pub trait ShellExecutor: Send + Sync {
     /// Build the process that runs `command` via `shell flag` for `workdir`.
     fn build_command(&self, shell: &str, flag: &str, command: &str, workdir: &Path) -> Command;
+}
+
+#[cfg(test)]
+mod shell_env_tests {
+    use super::*;
+
+    /// Asserts on the *built* command rather than a spawned one: `get_envs`
+    /// reports an explicit removal as `(name, None)`, which is deterministic on
+    /// every platform and needs no child process.
+    fn removed(policy: &ShellEnvPolicy) -> Vec<String> {
+        let mut cmd = Command::new("sh");
+        policy.apply(&mut cmd);
+        cmd.as_std()
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .filter_map(|(k, _)| k.to_str().map(str::to_string))
+            .collect()
+    }
+
+    /// The seam works end to end: a credential-shaped variable present in the
+    /// daemon's own environment is removed from the child, and `PATH` - which
+    /// every real command needs - is not.
+    #[test]
+    fn the_default_policy_strips_a_credential_but_not_the_path() {
+        temp_env::with_vars(
+            [
+                ("LEV_TEST_FAKE_API_KEY", Some("secret")),
+                ("LEV_TEST_ORDINARY", Some("fine")),
+            ],
+            || {
+                let out = removed(&ShellEnvPolicy::default());
+                assert!(out.iter().any(|n| n == "LEV_TEST_FAKE_API_KEY"));
+                assert!(!out.iter().any(|n| n == "LEV_TEST_ORDINARY"));
+                assert!(!out.iter().any(|n| n == "PATH"));
+            },
+        );
+    }
+
+    /// The builder carries the decision through to where the executor reads it.
+    /// Without this the policy resolves at spawn and is then dropped on the
+    /// floor, which every other assertion here would still pass.
+    #[test]
+    fn the_builder_carries_the_policy_to_the_context() {
+        let ctx = ToolContext::new(std::env::temp_dir()).with_shell_env(ShellEnvPolicy {
+            mode: leviath_core::ShellEnvMode::Custom,
+            withhold: vec!["LEV_TEST_NAMED".to_string()],
+            ..Default::default()
+        });
+        assert_eq!(ctx.shell_env.mode, leviath_core::ShellEnvMode::Custom);
+        temp_env::with_var("LEV_TEST_NAMED", Some("x"), || {
+            assert_eq!(removed(&ctx.shell_env), ["LEV_TEST_NAMED"]);
+        });
+    }
+
+    /// `inherit` is the escape hatch, and it must actually touch nothing.
+    #[test]
+    fn inherit_removes_nothing() {
+        temp_env::with_var("LEV_TEST_FAKE_API_KEY", Some("secret"), || {
+            let policy = ShellEnvPolicy {
+                mode: leviath_core::ShellEnvMode::Inherit,
+                ..Default::default()
+            };
+            assert!(removed(&policy).is_empty());
+        });
+    }
 }

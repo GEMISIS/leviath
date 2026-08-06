@@ -249,6 +249,75 @@ pub fn dotenv_var_allowed(name: &str) -> bool {
         && !DOTENV_DENY_PREFIXES.iter().any(|p| upper.starts_with(p))
 }
 
+/// How much of the daemon's environment a shell tool inherits.
+///
+/// A fourth question again, and a fourth shape. A shell tool is a child we hand
+/// over to, like an MCP server - but unlike one, it must keep behaving like the
+/// user's own shell, so [`child_env_allowed`]'s 28-name allowlist is wrong here:
+/// it would strip `CARGO_HOME`, `JAVA_HOME`, `NVM_DIR`, `VIRTUAL_ENV`, `GOPATH`
+/// and break every real toolchain. The name-shape denylist is the right
+/// instrument, and the only real question is how far it reaches.
+///
+/// Be honest about what this buys. With `cat` and `grep` on the default safe
+/// list, a granted shell can read `~/.leviath/config.toml` and find the provider
+/// key anyway. This is defence in depth against *accidental* leakage - an env
+/// dump in tool output, a `printenv` in a log, a subprocess that phones home -
+/// and it closes the seed-command case, where nothing was ever approved. It is
+/// not a boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShellEnvMode {
+    /// Withhold credential-shaped names, but hand over `SSH_AUTH_SOCK`.
+    ///
+    /// The carve-out is deliberate and is why this can be the default: the
+    /// agent socket is on the credential-name list, and withholding it breaks
+    /// `git push` over agent keys, which is one of the most ordinary things an
+    /// agent does in a shell.
+    #[default]
+    Filtered,
+    /// The full name-shape denylist, `SSH_AUTH_SOCK` included - and with it
+    /// `AWS_PROFILE`, `AWS_REGION`, `KUBECONFIG`, `NETRC`. Breaks `git push`,
+    /// `aws` and `kubectl` in a shell tool until those names are listed in
+    /// `[security] allow_env_vars`.
+    Strict,
+    /// Ignore the shape heuristic entirely: withhold exactly what
+    /// `[security] shell_env_withhold` names, and nothing else. For an
+    /// environment whose variable names the heuristic reads wrong in either
+    /// direction.
+    Custom,
+    /// Hand the whole environment over, as before this setting existed.
+    Inherit,
+}
+
+/// The variables in `names` a shell tool must not inherit.
+///
+/// Returns names rather than mutating a `Command`, so the decision is a pure
+/// function testable without spawning anything - which is what keeps its tests
+/// deterministic on Windows.
+///
+/// `allow_env_vars` wins under every mode. It already means "yes, this agent is
+/// meant to have that" for a Rhai `env_var` read, and one list with one meaning
+/// is worth more than a second list that means almost the same thing.
+pub fn withheld_child_vars<'a>(
+    names: impl Iterator<Item = &'a str>,
+    mode: ShellEnvMode,
+    allow_env_vars: &[String],
+    custom_withhold: &[String],
+) -> Vec<String> {
+    let listed = |list: &[String], name: &str| list.iter().any(|e| e.eq_ignore_ascii_case(name));
+    names
+        .filter(|name| match mode {
+            ShellEnvMode::Inherit => false,
+            ShellEnvMode::Custom => listed(custom_withhold, name) && !listed(allow_env_vars, name),
+            ShellEnvMode::Filtered if name.eq_ignore_ascii_case("SSH_AUTH_SOCK") => false,
+            ShellEnvMode::Filtered | ShellEnvMode::Strict => {
+                !script_env_allowed(name, allow_env_vars)
+            }
+        })
+        .map(str::to_string)
+        .collect()
+}
+
 /// Whether `name` looks like it holds a credential.
 ///
 /// Used to decide whether an explicit `env_var("NAME")` read from an agent's
@@ -375,6 +444,114 @@ mod tests {
         ] {
             assert!(is_sensitive_env_name(name), "{name} should be sensitive");
             assert!(!child_env_allowed(name), "{name} must not reach a child");
+        }
+    }
+
+    // ─── what a shell tool inherits ───────────────────────────────────────
+
+    /// A sample environment spanning what a real daemon holds: credentials it
+    /// must not hand over, and the toolchain variables every real command needs.
+    const SAMPLE_ENV: &[&str] = &[
+        "ANTHROPIC_API_KEY",
+        "GITHUB_TOKEN",
+        "AWS_SECRET_ACCESS_KEY",
+        "LEVIATH_API_TOKEN",
+        "DATABASE_URL",
+        "SSH_AUTH_SOCK",
+        "KUBECONFIG",
+        "PATH",
+        "HOME",
+        "CARGO_HOME",
+        "JAVA_HOME",
+        "VIRTUAL_ENV",
+        "NVM_DIR",
+        "GOPATH",
+        "DOCKER_HOST",
+        "TERM",
+    ];
+
+    fn withheld(mode: ShellEnvMode, allow: &[&str], custom: &[&str]) -> Vec<String> {
+        let allow: Vec<String> = allow.iter().map(|s| s.to_string()).collect();
+        let custom: Vec<String> = custom.iter().map(|s| s.to_string()).collect();
+        withheld_child_vars(SAMPLE_ENV.iter().copied(), mode, &allow, &custom)
+    }
+
+    /// The default. Credentials are withheld, every toolchain variable passes,
+    /// and `SSH_AUTH_SOCK` is the deliberate carve-out that lets this be the
+    /// default at all - without it `git push` over agent keys breaks in a shell
+    /// tool, which is one of the most ordinary things an agent does.
+    #[test]
+    fn filtered_withholds_credentials_and_keeps_toolchains() {
+        let out = withheld(ShellEnvMode::Filtered, &[], &[]);
+        for secret in [
+            "ANTHROPIC_API_KEY",
+            "GITHUB_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+            "LEVIATH_API_TOKEN",
+            "DATABASE_URL",
+        ] {
+            assert!(out.iter().any(|n| n == secret), "{secret} must be withheld");
+        }
+        for kept in [
+            "SSH_AUTH_SOCK",
+            "PATH",
+            "HOME",
+            "CARGO_HOME",
+            "JAVA_HOME",
+            "VIRTUAL_ENV",
+            "NVM_DIR",
+            "GOPATH",
+            "DOCKER_HOST",
+            "TERM",
+        ] {
+            assert!(!out.iter().any(|n| n == kept), "{kept} must pass through");
+        }
+    }
+
+    /// `strict` drops the carve-out, which is the whole difference, and takes
+    /// the credential-file names with it.
+    #[test]
+    fn strict_also_withholds_the_agent_socket() {
+        let out = withheld(ShellEnvMode::Strict, &[], &[]);
+        assert!(out.iter().any(|n| n == "SSH_AUTH_SOCK"));
+        assert!(out.iter().any(|n| n == "KUBECONFIG"));
+        // Still not a toolchain-breaker.
+        assert!(!out.iter().any(|n| n == "PATH"));
+        assert!(!out.iter().any(|n| n == "CARGO_HOME"));
+    }
+
+    /// `custom` ignores the shape heuristic entirely, for an environment whose
+    /// names it reads wrong in either direction.
+    #[test]
+    fn custom_withholds_exactly_what_it_names() {
+        let out = withheld(ShellEnvMode::Custom, &[], &["home", "MY_UNUSUAL_NAME"]);
+        assert_eq!(out, ["HOME"], "case-insensitive, and nothing inferred");
+        assert!(
+            !out.iter().any(|n| n == "ANTHROPIC_API_KEY"),
+            "the heuristic is off, so a credential passes unless named"
+        );
+    }
+
+    #[test]
+    fn inherit_withholds_nothing() {
+        assert!(withheld(ShellEnvMode::Inherit, &[], &["PATH"]).is_empty());
+    }
+
+    /// `allow_env_vars` wins under every mode. One list with one meaning is
+    /// worth more than a second list that means almost the same thing.
+    #[test]
+    fn an_allowlisted_name_is_handed_over_under_every_mode() {
+        for mode in [
+            ShellEnvMode::Filtered,
+            ShellEnvMode::Strict,
+            ShellEnvMode::Custom,
+        ] {
+            let out = withheld(mode, &["anthropic_api_key", "HOME"], &["HOME"]);
+            assert!(
+                !out.iter().any(|n| n == "ANTHROPIC_API_KEY"),
+                "{mode:?} should honour allow_env_vars"
+            );
+            assert!(!out.iter().any(|n| n == "HOME"), "{mode:?}");
         }
     }
 

@@ -377,6 +377,31 @@ pub struct SecurityConfig {
     #[serde(default)]
     pub allow_env_vars: Vec<String>,
 
+    /// How much of the daemon's environment a `shell` tool call, a Rhai
+    /// `shell()` host call, and a region's command seed inherit.
+    ///
+    /// The daemon holds provider keys, `LEVIATH_API_TOKEN`, and whatever
+    /// credentials the person who started it had exported. Handing all of that
+    /// to every shell command means a single `env` in tool output leaks the lot.
+    ///
+    /// `filtered` (the default) withholds credential-shaped names but keeps
+    /// `SSH_AUTH_SOCK`, so `git push` over agent keys still works. `strict`
+    /// drops the carve-out and also takes `AWS_PROFILE`, `KUBECONFIG` and
+    /// friends. `custom` ignores the shape heuristic and withholds exactly what
+    /// [`Self::shell_env_withhold`] names. `inherit` is the old behaviour.
+    ///
+    /// Toolchain variables - `PATH`, `HOME`, `CARGO_HOME`, `JAVA_HOME`,
+    /// `VIRTUAL_ENV`, `NVM_DIR`, `GOPATH`, `DOCKER_HOST` - pass through under
+    /// every mode. [`Self::allow_env_vars`] hands a specific name over under
+    /// every mode too.
+    #[serde(default)]
+    pub shell_env: leviath_core::ShellEnvMode,
+
+    /// The names `shell_env = "custom"` withholds. Ignored under every other
+    /// mode, where the name-shape heuristic decides instead.
+    #[serde(default)]
+    pub shell_env_withhold: Vec<String>,
+
     /// Whether a blueprint's `[read_paths]` declarations are honored as-is.
     ///
     /// **Off by default.** A `[read_paths]` block travels inside the
@@ -475,6 +500,8 @@ impl Default for SecurityConfig {
             allow_seed_commands: true,
             allow_local_network: false,
             allow_env_vars: Vec::new(),
+            shell_env: leviath_core::ShellEnvMode::default(),
+            shell_env_withhold: Vec::new(),
             allow_blueprint_read_paths: false,
             allow_blueprint_safe_commands: false,
             allow_blueprint_permissions: false,
@@ -3488,6 +3515,8 @@ enabled = false
                 read_paths: vec!["~/.leviath/runs".to_string()],
                 credential_store: leviath_core::CredentialStoreKind::Keychain,
                 allow_blueprint_permissions: false,
+                shell_env: leviath_core::ShellEnvMode::default(),
+                shell_env_withhold: Vec::new(),
             },
             agent_read_paths: HashMap::from([(
                 "cto".to_string(),
