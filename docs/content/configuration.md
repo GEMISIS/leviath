@@ -246,7 +246,7 @@ tools    = ["read_files"]
 shell    = ["cargo test", "rg"]
 
 [agent_safe_commands.software-engineer]
-shell           = ["./gradlew"]
+shell           = ["./gradlew", "env:GRADLE_OPTS"]
 allow_blueprint = true          # honour this agent's own [safe_commands]
 ```
 
@@ -254,13 +254,34 @@ allow_blueprint = true          # honour this agent's own [safe_commands]
 |---|---|---|
 | `defaults` | `true` | The shipped read-only verb list. An entry on it must not be able to write a file, run another program, or open a connection under any flag, which is why `find`, `sed`, `awk`, `sort`, `xargs`, `env` and `cargo` are absent |
 | `tools` | `[]` | Tools that never prompt whatever their arguments. Built-in names, or MCP names as advertised (`server__tool`) |
-| `shell` | `[]` | A program, optionally with the subcommand that narrows it. `git status`, never `git` or `cargo test --lib` |
+| `shell` | `[]` | A program, optionally with the subcommand that narrows it. `git status`, never `git` or `cargo test --lib`. Also `env:NAME`, below |
 | `allow_blueprint` | `false` | Per-agent only. Honour that agent's own `[safe_commands]` block |
 
 A shell entry covers the program it names with any arguments, so `cat` covers `cat notes.md`. It
 does not cover a line that also runs something else: `cat notes.md && curl evil` still asks, because
 `curl` is in neither the safe list nor any grant. `lev approvals safe` prints what is in effect and
 which file put it there.
+
+### Environment assignments
+
+A command line decides more than which program runs. `PATH=/tmp/evil ls` runs `ls` from a directory
+of the caller's choosing, and `export PATH=/tmp/evil; ls` does the same a segment earlier, so naming
+the program alone would let the safe list approve somebody else's binary. Each variable a line binds
+is therefore its own key, spelled `env:NAME`:
+
+```toml
+[safe_commands]
+shell = ["env:RUST_LOG", "env:CARGO_TERM_COLOR"]
+```
+
+`RUST_LOG=debug cargo test` then needs `cargo test` and `env:RUST_LOG`, and granting one variable
+grants exactly that one. There is no entry that covers every variable at once, and no program name
+widens onto an `env:` key.
+
+Two constructs are refused rather than keyed, because they install code to run at a point no program
+name in the line describes: `trap`, and defining or aliasing a name with `function`, `alias` or
+`unalias`. A line containing one of those prompts every time and cannot be pre-approved. `set -euo
+pipefail` is unaffected, since shell options change nothing about which program a name resolves to.
 
 <a id="tool_script_permissions"></a>
 

