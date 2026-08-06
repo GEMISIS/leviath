@@ -50,8 +50,22 @@ struct Cli {
     command: Commands,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // An explicit runtime instead of `#[tokio::main]` for one number: script
+    // providers execute every in-flight inference call on a blocking-pool
+    // thread, and tokio's default cap of 512 silently gated
+    // `[limits] max_concurrent_inferences` above that - a 1024-permit pool
+    // queued at the thread layer where nothing measured or reported it. 2048
+    // covers the largest supported pool; threads are spawned on demand and
+    // reaped when idle, so an idle daemon pays nothing for the headroom.
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .max_blocking_threads(2048)
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     // Pre-scan argv for dynamic `--<region>` seed flags on `run` (region names
     // are blueprint-defined, so clap can't declare them), then parse the rest
     // and fold the extracted flags back in (both steps are tested lib seams).
