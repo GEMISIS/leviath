@@ -2,11 +2,14 @@
 //!
 //! A release is triggered by the workspace version moving, which makes the bump
 //! the single most consequential edit in the repo - and it is spread across
-//! twelve lines of the root manifest. `[workspace.package] version` is what
-//! every crate inherits, and the eleven `[workspace.dependencies]` entries each
-//! repeat it because `cargo publish` refuses a path dependency with no version
+//! thirteen lines of two manifests. `[workspace.package] version` is what every
+//! crate inherits, and the eleven `[workspace.dependencies]` entries each repeat
+//! it because `cargo publish` refuses a path dependency with no version
 //! requirement. Cargo offers no way to make those requirements inherit the
 //! workspace version, so they have to be written out, and they have to agree.
+//! The thirteenth is `leviath-cli`'s allocator pin, which lives in that crate's
+//! own manifest on purpose - only the composition-root binary should pick an
+//! allocator - and so is invisible from the root.
 //!
 //! Getting that wrong is quiet. Within a `0.1.x` line a stale `version =
 //! "0.1.2"` pin is a `^0.1.2` requirement that `0.1.3` satisfies, so everything
@@ -14,8 +17,13 @@
 //! previous version. It only turns loud on a bump that crosses the caret
 //! boundary (`0.1.x` to `0.2.0`), and by then the alpha shipped a week earlier.
 //!
-//! So: `set` writes all twelve at once, and `check` is the CI guard that fails
-//! a hand-edit which touched only some of them.
+//! So: `set` writes all thirteen at once, and `check` is the CI guard that
+//! fails a hand-edit which touched only some of them.
+//!
+//! `check` also compares the two `[profile.release]` blocks, for the same
+//! reason: `leviath-cli`'s copy is what a `cargo install leviath-cli` build
+//! uses (that manifest is the root when there is no workspace), so drift there
+//! ships a binary built differently from the released one.
 
 use anyhow::{Context, Result};
 
@@ -24,6 +32,15 @@ use crate::coverage::Runner;
 /// Path of the manifest holding every version declaration, relative to the
 /// workspace root.
 const MANIFEST: &str = "Cargo.toml";
+
+/// Path of the `leviath-cli` manifest, relative to the workspace root.
+///
+/// The twelve declarations in the root manifest are not all of them: this one
+/// carries a thirteenth (the allocator pin, deliberately kept out of the
+/// workspace table) and a copy of `[profile.release]` that a `cargo install`
+/// build depends on. Both are checked here, because both are invisible from
+/// the root.
+const CLI_MANIFEST: &str = "crates/leviath-cli/Cargo.toml";
 
 /// Path of the changelog whose `## Unreleased` heading a bump rolls over.
 const CHANGELOG: &str = "CHANGELOG.md";
@@ -97,13 +114,25 @@ pub fn workspace_version(manifest: &str) -> Result<String> {
 pub fn pinned_versions(manifest: &str) -> Vec<(String, String)> {
     manifest
         .lines()
-        .filter(|line| line.contains("path = \"crates/"))
+        .filter(|line| is_workspace_path_dep(line))
         .filter_map(|line| {
             let name = line.split(" = ").next()?.trim();
             let pinned = pin_of(line)?;
             Some((name.to_owned(), pinned))
         })
         .collect()
+}
+
+/// Whether a dependency line names a crate in this workspace by path.
+///
+/// Two spellings, because the pins live in two manifests. The root's
+/// `[workspace.dependencies]` reach down (`path = "crates/..."`), and
+/// `leviath-cli`'s allocator pin reaches sideways (`path = "../..."`) - it is
+/// kept out of the workspace table on purpose, so only the composition-root
+/// binary picks an allocator. A third-party dependency carries no path at all,
+/// so a path is enough to identify one of ours.
+fn is_workspace_path_dep(line: &str) -> bool {
+    line.contains("path = \"crates/") || line.contains("path = \"../")
 }
 
 /// The version a dependency line pins, if it pins one.
@@ -130,11 +159,69 @@ fn unquote(text: &str) -> Option<String> {
 /// a pure function over the manifest text.
 pub fn disagreeing_pins(manifest: &str) -> Result<Vec<String>> {
     let expected = workspace_version(manifest)?;
-    Ok(pinned_versions(manifest)
+    Ok(disagreeing_pins_against(manifest, &expected))
+}
+
+/// The same check against a version supplied from elsewhere, for a manifest
+/// that inherits its version rather than declaring one.
+pub fn disagreeing_pins_against(manifest: &str, expected: &str) -> Vec<String> {
+    pinned_versions(manifest)
         .into_iter()
-        .filter(|(_, pinned)| *pinned != expected)
+        .filter(|(_, pinned)| pinned != expected)
         .map(|(name, pinned)| format!("{name} pins {pinned}"))
-        .collect())
+        .collect()
+}
+
+/// The `[profile.release]` settings a manifest declares, as `(key, value)` in
+/// declaration order, with comments and blank lines dropped.
+///
+/// A section ends at the next `[header]`, which is also how cargo reads it.
+pub fn release_profile(manifest: &str) -> Vec<(String, String)> {
+    manifest
+        .lines()
+        .skip_while(|line| line.trim() != "[profile.release]")
+        .skip(1)
+        .take_while(|line| !line.trim_start().starts_with('['))
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let (key, value) = line.split_once('=')?;
+            Some((key.trim().to_owned(), value.trim().to_owned()))
+        })
+        .collect()
+}
+
+/// Report the release-profile settings that differ between the two manifests.
+///
+/// `leviath-cli` carries a copy of the root's `[profile.release]` because a
+/// `cargo install leviath-cli` build has no workspace - that manifest is the
+/// root there, and without the copy cargo's defaults apply, silently dropping
+/// `overflow-checks` so token and budget arithmetic wraps instead of panicking.
+/// The copy's comment says it must be kept in sync; this is what makes that
+/// enforceable rather than aspirational.
+pub fn release_profile_drift(root: &str, cli: &str) -> Vec<String> {
+    let (root, cli) = (release_profile(root), release_profile(cli));
+    let mut drift: Vec<String> = Vec::new();
+
+    for (key, value) in &root {
+        match cli.iter().find(|(k, _)| k == key) {
+            Some((_, other)) if other == value => {}
+            Some((_, other)) => drift.push(format!(
+                "{key} is {value} at the root, {other} in {CLI_MANIFEST}"
+            )),
+            None => drift.push(format!("{key} = {value} is missing from {CLI_MANIFEST}")),
+        }
+    }
+    for (key, value) in &cli {
+        if !root.iter().any(|(k, _)| k == key) {
+            drift.push(format!(
+                "{key} = {value} in {CLI_MANIFEST} is not at the root"
+            ));
+        }
+    }
+    drift
 }
 
 // ── Set ──────────────────────────────────────────────────────────────────────
@@ -154,10 +241,8 @@ pub fn set_versions(manifest: &str, new: &str) -> Result<String> {
         if line.starts_with("version = ") && !rewrote_workspace {
             rewrote_workspace = true;
             out.push(format!("version = \"{new}\""));
-        } else if line.contains("path = \"crates/") && pin_of(line).is_some() {
-            out.push(replace_pin(line, new));
         } else {
-            out.push(line.to_owned());
+            out.push(rewrite_pin(line, new));
         }
     }
 
@@ -165,11 +250,38 @@ pub fn set_versions(manifest: &str, new: &str) -> Result<String> {
         rewrote_workspace,
         "no `version = \"...\"` line in the root Cargo.toml"
     );
-    let mut text = out.join("\n");
-    if manifest.ends_with('\n') {
+    Ok(rejoin(manifest, out))
+}
+
+/// Rewrite every intra-workspace pin in a manifest that declares no version of
+/// its own.
+///
+/// `leviath-cli`'s manifest inherits its version from the workspace, so it has
+/// no `version = "..."` line to anchor on - but it does carry a pin, and that
+/// pin has to move with the rest.
+pub fn set_pins(manifest: &str, new: &str) -> Result<String> {
+    validate_semver(new)?;
+    let out = manifest.lines().map(|l| rewrite_pin(l, new)).collect();
+    Ok(rejoin(manifest, out))
+}
+
+/// Swap the pinned version on a dependency line, or hand the line back as-is.
+fn rewrite_pin(line: &str, new: &str) -> String {
+    if is_workspace_path_dep(line) && pin_of(line).is_some() {
+        replace_pin(line, new)
+    } else {
+        line.to_owned()
+    }
+}
+
+/// Join rewritten lines back together, preserving whether the original ended
+/// in a newline.
+fn rejoin(original: &str, lines: Vec<String>) -> String {
+    let mut text = lines.join("\n");
+    if original.ends_with('\n') {
         text.push('\n');
     }
-    Ok(text)
+    text
 }
 
 /// Swap the version a dependency line pins, leaving the rest of the line -
@@ -242,28 +354,45 @@ pub fn run(mode: VersionMode) -> Result<()> {
 pub fn run_with(runner: &dyn Runner, mode: VersionMode) -> Result<()> {
     let manifest = std::fs::read_to_string(MANIFEST)
         .with_context(|| format!("reading {MANIFEST} - run this from the workspace root"))?;
+    let cli_manifest = std::fs::read_to_string(CLI_MANIFEST)
+        .with_context(|| format!("reading {CLI_MANIFEST} - run this from the workspace root"))?;
 
     match mode {
         VersionMode::Check => {
-            let disagreeing = disagreeing_pins(&manifest)?;
-            if disagreeing.is_empty() {
-                println!(
-                    "Every intra-workspace pin matches [workspace.package] version {}.",
-                    workspace_version(&manifest)?
-                );
-                return Ok(());
+            let expected = workspace_version(&manifest)?;
+            let mut disagreeing = disagreeing_pins(&manifest)?;
+            for name in disagreeing_pins_against(&cli_manifest, &expected) {
+                disagreeing.push(format!("{name} (in {CLI_MANIFEST})"));
             }
-            anyhow::bail!(
-                "[workspace.package] version is {}, but {}. \
+            anyhow::ensure!(
+                disagreeing.is_empty(),
+                "[workspace.package] version is {expected}, but {}. \
                  Run `cargo xtask version <X.Y.Z>` rather than editing them by hand.",
-                workspace_version(&manifest)?,
                 disagreeing.join(", ")
-            )
+            );
+
+            let drift = release_profile_drift(&manifest, &cli_manifest);
+            anyhow::ensure!(
+                drift.is_empty(),
+                "{CLI_MANIFEST}'s [profile.release] has drifted from the root's: {}. \
+                 The copy exists because `cargo install leviath-cli` builds without a \
+                 workspace; the two must agree or the published binary is built \
+                 differently from the released one.",
+                drift.join("; ")
+            );
+
+            println!(
+                "Every intra-workspace pin matches [workspace.package] version {expected}, \
+                 and both [profile.release] blocks agree."
+            );
+            Ok(())
         }
         VersionMode::Set(new) => {
             let previous = workspace_version(&manifest)?;
             std::fs::write(MANIFEST, set_versions(&manifest, &new)?)
                 .with_context(|| format!("writing {MANIFEST}"))?;
+            std::fs::write(CLI_MANIFEST, set_pins(&cli_manifest, &new)?)
+                .with_context(|| format!("writing {CLI_MANIFEST}"))?;
 
             let changelog = std::fs::read_to_string(CHANGELOG)
                 .with_context(|| format!("reading {CHANGELOG}"))?;
@@ -301,6 +430,31 @@ mod tests {
         "leviath-core = { path = \"crates/leviath-core\", version = \"0.1.2\" }\n",
         "leviath-testkit = { path = \"crates/leviath-testkit\" }\n",
         "serde = { version = \"1.0\", features = [\"derive\"] }\n",
+    );
+
+    /// A manifest shaped like `leviath-cli`'s: no version of its own, one
+    /// sideways path pin, workspace-inherited deps, and a third-party pin that
+    /// must never be rewritten.
+    const CLI_MANIFEST_FIXTURE: &str = concat!(
+        "[package]\n",
+        "name = \"leviath-cli\"\n",
+        "version.workspace = true\n",
+        "\n",
+        "[dependencies]\n",
+        "mimalloc = { version = \"0.1\", optional = true }\n",
+        "leviath-alloc = { path = \"../leviath-alloc\", version = \"0.1.2\", optional = true }\n",
+        "leviath-core = { workspace = true }\n",
+    );
+
+    /// A manifest carrying a `[profile.release]` with prose between settings,
+    /// as the real root one does.
+    const MANIFEST_WITH_PROFILE: &str = concat!(
+        "[profile.release]\n",
+        "# Overflow panics instead of wrapping.\n",
+        "overflow-checks = true\n",
+        "\n",
+        "# One codegen unit and fat LTO.\n",
+        "lto = \"fat\"\n",
     );
 
     // ── Argument parsing ──────────────────────────────────────────────────────
@@ -414,6 +568,121 @@ mod tests {
             disagreeing_pins("leviath = { path = \"crates/leviath\", version = \"1.0.0\" }\n")
                 .is_err()
         );
+    }
+
+    // ── The second manifest ───────────────────────────────────────────────────
+
+    #[test]
+    fn a_sideways_pin_is_seen_at_all() {
+        let pins = pinned_versions(CLI_MANIFEST_FIXTURE);
+        assert_eq!(pins, vec![("leviath-alloc".to_owned(), "0.1.2".to_owned())]);
+    }
+
+    #[test]
+    fn a_stale_sideways_pin_is_reported() {
+        let stale = CLI_MANIFEST_FIXTURE.replace("version = \"0.1.2\"", "version = \"0.1.1\"");
+        assert_eq!(
+            disagreeing_pins_against(&stale, "0.1.2"),
+            vec!["leviath-alloc pins 0.1.1".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_workspace_inherited_dep_is_not_mistaken_for_a_pin() {
+        // `leviath-core = { workspace = true }` carries neither path nor
+        // version; reading it as a pin would report every such line as stale.
+        assert!(
+            !pinned_versions(CLI_MANIFEST_FIXTURE)
+                .iter()
+                .any(|(n, _)| n == "leviath-core")
+        );
+    }
+
+    #[test]
+    fn set_pins_moves_the_sideways_pin_and_leaves_everything_else() {
+        let out = set_pins(CLI_MANIFEST_FIXTURE, "0.2.0").unwrap();
+        assert!(out.contains("path = \"../leviath-alloc\", version = \"0.2.0\""));
+        assert!(
+            out.contains("mimalloc = { version = \"0.1\""),
+            "third-party pin moved: {out}"
+        );
+        assert!(out.ends_with('\n'));
+    }
+
+    #[test]
+    fn set_pins_rejects_a_malformed_version() {
+        assert!(set_pins(CLI_MANIFEST_FIXTURE, "nope").is_err());
+    }
+
+    #[test]
+    fn set_pins_does_not_need_a_workspace_version_line() {
+        // The whole reason this exists: leviath-cli inherits its version, so
+        // `set_versions` would fail on it for want of an anchor.
+        assert!(!CLI_MANIFEST_FIXTURE.contains("\nversion = \""));
+        assert!(set_pins(CLI_MANIFEST_FIXTURE, "0.2.0").is_ok());
+    }
+
+    // ── Release-profile parity ────────────────────────────────────────────────
+
+    #[test]
+    fn release_profile_reads_settings_and_skips_prose() {
+        assert_eq!(
+            release_profile(MANIFEST_WITH_PROFILE),
+            vec![
+                ("overflow-checks".to_owned(), "true".to_owned()),
+                ("lto".to_owned(), "\"fat\"".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn release_profile_stops_at_the_next_section() {
+        let extended = format!("{MANIFEST_WITH_PROFILE}\n[profile.dev]\nopt-level = 1\n");
+        assert!(
+            !release_profile(&extended)
+                .iter()
+                .any(|(k, _)| k == "opt-level")
+        );
+    }
+
+    #[test]
+    fn release_profile_of_a_manifest_without_one_is_empty() {
+        assert!(release_profile(MANIFEST).is_empty());
+    }
+
+    #[test]
+    fn identical_profiles_do_not_drift() {
+        assert!(release_profile_drift(MANIFEST_WITH_PROFILE, MANIFEST_WITH_PROFILE).is_empty());
+    }
+
+    #[test]
+    fn a_changed_setting_is_reported_with_both_values() {
+        let cli =
+            MANIFEST_WITH_PROFILE.replace("overflow-checks = true", "overflow-checks = false");
+        let drift = release_profile_drift(MANIFEST_WITH_PROFILE, &cli);
+        assert_eq!(drift.len(), 1, "{drift:?}");
+        assert!(
+            drift[0].contains("true") && drift[0].contains("false"),
+            "{drift:?}"
+        );
+    }
+
+    #[test]
+    fn a_setting_missing_from_the_copy_is_reported() {
+        // The failure that motivated this: `cargo install leviath-cli` silently
+        // building without overflow checks.
+        let cli = MANIFEST_WITH_PROFILE.replace("overflow-checks = true\n", "");
+        let drift = release_profile_drift(MANIFEST_WITH_PROFILE, &cli);
+        assert_eq!(drift.len(), 1, "{drift:?}");
+        assert!(drift[0].contains("missing"), "{drift:?}");
+    }
+
+    #[test]
+    fn a_setting_only_in_the_copy_is_reported() {
+        let cli = format!("{MANIFEST_WITH_PROFILE}panic = \"abort\"\n");
+        let drift = release_profile_drift(MANIFEST_WITH_PROFILE, &cli);
+        assert_eq!(drift.len(), 1, "{drift:?}");
+        assert!(drift[0].contains("panic"), "{drift:?}");
     }
 
     // ── Set ───────────────────────────────────────────────────────────────────
