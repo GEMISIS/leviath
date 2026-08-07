@@ -44,4 +44,10 @@ else
   info "         brew install ast-grep | cargo install ast-grep --locked | npm i -g @ast-grep/cli"
 fi
 
+# 5. Structural limits — file length, as a ratchet
+info "Checking structural limits..."
+cargo xtask structure \
+  || fail "A file is over its production-line limit. Split it by concern."
+pass "Structure OK"
+
 pass "All pre-commit checks passed."
