@@ -138,6 +138,12 @@ async fn execute_with_registry(
         println!("  name = \"basic_response\"");
         println!("  input = \"Hello\"");
         println!("  expect_contains = \"hello\"");
+        // The other two keys are deliberately not spelled out here: a second
+        // partial example is a second thing to drift. `expect_tool_call` and
+        // `max_tokens` were each parsed and ignored for months, which is what
+        // an undocumented format buys.
+        println!("\nAlso available: expect_tool_call, max_tokens.");
+        println!("See https://leviath.dev/docs/cli#lev-test-path for what each does.");
         return Ok(());
     }
 
