@@ -135,7 +135,7 @@ impl Dashboard {
 
 #[cfg(test)]
 mod tests {
-    use crate::commands::dashboard::test_support::make_test_dashboard;
+    use crate::commands::dashboard::test_support::{make_test_dashboard, rendered_buffer};
     use crate::commands::dashboard::types::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -183,6 +183,11 @@ mod tests {
                 dash.draw_toasts(f);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(
+            buf.trim().is_empty(),
+            "no toasts should draw nothing: {buf}"
+        );
     }
 
     #[test]
@@ -200,6 +205,8 @@ mod tests {
                 dash.draw_toasts(f);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Agent completed"), "{buf}");
     }
 
     #[test]
@@ -222,6 +229,9 @@ mod tests {
                 dash.draw_toasts(f);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Needs input"), "{buf}");
+        assert!(buf.contains("Agent failed"), "{buf}");
     }
 
     #[test]
@@ -234,6 +244,8 @@ mod tests {
                 dash.draw_help_overlay(f);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Run list"), "{buf}");
     }
 
     #[test]
@@ -246,6 +258,8 @@ mod tests {
                 dash.draw_help_overlay(f);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Run list"), "{buf}");
     }
 
     #[test]
@@ -280,16 +294,6 @@ mod tests {
     // rendering both the "Main list" and "Detail view"/"Input" sections
     // regardless of page would show the user keybindings for a page they
     // aren't on.
-
-    fn rendered_buffer(terminal: &Terminal<TestBackend>) -> String {
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect()
-    }
 
     #[test]
     fn draw_help_overlay_main_list_omits_detail_view_section() {

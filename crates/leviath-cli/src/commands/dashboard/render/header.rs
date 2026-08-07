@@ -172,7 +172,7 @@ impl Dashboard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::dashboard::test_support::make_test_dashboard;
+    use crate::commands::dashboard::test_support::{make_test_dashboard, rendered_buffer};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -221,6 +221,11 @@ mod tests {
                 dash.render_header_breadcrumb(f, area, &agent);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("ACTIVE"), "{buf}");
+        assert!(!buf.contains("WAITING"), "{buf}");
+        assert!(!buf.contains("COMPLETE"), "{buf}");
+        assert!(!buf.contains("CANCEL"), "{buf}");
     }
 
     #[test]
@@ -235,6 +240,11 @@ mod tests {
                 dash.render_header_breadcrumb(f, area, &agent);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("WAITING"), "{buf}");
+        assert!(!buf.contains("ACTIVE"), "{buf}");
+        assert!(!buf.contains("COMPLETE"), "{buf}");
+        assert!(!buf.contains("CANCEL"), "{buf}");
     }
 
     #[test]
@@ -249,6 +259,11 @@ mod tests {
                 dash.render_header_breadcrumb(f, area, &agent);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("COMPLETE"), "{buf}");
+        assert!(!buf.contains("ACTIVE"), "{buf}");
+        assert!(!buf.contains("WAITING"), "{buf}");
+        assert!(!buf.contains("CANCEL"), "{buf}");
     }
 
     #[test]
@@ -263,6 +278,11 @@ mod tests {
                 dash.render_header_breadcrumb(f, area, &agent);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("ERROR: boom"), "{buf}");
+        assert!(!buf.contains("ACTIVE"), "{buf}");
+        assert!(!buf.contains("WAITING"), "{buf}");
+        assert!(!buf.contains("COMPLETE"), "{buf}");
     }
 
     #[test]
@@ -277,6 +297,11 @@ mod tests {
                 dash.render_header_breadcrumb(f, area, &agent);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("CANCEL"), "{buf}");
+        assert!(!buf.contains("ACTIVE"), "{buf}");
+        assert!(!buf.contains("WAITING"), "{buf}");
+        assert!(!buf.contains("COMPLETE"), "{buf}");
     }
 
     #[test]
@@ -292,6 +317,8 @@ mod tests {
                 dash.render_header_breadcrumb(f, area, &agent);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("test-agent"), "{buf}");
     }
 
     #[test]
@@ -307,6 +334,8 @@ mod tests {
                 dash.render_header_breadcrumb(f, area, &agent);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("ACTIVE"), "{buf}");
     }
 
     #[test]
@@ -322,6 +351,8 @@ mod tests {
                 dash.render_header_breadcrumb(f, area, &agent);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("WAITING"), "{buf}");
     }
 
     #[test]
@@ -336,6 +367,8 @@ mod tests {
                 dash.render_info_strip(f, area, &agent, 120);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("test task"), "{buf}");
     }
 
     #[test]
@@ -361,6 +394,8 @@ mod tests {
                 dash.render_info_strip(f, area, &agent, 120);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("test task"), "{buf}");
     }
 
     #[test]
@@ -376,6 +411,8 @@ mod tests {
                 dash.render_info_strip(f, area, &agent, 120);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("claude-sonnet-4"), "{buf}");
     }
 
     #[test]
@@ -391,6 +428,8 @@ mod tests {
                 dash.render_info_strip(f, area, &agent, 120);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("test task"), "{buf}");
     }
 
     #[test]
@@ -407,6 +446,11 @@ mod tests {
                 dash.render_info_strip(f, area, &agent, 120);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("~/projects/test"), "{buf}");
+        // The point of the substitution: the real home path is gone, not just
+        // accompanied by a tilde somewhere on the line.
+        assert!(!buf.contains(&*home.to_string_lossy()), "{buf}");
     }
 
     #[test]
@@ -424,6 +468,8 @@ mod tests {
                 dash.render_info_strip(f, area, &agent, 120);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("test task"), "{buf}");
     }
 
     #[test]
@@ -443,5 +489,7 @@ mod tests {
                 dash.render_info_strip(f, area, &agent, 120);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("test task"), "{buf}");
     }
 }
