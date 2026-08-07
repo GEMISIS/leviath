@@ -35,9 +35,7 @@ fn remove_agent_with(
     name: &str,
     uninstall: &dyn Fn(&str) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    // Verify it's actually installed first
-    let installed = installer.get_installed(name).unwrap();
-    if installed.is_none() {
+    if installer.get_installed(name).is_none() {
         anyhow::bail!(
             "Agent '{}' is not installed. Use `lev list` to see installed agents.",
             name
@@ -109,11 +107,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let installer = leviath_package::AgentInstaller::with_install_dir(dir.path().to_path_buf());
         install_test_agent(&installer, "my-agent");
-        assert!(installer.get_installed("my-agent").unwrap().is_some());
+        assert!(installer.get_installed("my-agent").is_some());
 
         remove_agent(&installer, "my-agent").unwrap();
 
-        assert!(installer.get_installed("my-agent").unwrap().is_none());
+        assert!(installer.get_installed("my-agent").is_none());
     }
 
     // ─── execute() ───────────────────────────────────────────────────────

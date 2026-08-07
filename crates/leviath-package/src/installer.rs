@@ -384,17 +384,30 @@ impl AgentInstaller {
         Ok(agents)
     }
 
-    /// Get information about a specific installed agent.
-    pub fn get_installed(&self, name: &str) -> anyhow::Result<Option<InstalledAgent>> {
+    /// Get information about a specific installed agent, or `None` if it is not
+    /// installed.
+    ///
+    /// Infallible on purpose, and the signature now says so. A manifest that
+    /// cannot be read or parsed still means *installed* - the directory and the
+    /// file are both there - so it reports the agent with whatever metadata it
+    /// could recover rather than failing. That is the state you would run
+    /// `lev remove` to fix, and an error here would be the one thing standing
+    /// between the user and the fix.
+    ///
+    /// It previously returned `anyhow::Result` and never once returned `Err`,
+    /// which left its only production caller `.unwrap()`-ing an infallible
+    /// result inside a function that returns `Result` - a panic waiting for
+    /// whoever made this propagate.
+    pub fn get_installed(&self, name: &str) -> Option<InstalledAgent> {
         let agent_dir = self.install_dir.join(name);
 
         if !agent_dir.exists() {
-            return Ok(None);
+            return None;
         }
 
         let manifest_path = agent_dir.join("agent.leviath");
         if !manifest_path.exists() {
-            return Ok(None);
+            return None;
         }
 
         let content = fs::read_to_string(&manifest_path).unwrap_or_default();
@@ -414,12 +427,12 @@ impl AgentInstaller {
             .unwrap_or("")
             .to_string();
 
-        Ok(Some(InstalledAgent {
+        Some(InstalledAgent {
             name: name.to_string(),
             version,
             path: agent_dir,
             description,
-        }))
+        })
     }
 }
 
@@ -829,7 +842,7 @@ description = "{}"
         let bundle = make_bundle("findme", "3.2.1", "Find this agent");
         installer.install_from_bytes("findme", &bundle).unwrap();
 
-        let agent = installer.get_installed("findme").unwrap().unwrap();
+        let agent = installer.get_installed("findme").unwrap();
         assert_eq!(agent.name, "findme");
         assert_eq!(agent.version, "3.2.1");
         assert_eq!(agent.description, "Find this agent");
@@ -839,7 +852,7 @@ description = "{}"
     fn get_installed_not_found() {
         let dir = tempfile::tempdir().unwrap();
         let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
-        assert!(installer.get_installed("nope").unwrap().is_none());
+        assert!(installer.get_installed("nope").is_none());
     }
 
     #[test]
@@ -849,7 +862,7 @@ description = "{}"
 
         // Create directory but no agent.leviath
         fs::create_dir_all(dir.path().join("empty-agent")).unwrap();
-        assert!(installer.get_installed("empty-agent").unwrap().is_none());
+        assert!(installer.get_installed("empty-agent").is_none());
     }
 
     // ─── AgentInstaller::new / Default ─────────────────────────────────

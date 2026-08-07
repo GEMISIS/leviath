@@ -70,7 +70,9 @@ fn register_pure_fns(engine: &mut Engine, env_allowlist: Arc<Vec<String>>) {
     engine.register_fn("parse_json", parse_json_fn);
     engine.register_fn("to_json", to_json_fn);
     engine.register_fn("parse_sse", parse_sse_fn);
-    engine.register_fn("encode_uri", |s: &str| percent_encode(s));
+    engine.register_fn("encode_uri", |s: &str| {
+        leviath_scripting::tool::percent_encode(s)
+    });
     engine.register_fn("encode_base64", |s: &str| {
         base64::engine::general_purpose::STANDARD.encode(s)
     });
@@ -144,32 +146,6 @@ fn count_tokens_heuristic_fn(text: &str, hint: &str) -> i64 {
         _ => "general",
     };
     crate::tokenizer::count_tokens(text, model) as i64
-}
-
-/// Percent-encode for a URL component (RFC 3986 unreserved set passes through).
-fn percent_encode(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for &byte in input.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char);
-            }
-            _ => {
-                out.push('%');
-                out.push(hex_digit(byte >> 4));
-                out.push(hex_digit(byte & 0x0f));
-            }
-        }
-    }
-    out
-}
-
-/// Map a nibble (0–15) to its uppercase hex digit.
-fn hex_digit(nibble: u8) -> char {
-    match nibble {
-        0..=9 => (b'0' + nibble) as char,
-        _ => (b'A' + (nibble - 10)) as char,
-    }
 }
 
 /// Convert a Rhai object-map of headers into a `BTreeMap<String,String>`.
