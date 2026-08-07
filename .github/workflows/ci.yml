@@ -199,6 +199,12 @@ jobs:
       - name: Verify the version declarations agree
         run: cargo xtask version --check
 
+      # File length, as a ratchet: nothing new over the cap, and nothing already
+      # over it may grow. Pure file reading, so it costs about a second and
+      # needs no toolchain beyond the one already here.
+      - name: Check structural limits
+        run: cargo xtask structure
+
   # Rejects broken or private intra-doc links and stray HTML tags in doc
   # comments (`-D warnings` promotes every rustdoc lint to an error). Cheap and
   # OS-independent, so it runs once on ubuntu.

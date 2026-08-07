@@ -80,6 +80,16 @@ npm install -g @ast-grep/cli     # via npm
 
 The workspace is gated at a hard **100%** on lines, regions, and functions, with no way to opt out. Coverage-suppression markers (`#[cfg(not(test))]`, `coverage(off)`, tarpaulin/lcov/grcov annotations) are banned by the ast-grep lint above, so code can't be hidden from measurement; it has to be refactored until it's testable. The *only* un-unit-tested code is the thin `lev` binary entrypoint (`crates/leviath-cli/src/main.rs`): the composition root that wires real terminal, stdin, network, and subprocess I/O into the library's tested cores. It's excluded from coverage measurement and guarded by a CI check that requires maintainer sign-off to change.
 
+### How long a file may be
+
+`cargo xtask structure` holds every source file to **1,200 lines of production code**, and the pre-commit hook and CI both run it. It costs about a tenth of a second: it reads files and counts, nothing more.
+
+It counts **production** lines, stopping at the first column-zero `#[cfg(test)]` and skipping sibling test files entirely. This workspace keeps most tests inline and gates a hard 100%, so about two thirds of the tree is test code; a total-lines rule would fire hardest on the best-tested files, which is exactly backwards.
+
+**The cap is a ratchet and only ever goes down.** 1,200 is where the tree sits today, not where it should end up — the longest file is 1,152 against a median of 218, and the next rungs are 1,000 and 800. Each is earned by splitting the files above it, not by editing the number.
+
+Raising the cap to admit one long file is how a limit stops being one. If a file wants to be longer, split it by concern: `config/`, `blueprint/`, `host/`, `components/`, `lint/` and `daemon/spawn/` are all worked examples, and the glob re-export they use means the split touches no call site. Split on what the code *is about*, not on where the line count lands — `lint/checks.rs` asks "will this agent work" and `lint/security.rs` asks "should this agent be allowed to", which is a real boundary; cutting the same file at "lint_a.rs" and "lint_b.rs" would have satisfied the same number and taught a reader nothing.
+
 ### Where a test module lives
 
 Inline `#[cfg(test)] mod tests` in the file under test is the default; 205 files use it. A sibling `foo_tests.rs` (or `foo/tests.rs`) is the sanctioned alternative, used by 24 — but only for one reason.

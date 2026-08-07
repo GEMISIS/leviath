@@ -8,9 +8,12 @@
 //!   `version <X.Y.Z>`           Move the workspace version and roll the changelog.
 //!   `version --check`           Verify the version declarations agree (CI runs this).
 //!   `docs`                      Check `docs/content/` for dead links and bad frontmatter.
+//!   `structure`                 Hold every source file to the production-line limit.
+//!   `structure --list`          Print every file's production-line count, longest first.
 
 mod coverage;
 mod docs;
+mod structure;
 mod version;
 
 use anyhow::Result;
@@ -24,7 +27,7 @@ fn main() -> Result<()> {
 ///
 /// Extracted from `main` so it can be unit-tested without spawning processes.
 pub fn dispatch(args: &[String]) -> Result<()> {
-    dispatch_with(args, coverage::run, version::run, docs::run)
+    dispatch_with(args, coverage::run, version::run, docs::run, structure::run)
 }
 
 /// Route the CLI arguments to the provided handler closures.
@@ -36,6 +39,7 @@ pub fn dispatch_with(
     run_cov: impl FnOnce(coverage::CoverageMode) -> Result<()>,
     run_ver: impl FnOnce(version::VersionMode) -> Result<()>,
     run_docs: impl FnOnce(docs::DocsMode) -> Result<()>,
+    run_struct: impl FnOnce(structure::StructureMode) -> Result<()>,
 ) -> Result<()> {
     let subcommand = args.first().map(String::as_str).unwrap_or("help");
     match subcommand {
@@ -51,6 +55,10 @@ pub fn dispatch_with(
             let mode = docs::DocsMode::parse(&args[1..])?;
             run_docs(mode)
         }
+        "structure" => {
+            let mode = structure::StructureMode::parse(&args[1..])?;
+            run_struct(mode)
+        }
         "help" | "--help" | "-h" => {
             println!("Usage: cargo xtask <subcommand>");
             println!();
@@ -58,6 +66,7 @@ pub fn dispatch_with(
             println!("  coverage                  Gate every workspace package at 100%%");
             println!("  coverage --package <pkg>  Gate one package (CI per-package fan-out)");
             println!("  version <X.Y.Z>           Move the workspace version, roll the changelog");
+            println!("  structure                 Hold every file to the production-line limit");
             println!("  version --check           Verify the version declarations agree");
             println!("  docs                      Check docs/content for dead links + frontmatter");
             Ok(())
@@ -90,6 +99,11 @@ mod tests {
     }
 
     /// A `run_docs` stub matching `impl FnOnce(DocsMode) -> Result<()>`.
+    /// Structure-handler stub: records nothing, succeeds.
+    fn struct_ok(_m: structure::StructureMode) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     fn docs_ok(_mode: docs::DocsMode) -> Result<()> {
         Ok(())
     }
@@ -162,6 +176,7 @@ mod tests {
             },
             ver_ok,
             docs_ok,
+            struct_ok,
         )
         .unwrap();
         assert_eq!(got, Some(CoverageMode::All));
@@ -178,6 +193,7 @@ mod tests {
             },
             ver_ok,
             docs_ok,
+            struct_ok,
         )
         .unwrap();
         assert_eq!(got, Some(CoverageMode::Package("leviath-core".to_owned())));
@@ -191,6 +207,7 @@ mod tests {
             cov_ok, // never called; covered by stub_returns_ok
             ver_ok,
             docs_ok,
+            struct_ok,
         );
         assert!(
             result.is_err(),
@@ -205,6 +222,7 @@ mod tests {
             |_mode| anyhow::bail!("simulated coverage failure"),
             ver_ok,
             docs_ok,
+            struct_ok,
         );
         assert!(result.is_err());
         assert!(
@@ -220,17 +238,29 @@ mod tests {
     #[test]
     fn dispatch_with_docs_parses_check() {
         let mut got = None;
-        dispatch_with(&args(&["docs"]), cov_ok, ver_ok, |mode| {
-            got = Some(mode);
-            Ok(())
-        })
+        dispatch_with(
+            &args(&["docs"]),
+            cov_ok,
+            ver_ok,
+            |mode| {
+                got = Some(mode);
+                Ok(())
+            },
+            struct_ok,
+        )
         .unwrap();
         assert_eq!(got, Some(docs::DocsMode::Check));
     }
 
     #[test]
     fn dispatch_with_docs_bad_arg_returns_err_without_calling_run_docs() {
-        let result = dispatch_with(&args(&["docs", "--fix"]), cov_ok, ver_ok, docs_ok);
+        let result = dispatch_with(
+            &args(&["docs", "--fix"]),
+            cov_ok,
+            ver_ok,
+            docs_ok,
+            struct_ok,
+        );
         assert!(
             result.is_err(),
             "an unknown docs flag must error: {result:?}"
@@ -250,6 +280,7 @@ mod tests {
                 Ok(())
             },
             docs_ok,
+            struct_ok,
         )
         .unwrap();
         assert_eq!(got, Some(VersionMode::Set("1.2.3".to_owned())));
@@ -266,6 +297,7 @@ mod tests {
                 Ok(())
             },
             docs_ok,
+            struct_ok,
         )
         .unwrap();
         assert_eq!(got, Some(VersionMode::Check));
@@ -278,6 +310,7 @@ mod tests {
             cov_ok,
             ver_ok,
             docs_ok,
+            struct_ok,
         );
         assert!(
             result.is_err(),
@@ -292,6 +325,7 @@ mod tests {
             cov_ok,
             |_mode| anyhow::bail!("simulated version failure"),
             docs_ok,
+            struct_ok,
         );
         assert!(
             result
