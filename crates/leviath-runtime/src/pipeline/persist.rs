@@ -97,12 +97,21 @@ impl PersistWatermark {
 #[derive(Resource)]
 pub struct PersistenceStage(pub UnboundedSender<PersistMsg>);
 
+/// What `reflect_interaction_status` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type ReflectInteractionStatusQuery = (
+    Entity,
+    &'static mut AgentState,
+    Option<&'static AwaitingInteraction>,
+);
+
 /// Persistence-dispatch system: for each agent carrying run metadata whose
 /// (iteration, stage, status) has changed since its last snapshot, build the
 /// `meta.json` + `context.json` value snapshot and hand it to the persistence
 /// lane. Fire-and-forget - no result to collect; the single-worker lane keeps a
 /// given agent's writes ordered. Agents without [`RunMetadata`] aren't persisted.
-#[allow(clippy::type_complexity)]
 /// Interaction-status reflection system: mirror the shared [`InteractionHub`]'s
 /// open requests into agent status so a blocked agent shows as `Waiting` (and
 /// the dashboard / `lev ps` surface its prompt) instead of a silent `Active`.
@@ -125,7 +134,7 @@ pub struct PersistenceStage(pub UnboundedSender<PersistMsg>);
 pub fn reflect_interaction_status(
     hub: Option<Res<InteractionHub>>,
     mut agents: Query<
-        (Entity, &mut AgentState, Option<&AwaitingInteraction>),
+        ReflectInteractionStatusQuery,
         (Without<FanOutWaiting>, Without<WaitingForChildren>),
     >,
     mut commands: Commands,
@@ -197,36 +206,41 @@ pub(crate) fn reconcile_stage_ledger(
     }
 }
 
+/// What `dispatch_persistence` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type PersistenceQuery = (
+    Entity,
+    &'static RunMetadata,
+    &'static AgentState,
+    &'static ContextWindow,
+    &'static StageCursor,
+    &'static TokenTotals,
+    &'static mut PersistWatermark,
+    Option<&'static mut StageLedger>,
+    Option<&'static mut StageIoBuffer>,
+    Option<&'static crate::taint::TaintGate>,
+    Option<&'static crate::components::ParentRef>,
+    Option<&'static crate::components::SubAgentChildren>,
+    Option<&'static crate::fanout::FanOutWaiting>,
+    (
+        Option<&'static crate::interaction_points::AwaitingInteractionPoint>,
+        Option<&'static crate::interaction_points::InteractionPointCursor>,
+        Option<&'static crate::interaction_points::InteractionPointRounds>,
+        Option<&'static crate::persistence::RunOutcomeFlags>,
+        Option<&'static crate::persistence::FinalOutput>,
+    ),
+);
+
 /// Hand each agent's current state to the persistence lane, which writes it to
 /// disk off the schedule thread.
 ///
 /// Coalescing lives here rather than in the lane: an agent whose digest has not
 /// changed since its last send is skipped, so a world full of idle runs costs
 /// nothing per tick.
-#[allow(clippy::type_complexity)]
 pub fn dispatch_persistence(
-    mut agents: Query<(
-        Entity,
-        &RunMetadata,
-        &AgentState,
-        &ContextWindow,
-        &StageCursor,
-        &TokenTotals,
-        &mut PersistWatermark,
-        Option<&mut StageLedger>,
-        Option<&mut StageIoBuffer>,
-        Option<&crate::taint::TaintGate>,
-        Option<&crate::components::ParentRef>,
-        Option<&crate::components::SubAgentChildren>,
-        Option<&crate::fanout::FanOutWaiting>,
-        (
-            Option<&crate::interaction_points::AwaitingInteractionPoint>,
-            Option<&crate::interaction_points::InteractionPointCursor>,
-            Option<&crate::interaction_points::InteractionPointRounds>,
-            Option<&crate::persistence::RunOutcomeFlags>,
-            Option<&crate::persistence::FinalOutput>,
-        ),
-    )>,
+    mut agents: Query<PersistenceQuery>,
     stage: Res<PersistenceStage>,
     hub: Option<Res<InteractionHub>>,
     sink: Option<Res<crate::host::WorldEventSink>>,

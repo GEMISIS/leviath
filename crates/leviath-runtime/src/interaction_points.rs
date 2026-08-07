@@ -434,21 +434,23 @@ fn stage_points<'a>(
     }
 }
 
+/// What `gate_interaction_points` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type InteractionPointQuery = (
+    Entity,
+    &'static AgentBlueprint,
+    &'static StageCursor,
+    Option<&'static InteractionPointCursor>,
+);
+
 /// Gate: intercept a would-be transition for an interactive-points stage whose
 /// points aren't all satisfied yet, routing the agent to the interaction-point
 /// lane instead. Stages with no points, or whose point cursor is past the end
 /// (all approved), fall through to the normal transition.
-#[allow(clippy::type_complexity)]
 pub fn gate_interaction_points(
-    agents: Query<
-        (
-            Entity,
-            &AgentBlueprint,
-            &StageCursor,
-            Option<&InteractionPointCursor>,
-        ),
-        With<ResolveTransition>,
-    >,
+    agents: Query<InteractionPointQuery, With<ResolveTransition>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -468,26 +470,28 @@ pub fn gate_interaction_points(
     }
 }
 
+/// What `dispatch_interaction_point` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type DispatchInteractionPointQuery = (
+    Entity,
+    &'static AgentState,
+    &'static AgentBlueprint,
+    &'static StageCursor,
+    &'static InferenceResult,
+    &'static mut ContextWindow,
+    Option<&'static InteractionPointCursor>,
+    Option<&'static InteractionPointRounds>,
+    Option<&'static PlanBodyOverride>,
+    Option<&'static crate::components::InteractionAutoApprove>,
+);
+
 /// Dispatch: for each `ReadyForInteractionPoint` agent, spawn the ask task for
 /// its current point and move it to `AwaitingInteractionPoint`. No hub (test
 /// world) ⇒ no-op; a non-interactive stage ⇒ fall back to the transition.
-#[allow(clippy::type_complexity)]
 pub fn dispatch_interaction_point(
-    mut agents: Query<
-        (
-            Entity,
-            &AgentState,
-            &AgentBlueprint,
-            &StageCursor,
-            &InferenceResult,
-            &mut ContextWindow,
-            Option<&InteractionPointCursor>,
-            Option<&InteractionPointRounds>,
-            Option<&PlanBodyOverride>,
-            Option<&crate::components::InteractionAutoApprove>,
-        ),
-        With<ReadyForInteractionPoint>,
-    >,
+    mut agents: Query<DispatchInteractionPointQuery, With<ReadyForInteractionPoint>>,
     hub: Option<Res<InteractionHub>>,
     stage: Option<Res<InteractionPointStage>>,
     mut commands: Commands,
@@ -581,25 +585,27 @@ pub fn dispatch_interaction_point(
     }
 }
 
+/// What `collect_interaction_point` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type CollectInteractionPointQuery = (
+    &'static mut AgentState,
+    &'static mut ContextWindow,
+    &'static AgentBlueprint,
+    &'static StageCursor,
+    Option<&'static InteractionPointCursor>,
+    Option<&'static InteractionPointRounds>,
+    Option<&'static mut StageIoBuffer>,
+);
+
 /// Collect: apply each resolved interaction-point outcome - approve advances
 /// (or transitions when all points are done), abort cancels, a directive injects
 /// the directive and re-infers in-stage, an edit injects the edited text and
 /// re-presents; both revision paths are bounded by [`MAX_REVISION_ROUNDS`].
-#[allow(clippy::type_complexity)]
 pub fn collect_interaction_point(
     mut results: ResMut<InteractionPointResults>,
-    mut agents: Query<
-        (
-            &mut AgentState,
-            &mut ContextWindow,
-            &AgentBlueprint,
-            &StageCursor,
-            Option<&InteractionPointCursor>,
-            Option<&InteractionPointRounds>,
-            Option<&mut StageIoBuffer>,
-        ),
-        With<AwaitingInteractionPoint>,
-    >,
+    mut agents: Query<CollectInteractionPointQuery, With<AwaitingInteractionPoint>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();

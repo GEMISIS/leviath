@@ -54,6 +54,17 @@ fn spawn_supervised_compaction(stage: &InferenceStage, entity: Entity, job: Comp
     );
 }
 
+/// What `dispatch_compaction` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type CompactionQuery = (
+    Entity,
+    &'static AgentState,
+    &'static mut ContextWindow,
+    &'static CompactionSettings,
+);
+
 /// Compaction-dispatch system: for each `ReadyToInfer` agent with
 /// [`CompactionSettings`] whose window is over the eviction threshold, do the
 /// synchronous eviction inline; if that surfaces regions needing LLM
@@ -63,12 +74,8 @@ fn spawn_supervised_compaction(stage: &InferenceStage, entity: Entity, job: Comp
 /// to summarize, provider missing, pool full) simply leaves the agent
 /// `ReadyToInfer` so inference proceeds - compaction is best-effort. (Ported from
 /// `AgentEngine::evict_and_compact`.)
-#[allow(clippy::type_complexity)]
 pub fn dispatch_compaction(
-    mut agents: Query<
-        (Entity, &AgentState, &mut ContextWindow, &CompactionSettings),
-        (With<ReadyToInfer>, Without<AwaitingCompaction>),
-    >,
+    mut agents: Query<CompactionQuery, (With<ReadyToInfer>, Without<AwaitingCompaction>)>,
     stage: Res<InferenceStage>,
     providers: Res<Providers>,
     mut commands: Commands,
@@ -301,24 +308,26 @@ pub(crate) fn apply_edge_transform(
     }
 }
 
+/// What `dispatch_edge_compact` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type EdgeCompactQuery = (
+    Entity,
+    &'static AgentState,
+    &'static ContextWindow,
+    &'static PendingEdgeCompact,
+    Option<&'static CompactionSettings>,
+);
+
 /// Edge-compaction dispatch: for each `ReadyToInfer` agent with a
 /// [`PendingEdgeCompact`] (an edge transform requested LLM summarization), spawn a
 /// compaction job for the named regions (reusing the compaction lane) and hold the
 /// agent `AwaitingCompaction`. If the agent has no compaction config, nothing to
 /// summarize, or no provider/permit, the request is dropped and the agent proceeds
 /// to inference un-compacted (memory-pressure compaction still applies later).
-#[allow(clippy::type_complexity)]
 pub fn dispatch_edge_compact(
-    mut agents: Query<
-        (
-            Entity,
-            &AgentState,
-            &ContextWindow,
-            &PendingEdgeCompact,
-            Option<&CompactionSettings>,
-        ),
-        (With<ReadyToInfer>, Without<AwaitingCompaction>),
-    >,
+    mut agents: Query<EdgeCompactQuery, (With<ReadyToInfer>, Without<AwaitingCompaction>)>,
     stage: Res<InferenceStage>,
     providers: Res<Providers>,
     mut commands: Commands,

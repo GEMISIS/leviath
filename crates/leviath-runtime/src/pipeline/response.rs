@@ -34,26 +34,28 @@ pub(crate) fn to_inference_result(
     }
 }
 
+/// What `collect_inference` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type InferenceQuery = (
+    &'static mut AgentState,
+    Option<&'static mut crate::persistence::TokenTotals>,
+    Option<&'static StageCursor>,
+    Option<&'static mut StageLedger>,
+    Option<&'static mut StageIoBuffer>,
+    Option<&'static mut StageInference>,
+    Option<&'static mut crate::telemetry::StageActivity>,
+);
+
 /// Inference-collect system: drain completed inferences and apply them. A
 /// success is stored on the agent (bumping its iteration) and the agent advances
 /// to `ProcessResponse`; an error marks the agent `Error`. An outcome for an
 /// agent that is no longer `AwaitingInference` (cancelled or despawned between
 /// dispatch and now) is dropped.
-#[allow(clippy::type_complexity)]
 pub fn collect_inference(
     mut results: ResMut<InferenceResults>,
-    mut agents: Query<
-        (
-            &mut AgentState,
-            Option<&mut crate::persistence::TokenTotals>,
-            Option<&StageCursor>,
-            Option<&mut StageLedger>,
-            Option<&mut StageIoBuffer>,
-            Option<&mut StageInference>,
-            Option<&mut crate::telemetry::StageActivity>,
-        ),
-        With<AwaitingInference>,
-    >,
+    mut agents: Query<InferenceQuery, With<AwaitingInference>>,
     mut circuits: Option<ResMut<ProviderCircuits>>,
     policy: Option<Res<CircuitPolicy>>,
     mut commands: Commands,
@@ -319,21 +321,23 @@ pub struct StageIoBuffer {
     pub logs: Vec<(usize, String)>,
 }
 
+/// What `process_response` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type ProcessResponseQuery = (
+    Entity,
+    &'static crate::components::InferenceResult,
+    &'static mut StageProgress,
+    Option<&'static mut crate::persistence::TokenTotals>,
+);
+
 /// Process-response system: route each `ProcessResponse` agent by whether its
 /// last inference asked for tools. Tool calls present ⇒ `ReadyForTools` (and the
 /// stage's running tool-call count is bumped); none ⇒ `ReadyForTransition`. Pure
 /// routing - no I/O.
-#[allow(clippy::type_complexity)]
 pub fn process_response(
-    mut agents: Query<
-        (
-            Entity,
-            &crate::components::InferenceResult,
-            &mut StageProgress,
-            Option<&mut crate::persistence::TokenTotals>,
-        ),
-        With<ProcessResponse>,
-    >,
+    mut agents: Query<ProcessResponseQuery, With<ProcessResponse>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -395,6 +399,20 @@ pub(crate) fn stage_output_is_reviewed(bp: &AgentBlueprint, cursor: &StageCursor
     )
 }
 
+/// What `handle_empty_response` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type EmptyResponseQuery = (
+    Entity,
+    &'static mut ContextWindow,
+    &'static crate::components::InferenceResult,
+    &'static mut StageProgress,
+    &'static AgentBlueprint,
+    &'static StageCursor,
+    Option<&'static GlobalNudge>,
+);
+
 /// Empty-response system: for each `ReadyForTransition` agent decide whether the
 /// stage is done. If the agent has already made tool calls, its nudge is
 /// disabled, or it has been nudged its budgeted number of times, the text
@@ -409,20 +427,8 @@ pub(crate) fn stage_output_is_reviewed(bp: &AgentBlueprint, cursor: &StageCursor
 /// configured, a stage whose output is reviewed is never nudged - see
 /// `stage_output_is_reviewed` - but an explicit `enabled` at any level speaks
 /// for itself. The text supports `{stage}` and `{regions}` placeholders.
-#[allow(clippy::type_complexity)]
 pub fn handle_empty_response(
-    mut agents: Query<
-        (
-            Entity,
-            &mut ContextWindow,
-            &crate::components::InferenceResult,
-            &mut StageProgress,
-            &AgentBlueprint,
-            &StageCursor,
-            Option<&GlobalNudge>,
-        ),
-        With<ReadyForTransition>,
-    >,
+    mut agents: Query<EmptyResponseQuery, With<ReadyForTransition>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();

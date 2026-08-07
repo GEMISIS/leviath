@@ -105,28 +105,33 @@ fn stage_tokens(ledger: Option<&StageLedger>, index: usize) -> (usize, usize) {
         .map_or((0, 0), |rec| (rec.prompt_tokens, rec.completion_tokens))
 }
 
+/// What `observe_lifecycle` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type LifecycleQuery = (
+    Entity,
+    &'static RunMetadata,
+    &'static AgentState,
+    Option<&'static StageCursor>,
+    Option<&'static TokenTotals>,
+    Option<&'static StageLedger>,
+    Option<&'static StageJustEntered>,
+    Option<&'static mut TelemetryState>,
+    Option<&'static mut StageActivity>,
+    Option<&'static StageIoBuffer>,
+    Option<&'static crate::persistence::RunOutcomeFlags>,
+);
+
 /// Emit lifecycle, activity, and log events for every agent run.
 ///
 /// Stage boundaries come from the `StageJustEntered` marker (with the
 /// agent's first sighting standing in for the marker-less initial stage);
 /// a re-entry into the same stage index keeps the stage open rather than
 /// closing and reopening it, matching how the stage ledger accrues.
-#[allow(clippy::type_complexity)]
 pub fn observe_lifecycle(
     telemetry: Res<Telemetry>,
-    mut agents: Query<(
-        Entity,
-        &RunMetadata,
-        &AgentState,
-        Option<&StageCursor>,
-        Option<&TokenTotals>,
-        Option<&StageLedger>,
-        Option<&StageJustEntered>,
-        Option<&mut TelemetryState>,
-        Option<&mut StageActivity>,
-        Option<&StageIoBuffer>,
-        Option<&crate::persistence::RunOutcomeFlags>,
-    )>,
+    mut agents: Query<LifecycleQuery>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
