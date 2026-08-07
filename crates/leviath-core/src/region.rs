@@ -308,19 +308,30 @@ impl Region {
         self.taint.as_ref().map(|t| t.level())
     }
 
-    /// Add an entry with a taint level. Used when taint tracking is enabled.
-    pub fn add_tainted_entry(
+    /// Accept one entry: validate it, charge it against the budget, record it,
+    /// and let the sliding window evict if it now needs to.
+    ///
+    /// The single implementation behind the five `add_*_entry` methods, which
+    /// differ only in what they supply for `metadata`, `kind` and
+    /// `taint_level`. They were five copies of this body, which is five places
+    /// for the budget check or the taint update to drift out of step - and the
+    /// order matters: content is validated before it is charged for, and the
+    /// window is enforced only after the entry is in.
+    ///
+    /// Private, so the public surface is unchanged and every caller keeps the
+    /// named method that says which of the three it cares about.
+    fn push_entry(
         &mut self,
         content: String,
         tokens: usize,
+        metadata: Option<serde_json::Value>,
+        kind: EntryKind,
         taint_level: crate::taint::TaintLevel,
     ) -> crate::error::Result<()> {
-        // Validate against schema if present
         if let Some(schema) = &self.schema {
             schema.validate(&content)?;
         }
 
-        // Check token budget
         if self.current_tokens + tokens > self.max_tokens {
             return Err(crate::error::Error::TokenBudgetExceeded {
                 used: self.current_tokens + tokens,
@@ -328,26 +339,36 @@ impl Region {
             });
         }
 
-        // Add entry
         self.content.push(RegionEntry {
             content,
             tokens,
             timestamp: chrono::Utc::now().timestamp(),
-            metadata: None,
-            kind: EntryKind::default(),
+            metadata,
+            kind,
             key: None,
         });
         self.current_tokens += tokens;
 
-        // Update taint tracking
+        // A region with taint tracking off ignores the level entirely, which is
+        // why the untainted callers can pass `Public` rather than needing a
+        // separate path.
         if let Some(taint) = &mut self.taint {
             taint.add_entry(taint_level);
         }
 
-        // Enforce SlidingWindow max_items limit
         self.enforce_sliding_window();
 
         Ok(())
+    }
+
+    /// Add an entry with a taint level. Used when taint tracking is enabled.
+    pub fn add_tainted_entry(
+        &mut self,
+        content: String,
+        tokens: usize,
+        taint_level: crate::taint::TaintLevel,
+    ) -> crate::error::Result<()> {
+        self.push_entry(content, tokens, None, EntryKind::default(), taint_level)
     }
 
     /// Add a typed entry with a taint level.
@@ -365,39 +386,7 @@ impl Region {
         kind: EntryKind,
         taint_level: crate::taint::TaintLevel,
     ) -> crate::error::Result<()> {
-        // Validate against schema if present
-        if let Some(schema) = &self.schema {
-            schema.validate(&content)?;
-        }
-
-        // Check token budget
-        if self.current_tokens + tokens > self.max_tokens {
-            return Err(crate::error::Error::TokenBudgetExceeded {
-                used: self.current_tokens + tokens,
-                max: self.max_tokens,
-            });
-        }
-
-        // Add entry
-        self.content.push(RegionEntry {
-            content,
-            tokens,
-            timestamp: chrono::Utc::now().timestamp(),
-            metadata: None,
-            kind,
-            key: None,
-        });
-        self.current_tokens += tokens;
-
-        // Update taint tracking with the supplied level
-        if let Some(taint) = &mut self.taint {
-            taint.add_entry(taint_level);
-        }
-
-        // Enforce SlidingWindow max_items limit
-        self.enforce_sliding_window();
-
-        Ok(())
+        self.push_entry(content, tokens, None, kind, taint_level)
     }
 
     /// Add a validation schema to this region.
@@ -411,39 +400,13 @@ impl Region {
     /// Validates content against schema if present, checks token budget,
     /// and adds the entry to the region.
     pub fn add_entry(&mut self, content: String, tokens: usize) -> crate::error::Result<()> {
-        // Validate against schema if present
-        if let Some(schema) = &self.schema {
-            schema.validate(&content)?;
-        }
-
-        // Check token budget
-        if self.current_tokens + tokens > self.max_tokens {
-            return Err(crate::error::Error::TokenBudgetExceeded {
-                used: self.current_tokens + tokens,
-                max: self.max_tokens,
-            });
-        }
-
-        // Add entry
-        self.content.push(RegionEntry {
+        self.push_entry(
             content,
             tokens,
-            timestamp: chrono::Utc::now().timestamp(),
-            metadata: None,
-            kind: EntryKind::default(),
-            key: None,
-        });
-        self.current_tokens += tokens;
-
-        // Track taint as Public for untagged entries
-        if let Some(taint) = &mut self.taint {
-            taint.add_entry(crate::taint::TaintLevel::Public);
-        }
-
-        // Enforce SlidingWindow max_items limit
-        self.enforce_sliding_window();
-
-        Ok(())
+            None,
+            EntryKind::default(),
+            crate::taint::TaintLevel::Public,
+        )
     }
 
     /// Add an entry with metadata.
@@ -453,39 +416,13 @@ impl Region {
         tokens: usize,
         metadata: serde_json::Value,
     ) -> crate::error::Result<()> {
-        // Validate against schema if present
-        if let Some(schema) = &self.schema {
-            schema.validate(&content)?;
-        }
-
-        // Check token budget
-        if self.current_tokens + tokens > self.max_tokens {
-            return Err(crate::error::Error::TokenBudgetExceeded {
-                used: self.current_tokens + tokens,
-                max: self.max_tokens,
-            });
-        }
-
-        // Add entry
-        self.content.push(RegionEntry {
+        self.push_entry(
             content,
             tokens,
-            timestamp: chrono::Utc::now().timestamp(),
-            metadata: Some(metadata),
-            kind: EntryKind::default(),
-            key: None,
-        });
-        self.current_tokens += tokens;
-
-        // Track taint as Public for untagged entries
-        if let Some(taint) = &mut self.taint {
-            taint.add_entry(crate::taint::TaintLevel::Public);
-        }
-
-        // Enforce SlidingWindow max_items limit
-        self.enforce_sliding_window();
-
-        Ok(())
+            Some(metadata),
+            EntryKind::default(),
+            crate::taint::TaintLevel::Public,
+        )
     }
 
     /// Add an entry with a specific [`EntryKind`] to this region.
@@ -499,39 +436,13 @@ impl Region {
         tokens: usize,
         kind: EntryKind,
     ) -> crate::error::Result<()> {
-        // Validate against schema if present
-        if let Some(schema) = &self.schema {
-            schema.validate(&content)?;
-        }
-
-        // Check token budget
-        if self.current_tokens + tokens > self.max_tokens {
-            return Err(crate::error::Error::TokenBudgetExceeded {
-                used: self.current_tokens + tokens,
-                max: self.max_tokens,
-            });
-        }
-
-        // Add entry
-        self.content.push(RegionEntry {
+        self.push_entry(
             content,
             tokens,
-            timestamp: chrono::Utc::now().timestamp(),
-            metadata: None,
+            None,
             kind,
-            key: None,
-        });
-        self.current_tokens += tokens;
-
-        // Track taint as Public for untagged entries
-        if let Some(taint) = &mut self.taint {
-            taint.add_entry(crate::taint::TaintLevel::Public);
-        }
-
-        // Enforce SlidingWindow max_items limit
-        self.enforce_sliding_window();
-
-        Ok(())
+            crate::taint::TaintLevel::Public,
+        )
     }
 
     /// Carry an already-accepted entry into this region verbatim, preserving
