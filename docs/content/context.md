@@ -151,6 +151,24 @@ working.
 > command seed in a blueprint, `lev run --no-seed-commands` refuses them for one run, and
 > `[security] allow_seed_commands = false` refuses them machine-wide.
 
+#### Seed paths stay in the working directory
+
+`files`, `glob` and `rhai` seeds resolve against the run's working directory and may not leave it.
+A path that does is refused at spawn, before anything is read.
+
+The rule is the one `read_file` follows, for the same reason: the *blueprint* chose this path, not
+you. Seeded contents land in a region the model reads on its first turn, so a path that escaped
+would put whatever it named in front of the model without anything having asked you.
+
+To read outside on purpose, declare it under `[read_paths]` and grant it in your config. That is
+already the mechanism for "this agent is meant to read there and I agreed", and seeding answers to
+it rather than having a second one of its own. A glob is checked per match, since `../*.toml` cannot
+be judged before it is expanded.
+
+Scripts are stricter and have no `[read_paths]` escape: a stage hook, a custom-region script and an
+output validator must all live inside the blueprint's own directory. A script is code the agent
+ships, and there is no such thing as loading your logic from somewhere else on purpose.
+
 ## Eviction is deterministic
 
 When a region crosses its threshold, the runtime acts by the region's *kind*, never by pushing out
