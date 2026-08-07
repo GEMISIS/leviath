@@ -495,6 +495,22 @@ impl BuiltinTools {
         args: &Value,
         timeout_duration: Duration,
     ) -> String {
+        self.shell_with_limits(args, timeout_duration, MAX_CAPTURE_BYTES)
+            .await
+    }
+
+    /// Same again, with the capture cap injectable too.
+    ///
+    /// The truncation wiring is otherwise only reachable by producing a real
+    /// megabyte of output, which needs a shell one-liner that floods stdout -
+    /// and `cmd.exe` and `sh` have no such line in common. A tiny cap and a
+    /// plain `echo` exercise the same arms on every platform.
+    pub(crate) async fn shell_with_limits(
+        &self,
+        args: &Value,
+        timeout_duration: Duration,
+        cap: usize,
+    ) -> String {
         let command = match args.get("command").and_then(|v| v.as_str()) {
             Some(c) => c,
             None => return "[error] missing 'command' argument".to_string(),
@@ -560,8 +576,8 @@ impl BuiltinTools {
             let mut out = child.stdout.take().expect("stdout was piped");
             let mut err = child.stderr.take().expect("stderr was piped");
             let (stdout, stderr, status) = tokio::join!(
-                capture_capped(&mut out, MAX_CAPTURE_BYTES),
-                capture_capped(&mut err, MAX_CAPTURE_BYTES),
+                capture_capped(&mut out, cap),
+                capture_capped(&mut err, cap),
                 child.wait(),
             );
             // The exit status is the only fallible part worth failing on, so it
@@ -581,7 +597,7 @@ impl BuiltinTools {
                     status.success(),
                     status.code().unwrap_or(-1),
                 );
-                match capture_note(&stdout, &stderr) {
+                match capture_note(&stdout, &stderr, cap) {
                     Some(note) => format!("{body}\n\n{note}"),
                     None => body,
                 }
@@ -690,7 +706,7 @@ pub(crate) async fn capture_capped(
 /// Said rather than silently dropped: an agent that reads a truncated listing
 /// as the whole listing draws a wrong conclusion from it, which is worse than
 /// knowing the answer is incomplete.
-pub(crate) fn capture_note(stdout: &Captured, stderr: &Captured) -> Option<String> {
+pub(crate) fn capture_note(stdout: &Captured, stderr: &Captured, cap: usize) -> Option<String> {
     let lost = |c: &Captured| c.total > c.kept.len() as u64;
     let which = match (lost(stdout), lost(stderr)) {
         (false, false) => return None,
@@ -700,8 +716,8 @@ pub(crate) fn capture_note(stdout: &Captured, stderr: &Captured) -> Option<Strin
     };
     let total = stdout.total + stderr.total;
     Some(format!(
-        "[truncated] The command wrote {total} bytes; {which} exceeded the {MAX_CAPTURE_BYTES}-byte \
-         capture limit and only the beginning is shown. Narrow the command (a filter, a line \
-         count, a smaller range) rather than re-running it."
+        "[truncated] The command wrote {total} bytes; {which} exceeded the {cap}-byte capture \
+         limit and only the beginning is shown. Narrow the command (a filter, a line count, a \
+         smaller range) rather than re-running it."
     ))
 }
