@@ -40,6 +40,9 @@ keyring-core = { version = "1", optional = true }
 nix = { workspace = true }
 
 [dev-dependencies]
+# The always-on tracing subscriber, so log-macro bodies run under test.
+# Shared rather than copied: three copies of it had already drifted apart.
+leviath-testkit = { workspace = true }
 tempfile = "3"
 # `std::env::set_var` is unsafe and this crate forbids unsafe, so environment
 # manipulation in tests goes through closures.
