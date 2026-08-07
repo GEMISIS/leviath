@@ -124,6 +124,33 @@ fn script_scan_dirs(
 /// Paths resolve against the blueprint directory, the same convention script
 /// tools and region hooks use, so a validator travels with the agent that needs
 /// it.
+/// Resolve a blueprint-declared script path against the blueprint's directory,
+/// refusing anything that lands outside it.
+///
+/// A script is code the blueprint ships, so it has no business living anywhere
+/// but beside the blueprint. Without this check `base.join(declared)` happily
+/// accepts `../../../../etc/shadow`: the file is read, handed to the Rhai
+/// compiler, and whether it compiles becomes an oracle for what exists on the
+/// host - from a package `lev add` installed, which `SECURITY.md` treats as a
+/// real attacker. There is no `[read_paths]` fallback here on purpose: that
+/// mechanism exists for an agent reading *data* the user pointed it at, and no
+/// legitimate agent loads its own logic from outside its own directory.
+fn script_within_blueprint(
+    base: &std::path::Path,
+    declared: &str,
+    what: &str,
+) -> Result<std::path::PathBuf, String> {
+    let full = base.join(declared);
+    match leviath_core::resolves_within(&full, base) {
+        true => Ok(full),
+        false => Err(format!(
+            "{what} '{declared}' resolves outside the blueprint's directory ({}); a script must \
+             live beside the agent that declares it",
+            base.display()
+        )),
+    }
+}
+
 pub(crate) fn resolve_output_validators(
     blueprint: &Blueprint,
     blueprint_path: &str,
@@ -145,7 +172,7 @@ pub(crate) fn resolve_output_validators(
         if compiled.contains_key(script) {
             continue;
         }
-        let path = base.join(script);
+        let path = script_within_blueprint(&base, script, "output validator")?;
         let source = std::fs::read_to_string(&path)
             .map_err(|e| format!("cannot read output validator '{}': {e}", path.display()))?;
         let validator = leviath_scripting::output_validator::compile(script, &source)
@@ -185,7 +212,7 @@ pub(crate) fn resolve_stage_hook_scripts(
 
     let mut scripts = HashMap::new();
     for (path, hooks) in wanted {
-        let full = base.join(path);
+        let full = script_within_blueprint(&base, path, "stage hook script")?;
         let source = std::fs::read_to_string(&full)
             .map_err(|e| format!("cannot read stage hook script '{}': {e}", full.display()))?;
         let compiled = leviath_scripting::stage_hook::compile(path, &source, &hooks)
@@ -219,7 +246,8 @@ pub(crate) fn resolve_region_scripts(
             if scripts.contains_key(script) {
                 continue;
             }
-            let path = base.join(script);
+            let path = script_within_blueprint(&base, script, "custom region script")
+                .map_err(|e| format!("region '{}': {e}", region.name))?;
             let source = std::fs::read_to_string(&path).map_err(|e| {
                 format!(
                     "region '{}': cannot read custom region script '{}': {e}",
@@ -415,6 +443,51 @@ fn build_tool_state(
     })
 }
 
+/// Resolve a blueprint-declared seed path against the run's working directory.
+///
+/// The same rule the `read_file` tool follows, and for the same reason: the
+/// *blueprint* chose this path, not the user, so an installed package could
+/// otherwise write `seed = { files = ["../../.leviath/config.toml"] }` and have
+/// the provider keys in that file seeded straight into a pinned context region -
+/// from where they travel to the model, and out through the answer, a webhook,
+/// or a sub-agent. `read_file` has been confined for exactly this since the
+/// symlink-escape fix; seeding was the path that stayed open.
+///
+/// Outside the workdir falls back to `[read_paths]`, which is already the
+/// mechanism for "this agent is meant to read there and the user agreed",
+/// rather than a second answer to the same question.
+fn seed_path_within(
+    base: &std::path::Path,
+    declared: &std::path::Path,
+    read_paths: &leviath_core::ReadPathPolicy,
+) -> Result<std::path::PathBuf, String> {
+    if leviath_core::resolves_within(declared, base) {
+        return Ok(declared.to_path_buf());
+    }
+    let refusal = || {
+        format!(
+            "seed path '{}' resolves outside the working directory ({}); grant it with \
+             [read_paths] in the blueprint and your config, or move it inside",
+            declared.display(),
+            base.display()
+        )
+    };
+    if !read_paths.is_active() {
+        return Err(refusal());
+    }
+    // One arm for both ways this fails, because they fail the same way: a path
+    // that cannot be canonicalized is never matched, exactly as a canonical one
+    // the policy declines is not.
+    leviath_core::canonicalize_for_match(declared)
+        .filter(|c| {
+            matches!(
+                read_paths.decide(c),
+                leviath_core::ReadPathDecision::Allowed
+            )
+        })
+        .ok_or_else(refusal)
+}
+
 /// Resolve every region's initial content from its blueprint-declared
 /// [`RegionSeed`] plus the caller-provided values on `args`, into a
 /// name→content map ready for [`spawn_agent_seeded`].
@@ -436,6 +509,7 @@ fn resolve_seeds(
     args: &SpawnArgs,
     workdir: &str,
     commands: &SeedCommandPolicy,
+    read_paths: &leviath_core::ReadPathPolicy,
 ) -> Result<HashMap<String, String>, String> {
     use leviath_core::layout::RegionSeed;
 
@@ -478,11 +552,12 @@ fn resolve_seeds(
                 seeds.insert(region.name.clone(), text.clone());
             }
             RegionSeed::Files { paths } => {
-                let content = read_and_concat(
-                    &region.name,
-                    paths.iter().map(|p| base.join(p)),
-                    region.required,
-                )?;
+                let resolved = paths
+                    .iter()
+                    .map(|p| seed_path_within(base, &base.join(p), read_paths))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| format!("region '{}': {e}", region.name))?;
+                let content = read_and_concat(&region.name, resolved.into_iter(), region.required)?;
                 if let Some(content) = content {
                     seeds.insert(region.name.clone(), content);
                 }
@@ -492,7 +567,13 @@ fn resolve_seeds(
                 let full = full.to_string_lossy();
                 let matches = glob::glob(&full)
                     .map_err(|e| format!("region '{}': bad glob '{pattern}': {e}", region.name))?;
-                let paths: Vec<std::path::PathBuf> = matches.filter_map(|m| m.ok()).collect();
+                // Each *match* is checked, not the pattern: `../../*.toml`
+                // cannot be judged before it is expanded.
+                let paths = matches
+                    .filter_map(|m| m.ok())
+                    .map(|p| seed_path_within(base, &p, read_paths))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| format!("region '{}': {e}", region.name))?;
                 let content = read_and_concat(&region.name, paths.into_iter(), region.required)?;
                 match content {
                     Some(content) => {
@@ -508,7 +589,8 @@ fn resolve_seeds(
                 }
             }
             RegionSeed::Rhai { script } => {
-                let path = base.join(script);
+                let path = seed_path_within(base, &base.join(script), read_paths)
+                    .map_err(|e| format!("region '{}': {e}", region.name))?;
                 let src = std::fs::read_to_string(&path).map_err(|e| {
                     format!(
                         "region '{}': read rhai seed '{}': {e}",
@@ -930,6 +1012,9 @@ fn build_agent_inner(
     // taint bump below, captured before the policy moves into the context.
     let read_paths_granted = read_path_policy.is_active()
         && (read_path_policy.allow_blueprint || !read_path_policy.grants.is_empty());
+    // Seeding runs below, after the policy has moved into the tool context, and
+    // a seed path answers to the same policy a `read_file` would.
+    let seed_read_paths = read_path_policy.clone();
     // The same question, per entry, recorded on the run so `lev ps` can show
     // that a live run is up but blind to paths its author designed it around.
     let read_path_counts =
@@ -1096,7 +1181,7 @@ fn build_agent_inner(
             sandbox.clone(),
             shell_env_policy(config),
         );
-        resolve_seeds(&blueprint, args, &args.workdir, &policy)?
+        resolve_seeds(&blueprint, args, &args.workdir, &policy, &seed_read_paths)?
     } else {
         HashMap::new()
     };
@@ -3738,6 +3823,17 @@ conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
         )
     }
 
+    /// A blueprint that declares no `[read_paths]`, which is the normal case
+    /// and the one where seed paths are confined to the workdir outright.
+    fn no_read_paths() -> leviath_core::ReadPathPolicy {
+        leviath_core::ReadPathPolicy {
+            agent: "a".to_string(),
+            blueprint: Default::default(),
+            grants: Default::default(),
+            allow_blueprint: false,
+        }
+    }
+
     /// A policy whose runner is a stub returning `result`, for the command-seed
     /// arms (no real process, deterministic on every platform).
     fn stub_policy(result: Result<String, String>) -> SeedCommandPolicy {
@@ -3760,7 +3856,7 @@ criteria = { kind = "pinned", max_tokens = 2000, seed = "input" }"#,
             HashMap::from([("criteria".to_string(), "be safe".to_string())]),
             "/tmp",
         );
-        let seeds = resolve_seeds(&bp, &args, "/tmp", &seed_policy()).unwrap();
+        let seeds = resolve_seeds(&bp, &args, "/tmp", &seed_policy(), &no_read_paths()).unwrap();
         assert_eq!(seeds.get("task").map(String::as_str), Some("build it"));
         assert_eq!(seeds.get("criteria").map(String::as_str), Some("be safe"));
     }
@@ -3770,7 +3866,7 @@ criteria = { kind = "pinned", max_tokens = 2000, seed = "input" }"#,
         let bp =
             bp(r#"spec = { kind = "pinned", max_tokens = 2000, seed = "input", required = true }"#);
         let args = args_with("t", HashMap::new(), "/tmp");
-        let err = resolve_seeds(&bp, &args, "/tmp", &seed_policy()).unwrap_err();
+        let err = resolve_seeds(&bp, &args, "/tmp", &seed_policy(), &no_read_paths()).unwrap_err();
         assert!(err.contains("spec"), "got: {err}");
     }
 
@@ -3778,7 +3874,7 @@ criteria = { kind = "pinned", max_tokens = 2000, seed = "input" }"#,
     fn resolve_seeds_optional_caller_input_missing_is_omitted() {
         let bp = bp(r#"notes = { kind = "pinned", max_tokens = 2000, seed = "input" }"#);
         let args = args_with("t", HashMap::new(), "/tmp");
-        let seeds = resolve_seeds(&bp, &args, "/tmp", &seed_policy()).unwrap();
+        let seeds = resolve_seeds(&bp, &args, "/tmp", &seed_policy(), &no_read_paths()).unwrap();
         assert!(!seeds.contains_key("notes"));
     }
 
@@ -3792,8 +3888,14 @@ criteria = { kind = "pinned", max_tokens = 2000, seed = "input" }"#,
 docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"] } }"#,
         );
         let args = args_with("t", HashMap::new(), &dir.path().to_string_lossy());
-        let seeds =
-            resolve_seeds(&bp, &args, &dir.path().to_string_lossy(), &seed_policy()).unwrap();
+        let seeds = resolve_seeds(
+            &bp,
+            &args,
+            &dir.path().to_string_lossy(),
+            &seed_policy(),
+            &no_read_paths(),
+        )
+        .unwrap();
         assert_eq!(seeds.get("lit").map(String::as_str), Some("hello"));
         let docs = seeds.get("docs").unwrap();
         assert!(docs.contains("alpha") && docs.contains("beta"));
@@ -3809,7 +3911,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             bp(r#"specs = { kind = "pinned", max_tokens = 4000, seed = { glob = "specs/*.md" } }"#);
         let wd = dir.path().to_string_lossy().to_string();
         let args = args_with("t", HashMap::new(), &wd);
-        let seeds = resolve_seeds(&bp, &args, &wd, &seed_policy()).unwrap();
+        let seeds = resolve_seeds(&bp, &args, &wd, &seed_policy(), &no_read_paths()).unwrap();
         let specs = seeds.get("specs").unwrap();
         assert!(specs.contains("spec one") && specs.contains("spec two"));
     }
@@ -3828,7 +3930,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         );
         let wd = dir.path().to_string_lossy().to_string();
         let args = args_with("hello", HashMap::new(), &wd);
-        let seeds = resolve_seeds(&bp, &args, &wd, &seed_policy()).unwrap();
+        let seeds = resolve_seeds(&bp, &args, &wd, &seed_policy(), &no_read_paths()).unwrap();
         assert_eq!(
             seeds.get("scripted").map(String::as_str),
             Some("seeded: hello")
@@ -3844,13 +3946,13 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             r#"docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["missing.txt"] }, required = true }"#,
         );
         let args = args_with("t", HashMap::new(), &wd);
-        let err = resolve_seeds(&req, &args, &wd, &seed_policy()).unwrap_err();
+        let err = resolve_seeds(&req, &args, &wd, &seed_policy(), &no_read_paths()).unwrap_err();
         assert!(err.contains("missing.txt"), "got: {err}");
         // Optional + a missing file → the region is simply omitted.
         let opt = bp(
             r#"docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["missing.txt"] } }"#,
         );
-        let seeds = resolve_seeds(&opt, &args, &wd, &seed_policy()).unwrap();
+        let seeds = resolve_seeds(&opt, &args, &wd, &seed_policy(), &no_read_paths()).unwrap();
         assert!(!seeds.contains_key("docs"));
     }
 
@@ -3863,12 +3965,12 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         let req = bp(
             r#"specs = { kind = "pinned", max_tokens = 2000, seed = { glob = "none/*.md" }, required = true }"#,
         );
-        let err = resolve_seeds(&req, &args, &wd, &seed_policy()).unwrap_err();
+        let err = resolve_seeds(&req, &args, &wd, &seed_policy(), &no_read_paths()).unwrap_err();
         assert!(err.contains("matched no files"), "got: {err}");
         // Optional glob with no matches → region omitted.
         let opt =
             bp(r#"specs = { kind = "pinned", max_tokens = 2000, seed = { glob = "none/*.md" } }"#);
-        let seeds = resolve_seeds(&opt, &args, &wd, &seed_policy()).unwrap();
+        let seeds = resolve_seeds(&opt, &args, &wd, &seed_policy(), &no_read_paths()).unwrap();
         assert!(!seeds.contains_key("specs"));
     }
 
@@ -3879,7 +3981,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         let wd = dir.path().to_string_lossy().to_string();
         let bp = bp(r#"specs = { kind = "pinned", max_tokens = 2000, seed = { glob = "[" } }"#);
         let args = args_with("t", HashMap::new(), &wd);
-        let err = resolve_seeds(&bp, &args, &wd, &seed_policy()).unwrap_err();
+        let err = resolve_seeds(&bp, &args, &wd, &seed_policy(), &no_read_paths()).unwrap_err();
         assert!(err.contains("bad glob"), "got: {err}");
     }
 
@@ -3893,7 +3995,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             r#"scripted = { kind = "pinned", max_tokens = 500, seed = { rhai = "boom.rhai" } }"#,
         );
         let args = args_with("t", HashMap::new(), &wd);
-        let err = resolve_seeds(&bp, &args, &wd, &seed_policy()).unwrap_err();
+        let err = resolve_seeds(&bp, &args, &wd, &seed_policy(), &no_read_paths()).unwrap_err();
         assert!(err.contains("rhai seed failed"), "got: {err}");
     }
 
@@ -3916,6 +4018,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             &args,
             "/tmp",
             &stub_policy(Ok("src/lib.rs\nsrc/main.rs".to_string())),
+            &no_read_paths(),
         )
         .unwrap();
         assert_eq!(
@@ -3941,7 +4044,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
                 ))
             }),
         };
-        let seeds = resolve_seeds(&bp, &args, "/work", &policy).unwrap();
+        let seeds = resolve_seeds(&bp, &args, "/work", &policy, &no_read_paths()).unwrap();
         assert_eq!(
             seeds.get("facts").map(String::as_str),
             Some("scan-repo@/work#9")
@@ -3957,6 +4060,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             &args,
             "/tmp",
             &stub_policy(Err("timed out".to_string())),
+            &no_read_paths(),
         )
         .unwrap();
         assert!(
@@ -3969,8 +4073,14 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
     fn resolve_seeds_command_failure_errors_when_required() {
         let bp = command_bp(true);
         let args = args_with("t", HashMap::new(), "/tmp");
-        let err =
-            resolve_seeds(&bp, &args, "/tmp", &stub_policy(Err("boom".to_string()))).unwrap_err();
+        let err = resolve_seeds(
+            &bp,
+            &args,
+            "/tmp",
+            &stub_policy(Err("boom".to_string())),
+            &no_read_paths(),
+        )
+        .unwrap_err();
         assert!(err.contains("scan-repo"), "got: {err}");
         assert!(err.contains("boom"), "got: {err}");
     }
@@ -3979,8 +4089,14 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
     fn resolve_seeds_command_empty_output_is_skipped_when_optional() {
         let bp = command_bp(false);
         let args = args_with("t", HashMap::new(), "/tmp");
-        let seeds =
-            resolve_seeds(&bp, &args, "/tmp", &stub_policy(Ok("   \n".to_string()))).unwrap();
+        let seeds = resolve_seeds(
+            &bp,
+            &args,
+            "/tmp",
+            &stub_policy(Ok("   \n".to_string())),
+            &no_read_paths(),
+        )
+        .unwrap();
         assert!(!seeds.contains_key("facts"));
     }
 
@@ -3988,7 +4104,14 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
     fn resolve_seeds_command_empty_output_errors_when_required() {
         let bp = command_bp(true);
         let args = args_with("t", HashMap::new(), "/tmp");
-        let err = resolve_seeds(&bp, &args, "/tmp", &stub_policy(Ok(String::new()))).unwrap_err();
+        let err = resolve_seeds(
+            &bp,
+            &args,
+            "/tmp",
+            &stub_policy(Ok(String::new())),
+            &no_read_paths(),
+        )
+        .unwrap_err();
         assert!(err.contains("returned empty"), "got: {err}");
     }
 
@@ -4001,7 +4124,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         let args = args_with("t", HashMap::new(), "/tmp");
         let mut policy = stub_policy(Ok("SHOULD NOT BE USED".to_string()));
         policy.allowed = false;
-        let seeds = resolve_seeds(&bp, &args, "/tmp", &policy).unwrap();
+        let seeds = resolve_seeds(&bp, &args, "/tmp", &policy, &no_read_paths()).unwrap();
         assert!(!seeds.contains_key("facts"));
     }
 
@@ -4011,7 +4134,14 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         // message naming the switch that turned command seeds off.
         let bp = command_bp(true);
         let args = args_with("t", HashMap::new(), "/tmp");
-        let err = resolve_seeds(&bp, &args, "/tmp", &SeedCommandPolicy::disabled()).unwrap_err();
+        let err = resolve_seeds(
+            &bp,
+            &args,
+            "/tmp",
+            &SeedCommandPolicy::disabled(),
+            &no_read_paths(),
+        )
+        .unwrap_err();
         assert!(err.contains("allow_seed_commands"), "got: {err}");
     }
 
@@ -4026,7 +4156,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             r#"specs = { kind = "pinned", max_tokens = 2000, seed = { glob = "sub*" }, required = true }"#,
         );
         let args = args_with("t", HashMap::new(), &wd);
-        let err = resolve_seeds(&bp, &args, &wd, &seed_policy()).unwrap_err();
+        let err = resolve_seeds(&bp, &args, &wd, &seed_policy(), &no_read_paths()).unwrap_err();
         assert!(err.contains("read seed file"), "got: {err}");
     }
 
@@ -4038,7 +4168,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             r#"scripted = { kind = "pinned", max_tokens = 500, seed = { rhai = "nope.rhai" } }"#,
         );
         let args = args_with("t", HashMap::new(), &wd);
-        let err = resolve_seeds(&bp, &args, &wd, &seed_policy()).unwrap_err();
+        let err = resolve_seeds(&bp, &args, &wd, &seed_policy(), &no_read_paths()).unwrap_err();
         assert!(err.contains("read rhai seed"), "got: {err}");
     }
 
@@ -4052,13 +4182,13 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         let req = bp(
             r#"scripted = { kind = "pinned", max_tokens = 500, seed = { rhai = "empty.rhai" }, required = true }"#,
         );
-        let err = resolve_seeds(&req, &args, &wd, &seed_policy()).unwrap_err();
+        let err = resolve_seeds(&req, &args, &wd, &seed_policy(), &no_read_paths()).unwrap_err();
         assert!(err.contains("returned empty"), "got: {err}");
         // Optional + empty → region omitted (no error).
         let opt = bp(
             r#"scripted = { kind = "pinned", max_tokens = 500, seed = { rhai = "empty.rhai" } }"#,
         );
-        let seeds = resolve_seeds(&opt, &args, &wd, &seed_policy()).unwrap();
+        let seeds = resolve_seeds(&opt, &args, &wd, &seed_policy(), &no_read_paths()).unwrap();
         assert!(!seeds.contains_key("scripted"));
     }
 
@@ -4072,8 +4202,214 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
             HashMap::from([("ghost".to_string(), "x".to_string())]),
             "/tmp",
         );
-        let seeds = resolve_seeds(&bp, &args, "/tmp", &seed_policy()).unwrap();
+        let seeds = resolve_seeds(&bp, &args, "/tmp", &seed_policy(), &no_read_paths()).unwrap();
         assert_eq!(seeds.get("task").map(String::as_str), Some("t"));
         assert!(!seeds.contains_key("ghost"));
+    }
+
+    // ─── Blueprint-declared paths stay where they belong ─────────────────────
+
+    /// A workdir with a file beside it that the blueprint has no business
+    /// reading, standing in for `~/.leviath/config.toml` and its provider keys.
+    fn workdir_with_a_neighbour() -> (tempfile::TempDir, String) {
+        let root = tempfile::tempdir().expect("tempdir");
+        let work = root.path().join("work");
+        std::fs::create_dir_all(&work).expect("dirs");
+        std::fs::write(root.path().join("config.toml"), "api_key = \"sk-SECRET\"").expect("write");
+        let wd = work.to_string_lossy().to_string();
+        (root, wd)
+    }
+
+    /// The one that mattered: seeded file contents land in a pinned region, so
+    /// an escaping path put the user's provider keys in front of the model.
+    #[test]
+    fn a_seed_file_outside_the_workdir_is_refused() {
+        let (_root, wd) = workdir_with_a_neighbour();
+        let bp = bp(
+            r#"notes = { kind = "pinned", max_tokens = 2000, seed = { files = ["../config.toml"] } }"#,
+        );
+        let args = args_with("t", HashMap::new(), &wd);
+        let err = resolve_seeds(&bp, &args, &wd, &seed_policy(), &no_read_paths()).unwrap_err();
+        assert!(err.contains("outside the working directory"), "{err}");
+        assert!(err.contains("read_paths"), "{err}");
+    }
+
+    /// The control, so the test above is not passing because everything is
+    /// refused: an ordinary path inside the workdir still seeds.
+    #[test]
+    fn a_seed_file_inside_the_workdir_still_seeds() {
+        let (root, wd) = workdir_with_a_neighbour();
+        std::fs::write(root.path().join("work").join("notes.md"), "hello").expect("write");
+        let bp = bp(
+            r#"notes = { kind = "pinned", max_tokens = 2000, seed = { files = ["notes.md"] } }"#,
+        );
+        let args = args_with("t", HashMap::new(), &wd);
+        let seeds = resolve_seeds(&bp, &args, &wd, &seed_policy(), &no_read_paths()).unwrap();
+        assert!(seeds.get("notes").is_some_and(|s| s.contains("hello")));
+    }
+
+    /// A glob is checked per *match*, since `../*.toml` cannot be judged before
+    /// it is expanded.
+    #[test]
+    fn a_glob_that_matches_outside_the_workdir_is_refused() {
+        let (_root, wd) = workdir_with_a_neighbour();
+        let bp =
+            bp(r#"notes = { kind = "pinned", max_tokens = 2000, seed = { glob = "../*.toml" } }"#);
+        let args = args_with("t", HashMap::new(), &wd);
+        let err = resolve_seeds(&bp, &args, &wd, &seed_policy(), &no_read_paths()).unwrap_err();
+        assert!(err.contains("outside the working directory"), "{err}");
+    }
+
+    /// `[read_paths]` is the consent mechanism, so a declared-and-granted path
+    /// seeds rather than being refused twice over.
+    #[test]
+    fn a_granted_read_path_lets_a_seed_file_out() {
+        let (root, wd) = workdir_with_a_neighbour();
+        let outside = root.path().to_string_lossy().to_string();
+        let mut policy = no_read_paths();
+        policy.blueprint = leviath_core::ReadPathSet::compile(
+            std::slice::from_ref(&outside),
+            std::path::Path::new(&wd),
+            None,
+            cfg!(windows),
+        )
+        .expect("declaration compiles");
+        policy.allow_blueprint = true;
+
+        let bp = bp(
+            r#"notes = { kind = "pinned", max_tokens = 2000, seed = { files = ["../config.toml"] } }"#,
+        );
+        let args = args_with("t", HashMap::new(), &wd);
+        let seeds = resolve_seeds(&bp, &args, &wd, &seed_policy(), &policy).unwrap();
+        assert!(seeds.get("notes").is_some_and(|s| s.contains("sk-SECRET")));
+    }
+
+    /// A script is code the blueprint ships, so it has no `[read_paths]` escape
+    /// at all: outside the blueprint's own directory is simply refused.
+    #[test]
+    fn a_hook_script_outside_the_blueprint_directory_is_refused() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let bp_dir = root.path().join("agents").join("evil");
+        std::fs::create_dir_all(&bp_dir).expect("dirs");
+        std::fs::write(root.path().join("outside.txt"), "NOT RHAI").expect("write");
+
+        let mut stage = leviath_core::Stage::new(
+            "main".to_string(),
+            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        );
+        stage.hooks.on_stage_enter = Some("../../outside.txt".to_string());
+        let blueprint = leviath_core::Blueprint::new(
+            "evil".to_string(),
+            "d".to_string(),
+            vec![stage],
+            leviath_core::layout::ContextLayout::new(vec![], 1000),
+        );
+
+        let bp_path = bp_dir.join("agent.leviath");
+        let err = resolve_stage_hook_scripts(&blueprint, bp_path.to_str().expect("utf8"))
+            .expect_err("an escaping script path is refused");
+        assert!(err.contains("outside the blueprint's directory"), "{err}");
+        // Refused before the read, so the file is never opened: a compile
+        // failure here would mean it had already been slurped.
+        assert!(!err.contains("failed to compile"), "{err}");
+    }
+
+    /// Declared but not granted is still a refusal: `[read_paths]` needs both
+    /// halves, and a seed path is not a way to get one of them for free.
+    #[test]
+    fn a_declared_but_ungranted_read_path_does_not_let_a_seed_file_out() {
+        let (root, wd) = workdir_with_a_neighbour();
+        let outside = root.path().to_string_lossy().to_string();
+        let mut policy = no_read_paths();
+        policy.blueprint = leviath_core::ReadPathSet::compile(
+            std::slice::from_ref(&outside),
+            std::path::Path::new(&wd),
+            None,
+            cfg!(windows),
+        )
+        .expect("declaration compiles");
+        // allow_blueprint stays false and grants stays empty: nothing granted.
+
+        let bp = bp(
+            r#"notes = { kind = "pinned", max_tokens = 2000, seed = { files = ["../config.toml"] } }"#,
+        );
+        let args = args_with("t", HashMap::new(), &wd);
+        let err = resolve_seeds(&bp, &args, &wd, &seed_policy(), &policy).unwrap_err();
+        assert!(err.contains("outside the working directory"), "{err}");
+    }
+
+    #[test]
+    fn a_rhai_seed_script_outside_the_workdir_is_refused() {
+        let (_root, wd) = workdir_with_a_neighbour();
+        let bp = bp(
+            r#"notes = { kind = "pinned", max_tokens = 2000, seed = { rhai = "../config.toml" } }"#,
+        );
+        let args = args_with("t", HashMap::new(), &wd);
+        let err = resolve_seeds(&bp, &args, &wd, &seed_policy(), &no_read_paths()).unwrap_err();
+        assert!(err.contains("outside the working directory"), "{err}");
+    }
+
+    #[test]
+    fn a_custom_region_script_outside_the_blueprint_directory_is_refused() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let bp_dir = root.path().join("agents").join("evil");
+        std::fs::create_dir_all(&bp_dir).expect("dirs");
+        std::fs::write(root.path().join("outside.txt"), "NOT RHAI").expect("write");
+
+        let blueprint =
+            bp(r#"notes = { kind = "custom", script = "../../outside.txt", max_tokens = 2000 }"#);
+        let bp_path = bp_dir.join("agent.leviath");
+        let err = resolve_region_scripts(&blueprint, bp_path.to_str().expect("utf8"))
+            .expect_err("an escaping script path is refused");
+        assert!(err.contains("outside the blueprint's directory"), "{err}");
+    }
+
+    #[test]
+    fn an_output_validator_outside_the_blueprint_directory_is_refused() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let bp_dir = root.path().join("agents").join("evil");
+        std::fs::create_dir_all(&bp_dir).expect("dirs");
+        std::fs::write(root.path().join("outside.txt"), "NOT RHAI").expect("write");
+
+        let mut blueprint = leviath_core::Blueprint::new(
+            "evil".to_string(),
+            "d".to_string(),
+            vec![],
+            leviath_core::layout::ContextLayout::new(vec![], 1000),
+        );
+        blueprint.output = Some(leviath_core::output::OutputSpec {
+            validator: Some("../../outside.txt".to_string()),
+            ..Default::default()
+        });
+        let bp_path = bp_dir.join("agent.leviath");
+        let err = resolve_output_validators(&blueprint, bp_path.to_str().expect("utf8"))
+            .expect_err("an escaping validator path is refused");
+        assert!(err.contains("outside the blueprint's directory"), "{err}");
+    }
+
+    /// The control: a script beside the blueprint compiles as before.
+    #[test]
+    fn a_hook_script_beside_the_blueprint_still_loads() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let bp_dir = root.path().join("agents").join("good");
+        std::fs::create_dir_all(&bp_dir).expect("dirs");
+        std::fs::write(bp_dir.join("h.rhai"), "fn on_stage_enter(ctx) { () }").expect("write");
+
+        let mut stage = leviath_core::Stage::new(
+            "main".to_string(),
+            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        );
+        stage.hooks.on_stage_enter = Some("h.rhai".to_string());
+        let blueprint = leviath_core::Blueprint::new(
+            "good".to_string(),
+            "d".to_string(),
+            vec![stage],
+            leviath_core::layout::ContextLayout::new(vec![], 1000),
+        );
+
+        let bp_path = bp_dir.join("agent.leviath");
+        let scripts = resolve_stage_hook_scripts(&blueprint, bp_path.to_str().expect("utf8"))
+            .expect("a script beside the blueprint loads");
+        assert!(scripts.contains_key("h.rhai"));
     }
 }
