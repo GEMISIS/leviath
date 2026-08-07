@@ -1376,13 +1376,21 @@ fn dispatch_persistence_emits_stage_index_and_drains_io_buffer() {
     assert!(world.get::<StageIoBuffer>(e).unwrap().output.is_empty());
 }
 
-/// The answer's bytes are sent once, not on every heartbeat.
+/// Every snapshot carries the answer's bytes whenever the agent holds them.
 ///
-/// `meta.json` carries only a descriptor, so this is the sole path by which the
-/// content reaches disk - and a run that lives for hours would otherwise rewrite
-/// a quarter-megabyte file every thirty seconds to no effect.
+/// It used to send them once and rely on a sender-side watermark thereafter.
+/// That watermark advanced when the job was *built*, but the persistence lane
+/// coalesces queued snapshots per run and keeps only the newest - so a run that
+/// finished inside one persistence window had the job carrying the body dropped
+/// as superseded, while every later job still wrote `meta.json`'s descriptor.
+/// The two halves then disagreed for good, and `read_final_output` reads that as
+/// "no answer" (issue #276).
+///
+/// Not writing the same quarter-megabyte file on every heartbeat is still worth
+/// doing; it now happens in the lane, past the coalescing, where whether a job
+/// was written is a fact rather than an assumption.
 #[test]
-fn dispatch_persistence_sends_the_answer_once_and_again_when_it_changes() {
+fn dispatch_persistence_always_carries_the_answer_for_the_lane_to_judge() {
     let (mut world, mut rx) = world_with_persistence();
     let e = world
         .spawn((
@@ -1410,20 +1418,31 @@ fn dispatch_persistence_sends_the_answer_once_and_again_when_it_changes() {
         Some("the first answer".len())
     );
 
-    // A second tick with the same answer sends no bytes. Backdating the
-    // watermark makes the heartbeat due, which is the case that would otherwise
-    // rewrite the file for no reason.
+    // A second tick carries the same answer again. Backdating the watermark
+    // makes the heartbeat due, which is the tick that previously sent nothing.
+    //
+    // This is the assertion that pins the bug: if this snapshot were the one to
+    // survive coalescing and it carried no body, the descriptor below would
+    // reach `meta.json` with no sidecar beside it.
     world
         .get_mut::<PersistWatermark>(e)
         .expect("watermark present")
         .backdate(0);
     run_dispatch_persistence(&mut world);
     let second = snapshot_job(rx.try_recv().expect("job sent"));
-    assert!(
-        second.final_output.is_none(),
-        "an unchanged answer is not rewritten"
+    assert_eq!(
+        second.final_output.as_deref(),
+        Some("the first answer"),
+        "a snapshot that describes an answer must also carry it"
     );
-    assert!(second.meta.final_output.is_some(), "but is still described");
+    assert!(second.meta.final_output.is_some(), "and still describes it");
+    // The pairing itself, stated once: describing without carrying is exactly
+    // the state that leaves `lev result` reporting no output.
+    assert_eq!(
+        second.meta.final_output.is_some(),
+        second.final_output.is_some(),
+        "descriptor and body must travel together"
+    );
 
     // A new submission is written again.
     world.entity_mut(e).insert(crate::persistence::FinalOutput(
