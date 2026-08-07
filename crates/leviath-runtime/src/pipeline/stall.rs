@@ -114,6 +114,28 @@ impl Default for StallTimeout {
     }
 }
 
+/// The clock the watchdog measures stall ages against.
+///
+/// Absent in production, where the wall clock is the only sensible answer. It
+/// exists so a test can pin the instant the watchdog reads, and that matters
+/// more than it looks: a stall's age is the gap between *two* clock reads - the
+/// one that stamped `since` and the one this system does - so a second boundary
+/// falling between them shifts every age by one. That is enough to flip a case
+/// deliberately sitting one second inside the grace period, which turns a
+/// boundary test into a coin toss that lands wrong on a loaded runner.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct StallClock(
+    /// Returns Unix seconds. A bare `fn` rather than a boxed closure so the
+    /// resource stays `Copy` and costs nothing when it is absent.
+    pub fn() -> i64,
+);
+
+/// Wall-clock seconds since the Unix epoch: what the watchdog reads when no
+/// [`StallClock`] pins it.
+fn now_secs() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
 /// Default grace period before an unresolvable stall fails its run.
 ///
 /// Long enough that a provider arriving late - a `.rhai` script dropped into the
@@ -180,6 +202,7 @@ pub fn fail_stalled_dispatch(
         Option<&mut StageIoBuffer>,
     )>,
     timeout: Option<Res<StallTimeout>>,
+    clock: Option<Res<StallClock>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -187,7 +210,7 @@ pub fn fail_stalled_dispatch(
     if limit == 0 {
         return; // watchdog disabled
     }
-    let now = chrono::Utc::now().timestamp();
+    let now = clock.map_or_else(now_secs, |c| (c.0)());
     for (entity, stall, si, mut state, buffer) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active || !stall.reason.needs_a_person() {
@@ -250,12 +273,17 @@ mod tests {
         }
     }
 
+    /// The instant these tests pretend it is, on both sides of the comparison.
+    ///
+    /// Arbitrary, and deliberately not the wall clock: see [`StallClock`] for
+    /// why reading it twice makes a boundary test flaky.
+    const NOW: i64 = 1_700_000_000;
+
     /// A stall that started `age` seconds ago and is still being refreshed.
     fn stalled_for(reason: StallReason, age: i64) -> DispatchStall {
-        let now = chrono::Utc::now().timestamp();
         DispatchStall {
-            since: now - age,
-            last_seen: now,
+            since: NOW - age,
+            last_seen: NOW,
             reason,
         }
     }
@@ -273,7 +301,15 @@ mod tests {
             .id()
     }
 
+    /// Run the watchdog with the clock pinned to [`NOW`], so an age of `n` is
+    /// exactly `n` and the grace boundary can be asserted to the second.
     fn run(world: &mut World) {
+        world.insert_resource(StallClock(|| NOW));
+        run_on_the_wall_clock(world);
+    }
+
+    /// Run it the way production does, with no clock pinned.
+    fn run_on_the_wall_clock(world: &mut World) {
         let mut schedule = Schedule::default();
         schedule.add_systems(fail_stalled_dispatch);
         schedule.run(world);
@@ -317,6 +353,53 @@ mod tests {
             AgentStatus::Active
         );
         assert!(world.get::<ReadyToInfer>(e).is_some());
+    }
+
+    #[test]
+    fn the_grace_period_ends_the_second_it_is_reached() {
+        // `<` rather than `<=`, so an age equal to the limit is already out of
+        // grace. Only worth asserting because the clock is pinned - against the
+        // wall clock this is the exact case a one-second drift inverts.
+        let mut world = World::new();
+        world.insert_resource(StallTimeout(60));
+        let e = spawn_stalled(&mut world, StallReason::ProviderMissing, 60);
+
+        run(&mut world);
+
+        let status = &world.get::<AgentState>(e).unwrap().status;
+        assert!(
+            matches!(status, AgentStatus::Error { message } if message.contains("ghost")),
+            "got: {status:?}"
+        );
+    }
+
+    #[test]
+    fn nothing_pinning_the_clock_means_the_wall_clock() {
+        // Production inserts no `StallClock`. The age here is far enough past
+        // the limit that no drift between the two reads can change the verdict.
+        let mut world = World::new();
+        world.insert_resource(StallTimeout(60));
+        let now = chrono::Utc::now().timestamp();
+        let e = world
+            .spawn((
+                agent_state(),
+                stage_inference(),
+                DispatchStall {
+                    since: now - 10_000,
+                    last_seen: now,
+                    reason: StallReason::ProviderMissing,
+                },
+                ReadyToInfer,
+            ))
+            .id();
+
+        run_on_the_wall_clock(&mut world);
+
+        let status = &world.get::<AgentState>(e).unwrap().status;
+        assert!(
+            matches!(status, AgentStatus::Error { message } if message.contains("ghost")),
+            "got: {status:?}"
+        );
     }
 
     #[test]
@@ -422,14 +505,13 @@ mod tests {
         // edge, an iteration cap) and came back. It must not be judged on a
         // wait it was not actually doing.
         let mut world = World::new();
-        let now = chrono::Utc::now().timestamp();
         let e = world
             .spawn((
                 agent_state(),
                 stage_inference(),
                 DispatchStall {
-                    since: now - 10_000,
-                    last_seen: now - STALL_FRESHNESS_SECS - 1,
+                    since: NOW - 10_000,
+                    last_seen: NOW - STALL_FRESHNESS_SECS - 1,
                     reason: StallReason::ProviderMissing,
                 },
                 ReadyToInfer,
