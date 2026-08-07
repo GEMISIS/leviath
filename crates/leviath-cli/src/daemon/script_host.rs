@@ -799,6 +799,10 @@ pub(crate) fn host_shell_command(
 ) -> TokioCommand {
     let mut c = TokioCommand::new(shell);
     c.arg(flag).arg(command).current_dir(workdir);
+    // Scripts call shell() often; apply CREATE_NO_WINDOW at construction so
+    // every caller (including seed commands) stays off the interactive desktop
+    // even if a later run_shell path forgets hide_console_window.
+    leviath_tools::hide_console_window(&mut c);
     c
 }
 
