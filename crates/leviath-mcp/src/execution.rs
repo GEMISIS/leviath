@@ -68,15 +68,6 @@ impl ToolExecutor {
         }
     }
 
-    /// Register an MCP client for a server, advertising its tools under names
-    /// safe for the LLM/provider.
-    ///
-    /// Equivalent to [`Self::add_client_advertised`] reserving nothing; kept for
-    /// callers that don't need the advertised metadata back.
-    pub fn add_client(&mut self, server_name: String, client: MCPClient) {
-        let _ = self.add_client_advertised(server_name, client, &HashSet::new());
-    }
-
     /// Register a client and return its tools under *advertised* names.
     ///
     /// Each advertised name is [`sanitize_tool_name`]d and made unique against
@@ -196,28 +187,6 @@ impl ToolExecutor {
         Ok(Self::map_result(tool_result))
     }
 
-    /// Execute a tool only if it is in the allowed list.
-    ///
-    /// Returns an error if the tool is not in the allowed_tools list.
-    pub async fn execute_filtered(
-        &mut self,
-        tool_name: &str,
-        arguments: Value,
-        allowed_tools: &[String],
-    ) -> anyhow::Result<ExecutionResult> {
-        if !allowed_tools.iter().any(|t| t == tool_name) {
-            return Ok(ExecutionResult {
-                success: false,
-                data: Value::Null,
-                text: format!(
-                    "Tool '{}' is not allowed in the current stage. Allowed tools: {:?}",
-                    tool_name, allowed_tools
-                ),
-            });
-        }
-        self.execute(tool_name, arguments).await
-    }
-
     /// Shutdown all connected MCP clients.
     ///
     /// `MCPClient::shutdown` always returns `Ok` by design (it swallows
@@ -292,20 +261,6 @@ mod tests {
     use super::*;
     use crate::client::EmbeddedResource;
     use crate::test_support::always_on_tracing_guard;
-
-    #[tokio::test]
-    async fn test_execute_filtered_rejects_disallowed_tool() {
-        let mut executor = ToolExecutor::new();
-        let allowed = vec!["read_file".to_string(), "write_file".to_string()];
-
-        let result = executor
-            .execute_filtered("delete_file", serde_json::json!({}), &allowed)
-            .await
-            .unwrap();
-
-        assert!(!result.success);
-        assert!(result.text.contains("not allowed"));
-    }
 
     #[test]
     fn test_tool_executor_creation() {
@@ -454,20 +409,6 @@ mod tests {
 
     // ─── execute_filtered: allowed tool ────────────────────────────────
 
-    #[tokio::test]
-    async fn test_execute_filtered_allowed_tool_but_no_server() {
-        let _guard = always_on_tracing_guard();
-        let mut executor = ToolExecutor::new();
-        let allowed = vec!["read_file".to_string()];
-
-        // Tool is allowed but no server has it
-        let result = executor
-            .execute_filtered("read_file", serde_json::json!({}), &allowed)
-            .await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No MCP server"));
-    }
-
     // ─── execute: no server ─────────────────────────────────────────────
 
     #[tokio::test]
@@ -559,7 +500,7 @@ for line in sys.stdin:
     async fn add_client_and_server_count_reflects_it() {
         let mut executor = ToolExecutor::new();
         let client = spawn_ready_client().await;
-        executor.add_client("server1".to_string(), client);
+        let _ = executor.add_client_advertised("server1".to_string(), client, &HashSet::new());
         assert_eq!(executor.server_count(), 1);
     }
 
@@ -570,7 +511,7 @@ for line in sys.stdin:
     async fn remove_client_takes_the_server_and_its_aliases() {
         let mut executor = ToolExecutor::new();
         let client = spawn_ready_client().await;
-        executor.add_client("server1".to_string(), client);
+        let _ = executor.add_client_advertised("server1".to_string(), client, &HashSet::new());
         assert_eq!(executor.server_count(), 1);
 
         assert!(executor.remove_client("nope").is_none());
@@ -587,7 +528,7 @@ for line in sys.stdin:
         let _guard = always_on_tracing_guard();
         let mut executor = ToolExecutor::new();
         let client = spawn_ready_client().await;
-        executor.add_client("server1".to_string(), client);
+        let _ = executor.add_client_advertised("server1".to_string(), client, &HashSet::new());
 
         let result = executor
             .execute("echo", serde_json::json!({"text": "hi"}))
@@ -602,7 +543,7 @@ for line in sys.stdin:
         let _guard = always_on_tracing_guard();
         let mut executor = ToolExecutor::new();
         let client = spawn_ready_client().await;
-        executor.add_client("server1".to_string(), client);
+        let _ = executor.add_client_advertised("server1".to_string(), client, &HashSet::new());
 
         let result = executor
             .execute_on("server1", "echo", serde_json::json!({}))
@@ -612,18 +553,21 @@ for line in sys.stdin:
         assert_eq!(result.text, "hello from tool");
     }
 
+    /// The end-to-end path against a live stub server. This used to go through
+    /// `execute_filtered`, which is gone; the call it actually exercised -
+    /// route by advertised name, dispatch, map the result - is `execute`, so
+    /// the coverage moves rather than disappearing with its wrapper.
     #[tokio::test]
-    async fn execute_filtered_allowed_tool_with_server_succeeds() {
+    async fn execute_routes_to_a_live_server_and_succeeds() {
         let _guard = always_on_tracing_guard();
         let mut executor = ToolExecutor::new();
         let client = spawn_ready_client().await;
-        executor.add_client("server1".to_string(), client);
+        let _ = executor.add_client_advertised("server1".to_string(), client, &HashSet::new());
 
-        let allowed = vec!["echo".to_string()];
         let result = executor
-            .execute_filtered("echo", serde_json::json!({}), &allowed)
+            .execute("echo", serde_json::json!({}))
             .await
-            .expect("execute_filtered should succeed");
+            .expect("execute should succeed");
         assert!(result.success);
     }
 
@@ -632,7 +576,7 @@ for line in sys.stdin:
         let _guard = always_on_tracing_guard();
         let mut executor = ToolExecutor::new();
         let client = spawn_ready_client().await;
-        executor.add_client("server1".to_string(), client);
+        let _ = executor.add_client_advertised("server1".to_string(), client, &HashSet::new());
 
         let result = executor.shutdown_all().await;
         assert!(result.is_ok());
@@ -712,7 +656,7 @@ for line in sys.stdin:
         client.list_tools().await.expect("list_tools");
 
         let mut executor = ToolExecutor::new();
-        executor.add_client("server1".to_string(), client);
+        let _ = executor.add_client_advertised("server1".to_string(), client, &HashSet::new());
 
         let result = executor
             .execute_on("server1", "echo", serde_json::json!({}))
@@ -1014,7 +958,7 @@ for line in sys.stdin:
         let _guard = always_on_tracing_guard();
         let mut executor = ToolExecutor::new();
         let client = spawn_named("plain").await;
-        executor.add_client("s".to_string(), client);
+        let _ = executor.add_client_advertised("s".to_string(), client, &HashSet::new());
         assert!(
             executor
                 .execute("plain", serde_json::json!({}))

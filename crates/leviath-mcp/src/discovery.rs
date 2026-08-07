@@ -237,29 +237,6 @@ impl ToolDiscovery {
         Ok((tools, client))
     }
 
-    /// Return all discovered tools across all servers.
-    pub fn all_tools(&self) -> Vec<&ToolMetadata> {
-        self.servers
-            .values()
-            .flat_map(|tools| tools.iter())
-            .collect()
-    }
-
-    /// Find a tool by name, returning the server name and tool metadata.
-    pub fn find_tool(&self, name: &str) -> Option<(&str, &ToolMetadata)> {
-        for (server_name, tools) in &self.servers {
-            if let Some(tool) = tools.iter().find(|t| t.name == name) {
-                return Some((server_name.as_str(), tool));
-            }
-        }
-        None
-    }
-
-    /// Get tools for a specific server.
-    pub fn server_tools(&self, server_name: &str) -> Option<&[ToolMetadata]> {
-        self.servers.get(server_name).map(|v| v.as_slice())
-    }
-
     /// Get the number of servers registered.
     pub fn server_count(&self) -> usize {
         self.servers.len()
@@ -354,30 +331,10 @@ mod tests {
     }
 
     #[test]
-    fn new_all_tools_is_empty() {
-        let discovery = ToolDiscovery::new();
-        assert!(discovery.all_tools().is_empty());
-    }
-
-    #[test]
-    fn new_find_tool_returns_none() {
-        let discovery = ToolDiscovery::new();
-        assert!(discovery.find_tool("x").is_none());
-    }
-
-    #[test]
-    fn new_server_tools_returns_none() {
-        let discovery = ToolDiscovery::new();
-        assert!(discovery.server_tools("x").is_none());
-    }
-
-    #[test]
     fn default_same_as_new() {
         let d1 = ToolDiscovery::new();
         let d2 = ToolDiscovery::default();
         assert_eq!(d1.server_count(), d2.server_count());
-        assert!(d1.all_tools().is_empty());
-        assert!(d2.all_tools().is_empty());
     }
 
     // --- discover_from_client / discover_from_config ---
@@ -427,33 +384,6 @@ for line in sys.stdin:
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "echo");
         assert_eq!(discovery.server_count(), 1);
-        assert_eq!(discovery.all_tools().len(), 1);
-
-        let (server_name, tool) = discovery.find_tool("echo").expect("tool should be found");
-        assert_eq!(server_name, "server1");
-        assert_eq!(tool.name, "echo");
-
-        let server_tools = discovery
-            .server_tools("server1")
-            .expect("server tools should be present");
-        assert_eq!(server_tools.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn discover_from_client_missing_tool_returns_none() {
-        let mut client = MCPClient::spawn("python3", &["-c", STUB_INIT_AND_LIST], &HashMap::new())
-            .await
-            .expect("failed to spawn stub server");
-        client.connect().await.expect("connect should succeed");
-
-        let mut discovery = ToolDiscovery::new();
-        discovery
-            .discover_from_client("server1", &mut client)
-            .await
-            .expect("discovery should succeed");
-
-        assert!(discovery.find_tool("nonexistent").is_none());
-        assert!(discovery.server_tools("nonexistent").is_none());
     }
 
     #[tokio::test]
@@ -475,7 +405,6 @@ for line in sys.stdin:
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "echo");
         assert_eq!(discovery.server_count(), 1);
-        assert!(discovery.find_tool("echo").is_some());
 
         // The returned client is live and connected (capabilities were parsed).
         assert!(client.capabilities().is_some());
