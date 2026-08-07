@@ -124,6 +124,17 @@ pub async fn persistence_worker(
     // write can be stored as a compact diff rather than a full snapshot. A
     // digest, not the snapshot itself: retaining a full copy of every live
     // run's context doubled the lane's resident cost.
+    // What the lane has actually written to each run's `final_output` sidecar,
+    // as `(submitted_at, bytes)`. `submit_output` replaces rather than appends,
+    // so a new answer always carries a later stamp.
+    //
+    // This lives here rather than with the sender because the sender cannot
+    // know whether a job it built was written: the coalescing below drops
+    // superseded snapshots, and a watermark advanced on the dropped one leaves
+    // the descriptor in `meta.json` with no sidecar beside it (issue #276).
+    // Here the skip is decided after that, so it reflects what is on disk.
+    let mut last_output: std::collections::HashMap<String, (i64, usize)> =
+        std::collections::HashMap::new();
     let mut last_context: std::collections::HashMap<String, run_archive::ContextDigest> =
         std::collections::HashMap::new();
     while let Some(first) = jobs.recv().await {
@@ -151,13 +162,22 @@ pub async fn persistence_worker(
                         continue; // superseded by a newer snapshot in this batch
                     }
                     let prev = last_context.get(&job.run_id);
-                    write_snapshot(&runs_dir, &job, &machine_id, &world_id, prev).await;
+                    let written = last_output.get(&job.run_id).copied();
+                    // Record what the write actually put on disk, not what this
+                    // job hoped to - deriving the watermark from the job rather
+                    // than the write is the shape of the bug being fixed.
+                    if let Some(key) =
+                        write_snapshot(&runs_dir, &job, &machine_id, &world_id, prev, written).await
+                    {
+                        last_output.insert(job.run_id.clone(), key);
+                    }
                     // Drop a fully-terminal run's cached digest (it won't be
                     // written again), so the map stays bounded by the set of
                     // *live* runs rather than every run the daemon has ever
                     // seen.
                     if is_terminal_run(&job.meta.status) {
                         last_context.remove(&job.run_id);
+                        last_output.remove(&job.run_id);
                     } else {
                         last_context.insert(
                             job.run_id.clone(),
@@ -314,11 +334,12 @@ async fn write_snapshot(
     machine_id: &str,
     world_id: &str,
     prev_context: Option<&run_archive::ContextDigest>,
-) {
+    written_output: Option<(i64, usize)>,
+) -> Option<(i64, usize)> {
     let dir = runs_dir.join(&job.run_id);
     if let Err(e) = create_private_dir(&dir).await {
         tracing::warn!(run_id = %job.run_id, error = %e, "persistence: create run dir failed");
-        return;
+        return None;
     }
     append_run_archive(&dir, job, machine_id, world_id, prev_context).await;
     let meta_json = serde_json::to_string_pretty(&job.meta).expect("RunMeta always serializes");
@@ -336,13 +357,31 @@ async fn write_snapshot(
 
     // The answer's bytes, beside the descriptor `meta.json` carries. Written
     // raw, so serving it is a read and `lev result --raw` is a copy.
-    if let Some(content) = &job.final_output {
+    //
+    // Skipped only when this lane has already written *this* answer, so a
+    // heartbeat does not rewrite an unchanged quarter-megabyte file every
+    // thirty seconds. The check is here rather than at the sender because only
+    // the lane knows a job survived coalescing to be written at all - deciding
+    // it earlier is what left descriptors without sidecars (issue #276).
+    let submitted = job
+        .meta
+        .final_output
+        .as_ref()
+        .map(|d| (d.submitted_at, d.bytes));
+    // `submitted.is_none()` writes unconditionally: with no descriptor there is
+    // nothing to identify the answer by, and skipping on an unidentifiable key
+    // is how the sidecar goes missing in the first place.
+    let mut wrote_output = None;
+    if let Some(content) = &job.final_output
+        && (submitted.is_none() || written_output != submitted)
+    {
         write_bytes_atomic(
             &dir.join(leviath_core::FINAL_OUTPUT_FILE),
             content.clone().into_bytes(),
             &job.run_id,
         )
         .await;
+        wrote_output = submitted;
     }
 
     // Per-stage index (names/status), rewritten whole; empty ⇒ agent has no ledger.
@@ -396,6 +435,7 @@ async fn write_snapshot(
             let _ = tokio::fs::remove_file(&interactions_path).await;
         }
     }
+    wrote_output
 }
 
 /// Append this snapshot to the run's portable archive (`<run_dir>/run.lvr`).
@@ -561,6 +601,68 @@ mod tests {
         }
     }
 
+    /// The whole loop, end to end, for issue #276: two snapshots for one run in
+    /// a single batch, both describing and carrying the answer.
+    ///
+    /// The first is dropped as superseded - which is exactly the coalescing that
+    /// used to lose the bytes, because the sender had already marked them sent.
+    /// The surviving snapshot must still produce the sidecar, and the second
+    /// batch (a heartbeat re-sending the same answer) must not rewrite it.
+    #[tokio::test]
+    async fn worker_writes_the_sidecar_even_when_the_first_snapshot_is_coalesced_away() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        let answered = |body: &str| {
+            let mut m = meta("run-fast");
+            m.final_output = Some(leviath_core::output::FinalOutputDescriptor {
+                format: None,
+                stage: "out".to_string(),
+                submitted_at: 100,
+                bytes: body.len(),
+                truncated: false,
+                artifacts: Vec::new(),
+            });
+            Box::new(PersistJob {
+                run_id: "run-fast".to_string(),
+                meta: m,
+                context: context(),
+                stages: vec![],
+                output_appends: vec![],
+                log_appends: vec![],
+                taint_audit: None,
+                fanout: None,
+                interactions: None,
+                final_output: Some(body.to_string()),
+            })
+        };
+
+        // Both land before the worker drains, so the first is superseded.
+        tx.send(PersistMsg::Snapshot(answered("the answer")))
+            .unwrap();
+        tx.send(PersistMsg::Snapshot(answered("the answer")))
+            .unwrap();
+        drop(tx);
+        persistence_worker(Some(dir.path().to_path_buf()), rx).await;
+
+        let sidecar = dir
+            .path()
+            .join("run-fast")
+            .join(leviath_core::FINAL_OUTPUT_FILE);
+        assert_eq!(
+            std::fs::read_to_string(&sidecar).expect("sidecar written"),
+            "the answer",
+            "a coalesced-away first snapshot must not lose the answer"
+        );
+        // Both halves, because `read_final_output` needs both and a test that
+        // checked one would pass on the bug.
+        let back: RunMeta = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("run-fast").join("meta.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(back.final_output.is_some(), "descriptor written too");
+    }
+
     #[tokio::test]
     async fn worker_writes_meta_and_context_then_exits_on_close() {
         let dir = tempfile::tempdir().unwrap();
@@ -652,7 +754,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut j = job("run-perms");
         j.final_output = Some("the answer".to_string());
-        write_snapshot(dir.path(), &j, "m", "w", None).await;
+        write_snapshot(dir.path(), &j, "m", "w", None, None).await;
 
         let run_dir = dir.path().join("run-perms");
         for name in ["meta.json", "context.json", leviath_core::FINAL_OUTPUT_FILE] {
@@ -678,7 +780,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut j = job("run-answer");
         j.final_output = Some("metric,value\nrows,2\n".to_string());
-        write_snapshot(dir.path(), &j, "m", "w", None).await;
+        write_snapshot(dir.path(), &j, "m", "w", None, None).await;
 
         let written = std::fs::read_to_string(
             dir.path()
@@ -689,12 +791,121 @@ mod tests {
         assert_eq!(written, "metric,value\nrows,2\n");
     }
 
+    /// The regression for issue #276: a descriptor must never reach `meta.json`
+    /// without its sidecar landing too.
+    ///
+    /// The failure was not in either write - it was in deciding *earlier* than
+    /// the write whether the bytes were needed. The sender advanced a watermark
+    /// when it built the job; the lane then dropped that job as superseded and
+    /// wrote a later one, which described the answer and carried nothing. Here
+    /// the second job is written with `written_output: None` - the honest state
+    /// after the first was dropped - and must still produce the sidecar.
+    #[tokio::test]
+    async fn a_described_answer_is_written_even_after_an_earlier_job_was_dropped() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut j = job("run-coalesced");
+        j.final_output = Some("the answer".to_string());
+        j.meta.final_output = Some(leviath_core::output::FinalOutputDescriptor {
+            format: None,
+            stage: "out".to_string(),
+            submitted_at: 100,
+            bytes: "the answer".len(),
+            truncated: false,
+            artifacts: Vec::new(),
+        });
+
+        // `None` is what the lane knows after the job that would have written
+        // the bytes was coalesced away: nothing has been written for this run.
+        write_snapshot(dir.path(), &j, "m", "w", None, None).await;
+
+        let sidecar = dir
+            .path()
+            .join("run-coalesced")
+            .join(leviath_core::FINAL_OUTPUT_FILE);
+        assert_eq!(
+            std::fs::read_to_string(&sidecar).expect("sidecar written"),
+            "the answer"
+        );
+        // The pairing, asserted as a pair: `read_final_output` needs both, so a
+        // test that checked only the descriptor would pass on the bug.
+        let meta: leviath_core::run_meta::RunMeta = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("run-coalesced").join("meta.json"))
+                .expect("meta written"),
+        )
+        .expect("meta parses");
+        assert!(meta.final_output.is_some(), "descriptor present");
+    }
+
+    /// The optimisation the watermark existed for, now decided where it is
+    /// true: an answer this lane has already written is not rewritten, so a
+    /// heartbeat does not rewrite a large file every thirty seconds.
+    #[tokio::test]
+    async fn an_answer_already_written_by_this_lane_is_not_rewritten() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut j = job("run-heartbeat");
+        j.final_output = Some("the answer".to_string());
+        j.meta.final_output = Some(leviath_core::output::FinalOutputDescriptor {
+            format: None,
+            stage: "out".to_string(),
+            submitted_at: 100,
+            bytes: "the answer".len(),
+            truncated: false,
+            artifacts: Vec::new(),
+        });
+        let sidecar = dir
+            .path()
+            .join("run-heartbeat")
+            .join(leviath_core::FINAL_OUTPUT_FILE);
+
+        write_snapshot(dir.path(), &j, "m", "w", None, None).await;
+        assert!(sidecar.exists(), "first write lands");
+        // Replace it with a marker: if the skip does not hold, the marker is
+        // overwritten, which is a difference a mere "file exists" cannot see.
+        std::fs::write(&sidecar, "MARKER").expect("marker");
+
+        write_snapshot(
+            dir.path(),
+            &j,
+            "m",
+            "w",
+            None,
+            Some((100, "the answer".len())),
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(&sidecar).expect("still there"),
+            "MARKER",
+            "an answer already on disk is not rewritten"
+        );
+
+        // A new submission (later stamp) is written again.
+        j.meta
+            .final_output
+            .as_mut()
+            .expect("descriptor")
+            .submitted_at = 200;
+        write_snapshot(
+            dir.path(),
+            &j,
+            "m",
+            "w",
+            None,
+            Some((100, "the answer".len())),
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(&sidecar).expect("rewritten"),
+            "the answer",
+            "a newer submission replaces it"
+        );
+    }
+
     /// A job with no answer writes no sidecar, rather than an empty file that
     /// would read as "the agent answered with nothing".
     #[tokio::test]
     async fn no_answer_writes_no_sidecar() {
         let dir = tempfile::tempdir().expect("temp dir");
-        write_snapshot(dir.path(), &job("run-silent"), "m", "w", None).await;
+        write_snapshot(dir.path(), &job("run-silent"), "m", "w", None, None).await;
         assert!(
             !dir.path()
                 .join("run-silent")
@@ -717,7 +928,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let run = dir.path().join("run-perms");
 
-        write_snapshot(dir.path(), &job("run-perms"), "m", "w", None).await;
+        write_snapshot(dir.path(), &job("run-perms"), "m", "w", None, None).await;
         append_stage_line(&run, 0, "output.log", "a line of agent output", "run-perms").await;
         append_stage_line(&run, 0, "logs.log", "a line of tool activity", "run-perms").await;
         append_record(
@@ -799,7 +1010,15 @@ mod tests {
     async fn write_snapshot_creates_a_readable_run_archive() {
         use leviath_core::run_archive::{RunRecord, fold, read_archive};
         let dir = tempfile::tempdir().unwrap();
-        write_snapshot(dir.path(), &job("run-1"), "machine-x", "world-y", None).await;
+        write_snapshot(
+            dir.path(),
+            &job("run-1"),
+            "machine-x",
+            "world-y",
+            None,
+            None,
+        )
+        .await;
 
         let bytes = std::fs::read(dir.path().join("run-1").join("run.lvr")).unwrap();
         let (version, records) = read_archive(&mut bytes.as_slice()).unwrap();
@@ -829,13 +1048,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let first = job_with_context("run-1", 1);
         let second = job_with_context("run-1", 3); // grew by 2 entries
-        write_snapshot(dir.path(), &first, "m", "w", None).await;
+        write_snapshot(dir.path(), &first, "m", "w", None, None).await;
         write_snapshot(
             dir.path(),
             &second,
             "m",
             "w",
             Some(&run_archive::digest_context(&first.context)),
+            None,
         )
         .await;
 
@@ -864,10 +1084,10 @@ mod tests {
         use leviath_core::run_archive::{RunRecord, read_archive};
         let dir = tempfile::tempdir().unwrap();
         // First process writes the archive.
-        write_snapshot(dir.path(), &job("run-1"), "m1", "w1", None).await;
+        write_snapshot(dir.path(), &job("run-1"), "m1", "w1", None, None).await;
         // A "restarted" worker (no prior context) writes to the existing archive:
         // it records an ownership handoff + a fresh context re-anchor, not a Header.
-        write_snapshot(dir.path(), &job("run-1"), "m2", "w2", None).await;
+        write_snapshot(dir.path(), &job("run-1"), "m2", "w2", None, None).await;
 
         let bytes = std::fs::read(dir.path().join("run-1").join("run.lvr")).unwrap();
         let (_v, records) = read_archive(&mut bytes.as_slice()).unwrap();
@@ -1031,7 +1251,7 @@ mod tests {
         // A job carrying fan-out state writes fanout.json.
         let mut fo_job = job("run-1");
         fo_job.fanout = Some(r#"{"resume":"me"}"#.to_string());
-        write_snapshot(dir.path(), &fo_job, "m", "w", None).await;
+        write_snapshot(dir.path(), &fo_job, "m", "w", None, None).await;
         assert!(path.exists());
         // A later job without fan-out state removes the now-stale file.
         write_snapshot(
@@ -1040,6 +1260,7 @@ mod tests {
             "m",
             "w",
             Some(&run_archive::digest_context(&fo_job.context)),
+            None,
         )
         .await;
         assert!(!path.exists());
@@ -1052,7 +1273,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let run_dir = dir.path().join("run-1");
         std::fs::create_dir_all(run_dir.join("run.lvr")).unwrap();
-        write_snapshot(dir.path(), &job("run-1"), "m", "w", None).await;
+        write_snapshot(dir.path(), &job("run-1"), "m", "w", None, None).await;
         // meta.json still written despite the archive failure.
         assert!(run_dir.join("meta.json").exists());
     }
@@ -1191,6 +1412,7 @@ mod tests {
             "machine-test",
             "world-test",
             None,
+            None,
         )
         .await;
 
@@ -1225,6 +1447,7 @@ mod tests {
             "machine-test",
             "world-test",
             None,
+            None,
         )
         .await;
         let audit =
@@ -1247,13 +1470,22 @@ mod tests {
             "machine-test",
             "world-test",
             None,
+            None,
         )
         .await;
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(written.contains("the plan"));
 
         // A later job that is no longer parked removes the stale sidecar.
-        write_snapshot(dir.path(), &job("r"), "machine-test", "world-test", None).await;
+        write_snapshot(
+            dir.path(),
+            &job("r"),
+            "machine-test",
+            "world-test",
+            None,
+            None,
+        )
+        .await;
         assert!(!path.exists());
     }
 
@@ -1276,6 +1508,7 @@ mod tests {
             },
             "machine-test",
             "world-test",
+            None,
             None,
         )
         .await;
@@ -1316,6 +1549,7 @@ mod tests {
             "machine-test",
             "world-test",
             None,
+            None,
         )
         .await;
     }
@@ -1345,6 +1579,7 @@ mod tests {
             },
             "machine-test",
             "world-test",
+            None,
             None,
         )
         .await;
@@ -1379,6 +1614,7 @@ mod tests {
             },
             "machine-test",
             "world-test",
+            None,
             None,
         )
         .await;

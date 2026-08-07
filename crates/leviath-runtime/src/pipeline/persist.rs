@@ -52,12 +52,6 @@ pub struct PersistWatermark {
     /// #184 was reported on the strength of a fresh `updated_at`, so this is the
     /// timestamp `lev ps` ages its rows against.
     last_progress_at: Option<i64>,
-    /// The answer already on disk, as `(submitted_at, bytes)`.
-    ///
-    /// The sidecar is only rewritten when this differs from what the agent
-    /// holds. Without it the heartbeat would rewrite a quarter-megabyte file
-    /// every thirty seconds for the whole life of a long run, to no effect.
-    last_output: Option<(i64, usize)>,
     /// The taint audit already on disk, as `(stage index, event count)`.
     ///
     /// The audit file is only rewritten when the gate recorded a new event.
@@ -387,17 +381,25 @@ pub fn dispatch_persistence(
             };
             Some(serde_json::to_string(&ip_state).expect("InteractionPointState always serializes"))
         });
-        // Send the answer's bytes only when they are not already on disk. The
-        // stamp-and-size pair identifies a submission: `submit_output` replaces
-        // rather than appends, so a new answer always carries a later stamp.
-        let output_key = final_output.map(|o| (o.0.submitted_at, o.0.content.len()));
-        let final_output_body = match output_key != watermark.last_output {
-            true => {
-                watermark.last_output = output_key;
-                final_output.map(|o| o.0.content.clone())
-            }
-            false => None,
-        };
+        // Always carry the answer's bytes when the agent holds them; the
+        // persistence lane decides whether they still need writing.
+        //
+        // This used to be skipped here, keyed on a watermark advanced when the
+        // job was *built*. That assumed every job it built would be written,
+        // and the lane explicitly does not promise that: it coalesces queued
+        // snapshots per run and keeps only the newest. A run that finished
+        // inside one persistence window therefore had the job carrying the body
+        // dropped as superseded, while every later job carried `None` and still
+        // rewrote `meta.json` with the descriptor - leaving the descriptor and
+        // the sidecar permanently disagreeing, which `read_final_output` reads
+        // as "no answer" (issue #276).
+        //
+        // The skip itself was worth keeping - it stops a heartbeat rewriting a
+        // quarter-megabyte file every thirty seconds - so it moved to the lane,
+        // past the coalescing, where "did this get written" is a fact rather
+        // than an assumption. The cost here is one clone of the answer per
+        // snapshot, on a path that already deep-clones the whole context window.
+        let final_output_body = final_output.map(|o| o.0.content.clone());
         let _ = stage.0.send(PersistMsg::Snapshot(Box::new(PersistJob {
             run_id: md.run_id.clone(),
             meta,
