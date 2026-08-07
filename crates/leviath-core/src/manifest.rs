@@ -195,13 +195,11 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
     Ok(blueprint)
 }
 
-/// Parse one `[stages.<name>]` table into a [`Stage`].
-///
-/// Reads nothing outside its own table, so the manifest's stage order is the
-/// only thing the caller contributes.
-fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result<Stage> {
+/// Parse `[stages.<name>.model]`, or the shipped default when the stage does
+/// not name one.
+fn parse_stage_model(stage_value: &toml::Value) -> ModelConfig {
     let model_table = stage_value.get("model").and_then(|v| v.as_table());
-    let model_config = if let Some(mt) = model_table {
+    if let Some(mt) = model_table {
         let mut models = Vec::new();
 
         // New format: [[stages.<name>.model.models]] list
@@ -299,182 +297,326 @@ fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result<Stage> {
         }
     } else {
         ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string())
+    }
+}
+
+/// Apply `[stages.<name>] mode`, along with the sub-tables a given mode reads
+/// (`interaction_points` for `interactive_points`, the fan-out block for
+/// `fan_out`). A stage that names no mode keeps the constructor's default.
+fn apply_stage_mode(stage: Stage, stage_name: &str, stage_value: &toml::Value) -> Result<Stage> {
+    let Some(mode_str) = stage_value.get("mode").and_then(|v| v.as_str()) else {
+        return Ok(stage);
     };
-
-    let mut stage = Stage::new(stage_name.to_string(), model_config);
-
-    if let Some(mode_str) = stage_value.get("mode").and_then(|v| v.as_str()) {
-        stage = match mode_str {
-            "interactive" => stage.with_mode(StageMode::Interactive),
-            "interactive_points" => {
-                let mut points = Vec::new();
-                if let Some(pts_arr) = stage_value
-                    .get("interaction_points")
-                    .and_then(|v| v.as_array())
-                {
-                    for pt in pts_arr {
-                        let pt_name = pt
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let pt_prompt = pt
-                            .get("prompt")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let pt_required =
-                            pt.get("required").and_then(|v| v.as_bool()).unwrap_or(true);
-                        // What the point does when nobody is watching.
-                        // Absent means auto-approve, the behaviour every
-                        // `--yolo` run has had; `"ask"` opts a genuine
-                        // human checkpoint out of that. A misspelling
-                        // here would silently un-gate the checkpoint, so
-                        // it is an error rather than a fallback.
-                        let pt_unattended = match pt.get("unattended").and_then(|v| v.as_str()) {
-                            None | Some("auto_approve") => {
-                                crate::blueprint::UnattendedPolicy::AutoApprove
-                            }
-                            Some("ask") => crate::blueprint::UnattendedPolicy::Ask,
-                            Some(other) => {
-                                return Err(Error::Other(format!(
-                                    "stage '{stage_name}': interaction point '{pt_name}' \
-                                     has unattended = \"{other}\" - expected \"ask\" or \
-                                     \"auto_approve\""
-                                )));
-                            }
-                        };
-                        let pt_style = match pt.get("style").and_then(|v| v.as_str()) {
-                            Some("multiple_choice") => {
-                                crate::blueprint::InteractionStyle::MultipleChoice
-                            }
-                            Some("confirm") => crate::blueprint::InteractionStyle::Confirm,
-                            _ => crate::blueprint::InteractionStyle::FreeText,
-                        };
-                        // Accept either "options" or "choices" key
-                        let pt_options: Vec<String> = pt
-                            .get("options")
-                            .or_else(|| pt.get("choices"))
-                            .and_then(|v| v.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        // Per-option directives, keyed by option label:
-                        // [stages.<name>.interaction_points.directives]
-                        // "Revise - I'll describe changes" = "Call ask_user_text ..."
-                        // `followups` is accepted as a backward-compat alias.
-                        let pt_directives: std::collections::HashMap<String, String> = pt
-                            .get("directives")
-                            .or_else(|| pt.get("followups"))
-                            .and_then(|v| v.as_table())
-                            .map(|tbl| {
-                                tbl.iter()
-                                    .filter_map(|(k, v)| {
-                                        v.as_str().map(|s| (k.clone(), s.to_string()))
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        // Options that immediately abort the run:
-                        // abort_options = ["Abort - cancel this run"]
-                        let pt_abort_options: Vec<String> = pt
-                            .get("abort_options")
-                            .and_then(|v| v.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        // Options that open the last output for direct editing:
-                        // edit_options = ["Add detail - expand a section"]
-                        let pt_edit_options: Vec<String> = pt
-                            .get("edit_options")
-                            .and_then(|v| v.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        // Pinned region that holds the authoritative
-                        // document: document_region = "plan"
-                        let pt_document_region: Option<String> = pt
-                            .get("document_region")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-                        points.push(crate::blueprint::InteractionPoint {
-                            name: pt_name,
-                            prompt: pt_prompt,
-                            required: pt_required,
-                            unattended: pt_unattended,
-                            style: pt_style,
-                            options: pt_options,
-                            directives: pt_directives,
-                            abort_options: pt_abort_options,
-                            edit_options: pt_edit_options,
-                            document_region: pt_document_region,
-                        });
-                    }
-                }
-                stage.with_mode(StageMode::InteractivePoints { points })
-            }
-            "fan_out" => {
-                let str_field = |key: &str| {
-                    stage_value
-                        .get(key)
+    Ok(match mode_str {
+        "interactive" => stage.with_mode(StageMode::Interactive),
+        "interactive_points" => {
+            let mut points = Vec::new();
+            if let Some(pts_arr) = stage_value
+                .get("interaction_points")
+                .and_then(|v| v.as_array())
+            {
+                for pt in pts_arr {
+                    let pt_name = pt
+                        .get("name")
                         .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                };
-                let on_worker_failure = match stage_value
-                    .get("on_worker_failure")
-                    .and_then(|v| v.as_str())
-                {
-                    Some("fail_all") => crate::blueprint::WorkerFailurePolicy::FailAll,
-                    // "continue" / missing / unknown all mean continue.
-                    _ => crate::blueprint::WorkerFailurePolicy::Continue,
-                };
-                let config = crate::blueprint::FanOutConfig {
-                    worker_agent: str_field("worker_agent"),
-                    worker_stage: str_field("worker_stage"),
-                    worker_query: str_field("worker_query"),
-                    merge_stage: str_field("merge_stage"),
-                    max_workers: stage_value
-                        .get("max_workers")
-                        .and_then(|v| v.as_integer())
-                        .map(|n| n as usize)
-                        .unwrap_or(4),
-                    on_worker_failure,
-                    split_prompt: str_field("split_prompt").unwrap_or_default(),
-                    results_region: str_field("results_region"),
-                    max_items: stage_value
-                        .get("max_items")
-                        .and_then(|v| v.as_integer())
-                        .filter(|n| *n > 0)
-                        .map(|n| n as usize),
-                };
-                stage.with_mode(StageMode::FanOut { config })
+                        .unwrap_or("")
+                        .to_string();
+                    let pt_prompt = pt
+                        .get("prompt")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let pt_required = pt.get("required").and_then(|v| v.as_bool()).unwrap_or(true);
+                    // What the point does when nobody is watching.
+                    // Absent means auto-approve, the behaviour every
+                    // `--yolo` run has had; `"ask"` opts a genuine
+                    // human checkpoint out of that. A misspelling
+                    // here would silently un-gate the checkpoint, so
+                    // it is an error rather than a fallback.
+                    let pt_unattended = match pt.get("unattended").and_then(|v| v.as_str()) {
+                        None | Some("auto_approve") => {
+                            crate::blueprint::UnattendedPolicy::AutoApprove
+                        }
+                        Some("ask") => crate::blueprint::UnattendedPolicy::Ask,
+                        Some(other) => {
+                            return Err(Error::Other(format!(
+                                "stage '{stage_name}': interaction point '{pt_name}' \
+                                 has unattended = \"{other}\" - expected \"ask\" or \
+                                 \"auto_approve\""
+                            )));
+                        }
+                    };
+                    let pt_style = match pt.get("style").and_then(|v| v.as_str()) {
+                        Some("multiple_choice") => {
+                            crate::blueprint::InteractionStyle::MultipleChoice
+                        }
+                        Some("confirm") => crate::blueprint::InteractionStyle::Confirm,
+                        _ => crate::blueprint::InteractionStyle::FreeText,
+                    };
+                    // Accept either "options" or "choices" key
+                    let pt_options: Vec<String> = pt
+                        .get("options")
+                        .or_else(|| pt.get("choices"))
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    // Per-option directives, keyed by option label:
+                    // [stages.<name>.interaction_points.directives]
+                    // "Revise - I'll describe changes" = "Call ask_user_text ..."
+                    // `followups` is accepted as a backward-compat alias.
+                    let pt_directives: std::collections::HashMap<String, String> = pt
+                        .get("directives")
+                        .or_else(|| pt.get("followups"))
+                        .and_then(|v| v.as_table())
+                        .map(|tbl| {
+                            tbl.iter()
+                                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    // Options that immediately abort the run:
+                    // abort_options = ["Abort - cancel this run"]
+                    let pt_abort_options: Vec<String> = pt
+                        .get("abort_options")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    // Options that open the last output for direct editing:
+                    // edit_options = ["Add detail - expand a section"]
+                    let pt_edit_options: Vec<String> = pt
+                        .get("edit_options")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    // Pinned region that holds the authoritative
+                    // document: document_region = "plan"
+                    let pt_document_region: Option<String> = pt
+                        .get("document_region")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    points.push(crate::blueprint::InteractionPoint {
+                        name: pt_name,
+                        prompt: pt_prompt,
+                        required: pt_required,
+                        unattended: pt_unattended,
+                        style: pt_style,
+                        options: pt_options,
+                        directives: pt_directives,
+                        abort_options: pt_abort_options,
+                        edit_options: pt_edit_options,
+                        document_region: pt_document_region,
+                    });
+                }
             }
-            "output" => stage.with_mode(StageMode::Output),
-            "autonomous" => stage.with_mode(StageMode::Autonomous),
-            // A misspelled mode used to become an autonomous stage in
-            // silence, so `mode = "outupt"` produced a stage that ran
-            // normally and never asked for the output it was written to
-            // produce. Region kinds have always rejected an unknown
-            // `kind` for the same reason; this brings stage modes into
-            // line. Any manifest this refuses was already not doing what
-            // it said.
-            unknown => {
+            stage.with_mode(StageMode::InteractivePoints { points })
+        }
+        "fan_out" => {
+            let str_field = |key: &str| {
+                stage_value
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            };
+            let on_worker_failure = match stage_value
+                .get("on_worker_failure")
+                .and_then(|v| v.as_str())
+            {
+                Some("fail_all") => crate::blueprint::WorkerFailurePolicy::FailAll,
+                // "continue" / missing / unknown all mean continue.
+                _ => crate::blueprint::WorkerFailurePolicy::Continue,
+            };
+            let config = crate::blueprint::FanOutConfig {
+                worker_agent: str_field("worker_agent"),
+                worker_stage: str_field("worker_stage"),
+                worker_query: str_field("worker_query"),
+                merge_stage: str_field("merge_stage"),
+                max_workers: stage_value
+                    .get("max_workers")
+                    .and_then(|v| v.as_integer())
+                    .map(|n| n as usize)
+                    .unwrap_or(4),
+                on_worker_failure,
+                split_prompt: str_field("split_prompt").unwrap_or_default(),
+                results_region: str_field("results_region"),
+                max_items: stage_value
+                    .get("max_items")
+                    .and_then(|v| v.as_integer())
+                    .filter(|n| *n > 0)
+                    .map(|n| n as usize),
+            };
+            stage.with_mode(StageMode::FanOut { config })
+        }
+        "output" => stage.with_mode(StageMode::Output),
+        "autonomous" => stage.with_mode(StageMode::Autonomous),
+        // A misspelled mode used to become an autonomous stage in
+        // silence, so `mode = "outupt"` produced a stage that ran
+        // normally and never asked for the output it was written to
+        // produce. Region kinds have always rejected an unknown
+        // `kind` for the same reason; this brings stage modes into
+        // line. Any manifest this refuses was already not doing what
+        // it said.
+        unknown => {
+            return Err(Error::Other(format!(
+                "stage '{stage_name}': unknown mode \"{unknown}\" (valid modes: \
+                 autonomous, interactive, interactive_points, fan_out, output)"
+            )));
+        }
+    })
+}
+
+/// Parse `[stages.<name>.transitions.<target>]` into the stage's edge map.
+///
+/// Unknown conditions and transforms are rejected here rather than degraded,
+/// because both failure modes build an edge the runtime never takes and a
+/// dead edge is invisible until the run wedges.
+fn parse_transitions(
+    transitions_table: &toml::value::Table,
+) -> Result<std::collections::HashMap<String, TransitionEdge>> {
+    let mut transitions = std::collections::HashMap::new();
+    for (target_name, edge_value) in transitions_table {
+        let hint = edge_value
+            .get("hint")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let condition = match edge_value.get("condition").and_then(|v| v.as_str()) {
+            Some("error") => TransitionCondition::Error,
+            Some("max_iterations") => TransitionCondition::MaxIterations,
+            Some("llm_choice") => TransitionCondition::LlmChoice,
+            Some("stuck") => TransitionCondition::Stuck,
+            Some("always") | None => TransitionCondition::Always,
+            // Reject unknown conditions rather than silently building a
+            // `Custom(..)` edge the runtime never evaluates (a dead edge).
+            Some(other) => {
                 return Err(Error::Other(format!(
-                    "stage '{stage_name}': unknown mode \"{unknown}\" (valid modes: \
-                     autonomous, interactive, interactive_points, fan_out, output)"
+                    "transition to '{target_name}' has unknown condition \
+                     '{other}' (valid: always, error, max_iterations, \
+                     llm_choice, stuck)"
                 )));
             }
         };
+
+        // Stuck thresholds live on the edge they arm, so a stage can
+        // be armed on iterations while another is armed on wall clock.
+        // Both halves are required together: a bare `condition =
+        // "stuck"` edge could never fire, and thresholds under any
+        // other condition would be silently ignored.
+        let stuck = parse_stuck_config(edge_value);
+        let is_stuck = condition == TransitionCondition::Stuck;
+        if is_stuck && stuck.is_none() {
+            return Err(Error::Other(format!(
+                "transition to '{target_name}' has condition 'stuck' but no \
+                 threshold (set at least one of stuck_after_iterations, \
+                 stuck_after_minutes, stuck_after_same_file_edits, \
+                 stuck_after_tool_calls)"
+            )));
+        }
+        if !is_stuck && stuck.is_some() {
+            return Err(Error::Other(format!(
+                "transition to '{target_name}' sets stuck_after_* thresholds \
+                 but its condition is not 'stuck' - they would never be read"
+            )));
+        }
+
+        let transform = match edge_value.get("transform").and_then(|v| v.as_str()) {
+            Some("clear") => EdgeTransform::Clear,
+            Some("compact") | Some("summarize") => EdgeTransform::Compact { prompt: None },
+            Some("custom") => {
+                // Parse transform_config sub-table
+                let tc = edge_value.get("transform_config");
+                let carry = tc
+                    .and_then(|v| v.get("carry"))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let compact = tc
+                    .and_then(|v| v.get("compact"))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let clear = tc
+                    .and_then(|v| v.get("clear"))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let compact_prompt = tc
+                    .and_then(|v| v.get("compact_prompt"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                EdgeTransform::Custom {
+                    carry,
+                    compact,
+                    clear,
+                    compact_prompt,
+                }
+            }
+            Some("direct") | None => EdgeTransform::Direct,
+            // Reject unknown transforms rather than silently downgrading
+            // to a plain `Direct` copy (a typo would pass unnoticed).
+            Some(other) => {
+                return Err(Error::Other(format!(
+                    "transition to '{target_name}' has unknown transform \
+                     '{other}' (valid: direct, clear, compact, summarize, custom)"
+                )));
+            }
+        };
+
+        // Parse the edge gate: `gate = { require_modifications = true, ... }`
+        // (or a `[stages.<name>.transitions.<target>.gate]` sub-table).
+        let gate = edge_value
+            .get("gate")
+            .and_then(|v| v.as_table())
+            .map(parse_transition_gate);
+
+        transitions.insert(
+            target_name.clone(),
+            TransitionEdge {
+                target: target_name.clone(),
+                condition,
+                hint,
+                transform,
+                gate,
+                stuck,
+            },
+        );
     }
+    Ok(transitions)
+}
+
+/// Parse one `[stages.<name>]` table into a [`Stage`].
+///
+/// Reads nothing outside its own table, so the manifest's stage order is the
+/// only thing the caller contributes.
+fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result<Stage> {
+    let model_config = parse_stage_model(stage_value);
+
+    let mut stage = Stage::new(stage_name.to_string(), model_config);
+
+    stage = apply_stage_mode(stage, stage_name, stage_value)?;
 
     if let Some(max_iter) = stage_value
         .get("max_iterations")
@@ -710,127 +852,7 @@ fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result<Stage> {
 
     // Parse transitions: [stages.<name>.transitions.<target>]
     if let Some(transitions_table) = stage_value.get("transitions").and_then(|v| v.as_table()) {
-        let mut transitions = std::collections::HashMap::new();
-        for (target_name, edge_value) in transitions_table {
-            let hint = edge_value
-                .get("hint")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-            let condition = match edge_value.get("condition").and_then(|v| v.as_str()) {
-                Some("error") => TransitionCondition::Error,
-                Some("max_iterations") => TransitionCondition::MaxIterations,
-                Some("llm_choice") => TransitionCondition::LlmChoice,
-                Some("stuck") => TransitionCondition::Stuck,
-                Some("always") | None => TransitionCondition::Always,
-                // Reject unknown conditions rather than silently building a
-                // `Custom(..)` edge the runtime never evaluates (a dead edge).
-                Some(other) => {
-                    return Err(Error::Other(format!(
-                        "transition to '{target_name}' has unknown condition \
-                         '{other}' (valid: always, error, max_iterations, \
-                         llm_choice, stuck)"
-                    )));
-                }
-            };
-
-            // Stuck thresholds live on the edge they arm, so a stage can
-            // be armed on iterations while another is armed on wall clock.
-            // Both halves are required together: a bare `condition =
-            // "stuck"` edge could never fire, and thresholds under any
-            // other condition would be silently ignored.
-            let stuck = parse_stuck_config(edge_value);
-            let is_stuck = condition == TransitionCondition::Stuck;
-            if is_stuck && stuck.is_none() {
-                return Err(Error::Other(format!(
-                    "transition to '{target_name}' has condition 'stuck' but no \
-                     threshold (set at least one of stuck_after_iterations, \
-                     stuck_after_minutes, stuck_after_same_file_edits, \
-                     stuck_after_tool_calls)"
-                )));
-            }
-            if !is_stuck && stuck.is_some() {
-                return Err(Error::Other(format!(
-                    "transition to '{target_name}' sets stuck_after_* thresholds \
-                     but its condition is not 'stuck' - they would never be read"
-                )));
-            }
-
-            let transform = match edge_value.get("transform").and_then(|v| v.as_str()) {
-                Some("clear") => EdgeTransform::Clear,
-                Some("compact") | Some("summarize") => EdgeTransform::Compact { prompt: None },
-                Some("custom") => {
-                    // Parse transform_config sub-table
-                    let tc = edge_value.get("transform_config");
-                    let carry = tc
-                        .and_then(|v| v.get("carry"))
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let compact = tc
-                        .and_then(|v| v.get("compact"))
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let clear = tc
-                        .and_then(|v| v.get("clear"))
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let compact_prompt = tc
-                        .and_then(|v| v.get("compact_prompt"))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    EdgeTransform::Custom {
-                        carry,
-                        compact,
-                        clear,
-                        compact_prompt,
-                    }
-                }
-                Some("direct") | None => EdgeTransform::Direct,
-                // Reject unknown transforms rather than silently downgrading
-                // to a plain `Direct` copy (a typo would pass unnoticed).
-                Some(other) => {
-                    return Err(Error::Other(format!(
-                        "transition to '{target_name}' has unknown transform \
-                         '{other}' (valid: direct, clear, compact, summarize, custom)"
-                    )));
-                }
-            };
-
-            // Parse the edge gate: `gate = { require_modifications = true, ... }`
-            // (or a `[stages.<name>.transitions.<target>.gate]` sub-table).
-            let gate = edge_value
-                .get("gate")
-                .and_then(|v| v.as_table())
-                .map(parse_transition_gate);
-
-            transitions.insert(
-                target_name.clone(),
-                TransitionEdge {
-                    target: target_name.clone(),
-                    condition,
-                    hint,
-                    transform,
-                    gate,
-                    stuck,
-                },
-            );
-        }
-        stage.transitions = Some(transitions);
+        stage.transitions = Some(parse_transitions(transitions_table)?);
     }
 
     Ok(stage)
