@@ -33,8 +33,13 @@ fn quoted(text: &str) -> Word {
 
 /// The second word of a single-command line, for asserting on how a word was
 /// read rather than on the key it produced.
+///
+/// Reads it under the **POSIX** escape rule explicitly rather than the host's,
+/// because every caller here is describing `sh`. The Windows reading has its
+/// own tests; leaving this on the platform default meant the same assertion
+/// described a different shell depending on who ran it.
 fn second_word(command: &str) -> Word {
-    let segments = tokenize(command).expect("line should tokenize");
+    let segments = tokenize_for(command, true).expect("line should tokenize");
     segments
         .into_iter()
         .find(|s| s.words.len() > 1)
@@ -299,8 +304,6 @@ fn an_unreadable_line_is_not_grantable() {
         "echo 'unterminated",    // no closing quote
         r#"echo "unterminated"#, // same, double
         "cat <<EOF",             // a heredoc body has its own grammar
-        "echo trailing\\",       // a backslash with nothing to escape
-        r#"cat "a\"#,            // the same, inside double quotes
         r#"cat "$(unbalanced""#, // a substitution opened inside a quoted word
         r#"echo $(cat "oops)"#,  // a substitution whose own contents do not read
         "$CMD --flag",           // the program itself is an expansion
@@ -313,6 +316,18 @@ fn an_unreadable_line_is_not_grantable() {
             "{command:?} must not be grantable"
         );
     }
+
+    // Two more, but only on a shell that escapes: there the trailing backslash
+    // swallows the terminator the line was looking for. On `cmd.exe` the same
+    // lines are ordinary, which is what the second half asserts.
+    for command in ["echo trailing\\", r#"cat "a\"#] {
+        assert_eq!(
+            keys_under(command, true),
+            Vec::<String>::new(),
+            "{command:?} must not be grantable on a POSIX shell"
+        );
+    }
+    assert_eq!(keys_under("echo trailing\\", false), ["shell:echo"]);
 }
 
 /// One unreadable command poisons the whole line, rather than the line silently
@@ -333,8 +348,11 @@ fn keys_are_sorted_and_deduped() {
 /// separator does not split the line.
 #[test]
 fn an_escaped_separator_is_not_a_boundary() {
-    assert_eq!(keys(r"echo a\;b"), ["shell:echo"]);
-    assert_eq!(keys(r"cat my\ file"), ["shell:cat my file"]);
+    assert_eq!(keys_under(r"echo a\;b", true), ["shell:echo"]);
+    assert_eq!(keys_under(r"cat my\ file", true), ["shell:cat my file"]);
+    // On a shell that does not escape, the separator is a separator and the
+    // backslash is data - which is `cmd.exe`, and correct there.
+    assert_eq!(keys_under(r"echo a\;b", false), ["shell:b", "shell:echo"]);
 }
 
 /// Inside double quotes a backslash escapes only the four characters that would
@@ -836,6 +854,15 @@ fn the_four_posix_escapes_inside_double_quotes_still_escape() {
     assert_eq!(arg_of(r#"cat "a\$b""#), "a$b");
     assert_eq!(arg_of(r#"cat "a\`b""#), "a`b");
     assert!(second_word(r#"cat "a\$b""#).literal, "not an expansion");
+}
+
+/// The two escapes that make a line *unreadable* are POSIX-only too: a trailing
+/// backslash consumes the terminator it was looking for. On a shell that does
+/// not escape, the same lines are ordinary.
+#[test]
+fn a_trailing_backslash_only_swallows_a_terminator_on_a_posix_shell() {
+    assert_eq!(keys_under(r"echo trailing\", true), Vec::<String>::new());
+    assert_eq!(keys_under(r"echo trailing\", false), ["shell:echo"]);
 }
 
 // ─── Where a redirect may write (issue #289) ─────────────────────────────────
