@@ -264,6 +264,11 @@ fn drop_unpaired_tool_turns(messages: Vec<serde_json::Value>) -> Vec<serde_json:
         .collect()
 }
 
+/// Render a request as an OpenAI chat-completions body.
+///
+/// Shared by every provider speaking that dialect - OpenAI itself, OpenRouter,
+/// and any `base_url` pointed at a compatible server - so one change to the wire
+/// shape reaches all of them rather than three copies drifting apart.
 pub fn build_openai_request_body(request: &InferenceRequest) -> serde_json::Value {
     let messages = openai_messages(request);
 
@@ -377,6 +382,11 @@ fn reasoning_text(message: &serde_json::Value) -> Option<String> {
     (!joined.trim().is_empty()).then_some(joined)
 }
 
+/// Read an OpenAI chat-completions response back into an [`InferenceResponse`].
+///
+/// The counterpart to [`build_openai_request_body`], and shared for the same
+/// reason. Handles the gateway case where a `200` body carries an `error`
+/// object: see the comment inside for what that cost before it was unpacked.
 pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceResponse> {
     // A gateway does not always use the status line to report a failure.
     // OpenRouter answers 200 with `{"error":{"code":…,"message":…}}` when an

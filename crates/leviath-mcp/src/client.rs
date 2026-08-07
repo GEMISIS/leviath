@@ -91,35 +91,49 @@ pub struct EmbeddedResource {
 pub enum ToolResultContent {
     /// Text content
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        /// The text itself.
+        text: String,
+    },
     /// Image content (base64 encoded)
     #[serde(rename = "image")]
     Image {
+        /// Base64-encoded bytes.
         data: String,
+        /// The media type those bytes are in.
         #[serde(rename = "mimeType")]
         mime_type: String,
     },
     /// Audio content (base64 encoded)
     #[serde(rename = "audio")]
     Audio {
+        /// Base64-encoded bytes.
         data: String,
+        /// The media type those bytes are in.
         #[serde(rename = "mimeType")]
         mime_type: String,
     },
     /// A link to a resource the client may fetch or subscribe to.
     #[serde(rename = "resource_link")]
     ResourceLink {
+        /// Where the resource lives, in the server's own URI scheme.
         uri: String,
+        /// A short label for it. Empty when the server sent none.
         #[serde(default)]
         name: String,
+        /// A longer description, when the server supplied one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
+        /// The media type behind the link, when the server declared it.
         #[serde(rename = "mimeType", default, skip_serializing_if = "Option::is_none")]
         mime_type: Option<String>,
     },
     /// An embedded resource, whose payload is nested under `resource`.
     #[serde(rename = "resource")]
-    Resource { resource: EmbeddedResource },
+    Resource {
+        /// The resource, carried inline rather than linked.
+        resource: EmbeddedResource,
+    },
     /// Any content block this client does not model.
     ///
     /// Internally-tagged enums can't carry the original payload in a catch-all

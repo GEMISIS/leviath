@@ -139,7 +139,11 @@ pub enum ProviderError {
     /// provider response for the logs; the message leads with what to do.
     #[error("{} ({detail})", .reason.remedy())]
     Unavailable {
+        /// Which kind of intervention is needed, which is what decides the
+        /// remedy text a user sees.
         reason: UnavailableReason,
+        /// The provider's own response, kept for the logs. Not shown first: it
+        /// is usually less actionable than the remedy.
         detail: String,
     },
 
@@ -153,7 +157,12 @@ pub enum ProviderError {
 
     /// Token limit exceeded
     #[error("Token limit exceeded: {used} > {max}")]
-    TokenLimitExceeded { used: usize, max: usize },
+    TokenLimitExceeded {
+        /// Tokens the request would have sent.
+        used: usize,
+        /// The model's context limit.
+        max: usize,
+    },
 
     /// Other error
     #[error("{0}")]
@@ -332,12 +341,18 @@ impl MessageContent {
 pub enum ContentBlock {
     /// A text content block.
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        /// The text itself.
+        text: String,
+    },
     /// A tool use request from the assistant.
     #[serde(rename = "tool_use")]
     ToolUse {
+        /// Provider-assigned call id, which the matching result must quote back.
         id: String,
+        /// The tool the model asked for.
         name: String,
+        /// Arguments as the model supplied them, before any validation.
         input: serde_json::Value,
         /// See [`ToolCall::thought_signature`]: replayed verbatim so a
         /// provider that requires it accepts the follow-up request.
@@ -347,8 +362,12 @@ pub enum ContentBlock {
     /// A tool result from executing a tool.
     #[serde(rename = "tool_result")]
     ToolResult {
+        /// The [`ContentBlock::ToolUse`] id this answers.
         tool_use_id: String,
+        /// The tool's output as text. Every provider takes a string here, so a
+        /// structured result is already rendered by this point.
         content: String,
+        /// Whether the tool refused or failed.
         is_error: bool,
     },
 }
@@ -652,6 +671,16 @@ fn same_origin_hop(attempt: &reqwest::redirect::Attempt<'_>) -> bool {
     })
 }
 
+/// The HTTP client every provider talks through.
+///
+/// Redirects are capped and confined to the origin the request started on. That
+/// second part is the load-bearing one: reqwest strips `Authorization` across
+/// origins by itself but leaves custom headers alone, and the provider keys
+/// travel as `x-api-key` and `x-goog-api-key`. A redirect to another host would
+/// hand them over.
+///
+/// `timeout_secs` of `None` leaves the request untimed, which is what a
+/// streaming call needs - a long generation is not a stalled one.
 pub fn build_http_client(timeout_secs: Option<u64>) -> reqwest::Client {
     reqwest::Client::builder()
         .pool_max_idle_per_host(0)

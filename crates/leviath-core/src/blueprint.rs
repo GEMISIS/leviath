@@ -1150,6 +1150,7 @@ pub struct ModelEntry {
 }
 
 impl ModelEntry {
+    /// One provider/model pair in a stage's fallback list.
     pub fn new(provider: String, model: String) -> Self {
         Self { provider, model }
     }
@@ -1506,15 +1507,22 @@ pub enum EdgeTransform {
 
     /// LLM-compact stage content into summary
     Compact {
+        /// What to ask the compaction model for, replacing the built-in
+        /// instruction. `None` uses the default summary prompt.
         #[serde(default)]
         prompt: Option<String>,
     },
 
     /// Per-region rules
     Custom {
+        /// Regions copied through untouched.
         carry: Vec<String>,
+        /// Regions replaced by an LLM summary of themselves.
         compact: Vec<String>,
+        /// Regions emptied on the way across.
         clear: Vec<String>,
+        /// The instruction used for everything in `compact`. `None` uses the
+        /// default summary prompt.
         compact_prompt: Option<String>,
     },
 }
@@ -1555,7 +1563,10 @@ pub enum ContentTransform {
     Summarize,
 
     /// Extract specific fields
-    Extract { fields: Vec<String> },
+    Extract {
+        /// Which fields to keep, by name. Anything else is dropped.
+        fields: Vec<String>,
+    },
 }
 
 #[cfg(test)]

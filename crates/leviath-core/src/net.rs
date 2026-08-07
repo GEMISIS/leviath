@@ -105,6 +105,17 @@ fn redirect_decision(
     check_url(url, allow_local).map_err(|e| format!("refused to follow redirect: {e}"))
 }
 
+/// A client whose redirects are policed by [`check_url`], so a permitted first
+/// hop cannot be turned into a request somewhere else.
+///
+/// The SSRF check on the URL a caller passes is worth little on its own: a
+/// cooperating server answers `302` and the default policy follows it to
+/// `169.254.169.254` with the original headers attached. Every redirect is
+/// re-checked here, and the chain is capped at five hops.
+///
+/// `allow_local` is threaded through to the same check, so a caller that
+/// legitimately talks to `localhost` (an Ollama endpoint) does not have to
+/// choose between that and having a redirect policy at all.
 pub fn checked_client(timeouts: ClientTimeouts, allow_local: bool) -> reqwest::Client {
     client_builder(timeouts)
         .redirect(reqwest::redirect::Policy::custom(

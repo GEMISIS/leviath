@@ -32,8 +32,14 @@ pub struct ToolContext {
 /// struct serves the shell tool, a Rhai `shell()`, and a command seed.
 #[derive(Debug, Clone, Default)]
 pub struct ShellEnvPolicy {
+    /// Which of the four filtering modes is in effect.
     pub mode: leviath_core::ShellEnvMode,
+    /// Names handed over under every mode, from `[security] allow_env_vars`.
+    /// The same list a Rhai `env_var` read goes through, so there is one answer
+    /// to "may agent-supplied code see this variable".
     pub allow_env_vars: Vec<String>,
+    /// Names withheld under `custom`, where the built-in name-shape heuristic
+    /// is off and only the explicit lists govern. Ignored in the other modes.
     pub withhold: Vec<String>,
 }
 

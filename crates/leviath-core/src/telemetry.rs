@@ -28,7 +28,9 @@ pub enum LogKind {
 pub enum TelemetryEvent {
     /// An agent run became visible to the observer.
     RunStarted {
+        /// The run this is about; the correlation key for every later event.
         run_id: String,
+        /// The blueprint's `[agent] name`.
         agent_name: String,
         /// The run-level model hint from spawn metadata, if one was recorded.
         model: Option<String>,
@@ -38,41 +40,67 @@ pub enum TelemetryEvent {
         /// spawned - its earlier life was traced (if at all) by a previous
         /// daemon process, so this trace starts mid-run.
         recovered: bool,
+        /// When it happened, in milliseconds since the Unix epoch.
         at_ms: i64,
     },
     /// The run entered a stage (including the first).
     StageEntered {
+        /// The run this is about.
         run_id: String,
+        /// Zero-based position of the stage in the blueprint's stage list.
         stage_index: usize,
+        /// The stage's name, matching its key under `[stages]`.
         stage_name: String,
+        /// When it happened, in milliseconds since the Unix epoch.
         at_ms: i64,
     },
     /// The run left a stage; token counts are the stage's own totals.
     StageExited {
+        /// The run this is about.
         run_id: String,
+        /// Zero-based position of the stage in the blueprint's stage list.
         stage_index: usize,
+        /// The stage's name, matching its key under `[stages]`.
         stage_name: String,
+        /// Input tokens billed across this stage's whole life, so a revisited
+        /// stage reports the accumulated figure rather than the last visit's.
         prompt_tokens: usize,
+        /// Output tokens billed across this stage's whole life.
         completion_tokens: usize,
+        /// When it happened, in milliseconds since the Unix epoch.
         at_ms: i64,
     },
     /// One inference call finished (successfully or not).
     InferenceCompleted {
+        /// The run this is about.
         run_id: String,
+        /// The stage the call was made from.
         stage_name: String,
+        /// Which provider served it, after fallback resolution - so this is the
+        /// one that answered, not the one the blueprint listed first.
         provider: String,
+        /// The model identifier sent on the wire.
         model: String,
         /// Wall-clock time of the provider call, including retries.
         latency_ms: u64,
+        /// Input tokens this single call billed.
         prompt_tokens: usize,
+        /// Output tokens this single call billed.
         completion_tokens: usize,
+        /// Input tokens served from the provider's prompt cache, already counted
+        /// within `prompt_tokens` rather than in addition to it.
         cached_tokens: usize,
+        /// Whether a response came back. A refusal or a tool call is still a
+        /// success; only a failed call is not.
         success: bool,
     },
     /// One tool call finished.
     ToolCallCompleted {
+        /// The run this is about.
         run_id: String,
+        /// The stage the call was made from.
         stage_name: String,
+        /// The tool as the model named it, before alias resolution.
         tool_name: String,
         /// Wall-clock time of the batch the call ran in. Tool calls execute
         /// in batches and the executor reports one duration per batch, so
@@ -84,29 +112,43 @@ pub enum TelemetryEvent {
     },
     /// A context compaction finished.
     CompactionCompleted {
+        /// The run this is about.
         run_id: String,
+        /// The stage whose context was compacted.
         stage_name: String,
+        /// Whether the compaction produced a usable summary. A failure leaves
+        /// the region as it was rather than emptying it.
         success: bool,
     },
     /// The run reached a terminal status; totals are run-wide.
     RunCompleted {
+        /// The run this is about.
         run_id: String,
         /// The terminal status label: `complete`, `error`, or `cancelled`.
         status: String,
+        /// Input tokens billed across the whole run.
         prompt_tokens: usize,
+        /// Output tokens billed across the whole run.
         completion_tokens: usize,
+        /// How many tool calls the run made, across every stage.
         tool_calls: usize,
         /// Whether the run stopped having modified nothing, when its blueprint
         /// gave it a way to. `complete` says the pipeline reached the end, not
         /// that it achieved anything; this is the difference.
         empty_output: bool,
+        /// When it happened, in milliseconds since the Unix epoch.
         at_ms: i64,
     },
     /// One per-run log line, as also written to the stage's log files.
     Log {
+        /// The run this is about. An OTLP sink uses it to look up the run's open
+        /// span and stamp the record with its trace context.
         run_id: String,
+        /// Which stage's log files the line also went to.
         stage_index: usize,
+        /// Which log the line belongs in.
         kind: LogKind,
+        /// The line itself, without a trailing newline.
         line: String,
     },
 }
