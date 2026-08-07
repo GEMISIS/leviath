@@ -10,6 +10,12 @@
 //! (see CONTRIBUTING, "Where a test module lives").
 
 use super::*;
+// Named here rather than inherited through `super::*`: the host itself no
+// longer mentions these (the types that do moved into `host::types`), so
+// leaning on the parent's imports would mean re-adding two it does not use.
+use leviath_core::interaction::{InteractionRequest, InteractionResponse};
+use tokio::sync::oneshot;
+
 use crate::dynamic_interaction::InteractionBackend;
 use crate::inference_pool::InferencePoolConfig;
 use crate::pipeline::{
