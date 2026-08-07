@@ -9,6 +9,7 @@ pub mod config_reload;
 pub mod fanout_spawner;
 pub mod gate_rules;
 pub mod mcp_pool;
+pub mod readiness;
 pub mod recovery;
 pub mod sandbox_manager;
 pub mod script_host;
