@@ -1107,8 +1107,45 @@ fn limits_fields(config: &Config) -> Vec<Field> {
             help: "Resolve a prompt nobody answered after this long, so the run carries on. 0 waits for ever.",
             value: FieldValue::Number(Some(config.limits.interaction_timeout_secs)),
         },
+        // The two write ceilings are unset in code and offered with a value
+        // here, so a fresh install has one written down where it can be seen
+        // and cleared. Clearing the field stores nothing, which is unlimited.
+        Field {
+            label: "Max bytes one tool call may write",
+            help: "Stops a single command that writes until the disk fills. Clear it for no limit.",
+            value: FieldValue::Number(Some(
+                config
+                    .limits
+                    .max_tool_call_write_bytes
+                    .unwrap_or(SUGGESTED_CALL_WRITE_BYTES),
+            )),
+        },
+        Field {
+            label: "Max bytes one run may write",
+            help: "The same ceiling across a whole run, which several ordinary-looking calls can reach. Clear it for no limit.",
+            value: FieldValue::Number(Some(
+                config
+                    .limits
+                    .max_run_write_bytes
+                    .unwrap_or(SUGGESTED_RUN_WRITE_BYTES),
+            )),
+        },
     ]
 }
+
+/// What `lev setup` offers as a per-call write ceiling.
+///
+/// 2 GiB is far above anything a tool call legitimately writes - a large build
+/// log, a full database dump - and far below the 14 GB a single runaway append
+/// reached in the incident this exists for. The gap between those two numbers
+/// is wide enough that the value does not need to be right, only present.
+const SUGGESTED_CALL_WRITE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// What `lev setup` offers as a per-run write ceiling.
+///
+/// Five times the per-call figure, so a run doing genuinely heavy work has room
+/// for several large writes while three runaway calls still stop.
+const SUGGESTED_RUN_WRITE_BYTES: u64 = 5 * SUGGESTED_CALL_WRITE_BYTES;
 
 /// Write the Limits screen's fields back into a config.
 fn apply_limits_fields(config: &mut Config, fields: &[Field]) {
@@ -1159,6 +1196,13 @@ fn apply_limits_fields(config: &mut Config, fields: &[Field]) {
                 config.limits.interaction_timeout_secs =
                     n.unwrap_or(Config::default().limits.interaction_timeout_secs)
             }
+            // The write ceilings break the rule above, and deliberately: here
+            // an unset field means *no limit*, not "keep the default". They are
+            // the only two settings whose absence is a real choice a user makes
+            // - deleting the line is how you say "let it write" - so unset
+            // stores `None` rather than reinstating a number they just removed.
+            (11, FieldValue::Number(n)) => config.limits.max_tool_call_write_bytes = *n,
+            (12, FieldValue::Number(n)) => config.limits.max_run_write_bytes = *n,
             _ => {}
         }
     }

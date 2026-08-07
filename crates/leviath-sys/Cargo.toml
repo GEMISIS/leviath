@@ -23,6 +23,13 @@ keychain = ["dep:keyring", "dep:keyring-core"]
 [dependencies]
 tracing = { workspace = true }
 
+# Free-space queries (`disk`). There is no such API in `std`, and this crate
+# forbids `unsafe`, so the syscall is delegated - the same arrangement `nix`
+# has here. `fs4` over the older `fs2` because it reaches the platform through
+# `rustix` rather than `libc`, which is one less C dependency in a binary that
+# is otherwise pure Rust plus its TLS stack.
+fs4 = { workspace = true }
+
 # The OS credential store (macOS Keychain / Windows Credential Manager / Secret
 # Service). Optional: see the `keychain` feature above. `keyring-core` is used
 # directly for the `Entry` API so tests can install an in-memory store as the

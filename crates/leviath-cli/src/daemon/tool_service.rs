@@ -36,10 +36,83 @@ use crate::tools::resolve_policy;
 /// Everything one agent needs to execute a tool call: the executors, its policy
 /// layers, and its interaction backend. All fields are cheap `Arc`s so a clone is
 /// moved into each `exec_for` closure. The stage-scoped fields
+/// One run's write ceilings and what it has spent of them (issue #252).
+///
+/// The count is what a *tool call reported writing*, which for a shell redirect
+/// is the target's size measured after the call. That is an approximation in
+/// one direction worth naming: a command that overwrites the same file twice is
+/// counted twice, so a run that rewrites one file in a loop reaches its budget
+/// sooner than the disk does. Erring that way is the point - the alternative is
+/// tracking per-path deltas, which a command writing to a path Leviath cannot
+/// name defeats anyway.
+pub struct WriteBudget {
+    limits: leviath_core::write_limits::WriteLimits,
+    written: std::sync::atomic::AtomicU64,
+    /// The filesystem probe, injected so a test can drive the disk-full arm
+    /// without one. `fn` rather than a closure: one coverage instance.
+    available: fn(&std::path::Path) -> Option<u64>,
+}
+
+impl WriteBudget {
+    /// A budget over the real filesystem.
+    pub fn new(limits: leviath_core::write_limits::WriteLimits) -> Self {
+        Self::with_probe(limits, leviath_sys::disk::available_bytes)
+    }
+
+    /// A budget whose free-space probe is supplied.
+    pub fn with_probe(
+        limits: leviath_core::write_limits::WriteLimits,
+        available: fn(&std::path::Path) -> Option<u64>,
+    ) -> Self {
+        Self {
+            limits,
+            written: std::sync::atomic::AtomicU64::new(0),
+            available,
+        }
+    }
+
+    /// Whether a write of `bytes` into `workdir` may proceed.
+    ///
+    /// Does not record anything: a refused write must not spend the budget it
+    /// was refused by, or one oversized call would exhaust the run.
+    pub fn check(
+        &self,
+        workdir: &std::path::Path,
+        bytes: u64,
+    ) -> leviath_core::write_limits::WriteVerdict {
+        leviath_core::write_limits::check_write(
+            self.limits,
+            self.written.load(std::sync::atomic::Ordering::Relaxed),
+            bytes,
+            (self.available)(workdir),
+        )
+    }
+
+    /// Record bytes a call actually wrote.
+    pub fn record(&self, bytes: u64) {
+        self.written
+            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// What this run has written so far.
+    pub fn written(&self) -> u64 {
+        self.written.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Everything one agent needs to execute a tool call: the executors, its policy
+/// layers, and its interaction backend. All fields are cheap `Arc`s so a clone
+/// is moved into each `exec_for` closure. The stage-scoped fields
 /// (`stage_perms`/`stage_name`) are shared handles the host updates as the agent
 /// changes stage.
 #[derive(Clone)]
 pub struct AgentToolState {
+    /// The write ceilings in effect, and what this run has spent of them.
+    ///
+    /// Shared rather than copied because the running total has to survive
+    /// across every batch this run makes - a per-run budget that reset per
+    /// batch would bound nothing.
+    pub writes: Arc<WriteBudget>,
     /// Built-in tool executor (holds the agent's workdir).
     pub builtins: Arc<leviath_tools::BuiltinTools>,
     /// MCP tool executor.
@@ -364,6 +437,29 @@ pub async fn dispatch_tools(
             continue;
         }
 
+        // How much this call would add to the run's disk footprint, and whether
+        // there is room for it (issue #252). Checked before the policy layers
+        // for the same reason containment is: a full disk is not a permission
+        // question, and no `--yolo` should be able to fill one.
+        if let Some(refusal) = crate::tools::write_budget_refusal(
+            &tc.name,
+            &tc.arguments,
+            state.builtins.workdir(),
+            &state.writes,
+        ) {
+            progress(&tc.id, &refusal);
+            slots.push((tc.id.clone(), Some(refusal)));
+            continue;
+        }
+        // Charged here, not after it runs. Every call in a batch is authorized
+        // before any of them execute, so a budget charged only on completion
+        // would let all of them check against a total none had spent - two
+        // 8-byte writes would both pass a 10-byte run budget. A refused call
+        // reaches `continue` above and is charged nothing.
+        if let Some(declared) = crate::tools::declared_write_bytes(&tc.name, &tc.arguments) {
+            state.writes.record(declared);
+        }
+
         let is_builtin = state.builtin_names.contains(&tc.name);
         // What a scoped approval for *this specific call* would be remembered
         // under. For a shell call that is one key per command in the line, not
@@ -456,6 +552,15 @@ pub async fn dispatch_tools(
         let progress = &progress;
         async move {
             let result = execute_tool(&state, *is_builtin, tc).await;
+            // Charge the run for what this call actually put on disk. A shell
+            // redirect is only measurable here, after the fact - see
+            // `write_budget_refusal` for why that is inherent rather than a
+            // shortcut.
+            state.writes.record(crate::tools::measured_write_bytes(
+                &tc.name,
+                &tc.arguments,
+                state.builtins.workdir(),
+            ));
             progress(&tc.id, &result);
             result
         }
@@ -682,6 +787,56 @@ mod tests {
 
     /// Empty script-tool fields (no discovered tools, a deny-all host) for tests
     /// that don't exercise script tools.
+    /// A budget that stops nothing, over a filesystem reporting plenty of room.
+    /// The default for every test that is not about the ceilings themselves,
+    /// so adding them changed no existing expectation.
+    fn unlimited_writes() -> WriteBudget {
+        WriteBudget::with_probe(Default::default(), |_| {
+            Some(leviath_core::write_limits::MIN_FREE_BYTES * 100)
+        })
+    }
+
+    /// A state over `workdir` with every write tool allowed and `budget` in
+    /// effect, so a test about the ceilings is not also a test about policy.
+    fn state_with_writes(workdir: &std::path::Path, budget: WriteBudget) -> Arc<AgentToolState> {
+        let builtins = Arc::new(leviath_tools::BuiltinTools::new(
+            leviath_tools::ToolContext::new(workdir.to_path_buf()),
+        ));
+        let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
+        let mut global = HashMap::new();
+        for tool in ["write_file", "edit_file", "shell"] {
+            global.insert(tool.to_string(), ToolPolicy::Allow);
+        }
+        let (script_tools, script_tool_names, script_host) = no_script_fields();
+        Arc::new(AgentToolState {
+            writes: Arc::new(budget),
+            builtins,
+            mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            builtin_names,
+            launch_overrides: Arc::new(HashMap::new()),
+            safe_keys: Arc::new(HashSet::new()),
+            run_allows: Arc::new(Mutex::new(HashSet::new())),
+            stage_allows: Arc::new(StdMutex::new(HashSet::new())),
+            stage_allows_index: Arc::new(StdMutex::new(None)),
+            stage_perms: Arc::new(StdMutex::new(HashMap::new())),
+            stage_perms_by_index: Arc::new(Vec::new()),
+            stage_required: Arc::new(StdMutex::new(HashSet::new())),
+            stage_required_by_index: Arc::new(Vec::new()),
+            agent_perms: Arc::new(HashMap::new()),
+            global_perms: Arc::new(global),
+            blueprint_may_loosen: false,
+            interaction: InteractionHub::new().backend_for("agent-a"),
+            unattended: false,
+            stage_name: Arc::new(StdMutex::new("main".to_string())),
+            subagent: None,
+            sandbox: None,
+            script_tools,
+            script_tool_names,
+            script_host,
+            dynamic: None,
+        })
+    }
+
     fn no_script_fields() -> ScriptFields {
         let allow = crate::daemon::script_host::ScriptAllow {
             http_get: false,
@@ -714,6 +869,7 @@ mod tests {
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
         let (script_tools, script_tool_names, script_host) = no_script_fields();
         Arc::new(AgentToolState {
+            writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(mcp)),
             builtin_names,
@@ -795,6 +951,7 @@ mod tests {
         ));
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
         let state = Arc::new(AgentToolState {
+            writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             builtin_names,
@@ -895,6 +1052,7 @@ mod tests {
         allow.insert("write_file".to_string(), ToolPolicy::Allow);
         allow.insert("edit_file".to_string(), ToolPolicy::Allow);
         Arc::new(AgentToolState {
+            writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             builtin_names,
@@ -1150,6 +1308,7 @@ mod tests {
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
         let (script_tools, script_tool_names, script_host) = no_script_fields();
         let state = Arc::new(AgentToolState {
+            writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             builtin_names,
@@ -1349,6 +1508,7 @@ mod tests {
         global.insert("write_file".to_string(), ToolPolicy::Deny);
         let (script_tools, script_tool_names, script_host) = no_script_fields();
         let state = Arc::new(AgentToolState {
+            writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             builtin_names,
@@ -1416,6 +1576,7 @@ mod tests {
         global.insert("write_file".to_string(), ToolPolicy::Allow);
         let (script_tools, script_tool_names, script_host) = no_script_fields();
         let state = Arc::new(AgentToolState {
+            writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             builtin_names,
@@ -1476,6 +1637,217 @@ mod tests {
         assert!(wrote_inside, "{allowed}");
     }
 
+    // ─── Write ceilings (issue #252) ─────────────────────────────────────────
+
+    /// The production constructor, against the machine's real filesystem.
+    ///
+    /// Every other test here injects a probe, which proves the arithmetic and
+    /// nothing about whether the arithmetic is wired to a real disk. This one
+    /// asks the actual syscall - and needs no disk to do it, because a write
+    /// larger than any filesystem is refused by reading the number, not by
+    /// filling anything.
+    #[test]
+    fn the_real_probe_refuses_a_write_no_filesystem_could_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let budget = WriteBudget::new(Default::default());
+
+        // Larger than any disk, so this is a refusal on measurement.
+        let refusal = budget
+            .check(dir.path(), u64::MAX / 2)
+            .refusal()
+            .unwrap_or_default();
+        assert!(refusal.contains("nearly out of disk"), "{refusal}");
+        // The control, and the one that matters: an ordinary write on a machine
+        // with room is allowed. Without it the test above would pass on a probe
+        // that refused everything.
+        assert_eq!(
+            budget.check(dir.path(), 1024),
+            leviath_core::write_limits::WriteVerdict::Allow
+        );
+        // Nothing was spent by either question.
+        assert_eq!(budget.written(), 0);
+    }
+
+    /// Recording accumulates, and a refusal spends nothing - otherwise one
+    /// oversized call would exhaust a run's budget by being rejected.
+    #[test]
+    fn a_budget_records_what_was_written_and_nothing_for_a_refusal() {
+        let budget = WriteBudget::with_probe(
+            leviath_core::write_limits::WriteLimits {
+                per_call: Some(10),
+                per_run: None,
+            },
+            |_| Some(leviath_core::write_limits::MIN_FREE_BYTES * 100),
+        );
+        let dir = tempfile::tempdir().unwrap();
+
+        budget.record(4);
+        budget.record(6);
+        assert_eq!(budget.written(), 10);
+        // A check never records, whatever it decides.
+        let _ = budget.check(dir.path(), 100);
+        assert_eq!(budget.written(), 10);
+    }
+
+    /// A `write_file` declares its size, so an oversized one is stopped before
+    /// a byte reaches the disk. The file not existing afterwards is the
+    /// assertion that matters; the message alone would not distinguish
+    /// "refused" from "wrote it and then complained".
+    #[tokio::test]
+    async fn an_oversized_write_file_is_refused_before_it_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_writes(
+            dir.path(),
+            WriteBudget::with_probe(
+                leviath_core::write_limits::WriteLimits {
+                    per_call: Some(8),
+                    per_run: None,
+                },
+                |_| Some(leviath_core::write_limits::MIN_FREE_BYTES * 100),
+            ),
+        );
+
+        let out = dispatch_tools(
+            state,
+            vec![call(
+                "c1",
+                "write_file",
+                serde_json::json!({"path": "big.txt", "content": "far too many bytes"}),
+            )],
+            noop_progress(),
+        )
+        .await;
+
+        let result = out[0].1.clone();
+        assert!(result.contains("per-call limit"), "{result}");
+        assert!(!dir.path().join("big.txt").exists(), "it wrote anyway");
+    }
+
+    /// The control: the same tool under the same ceiling writes when it fits.
+    #[tokio::test]
+    async fn a_write_file_within_the_ceiling_still_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_writes(
+            dir.path(),
+            WriteBudget::with_probe(
+                leviath_core::write_limits::WriteLimits {
+                    per_call: Some(1024),
+                    per_run: None,
+                },
+                |_| Some(leviath_core::write_limits::MIN_FREE_BYTES * 100),
+            ),
+        );
+
+        let out = dispatch_tools(
+            state,
+            vec![call(
+                "c1",
+                "write_file",
+                serde_json::json!({"path": "small.txt", "content": "fits"}),
+            )],
+            noop_progress(),
+        )
+        .await;
+
+        let result = out[0].1.clone();
+        assert!(!result.contains("[denied]"), "{result}");
+        assert!(dir.path().join("small.txt").exists());
+    }
+
+    /// A nearly-full disk refuses the write whatever the ceilings say, and the
+    /// message must not send anyone to raise a limit that is not the problem.
+    #[tokio::test]
+    async fn a_nearly_full_disk_refuses_a_write_with_no_ceiling_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_writes(
+            dir.path(),
+            // No limits at all - the code default - and a filesystem with
+            // almost nothing left.
+            WriteBudget::with_probe(Default::default(), |_| Some(1024)),
+        );
+
+        let out = dispatch_tools(
+            state,
+            vec![call(
+                "c1",
+                "write_file",
+                serde_json::json!({"path": "x.txt", "content": "hi"}),
+            )],
+            noop_progress(),
+        )
+        .await;
+
+        let result = out[0].1.clone();
+        assert!(result.contains("nearly out of disk"), "{result}");
+        assert!(!result.contains("max_"), "sent them to a config key");
+        assert!(!dir.path().join("x.txt").exists());
+    }
+
+    /// The per-run ceiling spans calls, which is the case a per-call ceiling
+    /// misses: two writes that each fit, and together do not.
+    #[tokio::test]
+    async fn the_run_ceiling_stops_the_second_of_two_calls_that_each_fit() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_writes(
+            dir.path(),
+            WriteBudget::with_probe(
+                leviath_core::write_limits::WriteLimits {
+                    per_call: Some(100),
+                    per_run: Some(10),
+                },
+                |_| Some(leviath_core::write_limits::MIN_FREE_BYTES * 100),
+            ),
+        );
+
+        let out = dispatch_tools(
+            state,
+            vec![
+                call(
+                    "c1",
+                    "write_file",
+                    serde_json::json!({"path": "a.txt", "content": "12345678"}),
+                ),
+                call(
+                    "c2",
+                    "write_file",
+                    serde_json::json!({"path": "b.txt", "content": "12345678"}),
+                ),
+            ],
+            noop_progress(),
+        )
+        .await;
+
+        let first = out[0].1.clone();
+        let second = out[1].1.clone();
+        assert!(!first.contains("[denied]"), "first should fit: {first}");
+        assert!(second.contains("budget"), "{second}");
+        assert!(dir.path().join("a.txt").exists());
+        assert!(!dir.path().join("b.txt").exists());
+    }
+
+    /// A run with no ceilings writes freely, which is the shipped default: how
+    /// much an agent should write is the user's call, not the engine's.
+    #[tokio::test]
+    async fn the_default_configuration_imposes_no_write_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_writes(dir.path(), unlimited_writes());
+
+        let out = dispatch_tools(
+            state,
+            vec![call(
+                "c1",
+                "write_file",
+                serde_json::json!({"path": "big.txt", "content": "x".repeat(200_000)}),
+            )],
+            noop_progress(),
+        )
+        .await;
+
+        let result = out[0].1.clone();
+        assert!(!result.contains("[denied]"), "{result}");
+        assert!(dir.path().join("big.txt").exists());
+    }
+
     #[tokio::test]
     async fn exec_for_without_state_errors() {
         let service = CliToolService::new();
@@ -1529,6 +1901,7 @@ mod tests {
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
         let (script_tools, script_tool_names, script_host) = no_script_fields();
         let state = Arc::new(AgentToolState {
+            writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             builtin_names,
@@ -2099,6 +2472,7 @@ mod tests {
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
         let (script_tools, script_tool_names, script_host) = no_script_fields();
         let state = Arc::new(AgentToolState {
+            writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             builtin_names,

@@ -118,6 +118,9 @@ anyhow = "1.0"
 chrono = "0.4"
 rhai = { version = "1.25", features = ["sync", "serde"] }
 glob = "0.3"
+# Free-space queries for the disk guard (`leviath-sys::disk`). Pure Rust over
+# `rustix`; `std` has no equivalent and the workspace forbids `unsafe`.
+fs4 = "1.1"
 # Compiled once per [read_paths] entry at spawn; already in the lock file
 # transitively, named here so the allowlist matcher in `leviath-core` uses the
 # same version everywhere.
