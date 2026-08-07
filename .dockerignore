@@ -1,6 +1,6 @@
 # Keep the build context to sources: the target dir alone is gigabytes.
-# agents/ must stay complete - build.rs embeds every file of every bundled
-# blueprint, including their READMEs.
+# crates/leviath-cli/agents/ must stay complete - build.rs embeds every file of
+# every bundled blueprint, including their READMEs.
 target/
 coverage/
 .git/

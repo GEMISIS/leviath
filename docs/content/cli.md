@@ -36,6 +36,8 @@ Spawn an agent into the daemon. `PATH` is an installed agent name, a blueprint d
 | `--allow <TOOL>` | Allow one tool outright. Repeatable |
 | `--max-depth <N>` | Override the blueprint's maximum sub-agent tree depth |
 | `--no-seed-commands` | Refuse the blueprint's `seed = { command = "..." }` regions for this run |
+| `--count <N>` | Start this many runs of the same agent and task, each under its own run id, from one invocation |
+| `--json` | Print the spawned run as JSON rather than a sentence, for a caller that parses the run id back out. With `--count` above 1 it is an array, one object per run |
 | `--output-format <LABEL>` | Ask for the final output in this shape. See [Final outputs](/docs/outputs) |
 | `--output-instructions <TEXT>` | Extra guidance about that shape |
 | `--output-schema <JSON\|@FILE>` | A JSON Schema the final output must satisfy |

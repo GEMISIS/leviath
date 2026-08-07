@@ -224,8 +224,7 @@ mod tests {
     // `runstate::list_runs()` reads the real on-disk runs directory (there's
     // no test-isolated override in this crate's test suite), so these tests
     // use unique run-id prefixes and only assert on their own entries, then
-    // clean up afterward - the same convention already used by
-    // `commands/run/worker.rs` and `commands/run/mod.rs`'s tests.
+    // clean up afterward.
 
     struct RunCleanup<'a>(&'a [&'a str]);
     impl Drop for RunCleanup<'_> {
