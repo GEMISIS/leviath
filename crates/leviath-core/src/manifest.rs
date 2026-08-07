@@ -790,6 +790,11 @@ fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result<Stage> {
         stage.sandbox = Some(parse_sandbox_config(sandbox_table)?);
     }
 
+    // Script-backed lifecycle hooks: [stages.<name>.hooks]
+    if let Some(hooks_table) = stage_value.get("hooks").and_then(|v| v.as_table()) {
+        stage.hooks = parse_stage_hooks(stage_name, hooks_table)?;
+    }
+
     // Parse the stage's declared output shape: [stages.<name>.output].
     // Narrows [agent.output]; whoever starts the run overrides both.
     if let Some(output_table) = stage_value.get("output").and_then(|v| v.as_table()) {
@@ -856,6 +861,37 @@ fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result<Stage> {
     }
 
     Ok(stage)
+}
+
+/// Parse `[stages.<name>.hooks]` into the stage's [`StageHooks`].
+///
+/// An unknown key is a hard error rather than an ignored line. A blueprint that
+/// writes `on_stage_entry` (or a hook this build does not implement yet) has
+/// asked for behaviour it will silently not get, and a silently-ignored hook
+/// reads exactly like one that ran and chose to do nothing.
+fn parse_stage_hooks(
+    stage_name: &str,
+    table: &toml::value::Table,
+) -> Result<crate::blueprint::StageHooks> {
+    let mut hooks = crate::blueprint::StageHooks::default();
+    for (key, value) in table {
+        let Some(path) = value.as_str() else {
+            return Err(Error::Other(format!(
+                "stage '{stage_name}': hook '{key}' must be a path to a .rhai file, got: {value}"
+            )));
+        };
+        match key.as_str() {
+            "on_stage_enter" => hooks.on_stage_enter = Some(path.to_string()),
+            "on_stage_exit" => hooks.on_stage_exit = Some(path.to_string()),
+            other => {
+                return Err(Error::Other(format!(
+                    "stage '{stage_name}': unknown hook '{other}' \
+                     (this build implements: on_stage_enter, on_stage_exit)"
+                )));
+            }
+        }
+    }
+    Ok(hooks)
 }
 
 /// Parse `[compaction]` over the defaults, leaving any field the manifest does
@@ -1491,6 +1527,68 @@ fn parse_sandbox_config(table: &toml::value::Table) -> Result<crate::sandbox::To
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── [stages.<name>.hooks] ────────────────────────────────────────────
+
+    fn stage_with_hooks(body: &str) -> Result<crate::Stage> {
+        let toml_src = format!("[stages.main]\n{body}\n");
+        let parsed: toml::Value = toml::from_str(&toml_src).expect("fixture parses");
+        let stage_value = parsed
+            .get("stages")
+            .and_then(|v| v.get("main"))
+            .expect("fixture shape");
+        parse_stage("main", stage_value)
+    }
+
+    #[test]
+    fn a_stage_declaring_no_hooks_has_none() {
+        let stage = stage_with_hooks("mode = \"autonomous\"").expect("parses");
+        assert!(stage.hooks.is_empty());
+        assert!(stage.hooks.declared().is_empty());
+    }
+
+    #[test]
+    fn both_hooks_parse_and_report_the_function_they_back() {
+        let stage = stage_with_hooks(
+            "[stages.main.hooks]\non_stage_enter = \"a.rhai\"\non_stage_exit = \"b.rhai\"",
+        )
+        .expect("parses");
+        assert!(!stage.hooks.is_empty());
+        assert_eq!(
+            stage.hooks.declared(),
+            vec![("on_stage_enter", "a.rhai"), ("on_stage_exit", "b.rhai")]
+        );
+    }
+
+    #[test]
+    fn one_file_may_back_both_hooks() {
+        let stage = stage_with_hooks(
+            "[stages.main.hooks]\non_stage_enter = \"h.rhai\"\non_stage_exit = \"h.rhai\"",
+        )
+        .expect("parses");
+        let paths: Vec<&str> = stage.hooks.declared().iter().map(|(_, p)| *p).collect();
+        assert_eq!(paths, vec!["h.rhai", "h.rhai"]);
+    }
+
+    /// An unrecognised hook is refused rather than ignored. A blueprint writing
+    /// `on_stage_entry` has asked for behaviour it would silently not get, and
+    /// a hook that never runs reads exactly like one that ran and did nothing.
+    #[test]
+    fn an_unknown_hook_name_is_refused_and_lists_the_real_ones() {
+        let err = stage_with_hooks("[stages.main.hooks]\non_stage_entry = \"a.rhai\"")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown hook 'on_stage_entry'"), "{err}");
+        assert!(err.contains("on_stage_enter"), "{err}");
+    }
+
+    #[test]
+    fn a_hook_that_is_not_a_path_is_refused() {
+        let err = stage_with_hooks("[stages.main.hooks]\non_stage_enter = 42")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must be a path"), "{err}");
+    }
 
     /// Extract the `points` vec from a `StageMode::InteractivePoints`.
     /// Panics (with a diagnostic) when the mode is any other variant.

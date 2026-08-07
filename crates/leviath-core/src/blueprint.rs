@@ -762,6 +762,53 @@ pub struct InteractionPoint {
     pub document_region: Option<String>,
 }
 
+/// Script-backed lifecycle hooks for a stage: `[stages.<name>.hooks]`.
+///
+/// Each field names a `.rhai` file, resolved relative to the blueprint
+/// directory exactly as a custom region's script is. Every hook is optional and
+/// an agent that declares none pays nothing - no file is read and no engine is
+/// built (issue #260).
+///
+/// The hook a script implements is the function it defines, named for the
+/// field: a file given as `on_stage_enter` must define `fn on_stage_enter(ctx)`.
+/// One file may back several hooks by defining several functions.
+///
+/// Hooks are a **return-value contract**, like region hooks: Rhai passes
+/// arguments by value, so mutating `ctx` in place does nothing and the script
+/// must return its decision. See `leviath_scripting::stage_hook`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StageHooks {
+    /// Fires as the agent enters the stage, before its first inference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_stage_enter: Option<String>,
+    /// Fires when the stage finishes, before transition evaluation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_stage_exit: Option<String>,
+}
+
+impl StageHooks {
+    /// Whether any hook is declared. The whole feature is skipped when not -
+    /// no file read, no compile, no engine.
+    pub fn is_empty(&self) -> bool {
+        self.on_stage_enter.is_none() && self.on_stage_exit.is_none()
+    }
+
+    /// Every script path this stage declares, with the hook it backs.
+    ///
+    /// Returned as pairs rather than a set because the same file may back more
+    /// than one hook, and the caller needs to know which function to look for.
+    pub fn declared(&self) -> Vec<(&'static str, &str)> {
+        let mut out = Vec::new();
+        if let Some(p) = self.on_stage_enter.as_deref() {
+            out.push(("on_stage_enter", p));
+        }
+        if let Some(p) = self.on_stage_exit.as_deref() {
+            out.push(("on_stage_exit", p));
+        }
+        out
+    }
+}
+
 /// A single execution stage in an agent's workflow.
 ///
 /// Stages allow an agent to use different models or configurations for
@@ -937,6 +984,10 @@ pub struct Stage {
     /// a fan-out worker whose summary its merge stage depends on.
     #[serde(default)]
     pub require_output: bool,
+    /// Script-backed lifecycle hooks: `[stages.<name>.hooks]`. Absent ⇒ none,
+    /// and nothing about the scripting engine is touched for this stage.
+    #[serde(default, skip_serializing_if = "StageHooks::is_empty")]
+    pub hooks: StageHooks,
 }
 
 /// Default value for bool fields that should default to true.
@@ -974,6 +1025,7 @@ impl Stage {
             tool_result_routing: None,
             output: None,
             require_output: false,
+            hooks: StageHooks::default(),
         }
     }
 
