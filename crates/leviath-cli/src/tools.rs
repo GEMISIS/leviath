@@ -2244,4 +2244,152 @@ mod policy_tests {
 
     // Register a blueprint, spawn a caller entity in the world, then call spawn.
     // Uses multi_thread flavor because exec_spawn internally calls blocking_write().
+
+    // ─── What may run without asking ──────────────────────────────────────
+    //
+    // `default_tool_policy` falls through to `Ask`, so a new tool is safe by
+    // construction *unless* somebody adds a match arm for it. These pin the
+    // other direction: which tools that arm is allowed to name.
+
+    /// Every tool that runs unprompted under the shipped defaults.
+    ///
+    /// Adding a name here is the decision to let that tool act with no human in
+    /// the loop, on every run, for ever. It belongs in a diff a reviewer sees
+    /// rather than falling out of a match arm somebody extended - which is the
+    /// whole reason this list is written out instead of derived.
+    ///
+    /// The four groups, and why each is defensible:
+    ///
+    /// - **Reads.** `read_file`/`read_files`/`list_dir` are already bounded by
+    ///   `[read_paths]`, so the prompt would be asking about a capability the
+    ///   confinement has already decided.
+    /// - **Context.** The `context_*` tools write the agent's own context
+    ///   regions, not the filesystem. They used to fall through to `Ask` and
+    ///   cost 25 prompts on one run, none of which a person could act on.
+    /// - **Sub-agents.** These default to `Allow` so a fan-out does not stop on
+    ///   a prompt nothing is there to answer. They are routed through policy
+    ///   resolution anyway so a configured `deny` still counts.
+    /// - **Asking.** These *are* the human-in-the-loop mechanism; gating them
+    ///   would mean asking permission to ask.
+    const ALLOWED_WITHOUT_ASKING: &[&str] = &[
+        "read_file",
+        "read_files",
+        "list_dir",
+        "context_write",
+        "context_append",
+        "context_read",
+        "context_delete",
+        "context_list",
+        "spawn_agent",
+        "check_agent",
+        "wait_for_agent",
+        "send_to_agent",
+        "kill_agent",
+        "ask_user_text",
+        "ask_user_choice",
+        "ask_user_confirm",
+        "edit_document",
+    ];
+
+    /// Every tool the runtime actually advertises, discovered rather than
+    /// listed.
+    ///
+    /// Discovered on purpose: a test that enumerated tool names by hand would
+    /// keep passing on the day somebody adds one, which is exactly the day it
+    /// needs to fail.
+    fn advertised_tool_names() -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let builtins = leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(
+            dir.path().to_path_buf(),
+        ));
+        let mut names: Vec<String> = builtins
+            .tool_defs()
+            .into_iter()
+            .map(|t| t.name)
+            .chain(
+                leviath_tools::BuiltinTools::subagent_tool_defs()
+                    .into_iter()
+                    .map(|t| t.name),
+            )
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// The discovery has to find something, or every assertion below passes by
+    /// iterating an empty list.
+    #[test]
+    fn the_tool_discovery_finds_the_real_toolset() {
+        let names = advertised_tool_names();
+        // Precomputed rather than called inside the message: an expression in an
+        // `assert!` message is its own coverage region and only runs on failure.
+        let count = names.len();
+        assert!(count >= 15, "only {count} tools discovered: {names:?}");
+        for expected in ["read_file", "write_file", "shell"] {
+            assert!(names.contains(&expected.to_string()), "{expected} missing");
+        }
+    }
+
+    /// No advertised tool runs unprompted unless it is on the reviewed list.
+    ///
+    /// This is the guard that makes adding a tool safe. Ship a new one with an
+    /// `Allow` arm and this fails until the name is added above, which is the
+    /// moment somebody has to justify it.
+    #[test]
+    fn only_reviewed_tools_run_without_asking() {
+        for name in advertised_tool_names() {
+            let policy = default_tool_policy(&name, true);
+            let reviewed = ALLOWED_WITHOUT_ASKING.contains(&name.as_str());
+            match reviewed {
+                true => assert_eq!(
+                    policy,
+                    ToolPolicy::Allow,
+                    "{name} is on the reviewed unprompted list but does not resolve to Allow"
+                ),
+                false => assert_ne!(
+                    policy,
+                    ToolPolicy::Allow,
+                    "{name} runs with no prompt and is not on the reviewed list"
+                ),
+            }
+        }
+    }
+
+    /// A tool nobody has heard of asks.
+    ///
+    /// The fall-through is what makes an MCP server's tools safe without this
+    /// file knowing their names, so it is worth pinning separately from the
+    /// discovered set.
+    #[test]
+    fn an_unknown_tool_asks_rather_than_running() {
+        for name in [
+            "definitely_not_a_real_tool",
+            "mcp__someserver__delete_everything",
+            "",
+        ] {
+            assert_eq!(default_tool_policy(name, false), ToolPolicy::Ask, "{name}");
+            assert_eq!(default_tool_policy(name, true), ToolPolicy::Ask, "{name}");
+        }
+    }
+
+    /// The two tools that touch the filesystem, and the one that runs code, are
+    /// never `Allow` by default under any spelling.
+    ///
+    /// Spelled out separately from the list above because these three are the
+    /// ones an aliasing mistake would quietly promote: `default_tool_policy`
+    /// matches on the *canonical* name, so a call arriving as `bash` has to land
+    /// on the same arm as `shell`.
+    #[test]
+    fn the_effectful_tools_ask_under_every_spelling() {
+        for name in ["write_file", "edit_file", "shell"] {
+            for spelling in leviath_tools::tool_name_spellings(name) {
+                assert_eq!(
+                    default_tool_policy(spelling, true),
+                    ToolPolicy::Ask,
+                    "{spelling:?} (a spelling of {name}) does not ask"
+                );
+            }
+        }
+    }
 }
