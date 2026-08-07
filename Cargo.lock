@@ -2417,6 +2417,7 @@ dependencies = [
  "chrono",
  "dirs",
  "glob",
+ "leviath-testkit",
  "regex",
  "reqwest",
  "serde",
@@ -2547,6 +2548,7 @@ version = "0.2.0"
 dependencies = [
  "keyring",
  "keyring-core",
+ "leviath-testkit",
  "nix 0.31.3",
  "temp-env",
  "tempfile",

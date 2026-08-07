@@ -170,6 +170,22 @@ One rule breaks that pattern on purpose. If you name a `format` and supply no sc
 blueprint declared is dropped. A check written for one shape says nothing about another. Supply your
 own schema alongside your format when you want the answer validated.
 
+### It outranks the stage's prompt
+
+A stage's `system_prompt` often has opinions about presentation of its own. The bundled
+`log-analyzer` tells its summary stage to lead with the diagnosis and name the report file, which is
+good default behaviour and directly at odds with `--output-instructions "reply with only the
+integer"`.
+
+Once the three levels above have combined, the winning spec is stated to the model as the one that
+governs how the answer is presented, and the stage prompt yields to it wherever the two disagree. So
+a caller who passes `--output-format` or `--output-instructions` does not have to know what the
+blueprint's prompt says, and a blueprint author does not have to strip presentation guidance out of
+a prompt to leave room for callers who may never pass anything.
+
+The claim is scoped to presentation: length, structure, what to lead with. It does not tell the
+model to disregard what the stage prompt asked it to *do*.
+
 ## Checking the shape, with a JSON Schema
 
 ```toml
