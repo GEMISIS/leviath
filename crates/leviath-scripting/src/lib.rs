@@ -11,6 +11,7 @@ pub mod functions;
 pub mod output_validator;
 pub mod region_hook;
 pub mod sandbox;
+pub mod stage_hook;
 pub mod tool;
 pub mod types;
 
