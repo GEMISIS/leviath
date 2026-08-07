@@ -2306,7 +2306,11 @@ for line in sys.stdin:
         client.connect().await.expect("connect");
         client.list_tools().await.expect("list_tools");
         let mut executor = leviath_mcp::ToolExecutor::new();
-        executor.add_client("stub".to_string(), client);
+        let _ = executor.add_client_advertised(
+            "stub".to_string(),
+            client,
+            &std::collections::HashSet::new(),
+        );
         executor
     }
 
