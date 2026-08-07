@@ -790,6 +790,10 @@ pub struct StageHooks {
     /// Fires with the model's response in hand, before it reaches context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_inference: Option<String>,
+    /// Fires with the model's tool calls, before the policy and taint layers
+    /// see them - so a hook can narrow what runs, never widen it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_tool_call: Option<String>,
 }
 
 impl StageHooks {
@@ -800,6 +804,7 @@ impl StageHooks {
             && self.on_stage_exit.is_none()
             && self.before_inference.is_none()
             && self.after_inference.is_none()
+            && self.on_tool_call.is_none()
     }
 
     /// Every script path this stage declares, with the hook it backs.
@@ -819,6 +824,9 @@ impl StageHooks {
         }
         if let Some(p) = self.after_inference.as_deref() {
             out.push(("after_inference", p));
+        }
+        if let Some(p) = self.on_tool_call.as_deref() {
+            out.push(("on_tool_call", p));
         }
         out
     }

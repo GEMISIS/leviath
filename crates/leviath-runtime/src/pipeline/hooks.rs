@@ -312,3 +312,122 @@ pub fn run_after_inference_hooks(
         }
     }
 }
+
+/// Read a hook's replacement tool calls, or say why they are not usable.
+///
+/// Split out so every malformed shape is reachable from a plain value in tests,
+/// without standing up an engine and a world to produce each one.
+fn tool_calls_from(value: &serde_json::Value) -> Result<Vec<crate::components::ToolCall>, String> {
+    let Some(items) = value.as_array() else {
+        return Err(format!(
+            "'value' must be an array of #{{ name, arguments }}, got: {value}"
+        ));
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(name) = item.get("name").and_then(|n| n.as_str()) else {
+            return Err(format!("a replacement call has no 'name': {item}"));
+        };
+        out.push(crate::components::ToolCall {
+            // A fresh id: the hook is proposing a call, not editing one in
+            // place, and reusing an id would tie a rewritten call to a
+            // provider record that no longer describes it.
+            tool_id: format!("hook-{name}-{}", out.len()),
+            name: name.to_string(),
+            arguments: item
+                .get("arguments")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            // Dropped on purpose: the signature is a provider's token for the
+            // call *it* produced, and echoing it back with different arguments
+            // would attribute the hook's call to the model.
+            thought_signature: None,
+        });
+    }
+    Ok(out)
+}
+
+/// Run `on_tool_call` before the model's tool calls reach the policy layer.
+///
+/// # Composition with the gate, which is the whole design question
+///
+/// Scheduled **before** `dispatch_tools`, which is where the tool policy, the
+/// taint gate, and the approval prompt live. So whatever this hook leaves in
+/// `InferenceResult` is what those layers then check.
+///
+/// That ordering is the safety property: a hook can *narrow* what runs - veto a
+/// call, rewrite arguments to something tamer - but it cannot widen anything,
+/// because nothing it produces skips the checks. Running it after the gate
+/// would let an approved call be rewritten into an unapproved one, which is a
+/// way around the operator's configuration and is why it is not done that way.
+///
+/// The hook also has no access to `TaintGate`, `GateAutoApprove`, or
+/// `ToolSensitivities` - it cannot mark its own calls approved. Its query says
+/// so, and a test asserts the gate state is untouched across a hook that
+/// rewrites everything.
+#[allow(clippy::type_complexity)]
+pub fn run_tool_call_hooks(
+    mut agents: Query<
+        (
+            Entity,
+            &StageCursor,
+            &AgentBlueprint,
+            &StageHookScripts,
+            &mut crate::components::InferenceResult,
+            &mut AgentState,
+        ),
+        With<ReadyForTools>,
+    >,
+) {
+    crate::tick_scope::clear();
+    for (entity, cursor, bp, scripts, mut result, mut state) in agents.iter_mut() {
+        crate::tick_scope::enter(entity);
+        let Some(stage) = bp.0.stages.get(cursor.index) else {
+            continue;
+        };
+        let Some(script) = scripts.script_for(stage, "on_tool_call") else {
+            continue;
+        };
+        if result.tool_calls.is_empty() {
+            continue;
+        }
+
+        let ctx = serde_json::json!({
+            "stage": stage.name,
+            "stage_index": cursor.index,
+            "tool_calls": result
+                .tool_calls
+                .iter()
+                .map(|c| serde_json::json!({ "name": c.name, "arguments": c.arguments }))
+                .collect::<Vec<_>>(),
+        });
+
+        match run(&script, "on_tool_call", ctx) {
+            Err(e) => refuse(&mut state, "on_tool_call", format!("hook failed: {e}")),
+            Ok(HookOutcome::Allow) => {}
+            Ok(HookOutcome::Modify(value)) => match tool_calls_from(&value) {
+                Ok(calls) => result.tool_calls = calls,
+                Err(e) => refuse(&mut state, "on_tool_call", e),
+            },
+            Ok(HookOutcome::Cancel(reason)) => {
+                let why = reason.unwrap_or_else(|| "no reason given".to_string());
+                refuse(
+                    &mut state,
+                    "on_tool_call",
+                    format!("refused the tool calls: {why}"),
+                );
+            }
+            // Re-running a call the hook has already seen would need the batch
+            // rebuilt and the attempt counted, or a hook that always retries
+            // wedges the run. Vetoing and letting the model try again is the
+            // supported shape.
+            Ok(HookOutcome::Retry) => refuse(
+                &mut state,
+                "on_tool_call",
+                "returned 'retry', which this hook cannot honour - cancel the call and let \
+                 the model choose again"
+                    .to_string(),
+            ),
+        }
+    }
+}

@@ -58,6 +58,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "on_stage_exit",
     "before_inference",
     "after_inference",
+    "on_tool_call",
 ];
 
 /// What a hook decided.

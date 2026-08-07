@@ -46,7 +46,7 @@ use crate::pipeline::{
     fail_wedged_runs, gate_requires_children, handle_empty_response, poll_dynamic_tool_refresh,
     process_response, reflect_interaction_status, refresh_advertised_tools,
     require_context_regions, require_final_output, resolve_transition, run_after_inference_hooks,
-    run_before_inference_hooks, run_stage_enter_hooks, sync_tool_stages,
+    run_before_inference_hooks, run_stage_enter_hooks, run_tool_call_hooks, sync_tool_stages,
 };
 use crate::providers::ProviderRegistry;
 use crate::tool_bridge::ToolLane;
@@ -349,7 +349,9 @@ impl PipelineWorld {
                 // Apply resolved taint gate prompts (re-arming ReadyForTools)
                 // before the tool dispatch re-runs the held batch.
                 crate::gate_prompt::collect_gate_prompt,
-                dispatch_tools,
+                // `on_tool_call` before the policy and taint layers see the
+                // calls, so a hook can narrow what runs and never widen it.
+                (run_tool_call_hooks, dispatch_tools).chain(),
                 collect_tools,
                 // Apply any resolved stage-boundary interaction-point answers
                 // before the stage decides its transition.
