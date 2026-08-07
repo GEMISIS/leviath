@@ -19,6 +19,19 @@ use std::path::Path;
 /// an unanswerable probe would block writes on any filesystem `fs4` cannot
 /// read; allowing on it is what the caller does, because a guard that cannot
 /// measure has nothing to say.
+///
+/// # A path that does not exist answers differently per platform
+///
+/// On Windows `fs4` resolves the path to its volume first
+/// (`GetVolumePathNameW`), which succeeds for a path nothing has created yet, so
+/// `C:\nope\nope` reports `C:`'s free space. On Unix `statvfs` needs the path
+/// itself and fails.
+///
+/// Neither is wrong - "how much room is there where this would go" is a
+/// reasonable question to answer for a path that does not exist yet - so this
+/// does not normalize them. Nothing depends on it: the only caller asks about a
+/// run's working directory, which exists by the time anything writes into it.
+/// Do not build a "does this path exist" check on top of this.
 pub fn available_bytes(path: &Path) -> Option<u64> {
     fs4::available_space(path).ok()
 }
@@ -91,12 +104,18 @@ mod tests {
         );
     }
 
-    /// A path that does not exist cannot be measured, and the caller has to be
-    /// able to tell that apart from "measured, and it is zero".
+    /// An unmeasurable path answers `None`, and the caller has to be able to
+    /// tell that apart from "measured, and it is zero".
+    ///
+    /// The empty path rather than a missing one, and that distinction is the
+    /// whole reason this comment exists. A *missing* path is unmeasurable on
+    /// Unix and perfectly measurable on Windows, where `fs4` resolves to the
+    /// volume first - so asserting `None` for one passed on three CI legs and
+    /// failed on the fourth, and left this branch unreachable there. An empty
+    /// path has no volume to resolve to on either.
     #[test]
     fn an_unmeasurable_path_answers_none() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let gone = dir.path().join("no").join("such").join("place");
-        assert_eq!(available_bytes(&gone), None);
+        assert_eq!(available_bytes(Path::new("")), None);
+        assert_eq!(total_bytes(Path::new("")), None);
     }
 }
