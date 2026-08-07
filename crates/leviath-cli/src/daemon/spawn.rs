@@ -793,6 +793,32 @@ fn bump_read_sensitivities(
     }
 }
 
+/// Everything a spawn needs that is not the request itself.
+///
+/// Grouped because these seven travel together through every spawn path -
+/// [`build_agent`], [`build_agent_for_reload`], and the fan-out world-system -
+/// and threading them positionally meant three signatures that had to agree
+/// plus a `too_many_arguments` suppression on each. It also meant a nine-argument
+/// call in which `config`, `mcp_tool_defs` and `hub` are adjacent references:
+/// transposing two of them type-checks in some orders, and the compiler is the
+/// only thing that was ever going to notice.
+pub struct SpawnDeps<'a> {
+    /// The daemon's tool service, which per-agent state is registered against.
+    pub tool_service: &'a CliToolService,
+    /// The resolved daemon configuration for this run.
+    pub config: &'a Config,
+    /// MCP connections shared by every agent, built once at startup.
+    pub shared_mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
+    /// Tool definitions those MCP servers advertise.
+    pub mcp_tool_defs: &'a [Tool],
+    /// Where this agent's interaction prompts are parked.
+    pub hub: &'a InteractionHub,
+    /// Spawn time, injected so a test does not depend on the wall clock.
+    pub now_secs: i64,
+    /// Channel the agent's sub-agent tools send operations on.
+    pub subagent_tx: UnboundedSender<SubAgentOp>,
+}
+
 /// Load the blueprint at `args.blueprint_path`, spawn the agent into `world`,
 /// register its tool state, and return the new entity. Operates on the raw ECS
 /// [`World`] so it is callable both from the host's spawner (via
@@ -802,59 +828,23 @@ fn bump_read_sensitivities(
 /// caller-input regions weren't provided fails here. Use
 /// [`build_agent_for_reload`] on the recovery path, where the window is restored
 /// from a snapshot afterward and the gate must not re-fire.
-#[allow(clippy::too_many_arguments)]
 pub fn build_agent(
     world: &mut World,
-    tool_service: &CliToolService,
-    config: &Config,
-    shared_mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
-    mcp_tool_defs: &[Tool],
-    hub: &InteractionHub,
+    deps: SpawnDeps<'_>,
     args: &SpawnArgs,
-    now_secs: i64,
-    subagent_tx: UnboundedSender<SubAgentOp>,
 ) -> Result<Entity, String> {
-    build_agent_inner(
-        world,
-        tool_service,
-        config,
-        shared_mcp,
-        mcp_tool_defs,
-        hub,
-        args,
-        now_secs,
-        subagent_tx,
-        true,
-    )
+    build_agent_inner(world, deps, args, true)
 }
 
 /// Like [`build_agent`], but skips the required-at-spawn region gate - used by
 /// restart recovery, which reloads a run that already passed the gate when first
 /// spawned and whose context window is restored from a snapshot after this call.
-#[allow(clippy::too_many_arguments)]
 pub fn build_agent_for_reload(
     world: &mut World,
-    tool_service: &CliToolService,
-    config: &Config,
-    shared_mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
-    mcp_tool_defs: &[Tool],
-    hub: &InteractionHub,
+    deps: SpawnDeps<'_>,
     args: &SpawnArgs,
-    now_secs: i64,
-    subagent_tx: UnboundedSender<SubAgentOp>,
 ) -> Result<Entity, String> {
-    build_agent_inner(
-        world,
-        tool_service,
-        config,
-        shared_mcp,
-        mcp_tool_defs,
-        hub,
-        args,
-        now_secs,
-        subagent_tx,
-        false,
-    )
+    build_agent_inner(world, deps, args, false)
 }
 
 /// Log whatever `lev validate` would have reported about this manifest.
@@ -891,17 +881,10 @@ fn log_blueprint_lint(content: &str, blueprint: &Blueprint, manifest_path: &str)
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_agent_inner(
     world: &mut World,
-    tool_service: &CliToolService,
-    config: &Config,
-    shared_mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
-    mcp_tool_defs: &[Tool],
-    hub: &InteractionHub,
+    deps: SpawnDeps<'_>,
     args: &SpawnArgs,
-    now_secs: i64,
-    subagent_tx: UnboundedSender<SubAgentOp>,
     enforce_seeds: bool,
 ) -> Result<Entity, String> {
     // 0a. The run id becomes a directory name, and everything this run writes
@@ -950,11 +933,11 @@ fn build_agent_inner(
     if let Some(md) = args.max_depth {
         blueprint.max_child_depth = Some(md);
     }
-    // Apply the config's `default_max_iterations` to any stage that doesn't set
+    // Apply the deps.config's `default_max_iterations` to any stage that doesn't set
     // its own, so an agent can't loop forever with no completion signal
     // (`enforce_max_iterations` treats `None`/0 as unbounded). A stage's explicit
     // `max_iterations` always wins.
-    if let Some(default_max) = config.limits.default_max_iterations {
+    if let Some(default_max) = deps.config.limits.default_max_iterations {
         for stage in &mut blueprint.stages {
             // `0` means *unbounded* to the pipeline, and `get_or_insert` only
             // fills `None` - so a manifest writing `max_iterations = 0` looked
@@ -972,7 +955,7 @@ fn build_agent_inner(
     // 2a. Entry stage + per-stage sandbox resolution. Each stage's effective
     // sandbox cascades stage → agent → global (`resolve_sandbox`); building the
     // manager creates any containers up front and fails here (returning the
-    // error to the spawner) when a required runtime is unavailable and the config
+    // error to the spawner) when a required runtime is unavailable and the deps.config
     // says to error. `None` means no stage is sandboxed → no executor attached
     // (zero overhead, exact prior host behavior).
     let entry_stage = blueprint
@@ -990,7 +973,7 @@ fn build_agent_inner(
         .iter()
         .map(|s| {
             leviath_core::resolve_sandbox(
-                config.sandbox.as_ref(),
+                deps.config.sandbox.as_ref(),
                 blueprint.sandbox.as_ref(),
                 s.sandbox.as_ref(),
             )
@@ -1006,10 +989,10 @@ fn build_agent_inner(
 
     // 2b. Per-agent built-in tools (over the agent's workdir), routing shell
     // execution through the sandbox when one is configured. The blueprint's
-    // `[read_paths]` declarations are resolved against the user's config here -
+    // `[read_paths]` declarations are resolved against the user's deps.config here -
     // declared AND granted, or the read tools never leave the workdir.
     let (read_path_policy, read_path_warning) =
-        build_read_path_policy(&blueprint, config, std::path::Path::new(&args.workdir))?;
+        build_read_path_policy(&blueprint, deps.config, std::path::Path::new(&args.workdir))?;
     if let Some(warning) = &read_path_warning {
         tracing::warn!(agent_name = %blueprint.name, "{warning}");
     }
@@ -1023,10 +1006,10 @@ fn build_agent_inner(
     // The same question, per entry, recorded on the run so `lev ps` can show
     // that a live run is up but blind to paths its author designed it around.
     let read_path_counts =
-        read_path_grant_counts(&blueprint, config, std::path::Path::new(&args.workdir));
+        read_path_grant_counts(&blueprint, deps.config, std::path::Path::new(&args.workdir));
     let tool_ctx = leviath_tools::ToolContext::new(std::path::PathBuf::from(&args.workdir))
         .with_read_paths(read_path_policy)
-        .with_shell_env(shell_env_policy(config));
+        .with_shell_env(shell_env_policy(deps.config));
     let mut builtins = leviath_tools::BuiltinTools::new(tool_ctx);
     if let Some(mgr) = &sandbox {
         builtins =
@@ -1036,7 +1019,7 @@ fn build_agent_inner(
     let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
     let mut all_tool_defs = builtins.tool_defs();
     all_tool_defs.extend(leviath_tools::BuiltinTools::subagent_tool_defs());
-    all_tool_defs.extend(mcp_tool_defs.iter().cloned());
+    all_tool_defs.extend(deps.mcp_tool_defs.iter().cloned());
     // The non-script defs (built-in + sub-agent + MCP), captured before script
     // defs are appended - a `dynamic_tools` agent re-filters against these plus a
     // fresh script scan on each mid-run refresh.
@@ -1057,7 +1040,7 @@ fn build_agent_inner(
     let (script_tools, script_tool_names, script_defs) = discover_script_tools(
         &args.blueprint_path,
         &builtin_names,
-        mcp_tool_defs,
+        deps.mcp_tool_defs,
         workdir_tools_dir.clone(),
     );
     all_tool_defs.extend(script_defs);
@@ -1071,7 +1054,7 @@ fn build_agent_inner(
         resolve_stages(
             &blueprint,
             args.model.as_deref(),
-            &model_defaults(config),
+            &model_defaults(deps.config),
             registry,
             &all_tool_defs,
             args.yolo,
@@ -1085,7 +1068,7 @@ fn build_agent_inner(
     let compaction = blueprint.compaction_config.clone();
     let max_child_depth = blueprint.max_child_depth.unwrap_or(DEFAULT_SUBAGENT_DEPTH);
     // Taint gate: opt-in via the blueprint's `[security]` block, else the global
-    // config's `taint_tracking`, else off. Cascading through
+    // deps.config's `taint_tracking`, else off. Cascading through
     // `resolve_security` (rather than `unwrap_or_default`, which forced taint on
     // for every agent because `SecurityConfig::default()` is taint-on) means a
     // blueprint with no `[security]` block correctly inherits the global setting -
@@ -1093,7 +1076,7 @@ fn build_agent_inner(
     // against its context taint + the policy allowlist; when off no gate is
     // attached (zero enforcement overhead).
     let security = leviath_core::taint::resolve_security(
-        config.taint_tracking,
+        deps.config.taint_tracking,
         blueprint.security.as_ref(),
         None,
     );
@@ -1172,19 +1155,19 @@ fn build_agent_inner(
     // `[security] allow_seed_commands` switch or this run's `--no-seed-commands`.
     let seeds = if enforce_seeds {
         let policy = SeedCommandPolicy::new(
-            config.security.allow_seed_commands && !args.no_seed_commands,
-            std::time::Duration::from_secs(config.limits.script_shell_timeout_secs),
+            deps.config.security.allow_seed_commands && !args.no_seed_commands,
+            std::time::Duration::from_secs(deps.config.limits.script_shell_timeout_secs),
             // The same pre-approval this run gives the `shell` tool. A seed runs
             // before any prompt exists, so the safe list is the only thing that
             // can have said yes to it.
             Arc::new(
-                config
+                deps.config
                     .safe_keys_for_agent(&agent_name, blueprint.safe_commands.as_ref())
                     .into_keys()
                     .collect(),
             ),
             sandbox.clone(),
-            shell_env_policy(config),
+            shell_env_policy(deps.config),
         );
         resolve_seeds(&blueprint, args, &args.workdir, &policy, &seed_read_paths)?
     } else {
@@ -1216,10 +1199,10 @@ fn build_agent_inner(
         &seeds,
         stages,
         leviath_core::config::PromptHints {
-            batch_tool: config.batch_tool_hint,
-            shell: config.shell_hint,
+            batch_tool: deps.config.batch_tool_hint,
+            shell: deps.config.shell_hint,
         },
-        config.nudge.clone(),
+        deps.config.nudge.clone(),
         region_scripts,
     )?;
 
@@ -1243,7 +1226,7 @@ fn build_agent_inner(
         model: model_label,
         workdir: args.workdir.clone(),
         num_stages,
-        started_at: now_secs,
+        started_at: deps.now_secs,
         parent_run_id: args.parent_run_id.clone(),
         metadata: args.metadata.clone(),
         callback_url: args.callback_url.clone(),
@@ -1273,14 +1256,14 @@ fn build_agent_inner(
         // searches). Root runs only: sub-agents inherit their parent's context
         // in the run list, and titling every fan-out worker would multiply
         // cheap-but-nonzero LLM calls for no UX gain.
-        (config.title.enabled && !args.task.is_empty() && args.parent_run_id.is_none())
+        (deps.config.title.enabled && !args.task.is_empty() && args.parent_run_id.is_none())
             .then_some(leviath_runtime::title::PendingTitle)
             .into_iter()
             .for_each(|marker| {
                 entity_mut.insert(marker);
             });
         // `--yolo` means run unattended, so a blueprint's stage-boundary
-        // checkpoints are approved rather than parked on a hub nobody is
+        // checkpoints are approved rather than parked on a deps.hub nobody is
         // watching. (`.then_some(..).into_iter()` keeps the non-yolo path
         // branch-free, matching the taint-gate marker below.)
         args.yolo
@@ -1330,7 +1313,7 @@ fn build_agent_inner(
         launch_overrides.insert(tool.clone(), crate::config::ToolPolicy::Allow);
     }
     let subagent = SubAgentHandle {
-        sender: subagent_tx,
+        sender: deps.subagent_tx,
         parent_run_id: args.run_id.clone(),
         workdir: args.workdir.clone(),
         max_depth: max_child_depth,
@@ -1345,16 +1328,16 @@ fn build_agent_inner(
         .cloned()
         .unwrap_or_default();
     // The agent may carry its own `[tool_script_permissions]` (it can ship its own
-    // tool scripts), overlaid per field on the global config.
+    // tool scripts), overlaid per field on the global deps.config.
     let effective_script_perms = crate::daemon::script_host::effective_script_permissions(
-        &config.tool_script_permissions,
+        &deps.config.tool_script_permissions,
         &content,
     );
     // Same ceiling `build_tool_state` resolves for the built-in tools: the
     // global `[tool_permissions]` with this agent's `[agent_tool_permissions]`
     // grants overlaid. Passing the raw global map here would silently ignore a
     // per-agent grant when a script tool's `inherit` defers to the built-in.
-    let agent_scoped_perms = config.permissions_for_agent(&agent_name);
+    let agent_scoped_perms = deps.config.permissions_for_agent(&agent_name);
     let script_allow = crate::daemon::script_host::resolve_script_permissions(
         &effective_script_perms,
         &|builtin| {
@@ -1365,7 +1348,7 @@ fn build_agent_inner(
                 &entry_stage_perms,
                 &agent_perms,
                 &agent_scoped_perms,
-                config.security.allow_blueprint_permissions,
+                deps.config.security.allow_blueprint_permissions,
             )
         },
     );
@@ -1379,16 +1362,16 @@ fn build_agent_inner(
         // configured wall-clock timeout.
         .with_shell(
             sandbox.clone(),
-            std::time::Duration::from_secs(config.limits.script_shell_timeout_secs),
-            shell_env_policy(config),
+            std::time::Duration::from_secs(deps.config.limits.script_shell_timeout_secs),
+            shell_env_policy(deps.config),
         )
         // `[security] allow_local_network`. Off by default, so a `web_fetch` URL
         // the model picked out of attacker-influenced context cannot reach cloud
         // metadata, the user's own `lev serve`, or their LAN.
-        .with_local_network(config.security.allow_local_network)
+        .with_local_network(deps.config.security.allow_local_network)
         // `[security] allow_env_vars`. Empty by default, so a script tool cannot
         // read the user's provider keys and post them somewhere.
-        .with_env_allowlist(config.security.allow_env_vars.clone()),
+        .with_env_allowlist(deps.config.security.allow_env_vars.clone()),
     );
     // Build the dynamic-tools re-resolution context (issue #97 escape hatch) and
     // tag the entity `DynamicTools` so the runtime polls it for mid-run re-scans.
@@ -1398,7 +1381,7 @@ fn build_agent_inner(
             .insert(leviath_runtime::pipeline::DynamicTools);
         Arc::new(crate::daemon::tool_service::DynamicToolCtx {
             scan_dirs: script_scan_dirs(&args.blueprint_path, workdir_tools_dir),
-            reserved_names: reserved_tool_names(&builtin_names, mcp_tool_defs),
+            reserved_names: reserved_tool_names(&builtin_names, deps.mcp_tool_defs),
             static_defs: static_tool_defs,
             stage_available,
             stage_required,
@@ -1409,9 +1392,9 @@ fn build_agent_inner(
     let state = build_tool_state(
         builtins,
         builtin_names,
-        shared_mcp,
-        config,
-        hub,
+        deps.shared_mcp,
+        deps.config,
+        deps.hub,
         &args.run_id,
         &entry_stage,
         entry_index,
@@ -1429,7 +1412,7 @@ fn build_agent_inner(
         args.yolo,
         blueprint_safe.as_ref(),
     );
-    tool_service.register(entity, state);
+    deps.tool_service.register(entity, state);
 
     Ok(entity)
 }
@@ -2070,14 +2053,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         let args = spawn_args(&manifest.to_string_lossy());
         let err = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &args,
-            100,
-            sub_tx(),
         )
         .unwrap_err();
         assert!(err.contains("region 'brain'"), "got: {err}");
@@ -2101,14 +2086,16 @@ system = { kind = "pinned", max_tokens = 1000 }
             args.run_id = bad.to_string();
             let err = build_agent(
                 world.world_mut(),
-                cli.as_ref(),
-                &Config::default(),
-                mcp,
-                &[],
-                &hub,
+                SpawnDeps {
+                    tool_service: cli.as_ref(),
+                    config: &Config::default(),
+                    shared_mcp: mcp,
+                    mcp_tool_defs: &[],
+                    hub: &hub,
+                    now_secs: 100,
+                    subagent_tx: sub_tx(),
+                },
                 &args,
-                100,
-                sub_tx(),
             )
             .unwrap_err();
             assert!(
@@ -2148,14 +2135,16 @@ system = { kind = "pinned", max_tokens = 1000 }
             args.workdir = workdir.clone();
             let err = build_agent(
                 world.world_mut(),
-                cli.as_ref(),
-                &Config::default(),
-                mcp,
-                &[],
-                &hub,
+                SpawnDeps {
+                    tool_service: cli.as_ref(),
+                    config: &Config::default(),
+                    shared_mcp: mcp,
+                    mcp_tool_defs: &[],
+                    hub: &hub,
+                    now_secs: 100,
+                    subagent_tx: sub_tx(),
+                },
                 &args,
-                100,
-                sub_tx(),
             )
             .unwrap_err();
             assert!(err.contains("workspace"), "got: {err}");
@@ -2179,14 +2168,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let entity = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds");
 
@@ -2236,14 +2227,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         // Root run with the default-enabled [title] config: marked.
         let root = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds");
         assert!(
@@ -2259,14 +2252,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         child_args.parent_run_id = Some("run-x".to_string());
         let child = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &child_args,
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds");
         assert!(
@@ -2289,14 +2284,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         off_args.run_id = "run-off".to_string();
         let off = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &config,
-            Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &config,
+                shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &off_args,
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds");
         assert!(
@@ -2341,14 +2338,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let entity = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds");
 
@@ -2385,14 +2384,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         // spawn_args() provides only the task, not the required `spec` region.
         let err = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .unwrap_err();
         assert!(err.contains("spec"), "got: {err}");
@@ -2417,14 +2418,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let entity = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds");
         // The agent's tool state carries a sandbox manager.
@@ -2452,14 +2455,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let err = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .expect_err("a nonexistent engine can't start the container");
         assert!(err.contains("sandbox unavailable"), "got: {err}");
@@ -2483,14 +2488,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         args.yolo = true;
         let entity = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &args,
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds");
         // Taint on + `--yolo` ⇒ gate is auto-approved (marker attached) so a
@@ -2538,14 +2545,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         args.yolo = true;
         let entity = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
-            &[],
-            &InteractionHub::new(),
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+                mcp_tool_defs: &[],
+                hub: &InteractionHub::new(),
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &args,
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds");
 
@@ -2585,14 +2594,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         let args = spawn_args(&manifest.to_string_lossy());
         let err = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &args,
-            100,
-            sub_tx(),
         )
         .unwrap_err();
 
@@ -2623,14 +2634,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         let args = spawn_args(&manifest.to_string_lossy());
         let entity = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &args,
-            100,
-            sub_tx(),
         )
         .expect("spawns");
 
@@ -2660,14 +2673,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         let args = spawn_args(&manifest.to_string_lossy());
         let entity = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &args,
-            100,
-            sub_tx(),
         )
         .expect("spawns");
 
@@ -2696,14 +2711,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         args.yolo = true;
         let entity = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
-            &[],
-            &InteractionHub::new(),
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+                mcp_tool_defs: &[],
+                hub: &InteractionHub::new(),
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &args,
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds");
 
@@ -2733,14 +2750,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let entity = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds");
         assert!(
@@ -2771,14 +2790,17 @@ system = { kind = "pinned", max_tokens = 1000 }
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let entity = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(), // taint_tracking defaults to false
+            SpawnDeps {
+        tool_service: cli.as_ref(),
+        config: &Config::default(),
+        shared_mcp: // taint_tracking defaults to false
             mcp,
-            &[],
-            &hub,
+        mcp_tool_defs: &[],
+        hub: &hub,
+        now_secs: 100,
+        subagent_tx: sub_tx(),
+    },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds");
         assert!(
@@ -2800,14 +2822,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let entity = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds");
         world
@@ -2847,14 +2871,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let entity = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds");
 
@@ -2901,14 +2927,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let entity = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds");
 
@@ -2952,14 +2980,16 @@ system = { kind = "pinned", max_tokens = 1000 }
 
         let entity = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &config,
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &config,
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &args,
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds");
         assert_eq!(world.agent_status(entity), Some(AgentStatus::Active));
@@ -3024,14 +3054,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let entity = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds");
 
@@ -3082,14 +3114,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         args.workdir = dir.path().to_string_lossy().to_string();
         let entity = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &config,
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &config,
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &args,
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds");
 
@@ -3131,14 +3165,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         };
         let entity = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &config,
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &config,
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds");
 
@@ -3183,14 +3219,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         };
         let entity = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &config,
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &config,
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds");
 
@@ -3369,14 +3407,16 @@ system = { kind = "pinned", max_tokens = 1000 }
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let err = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args("/no/such/manifest.leviath"),
-            100,
-            sub_tx(),
         )
         .unwrap_err();
         assert!(err.contains("read manifest"));
@@ -3415,14 +3455,16 @@ system_prompt = "SYSTEM_PROMPT_PLACEHOLDER"
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let result = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         );
         assert!(result.is_err(), "expected spawn error, got {result:?}");
     }
@@ -3459,14 +3501,16 @@ available_tools = []
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let err = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .unwrap_err();
         assert!(err.contains("main"), "names the stage: {err}");
@@ -3503,14 +3547,16 @@ available_tools = []
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let err = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .unwrap_err();
         assert!(err.contains("invalid blueprint"));
@@ -3550,14 +3596,16 @@ system_prompt = "be brief"
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let entity = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds");
         assert_eq!(world.agent_status(entity), Some(AgentStatus::Active));
@@ -3617,14 +3665,16 @@ system_prompt = "be brief"
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let entity = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds");
 
@@ -3655,14 +3705,16 @@ system_prompt = "be brief"
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let err = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .expect_err("a broken hook script must fail the spawn");
         assert!(err.contains("failed to compile"), "{err}");
@@ -3682,14 +3734,16 @@ system_prompt = "be brief"
         config.taint_tracking = true;
         let entity = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &config,
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &config,
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds");
         assert_eq!(world.agent_status(entity), Some(AgentStatus::Active));
@@ -3706,14 +3760,16 @@ system_prompt = "be brief"
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let entity = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .expect("spawn succeeds even when nothing grants the declaration");
         assert_eq!(world.agent_status(entity), Some(AgentStatus::Active));
@@ -3732,14 +3788,16 @@ system_prompt = "be brief"
         config.security.read_paths = vec!["glob:[".to_string()];
         let err = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &config,
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &config,
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .expect_err("a broken config grant must fail the spawn");
         assert!(err.contains("config.toml"), "{err}");
@@ -3755,14 +3813,16 @@ system_prompt = "be brief"
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let err = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
             &spawn_args(&manifest.to_string_lossy()),
-            100,
-            sub_tx(),
         )
         .unwrap_err();
         assert!(err.contains("parse manifest"));

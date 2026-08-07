@@ -393,14 +393,16 @@ pub fn build_host(
         let config = spawn_reloader.current();
         let built = build_agent(
             world.world_mut(),
-            tool_service.as_ref(),
-            &config,
-            shared_mcp.clone(),
-            &defs,
-            &hub,
+            crate::daemon::spawn::SpawnDeps {
+                tool_service: tool_service.as_ref(),
+                config: &config,
+                shared_mcp: shared_mcp.clone(),
+                mcp_tool_defs: &defs,
+                hub: &hub,
+                now_secs: now_secs(),
+                subagent_tx: subagent_tx.clone(),
+            },
             args,
-            now_secs(),
-            subagent_tx.clone(),
         );
         // The placeholder above is `Starting`, which is *not* terminal - so a
         // failed spawn used to leave a run that claimed to be alive for ever,
