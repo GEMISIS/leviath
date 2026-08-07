@@ -22,6 +22,7 @@ use tracing::info;
 
 use leviath_cli::commands;
 use leviath_cli::commands::dashboard::{CrosstermEventSource, DashboardArgs, TerminalSetup};
+use leviath_cli::daemon::readiness::poll_until;
 use leviath_cli::dispatch::{Commands, RiskyExecutors, apply_region_flags, dispatch};
 
 /// mimalloc instead of the platform allocator. The daemon's workload is a
@@ -310,7 +311,7 @@ async fn ensure_daemon_running() -> anyhow::Result<()> {
         let _ = control_client()?
             .request(&leviath_runtime::control_socket::ControlRequest::Shutdown)
             .await;
-        poll_until(|| !is_daemon_running(&id)).await;
+        poll_until(&mut || !is_daemon_running(&id)).await;
     }
     let exe = std::env::current_exe()?;
     let mut cmd = std::process::Command::new(exe);
@@ -320,28 +321,10 @@ async fn ensure_daemon_running() -> anyhow::Result<()> {
         .stderr(std::process::Stdio::null());
     leviath_sys::process::configure_detached(&mut cmd);
     cmd.spawn()?;
-    if poll_until(|| is_daemon_running(&id)).await {
+    if poll_until(&mut || is_daemon_running(&id)).await {
         return Ok(());
     }
     anyhow::bail!("the leviath daemon did not start within 5s");
-}
-
-/// Poll `done` until it returns true or ~5s elapses, sleeping 2ms at first
-/// and doubling to a 50ms ceiling. The daemon boots in ~20ms, so the old
-/// fixed 50ms tick spent more time waiting than the daemon spent starting -
-/// it was most of the measured 97ms cold `lev run`. Backoff keeps the
-/// slow-path cost (a daemon that genuinely takes seconds) unchanged.
-async fn poll_until(mut done: impl FnMut() -> bool) -> bool {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut delay = std::time::Duration::from_millis(2);
-    while !done() {
-        if tokio::time::Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(delay).await;
-        delay = (delay * 2).min(std::time::Duration::from_millis(50));
-    }
-    true
 }
 
 /// `lev daemon start`: auto-start a detached daemon if none is running.
@@ -377,7 +360,7 @@ async fn real_daemon_stop() -> anyhow::Result<()> {
             None => return Err(e),
         }
     }
-    if poll_until(|| !is_daemon_running(&id)).await {
+    if poll_until(&mut || !is_daemon_running(&id)).await {
         println!("daemon stopped");
         return Ok(());
     }
@@ -444,12 +427,10 @@ fn run_supervisor(cmd: &(String, Vec<String>)) -> anyhow::Result<()> {
     if out.status.success() {
         return Ok(());
     }
-    anyhow::bail!(
-        "`{} {}` failed: {}",
-        cmd.0,
-        cmd.1.join(" "),
-        String::from_utf8_lossy(&out.stderr).trim()
-    )
+    Err(commands::daemon_service::supervisor_failure(
+        cmd,
+        &out.stderr,
+    ))
 }
 
 /// `lev daemon install`: write the platform service file and hand it to the
@@ -488,19 +469,16 @@ fn real_daemon_uninstall() -> anyhow::Result<()> {
 /// that never had the old label, every step is a no-op.
 #[cfg(target_os = "macos")]
 fn remove_legacy_services() {
-    let Some(user_home) = dirs::home_dir() else {
-        return;
-    };
-    let Ok(config_home) = commands::daemon_service::config_home(&user_home) else {
-        return;
-    };
-    for (path, bootout) in
-        commands::daemon_service::legacy_cleanup(&config_home, leviath_sys::current_uid())
-    {
-        let _ = run_supervisor(&bootout);
-        if std::fs::remove_file(&path).is_ok() {
-            println!("removed legacy service file {}", path.display());
-        }
+    let removed = commands::daemon_service::remove_legacy_with(
+        dirs::home_dir(),
+        leviath_sys::current_uid(),
+        &mut |bootout| {
+            let _ = run_supervisor(bootout);
+        },
+        &mut |path| std::fs::remove_file(path).is_ok(),
+    );
+    for path in removed {
+        println!("removed legacy service file {}", path.display());
     }
 }
 

@@ -28,11 +28,19 @@ pub const SERVICE_LABEL: &str = "dev.leviath.daemon";
 #[cfg(target_os = "macos")]
 pub const LEGACY_SERVICE_LABELS: &[&str] = &["ai.sunforge.leviath"];
 
+/// A supervisor invocation: the program to run and its arguments.
+///
+/// `launchctl` and `systemctl` are both spawned this way. Named rather than
+/// written out at each of the six places it appears, because a bare
+/// `(String, Vec<String>)` says nothing about which of the two strings is the
+/// program.
+pub type SupervisorCommand = (String, Vec<String>);
+
 /// The cleanup a legacy label needs: the unit file it wrote and the
 /// `launchctl bootout` that deregisters it. Pure data - running the commands
 /// is the caller's subprocess I/O, same split as [`ServiceUnit`].
 #[cfg(target_os = "macos")]
-pub fn legacy_cleanup(config_home: &Path, uid: u32) -> Vec<(PathBuf, (String, Vec<String>))> {
+pub fn legacy_cleanup(config_home: &Path, uid: u32) -> Vec<(PathBuf, SupervisorCommand)> {
     LEGACY_SERVICE_LABELS
         .iter()
         .map(|label| {
@@ -60,9 +68,9 @@ pub struct ServiceUnit {
     /// The file's contents.
     pub contents: String,
     /// Command + args that tell the supervisor to pick it up.
-    pub activate: (String, Vec<String>),
+    pub activate: SupervisorCommand,
     /// Command + args that tell the supervisor to let it go.
-    pub deactivate: (String, Vec<String>),
+    pub deactivate: SupervisorCommand,
 }
 
 // ── macOS: a launchd user agent ──────────────────────────────────────────────
@@ -301,6 +309,52 @@ pub fn uninstall(unit: &ServiceUnit) -> Result<bool> {
     }
 }
 
+/// Turn a failed supervisor command into the error the user reads.
+///
+/// Split from the spawn so the message is tested: it names the command that
+/// failed, because "`launchctl` failed" with no argv is unactionable, and the
+/// argv is the part a user can retry by hand.
+pub fn supervisor_failure(cmd: &SupervisorCommand, stderr: &[u8]) -> anyhow::Error {
+    anyhow::anyhow!(
+        "`{} {}` failed: {}",
+        cmd.0,
+        cmd.1.join(" "),
+        String::from_utf8_lossy(stderr).trim()
+    )
+}
+
+/// Deregister and delete every service registration left under a previous
+/// label, returning the paths actually removed so the caller can report them.
+///
+/// Best-effort by design: on a machine that never carried the old label, every
+/// step is a no-op. The effects are injected so that "which files does this
+/// decide to remove" is testable without a supervisor or a real home
+/// directory - `run` deregisters, `remove` deletes and says whether there was
+/// anything there.
+#[cfg(target_os = "macos")]
+pub fn remove_legacy_with(
+    user_home: Option<PathBuf>,
+    uid: u32,
+    run: &mut dyn FnMut(&SupervisorCommand),
+    remove: &mut dyn FnMut(&Path) -> bool,
+) -> Vec<PathBuf> {
+    let Some(user_home) = user_home else {
+        return Vec::new();
+    };
+    // Infallible here: the macOS `config_home` only joins onto the home path.
+    // A `let Ok(..) else` would be a branch this platform can never take.
+    let config_home = config_home(&user_home)
+        .expect("infallible: the macOS config_home only joins onto the home path");
+    let mut removed = Vec::new();
+    for (path, bootout) in legacy_cleanup(&config_home, uid) {
+        run(&bootout);
+        if remove(&path) {
+            removed.push(path);
+        }
+    }
+    removed
+}
+
 /// The line `lev daemon status` adds about supervision.
 pub fn format_supervision(installed: bool, path: &Path) -> String {
     if installed {
@@ -324,6 +378,84 @@ fn display(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── supervisor_failure ───────────────────────────────────────────────
+
+    #[test]
+    fn supervisor_failure_names_the_command_and_its_stderr() {
+        let err = supervisor_failure(
+            &(
+                "launchctl".to_string(),
+                vec!["bootstrap".to_string(), "gui/501".to_string()],
+            ),
+            b"  Load failed: 5: Input/output error\n",
+        )
+        .to_string();
+        // The argv, so the user can retry it by hand.
+        assert!(err.contains("`launchctl bootstrap gui/501`"), "{err}");
+        // The supervisor's own words, trimmed.
+        assert!(err.contains("Load failed: 5: Input/output error"), "{err}");
+        assert!(!err.contains('\n'), "stderr should be trimmed: {err}");
+    }
+
+    #[test]
+    fn supervisor_failure_survives_non_utf8_stderr() {
+        let err = supervisor_failure(&("x".to_string(), vec![]), &[0xff, 0xfe]).to_string();
+        assert!(err.contains("`x `"), "{err}");
+    }
+
+    // ─── remove_legacy_with (macOS only: nothing else ever had a rename) ──
+
+    /// Both halves in one test on purpose. A separate no-home case would pass
+    /// closures that are never called, and an uncalled closure body is an
+    /// uncovered region - the gate would read a correct test as a hole.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn remove_legacy_with_no_home_directory_does_nothing() {
+        let calls = std::cell::Cell::new(0);
+        let mut run = |_: &SupervisorCommand| calls.set(calls.get() + 1);
+        let mut remove = |_: &Path| {
+            calls.set(calls.get() + 1);
+            false
+        };
+
+        assert!(remove_legacy_with(None, 501, &mut run, &mut remove).is_empty());
+        assert_eq!(calls.get(), 0, "no home means no supervisor and no unlink");
+
+        // The same closures against a real home, so both bodies run and the
+        // zero above is a measured difference rather than an absence.
+        assert!(
+            remove_legacy_with(Some(PathBuf::from("/u")), 501, &mut run, &mut remove).is_empty()
+        );
+        assert!(calls.get() > 0, "the injected effects were never reached");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn remove_legacy_with_deregisters_before_deleting() {
+        // Order matters: deleting the plist first would leave the label still
+        // bootstrapped with no file to point at.
+        let events: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let removed = remove_legacy_with(
+            Some(PathBuf::from("/u")),
+            501,
+            &mut |cmd| {
+                events
+                    .borrow_mut()
+                    .push(format!("run {} {}", cmd.0, cmd.1.join(" ")));
+            },
+            &mut |path| {
+                events
+                    .borrow_mut()
+                    .push(format!("remove {}", path.display()));
+                true
+            },
+        );
+        let events = events.into_inner();
+        assert_eq!(removed.len(), LEGACY_SERVICE_LABELS.len());
+        assert!(events[0].starts_with("run launchctl bootout"), "{events:?}");
+        assert!(events[1].starts_with("remove "), "{events:?}");
+    }
 
     /// A unit that needs no platform support to construct, for the shared
     /// filesystem helpers.
