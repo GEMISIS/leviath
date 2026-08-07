@@ -366,6 +366,13 @@ pub fn collect_transition_choice(
                     &mut window,
                 ) {
                     Ok(visit) => {
+                        // No `status = Active` here, unlike the same sequence in
+                        // `resolve_transition`. That reset exists to clear an
+                        // error status when recovering down an `error` edge, and
+                        // this path cannot be carrying one: `StageResolution`
+                        // only yields `Choose` from the branch that ran with no
+                        // stage outcome, so an errored stage routes to `Next`
+                        // and never reaches an LLM choice.
                         let name = bp.0.stages[idx].name.clone();
                         emit_stage_transition(&sink, metadata, &state.agent_id, from, &name, visit);
                         let mut ec = commands.entity(outcome.entity);
