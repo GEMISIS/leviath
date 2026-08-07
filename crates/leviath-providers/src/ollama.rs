@@ -356,8 +356,9 @@ impl Provider for OllamaProvider {
             .await
             .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
 
-        // Shared classification, as above: a non-2xx here used to be
-        // `RequestFailed`, which reads as a retryable network fault.
+        // Shared classification, as above. A bare `RequestFailed` here would
+        // read as a retryable network fault; the status is what says whether
+        // retrying can help.
         let response = crate::provider::check_http_response(response, None).await?;
 
         let body: serde_json::Value = response

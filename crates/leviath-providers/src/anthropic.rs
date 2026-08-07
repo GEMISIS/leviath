@@ -666,9 +666,10 @@ impl Provider for AnthropicProvider {
             .await
             .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
 
-        // Shared classification here too. This used to be `RequestFailed`,
-        // which `is_transient` treats as retryable, so a revoked key looked
-        // like a flaky network rather than something only the operator can fix.
+        // Shared classification here too. `is_transient` treats
+        // `RequestFailed` as retryable, so classifying by status is what keeps
+        // a revoked key from looking like a flaky network - the one is only
+        // fixable by the operator, the other by waiting.
         let response = crate::provider::check_http_response(response, None).await?;
 
         let body: serde_json::Value = response

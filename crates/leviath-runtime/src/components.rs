@@ -1240,8 +1240,9 @@ impl MessageInbox {
     }
 
     /// Add a message to the inbox. Messages deliver in the order they
-    /// arrived; there used to be a priority field here, but no path that
-    /// sends a message ever set it, so FIFO is what always happened.
+    /// arrived, and deliberately carry no priority: nothing that sends one
+    /// has a reason to reorder, and a priority field nobody sets is a field
+    /// every reader of the inbox has to rule out first.
     pub fn push(&mut self, msg: AgentMessage) {
         self.messages.push(msg);
     }
