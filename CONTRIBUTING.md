@@ -108,13 +108,21 @@ cargo xtask version 0.1.3
 ```
 
 That writes `[workspace.package] version`, the eleven intra-workspace pins in
-`[workspace.dependencies]` just below it, and `Cargo.lock`, then moves
-`## Unreleased` in `CHANGELOG.md` under a dated `## 0.1.3` heading and opens a
-fresh empty one. The pins exist because `cargo publish` refuses a path
-dependency with no version requirement, and Cargo has no way to make those
-requirements inherit the workspace version — so they are written out, and they
-have to agree. `cargo xtask version --check` is the CI job that fails a
-hand-edit which moved only some of them.
+`[workspace.dependencies]` just below it, the allocator pin in
+`crates/leviath-cli/Cargo.toml` (which lives there rather than in the workspace
+table because only the composition-root binary should pick an allocator), and
+`Cargo.lock`, then moves `## Unreleased` in `CHANGELOG.md` under a dated
+`## 0.1.3` heading and opens a fresh empty one. The pins exist because
+`cargo publish` refuses a path dependency with no version requirement, and Cargo
+has no way to make those requirements inherit the workspace version — so they
+are written out, and they have to agree. `cargo xtask version --check` is the CI
+job that fails a hand-edit which moved only some of them.
+
+That same check compares the `[profile.release]` block in
+`crates/leviath-cli/Cargo.toml` against the root's. The copy exists because
+`cargo install leviath-cli` builds with no workspace — that manifest is the root
+there — and without it cargo's defaults apply, silently dropping
+`overflow-checks`. Edit one and you have to edit the other.
 
 Then write the changelog entries for what you are shipping, and open the PR.
 Because merging a bump publishes, CI requires the **`allow-version-bump`** label
