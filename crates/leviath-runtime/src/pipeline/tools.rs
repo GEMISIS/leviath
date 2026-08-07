@@ -285,6 +285,28 @@ type DispatchToolsQuery = (
     Option<&'static crate::components::OutputValidators>,
 );
 
+/// The resources the daemon installs, which a bare world does not have.
+///
+/// Every field is optional because `lev run` drives these same systems with no
+/// daemon behind them: no gate lane to prompt through, no persistence lane, no
+/// event sink. Bundled as one `SystemParam` so a system's signature stays about
+/// what it *queries* rather than listing the six things that might be wired.
+#[derive(bevy_ecs::system::SystemParam)]
+pub struct DaemonServices<'w> {
+    /// The taint-gate policy, when one is configured.
+    pub policy: Option<Res<'w, PolicyGate>>,
+    /// Rhai rules the gate consults before blocking.
+    pub script_rules: Option<Res<'w, GateScriptRules>>,
+    /// The hub a blocked call can prompt through.
+    pub hub: Option<Res<'w, InteractionHub>>,
+    /// The lane a gate prompt's answer comes back on.
+    pub gate_stage: Option<Res<'w, crate::gate_prompt::GatePromptStage>>,
+    /// The lane run state is written on.
+    pub persist: Option<Res<'w, PersistenceStage>>,
+    /// Where world events are broadcast.
+    pub sink: Option<Res<'w, crate::host::WorldEventSink>>,
+}
+
 /// Tool-dispatch system: for each `ReadyForTools` agent, apply its `context_*`
 /// tool calls inline (they mutate the ECS window) and hand the rest to the
 /// sequential tool lane, moving it to `AwaitingTools`. If a batch is *all*
@@ -298,22 +320,21 @@ type DispatchToolsQuery = (
 /// with an ack the exec waits on, and a per-call [`ToolProgress`] journals each
 /// completion as a `ToolCallDone`. On a crash mid-batch, recovery replays the
 /// recorded results instead of re-running their side effects (issue #96).
-#[expect(
-    clippy::too_many_arguments,
-    reason = "a bevy system: every parameter is a distinct Query or Res the scheduler injects, and the ECS decides the signature rather than this code"
-)]
 pub fn dispatch_tools(
     mut agents: Query<DispatchToolsQuery, With<ReadyForTools>>,
     service: Res<ToolServiceRes>,
     stage: Res<ToolStage>,
-    policy: Option<Res<PolicyGate>>,
-    script_rules: Option<Res<GateScriptRules>>,
-    hub: Option<Res<InteractionHub>>,
-    gate_stage: Option<Res<crate::gate_prompt::GatePromptStage>>,
-    persist: Option<Res<PersistenceStage>>,
-    sink: Option<Res<crate::host::WorldEventSink>>,
+    daemon: DaemonServices,
     mut commands: Commands,
 ) {
+    let DaemonServices {
+        policy,
+        script_rules,
+        hub,
+        gate_stage,
+        persist,
+        sink,
+    } = daemon;
     crate::tick_scope::clear();
     let default_policy = leviath_core::PolicyConfig::default();
     let policy_ref = policy.as_ref().map(|p| &p.0).unwrap_or(&default_policy);
@@ -511,15 +532,19 @@ pub fn dispatch_tools(
                 gate_stage
                     .runtime
                     .spawn(crate::gate_prompt::run_gate_prompt(
-                        entity,
-                        (*hub).clone(),
-                        state.agent_id.clone(),
-                        tool_id,
-                        name,
-                        taint,
-                        clearance,
-                        gate_stage.outcomes.clone(),
-                        gate_stage.wake.clone(),
+                        crate::gate_prompt::GatedCall {
+                            entity,
+                            agent_id: state.agent_id.clone(),
+                            tool_id,
+                            tool_name: name,
+                            taint,
+                            clearance,
+                        },
+                        crate::interaction_hub::PromptLane {
+                            hub: (*hub).clone(),
+                            outcomes: gate_stage.outcomes.clone(),
+                            wake: gate_stage.wake.clone(),
+                        },
                     ));
             }
             commands

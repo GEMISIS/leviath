@@ -277,3 +277,18 @@ impl InteractionBackend for HubInteractionBackend {
 #[cfg(test)]
 #[path = "interaction_hub_tests.rs"]
 mod tests;
+
+/// Where a prompt's answer goes once a person gives one.
+///
+/// Both prompt paths - the taint gate and blueprint interaction points - are the
+/// same three things: the hub that owns the conversation, the channel the
+/// resolution is reported on, and the driver to wake once it is. Only the
+/// outcome type differs, so this is generic over it rather than written twice.
+pub struct PromptLane<T> {
+    /// The hub that owns the conversation with the user.
+    pub hub: InteractionHub,
+    /// The channel the resolution is reported on.
+    pub outcomes: tokio::sync::mpsc::UnboundedSender<T>,
+    /// The driver to wake once it is.
+    pub wake: std::sync::Arc<tokio::sync::Notify>,
+}

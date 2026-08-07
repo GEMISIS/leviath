@@ -28,7 +28,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::dynamic_interaction::InteractionBackend;
-use crate::interaction_hub::InteractionHub;
+use crate::interaction_hub::PromptLane;
 use crate::taint::GateResolution;
 
 /// Marks an agent holding its tool batch while `n` gate prompts are outstanding.
@@ -111,21 +111,41 @@ fn build_gate_request(
 
 /// Ask the user how to resolve a blocked outbound call, then report the
 /// resolution on the lane and wake the tick loop.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "an async lane entry point: the prompt, the lane sender, the waker and the resolution channel are four unrelated lifetimes"
-)]
-pub async fn run_gate_prompt(
-    entity: Entity,
-    hub: InteractionHub,
-    agent_id: String,
-    tool_id: String,
-    tool_name: String,
-    taint: TaintLevel,
-    clearance: TaintLevel,
-    outcomes: UnboundedSender<GatePromptOutcome>,
-    wake: Arc<Notify>,
-) {
+/// The call being gated: who is asking, for what, and how the taint levels
+/// compare.
+///
+/// Held apart from the lane it reports on because these six answer "what is the
+/// user being asked about" and the other three answer "where does the answer
+/// go" - and only the first six ever appear in the prompt.
+pub struct GatedCall {
+    /// The agent whose call is blocked.
+    pub entity: Entity,
+    /// That agent's run id, for the hub's per-agent backend.
+    pub agent_id: String,
+    /// The tool call's id, which the resolution is matched back to.
+    pub tool_id: String,
+    /// The tool being called, as the prompt names it.
+    pub tool_name: String,
+    /// How tainted the data reaching this call is.
+    pub taint: TaintLevel,
+    /// What the call is cleared for.
+    pub clearance: TaintLevel,
+}
+
+pub async fn run_gate_prompt(call: GatedCall, lane: PromptLane<GatePromptOutcome>) {
+    let GatedCall {
+        entity,
+        agent_id,
+        tool_id,
+        tool_name,
+        taint,
+        clearance,
+    } = call;
+    let PromptLane {
+        hub,
+        outcomes,
+        wake,
+    } = lane;
     let backend = hub.backend_for(agent_id);
     let req = build_gate_request(format!("gate-{tool_id}"), &tool_name, taint, clearance);
     let resolution = resolution_from_answer(&backend.ask(req).await);
@@ -190,7 +210,10 @@ pub fn collect_gate_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Production reaches the hub only through `PromptLane`, so the type itself
+    // is named here rather than imported above and left unused there.
     use crate::components::AgentState;
+    use crate::interaction_hub::InteractionHub;
     use crate::pipeline::ReadyForTools;
     use crate::taint::TaintGate;
     use leviath_core::SecurityConfig;
@@ -237,15 +260,20 @@ mod tests {
         let task = {
             let hub = hub.clone();
             tokio::spawn(run_gate_prompt(
-                Entity::from_raw_u32(1).expect("a small literal index is always a valid entity id"),
-                hub,
-                "run".to_string(),
-                "c1".to_string(),
-                "shell".to_string(),
-                TaintLevel::Internal,
-                TaintLevel::Public,
-                tx,
-                Arc::new(Notify::new()),
+                GatedCall {
+                    entity: Entity::from_raw_u32(1)
+                        .expect("a small literal index is always a valid entity id"),
+                    agent_id: "run".to_string(),
+                    tool_id: "c1".to_string(),
+                    tool_name: "shell".to_string(),
+                    taint: TaintLevel::Internal,
+                    clearance: TaintLevel::Public,
+                },
+                PromptLane {
+                    hub,
+                    outcomes: tx,
+                    wake: Arc::new(Notify::new()),
+                },
             ))
         };
         for _ in 0..8 {

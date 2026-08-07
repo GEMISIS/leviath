@@ -343,16 +343,20 @@ pub fn dispatch_persistence(
         // what lets an observer reading `meta.json` tell a slow run from a wedged
         // one, which `updated_at` (which is `now` either way) cannot.
         let meta = build_run_meta(
-            md,
-            state,
-            totals,
-            &flags,
-            cursor.index,
-            now,
-            watermark.last_progress_at(),
-            depth,
-            max_child_depth,
-            final_output,
+            crate::persistence::RunMetaSources {
+                md,
+                state,
+                totals,
+                flags: &flags,
+                final_output,
+            },
+            crate::persistence::RunPosition {
+                stage_index: cursor.index,
+                now_secs: now,
+                last_progress_at: watermark.last_progress_at(),
+                depth,
+                max_child_depth,
+            },
         );
         let context = build_context_snapshot(window, &state.current_stage);
         let stages = ledger.as_deref().map(|l| l.0.clone()).unwrap_or_default();
