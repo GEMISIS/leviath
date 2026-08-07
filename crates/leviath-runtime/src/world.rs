@@ -46,7 +46,8 @@ use crate::pipeline::{
     fail_wedged_runs, gate_requires_children, handle_empty_response, poll_dynamic_tool_refresh,
     process_response, reflect_interaction_status, refresh_advertised_tools,
     require_context_regions, require_final_output, resolve_transition, run_after_inference_hooks,
-    run_before_inference_hooks, run_stage_enter_hooks, run_tool_call_hooks, sync_tool_stages,
+    run_before_inference_hooks, run_stage_enter_hooks, run_stage_exit_hooks, run_terminal_hooks,
+    run_tool_call_hooks, sync_tool_stages,
 };
 use crate::providers::ProviderRegistry;
 use crate::tool_bridge::ToolLane;
@@ -376,7 +377,9 @@ impl PipelineWorld {
                 // (e.g. plan_approval) and drive the interaction-point lane.
                 crate::interaction_points::gate_interaction_points,
                 crate::interaction_points::dispatch_interaction_point,
-                resolve_transition,
+                // `on_stage_exit` while the finishing stage is still current
+                // and before the edge that leaves it is picked.
+                (run_stage_exit_hooks, resolve_transition).chain(),
                 dispatch_transition_choice,
                 collect_transition_choice,
                 // Drive fan-out workers and merge once they finish.
@@ -395,7 +398,9 @@ impl PipelineWorld {
                 // Store any finished run title, then start newly-marked ones.
                 // Collect precedes persistence so a landed title is written on
                 // this same tick.
-                crate::title::collect_title,
+                // `on_completion` / `on_error`, once, as a run finishes.
+                // Grouped for the 20-system `.chain()` limit, as above.
+                (run_terminal_hooks, crate::title::collect_title).chain(),
                 crate::title::dispatch_title,
                 // Fail a run whose dispatch has been declining for something
                 // that will never arrive. Last of the guards, and after *both*

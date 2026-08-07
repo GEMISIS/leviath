@@ -377,6 +377,8 @@ impl StageHookScripts {
             "before_inference" => stage.hooks.before_inference.as_deref(),
             "after_inference" => stage.hooks.after_inference.as_deref(),
             "on_tool_call" => stage.hooks.on_tool_call.as_deref(),
+            "on_completion" => stage.hooks.on_completion.as_deref(),
+            "on_error" => stage.hooks.on_error.as_deref(),
             _ => None,
         }?;
         self.0.get(path).cloned()

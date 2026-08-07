@@ -3,7 +3,7 @@ title: Agent Client Protocol
 description: Serve an agent over the Agent Client Protocol on stdio, so an editor or orchestrator can drive it as a child process.
 group: Reference
 group_order: 3
-order: 12
+order: 13
 ---
 
 # Agent Client Protocol (editor integration)

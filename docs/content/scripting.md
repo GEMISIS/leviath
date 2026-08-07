@@ -32,6 +32,7 @@ can copy and change. [rhai.rs](https://rhai.rs) has the language reference if yo
 |---|---|---|
 | [**Model providers**](/docs/rhai-providers) | `~/.leviath/providers/<name>.rhai` | How to map a request onto some HTTP API, and the response back |
 | [**Context regions**](/docs/rhai-regions) | beside the agent, referenced by `script =` | How one region renders, accepts writes, and sheds content under pressure |
+| [**Stage hooks**](/docs/rhai-hooks) | beside the agent, referenced by `[stages.<name>.hooks]` | What happens at seven points in an agent's lifecycle - entering a stage, either side of an inference, before a tool call, and at the end |
 | [**Global tools**](/docs/rhai-tools) | `~/.leviath/tools/*.rhai`, or an agent's own `tools/` | A new tool, its schema, and what it does |
 | [**Policy rules**](/docs/rhai-tools#policy-rules) | `rules/*.rhai` in your OS config dir, see [configuration](/docs/configuration#policytoml) | Whether a given tool call is allowed to fire |
 
