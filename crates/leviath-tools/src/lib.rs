@@ -1582,21 +1582,61 @@ mod tests {
 
     #[test]
     fn capture_note_is_silent_when_nothing_was_dropped() {
-        assert!(capture_note(&captured(10, 10), &captured(0, 0)).is_none());
+        assert!(capture_note(&captured(10, 10), &captured(0, 0), 10).is_none());
     }
 
     #[test]
     fn capture_note_names_whichever_stream_overran() {
         let over = captured(10, 5_000);
         let fine = captured(10, 10);
-        let stdout_only = capture_note(&over, &fine).expect("stdout overran");
+        let stdout_only = capture_note(&over, &fine, 10).expect("stdout overran");
         assert!(stdout_only.contains("stdout exceeded"), "{stdout_only}");
-        let stderr_only = capture_note(&fine, &over).expect("stderr overran");
+        let stderr_only = capture_note(&fine, &over, 10).expect("stderr overran");
         assert!(stderr_only.contains("stderr exceeded"), "{stderr_only}");
-        let both = capture_note(&over, &over).expect("both overran");
+        let both = capture_note(&over, &over, 10).expect("both overran");
         assert!(both.contains("stdout and stderr exceeded"), "{both}");
         // The count is everything the command wrote, not what survived.
         assert!(both.contains("10000 bytes"), "{both}");
+    }
+
+    /// The truncation wiring, driven through a real process on every platform.
+    ///
+    /// `echo hello` is the one flooding-free way to exceed a cap that both
+    /// `cmd.exe` and `sh` understand, so the cap is injected rather than the
+    /// output being made enormous. The `#[cfg(unix)]` test below is the
+    /// real-megabyte twin.
+    #[tokio::test]
+    async fn a_command_that_outruns_the_cap_is_truncated_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools
+            .shell_with_limits(
+                &json!({"command": "echo hello"}),
+                Duration::from_secs(30),
+                4,
+            )
+            .await;
+        assert!(result.contains("[truncated]"), "{result}");
+        assert!(result.contains("hell"), "{result}");
+        assert!(!result.contains("[timed out]"), "{result}");
+    }
+
+    /// The control: under a cap it comfortably fits, nothing is said about
+    /// truncation. Without this the test above passes against a version that
+    /// always appends the note.
+    #[tokio::test]
+    async fn a_command_within_the_cap_gets_no_truncation_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools
+            .shell_with_limits(
+                &json!({"command": "echo hello"}),
+                Duration::from_secs(30),
+                MAX_CAPTURE_BYTES,
+            )
+            .await;
+        assert!(result.contains("hello"), "{result}");
+        assert!(!result.contains("[truncated]"), "{result}");
     }
 
     /// The end-to-end twin: a real command that outproduces the cap comes back
