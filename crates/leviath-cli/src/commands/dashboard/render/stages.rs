@@ -223,7 +223,7 @@ impl Dashboard {
 mod tests {
     use super::*;
     use crate::commands::dashboard::graph::{GraphEdge, GraphTransitionInfo};
-    use crate::commands::dashboard::test_support::make_test_dashboard;
+    use crate::commands::dashboard::test_support::{make_test_dashboard, rendered_buffer};
     use crate::runstate::{StageRecord, StageRunStatus};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -292,6 +292,8 @@ mod tests {
                 dash.render_stage_tabs(f, area, &agent);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("main"), "{buf}");
     }
 
     #[test]
@@ -311,6 +313,9 @@ mod tests {
                 dash.render_stage_tabs(f, area, &agent);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("plan"), "{buf}");
+        assert!(buf.contains("implement"), "{buf}");
     }
 
     #[test]
@@ -334,6 +339,12 @@ mod tests {
                 dash.draw_linear_tabs(f, area, &agent);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("s1"), "{buf}");
+        assert!(buf.contains("s2"), "{buf}");
+        assert!(buf.contains("s3"), "{buf}");
+        assert!(buf.contains("s4"), "{buf}");
+        assert!(buf.contains("s5"), "{buf}");
     }
 
     #[test]
@@ -368,6 +379,9 @@ mod tests {
                 dash.render_stage_tabs(f, area, &agent);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("plan"), "{buf}");
+        assert!(buf.contains("implement"), "{buf}");
     }
 
     #[test]
@@ -388,6 +402,8 @@ mod tests {
                 dash.render_stage_tabs(f, area, &agent);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("main"), "{buf}");
     }
 
     #[test]
