@@ -323,16 +323,22 @@ async fn ensure_daemon_running() -> anyhow::Result<()> {
     if poll_until(|| is_daemon_running(&id)).await {
         return Ok(());
     }
-    anyhow::bail!("the leviath daemon did not start within 5s");
+    anyhow::bail!("the leviath daemon did not start within the readiness window");
 }
 
-/// Poll `done` until it returns true or ~5s elapses, sleeping 2ms at first
-/// and doubling to a 50ms ceiling. The daemon boots in ~20ms, so the old
-/// fixed 50ms tick spent more time waiting than the daemon spent starting -
-/// it was most of the measured 97ms cold `lev run`. Backoff keeps the
-/// slow-path cost (a daemon that genuinely takes seconds) unchanged.
+/// Poll `done` until it returns true or the readiness window elapses, sleeping
+/// 2ms at first and doubling to a 50ms ceiling. The daemon boots in ~20ms, so
+/// the old fixed 50ms tick spent more time waiting than the daemon spent
+/// starting - it was most of the measured 97ms cold `lev run`. Backoff keeps
+/// the slow-path cost (a daemon that genuinely takes seconds) unchanged.
+///
+/// Windows uses a longer window (15s): named-pipe bind plus job-object detach
+/// under concurrent EnsureDaemon (Gas City supervisor starting many sessions)
+/// regularly exceeded the original 5s cap and left pools with
+/// `runtime-missing` / pipe-busy failures.
 async fn poll_until(mut done: impl FnMut() -> bool) -> bool {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let secs: u64 = if cfg!(windows) { 15 } else { 5 };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
     let mut delay = std::time::Duration::from_millis(2);
     while !done() {
         if tokio::time::Instant::now() >= deadline {
