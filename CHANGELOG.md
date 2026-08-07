@@ -252,6 +252,12 @@ same list.
   file listing reports `modifying_tool_calls` and `modified_files_truncated` as
   separate facts, so a client never subtracts one from the other to guess how
   many files there were.
+- Removed: five public functions in `leviath-mcp` that nothing outside their own
+  tests called. `ToolExecutor::add_client` was `add_client_advertised` with an
+  empty advertised set, `ToolExecutor::execute_filtered` was `execute` behind a
+  name check the caller already does, and `ToolRegistry`'s `all_tools`,
+  `find_tool` and `server_tools` were superseded by the advertised-name map.
+  Callers of `add_client` want `add_client_advertised(name, client, &advertised)`.
 
 ## 0.2.0 - 2026-08-04
 
