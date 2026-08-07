@@ -306,6 +306,33 @@ pub fn writes_a_file(command: &str) -> bool {
     })
 }
 
+/// Every literal path `command` redirects a write to.
+///
+/// [`writes_a_file`] answers whether to clamp by the write policy; this answers
+/// *where*, so a caller can hold a redirect to the same workspace confinement
+/// `write_file` enforces.
+///
+/// Discarded targets (`/dev/null` and friends) are absent because they write
+/// nothing anyone can read back. **Unreadable** targets are absent too, and that
+/// is the one asymmetry worth stating: `> $OUT` names a path only the shell will
+/// know, so there is nothing to check it against. Those are already ungrantable
+/// by [`writes_a_file`] and prompt every time, which is the containment they
+/// get. A line that will not tokenize yields nothing here for the same reason -
+/// it is already treated as writing.
+pub fn write_target_paths(command: &str) -> Vec<String> {
+    let Some(segments) = tokenize(command) else {
+        return Vec::new();
+    };
+    segments
+        .iter()
+        .flat_map(|segment| segment.writes.iter())
+        .filter_map(|t| match classify_write(t) {
+            WriteTarget::Path(p) => Some(p),
+            WriteTarget::Discarded | WriteTarget::Unreadable => None,
+        })
+        .collect()
+}
+
 /// The program half of a key, dropping any folded subcommand or argument.
 ///
 /// This is what makes a safe-command entry cover a family rather than a single

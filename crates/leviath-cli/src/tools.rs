@@ -313,6 +313,48 @@ pub fn clamp_by_effect(
     policy
 }
 
+/// Refuse a shell call whose redirect writes outside the working directory, or
+/// `None` when every literal target it names stays inside.
+///
+/// [`clamp_by_effect`] answers "which policy governs this write" and is a
+/// separate question from "is this path allowed at all". Folding them together
+/// would hide the second one behind the first's name, so they stay apart.
+///
+/// **Refusal, not a prompt.** `write_file` does not prompt for a path outside
+/// the workdir, it refuses, and this is the same write. Prompting would also be
+/// unusable where it matters: the case this closes needs `write_file` to have
+/// resolved to `Allow`, which in practice means `--yolo`, and
+/// [`ToolPolicy::Ask`] blocks until answered - an unattended run would park in
+/// `WaitingInput` holding its slot rather than being protected.
+///
+/// The message names the offending path so the model can retry inside the
+/// workspace instead of guessing which part of its line was refused.
+pub fn escaping_write_refusal(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    workdir: &std::path::Path,
+) -> Option<String> {
+    if leviath_tools::canonical_tool_name(tool_name) != "shell" {
+        return None;
+    }
+    let command = arguments.get("command").and_then(|v| v.as_str())?;
+    let escaping = crate::shell_keys::write_target_paths(command)
+        .into_iter()
+        .find(|target| {
+            let joined = match std::path::Path::new(target).is_absolute() {
+                true => std::path::PathBuf::from(target),
+                false => workdir.join(target),
+            };
+            !leviath_core::resolves_within(&joined, workdir)
+        })?;
+    Some(format!(
+        "[denied] Shell redirect writes to '{escaping}', which is outside the working directory \
+         ({}). The `write_file` tool refuses the same path; a redirect is not a way around it. \
+         Write inside the workspace instead.",
+        workdir.display()
+    ))
+}
+
 /// Tools a blueprint may declare *more* permissively than the built-in default
 /// without the user opting in.
 ///
@@ -755,6 +797,93 @@ mod policy_tests {
 
     fn allow() -> ToolPolicy {
         ToolPolicy::Allow
+    }
+
+    // ─── Redirect confinement (issue #289) ───────────────────────────────────
+
+    /// The asymmetry this closes. Under `--yolo` the write policy resolves to
+    /// `Allow`, so the clamp above passes the call through - and the target was
+    /// then never checked, while `write_file` on the same path is refused by
+    /// `resolve_within`. The shell was the spelling that worked.
+    #[test]
+    fn a_redirect_outside_the_workdir_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for command in [
+            "echo pwn > /root/.bashrc",
+            "cat notes.md > ../escaped.txt",
+            "echo x >> ../../etc/hosts",
+        ] {
+            let refusal = escaping_write_refusal("shell", &shell_call(command), dir.path());
+            assert!(
+                refusal.is_some(),
+                "{command:?} writes outside the workdir and must be refused"
+            );
+            let refusal = refusal.expect("just asserted");
+            assert!(
+                refusal.contains("outside the working directory"),
+                "{refusal}"
+            );
+        }
+    }
+
+    /// The control. Without it the test above passes against a version that
+    /// refuses every redirect, which would break every agent that writes a file.
+    #[test]
+    fn a_redirect_inside_the_workdir_is_allowed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for command in [
+            "echo x > out.txt",
+            "echo x > sub/dir/out.txt",
+            "cat a >> ./notes.md",
+            // A discarded write names no path at all.
+            "ninja > /dev/null 2>&1",
+            "cat a 2>/dev/null",
+            // Not a shell call, so not this function's business.
+            "ls",
+        ] {
+            assert_eq!(
+                escaping_write_refusal("shell", &shell_call(command), dir.path()),
+                None,
+                "{command:?} stays inside and must not be refused"
+            );
+        }
+    }
+
+    /// An absolute path *into* the workdir is inside it, so the check cannot be
+    /// a naive "is it absolute" test.
+    #[test]
+    fn an_absolute_path_into_the_workdir_is_allowed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let inside = dir.path().join("out.txt");
+        let command = format!("echo x > {}", inside.display());
+        assert_eq!(
+            escaping_write_refusal("shell", &shell_call(&command), dir.path()),
+            None
+        );
+    }
+
+    /// The alias is the same tool, and a non-shell tool is not this check's
+    /// business - `write_file` has its own confinement.
+    #[test]
+    fn the_refusal_covers_the_alias_and_ignores_other_tools() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(
+            escaping_write_refusal("bash", &shell_call("echo x > /root/.bashrc"), dir.path())
+                .is_some()
+        );
+        assert_eq!(
+            escaping_write_refusal(
+                "write_file",
+                &serde_json::json!({ "path": "/root/.bashrc", "content": "x" }),
+                dir.path()
+            ),
+            None
+        );
+        // A shell call with no `command` argument names nothing to check.
+        assert_eq!(
+            escaping_write_refusal("shell", &serde_json::json!({}), dir.path()),
+            None
+        );
     }
 
     /// The property this exists for: a model that finds `write_file` refused
