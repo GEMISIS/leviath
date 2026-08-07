@@ -442,9 +442,8 @@ fn builtin_table() -> Vec<BuiltinEntry> {
 /// each call site's monomorphization of this function separately, and it
 /// has been observed to report the production instantiation as 0-hit even
 /// though it's genuinely exercised by `execute_list_command_runs_without_error`
-/// et al. - the same instantiation-merging undercount documented for
-/// `run_stage_loop` (see `run/worker.rs`'s `run_worker_inner` and
-/// `run/session.rs`'s `resolve_task_with`, which use the same fix). A
+/// et al. - the same instantiation-merging undercount `run/task.rs`'s
+/// `resolve_task_with` documents at length and fixes the same way. A
 /// `&dyn Fn` trait object is one concrete type regardless of what closure is
 /// passed, so every call site shares a single instrumented instantiation.
 async fn list_with_registry(
@@ -494,7 +493,7 @@ async fn list_with_registry(
             // `registry.get(provider_name)` is structurally guaranteed
             // `Some` here - `provider_name` comes from
             // `registry.provider_names()` just above, and both methods read
-            // the same underlying map (see `leviath-runtime/src/engine.rs`'s
+            // the same underlying map (see `leviath-runtime/src/providers.rs`'s
             // `ProviderRegistry`). There is no way to construct a registry
             // where a name from `provider_names()` isn't `get()`-able, so
             // `.expect()` documents that invariant instead of leaving a
