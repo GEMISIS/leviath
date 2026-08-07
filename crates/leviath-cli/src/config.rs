@@ -324,6 +324,22 @@ pub struct ReadPathGrants {
 /// tracking for one agent - this one holds machine-wide switches.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SecurityConfig {
+    /// Directories a run's workdir may sit under without being confirmed.
+    ///
+    /// **Empty by default**, which means "ask once about anything alarming"
+    /// rather than "ask about everything": a workdir is only questioned when it
+    /// is a home directory or a filesystem root, which is where an agent's file
+    /// writes do the most damage and the least good. Listing a path here says
+    /// "yes, I work there" and silences the prompt for it and everything under
+    /// it.
+    ///
+    /// This exists because the workdir defaults to wherever `lev run` was
+    /// invoked, and running from `~` is an easy thing to do by accident - issue
+    /// #252 is a machine that lost 115 GB to an agent writing under a profile
+    /// root. Confirming is cheap; noticing afterwards is not.
+    #[serde(default)]
+    pub allowed_workdirs: Vec<String>,
+
     /// Whether a blueprint's `seed = { command = "..." }` regions may run.
     ///
     /// **On by default.** A command seed executes at spawn - before the first
@@ -497,6 +513,7 @@ pub struct SecurityConfig {
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
+            allowed_workdirs: Vec::new(),
             allow_seed_commands: true,
             allow_local_network: false,
             allow_env_vars: Vec::new(),
@@ -3596,6 +3613,7 @@ enabled = false
                 env_var: ScriptPermission::Allow,
             },
             security: SecurityConfig {
+                allowed_workdirs: Vec::new(),
                 allow_seed_commands: false,
                 allow_local_network: true,
                 allow_env_vars: vec!["MY_PROVIDER_KEY".to_string()],

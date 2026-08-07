@@ -265,6 +265,9 @@ mod test_doubles {
     pub(crate) struct TestSetup {
         pub(crate) enable_should_fail: bool,
         pub(crate) create_should_fail: bool,
+        /// Hand back a backend whose every draw fails, so a loop's draw-error
+        /// arm is reachable without a second `TerminalSetup` implementation.
+        pub(crate) draw_should_fail: bool,
     }
 
     impl TestSetup {
@@ -272,6 +275,7 @@ mod test_doubles {
             Self {
                 enable_should_fail: false,
                 create_should_fail: false,
+                draw_should_fail: false,
             }
         }
     }
@@ -290,7 +294,11 @@ mod test_doubles {
             if self.create_should_fail {
                 anyhow::bail!("simulated create_terminal failure");
             }
-            Terminal::new(TestBackendHarness::new(80, 24)).map_err(anyhow::Error::from)
+            let backend = match self.draw_should_fail {
+                true => TestBackendHarness::failing(80, 24),
+                false => TestBackendHarness::new(80, 24),
+            };
+            Terminal::new(backend).map_err(anyhow::Error::from)
         }
 
         fn disable(&mut self) {}
@@ -488,12 +496,14 @@ mod tests {
         let mut enable_fails = TestSetup {
             enable_should_fail: true,
             create_should_fail: false,
+            draw_should_fail: false,
         };
         assert!(enable_fails.enable().is_err());
 
         let mut create_fails = TestSetup {
             enable_should_fail: false,
             create_should_fail: true,
+            draw_should_fail: false,
         };
         assert!(create_fails.create_terminal().is_err());
     }

@@ -18,3 +18,4 @@ pub mod shell_keys;
 mod test_support;
 pub mod tools;
 pub mod tui;
+pub mod workdir_guard;
