@@ -111,7 +111,10 @@ fn build_gate_request(
 
 /// Ask the user how to resolve a blocked outbound call, then report the
 /// resolution on the lane and wake the tick loop.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "an async lane entry point: the prompt, the lane sender, the waker and the resolution channel are four unrelated lifetimes"
+)]
 pub async fn run_gate_prompt(
     entity: Entity,
     hub: InteractionHub,

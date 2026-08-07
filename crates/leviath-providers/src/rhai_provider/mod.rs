@@ -109,7 +109,10 @@ impl RhaiProvider {
 
     /// Build a provider from in-memory source with an injected [`HttpExecutor`]
     /// (used by tests to avoid real network I/O).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the injected-executor constructor takes what the real one reads from config, one parameter per setting, so a struct here would only move the list"
+    )]
     pub fn from_source(
         name: String,
         src: &str,

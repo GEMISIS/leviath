@@ -121,7 +121,10 @@ impl GeminiProvider {
         // All families currently share these values; the match keeps them
         // labelled by family so any one can be adjusted independently (the arms
         // are intentionally identical today - divergence-readiness scaffolding).
-        #[allow(clippy::match_same_arms)]
+        #[expect(
+            clippy::match_same_arms,
+            reason = "the arms are identical today and deliberately kept separate, so each family's limits can move without disturbing the others"
+        )]
         let (max_context_tokens, max_output_tokens) = match GeminiFamily::classify(model) {
             GeminiFamily::FlashLite => (1_048_576, 65_535),
             GeminiFamily::Pro => (1_048_576, 65_535),

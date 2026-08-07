@@ -1374,7 +1374,10 @@ mod tests {
     // `set_readonly(false)` widens Unix perms beyond the original, but here it
     // only re-enables cleanup of a throwaway tempdir file, which is exactly
     // what we want.
-    #[allow(clippy::permissions_set_readonly_false)]
+    #[expect(
+        clippy::permissions_set_readonly_false,
+        reason = "same as the blueprints test: set_readonly(false) here only re-enables cleanup of a temp file this test created moments ago"
+    )]
     #[tokio::test]
     async fn edit_file_write_failure_after_successful_match() {
         let dir = tempfile::tempdir().unwrap();

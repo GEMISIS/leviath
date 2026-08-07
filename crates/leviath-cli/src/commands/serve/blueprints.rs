@@ -1087,7 +1087,10 @@ prompt = "p"
         // production/security-relevant code, so clippy's warning about
         // `set_readonly(false)` making the file world-writable on Unix
         // doesn't apply here.
-        #[allow(clippy::permissions_set_readonly_false)]
+        #[expect(
+            clippy::permissions_set_readonly_false,
+            reason = "test-only cleanup: re-enabling write on a throwaway tempdir file so it can be removed, which is the one case the lint's security concern does not cover"
+        )]
         {
             let mut perms = std::fs::metadata(&manifest_path).unwrap().permissions();
             perms.set_readonly(false);

@@ -274,7 +274,10 @@ pub fn build_context_snapshot(window: &ContextWindow, stage_name: &str) -> Conte
 /// the progress stamp where it was. Taken as a plain `Option` rather than the
 /// watermark it comes from so this stays a data mapper with no dependency on the
 /// persistence pipeline.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "meta.json has this many independent fields; the struct this would take is RunMetadata, which is what it returns"
+)]
 pub fn build_run_meta(
     md: &RunMetadata,
     state: &AgentState,

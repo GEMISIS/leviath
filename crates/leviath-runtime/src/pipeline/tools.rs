@@ -298,7 +298,10 @@ type DispatchToolsQuery = (
 /// with an ack the exec waits on, and a per-call [`ToolProgress`] journals each
 /// completion as a `ToolCallDone`. On a crash mid-batch, recovery replays the
 /// recorded results instead of re-running their side effects (issue #96).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a bevy system: every parameter is a distinct Query or Res the scheduler injects, and the ECS decides the signature rather than this code"
+)]
 pub fn dispatch_tools(
     mut agents: Query<DispatchToolsQuery, With<ReadyForTools>>,
     service: Res<ToolServiceRes>,

@@ -57,6 +57,7 @@ use tool_state::*;
 /// call in which `config`, `mcp_tool_defs` and `hub` are adjacent references:
 /// transposing two of them type-checks in some orders, and the compiler is the
 /// only thing that was ever going to notice.
+#[derive(Clone)]
 pub struct SpawnDeps<'a> {
     /// The daemon's tool service, which per-agent state is registered against.
     pub tool_service: &'a CliToolService,

@@ -563,7 +563,10 @@ pub fn resolve_transition(
 /// `Ok` carries the stage's updated visit count (this entry included), which the
 /// transition systems stamp into the [`StageTransition`](crate::host::WorldEvent)
 /// event.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "updates seven unrelated per-stage components in one pass, which is cheaper than seven queries over the same entity"
+)]
 pub(crate) fn enter_stage(
     idx: usize,
     blueprint: &leviath_core::Blueprint,

@@ -37,40 +37,27 @@
 //! the re-issued inference decides what still needs doing.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
 use leviath_core::run_archive;
 use leviath_core::run_meta::{ContextSnapshot, RunMeta, RunStatus};
-use leviath_mcp::ToolExecutor;
-use leviath_providers::Tool;
-use leviath_runtime::host::{SpawnArgs, SubAgentOp};
-use leviath_runtime::interaction_hub::InteractionHub;
+use leviath_runtime::host::SpawnArgs;
 use leviath_runtime::interaction_points::InteractionPointState;
 use leviath_runtime::persistence::{RunMetadata, TokenTotals};
 use leviath_runtime::restore::restore_agent;
 use leviath_runtime::world::PipelineWorld;
-use tokio::sync::Mutex;
-use tokio::sync::mpsc::UnboundedSender;
 
-use crate::config::Config;
+// Seven of recovery's former imports came in only to spell the seven parameters
+// that are now one `SpawnDeps`.
 use crate::daemon::spawn::{SpawnDeps, build_agent_for_reload};
-use crate::daemon::tool_service::CliToolService;
 
 /// Reload every non-terminal persisted run under `runs_dir`, returning the
 /// `(run_id, entity)` pairs for the host to map. Runs that fail to reload are
 /// skipped.
-#[allow(clippy::too_many_arguments)]
 pub fn reload_persisted_agents(
     world: &mut PipelineWorld,
-    tool_service: &CliToolService,
-    config: &Config,
-    shared_mcp: Arc<Mutex<ToolExecutor>>,
-    mcp_tool_defs: &[Tool],
-    hub: &InteractionHub,
+    deps: SpawnDeps<'_>,
     runs_dir: &Path,
-    now_secs: i64,
-    subagent_tx: &UnboundedSender<SubAgentOp>,
 ) -> Vec<(String, Entity)> {
     let mut reloaded: Vec<(RunMeta, Entity)> = Vec::new();
     let Ok(dir_entries) = std::fs::read_dir(runs_dir) else {
@@ -93,22 +80,11 @@ pub fn reload_persisted_agents(
     let ordered = leviath_runtime::restore::triage_restores(candidates);
     for meta in ordered {
         let run_dir = runs_dir.join(&meta.run_id);
-        match reload_one(
-            world,
-            tool_service,
-            config,
-            shared_mcp.clone(),
-            mcp_tool_defs,
-            hub,
-            &meta,
-            &run_dir,
-            now_secs,
-            subagent_tx,
-        ) {
+        match reload_one(world, deps.clone(), &meta, &run_dir) {
             Ok(entity) => reloaded.push((meta, entity)),
             Err(e) => {
                 tracing::warn!(run_id = %meta.run_id, error = %e, "skipping un-reloadable run");
-                mark_crashed(&run_dir, meta, &e.to_string(), now_secs);
+                mark_crashed(&run_dir, meta, &e.to_string(), deps.now_secs);
             }
         }
     }
@@ -128,37 +104,18 @@ pub fn reload_persisted_agents(
 /// (blueprint + tool state + context/stage) and returns the new entity. `None`
 /// if there's no such resumable run. This is the host's reload-on-demand seam
 /// (an op targeting an unloaded run pages it in first).
-#[allow(clippy::too_many_arguments)]
 pub fn reload_run(
     world: &mut PipelineWorld,
-    tool_service: &CliToolService,
-    config: &Config,
-    shared_mcp: Arc<Mutex<ToolExecutor>>,
-    mcp_tool_defs: &[Tool],
-    hub: &InteractionHub,
+    deps: SpawnDeps<'_>,
     run_id: &str,
     runs_dir: &std::path::Path,
-    now_secs: i64,
-    subagent_tx: &UnboundedSender<SubAgentOp>,
 ) -> Option<Entity> {
     let run_dir = runs_dir.join(run_id);
     let meta = read_meta(&run_dir)?;
     if is_terminal(&meta.status) {
         return None; // a finished run isn't paged back in
     }
-    reload_one(
-        world,
-        tool_service,
-        config,
-        shared_mcp,
-        mcp_tool_defs,
-        hub,
-        &meta,
-        &run_dir,
-        now_secs,
-        subagent_tx,
-    )
-    .ok()
+    reload_one(world, deps, &meta, &run_dir).ok()
 }
 
 /// Rebuild `FanOutWaiting` for any reloaded parent that was parked mid fan-out
@@ -298,18 +255,11 @@ fn is_terminal(status: &RunStatus) -> bool {
 
 /// Reload one run: spawn it fresh from its blueprint, then overlay the persisted
 /// context / stage / totals and preserve the original run metadata.
-#[allow(clippy::too_many_arguments)]
 fn reload_one(
     world: &mut PipelineWorld,
-    tool_service: &CliToolService,
-    config: &Config,
-    shared_mcp: Arc<Mutex<ToolExecutor>>,
-    mcp_tool_defs: &[Tool],
-    hub: &InteractionHub,
+    deps: SpawnDeps<'_>,
     meta: &RunMeta,
     run_dir: &Path,
-    now_secs: i64,
-    subagent_tx: &UnboundedSender<SubAgentOp>,
 ) -> Result<Entity, String> {
     let args = SpawnArgs {
         run_id: meta.run_id.clone(),
@@ -346,19 +296,7 @@ fn reload_one(
         // blueprint's partway through, and the caller would never see why.
         output: meta.output_request.clone(),
     };
-    let entity = build_agent_for_reload(
-        world.world_mut(),
-        SpawnDeps {
-            tool_service,
-            config,
-            shared_mcp,
-            mcp_tool_defs,
-            hub,
-            now_secs,
-            subagent_tx: subagent_tx.clone(),
-        },
-        &args,
-    )?;
+    let entity = build_agent_for_reload(world.world_mut(), deps, &args)?;
 
     // Restore the persisted context, stage, iteration, and token totals.
     //
@@ -515,6 +453,20 @@ fn read_final_output_from(dir: &Path, meta: &RunMeta) -> Option<leviath_core::Fi
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Named here rather than inherited from the parent: production now spells
+    // these seven as one `SpawnDeps`, so importing them above would mean seven
+    // imports the module itself does not use.
+    use std::sync::Arc;
+
+    use leviath_mcp::ToolExecutor;
+    use leviath_runtime::host::SubAgentOp;
+    use leviath_runtime::interaction_hub::InteractionHub;
+    use tokio::sync::Mutex;
+    use tokio::sync::mpsc::UnboundedSender;
+
+    use crate::config::Config;
+    use crate::daemon::tool_service::CliToolService;
+
     use leviath_runtime::ProviderRegistry;
     use leviath_runtime::components::AgentStatus;
     use leviath_runtime::inference_pool::InferencePoolConfig;
@@ -593,7 +545,10 @@ mod tests {
 
     /// Like [`write_run`], but with explicit tree links so recovery's re-linking
     /// pass can be exercised.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a test fixture that writes one run with explicit tree links; every argument is a field of the record it writes"
+    )]
     fn write_run_tree(
         runs_dir: &Path,
         run_id: &str,
@@ -766,14 +721,16 @@ mod tests {
         let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
         let restored = reload_persisted_agents(
             &mut world,
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            crate::daemon::spawn::SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 999,
+                subagent_tx: sub_tx().clone(),
+            },
             runs.path(),
-            999,
-            &sub_tx(),
         );
 
         assert_eq!(restored.len(), 1);
@@ -828,14 +785,16 @@ mod tests {
         let (mut world, cli) = test_world();
         let restored = reload_persisted_agents(
             &mut world,
-            cli.as_ref(),
-            &Config::default(),
-            Arc::new(Mutex::new(ToolExecutor::new())),
-            &[],
-            &InteractionHub::new(),
+            crate::daemon::spawn::SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: Arc::new(Mutex::new(ToolExecutor::new())),
+                mcp_tool_defs: &[],
+                hub: &InteractionHub::new(),
+                now_secs: 999,
+                subagent_tx: sub_tx().clone(),
+            },
             runs,
-            999,
-            &sub_tx(),
         );
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].0, run_id);
@@ -960,14 +919,16 @@ mod tests {
         let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
         let restored = reload_persisted_agents(
             &mut world,
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            crate::daemon::spawn::SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 999,
+                subagent_tx: sub_tx().clone(),
+            },
             runs.path(),
-            999,
-            &sub_tx(),
         );
 
         assert_eq!(restored.len(), 1);
@@ -1066,14 +1027,16 @@ mod tests {
         let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
         let restored = reload_persisted_agents(
             &mut world,
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            crate::daemon::spawn::SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 999,
+                subagent_tx: sub_tx().clone(),
+            },
             runs.path(),
-            999,
-            &sub_tx(),
         );
 
         assert_eq!(restored.len(), 1);
@@ -1125,14 +1088,16 @@ mod tests {
         let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
         let restored = reload_persisted_agents(
             &mut world,
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            crate::daemon::spawn::SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 999,
+                subagent_tx: sub_tx().clone(),
+            },
             runs.path(),
-            999,
-            &sub_tx(),
         );
 
         assert_eq!(restored.len(), 1);
@@ -1234,14 +1199,16 @@ mod tests {
         let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
         let restored = reload_persisted_agents(
             &mut world,
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            crate::daemon::spawn::SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 999,
+                subagent_tx: sub_tx().clone(),
+            },
             runs.path(),
-            999,
-            &sub_tx(),
         );
 
         assert_eq!(restored.len(), 1);
@@ -1342,14 +1309,16 @@ mod tests {
         let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
         let restored = reload_persisted_agents(
             &mut world,
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            crate::daemon::spawn::SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 999,
+                subagent_tx: sub_tx().clone(),
+            },
             runs.path(),
-            999,
-            &sub_tx(),
         );
 
         assert_eq!(restored.len(), 1);
@@ -1409,14 +1378,16 @@ mod tests {
         let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
         let restored = reload_persisted_agents(
             &mut world,
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            crate::daemon::spawn::SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 999,
+                subagent_tx: sub_tx().clone(),
+            },
             runs.path(),
-            999,
-            &sub_tx(),
         );
 
         assert_eq!(restored.len(), 1);
@@ -1472,14 +1443,16 @@ mod tests {
         let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
         let restored = reload_persisted_agents(
             &mut world,
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            crate::daemon::spawn::SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 999,
+                subagent_tx: sub_tx().clone(),
+            },
             runs.path(),
-            999,
-            &sub_tx(),
         );
 
         // Terminal run skipped; the actionable (Running) run is restored first.
@@ -1504,15 +1477,17 @@ mod tests {
         assert!(
             reload_run(
                 &mut world,
-                cli.as_ref(),
-                &Config::default(),
-                mcp.clone(),
-                &[],
-                &hub,
+                crate::daemon::spawn::SpawnDeps {
+                    tool_service: cli.as_ref(),
+                    config: &Config::default(),
+                    shared_mcp: mcp.clone(),
+                    mcp_tool_defs: &[],
+                    hub: &hub,
+                    now_secs: 1,
+                    subagent_tx: sub_tx().clone(),
+                },
                 "live",
                 runs.path(),
-                1,
-                &sub_tx(),
             )
             .is_some()
         );
@@ -1520,15 +1495,17 @@ mod tests {
         assert!(
             reload_run(
                 &mut world,
-                cli.as_ref(),
-                &Config::default(),
-                mcp.clone(),
-                &[],
-                &hub,
+                crate::daemon::spawn::SpawnDeps {
+                    tool_service: cli.as_ref(),
+                    config: &Config::default(),
+                    shared_mcp: mcp.clone(),
+                    mcp_tool_defs: &[],
+                    hub: &hub,
+                    now_secs: 1,
+                    subagent_tx: sub_tx().clone(),
+                },
                 "done",
                 runs.path(),
-                1,
-                &sub_tx(),
             )
             .is_none()
         );
@@ -1536,15 +1513,17 @@ mod tests {
         assert!(
             reload_run(
                 &mut world,
-                cli.as_ref(),
-                &Config::default(),
-                mcp,
-                &[],
-                &hub,
+                crate::daemon::spawn::SpawnDeps {
+                    tool_service: cli.as_ref(),
+                    config: &Config::default(),
+                    shared_mcp: mcp,
+                    mcp_tool_defs: &[],
+                    hub: &hub,
+                    now_secs: 1,
+                    subagent_tx: sub_tx().clone(),
+                },
                 "no-such-run",
                 runs.path(),
-                1,
-                &sub_tx(),
             )
             .is_none()
         );
@@ -1605,14 +1584,16 @@ mod tests {
         let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
         let restored = reload_persisted_agents(
             &mut world,
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            crate::daemon::spawn::SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 999,
+                subagent_tx: sub_tx().clone(),
+            },
             runs.path(),
-            999,
-            &sub_tx(),
         );
         let by_id: std::collections::HashMap<_, _> =
             restored.iter().map(|(r, e)| (r.clone(), *e)).collect();
@@ -1681,14 +1662,16 @@ mod tests {
         let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
         let restored = reload_persisted_agents(
             &mut world,
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            crate::daemon::spawn::SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 999,
+                subagent_tx: sub_tx().clone(),
+            },
             runs.path(),
-            999,
-            &sub_tx(),
         );
         assert_eq!(restored.len(), 3);
         let by_id: std::collections::HashMap<_, _> =
@@ -1776,14 +1759,16 @@ mod tests {
         let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
         let restored = reload_persisted_agents(
             &mut world,
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            crate::daemon::spawn::SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 999,
+                subagent_tx: sub_tx().clone(),
+            },
             runs.path(),
-            999,
-            &sub_tx(),
         );
         // Only the two non-terminal runs reload.
         assert_eq!(restored.len(), 2);
@@ -1818,14 +1803,16 @@ mod tests {
         let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
         let restored = reload_persisted_agents(
             &mut world,
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            crate::daemon::spawn::SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 999,
+                subagent_tx: sub_tx().clone(),
+            },
             runs.path(),
-            999,
-            &sub_tx(),
         );
         assert_eq!(restored.len(), 1);
         assert!(world.world().get::<TokenTotals>(restored[0].1).is_some());
@@ -1840,14 +1827,16 @@ mod tests {
         assert!(
             reload_persisted_agents(
                 &mut world,
-                cli.as_ref(),
-                &Config::default(),
-                mcp.clone(),
-                &[],
-                &hub,
+                crate::daemon::spawn::SpawnDeps {
+                    tool_service: cli.as_ref(),
+                    config: &Config::default(),
+                    shared_mcp: mcp.clone(),
+                    mcp_tool_defs: &[],
+                    hub: &hub,
+                    now_secs: 1,
+                    subagent_tx: sub_tx().clone(),
+                },
                 std::path::Path::new("/no/such/runs/dir"),
-                1,
-                &sub_tx(),
             )
             .is_empty()
         );
@@ -1869,14 +1858,16 @@ mod tests {
 
         let restored = reload_persisted_agents(
             &mut world,
-            cli.as_ref(),
-            &Config::default(),
-            mcp,
-            &[],
-            &hub,
+            crate::daemon::spawn::SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                hub: &hub,
+                now_secs: 1,
+                subagent_tx: sub_tx().clone(),
+            },
             runs.path(),
-            1,
-            &sub_tx(),
         );
         assert!(restored.is_empty()); // all skipped, none fatal
 

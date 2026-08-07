@@ -210,7 +210,10 @@ pub fn spawn_agent(
 /// the agent as a [`crate::pipeline::response::GlobalNudge`] component; each
 /// field is resolved per stage against the blueprint's agent-level and
 /// per-stage nudge settings when an empty response is handled.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "spawns an entity from a blueprint plus five independent seed sources; the sources have nothing in common but this call"
+)]
 pub fn spawn_agent_seeded(
     world: &mut World,
     agent_id: String,

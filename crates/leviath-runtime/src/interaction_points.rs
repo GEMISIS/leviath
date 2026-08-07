@@ -276,7 +276,10 @@ enum Routed {
 /// Ask an interaction point through the hub, resolve + route the answer (doing
 /// the edit branch's second "edit this text" ask when needed), and report the
 /// [`PointOutcome`] on the lane, waking the tick loop.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "same shape as run_gate_prompt, plus the edit branch's second ask"
+)]
 async fn run_interaction_point(
     entity: Entity,
     hub: InteractionHub,

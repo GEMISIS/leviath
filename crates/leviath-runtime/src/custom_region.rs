@@ -106,7 +106,10 @@ fn fallback_block(region: &Region) -> leviath_providers::SystemBlock {
 /// Temporary-style block with a warning; success is followed by a warn-only
 /// token re-check against the region's budget (no truncation - the opt-in
 /// exact-token preflight remains the hard guard).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "renders through a script into two caller-owned accumulators, so the accumulators and the script context cannot be collapsed into one value"
+)]
 pub(crate) fn render_custom_region(
     region: &Region,
     script: Option<&Arc<RegionScript>>,

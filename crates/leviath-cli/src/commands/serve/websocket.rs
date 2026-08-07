@@ -1177,7 +1177,10 @@ mod tests {
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             // Set SO_LINGER to 0 - causes RST on close instead of FIN.
-            #[allow(deprecated)]
+            #[expect(
+                deprecated,
+                reason = "SO_LINGER(0) is the point - it forces an RST rather than a FIN, which is what this test needs and what the deprecation does not offer a replacement for"
+            )]
             stream.set_linger(Some(Duration::from_secs(0))).unwrap();
             // Close immediately (drop triggers RST).
         });
