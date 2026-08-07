@@ -120,28 +120,30 @@ pub(crate) fn match_transition_choice(
     }
 }
 
+/// What `dispatch_transition_choice` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type TransitionChoiceQuery = (
+    Entity,
+    &'static AgentState,
+    &'static mut ContextWindow,
+    &'static StageInference,
+    &'static AgentBlueprint,
+    &'static StageCursor,
+    &'static AwaitingTransitionChoice,
+    Option<&'static InFlightWork>,
+    Option<&'static DispatchStall>,
+);
+
 /// Transition-choice dispatch: for each `AwaitingTransitionChoice` agent, inject
 /// the "which stage next?" prompt into its context, build a short deterministic
 /// request, acquire a per-model permit, spawn the inference onto the transition
 /// lane, and move it to `AwaitingTransitionResponse`. Provider-missing / pool-full
 /// leaves it choosing and retries next tick (same backpressure as
 /// [`dispatch_inference`]).
-#[allow(clippy::type_complexity)]
 pub fn dispatch_transition_choice(
-    mut agents: Query<
-        (
-            Entity,
-            &AgentState,
-            &mut ContextWindow,
-            &StageInference,
-            &AgentBlueprint,
-            &StageCursor,
-            &AwaitingTransitionChoice,
-            Option<&InFlightWork>,
-            Option<&DispatchStall>,
-        ),
-        With<AwaitingTransitionChoice>,
-    >,
+    mut agents: Query<TransitionChoiceQuery, With<AwaitingTransitionChoice>>,
     stage: Res<InferenceStage>,
     providers: Res<Providers>,
     mut commands: Commands,
@@ -240,26 +242,31 @@ pub fn dispatch_transition_choice(
     }
 }
 
+/// What `collect_transition_choice` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type CollectTransitionChoiceQuery = (
+    &'static AgentBlueprint,
+    &'static mut StageCursor,
+    &'static mut AgentState,
+    &'static mut StageProgress,
+    &'static StageInferences,
+    &'static StageSetups,
+    &'static mut VisitCounts,
+    &'static mut ContextWindow,
+    &'static AwaitingTransitionResponse,
+    Option<&'static mut crate::persistence::RunOutcomeFlags>,
+    Option<&'static crate::persistence::RunMetadata>,
+);
+
 /// Transition-choice collect: drain completed routing inferences, match each to a
 /// target stage (or completion), record the decision in context, and either enter
 /// the chosen stage (loop to `ReadyToInfer`) or mark the agent `Complete`. A
 /// provider error marks the agent `Error`.
-#[allow(clippy::type_complexity)]
 pub fn collect_transition_choice(
     mut results: ResMut<TransitionResults>,
-    mut agents: Query<(
-        &AgentBlueprint,
-        &mut StageCursor,
-        &mut AgentState,
-        &mut StageProgress,
-        &StageInferences,
-        &StageSetups,
-        &mut VisitCounts,
-        &mut ContextWindow,
-        &AwaitingTransitionResponse,
-        Option<&mut crate::persistence::RunOutcomeFlags>,
-        Option<&crate::persistence::RunMetadata>,
-    )>,
+    mut agents: Query<CollectTransitionChoiceQuery>,
     sink: Option<Res<crate::host::WorldEventSink>>,
     mut commands: Commands,
 ) {

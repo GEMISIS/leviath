@@ -157,25 +157,27 @@ pub(crate) fn inject_required_region_nudges(
     }
 }
 
+/// What `require_context_regions` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type ContextRegionQuery = (
+    Entity,
+    &'static AgentBlueprint,
+    &'static StageCursor,
+    &'static mut ContextWindow,
+    Option<&'static RequiredReentries>,
+    Option<&'static StageOutcome>,
+);
+
 /// Required-region gate: before a normally-completed stage transitions, if it can
 /// write context and a `required` region is still empty, inject a nudge and re-run
 /// the stage (loop back to `ReadyToInfer`) instead of transitioning - bounded by
 /// the stage's `max_revisits` (or a default cap), after which
 /// it proceeds with a warning. Skipped when the stage ended on an error / max-iter
 /// outcome (those transitions take precedence). Ported from the imperative gate.
-#[allow(clippy::type_complexity)]
 pub fn require_context_regions(
-    mut agents: Query<
-        (
-            Entity,
-            &AgentBlueprint,
-            &StageCursor,
-            &mut ContextWindow,
-            Option<&RequiredReentries>,
-            Option<&StageOutcome>,
-        ),
-        With<ResolveTransition>,
-    >,
+    mut agents: Query<ContextRegionQuery, With<ResolveTransition>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -224,6 +226,22 @@ const MISSING_OUTPUT_NUDGE: &str = "This stage is not finished: you have not cal
      files or to context is not what the caller receives - only the final output is. Call \
      `submit_output` now with your answer.";
 
+/// What `require_final_output` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type FinalOutputQuery = (
+    Entity,
+    &'static AgentBlueprint,
+    &'static StageCursor,
+    &'static AgentState,
+    &'static mut ContextWindow,
+    Option<&'static OutputReentries>,
+    Option<&'static StageOutcome>,
+    Option<&'static crate::persistence::FinalOutput>,
+    Option<&'static mut crate::persistence::RunOutcomeFlags>,
+);
+
 /// Required-output gate: hold a stage that owes a final output and has not
 /// submitted one, nudge it, and re-run - bounded, then give up loudly.
 ///
@@ -241,22 +259,8 @@ const MISSING_OUTPUT_NUDGE: &str = "This stage is not finished: you have not cal
 /// output from anywhere. A blueprint whose worker stage submits and whose later
 /// summary stage also must would otherwise let the summary coast on the
 /// worker's answer.
-#[allow(clippy::type_complexity)]
 pub fn require_final_output(
-    mut agents: Query<
-        (
-            Entity,
-            &AgentBlueprint,
-            &StageCursor,
-            &AgentState,
-            &mut ContextWindow,
-            Option<&OutputReentries>,
-            Option<&StageOutcome>,
-            Option<&crate::persistence::FinalOutput>,
-            Option<&mut crate::persistence::RunOutcomeFlags>,
-        ),
-        With<ResolveTransition>,
-    >,
+    mut agents: Query<FinalOutputQuery, With<ResolveTransition>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();

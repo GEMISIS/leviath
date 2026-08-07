@@ -173,6 +173,18 @@ pub(crate) fn note_stall(
     }
 }
 
+/// What `fail_stalled_dispatch` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type StalledDispatchQuery = (
+    Entity,
+    &'static DispatchStall,
+    &'static StageInference,
+    &'static mut AgentState,
+    Option<&'static mut StageIoBuffer>,
+);
+
 /// Dispatch-stall watchdog: fail any agent whose dispatch has been declining for
 /// an unresolvable reason longer than [`StallTimeout`].
 ///
@@ -192,15 +204,8 @@ pub(crate) fn note_stall(
 /// and dispatching removes it - so an agent holding one has nothing
 /// outstanding. A fifteen-minute inference is `AwaitingInference` with no stall
 /// record, and is never a candidate here.
-#[allow(clippy::type_complexity)]
 pub fn fail_stalled_dispatch(
-    mut agents: Query<(
-        Entity,
-        &DispatchStall,
-        &StageInference,
-        &mut AgentState,
-        Option<&mut StageIoBuffer>,
-    )>,
+    mut agents: Query<StalledDispatchQuery>,
     timeout: Option<Res<StallTimeout>>,
     clock: Option<Res<StallClock>>,
     mut commands: Commands,

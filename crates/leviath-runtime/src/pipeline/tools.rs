@@ -264,6 +264,27 @@ pub(crate) fn invalid_args_refusal(
     }
 }
 
+/// What `dispatch_tools` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type DispatchToolsQuery = (
+    Entity,
+    &'static AgentState,
+    &'static StageInference,
+    &'static crate::components::InferenceResult,
+    &'static mut ContextWindow,
+    Option<&'static crate::components::ToolResultRoutingComponent>,
+    Option<&'static ToolSensitivities>,
+    Option<&'static mut crate::taint::TaintGate>,
+    Option<&'static crate::gate_prompt::GateResolved>,
+    Option<&'static crate::components::GateAutoApprove>,
+    Option<&'static InFlightWork>,
+    Option<&'static StageCursor>,
+    Option<&'static RunMetadata>,
+    Option<&'static crate::components::OutputValidators>,
+);
+
 /// Tool-dispatch system: for each `ReadyForTools` agent, apply its `context_*`
 /// tool calls inline (they mutate the ECS window) and hand the rest to the
 /// sequential tool lane, moving it to `AwaitingTools`. If a batch is *all*
@@ -277,27 +298,9 @@ pub(crate) fn invalid_args_refusal(
 /// with an ack the exec waits on, and a per-call [`ToolProgress`] journals each
 /// completion as a `ToolCallDone`. On a crash mid-batch, recovery replays the
 /// recorded results instead of re-running their side effects (issue #96).
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_tools(
-    mut agents: Query<
-        (
-            Entity,
-            &AgentState,
-            &StageInference,
-            &crate::components::InferenceResult,
-            &mut ContextWindow,
-            Option<&crate::components::ToolResultRoutingComponent>,
-            Option<&ToolSensitivities>,
-            Option<&mut crate::taint::TaintGate>,
-            Option<&crate::gate_prompt::GateResolved>,
-            Option<&crate::components::GateAutoApprove>,
-            Option<&InFlightWork>,
-            Option<&StageCursor>,
-            Option<&RunMetadata>,
-            Option<&crate::components::OutputValidators>,
-        ),
-        With<ReadyForTools>,
-    >,
+    mut agents: Query<DispatchToolsQuery, With<ReadyForTools>>,
     service: Res<ToolServiceRes>,
     stage: Res<ToolStage>,
     policy: Option<Res<PolicyGate>>,
