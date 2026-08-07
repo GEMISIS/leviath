@@ -10,6 +10,21 @@
 //!
 //! The dashboard's activity log is persisted separately at:
 //! - `~/.leviath/dashboard.log` - never cleared, appended across sessions
+//!
+//! # Who writes, and which copy is authoritative
+//!
+//! There are two answers to "what runs exist", and that is deliberate. The ECS
+//! world is the live one: it knows wait reasons and tick-fresh progress for the
+//! runs the daemon is holding right now, and `host.rs`'s `list()` reads it.
+//! The runs directory is the durable one: it survives a crash or a daemon that
+//! is not running, and `list_runs` below reads it. Disk lags the world by at
+//! most one persistence tick, so the two disagreeing is expected rather than a
+//! bug, and every reconciliation of that gap goes through `looks_abandoned`.
+//!
+//! The runtime's `persistence_bridge` is the only thing that writes a live
+//! run's state. The writers in this module are `#[cfg(test)]` so that stays
+//! true by compilation rather than by convention: a test can lay down a run
+//! directory to read back, and production has no second path to the same files.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,6 +40,11 @@ pub use leviath_core::run_meta::{
 };
 
 /// Atomically write a context snapshot for the run.
+///
+/// Test-only. Production writes go through the runtime's `persistence_bridge`,
+/// which is the sole writer of a live run's on-disk state; this exists so a
+/// test can lay down a run directory to read back. See the module doc.
+#[cfg(test)]
 pub fn write_context_snapshot(run_id: &str, snap: &ContextSnapshot) -> anyhow::Result<()> {
     write_context_snapshot_to(&run_dir(run_id), snap)
 }
@@ -56,6 +76,7 @@ fn write_private_atomic(path: &std::path::Path, body: &str) -> anyhow::Result<()
     Ok(())
 }
 
+#[cfg(test)]
 fn write_context_snapshot_to(dir: &std::path::Path, snap: &ContextSnapshot) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(snap)
         .expect("infallible: ContextSnapshot always serializes to JSON");
@@ -455,6 +476,9 @@ pub fn final_output_path(dir: &std::path::Path) -> PathBuf {
 ///
 /// Raw content with no wrapper: serving it is a read, and `lev result --raw` is
 /// a copy. The descriptor in `meta.json` is what says it exists.
+///
+/// Test-only; see [`write_context_snapshot`].
+#[cfg(test)]
 pub fn write_final_output(dir: &std::path::Path, content: &str) -> anyhow::Result<()> {
     write_private_atomic(&final_output_path(dir), content)
 }
@@ -758,10 +782,14 @@ pub fn stage_dir(run_id: &str, stage_idx: usize) -> PathBuf {
 }
 
 /// Atomically write the stages index for a run.
+///
+/// Test-only; see [`write_context_snapshot`].
+#[cfg(test)]
 pub fn write_stages_index(run_id: &str, stages: &[StageRecord]) -> anyhow::Result<()> {
     write_stages_index_to(&run_dir(run_id), stages)
 }
 
+#[cfg(test)]
 fn write_stages_index_to(dir: &std::path::Path, stages: &[StageRecord]) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(&stages)
         .expect("infallible: StageRecord slice always serializes to JSON");
@@ -779,12 +807,16 @@ pub fn read_stages_index(run_id: &str) -> Vec<StageRecord> {
 }
 
 /// Ensure the per-stage directory exists (called before first write).
+#[cfg(test)]
 fn ensure_stage_dir(run_id: &str, stage_idx: usize) {
     let dir = stage_dir(run_id, stage_idx);
     let _ = leviath_sys::create_private_dir_all(&dir);
 }
 
 /// Append a line of readable agent output to the per-stage output log.
+///
+/// Test-only; see [`write_context_snapshot`].
+#[cfg(test)]
 pub fn append_stage_output(run_id: &str, stage_idx: usize, text: &str) {
     use std::io::Write;
     ensure_stage_dir(run_id, stage_idx);
@@ -795,6 +827,9 @@ pub fn append_stage_output(run_id: &str, stage_idx: usize, text: &str) {
 }
 
 /// Append a line of operational/tool-activity log to the per-stage logs file.
+///
+/// Test-only; see [`write_context_snapshot`].
+#[cfg(test)]
 pub fn append_stage_log(run_id: &str, stage_idx: usize, text: &str) {
     use std::io::Write;
     ensure_stage_dir(run_id, stage_idx);
@@ -805,6 +840,9 @@ pub fn append_stage_log(run_id: &str, stage_idx: usize, text: &str) {
 }
 
 /// Atomically write a context snapshot for a specific stage.
+///
+/// Test-only; see [`write_context_snapshot`].
+#[cfg(test)]
 pub fn write_stage_context(
     run_id: &str,
     stage_idx: usize,
