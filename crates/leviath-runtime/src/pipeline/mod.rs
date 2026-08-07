@@ -34,6 +34,16 @@ use crate::tool_bridge::{BoxedToolExec, ToolJob, ToolOutcome};
 // Sections of the former single-file pipeline, one per concern.
 mod transition;
 pub use transition::*;
+mod watchdog;
+pub use watchdog::*;
+mod requirements;
+pub use requirements::*;
+mod spawn;
+pub use spawn::*;
+mod transition_choice;
+pub use transition_choice::*;
+mod tool_stages;
+pub use tool_stages::*;
 mod messaging;
 pub use messaging::*;
 mod persist;
