@@ -10229,3 +10229,364 @@ fn entering_a_stage_clears_the_output_reentry_count() {
     world.flush();
     assert!(world.get::<OutputReentries>(e).is_none());
 }
+
+// ─── on_stage_enter (issue #260) ─────────────────────────────────────────────
+
+fn hook_scripts(src: &str, wanted: &[&str]) -> crate::components::StageHookScripts {
+    let compiled = leviath_scripting::stage_hook::compile("h.rhai", src, wanted)
+        .expect("the fixture script compiles");
+    let mut map = std::collections::HashMap::new();
+    map.insert("h.rhai".to_string(), std::sync::Arc::new(compiled));
+    crate::components::StageHookScripts(map)
+}
+
+/// A one-stage blueprint whose stage names `h.rhai` for `on_stage_enter`.
+fn hooked_bp() -> AgentBlueprint {
+    let mut stage = leviath_core::Stage::new(
+        "main".to_string(),
+        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+    );
+    stage.hooks.on_stage_enter = Some("h.rhai".to_string());
+    AgentBlueprint(blueprint(vec![stage]))
+}
+
+fn spawn_hooked(world: &mut World, src: &str) -> Entity {
+    world
+        .spawn((
+            hooked_bp(),
+            agent_state(),
+            conv_window(),
+            StageJustEntered {
+                index: 0,
+                name: "main".to_string(),
+            },
+            hook_scripts(src, &["on_stage_enter"]),
+        ))
+        .id()
+}
+
+fn run_stage_hooks(world: &mut World) {
+    let mut schedule = Schedule::default();
+    schedule.add_systems(run_stage_enter_hooks);
+    schedule.run(world);
+}
+
+fn region_text(world: &World, e: Entity, name: &str) -> String {
+    world
+        .get::<ContextWindow>(e)
+        .expect("window")
+        .get_region(name)
+        .expect("region")
+        .content
+        .iter()
+        .map(|x| x.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn a_hook_that_allows_changes_nothing_and_leaves_the_agent_running() {
+    let mut world = World::new();
+    let e = spawn_hooked(&mut world, "fn on_stage_enter(ctx) { () }");
+    run_stage_hooks(&mut world);
+    assert_eq!(region_text(&world, e, "conversation"), "");
+    assert!(matches!(
+        world.get::<AgentState>(e).expect("state").status,
+        AgentStatus::Active | AgentStatus::Idle
+    ));
+}
+
+/// The hook's whole point: seed a region before the stage's first inference.
+#[test]
+fn a_hook_can_write_a_region_on_entry() {
+    let mut world = World::new();
+    let e = spawn_hooked(
+        &mut world,
+        r#"fn on_stage_enter(ctx) { #{ action: "modify", value: #{ conversation: "seeded" } } }"#,
+    );
+    run_stage_hooks(&mut world);
+    assert_eq!(region_text(&world, e, "conversation"), "seeded");
+}
+
+/// The script is shown the stage it is entering, not a placeholder.
+#[test]
+fn the_hook_sees_the_stage_it_is_entering() {
+    let mut world = World::new();
+    let e = spawn_hooked(
+        &mut world,
+        r#"fn on_stage_enter(ctx) { #{ action: "modify", value: #{ conversation: ctx.stage } } }"#,
+    );
+    run_stage_hooks(&mut world);
+    assert_eq!(region_text(&world, e, "conversation"), "main");
+}
+
+/// Replace, not append - otherwise a hook that echoes its input doubles the
+/// region every time the stage is re-entered.
+#[test]
+fn writing_a_region_replaces_it_rather_than_appending() {
+    let mut world = World::new();
+    let e = spawn_hooked(
+        &mut world,
+        r#"fn on_stage_enter(ctx) { #{ action: "modify", value: #{ conversation: "once" } } }"#,
+    );
+    run_stage_hooks(&mut world);
+    // Re-enter the same stage; the marker is what drives the hook.
+    world.entity_mut(e).insert(StageJustEntered {
+        index: 0,
+        name: "main".to_string(),
+    });
+    run_stage_hooks(&mut world);
+    assert_eq!(region_text(&world, e, "conversation"), "once");
+}
+
+#[test]
+fn a_hook_can_refuse_the_stage_and_the_reason_reaches_the_run() {
+    let mut world = World::new();
+    let e = spawn_hooked(
+        &mut world,
+        r#"fn on_stage_enter(ctx) { #{ action: "cancel", reason: "over budget" } }"#,
+    );
+    run_stage_hooks(&mut world);
+    let AgentStatus::Error { message } = &world.get::<AgentState>(e).expect("state").status else {
+        panic!("a refused stage must error the run");
+    };
+    assert!(message.contains("over budget"), "{message}");
+}
+
+/// A hook that throws is not a hook that allowed. Treating a failed script as
+/// permission is how a gate silently stops gating.
+#[test]
+fn a_hook_that_fails_errors_the_run_rather_than_proceeding() {
+    let mut world = World::new();
+    let e = spawn_hooked(&mut world, r#"fn on_stage_enter(ctx) { throw "boom" }"#);
+    run_stage_hooks(&mut world);
+    let AgentStatus::Error { message } = &world.get::<AgentState>(e).expect("state").status else {
+        panic!("a failing hook must error the run");
+    };
+    assert!(message.contains("on_stage_enter hook failed"), "{message}");
+}
+
+#[test]
+fn writing_a_region_the_stage_does_not_have_errors_rather_than_being_dropped() {
+    let mut world = World::new();
+    let e = spawn_hooked(
+        &mut world,
+        r#"fn on_stage_enter(ctx) { #{ action: "modify", value: #{ nope: "x" } } }"#,
+    );
+    run_stage_hooks(&mut world);
+    let AgentStatus::Error { message } = &world.get::<AgentState>(e).expect("state").status else {
+        panic!("writing an unknown region must error");
+    };
+    assert!(message.contains("no region 'nope'"), "{message}");
+}
+
+#[test]
+fn a_non_string_region_value_errors() {
+    let mut world = World::new();
+    let e = spawn_hooked(
+        &mut world,
+        r#"fn on_stage_enter(ctx) { #{ action: "modify", value: #{ conversation: 42 } } }"#,
+    );
+    run_stage_hooks(&mut world);
+    assert!(matches!(
+        world.get::<AgentState>(e).expect("state").status,
+        AgentStatus::Error { .. }
+    ));
+}
+
+#[test]
+fn a_modify_value_that_is_not_a_map_errors() {
+    let mut world = World::new();
+    let e = spawn_hooked(
+        &mut world,
+        r#"fn on_stage_enter(ctx) { #{ action: "modify", value: "just a string" } }"#,
+    );
+    run_stage_hooks(&mut world);
+    assert!(matches!(
+        world.get::<AgentState>(e).expect("state").status,
+        AgentStatus::Error { .. }
+    ));
+}
+
+/// `retry` has no meaning for a stage already entered. Saying so beats treating
+/// it as allow, which would let a script believe it had asked for something.
+#[test]
+fn retry_is_reported_as_unhonourable_rather_than_silently_allowed() {
+    let mut world = World::new();
+    let e = spawn_hooked(
+        &mut world,
+        r#"fn on_stage_enter(ctx) { #{ action: "retry" } }"#,
+    );
+    run_stage_hooks(&mut world);
+    let AgentStatus::Error { message } = &world.get::<AgentState>(e).expect("state").status else {
+        panic!("an unhonourable outcome must be reported");
+    };
+    assert!(message.contains("cannot honour"), "{message}");
+}
+
+/// An agent with no hook component is skipped entirely - this is what "no
+/// hooks, no cost" means, and the system must not panic on its absence.
+#[test]
+fn an_agent_without_hooks_is_untouched() {
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            hooked_bp(),
+            agent_state(),
+            conv_window(),
+            StageJustEntered {
+                index: 0,
+                name: "main".to_string(),
+            },
+        ))
+        .id();
+    run_stage_hooks(&mut world);
+    assert_eq!(region_text(&world, e, "conversation"), "");
+}
+
+/// A stage index the blueprint does not have cannot be looked up; the system
+/// skips rather than panicking on the slice.
+#[test]
+fn an_out_of_range_stage_index_is_skipped() {
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            hooked_bp(),
+            agent_state(),
+            conv_window(),
+            StageJustEntered {
+                index: 99,
+                name: "gone".to_string(),
+            },
+            hook_scripts(
+                r#"fn on_stage_enter(ctx) { #{ action: "cancel", reason: "should not run" } }"#,
+                &["on_stage_enter"],
+            ),
+        ))
+        .id();
+    run_stage_hooks(&mut world);
+    assert!(!matches!(
+        world.get::<AgentState>(e).expect("state").status,
+        AgentStatus::Error { .. }
+    ));
+}
+
+/// A stage that declares no hook is not run even when the agent carries
+/// scripts - another stage in the same blueprint may have declared them.
+#[test]
+fn a_stage_that_declares_no_hook_does_not_run_one() {
+    let mut world = World::new();
+    let stage = leviath_core::Stage::new(
+        "main".to_string(),
+        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+    );
+    let e = world
+        .spawn((
+            AgentBlueprint(blueprint(vec![stage])),
+            agent_state(),
+            conv_window(),
+            StageJustEntered {
+                index: 0,
+                name: "main".to_string(),
+            },
+            hook_scripts(
+                r#"fn on_stage_enter(ctx) { #{ action: "modify", value: #{ conversation: "ran" } } }"#,
+                &["on_stage_enter"],
+            ),
+        ))
+        .id();
+    run_stage_hooks(&mut world);
+    assert_eq!(region_text(&world, e, "conversation"), "");
+}
+
+/// A write the region cannot hold is reported, not swallowed. `add_entry`
+/// refuses an entry over the region's budget, and a hook whose write silently
+/// vanished would look exactly like one that chose to write nothing.
+#[test]
+fn a_region_write_that_does_not_fit_errors() {
+    let mut world = World::new();
+    let mut window = ContextWindow::new(10_000);
+    // A budget too small for anything the hook could write.
+    window.add_region(Region::new(
+        "conversation".to_string(),
+        RegionKind::Clearable,
+        1,
+    ));
+    let e = world
+        .spawn((
+            hooked_bp(),
+            agent_state(),
+            window,
+            StageJustEntered {
+                index: 0,
+                name: "main".to_string(),
+            },
+            hook_scripts(
+                r#"fn on_stage_enter(ctx) { #{ action: "modify", value: #{ conversation: "a much longer string than one token" } } }"#,
+                &["on_stage_enter"],
+            ),
+        ))
+        .id();
+    run_stage_hooks(&mut world);
+    let AgentStatus::Error { message } = &world.get::<AgentState>(e).expect("state").status else {
+        panic!("a write that does not fit must error");
+    };
+    assert!(
+        message.contains("writing region 'conversation'"),
+        "{message}"
+    );
+}
+
+/// Writing an empty string clears the region rather than storing a blank
+/// entry - "" is how a hook says "there should be nothing here".
+#[test]
+fn writing_an_empty_string_clears_the_region() {
+    let mut world = World::new();
+    let mut window = conv_window();
+    window
+        .get_region_mut("conversation")
+        .expect("region")
+        .add_entry("something".to_string(), 1)
+        .expect("seeded");
+    let e = world
+        .spawn((
+            hooked_bp(),
+            agent_state(),
+            window,
+            StageJustEntered {
+                index: 0,
+                name: "main".to_string(),
+            },
+            hook_scripts(
+                r#"fn on_stage_enter(ctx) { #{ action: "modify", value: #{ conversation: "" } } }"#,
+                &["on_stage_enter"],
+            ),
+        ))
+        .id();
+    run_stage_hooks(&mut world);
+    assert_eq!(region_text(&world, e, "conversation"), "");
+    assert!(
+        world
+            .get::<ContextWindow>(e)
+            .expect("window")
+            .get_region("conversation")
+            .expect("region")
+            .content
+            .is_empty(),
+        "an empty write leaves no entry behind"
+    );
+}
+
+/// A bare `false` refuses with no reason. The message still has to say the
+/// stage was refused, or an operator sees a failed run and no cause at all.
+#[test]
+fn a_refusal_without_a_reason_still_says_it_was_refused() {
+    let mut world = World::new();
+    let e = spawn_hooked(&mut world, "fn on_stage_enter(ctx) { false }");
+    run_stage_hooks(&mut world);
+    let AgentStatus::Error { message } = &world.get::<AgentState>(e).expect("state").status else {
+        panic!("a bare false must refuse");
+    };
+    assert!(message.contains("refused stage 'main'"), "{message}");
+    assert!(message.contains("no reason given"), "{message}");
+}

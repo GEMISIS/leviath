@@ -45,7 +45,8 @@ use crate::pipeline::{
     dispatch_tools, dispatch_transition_choice, enforce_max_iterations, fail_stalled_dispatch,
     fail_wedged_runs, gate_requires_children, handle_empty_response, poll_dynamic_tool_refresh,
     process_response, reflect_interaction_status, refresh_advertised_tools,
-    require_context_regions, require_final_output, resolve_transition, sync_tool_stages,
+    require_context_regions, require_final_output, resolve_transition, run_stage_enter_hooks,
+    sync_tool_stages,
 };
 use crate::providers::ProviderRegistry;
 use crate::tool_bridge::ToolLane;
@@ -370,6 +371,11 @@ impl PipelineWorld {
                 // `StageJustEntered` marker) and before `dispatch_persistence`
                 // (which drains the log buffer this system only reads).
                 crate::telemetry::observe_lifecycle,
+                // A stage's `on_stage_enter` script, before `sync_tool_stages`
+                // consumes the `StageJustEntered` marker it fires on - so the
+                // hook sees the stage's layout and prompt already in place, and
+                // whatever it writes is in the stage's first request.
+                run_stage_enter_hooks,
                 sync_tool_stages,
                 // Store any finished run title, then start newly-marked ones.
                 // Collect precedes persistence so a landed title is written on

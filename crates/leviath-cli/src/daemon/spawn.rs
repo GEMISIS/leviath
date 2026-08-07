@@ -155,6 +155,46 @@ pub(crate) fn resolve_output_validators(
     Ok(compiled)
 }
 
+/// Compile every stage-hook script the blueprint declares, keyed by the path as
+/// written (issue #260).
+///
+/// Fail-fast at spawn, exactly as region scripts are: an unreadable file, one
+/// that does not compile, or one the blueprint names for a hook it does not
+/// define is a spawn error rather than a surprise partway through a run. One
+/// file backing several hooks is read and compiled once.
+///
+/// Returns an empty map when no stage declares a hook, so the agent gets a
+/// component that every lookup misses rather than a special case.
+pub(crate) fn resolve_stage_hook_scripts(
+    blueprint: &Blueprint,
+    blueprint_path: &str,
+) -> Result<HashMap<String, Arc<leviath_scripting::stage_hook::HookScript>>, String> {
+    let base = std::path::Path::new(blueprint_path)
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+
+    // Gather what each file is wanted for before compiling, so a file backing
+    // two hooks is checked for both in one pass.
+    let mut wanted: HashMap<&str, Vec<&str>> = HashMap::new();
+    for stage in &blueprint.stages {
+        for (hook, path) in stage.hooks.declared() {
+            wanted.entry(path).or_default().push(hook);
+        }
+    }
+
+    let mut scripts = HashMap::new();
+    for (path, hooks) in wanted {
+        let full = base.join(path);
+        let source = std::fs::read_to_string(&full)
+            .map_err(|e| format!("cannot read stage hook script '{}': {e}", full.display()))?;
+        let compiled = leviath_scripting::stage_hook::compile(path, &source, &hooks)
+            .map_err(|e| format!("stage hook script '{path}' failed to compile: {e}"))?;
+        scripts.insert(path.to_string(), Arc::new(compiled));
+    }
+    Ok(scripts)
+}
+
 pub(crate) fn resolve_region_scripts(
     blueprint: &Blueprint,
     blueprint_path: &str,
@@ -1066,6 +1106,7 @@ fn build_agent_inner(
     // AND reloads (the hooks must work after a restart), and a broken script
     // is a hard error either way.
     let region_scripts = resolve_region_scripts(&blueprint, &args.blueprint_path)?;
+    let stage_hooks = resolve_stage_hook_scripts(&blueprint, &args.blueprint_path)?;
     let output_validators = resolve_output_validators(&blueprint, &args.blueprint_path)?;
 
     // Whether any stage can produce a file change the framework would see -
@@ -1091,6 +1132,16 @@ fn build_agent_inner(
         config.nudge.clone(),
         region_scripts,
     )?;
+
+    // Stage hooks, only when some stage declares one. Withholding the component
+    // rather than attaching an empty map is what makes "no hooks, no cost"
+    // literal: the hook systems' queries then skip the agent at the archetype
+    // level and never look at it again.
+    if !stage_hooks.is_empty() {
+        world
+            .entity_mut(entity)
+            .insert(leviath_runtime::components::StageHookScripts(stage_hooks));
+    }
 
     // 7. Attach run metadata / token totals / persistence watermark (+ optional
     // compaction settings).
@@ -1737,6 +1788,97 @@ system = { kind = "pinned", max_tokens = 1000 }
             resolve_output_validators(&bp, &manifest.to_string_lossy()).expect_err("wrong arity");
 
         assert!(err.contains("failed to compile"), "{err}");
+    }
+
+    // ─── resolve_stage_hook_scripts (issue #260) ─────────────────────────
+
+    fn hooked_manifest(hooks: &str) -> leviath_core::Blueprint {
+        leviath_core::manifest::parse_manifest(&format!(
+            "[agent]\nname = \"h\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = {{ provider = \"anthropic\", model = \"m\" }}\n{hooks}"
+        ))
+        .expect("the fixture manifest parses")
+    }
+
+    #[test]
+    fn stage_hooks_are_empty_when_no_stage_declares_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        let bp = hooked_manifest("");
+        let got = resolve_stage_hook_scripts(&bp, &manifest.to_string_lossy()).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn a_declared_hook_is_compiled_and_keyed_by_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(dir.path().join("h.rhai"), "fn on_stage_enter(ctx) { () }").unwrap();
+        let bp = hooked_manifest("[stages.main.hooks]\non_stage_enter = \"h.rhai\"\n");
+
+        let got = resolve_stage_hook_scripts(&bp, &manifest.to_string_lossy()).unwrap();
+        assert_eq!(got.len(), 1);
+        assert!(got["h.rhai"].defines("on_stage_enter"));
+    }
+
+    /// One file backing both hooks is read and compiled once, not twice.
+    #[test]
+    fn one_file_backing_two_hooks_is_compiled_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            dir.path().join("h.rhai"),
+            "fn on_stage_enter(ctx) { () } fn on_stage_exit(ctx) { () }",
+        )
+        .unwrap();
+        let bp = hooked_manifest(
+            "[stages.main.hooks]\non_stage_enter = \"h.rhai\"\non_stage_exit = \"h.rhai\"\n",
+        );
+
+        let got = resolve_stage_hook_scripts(&bp, &manifest.to_string_lossy()).unwrap();
+        assert_eq!(got.len(), 1, "one entry, not one per hook");
+        assert!(got["h.rhai"].defines("on_stage_enter"));
+        assert!(got["h.rhai"].defines("on_stage_exit"));
+    }
+
+    /// Fail-fast at spawn: a missing script must not become a runtime surprise
+    /// partway through a run.
+    #[test]
+    fn a_missing_hook_script_fails_the_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        let bp = hooked_manifest("[stages.main.hooks]\non_stage_enter = \"gone.rhai\"\n");
+
+        let err = resolve_stage_hook_scripts(&bp, &manifest.to_string_lossy())
+            .expect_err("a missing script is a spawn error");
+        assert!(err.contains("cannot read stage hook script"), "{err}");
+    }
+
+    #[test]
+    fn a_hook_script_that_does_not_compile_fails_the_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(dir.path().join("h.rhai"), "fn on_stage_enter(ctx) {").unwrap();
+        let bp = hooked_manifest("[stages.main.hooks]\non_stage_enter = \"h.rhai\"\n");
+
+        let err = resolve_stage_hook_scripts(&bp, &manifest.to_string_lossy())
+            .expect_err("a broken script is a spawn error");
+        assert!(err.contains("failed to compile"), "{err}");
+    }
+
+    /// The blueprint named this file for a hook it does not implement. Letting
+    /// that spawn would give a hook that never runs, which looks exactly like
+    /// one that ran and allowed everything.
+    #[test]
+    fn a_file_that_lacks_the_hook_it_was_named_for_fails_the_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(dir.path().join("h.rhai"), "fn on_stage_exit(ctx) { () }").unwrap();
+        let bp = hooked_manifest("[stages.main.hooks]\non_stage_enter = \"h.rhai\"\n");
+
+        let err = resolve_stage_hook_scripts(&bp, &manifest.to_string_lossy())
+            .expect_err("a file missing its named hook is a spawn error");
+        assert!(err.contains("defines no"), "{err}");
     }
 
     #[test]
@@ -3363,6 +3505,77 @@ system_prompt = "be brief"
         )
         .unwrap();
         manifest
+    }
+
+    /// A blueprint declaring a stage hook spawns with the compiled script
+    /// attached - the branch that only runs when some stage declared one.
+    #[tokio::test]
+    async fn build_agent_attaches_declared_stage_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("h.rhai"), "fn on_stage_enter(ctx) { () }").unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"h\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
+             [stages.main.hooks]\non_stage_enter = \"h.rhai\"\n",
+        )
+        .unwrap();
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let entity = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+            sub_tx(),
+        )
+        .expect("spawn succeeds");
+
+        let scripts = world
+            .world_mut()
+            .get::<leviath_runtime::components::StageHookScripts>(entity)
+            .expect("the hook script is attached");
+        assert!(scripts.0.contains_key("h.rhai"));
+    }
+
+    /// A broken hook script fails the spawn rather than the run - the `?` on
+    /// the resolver, which is the whole point of resolving at spawn.
+    #[tokio::test]
+    async fn build_agent_refuses_a_broken_stage_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("h.rhai"), "fn on_stage_enter(ctx) {").unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"h\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
+             [stages.main.hooks]\non_stage_enter = \"h.rhai\"\n",
+        )
+        .unwrap();
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let err = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+            sub_tx(),
+        )
+        .expect_err("a broken hook script must fail the spawn");
+        assert!(err.contains("failed to compile"), "{err}");
     }
 
     /// A granted `[read_paths]` spawns cleanly, with taint on so the read-tool
