@@ -199,26 +199,28 @@ pub(crate) fn track_in_flight(
     commands.entity(entity).insert(InFlightWork(tokens));
 }
 
+/// What `dispatch_inference` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type InferenceQuery = (
+    Entity,
+    &'static AgentState,
+    &'static ContextWindow,
+    Option<&'static InferenceConfig>,
+    &'static StageInference,
+    Option<&'static InFlightWork>,
+    Option<&'static StageProgress>,
+    Option<&'static DispatchStall>,
+);
+
 /// Inference-dispatch system: for every `ReadyToInfer` agent, resolve its
 /// provider and, **if a per-model permit is free**, build the request, spawn the
 /// inference job, and move it to `AwaitingInference`. If its provider is missing
 /// or no slot is free, it stays `ReadyToInfer` and is retried on a later tick -
 /// no blocking, no wasted task.
-#[allow(clippy::type_complexity)]
 pub fn dispatch_inference(
-    agents: Query<
-        (
-            Entity,
-            &AgentState,
-            &ContextWindow,
-            Option<&InferenceConfig>,
-            &StageInference,
-            Option<&InFlightWork>,
-            Option<&StageProgress>,
-            Option<&DispatchStall>,
-        ),
-        With<ReadyToInfer>,
-    >,
+    agents: Query<InferenceQuery, With<ReadyToInfer>>,
     stage: Res<InferenceStage>,
     providers: Res<Providers>,
     circuits: Option<Res<ProviderCircuits>>,

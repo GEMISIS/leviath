@@ -10,6 +10,18 @@ use super::*;
 /// cheaper than the tool failures it replaces.
 pub const WORKSPACE_CHECK_INTERVAL: usize = 5;
 
+/// What `check_workspace_health` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type WorkspaceHealthQuery = (
+    Entity,
+    &'static RunMetadata,
+    &'static StageProgress,
+    &'static mut AgentState,
+    Option<&'static mut crate::persistence::RunOutcomeFlags>,
+);
+
 /// Workspace health guard: fail a run whose working directory has disappeared.
 ///
 /// The motivating failure: an external harness deleted the workspace out from
@@ -18,18 +30,8 @@ pub const WORKSPACE_CHECK_INTERVAL: usize = 5;
 /// runs - with no way back. Nothing can recreate a deleted checkout from inside
 /// the agent, so this stops immediately with a message that names the real
 /// problem, instead of routing to error recovery to flail more cheaply.
-#[allow(clippy::type_complexity)]
 pub fn check_workspace_health(
-    mut agents: Query<
-        (
-            Entity,
-            &RunMetadata,
-            &StageProgress,
-            &mut AgentState,
-            Option<&mut crate::persistence::RunOutcomeFlags>,
-        ),
-        With<ReadyToInfer>,
-    >,
+    mut agents: Query<WorkspaceHealthQuery, With<ReadyToInfer>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -59,23 +61,25 @@ pub fn check_workspace_health(
     }
 }
 
+/// What `enforce_max_iterations` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type MaxIterationQuery = (
+    Entity,
+    &'static AgentState,
+    &'static AgentBlueprint,
+    &'static StageCursor,
+    &'static StageProgress,
+    Option<&'static mut crate::persistence::RunOutcomeFlags>,
+);
+
 /// Max-iterations guard: for each `ReadyToInfer` agent whose per-stage inference
 /// count has reached the stage's `max_iterations`, end the stage (routing to a
 /// `max_iterations` edge if one exists, else a normal transition) instead of
 /// running another inference. Ported from the imperative `run_autonomous` cap.
-#[allow(clippy::type_complexity)]
 pub fn enforce_max_iterations(
-    mut agents: Query<
-        (
-            Entity,
-            &AgentState,
-            &AgentBlueprint,
-            &StageCursor,
-            &StageProgress,
-            Option<&mut crate::persistence::RunOutcomeFlags>,
-        ),
-        With<ReadyToInfer>,
-    >,
+    mut agents: Query<MaxIterationQuery, With<ReadyToInfer>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -240,6 +244,21 @@ pub(crate) fn note_max_iterations(window: &mut ContextWindow, stage: &str, cap: 
     );
 }
 
+/// What `detect_stuck_stage` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type StuckStageQuery = (
+    Entity,
+    &'static AgentState,
+    &'static AgentBlueprint,
+    &'static StageCursor,
+    &'static mut StageProgress,
+    &'static VisitCounts,
+    &'static mut ContextWindow,
+    Option<&'static mut StageIoBuffer>,
+);
+
 /// Stuck-detection guard: for each `ReadyToInfer` agent whose current stage
 /// declares a `stuck`-conditioned edge, evaluate that edge's thresholds against
 /// the stage's progress. When one trips, write the diagnosis into context and
@@ -251,21 +270,8 @@ pub(crate) fn note_max_iterations(window: &mut ContextWindow, stage: &str, cap: 
 /// spent its `max_revisits` - an exhausted escape hatch must leave the agent
 /// working the stage normally (its `max_iterations` is still the hard cap) rather
 /// than kick it out down an unrelated edge.
-#[allow(clippy::type_complexity)]
 pub fn detect_stuck_stage(
-    mut agents: Query<
-        (
-            Entity,
-            &AgentState,
-            &AgentBlueprint,
-            &StageCursor,
-            &mut StageProgress,
-            &VisitCounts,
-            &mut ContextWindow,
-            Option<&mut StageIoBuffer>,
-        ),
-        With<ReadyToInfer>,
-    >,
+    mut agents: Query<StuckStageQuery, With<ReadyToInfer>>,
     mut commands: Commands,
 ) {
     use leviath_core::blueprint::TransitionCondition;

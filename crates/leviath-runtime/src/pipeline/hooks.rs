@@ -164,6 +164,19 @@ fn refuse(state: &mut AgentState, hook: &str, what: String) {
     };
 }
 
+/// What `run_before_inference_hooks` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type BeforeInferenceHookQuery = (
+    Entity,
+    &'static StageCursor,
+    &'static AgentBlueprint,
+    &'static StageHookScripts,
+    &'static mut ContextWindow,
+    &'static mut AgentState,
+);
+
 /// Run `before_inference` for every agent about to infer.
 ///
 /// Scheduled before `dispatch_inference`, on the same `ReadyToInfer` marker it
@@ -174,19 +187,8 @@ fn refuse(state: &mut AgentState, hook: &str, what: String) {
 /// that system's per-agent body runs in parallel on the compute pool, where a
 /// panicking script would be attributed by different machinery. Sequential here
 /// costs a query pass and keeps script failures at the tick boundary.
-#[allow(clippy::type_complexity)]
 pub fn run_before_inference_hooks(
-    mut agents: Query<
-        (
-            Entity,
-            &StageCursor,
-            &AgentBlueprint,
-            &StageHookScripts,
-            &mut ContextWindow,
-            &mut AgentState,
-        ),
-        With<ReadyToInfer>,
-    >,
+    mut agents: Query<BeforeInferenceHookQuery, With<ReadyToInfer>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -230,6 +232,19 @@ pub fn run_before_inference_hooks(
     }
 }
 
+/// What `run_after_inference_hooks` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type AfterInferenceHookQuery = (
+    Entity,
+    &'static StageCursor,
+    &'static AgentBlueprint,
+    &'static StageHookScripts,
+    &'static mut crate::components::InferenceResult,
+    &'static mut AgentState,
+);
+
 /// Run `after_inference` with the model's response in hand.
 ///
 /// Scheduled before `process_response`, on the `ProcessResponse` marker, so the
@@ -241,19 +256,8 @@ pub fn run_before_inference_hooks(
 /// a hook that could rewrite them would be a way around checks the operator
 /// configured. Steering tool calls is `on_tool_call`'s job, where the gate can
 /// see it.
-#[allow(clippy::type_complexity)]
 pub fn run_after_inference_hooks(
-    mut agents: Query<
-        (
-            Entity,
-            &StageCursor,
-            &AgentBlueprint,
-            &StageHookScripts,
-            &mut crate::components::InferenceResult,
-            &mut AgentState,
-        ),
-        With<ProcessResponse>,
-    >,
+    mut agents: Query<AfterInferenceHookQuery, With<ProcessResponse>>,
 ) {
     crate::tick_scope::clear();
     for (entity, cursor, bp, scripts, mut result, mut state) in agents.iter_mut() {
@@ -347,6 +351,19 @@ fn tool_calls_from(value: &serde_json::Value) -> Result<Vec<crate::components::T
     Ok(out)
 }
 
+/// What `run_tool_call_hooks` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type ToolCallHookQuery = (
+    Entity,
+    &'static StageCursor,
+    &'static AgentBlueprint,
+    &'static StageHookScripts,
+    &'static mut crate::components::InferenceResult,
+    &'static mut AgentState,
+);
+
 /// Run `on_tool_call` before the model's tool calls reach the policy layer.
 ///
 /// # Composition with the gate, which is the whole design question
@@ -365,20 +382,7 @@ fn tool_calls_from(value: &serde_json::Value) -> Result<Vec<crate::components::T
 /// `ToolSensitivities` - it cannot mark its own calls approved. Its query says
 /// so, and a test asserts the gate state is untouched across a hook that
 /// rewrites everything.
-#[allow(clippy::type_complexity)]
-pub fn run_tool_call_hooks(
-    mut agents: Query<
-        (
-            Entity,
-            &StageCursor,
-            &AgentBlueprint,
-            &StageHookScripts,
-            &mut crate::components::InferenceResult,
-            &mut AgentState,
-        ),
-        With<ReadyForTools>,
-    >,
-) {
+pub fn run_tool_call_hooks(mut agents: Query<ToolCallHookQuery, With<ReadyForTools>>) {
     crate::tick_scope::clear();
     for (entity, cursor, bp, scripts, mut result, mut state) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
@@ -440,6 +444,19 @@ pub fn run_tool_call_hooks(
 #[derive(Component, Debug, Clone, Copy)]
 pub struct TerminalHookFired;
 
+/// What `run_terminal_hooks` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type TerminalHookQuery = (
+    Entity,
+    &'static StageCursor,
+    &'static AgentBlueprint,
+    &'static StageHookScripts,
+    &'static mut AgentState,
+    Option<&'static mut crate::persistence::FinalOutput>,
+);
+
 /// Run `on_completion` or `on_error` once, as the run finishes.
 ///
 /// Which one fires is the run's own outcome: a completed run gets
@@ -451,19 +468,8 @@ pub struct TerminalHookFired;
 /// completion, the message for an error. `cancel` on a completion is a
 /// meaningful veto - the answer was not acceptable - and turns the run into an
 /// error carrying the reason.
-#[allow(clippy::type_complexity)]
 pub fn run_terminal_hooks(
-    mut agents: Query<
-        (
-            Entity,
-            &StageCursor,
-            &AgentBlueprint,
-            &StageHookScripts,
-            &mut AgentState,
-            Option<&mut crate::persistence::FinalOutput>,
-        ),
-        Without<TerminalHookFired>,
-    >,
+    mut agents: Query<TerminalHookQuery, Without<TerminalHookFired>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -556,6 +562,19 @@ pub fn run_terminal_hooks(
     }
 }
 
+/// What `run_stage_exit_hooks` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type StageExitHookQuery = (
+    Entity,
+    &'static StageCursor,
+    &'static AgentBlueprint,
+    &'static StageHookScripts,
+    &'static mut ContextWindow,
+    &'static mut AgentState,
+);
+
 /// Run `on_stage_exit` as a stage finishes, before its transition is chosen.
 ///
 /// On the `ResolveTransition` marker and scheduled before `resolve_transition`,
@@ -565,20 +584,7 @@ pub fn run_terminal_hooks(
 /// The window is still the finishing stage's, so `modify` writes there. A
 /// `cancel` errors the run rather than blocking the transition: a stage that
 /// refuses to be left has nowhere to go, and wedging is worse than stopping.
-#[allow(clippy::type_complexity)]
-pub fn run_stage_exit_hooks(
-    mut agents: Query<
-        (
-            Entity,
-            &StageCursor,
-            &AgentBlueprint,
-            &StageHookScripts,
-            &mut ContextWindow,
-            &mut AgentState,
-        ),
-        With<ResolveTransition>,
-    >,
-) {
+pub fn run_stage_exit_hooks(mut agents: Query<StageExitHookQuery, With<ResolveTransition>>) {
     crate::tick_scope::clear();
     for (entity, cursor, bp, scripts, mut window, mut state) in agents.iter_mut() {
         crate::tick_scope::enter(entity);

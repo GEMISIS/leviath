@@ -335,30 +335,32 @@ pub(crate) fn hold_for_gate(
         .insert(ReadyToInfer);
 }
 
+/// What `resolve_transition` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type ResolveTransitionQuery = (
+    Entity,
+    &'static AgentBlueprint,
+    &'static mut StageCursor,
+    &'static mut AgentState,
+    &'static mut StageProgress,
+    &'static StageInferences,
+    &'static StageSetups,
+    &'static mut VisitCounts,
+    &'static mut ContextWindow,
+    Option<&'static StageOutcome>,
+    Option<&'static mut crate::persistence::RunOutcomeFlags>,
+    Option<&'static crate::persistence::RunMetadata>,
+);
+
 /// Transition-resolution system: for each `ResolveTransition` agent, resolve the
 /// next stage. Terminal ⇒ mark the agent `Complete`. A single/linear target ⇒
 /// enter the new stage (swap its `StageInference`, reset stage progress, bump the
 /// visit count) and loop to `ReadyToInfer`. Multiple candidate edges ⇒ hand off
 /// to the async transition-choice system via `AwaitingTransitionChoice`.
-#[allow(clippy::type_complexity)]
 pub fn resolve_transition(
-    mut agents: Query<
-        (
-            Entity,
-            &AgentBlueprint,
-            &mut StageCursor,
-            &mut AgentState,
-            &mut StageProgress,
-            &StageInferences,
-            &StageSetups,
-            &mut VisitCounts,
-            &mut ContextWindow,
-            Option<&StageOutcome>,
-            Option<&mut crate::persistence::RunOutcomeFlags>,
-            Option<&crate::persistence::RunMetadata>,
-        ),
-        With<ResolveTransition>,
-    >,
+    mut agents: Query<ResolveTransitionQuery, With<ResolveTransition>>,
     sink: Option<Res<crate::host::WorldEventSink>>,
     mut commands: Commands,
 ) {

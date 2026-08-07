@@ -120,14 +120,19 @@ fn sanitize_title(raw: &str) -> String {
         .to_string()
 }
 
+/// What `dispatch_title` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type TitleQuery = (Entity, &'static RunMetadata);
+
 /// Dispatch system: start the title call for each [`PendingTitle`] run.
 ///
 /// A full pool leaves the marker in place to retry next tick; every other
 /// dead end (no settings resource, no resolvable provider/model, provider
 /// not registered) drops the marker so the query empties instead of spinning.
-#[allow(clippy::type_complexity)]
 pub fn dispatch_title(
-    agents: Query<(Entity, &RunMetadata), (With<PendingTitle>, Without<AwaitingTitle>)>,
+    agents: Query<TitleQuery, (With<PendingTitle>, Without<AwaitingTitle>)>,
     settings: Option<Res<TitleSettings>>,
     stage: Res<InferenceStage>,
     providers: Res<Providers>,

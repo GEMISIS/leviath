@@ -155,23 +155,25 @@ pub type Unreachable = (
     ),
 );
 
+/// What `fail_wedged_runs` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type WedgedRunQuery = (
+    Entity,
+    Option<&'static Wedged>,
+    &'static mut AgentState,
+    Option<&'static mut StageIoBuffer>,
+);
+
 /// Wedge watchdog: fail any non-terminal agent that has been unreachable for
 /// longer than [`WedgeTimeout`].
 ///
 /// See the module documentation for why this is safe. In short: an agent matches
 /// [`Unreachable`] only in a state the rest of the pipeline guarantees it never
 /// leaves an agent in, so anything that matches is already lost.
-#[allow(clippy::type_complexity)]
 pub fn fail_wedged_runs(
-    mut agents: Query<
-        (
-            Entity,
-            Option<&Wedged>,
-            &mut AgentState,
-            Option<&mut StageIoBuffer>,
-        ),
-        Unreachable,
-    >,
+    mut agents: Query<WedgedRunQuery, Unreachable>,
     timeout: Option<Res<WedgeTimeout>>,
     mut commands: Commands,
 ) {

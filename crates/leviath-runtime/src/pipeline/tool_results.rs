@@ -311,34 +311,36 @@ pub(crate) fn record_modifications(
     }
 }
 
+/// What `collect_tools` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type ToolQuery = (
+    &'static mut ContextWindow,
+    &'static crate::components::InferenceResult,
+    Option<&'static crate::components::ToolResultRoutingComponent>,
+    Option<&'static ToolSensitivities>,
+    Option<&'static ContextToolResults>,
+    Option<&'static StageCursor>,
+    Option<&'static mut StageIoBuffer>,
+    Option<&'static AgentBlueprint>,
+    Option<&'static mut crate::repetition::RepetitionDetector>,
+    Option<&'static mut StageProgress>,
+    Option<&'static mut crate::persistence::RunOutcomeFlags>,
+    Option<&'static mut crate::telemetry::StageActivity>,
+    (
+        Option<&'static crate::persistence::RunMetadata>,
+        Option<&'static crate::components::AgentState>,
+    ),
+);
+
 /// Tool-collect system: drain finished tool batches and apply them. Results are
 /// written into the agent's context window (routing/truncation/taint honored)
 /// and the agent loops back to `ReadyToInfer`. Outcomes for agents no longer
 /// `AwaitingTools` (cancelled/despawned) are dropped.
-#[allow(clippy::type_complexity)]
 pub fn collect_tools(
     mut results: ResMut<ToolResults>,
-    mut agents: Query<
-        (
-            &mut ContextWindow,
-            &crate::components::InferenceResult,
-            Option<&crate::components::ToolResultRoutingComponent>,
-            Option<&ToolSensitivities>,
-            Option<&ContextToolResults>,
-            Option<&StageCursor>,
-            Option<&mut StageIoBuffer>,
-            Option<&AgentBlueprint>,
-            Option<&mut crate::repetition::RepetitionDetector>,
-            Option<&mut StageProgress>,
-            Option<&mut crate::persistence::RunOutcomeFlags>,
-            Option<&mut crate::telemetry::StageActivity>,
-            (
-                Option<&crate::persistence::RunMetadata>,
-                Option<&crate::components::AgentState>,
-            ),
-        ),
-        With<AwaitingTools>,
-    >,
+    mut agents: Query<ToolQuery, With<AwaitingTools>>,
     sink: Option<Res<crate::host::WorldEventSink>>,
     mut commands: Commands,
 ) {
