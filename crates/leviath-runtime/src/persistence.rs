@@ -264,6 +264,38 @@ pub fn build_context_snapshot(window: &ContextWindow, stage_name: &str) -> Conte
     }
 }
 
+/// The agent components `meta.json` is built from.
+///
+/// Held apart from [`RunPosition`] because these are read off the entity while
+/// the position is stamped onto it: one is what the agent *is*, the other is
+/// where it has got to.
+pub struct RunMetaSources<'a> {
+    /// The run's immutable metadata, fixed at spawn.
+    pub md: &'a RunMetadata,
+    /// The agent's live state.
+    pub state: &'a AgentState,
+    /// Token totals accumulated so far.
+    pub totals: &'a TokenTotals,
+    /// Outcome flags the blueprint's shape decides.
+    pub flags: &'a RunOutcomeFlags,
+    /// The submitted answer, when the run has produced one.
+    pub final_output: Option<&'a FinalOutput>,
+}
+
+/// Where the run has got to, and when.
+pub struct RunPosition {
+    /// Index of the stage the agent is in.
+    pub stage_index: usize,
+    /// The moment `updated_at` is stamped with.
+    pub now_secs: i64,
+    /// When the run last actually moved, as distinct from last being touched.
+    pub last_progress_at: Option<i64>,
+    /// How deep in the sub-agent tree this run sits.
+    pub depth: usize,
+    /// How deep the tree may go.
+    pub max_child_depth: usize,
+}
+
 /// Build the run metadata (`meta.json`) from an agent's live components, stamping
 /// `updated_at` with `now_secs`. `stage_index` is the agent's current stage
 /// position within its blueprint.
@@ -274,22 +306,21 @@ pub fn build_context_snapshot(window: &ContextWindow, stage_name: &str) -> Conte
 /// the progress stamp where it was. Taken as a plain `Option` rather than the
 /// watermark it comes from so this stays a data mapper with no dependency on the
 /// persistence pipeline.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "meta.json has this many independent fields; the struct this would take is RunMetadata, which is what it returns"
-)]
-pub fn build_run_meta(
-    md: &RunMetadata,
-    state: &AgentState,
-    totals: &TokenTotals,
-    flags: &RunOutcomeFlags,
-    stage_index: usize,
-    now_secs: i64,
-    last_progress_at: Option<i64>,
-    depth: usize,
-    max_child_depth: usize,
-    final_output: Option<&FinalOutput>,
-) -> RunMeta {
+pub fn build_run_meta(sources: RunMetaSources<'_>, at: RunPosition) -> RunMeta {
+    let RunMetaSources {
+        md,
+        state,
+        totals,
+        flags,
+        final_output,
+    } = sources;
+    let RunPosition {
+        stage_index,
+        now_secs,
+        last_progress_at,
+        depth,
+        max_child_depth,
+    } = at;
     let status = run_status_from(&state.status);
     let mut flags = flags.0.clone();
     // Having submitted an output is itself production, so this is settled before
@@ -592,16 +623,20 @@ mod tests {
         let mut st = state(AgentStatus::Active);
         st.spawned_children_ids = vec!["child-a".to_string(), "child-b".to_string()];
         let meta = build_run_meta(
-            &md,
-            &st,
-            &totals,
-            &RunOutcomeFlags::default(),
-            1,
-            2000,
-            Some(1900),
-            1,
-            4,
-            None,
+            RunMetaSources {
+                md: &md,
+                state: &st,
+                totals: &totals,
+                flags: &RunOutcomeFlags::default(),
+                final_output: None,
+            },
+            RunPosition {
+                stage_index: 1,
+                now_secs: 2000,
+                last_progress_at: Some(1900),
+                depth: 1,
+                max_child_depth: 4,
+            },
         );
 
         assert_eq!(meta.run_id, "run-1");
@@ -637,16 +672,20 @@ mod tests {
         let mut md = metadata();
         md.unattended = true;
         let meta = build_run_meta(
-            &md,
-            &state(AgentStatus::Active),
-            &TokenTotals::default(),
-            &RunOutcomeFlags::default(),
-            1,
-            2000,
-            None,
-            1,
-            4,
-            None,
+            RunMetaSources {
+                md: &md,
+                state: &state(AgentStatus::Active),
+                totals: &TokenTotals::default(),
+                flags: &RunOutcomeFlags::default(),
+                final_output: None,
+            },
+            RunPosition {
+                stage_index: 1,
+                now_secs: 2000,
+                last_progress_at: None,
+                depth: 1,
+                max_child_depth: 4,
+            },
         );
         assert!(meta.yolo);
     }
@@ -657,16 +696,20 @@ mod tests {
         flags.0.gates_forced = 2;
         // Still running with nothing written: not (yet) an empty run.
         let running = build_run_meta(
-            &metadata(),
-            &state(AgentStatus::Active),
-            &TokenTotals::default(),
-            &flags,
-            0,
-            1000,
-            None,
-            0,
-            0,
-            None,
+            RunMetaSources {
+                md: &metadata(),
+                state: &state(AgentStatus::Active),
+                totals: &TokenTotals::default(),
+                flags: &flags,
+                final_output: None,
+            },
+            RunPosition {
+                stage_index: 0,
+                now_secs: 1000,
+                last_progress_at: None,
+                depth: 0,
+                max_child_depth: 0,
+            },
         );
         assert!(!running.flags.empty_output);
         assert_eq!(running.flags.gates_forced, 2);
@@ -680,16 +723,20 @@ mod tests {
             },
         ] {
             let meta = build_run_meta(
-                &metadata(),
-                &state(status),
-                &TokenTotals::default(),
-                &flags,
-                0,
-                1000,
-                None,
-                0,
-                0,
-                None,
+                RunMetaSources {
+                    md: &metadata(),
+                    state: &state(status),
+                    totals: &TokenTotals::default(),
+                    flags: &flags,
+                    final_output: None,
+                },
+                RunPosition {
+                    stage_index: 0,
+                    now_secs: 1000,
+                    last_progress_at: None,
+                    depth: 0,
+                    max_child_depth: 0,
+                },
             );
             assert!(meta.flags.empty_output);
         }
@@ -698,16 +745,20 @@ mod tests {
         let mut wrote = RunOutcomeFlags::default();
         wrote.0.record_modification("src/a.rs");
         let meta = build_run_meta(
-            &metadata(),
-            &state(AgentStatus::Complete),
-            &TokenTotals::default(),
-            &wrote,
-            0,
-            1000,
-            None,
-            0,
-            0,
-            None,
+            RunMetaSources {
+                md: &metadata(),
+                state: &state(AgentStatus::Complete),
+                totals: &TokenTotals::default(),
+                flags: &wrote,
+                final_output: None,
+            },
+            RunPosition {
+                stage_index: 0,
+                now_secs: 1000,
+                last_progress_at: None,
+                depth: 0,
+                max_child_depth: 0,
+            },
         );
         assert!(!meta.flags.empty_output);
         assert_eq!(meta.flags.modified_files, vec!["src/a.rs".to_string()]);
@@ -717,16 +768,20 @@ mod tests {
         let mut incapable = RunOutcomeFlags::default();
         incapable.0.no_output_tools = true;
         let meta = build_run_meta(
-            &metadata(),
-            &state(AgentStatus::Complete),
-            &TokenTotals::default(),
-            &incapable,
-            0,
-            1000,
-            None,
-            0,
-            0,
-            None,
+            RunMetaSources {
+                md: &metadata(),
+                state: &state(AgentStatus::Complete),
+                totals: &TokenTotals::default(),
+                flags: &incapable,
+                final_output: None,
+            },
+            RunPosition {
+                stage_index: 0,
+                now_secs: 1000,
+                last_progress_at: None,
+                depth: 0,
+                max_child_depth: 0,
+            },
         );
         assert!(!meta.flags.empty_output);
         assert!(meta.flags.no_output_tools);
@@ -735,18 +790,22 @@ mod tests {
     #[test]
     fn build_run_meta_carries_error_message() {
         let meta = build_run_meta(
-            &metadata(),
-            &state(AgentStatus::Error {
-                message: "boom".to_string(),
-            }),
-            &TokenTotals::default(),
-            &RunOutcomeFlags::default(),
-            2,
-            3000,
-            None,
-            0,
-            0,
-            None,
+            RunMetaSources {
+                md: &metadata(),
+                state: &state(AgentStatus::Error {
+                    message: "boom".to_string(),
+                }),
+                totals: &TokenTotals::default(),
+                flags: &RunOutcomeFlags::default(),
+                final_output: None,
+            },
+            RunPosition {
+                stage_index: 2,
+                now_secs: 3000,
+                last_progress_at: None,
+                depth: 0,
+                max_child_depth: 0,
+            },
         );
         assert_eq!(meta.status, RunStatus::Error);
         assert_eq!(meta.error.as_deref(), Some("boom"));
@@ -766,16 +825,20 @@ mod tests {
             1234,
         ));
         let meta = build_run_meta(
-            &metadata(),
-            &state(AgentStatus::Complete),
-            &TokenTotals::default(),
-            &RunOutcomeFlags::default(),
-            0,
-            1000,
-            None,
-            0,
-            0,
-            Some(&submitted),
+            RunMetaSources {
+                md: &metadata(),
+                state: &state(AgentStatus::Complete),
+                totals: &TokenTotals::default(),
+                flags: &RunOutcomeFlags::default(),
+                final_output: Some(&submitted),
+            },
+            RunPosition {
+                stage_index: 0,
+                now_secs: 1000,
+                last_progress_at: None,
+                depth: 0,
+                max_child_depth: 0,
+            },
         );
         let carried = meta.final_output.expect("the submission reached meta.json");
         // The descriptor, not the bytes: `meta.json` is parsed for every run on
@@ -796,16 +859,20 @@ mod tests {
     #[test]
     fn a_run_that_submits_nothing_is_still_judged_empty() {
         let meta = build_run_meta(
-            &metadata(),
-            &state(AgentStatus::Complete),
-            &TokenTotals::default(),
-            &RunOutcomeFlags::default(),
-            0,
-            1000,
-            None,
-            0,
-            0,
-            None,
+            RunMetaSources {
+                md: &metadata(),
+                state: &state(AgentStatus::Complete),
+                totals: &TokenTotals::default(),
+                flags: &RunOutcomeFlags::default(),
+                final_output: None,
+            },
+            RunPosition {
+                stage_index: 0,
+                now_secs: 1000,
+                last_progress_at: None,
+                depth: 0,
+                max_child_depth: 0,
+            },
         );
         assert!(meta.final_output.is_none());
         assert!(!meta.flags.produced_output);

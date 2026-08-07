@@ -38,7 +38,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::components::{AgentState, AgentStatus, ContextWindow, InferenceResult};
 use crate::dynamic_interaction::InteractionBackend;
-use crate::interaction_hub::InteractionHub;
+use crate::interaction_hub::{InteractionHub, PromptLane};
 use crate::pipeline::{
     AgentBlueprint, ReadyToInfer, ResolveTransition, StageCursor, StageIoBuffer,
 };
@@ -276,20 +276,39 @@ enum Routed {
 /// Ask an interaction point through the hub, resolve + route the answer (doing
 /// the edit branch's second "edit this text" ask when needed), and report the
 /// [`PointOutcome`] on the lane, waking the tick loop.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "same shape as run_gate_prompt, plus the edit branch's second ask"
-)]
-async fn run_interaction_point(
-    entity: Entity,
-    hub: InteractionHub,
-    agent_id: String,
-    point: InteractionPoint,
-    body: String,
-    round: usize,
-    outcomes: UnboundedSender<InteractionPointOutcome>,
-    wake: Arc<Notify>,
-) {
+/// The point being asked: whose run, which point, on what text, and how many
+/// times it has come round already.
+///
+/// Held apart from the lane it reports on for the same reason as
+/// the taint gate's own `GatedCall`: these five are what the person sees, and
+/// the lane is only where their answer goes.
+pub struct PointAsk {
+    /// The agent parked on this point.
+    pub entity: Entity,
+    /// That agent's run id, which the request id is namespaced by so two runs
+    /// at the same point never collide in the shared hub.
+    pub agent_id: String,
+    /// The point as the blueprint declared it.
+    pub point: InteractionPoint,
+    /// The text being asked about.
+    pub body: String,
+    /// Which round of this point the run is on.
+    pub round: usize,
+}
+
+async fn run_interaction_point(ask: PointAsk, lane: PromptLane<InteractionPointOutcome>) {
+    let PointAsk {
+        entity,
+        agent_id,
+        point,
+        body,
+        round,
+    } = ask;
+    let PromptLane {
+        hub,
+        outcomes,
+        wake,
+    } = lane;
     // Request ids are prefixed with the run id so concurrent runs at the same
     // point (same name/round) never collide in the shared hub.
     let ask_id = format!("{agent_id}-point-{}-{round}", point.name);
@@ -412,14 +431,18 @@ pub fn restore_interaction_point(world: &mut World, entity: Entity, state: Inter
 
     // Re-open the request in the hub and await it, exactly as a live dispatch would.
     runtime.spawn(run_interaction_point(
-        entity,
-        hub,
-        agent_id,
-        point,
-        state.body,
-        state.round,
-        outcomes,
-        wake,
+        PointAsk {
+            entity,
+            agent_id,
+            point,
+            body: state.body,
+            round: state.round,
+        },
+        PromptLane {
+            hub,
+            outcomes,
+            wake,
+        },
     ));
 }
 
@@ -571,14 +594,18 @@ pub fn dispatch_interaction_point(
             continue;
         }
         stage.runtime.spawn(run_interaction_point(
-            entity,
-            hub.clone(),
-            state.agent_id.clone(),
-            point,
-            body,
-            rounds.map_or(0, |r| r.0),
-            stage.outcomes.clone(),
-            stage.wake.clone(),
+            PointAsk {
+                entity,
+                agent_id: state.agent_id.clone(),
+                point,
+                body,
+                round: rounds.map_or(0, |r| r.0),
+            },
+            PromptLane {
+                hub: hub.clone(),
+                outcomes: stage.outcomes.clone(),
+                wake: stage.wake.clone(),
+            },
         ));
         commands
             .entity(entity)
@@ -1284,14 +1311,18 @@ mod tests {
             let mut point = plan_point();
             point.unattended = policy;
             let task = tokio::spawn(run_interaction_point(
-                Entity::from_raw_u32(1).unwrap(),
-                hub.clone(),
-                "run-1".to_string(),
-                point,
-                "the plan".to_string(),
-                0,
-                tx,
-                Arc::new(Notify::new()),
+                PointAsk {
+                    entity: Entity::from_raw_u32(1).unwrap(),
+                    agent_id: "run-1".to_string(),
+                    point,
+                    body: "the plan".to_string(),
+                    round: 0,
+                },
+                PromptLane {
+                    hub: hub.clone(),
+                    outcomes: tx,
+                    wake: Arc::new(Notify::new()),
+                },
             ));
             // Expiring and cancelling hand back the same neutral response, and
             // cancelling does not need a clock. The id is the one
@@ -1807,14 +1838,19 @@ mod tests {
         let task = {
             let hub = hub.clone();
             tokio::spawn(run_interaction_point(
-                Entity::from_raw_u32(1).expect("a small literal index is always a valid entity id"),
-                hub,
-                "run".to_string(),
-                point,
-                "body".to_string(),
-                0,
-                tx,
-                Arc::new(Notify::new()),
+                PointAsk {
+                    entity: Entity::from_raw_u32(1)
+                        .expect("a small literal index is always a valid entity id"),
+                    agent_id: "run".to_string(),
+                    point,
+                    body: "body".to_string(),
+                    round: 0,
+                },
+                PromptLane {
+                    hub,
+                    outcomes: tx,
+                    wake: Arc::new(Notify::new()),
+                },
             ))
         };
         for _ in 0..8 {
@@ -1875,14 +1911,19 @@ mod tests {
         let task = {
             let hub = hub.clone();
             tokio::spawn(run_interaction_point(
-                Entity::from_raw_u32(1).expect("a small literal index is always a valid entity id"),
-                hub,
-                "run".to_string(),
-                plan_point(),
-                "body".to_string(),
-                0,
-                tx,
-                Arc::new(Notify::new()),
+                PointAsk {
+                    entity: Entity::from_raw_u32(1)
+                        .expect("a small literal index is always a valid entity id"),
+                    agent_id: "run".to_string(),
+                    point: plan_point(),
+                    body: "body".to_string(),
+                    round: 0,
+                },
+                PromptLane {
+                    hub,
+                    outcomes: tx,
+                    wake: Arc::new(Notify::new()),
+                },
             ))
         };
         // Answer the point with the edit option.
