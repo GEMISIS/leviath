@@ -329,7 +329,7 @@ impl Dashboard {
 mod tests {
     use crate::commands::dashboard::graph::{GraphEdge, GraphTransitionInfo};
     use crate::commands::dashboard::history::{RunHistoryCache, derive_visits};
-    use crate::commands::dashboard::test_support::make_test_dashboard;
+    use crate::commands::dashboard::test_support::{make_test_dashboard, rendered_buffer};
     use crate::commands::dashboard::types::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -560,6 +560,11 @@ mod tests {
         terminal
             .draw(|f| dash.draw_explorer_graph(f, f.area(), &agent, &[]))
             .unwrap();
+        // The guard is the point: with no explorer state there is nothing to
+        // lay out, so it must return before drawing rather than draw an empty
+        // graph frame.
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.trim().is_empty(), "{buf}");
     }
 
     #[test]

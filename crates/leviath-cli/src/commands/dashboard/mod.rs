@@ -613,6 +613,10 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
         terminal.draw(|f| dash.draw(f)).unwrap();
+        // An empty dashboard still draws its chrome. Without this the test
+        // would pass just as happily against a `draw` that returned early.
+        let buf = crate::commands::dashboard::test_support::rendered_buffer(&terminal);
+        assert!(buf.contains("Agents"), "{buf}");
     }
 
     #[test]
