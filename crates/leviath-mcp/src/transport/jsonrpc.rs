@@ -59,9 +59,6 @@ impl JsonRpcRequest {
 /// A JSON-RPC response frame.
 #[derive(Deserialize)]
 pub(crate) struct JsonRpcResponse {
-    #[allow(dead_code)]
-    pub(crate) jsonrpc: String,
-    #[allow(dead_code)]
     pub(crate) id: Option<Value>,
     pub(crate) result: Option<Value>,
     pub(crate) error: Option<JsonRpcError>,
@@ -70,7 +67,9 @@ pub(crate) struct JsonRpcResponse {
 /// The `error` member of a JSON-RPC response.
 #[derive(Deserialize)]
 pub(crate) struct JsonRpcError {
-    #[allow(dead_code)]
+    /// The JSON-RPC error code, surfaced in the message because it is the half
+    /// of the error a reader can look up: `-32601` says "method not found"
+    /// whatever prose the server chose to pair with it.
     pub(crate) code: i64,
     pub(crate) message: String,
 }
@@ -81,7 +80,11 @@ impl JsonRpcResponse {
     /// `result` nor `error` (which is malformed, but servers do emit it).
     pub(crate) fn into_result(self) -> anyhow::Result<Value> {
         if let Some(error) = self.error {
-            return Err(anyhow::anyhow!("MCP server error: {}", error.message));
+            return Err(anyhow::anyhow!(
+                "MCP server error {}: {}",
+                error.code,
+                error.message
+            ));
         }
         self.result
             .ok_or_else(|| anyhow::anyhow!("MCP server returned no result"))

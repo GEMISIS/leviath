@@ -171,20 +171,20 @@ async fn an_agent_runs_a_tool_and_the_file_lands_on_disk() {
     );
 
     let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
-    let mut host = leviath_cli::daemon::setup::build_host(
-        leviath_cli::config::Config::default(),
+    let mut host = leviath_cli::daemon::setup::build_host(leviath_cli::daemon::setup::HostParts {
+        config: leviath_cli::config::Config::default(),
         providers,
-        runs.path().to_path_buf(),
-        mcp,
-        vec![],
-        leviath_cli::daemon::mcp_pool::McpPool::for_daemon(
+        runs_dir: runs.path().to_path_buf(),
+        shared_mcp: mcp,
+        mcp_tool_defs: vec![],
+        mcp_pool: leviath_cli::daemon::mcp_pool::McpPool::for_daemon(
             Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             &[],
         ),
-        Handle::current(),
+        runtime: Handle::current(),
         // A fixed clock, so nothing here is a function of how long CI took.
-        || 1_700_000_000,
-    );
+        now_secs: || 1_700_000_000,
+    });
 
     let (reply, spawned) = oneshot::channel();
     host.handle(ControlOp::Spawn {

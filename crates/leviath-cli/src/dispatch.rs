@@ -121,7 +121,10 @@ pub enum Commands {
 ///
 /// `async fn` in a trait is fine here: `dispatch` takes `&impl RiskyExecutors`
 /// (static dispatch, no `dyn`), so no boxing or `Send` bound is required.
-#[allow(async_fn_in_trait)]
+#[expect(
+    async_fn_in_trait,
+    reason = "the trait exists to be a test seam and is never used as a dyn object, so the auto-trait bounds the lint warns about cannot matter here"
+)]
 pub trait RiskyExecutors {
     /// `lev run` - auto-starts the daemon (real process spawn) if needed and
     /// spawns the agent into the shared world over the control socket.

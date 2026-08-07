@@ -361,7 +361,6 @@ impl TaintGate {
         &self.audit_log
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn log_event(
         &mut self,
         agent_id: &str,

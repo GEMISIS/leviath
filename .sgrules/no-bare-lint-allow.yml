@@ -1,0 +1,13 @@
+id: no-bare-lint-allow
+language: rust
+severity: error
+message: >-
+  `#[allow(...)]` is banned; use `#[expect(..., reason = "...")]`. `expect`
+  fails the build the moment the lint stops firing, so a suppression cannot
+  outlive the problem it was written for - an orphaned `allow` survived a whole
+  refactor in this repo before anyone noticed. The `reason` is the point: it is
+  the one place a reader learns why the lint was wrong here rather than the code.
+  If the honest reason is "the code should change", change the code.
+rule:
+  kind: attribute_item
+  regex: '^#\[allow\('

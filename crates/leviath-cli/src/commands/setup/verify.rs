@@ -70,7 +70,10 @@ impl Outcome {
 ///
 /// The whole point is that the wizard never calls a provider directly, so its
 /// tests never open a socket.
-#[allow(async_fn_in_trait)] // callers are concrete; no `dyn` and no boxing needed
+#[expect(
+    async_fn_in_trait,
+    reason = "same as dispatch::RiskyExecutors: a test seam, never a dyn object"
+)] // callers are concrete; no `dyn` and no boxing needed
 pub trait ProviderVerifier {
     /// Ask the provider whether these credentials work, and what models they
     /// reach. Never fails: an unreachable provider is an [`Outcome::Failed`],

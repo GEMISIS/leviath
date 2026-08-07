@@ -30,7 +30,6 @@ pub struct TestArgs {
 
 /// A test case loaded from a TOML test file.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct TestCase {
     name: String,
     input: String,
@@ -298,6 +297,38 @@ async fn execute_with_registry(
     Ok(())
 }
 
+/// How many output tokens one case may ask for.
+///
+/// A case's `max_tokens` narrows `ceiling` and never widens it: it is there to
+/// keep one test cheap, not to let a test ask for more than the context window
+/// or the model allows. A free function rather than an inline `map_or` so the
+/// rule is exercised without reaching a provider.
+fn resolved_max_tokens(case_cap: Option<usize>, ceiling: usize) -> usize {
+    match case_cap {
+        Some(cap) => cap.min(ceiling),
+        None => ceiling,
+    }
+}
+
+/// The tools a stage advertises, as the provider wants them.
+///
+/// `lev test` drives one inference, so this is the same set the first turn of a
+/// real run would see - which is what makes `expect_tool_call` mean the same
+/// thing here as it does in production.
+fn stage_tools(stage: &leviath_core::Stage) -> Vec<leviath_providers::Tool> {
+    // Built over a throwaway workdir: `lev test` never executes a tool, it only
+    // needs the definitions so the model can choose to call one.
+    let builtins =
+        leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(std::env::temp_dir()));
+    let mut defs = builtins.tool_defs();
+    defs.extend(leviath_tools::BuiltinTools::subagent_tool_defs());
+    stage
+        .available_tools
+        .iter()
+        .filter_map(|name| defs.iter().find(|d| d.name == *name).cloned())
+        .collect()
+}
+
 /// Run a single test case: build a one-off context window from the blueprint,
 /// run one inference against the resolved provider, and check the assertions.
 async fn run_test_case(
@@ -341,15 +372,22 @@ async fn run_test_case(
     });
     let caps = provider.capabilities(model_name);
     let remaining = window.max_tokens.saturating_sub(window.current_tokens);
+    // A case's `max_tokens` narrows the ceiling and never widens it: it is there
+    // to keep one test cheap, not to let a test ask for more than the window or
+    // the model allows.
+    let max_tokens = resolved_max_tokens(test.max_tokens, remaining.min(caps.max_output_tokens));
     let temperature = if caps.supports_temperature { 0.7 } else { 0.0 };
     let request = InferenceRequest {
         system: assembled.system_blocks,
         messages: assembled.messages,
         model: model_name.to_string(),
-        max_tokens: remaining.min(caps.max_output_tokens),
+        max_tokens,
         temperature,
-        // `lev test` advertises no tools (matches prior single-shot behaviour).
-        tools: Vec::new(),
+        // The stage's own tools, so a case can assert on a tool call at all.
+        // Advertising none was the prior behaviour and made `expect_tool_call`
+        // unsatisfiable: the model cannot call a tool it was never offered, so
+        // every such assertion failed whatever the agent did.
+        tools: stage_tools(stage),
         extra: serde_json::Value::Null,
         request_timeout_secs: None,
     };
@@ -556,6 +594,65 @@ max_tokens = 500
             Some("read_file")
         );
         assert_eq!(test_file.test[1].max_tokens, Some(500));
+    }
+
+    /// A minimal model config, since `Stage::new` needs one and these tests
+    /// never reach a provider.
+    fn test_model() -> leviath_core::blueprint::ModelConfig {
+        leviath_core::blueprint::ModelConfig::new("anthropic".to_string(), "m".to_string())
+    }
+
+    /// The bug these two fixes closed, pinned so it cannot reopen: both keys
+    /// were parsed, asserted on *as parsed values*, and then ignored. A test
+    /// that only checks deserialisation certifies nothing about behaviour.
+    #[test]
+    fn a_case_max_tokens_narrows_the_ceiling_and_never_widens_it() {
+        let ceiling = 4_000;
+        assert_eq!(
+            resolved_max_tokens(Some(500), ceiling),
+            500,
+            "a smaller case cap wins"
+        );
+        assert_eq!(
+            resolved_max_tokens(Some(99_000), ceiling),
+            ceiling,
+            "a case may not ask for more than the model allows"
+        );
+        assert_eq!(
+            resolved_max_tokens(None, ceiling),
+            ceiling,
+            "no cap means the full ceiling"
+        );
+    }
+
+    /// `expect_tool_call` was unsatisfiable: the request advertised no tools, so
+    /// the model could never call one and every such assertion failed whatever
+    /// the agent did.
+    #[test]
+    fn a_stage_advertises_its_tools_so_a_tool_call_is_possible() {
+        let mut stage = leviath_core::Stage::new("s".to_string(), test_model());
+        stage.available_tools = vec!["read_file".to_string(), "write_file".to_string()];
+        let tools = stage_tools(&stage);
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"read_file"), "got {names:?}");
+        assert!(names.contains(&"write_file"), "got {names:?}");
+    }
+
+    /// A stage that advertises nothing still sends nothing, so a plain
+    /// text-assertion case is unchanged.
+    #[test]
+    fn a_stage_with_no_tools_advertises_none() {
+        let stage = leviath_core::Stage::new("s".to_string(), test_model());
+        assert!(stage_tools(&stage).is_empty());
+    }
+
+    /// A name the builtins do not know is dropped rather than sent as a tool the
+    /// provider would reject.
+    #[test]
+    fn an_unknown_tool_name_is_not_advertised() {
+        let mut stage = leviath_core::Stage::new("s".to_string(), test_model());
+        stage.available_tools = vec!["definitely_not_a_tool".to_string()];
+        assert!(stage_tools(&stage).is_empty());
     }
 
     #[test]

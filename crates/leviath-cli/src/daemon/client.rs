@@ -127,7 +127,10 @@ pub fn never_interactive() -> bool {
 /// Regions are resolved *before* the task on purpose. A typo'd `--foo` has to
 /// fail before the user is dropped into an editor and types a paragraph they
 /// are about to lose.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "resolves six independent CLI inputs into one request; grouping them would invent a type whose only member is this call"
+)]
 pub fn resolve_spawn_args(
     path: &str,
     task: Option<&str>,

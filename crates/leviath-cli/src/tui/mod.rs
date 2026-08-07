@@ -52,7 +52,10 @@ pub struct CrosstermEventSource {
     read_fn: fn() -> std::io::Result<Event>,
 }
 
-#[allow(clippy::new_without_default)] // constructed only by the binary's real UI entrypoints
+#[expect(
+    clippy::new_without_default,
+    reason = "constructed only by the binary's real UI entrypoints, where a Default would be a way to build one that reads no terminal"
+)] // constructed only by the binary's real UI entrypoints
 impl CrosstermEventSource {
     /// Read from the real terminal.
     pub fn new() -> Self {

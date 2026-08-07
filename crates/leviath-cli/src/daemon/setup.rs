@@ -108,16 +108,16 @@ pub async fn setup_daemon_host(
         config.limits.mcp_idle_disconnect_secs,
     );
     mcp_pool.warm_recovered(&runs_dir).await;
-    build_host(
+    build_host(HostParts {
         config,
         providers,
         runs_dir,
-        registry.mcp,
-        registry.mcp_tool_defs,
+        shared_mcp: registry.mcp,
+        mcp_tool_defs: registry.mcp_tool_defs,
         mcp_pool,
         runtime,
-        || chrono::Utc::now().timestamp(),
-    )
+        now_secs: || chrono::Utc::now().timestamp(),
+    })
 }
 
 /// The reap hook installed on the host: drops a reaped agent's tool state and
@@ -142,48 +142,63 @@ fn make_reaper(
     })
 }
 
+/// Everything the daemon hands its world host at construction.
+///
+/// A struct rather than eight positional parameters because these are not
+/// arguments in the usual sense: each is a resource the host owns for the rest
+/// of the process's life, assembled once at boot and never varied. Naming them
+/// here describes the daemon; listing them at the call site described nothing.
+pub struct HostParts {
+    /// The resolved configuration this daemon booted with.
+    pub config: Config,
+    /// Providers built from that config, keyed by name.
+    pub providers: ProviderRegistry,
+    /// Where run state is persisted.
+    pub runs_dir: std::path::PathBuf,
+    /// MCP connections shared across every agent.
+    pub shared_mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
+    /// The tools those servers advertise.
+    pub mcp_tool_defs: Vec<Tool>,
+    /// The pool that keeps per-agent MCP servers warm.
+    pub mcp_pool: Arc<crate::daemon::mcp_pool::McpPool>,
+    /// The tokio runtime the async lanes run on.
+    pub runtime: Handle,
+    /// The clock, injected so a test does not depend on the wall clock.
+    pub now_secs: fn() -> i64,
+}
+
 /// Build the daemon's [`WorldHost`]: one world hosting every agent, its tool
-/// service + interaction hub, and a `Spawn`-op spawner that loads blueprints and
-/// registers per-agent tool state. `shared_mcp` / `mcp_tool_defs` are the MCP
-/// connections built once at startup and reused by every agent.
-#[allow(clippy::too_many_arguments)]
-pub fn build_host(
-    config: Config,
-    providers: ProviderRegistry,
-    runs_dir: std::path::PathBuf,
-    shared_mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
-    mcp_tool_defs: Vec<Tool>,
-    mcp_pool: Arc<crate::daemon::mcp_pool::McpPool>,
-    runtime: Handle,
-    now_secs: fn() -> i64,
-) -> WorldHost {
+/// service + interaction hub, and a `Spawn`-op spawner that loads blueprints
+/// and registers per-agent tool state. The MCP connections in [`HostParts`]
+/// are built once at startup and reused by every agent.
+pub fn build_host(parts: HostParts) -> WorldHost {
     let hub = InteractionHub::new();
     // How long a prompt may go unanswered before the hub resolves it itself, so
     // an operator who walked away costs the run a delay rather than its slot
     // for as long as the daemon lives (issue #204).
-    hub.set_timeout_secs(config.limits.interaction_timeout_secs);
+    hub.set_timeout_secs(parts.config.limits.interaction_timeout_secs);
     let tool_service = Arc::new(CliToolService::new());
     // The configured global fallback bounds concurrent inference for any model
     // without its own per-model pool entry (defaults to a small cap so a fresh
     // install can't fan out unbounded requests against provider rate limits).
     let pool_config =
-        InferencePoolConfig::new().with_default(config.limits.max_concurrent_inferences);
+        InferencePoolConfig::new().with_default(parts.config.limits.max_concurrent_inferences);
     let mut world = PipelineWorld::new(
-        providers,
+        parts.providers,
         tool_service.clone(),
         pool_config,
-        config.limits.max_concurrent_tools,
-        Some(runs_dir.clone()),
-        runtime,
+        parts.config.limits.max_concurrent_tools,
+        Some(parts.runs_dir.clone()),
+        parts.runtime,
     );
     // Opt-in accurate pre-inference budget guard (off by default).
-    world.set_exact_token_counting(config.limits.exact_token_counting);
+    world.set_exact_token_counting(parts.config.limits.exact_token_counting);
     // How long a run may sit unable to dispatch before the watchdog fails it
     // rather than leaving it "running" for ever (issue #190).
     world
         .world_mut()
         .insert_resource(leviath_runtime::pipeline::StallTimeout(
-            config.limits.stall_timeout_secs,
+            parts.config.limits.stall_timeout_secs,
         ));
     // How long a run may sit in a state nothing can reach at all before the
     // watchdog fails it and releases what it was holding (issue #202). Off
@@ -191,7 +206,7 @@ pub fn build_host(
     world
         .world_mut()
         .insert_resource(leviath_runtime::pipeline::WedgeTimeout(
-            config.limits.wedge_timeout_secs,
+            parts.config.limits.wedge_timeout_secs,
         ));
     // Take a provider out of service after it has failed this many times in a
     // row for a reason only a person can fix, so the next run does not have to
@@ -199,8 +214,8 @@ pub fn build_host(
     world
         .world_mut()
         .insert_resource(leviath_runtime::pipeline::CircuitPolicy {
-            failures_before_open: config.limits.provider_failures_before_open,
-            cooldown_secs: config.limits.provider_circuit_cooldown_secs,
+            failures_before_open: parts.config.limits.provider_failures_before_open,
+            cooldown_secs: parts.config.limits.provider_circuit_cooldown_secs,
         });
     world
         .world_mut()
@@ -211,10 +226,10 @@ pub fn build_host(
     let mut host = WorldHost::with_interactions(world, hub.clone());
     // How long the daemon may sit with a full tool lane and no run moving before
     // it widens the lane to break the jam (issue #191).
-    host.set_dead_cycles_before_relief(config.limits.dead_cycles_before_relief);
+    host.set_dead_cycles_before_relief(parts.config.limits.dead_cycles_before_relief);
     // How long a finished run keeps its place in the listing, so a scheduler
     // polling on an interval can see how a run ended (issue #205).
-    host.set_finished_retention_secs(config.limits.finished_retention_secs);
+    host.set_finished_retention_secs(parts.config.limits.finished_retention_secs);
     // Handed to each agent's tool state so its sub-agent tools reach the world
     // through the host.
     let subagent_tx = host.subagent_sender();
@@ -224,43 +239,45 @@ pub fn build_host(
     // shared resources.
     let reloaded = crate::daemon::recovery::reload_persisted_agents(
         host.world_mut(),
-        tool_service.as_ref(),
-        &config,
-        shared_mcp.clone(),
-        &mcp_tool_defs,
-        &hub,
-        &runs_dir,
-        now_secs(),
-        &subagent_tx,
+        crate::daemon::spawn::SpawnDeps {
+            tool_service: tool_service.as_ref(),
+            config: &parts.config,
+            shared_mcp: parts.shared_mcp.clone(),
+            mcp_tool_defs: &parts.mcp_tool_defs,
+            hub: &hub,
+            now_secs: (parts.now_secs)(),
+            subagent_tx: subagent_tx.clone(),
+        },
+        &parts.runs_dir,
     );
     for (run_id, entity) in reloaded {
         host.register(run_id, entity);
     }
 
-    // Config hot-reload: after boot, spawn-time config (permissions,
+    // Config hot-reload: after boot, spawn-time parts.config (permissions,
     // `[read_paths]`, sandbox, limits, taint) is served from here, reloaded
-    // when `config.toml` changes on disk. The boot infrastructure (provider
+    // when `parts.config.toml` changes on disk. The boot infrastructure (provider
     // registry, MCP pool, network policy, telemetry) keeps the boot snapshot -
     // those hold live connections and need a restart - so the reloader takes a
     // clone and the boot snapshot stays usable below.
     let reloader = std::sync::Arc::new(crate::daemon::config_reload::ConfigReloader::new(
         Config::config_path(),
-        config.clone(),
+        parts.config.clone(),
     ));
 
-    // Install the fan-out spawner as a world resource so the runtime's fan-out
+    // Install the fan-out spawner as a world resource so the parts.runtime's fan-out
     // systems can start workers (it captures the same context as the spawner
     // below, cloned before those move into the closure).
     let fanout_spawner = DaemonFanOutSpawner {
         config: reloader.clone(),
-        shared_mcp: shared_mcp.clone(),
-        mcp_tool_defs: mcp_tool_defs.clone(),
-        mcp_pool: mcp_pool.clone(),
+        shared_mcp: parts.shared_mcp.clone(),
+        mcp_tool_defs: parts.mcp_tool_defs.clone(),
+        mcp_pool: parts.mcp_pool.clone(),
         hub: hub.clone(),
         subagent_tx: subagent_tx.clone(),
         tool_service: tool_service.clone(),
         agents_dir: leviath_core::paths::agents_dir(),
-        now_secs,
+        now_secs: parts.now_secs,
     };
     host.world_mut()
         .world_mut()
@@ -278,9 +295,11 @@ pub fn build_host(
     // `[title]` is enabled, and the dispatch system reads provider/model here.
     host.world_mut()
         .world_mut()
-        .insert_resource(leviath_runtime::title::TitleSettings(config.title.clone()));
+        .insert_resource(leviath_runtime::title::TitleSettings(
+            parts.config.title.clone(),
+        ));
 
-    // Scripted gate rules (`<config>/leviath/rules/*.rhai`), consulted by the gate
+    // Scripted gate rules (`<parts.config>/leviath/rules/*.rhai`), consulted by the gate
     // after the static allowlist (a no-op checker when there are none).
     let script_checker =
         crate::daemon::gate_rules::build_gate_script_checker(&crate::commands::policy::rules_dir());
@@ -293,7 +312,7 @@ pub fn build_host(
     // the daemon's own tracing events through the same pipeline. A pipeline
     // that fails to build logs a warning and leaves the no-op in place -
     // observability must never stop the work it observes.
-    if let Some(built) = leviath_telemetry::build_sink(&config.observability) {
+    if let Some(built) = leviath_telemetry::build_sink(&parts.config.observability) {
         host.world_mut()
             .world_mut()
             .insert_resource(leviath_runtime::telemetry::Telemetry(built.sink));
@@ -307,27 +326,29 @@ pub fn build_host(
     // originals below).
     let reload_tools = tool_service.clone();
     let reload_reloader = reloader.clone();
-    let reload_mcp = shared_mcp.clone();
-    let reload_defs = mcp_tool_defs.clone();
+    let reload_mcp = parts.shared_mcp.clone();
+    let reload_defs = parts.mcp_tool_defs.clone();
     let reload_hub = hub.clone();
     let reload_tx = subagent_tx.clone();
-    let reload_runs = runs_dir.clone();
-    let reload_pool = mcp_pool.clone();
+    let reload_runs = parts.runs_dir.clone();
+    let reload_pool = parts.mcp_pool.clone();
     host.set_reloader(Box::new(move |world, run_id| {
-        // Pages a run back in with the current on-disk config, matching what a
+        // Pages a run back in with the current on-disk parts.config, matching what a
         // real restart would restore it with.
         let reload_config = reload_reloader.current();
         let entity = crate::daemon::recovery::reload_run(
             world,
-            reload_tools.as_ref(),
-            &reload_config,
-            reload_mcp.clone(),
-            &reload_defs,
-            &reload_hub,
+            crate::daemon::spawn::SpawnDeps {
+                tool_service: reload_tools.as_ref(),
+                config: &reload_config,
+                shared_mcp: reload_mcp.clone(),
+                mcp_tool_defs: &reload_defs,
+                hub: &reload_hub,
+                now_secs: (parts.now_secs)(),
+                subagent_tx: reload_tx.clone(),
+            },
             run_id,
             &reload_runs,
-            now_secs(),
-            &reload_tx,
         );
         lease_reloaded(&reload_pool, run_id, entity.is_some());
         entity
@@ -338,16 +359,17 @@ pub fn build_host(
     // rebuilt - deleted blueprint, unreadable metadata, died mid-spawn - and
     // without this a cancel in that state wrote nothing at all, so `meta.json`
     // went on claiming the run was live and nothing could ever clear it.
-    let terminate_runs = runs_dir.clone();
+    let terminate_runs = parts.runs_dir.clone();
     host.set_force_terminator(Box::new(move |run_id| {
-        crate::runstate::force_cancel_in(&terminate_runs.join(run_id), now_secs()).found_run()
+        crate::runstate::force_cancel_in(&terminate_runs.join(run_id), (parts.now_secs)())
+            .found_run()
     }));
 
     // Reap hook: when a terminal agent is reaped, tear down its sandbox and drop
     // its per-agent tool state (the latter also fixing a prior leak where tool
     // state was never released). Factored into `make_reaper` so the closure body
     // is unit-testable - the daemon only ever drives it from `serve()`.
-    host.set_reaper(make_reaper(tool_service.clone(), mcp_pool.clone()));
+    host.set_reaper(make_reaper(tool_service.clone(), parts.mcp_pool.clone()));
 
     // The shared MCP pool (created + recovery-warmed by the caller). Per-agent
     // `[[mcp_servers]]` connect lazily through it.
@@ -357,7 +379,7 @@ pub fn build_host(
     // and pre-warm the servers declared by any `worker_agent`/`worker_query`
     // fan-out worker this blueprint will spawn, so the *first* such worker already
     // advertises them (they'd otherwise land one turn late - issue #97).
-    let pp_pool = mcp_pool.clone();
+    let pp_pool = parts.mcp_pool.clone();
     let pp_agents_dir = leviath_core::paths::agents_dir();
     host.set_spawn_preprocessor(Box::new(move |args| {
         let pool = pp_pool.clone();
@@ -369,11 +391,11 @@ pub fn build_host(
         })
     }));
 
-    // The spawner captures everything an agent needs; `now_secs` is called at
+    // The spawner captures everything an agent needs; `parts.now_secs` is called at
     // spawn time for the run's start timestamp. Per-agent MCP defs = the global
     // servers' defs plus this blueprint's declared servers' defs (warmed above).
-    let spawn_pool = mcp_pool.clone();
-    let spawn_runs_dir = runs_dir.clone();
+    let spawn_pool = parts.mcp_pool.clone();
+    let spawn_runs_dir = parts.runs_dir.clone();
     let spawn_reloader = reloader.clone();
     host.set_spawner(Box::new(move |world, args| {
         // Stake out the run directory before anything that can fail: blueprint
@@ -383,7 +405,7 @@ pub fn build_host(
         // The reload path deliberately doesn't do this: it must not overwrite a
         // recovering run's own metadata.
         write_placeholder_meta(&spawn_runs_dir, args);
-        let defs = per_agent_mcp_defs(&spawn_pool, &mcp_tool_defs, &args.blueprint_path);
+        let defs = per_agent_mcp_defs(&spawn_pool, &parts.mcp_tool_defs, &args.blueprint_path);
         // Hold the blueprint's per-agent servers open for this run's life;
         // the reap hook releases them (idle-disconnect follows).
         spawn_pool.lease_blueprint(&args.blueprint_path, &args.run_id);
@@ -396,10 +418,10 @@ pub fn build_host(
             crate::daemon::spawn::SpawnDeps {
                 tool_service: tool_service.as_ref(),
                 config: &config,
-                shared_mcp: shared_mcp.clone(),
+                shared_mcp: parts.shared_mcp.clone(),
                 mcp_tool_defs: &defs,
                 hub: &hub,
-                now_secs: now_secs(),
+                now_secs: (parts.now_secs)(),
                 subagent_tx: subagent_tx.clone(),
             },
             args,
@@ -412,7 +434,7 @@ pub fn build_host(
             crate::runstate::force_error_in(
                 &spawn_runs_dir.join(&args.run_id),
                 message,
-                now_secs(),
+                (parts.now_secs)(),
             );
         }
         built
@@ -781,43 +803,53 @@ mod tests {
     #[tokio::test]
     async fn spawner_writes_the_placeholder_under_the_hosts_runs_dir() {
         let runs = tempfile::tempdir().unwrap();
-        // Resolve the global dir once: sibling tests redirect it via the
-        // process-global `LEVIATH_RUNS_DIR`, so resolving it twice could compare
-        // two different directories.
-        let global = crate::runstate::runs_dir();
-        let global_before = run_ids_in(&global);
+        // The assertion below is "spawning wrote nothing into the *global* runs
+        // dir", which is only decidable if no other test can write there while
+        // this one runs. Resolving it once is not enough - that was the previous
+        // attempt, and it still compared a directory the rest of the suite
+        // shares. `with_isolated_runs_dir_async` points `LEVIATH_RUNS_DIR` at a
+        // directory only this test can reach, and `temp_env` serialises the
+        // change process-wide, so the comparison is deterministic.
+        crate::runstate::with_isolated_runs_dir_async(
+            "setup-host-isolation",
+            |global| async move {
+                let global_before = run_ids_in(&global);
 
-        let mut host = setup_daemon_host(
-            Config::default(),
-            runs.path().to_path_buf(),
-            Handle::current(),
+                let mut host = setup_daemon_host(
+                    Config::default(),
+                    runs.path().to_path_buf(),
+                    Handle::current(),
+                )
+                .await;
+                let (reply, rx) = oneshot::channel();
+                host.handle(ControlOp::Spawn {
+                    args: Box::new(SpawnArgs {
+                        // A blueprint that doesn't exist: the spawn fails *after* the
+                        // placeholder is staked out, which is the case that leaves a run
+                        // dir behind.
+                        run_id: "isolation-1234-ab12".to_string(),
+                        blueprint_path: "/no/such/agent.leviath".to_string(),
+                        task: "t".to_string(),
+                        workdir: std::env::temp_dir().to_string_lossy().to_string(),
+                        ..Default::default()
+                    }),
+                    reply,
+                });
+                assert!(rx.await.unwrap().is_err(), "the spawn itself fails");
+
+                assert!(
+                    crate::runstate::read_meta_from(&runs.path().join("isolation-1234-ab12"))
+                        .is_ok(),
+                    "the placeholder lands in the host's configured runs dir"
+                );
+                assert_eq!(
+                    run_ids_in(&global),
+                    global_before,
+                    "spawning through a host must not write into the home-resolved runs dir"
+                );
+            },
         )
         .await;
-        let (reply, rx) = oneshot::channel();
-        host.handle(ControlOp::Spawn {
-            args: Box::new(SpawnArgs {
-                // A blueprint that doesn't exist: the spawn fails *after* the
-                // placeholder is staked out, which is the case that leaves a run
-                // dir behind.
-                run_id: "isolation-1234-ab12".to_string(),
-                blueprint_path: "/no/such/agent.leviath".to_string(),
-                task: "t".to_string(),
-                workdir: std::env::temp_dir().to_string_lossy().to_string(),
-                ..Default::default()
-            }),
-            reply,
-        });
-        assert!(rx.await.unwrap().is_err(), "the spawn itself fails");
-
-        assert!(
-            crate::runstate::read_meta_from(&runs.path().join("isolation-1234-ab12")).is_ok(),
-            "the placeholder lands in the host's configured runs dir"
-        );
-        assert_eq!(
-            run_ids_in(&global),
-            global_before,
-            "spawning through a host must not write into the home-resolved runs dir"
-        );
     }
 
     /// End-to-end for the unkillable-run shape: a run whose blueprint no longer
@@ -1168,19 +1200,19 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
             ..Config::default()
         };
         let runs = tempfile::tempdir().unwrap();
-        let _host = build_host(
+        let _host = build_host(HostParts {
             config,
-            ProviderRegistry::new(),
-            runs.path().to_path_buf(),
-            Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
-            Vec::new(),
-            crate::daemon::mcp_pool::McpPool::for_daemon(
+            providers: ProviderRegistry::new(),
+            runs_dir: runs.path().to_path_buf(),
+            shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            mcp_tool_defs: Vec::new(),
+            mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(
                 Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
                 &[],
             ),
-            Handle::current(),
-            || 0,
-        );
+            runtime: Handle::current(),
+            now_secs: || 0,
+        });
     }
 
     #[tokio::test]
@@ -1196,19 +1228,19 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
             ..Config::default()
         };
         let runs = tempfile::tempdir().unwrap();
-        let mut host = build_host(
+        let mut host = build_host(HostParts {
             config,
-            ProviderRegistry::new(),
-            runs.path().to_path_buf(),
-            Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
-            Vec::new(),
-            crate::daemon::mcp_pool::McpPool::for_daemon(
+            providers: ProviderRegistry::new(),
+            runs_dir: runs.path().to_path_buf(),
+            shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            mcp_tool_defs: Vec::new(),
+            mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(
                 Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
                 &[],
             ),
-            Handle::current(),
-            || 0,
-        );
+            runtime: Handle::current(),
+            now_secs: || 0,
+        });
         assert!(
             host.world_mut()
                 .world_mut()
@@ -1234,19 +1266,19 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
             ..Config::default()
         };
         let runs = tempfile::tempdir().unwrap();
-        let mut host = build_host(
+        let mut host = build_host(HostParts {
             config,
-            ProviderRegistry::new(),
-            runs.path().to_path_buf(),
-            Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
-            Vec::new(),
-            crate::daemon::mcp_pool::McpPool::for_daemon(
+            providers: ProviderRegistry::new(),
+            runs_dir: runs.path().to_path_buf(),
+            shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            mcp_tool_defs: Vec::new(),
+            mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(
                 Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
                 &[],
             ),
-            Handle::current(),
-            || 0,
-        );
+            runtime: Handle::current(),
+            now_secs: || 0,
+        });
         assert!(
             host.world_mut()
                 .world_mut()
@@ -1267,19 +1299,19 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
         let mut providers = ProviderRegistry::new();
         providers.register("fake".to_string(), Arc::new(FakeProvider));
         let runs = tempfile::tempdir().unwrap();
-        let mut host = build_host(
-            Config::default(),
+        let mut host = build_host(HostParts {
+            config: Config::default(),
             providers,
-            runs.path().to_path_buf(),
-            Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
-            Vec::new(),
-            crate::daemon::mcp_pool::McpPool::for_daemon(
+            runs_dir: runs.path().to_path_buf(),
+            shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            mcp_tool_defs: Vec::new(),
+            mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(
                 Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
                 &[],
             ),
-            Handle::current(),
-            || 0,
-        );
+            runtime: Handle::current(),
+            now_secs: || 0,
+        });
         let (ctl_tx, ctl_rx) = tokio::sync::mpsc::unbounded_channel();
         let (reply, reply_rx) = oneshot::channel();
         ctl_tx
@@ -1345,19 +1377,19 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
 
         let runs = tempfile::tempdir().unwrap();
-        let mut host = build_host(
-            Config::default(),
-            registry,
-            runs.path().to_path_buf(),
-            mcp,
-            vec![],
-            crate::daemon::mcp_pool::McpPool::for_daemon(
+        let mut host = build_host(HostParts {
+            config: Config::default(),
+            providers: registry,
+            runs_dir: runs.path().to_path_buf(),
+            shared_mcp: mcp,
+            mcp_tool_defs: vec![],
+            mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(
                 Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
                 &[],
             ),
-            Handle::current(),
-            || 100,
-        );
+            runtime: Handle::current(),
+            now_secs: || 100,
+        });
 
         // Drive a Spawn control op through the host.
         let (reply, rx) = oneshot::channel();
@@ -1448,19 +1480,19 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
         let mut registry = ProviderRegistry::new();
         registry.register("anthropic".to_string(), Arc::new(FakeProvider));
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
-        let mut host = build_host(
-            Config::default(),
-            registry,
-            runs.path().to_path_buf(),
-            mcp,
-            vec![],
-            crate::daemon::mcp_pool::McpPool::for_daemon(
+        let mut host = build_host(HostParts {
+            config: Config::default(),
+            providers: registry,
+            runs_dir: runs.path().to_path_buf(),
+            shared_mcp: mcp,
+            mcp_tool_defs: vec![],
+            mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(
                 Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
                 &[],
             ),
-            Handle::current(),
-            || 100,
-        );
+            runtime: Handle::current(),
+            now_secs: || 100,
+        });
 
         // The reloaded run is registered → Status resolves it.
         let (reply, rx) = oneshot::channel();
@@ -1484,19 +1516,19 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} 
         let mut registry = ProviderRegistry::new();
         registry.register("anthropic".to_string(), Arc::new(FakeProvider));
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
-        let mut host = build_host(
-            Config::default(),
-            registry,
-            runs.path().to_path_buf(),
-            mcp,
-            vec![],
-            crate::daemon::mcp_pool::McpPool::for_daemon(
+        let mut host = build_host(HostParts {
+            config: Config::default(),
+            providers: registry,
+            runs_dir: runs.path().to_path_buf(),
+            shared_mcp: mcp,
+            mcp_tool_defs: vec![],
+            mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(
                 Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
                 &[],
             ),
-            Handle::current(),
-            || 100,
-        );
+            runtime: Handle::current(),
+            now_secs: || 100,
+        });
 
         // Persist a running run only now - build_host's startup reload already ran,
         // so it is on disk but absent from the world.

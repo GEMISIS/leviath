@@ -468,7 +468,6 @@ mod tests {
     /// `statuses` answers successive `Check`s for *children* in order (`None`
     /// once exhausted); `ok` answers `Send`/`Kill`. The caller ("parent") is
     /// reported `Active` - see [`fake_host_with_parent`] to script it.
-    #[allow(clippy::type_complexity)]
     fn fake_host(
         spawn_result: Result<String, String>,
         statuses: Vec<Option<AgentStatus>>,
@@ -483,7 +482,6 @@ mod tests {
 
     /// [`fake_host`] with the child's submitted answer scripted too, so the
     /// "return its final result" half of `check`/`wait` can be exercised.
-    #[allow(clippy::type_complexity)]
     fn fake_host_with_output(
         statuses: Vec<Option<AgentStatus>>,
         output: Option<leviath_core::output::FinalOutput>,
@@ -502,7 +500,6 @@ mod tests {
     }
 
     /// [`fake_host`] with the calling agent's own status scripted too.
-    #[allow(clippy::type_complexity)]
     fn fake_host_with_parent(
         spawn_result: Result<String, String>,
         statuses: Vec<Option<AgentStatus>>,
@@ -517,7 +514,6 @@ mod tests {
     }
 
     /// The one fake behind the three wrappers above.
-    #[allow(clippy::type_complexity)]
     fn fake_host_full(
         spawn_result: Result<String, String>,
         statuses: Vec<Option<AgentStatus>>,
@@ -994,7 +990,10 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     }
 
     /// A host that answers only `Send`, recording each op's `target_region`.
-    #[allow(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "returns the handle beside the recording buffer the assertions read"
+    )]
     fn send_recording_host() -> (
         SubAgentHandle,
         std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
