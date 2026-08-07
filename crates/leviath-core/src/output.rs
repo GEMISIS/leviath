@@ -291,6 +291,16 @@ pub fn resolve_output_spec(
 /// most for a format the model has no prior knowledge of, which is exactly the
 /// case this module is built to support.
 ///
+/// A constrained spec closes with a precedence sentence, because without one
+/// this text and the stage's own system prompt are two peer instructions and
+/// which wins is model-dependent (issue #282: a stage prompt saying "lead with
+/// the diagnosis" beat `--output-instructions "reply with only the integer"` on
+/// some models and lost on others). By the time this runs, [`resolve_output_spec`]
+/// has already picked one winner per field - a caller's flag replaces the
+/// blueprint's line rather than joining it - so there is exactly one shape here
+/// and it is the one that should govern. The sentence is scoped to presentation
+/// so a bare `format` does not read as licence to drop content.
+///
 /// Returns an empty string for a spec that constrains nothing, so callers can
 /// append it unconditionally.
 pub fn describe_spec(spec: &OutputSpec) -> String {
@@ -310,6 +320,14 @@ pub fn describe_spec(spec: &OutputSpec) -> String {
         parts.push(format!(
             "Here is an example of the expected shape:\n{example}"
         ));
+    }
+    if !parts.is_empty() {
+        parts.push(
+            "This governs how the answer is presented. Where anything else you were told says \
+             to present it differently - its length, its structure, what to lead with - follow \
+             this."
+                .to_string(),
+        );
     }
     parts.join("\n\n")
 }
@@ -548,6 +566,48 @@ mod tests {
         assert!(described.contains("One card per finding."));
         assert!(described.contains("valid against this schema"));
         assert!(described.contains("{\"root\": {}}"));
+    }
+
+    /// Issue #282. Without this the spec and the stage's own system prompt are
+    /// two peer instructions, and a strongly-shaped stage prompt wins on some
+    /// models and loses on others.
+    #[test]
+    fn a_constrained_spec_says_it_outranks_the_stage_prompt() {
+        let described = describe_spec(&OutputSpec {
+            instructions: Some("Reply with only the integer.".to_string()),
+            ..OutputSpec::default()
+        });
+        assert!(
+            described.contains("Where anything else you were told"),
+            "{described}"
+        );
+        // Last, so it is read as governing what precedes it rather than as one
+        // more line the next paragraph can override.
+        assert!(
+            described.trim_end().ends_with("follow this."),
+            "{described}"
+        );
+    }
+
+    /// A format on its own is still a shape, so it still outranks a prompt that
+    /// describes a different one.
+    #[test]
+    fn a_format_only_spec_claims_precedence_too() {
+        let described = describe_spec(&OutputSpec {
+            format: Some("text".to_string()),
+            ..OutputSpec::default()
+        });
+        assert!(
+            described.contains("Where anything else you were told"),
+            "{described}"
+        );
+    }
+
+    /// The claim is scoped to presentation. A spec that constrains nothing must
+    /// not tell a model to disregard its stage prompt.
+    #[test]
+    fn an_unconstrained_spec_claims_nothing() {
+        assert!(!describe_spec(&OutputSpec::default()).contains("follow this"));
     }
 
     #[test]

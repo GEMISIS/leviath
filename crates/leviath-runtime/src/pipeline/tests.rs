@@ -9890,6 +9890,39 @@ fn stage_setup_from_folds_a_required_output_into_the_system_prompt() {
     assert!(prompt.contains("{\"root\": {}}"), "{prompt}");
 }
 
+/// Issue #282. The stage's own prompt and the resolved spec are both just text
+/// to a model, so the spec has to come last *and* say it governs. Ordering on
+/// its own is what the reported build already did, and a strong stage prompt
+/// still won on some models.
+#[test]
+fn a_required_outputs_shape_comes_after_the_stage_prompt_and_outranks_it() {
+    let spec = leviath_core::output::OutputSpec {
+        format: Some("text".to_string()),
+        instructions: Some("Reply with only the integer.".to_string()),
+        ..Default::default()
+    };
+    let mut s = stage_named("summary", None, false, None);
+    s.require_output = true;
+    s.config.insert(
+        "system_prompt".to_string(),
+        serde_json::Value::String("Lead with the diagnosis.".to_string()),
+    );
+    let prompt = stage_setup_from(&s, hints(true), Default::default(), Some(spec))
+        .system_prompt
+        .expect("a required output always produces instructions");
+    let stage_at = prompt
+        .find("Lead with the diagnosis.")
+        .expect("stage prompt");
+    let caller_at = prompt
+        .find("Reply with only the integer.")
+        .expect("the caller's instructions");
+    let rule_at = prompt
+        .find("Where anything else you were told")
+        .expect("the precedence rule");
+    assert!(stage_at < caller_at, "{prompt}");
+    assert!(caller_at < rule_at, "{prompt}");
+}
+
 /// A stage that declares a shape but is not required to submit is left alone:
 /// declaring is not demanding.
 #[test]
