@@ -1,0 +1,253 @@
+//! Turning world state into the event stream subscribers see.
+//!
+//! The change-detection pass: compare every run against the snapshot kept from
+//! the previous cycle and emit only what actually moved. This is why an idle
+//! daemon produces no events rather than a heartbeat of unchanged status.
+
+use super::*;
+
+impl WorldHost {
+    /// Subscribe to [`WorldEvent`]s. The HTTP/WS gateway uses this (via the
+    /// control transport's `Subscribe`) to push updates instead of polling.
+    pub fn subscribe(&self) -> broadcast::Receiver<WorldEvent> {
+        self.events.subscribe()
+    }
+
+    /// The world-event sender, handed to the control transport so a `Subscribe`
+    /// connection can stream events.
+    pub fn event_sender(&self) -> broadcast::Sender<WorldEvent> {
+        self.events.clone()
+    }
+
+    /// Diff every registered run against its last-emitted snapshot and broadcast
+    /// what changed (status/tokens/context/completion) plus any new interaction.
+    /// Called after each drive to quiescence, so subscribers see every change.
+    pub(super) fn emit_events(&mut self) {
+        self.adopt_unregistered_runs();
+        let pairs: Vec<(String, Entity)> = self
+            .by_run_id
+            .iter()
+            .map(|(k, &v)| (k.clone(), v))
+            .collect();
+        // Terminal agents to unload from memory this pass (their disk state is
+        // preserved and still viewable). Collected during the loop, reaped after.
+        // The listing row travels with each one: it is built here, while the
+        // entity is untouched, rather than in the reap loop below, where the
+        // daemon's reap hook has already had the world and is free to have taken
+        // the components it reads.
+        let mut to_reap: Vec<(String, Entity, RunListEntry)> = Vec::new();
+        let mut to_park: Vec<(String, Entity, RunListEntry)> = Vec::new();
+        let now = chrono::Utc::now().timestamp();
+        for (run_id, entity) in pairs {
+            let Some(state) = self.world.world().get::<AgentState>(entity) else {
+                continue; // reaped between registration and now
+            };
+            let agent_id = state.agent_id.clone();
+            let status = status_str(&state.status);
+            let terminal = matches!(
+                state.status,
+                AgentStatus::Complete | AgentStatus::Error { .. } | AgentStatus::Cancelled
+            );
+            let cur = {
+                let totals = self
+                    .world
+                    .world()
+                    .get::<TokenTotals>(entity)
+                    .copied()
+                    .unwrap_or_default();
+                let (context_tokens, _) = self
+                    .world
+                    .world()
+                    .get::<ContextWindow>(entity)
+                    .map(|w| (w.current_tokens, w.max_tokens))
+                    .unwrap_or((0, 0));
+                Emitted {
+                    status,
+                    stage: state.current_stage.clone(),
+                    iteration: state.iteration,
+                    tool_calls: totals.tool_calls,
+                    accepts_messages: state.accepts_messages,
+                    prompt_tokens: totals.prompt_tokens,
+                    completion_tokens: totals.completion_tokens,
+                    cached_tokens: totals.cached_tokens,
+                    cache_write_tokens: totals.cache_write_tokens,
+                    context_tokens,
+                    terminal,
+                }
+            };
+            let max_tokens = self
+                .world
+                .world()
+                .get::<ContextWindow>(entity)
+                .map(|w| w.max_tokens)
+                .unwrap_or(0);
+            let prev = self.emitted.get(&run_id).cloned();
+
+            if prev.is_none() {
+                let blueprint = self
+                    .world
+                    .world()
+                    .get::<RunMetadata>(entity)
+                    .map(|m| m.agent_name.clone())
+                    .unwrap_or_default();
+                let _ = self.events.send(WorldEvent::Spawned {
+                    run_id: run_id.clone(),
+                    agent_id: agent_id.clone(),
+                    blueprint,
+                });
+            }
+
+            let status_key = |e: &Emitted| {
+                (
+                    e.status,
+                    e.stage.clone(),
+                    e.iteration,
+                    e.tool_calls,
+                    e.accepts_messages,
+                )
+            };
+            if prev.as_ref().map(status_key) != Some(status_key(&cur)) {
+                let _ = self.events.send(WorldEvent::Status {
+                    run_id: run_id.clone(),
+                    agent_id: agent_id.clone(),
+                    status: status.to_string(),
+                    stage: cur.stage.clone(),
+                    iteration: cur.iteration,
+                    tool_calls: cur.tool_calls,
+                    accepts_messages: cur.accepts_messages,
+                });
+            }
+
+            let token_key = |e: &Emitted| {
+                (
+                    e.prompt_tokens,
+                    e.completion_tokens,
+                    e.cached_tokens,
+                    e.cache_write_tokens,
+                )
+            };
+            if prev.as_ref().map(token_key) != Some(token_key(&cur)) {
+                let _ = self.events.send(WorldEvent::Tokens {
+                    run_id: run_id.clone(),
+                    agent_id: agent_id.clone(),
+                    prompt_tokens: cur.prompt_tokens,
+                    completion_tokens: cur.completion_tokens,
+                    cached_tokens: cur.cached_tokens,
+                    cache_write_tokens: cur.cache_write_tokens,
+                });
+            }
+
+            if prev.as_ref().map(|e| e.context_tokens) != Some(cur.context_tokens) {
+                let _ = self.events.send(WorldEvent::Context {
+                    run_id: run_id.clone(),
+                    agent_id: agent_id.clone(),
+                    total_tokens: cur.context_tokens,
+                    max_tokens,
+                });
+            }
+
+            let was_terminal = prev.as_ref().map(|e| e.terminal) == Some(true);
+            if cur.terminal && !was_terminal {
+                let _ = self.events.send(WorldEvent::Completed {
+                    run_id: run_id.clone(),
+                    agent_id: agent_id.clone(),
+                    status: status.to_string(),
+                    // Read off the live entity, not off disk: this fires the
+                    // moment the run goes terminal, and the persist tick that
+                    // writes `meta.json` has not necessarily run yet.
+                    final_output: self
+                        .world
+                        .world()
+                        .get::<crate::persistence::FinalOutput>(entity)
+                        .map(|o| o.0.clone()),
+                });
+            }
+            // Unload a terminal agent once its terminal state has been emitted (a
+            // prior pass already saw it terminal, so the event went out and the
+            // persistence lane captured it) and no live parent still needs it.
+            if cur.terminal && was_terminal && self.no_live_parent(entity) {
+                let entry = self.entry_for(&run_id, entity, state);
+                to_reap.push((run_id.clone(), entity, entry));
+            }
+            // Page a paused run out of the world once its paused state is on
+            // its way to disk. Unlike `Waiting` (see the NOTE below), `Paused`
+            // carries no live continuation - it is the one non-terminal state
+            // whose whole meaning is "nothing is driving this" - and Resume,
+            // Message and Cancel all page an unloaded run back in through
+            // `resolve_or_reload`, exactly as a daemon restart would. Scoped
+            // to standalone roots: a run with tree links or an open prompt
+            // keeps the restart-equivalence question open and stays resident.
+            if self.parkable(entity, &state.status) {
+                let entry = self.entry_for(&run_id, entity, state);
+                to_park.push((run_id.clone(), entity, entry));
+            }
+            // NOTE: non-terminal `Waiting` agents are intentionally NOT unloaded.
+            // Every `Waiting` state carries a live, unpersisted continuation - a
+            // blocked `ask` future (`AwaitingInteraction`), running fan-out workers
+            // (`FanOutWaiting`), or pending children (`WaitingForChildren`) - so
+            // flushing one to disk and paging it back cannot resume it (in-flight
+            // interactions aren't persisted; the blocked future is gone). Only
+            // terminal agents (fully on disk) are reaped, and paused ones parked.
+
+            self.emitted.insert(run_id, cur);
+        }
+
+        // Reap: run the daemon's reap hook (sandbox teardown + tool-state drop)
+        // while the entity is still valid, then despawn it and erase its host-map
+        // entries. Iterating a snapshot of `by_run_id` above means removing here
+        // is safe. The reaper is moved out for the loop to avoid borrowing `self`
+        // twice, then restored.
+        let mut reaper = self.reaper.take();
+        let reaped_any = !to_reap.is_empty();
+        for (run_id, entity, entry) in to_reap {
+            if let Some(reaper) = reaper.as_mut() {
+                reaper(&mut self.world, entity);
+            }
+            self.world.world_mut().despawn(entity);
+            self.by_run_id.remove(&run_id);
+            self.emitted.remove(&run_id);
+            // The run leaves memory but not the listing: for a while yet it can
+            // still say how it ended, which is the whole of issue #205.
+            self.record_finished(entry, now);
+        }
+        // Park paused runs: same teardown as a reap (the reap hook drops the
+        // agent's tool state and sandbox, which a page-in rebuilds the way a
+        // daemon restart does), but the listing row moves to `parked` rather
+        // than `finished` - the run is not over, it is just not resident.
+        for (run_id, entity, entry) in to_park {
+            if let Some(reaper) = reaper.as_mut() {
+                reaper(&mut self.world, entity);
+            }
+            self.world.world_mut().despawn(entity);
+            self.by_run_id.remove(&run_id);
+            self.emitted.remove(&run_id);
+            self.parked.insert(run_id, entry);
+        }
+        self.reaper = reaper;
+        self.prune_finished(now);
+        // Reaped runs answer no further prompts: drop their request ids from
+        // the emitted-interaction set, which otherwise grows for the daemon's
+        // life (the set is keyed by request id, so prune by what is still
+        // pending - the same shape `cancel_tree` uses).
+        if reaped_any {
+            let still_open: std::collections::HashSet<String> = self
+                .interactions
+                .pending()
+                .into_iter()
+                .map(|(_, req)| req.id)
+                .collect();
+            self.emitted_interactions
+                .retain(|id| still_open.contains(id));
+        }
+
+        for (agent_id, request) in self.interactions.pending() {
+            if self.emitted_interactions.insert(request.id.clone()) {
+                let _ = self.events.send(WorldEvent::Interaction {
+                    run_id: agent_id.clone(),
+                    agent_id,
+                    request,
+                });
+            }
+        }
+    }
+}
