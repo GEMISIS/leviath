@@ -371,6 +371,15 @@ impl ScriptHost for DaemonScriptHost {
         if !self.allow.write_file && crate::shell_keys::writes_a_file(command) {
             return Err(denied("write_file (a shell redirect writes a file)"));
         }
+        // And the containment half, which no `allow` lifts: this host's own
+        // `write_file` is workdir-confined, so its `shell()` redirects are too.
+        if let Some(refusal) = crate::tools::escaping_write_refusal(
+            "shell",
+            &serde_json::json!({ "command": command }),
+            &self.workdir,
+        ) {
+            return Err(refusal);
+        }
         let (shell, flag) = default_shell();
         // With a sandbox, build the command that runs inside the current stage's
         // container / namespace; otherwise run the shell directly on the host
@@ -1050,10 +1059,31 @@ mod tests {
         // write being refused rather than the shell.
         host.shell("echo pwn").expect("a non-writing shell is fine");
 
-        // And with writes permitted, the redirect runs.
+        // And with writes permitted, a redirect *inside the workdir* runs.
         let host = DaemonScriptHost::with_io(all_allowed(), std::env::temp_dir(), io.clone());
-        host.shell("echo pwn > /tmp/x")
+        host.shell("echo pwn > x")
             .expect("a permitted write is not clamped");
+    }
+
+    /// Issue #289. `allow.write_file` answers "may this write at all"; it does
+    /// not answer "may it write *there*". This host's `write_file` is
+    /// workdir-confined, so its `shell()` redirects are too - otherwise a script
+    /// with writes permitted could put a file anywhere on the host.
+    #[test]
+    fn a_script_shell_redirect_stays_inside_the_workdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let io = RecordingIo::arc();
+        let host = DaemonScriptHost::with_io(all_allowed(), dir.path().to_path_buf(), io.clone());
+
+        let err = host
+            .shell("echo pwn > /root/.bashrc")
+            .expect_err("an escaping redirect is refused even with writes allowed");
+        assert!(err.contains("outside the working directory"), "got: {err}");
+
+        // The control: inside the workdir it still runs, so this is the path
+        // being refused rather than every redirect.
+        host.shell("echo ok > inside.txt")
+            .expect("a redirect inside the workdir runs");
     }
 
     #[test]

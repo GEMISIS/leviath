@@ -67,7 +67,10 @@ a vulnerability:
   owner-only too.
 - **A repository the agent is pointed at.** File tools resolve symlinks and
   refuse paths that leave the workspace, so a checked-in symlink cannot read
-  your `~/.ssh`. The one exception is deliberate and yours to make: an agent
+  your `~/.ssh`. A shell redirect answers to the same fence: `> path` outside
+  the workspace is refused exactly as `write_file` refuses it, so the shell is
+  not a spelling that gets further. No flag lifts that, `--yolo` included -
+  it is containment rather than permission. The one exception is deliberate and yours to make: an agent
   may declare extra directories under `[read_paths]`, and those declarations
   are inert until your config grants them. When granted they are read-only,
   and every access is checked against the symlink-resolved real path, so a

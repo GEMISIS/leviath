@@ -69,6 +69,23 @@ blueprint. See [Configuration](/docs/configuration#system-prompt-hints).
 > `shell` requires the platform's process-spawn capability. On platforms that don't provide it, the
 > tool (and its `bash` alias) is filtered out and never advertised.
 
+### Where a redirect may write
+
+`echo x > report.md` is a file write that no tool name describes, so it answers to the `write_file`
+policy rather than the shell's alone. A denied `write_file` denies the redirect too, and no
+`[safe_commands]` entry can pre-approve one.
+
+It also answers to the same **workspace confinement**. A redirect whose target resolves outside the
+working directory is refused, exactly as `write_file` refuses that path, and no flag lifts it -
+`--yolo` included. That is deliberate: `--yolo` grants permission, and this is not a permission
+question.
+
+Discarded writes cost nothing. `2>/dev/null`, `> /dev/null 2>&1`, `&> /dev/null` and `> NUL` write
+nowhere anyone can read back, so they are neither clamped nor confined.
+
+A target the parser cannot name - `> $OUT`, or bash's `/dev/tcp/host/port` - has no path to check,
+so it is ungrantable instead: it prompts every time and no approval makes it reusable.
+
 ### How much output comes back
 
 At most 1 MB of stdout and 1 MB of stderr per call. Past that the bytes are counted and dropped,

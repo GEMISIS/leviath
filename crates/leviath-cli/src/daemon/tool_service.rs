@@ -352,6 +352,18 @@ pub async fn dispatch_tools(
             continue;
         }
 
+        // A redirect leaving the workdir is a write `write_file` would refuse
+        // outright, so the shell does not get to be the spelling that works.
+        // Checked before policy resolution because no policy makes it allowed:
+        // this is containment, not permission.
+        if let Some(refusal) =
+            crate::tools::escaping_write_refusal(&tc.name, &tc.arguments, state.builtins.workdir())
+        {
+            progress(&tc.id, &refusal);
+            slots.push((tc.id.clone(), Some(refusal)));
+            continue;
+        }
+
         let is_builtin = state.builtin_names.contains(&tc.name);
         // What a scoped approval for *this specific call* would be remembered
         // under. For a shell call that is one key per command in the line, not
@@ -1380,6 +1392,88 @@ mod tests {
         assert_eq!(out[0], ("c1".to_string(), "AAA".to_string()));
         assert!(out[1].0 == "c2" && out[1].1.contains("[denied]"));
         assert_eq!(out[2], ("c3".to_string(), "BBB".to_string()));
+    }
+
+    /// Issue #289, at the layer that actually decides. Everything here is
+    /// permitted - `shell` and `write_file` both `Allow`, which is what
+    /// `--yolo` produces - so the only thing that can stop the write is the
+    /// containment check, and the control proves it is not stopping everything.
+    #[tokio::test]
+    async fn a_shell_redirect_outside_the_workdir_is_refused_before_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let escaped = dir
+            .path()
+            .parent()
+            .expect("tempdir has a parent")
+            .join("leviath-289-probe.txt");
+        let hub = InteractionHub::new();
+        let builtins = Arc::new(leviath_tools::BuiltinTools::new(
+            leviath_tools::ToolContext::new(dir.path().to_path_buf()),
+        ));
+        let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
+        let mut global = HashMap::new();
+        global.insert("shell".to_string(), ToolPolicy::Allow);
+        global.insert("write_file".to_string(), ToolPolicy::Allow);
+        let (script_tools, script_tool_names, script_host) = no_script_fields();
+        let state = Arc::new(AgentToolState {
+            builtins,
+            mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            builtin_names,
+            launch_overrides: Arc::new(HashMap::new()),
+            safe_keys: Arc::new(HashSet::new()),
+            run_allows: Arc::new(Mutex::new(HashSet::new())),
+            stage_allows: Arc::new(StdMutex::new(HashSet::new())),
+            stage_allows_index: Arc::new(StdMutex::new(None)),
+            stage_perms: Arc::new(StdMutex::new(HashMap::new())),
+            stage_perms_by_index: Arc::new(Vec::new()),
+            stage_required: Arc::new(StdMutex::new(HashSet::new())),
+            stage_required_by_index: Arc::new(Vec::new()),
+            agent_perms: Arc::new(HashMap::new()),
+            global_perms: Arc::new(global),
+            blueprint_may_loosen: false,
+            interaction: hub.backend_for("agent-a"),
+            unattended: false,
+            stage_name: Arc::new(StdMutex::new("main".to_string())),
+            subagent: None,
+            sandbox: None,
+            script_tools,
+            script_tool_names,
+            script_host,
+            dynamic: None,
+        });
+
+        let out = dispatch_tools(
+            state,
+            vec![
+                call(
+                    "c1",
+                    "shell",
+                    serde_json::json!({
+                        "command": format!("echo pwn > {}", escaped.display())
+                    }),
+                ),
+                call(
+                    "c2",
+                    "shell",
+                    serde_json::json!({ "command": "echo ok > inside.txt" }),
+                ),
+            ],
+            noop_progress(),
+        )
+        .await;
+
+        assert_eq!(out.len(), 2);
+        let refused = out[0].1.clone();
+        let allowed = out[1].1.clone();
+        assert!(
+            refused.contains("outside the working directory"),
+            "{refused}"
+        );
+        // Refused *before it runs*, which the message alone would not prove.
+        assert!(!escaped.exists(), "the escaping write was executed anyway");
+        // The control: the same permissions write happily inside the workdir.
+        let wrote_inside = dir.path().join("inside.txt").exists();
+        assert!(wrote_inside, "{allowed}");
     }
 
     #[tokio::test]

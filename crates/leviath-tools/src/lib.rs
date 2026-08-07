@@ -54,6 +54,15 @@ impl BuiltinTools {
         }
     }
 
+    /// The directory every path these tools resolve is confined to.
+    ///
+    /// Exposed so the authorization layer can hold a *shell redirect* to the
+    /// same fence `resolve` already holds `write_file` to. Without it the two
+    /// disagree, and `> path` becomes the spelling of `write_file` that works.
+    pub fn workdir(&self) -> &Path {
+        &self.ctx.workdir
+    }
+
     /// Route this agent's shell execution through `executor` (a container /
     /// namespace sandbox) instead of the host.
     pub fn with_shell_executor(mut self, executor: Arc<dyn ShellExecutor>) -> Self {
