@@ -367,7 +367,9 @@ pub fn remove_legacy_with(
 /// Deactivation is deliberately unchecked. It fails when nothing is registered,
 /// which is the normal case on a first install and not a problem.
 ///
-/// The effects are injected for the same reason [`remove_legacy_with`]'s are:
+/// The effects are injected for the same reason `remove_legacy_with`'s are
+/// (deliberately not a link: that function is macOS-only, so the link would not
+/// resolve when rustdoc runs on any other platform):
 /// `run` shells out to `launchctl`/`systemctl`, and nothing about the sequence
 /// needs a real supervisor to be checked.
 pub fn install_with(
