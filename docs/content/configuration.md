@@ -112,6 +112,8 @@ wedge_timeout_secs        = 0    # fail a run nothing can reach any more; 0 is o
 provider_failures_before_open  = 3     # pull a provider after this many failures in a row
 provider_circuit_cooldown_secs = 300   # how long before it is tried again
 interaction_timeout_secs  = 3600 # release a prompt nobody answered
+max_tool_call_write_bytes = 2147483648   # 2 GiB; delete the line for no limit
+max_run_write_bytes       = 10737418240  # 10 GiB; delete the line for no limit
 ```
 
 | Key | Default | Notes |
@@ -128,8 +130,10 @@ interaction_timeout_secs  = 3600 # release a prompt nobody answered
 | `provider_failures_before_open` | `3` | Failures in a row before a provider is pulled. See below |
 | `provider_circuit_cooldown_secs` | `300` | How long a pulled provider waits before one request tests it. A success restores it, a failure restarts the wait |
 | `interaction_timeout_secs` | `3600` | How long a prompt may go unanswered. See below |
+| `max_tool_call_write_bytes` | unset | Most one tool call may write. See below |
+| `max_run_write_bytes` | unset | Most a whole run may write. See below |
 
-Six of those need more than a table cell.
+Seven of those need more than a table cell.
 
 **`exact_token_counting`** measures each assembled request before sending it and refuses one that
 would overflow the window. On providers with a remote counting endpoint that costs a network round
@@ -162,6 +166,26 @@ never counts as consent. `0` waits indefinitely. See
 [when nobody answers](/docs/interaction#when-nobody-answers).
 
 <a id="security"></a>
+
+**`max_tool_call_write_bytes`** and **`max_run_write_bytes`** bound how much an agent puts on disk.
+Both are **unset in code and written by `lev setup`**, which is the unusual part and deliberate: how
+much an agent should be allowed to write depends on what you are doing with it, so Leviath imposes
+nothing on a config it did not write. A fresh install gets concrete numbers here, where you can see
+them and **delete the line to remove the limit**.
+
+The incident behind them was a single shell call appending in a loop until the 60-second timeout -
+about 14 GB from one call that looked ordinary - repeated until the disk was full.
+
+They work differently because they have to. `write_file` and `edit_file` carry their content as an
+argument, so an oversized one is refused before a byte lands. A shell redirect does not: those bytes
+go from the shell to the file without passing through Leviath, so the target is measured *after* the
+call. That stops the call after the one that overran, not the one that did.
+
+Running out of disk is separate and **not configurable**. Leviath refuses any write that would leave
+under a gigabyte free, whatever these two say and whatever `--yolo` says, because filling the disk
+harms every other process on the machine rather than just the run. A filesystem whose free space
+cannot be read is treated as unknown and allowed - a guard that cannot measure has nothing to say -
+and the two ceilings above still apply to it.
 
 ## `[security]`
 

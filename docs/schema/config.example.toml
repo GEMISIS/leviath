@@ -38,6 +38,11 @@ wedge_timeout_secs = 0
 provider_failures_before_open = 3
 provider_circuit_cooldown_secs = 300
 interaction_timeout_secs = 3600
+# How much an agent may write to disk. Unset in code and written by `lev setup`:
+# delete either line to remove that limit. Running out of disk is refused
+# separately and is not configurable.
+max_tool_call_write_bytes = 2147483648
+max_run_write_bytes = 10737418240
 
 [security]
 allow_seed_commands = true

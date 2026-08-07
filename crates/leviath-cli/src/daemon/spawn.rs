@@ -407,6 +407,11 @@ fn build_tool_state(
         .cloned()
         .unwrap_or_default();
     Arc::new(AgentToolState {
+        // One budget per run, so the per-run ceiling spans every batch rather
+        // than resetting with each one.
+        writes: Arc::new(crate::daemon::tool_service::WriteBudget::new(
+            config.limits.write_limits(),
+        )),
         builtins,
         mcp,
         builtin_names,

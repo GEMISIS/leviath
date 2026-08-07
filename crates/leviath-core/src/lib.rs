@@ -33,6 +33,7 @@ pub mod secrets;
 pub mod taint;
 pub mod telemetry;
 pub mod text;
+pub mod write_limits;
 
 pub use blueprint::{
     Blueprint, ContextTransform, EdgeTransform, FileTrackingConfig, NudgeConfig, ReadPathsConfig,

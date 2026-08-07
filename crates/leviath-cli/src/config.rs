@@ -759,6 +759,46 @@ pub struct LimitsConfig {
     /// Read once at daemon start, so a change needs a daemon restart.
     #[serde(default = "default_interaction_timeout_secs")]
     pub interaction_timeout_secs: u64,
+
+    /// Most bytes one tool call may write to disk. Unset is unlimited.
+    ///
+    /// **Unset in code, set by `lev setup`.** How much an agent should write is
+    /// a judgement about what you are doing with it, so nothing is imposed on a
+    /// user who never opened this file - but a fresh install gets a concrete
+    /// number written here, where it is visible and can be deleted outright.
+    ///
+    /// The incident behind it (issue #252) was a single shell call appending in
+    /// a loop until the 60-second timeout: about 14 GB, from one call that
+    /// looked ordinary.
+    ///
+    /// A shell redirect is measured *after* the call, since the bytes go from
+    /// the shell to the file without passing through Leviath. So this stops the
+    /// call after the one that overran, not the one that did. `write_file` is
+    /// measured before, and is stopped outright.
+    ///
+    /// Running out of disk is checked separately and is never configurable: see
+    /// [`leviath_core::write_limits::MIN_FREE_BYTES`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_call_write_bytes: Option<u64>,
+
+    /// Most bytes a whole run may write to disk. Unset is unlimited.
+    ///
+    /// The companion to `max_tool_call_write_bytes`, and the one that catches
+    /// what a per-call ceiling cannot: three calls of 12-14 GB each are
+    /// individually plausible and collectively a full disk. Same defaulting -
+    /// unset in code, written by `lev setup`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_run_write_bytes: Option<u64>,
+}
+
+impl LimitsConfig {
+    /// The write ceilings in effect, for the engine.
+    pub fn write_limits(&self) -> leviath_core::write_limits::WriteLimits {
+        leviath_core::write_limits::WriteLimits {
+            per_call: self.max_tool_call_write_bytes,
+            per_run: self.max_run_write_bytes,
+        }
+    }
 }
 
 impl Default for LimitsConfig {
@@ -777,6 +817,12 @@ impl Default for LimitsConfig {
             provider_failures_before_open: default_provider_failures_before_open(),
             provider_circuit_cooldown_secs: default_provider_circuit_cooldown_secs(),
             interaction_timeout_secs: default_interaction_timeout_secs(),
+            // Deliberately `None` here and concrete in `lev setup`: the code
+            // imposes no ceiling on a user who never opened the config, and a
+            // fresh install gets a number written where it can be seen and
+            // deleted. See the field docs.
+            max_tool_call_write_bytes: None,
+            max_run_write_bytes: None,
         }
     }
 }
@@ -3566,6 +3612,8 @@ enabled = false
             taint_tracking: false,
             limits: LimitsConfig {
                 mcp_idle_disconnect_secs: default_mcp_idle_disconnect_secs(),
+                max_tool_call_write_bytes: None,
+                max_run_write_bytes: None,
                 max_concurrent_inferences: Some(4),
                 max_concurrent_tools: 3,
                 default_max_iterations: Some(99),

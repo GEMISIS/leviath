@@ -361,6 +361,102 @@ pub fn escaping_write_refusal(
     ))
 }
 
+/// How many bytes this call declares it will write, when that is knowable
+/// before it runs.
+///
+/// `write_file` and `edit_file` carry their content as an argument, so the
+/// figure is exact and the call can be stopped before a byte lands. A shell
+/// redirect cannot be: the bytes go from the shell to the file without passing
+/// through Leviath, so `None` here means "unknown, measure afterwards" rather
+/// than "writes nothing".
+pub fn declared_write_bytes(tool_name: &str, arguments: &serde_json::Value) -> Option<u64> {
+    let field = match leviath_tools::canonical_tool_name(tool_name) {
+        "write_file" => "content",
+        "edit_file" => "new_str",
+        _ => return None,
+    };
+    arguments
+        .get(field)
+        .and_then(|v| v.as_str())
+        .map(|s| s.len() as u64)
+}
+
+/// Refuse a call that would take the run past a write ceiling, or fill the disk.
+///
+/// Returns the refusal, or `None` to proceed.
+///
+/// Two shapes of call reach here and they are not symmetric. A `write_file`
+/// declares its size, so it is judged before it runs and nothing is written. A
+/// shell redirect does not, so it is judged on what the run has *already*
+/// spent - which stops the call after the one that overran, not the one that
+/// did. That asymmetry is inherent: Leviath never sees those bytes, and the
+/// alternative is refusing every redirect on a run near its budget.
+///
+/// The disk check applies to both, and to a shell call with any write target at
+/// all: a machine with no room left should not be handed a command that writes,
+/// whatever its size turns out to be.
+pub fn write_budget_refusal(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    workdir: &std::path::Path,
+    budget: &crate::daemon::tool_service::WriteBudget,
+) -> Option<String> {
+    let declared = declared_write_bytes(tool_name, arguments);
+    let writes_something = declared.is_some()
+        || (leviath_tools::canonical_tool_name(tool_name) == "shell"
+            && arguments
+                .get("command")
+                .and_then(|v| v.as_str())
+                .is_some_and(crate::shell_keys::writes_a_file));
+    if !writes_something {
+        return None;
+    }
+    budget.check(workdir, declared.unwrap_or(0)).refusal()
+}
+
+/// How many bytes a *finished* shell call put on disk, for charging the run's
+/// budget.
+///
+/// The current size of every literal redirect target, measured now that the
+/// command has run - which is the only moment those bytes are visible to
+/// Leviath at all.
+///
+/// Zero for a declaring tool. Those are charged when they are checked, before
+/// the batch runs: a batch's calls are all authorized before any of them
+/// execute, so a per-run budget charged only afterwards would let every call in
+/// one batch check against a budget none of them had spent yet. Charging a
+/// known size up front is what makes the second write in a two-write batch see
+/// the first.
+///
+/// A target that no longer exists, or was never created, contributes nothing: a
+/// command that failed should not spend the run's budget on a file it did not
+/// write.
+pub fn measured_write_bytes(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    workdir: &std::path::Path,
+) -> u64 {
+    if declared_write_bytes(tool_name, arguments).is_some() {
+        return 0;
+    }
+    if leviath_tools::canonical_tool_name(tool_name) != "shell" {
+        return 0;
+    }
+    let Some(command) = arguments.get("command").and_then(|v| v.as_str()) else {
+        return 0;
+    };
+    crate::shell_keys::write_target_paths(command)
+        .into_iter()
+        .map(|target| {
+            let path = match std::path::Path::new(&target).is_absolute() {
+                true => std::path::PathBuf::from(&target),
+                false => workdir.join(&target),
+            };
+            std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+        })
+        .sum()
+}
+
 /// Tools a blueprint may declare *more* permissively than the built-in default
 /// without the user opting in.
 ///
@@ -893,6 +989,87 @@ mod policy_tests {
         assert_eq!(
             escaping_write_refusal("shell", &serde_json::json!({}), dir.path()),
             None
+        );
+    }
+
+    // ─── Write accounting (issue #252) ───────────────────────────────────────
+
+    /// What each tool declares it will write, which is what lets an oversized
+    /// `write_file` be stopped before a byte lands.
+    #[test]
+    fn a_declaring_tool_reports_its_size_and_a_shell_call_does_not() {
+        assert_eq!(
+            declared_write_bytes("write_file", &serde_json::json!({"content": "abcd"})),
+            Some(4)
+        );
+        assert_eq!(
+            declared_write_bytes("edit_file", &serde_json::json!({"new_str": "abc"})),
+            Some(3)
+        );
+        // A shell redirect's bytes never pass through Leviath, so there is
+        // nothing to declare - `None` means "measure afterwards", not "writes
+        // nothing".
+        assert_eq!(
+            declared_write_bytes("shell", &shell_call("echo x > out.txt")),
+            None
+        );
+        // A declaring tool with the field missing declares nothing either.
+        assert_eq!(
+            declared_write_bytes("write_file", &serde_json::json!({})),
+            None
+        );
+    }
+
+    /// Measuring runs after the call, so a declaring tool contributes nothing
+    /// here - it was charged when it was checked - and a shell call is charged
+    /// what its targets actually weigh.
+    #[test]
+    fn measuring_charges_the_shell_and_not_the_declaring_tools() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("out.txt"), "0123456789").expect("write");
+
+        assert_eq!(
+            measured_write_bytes("shell", &shell_call("echo x > out.txt"), dir.path()),
+            10
+        );
+        // Already charged at check time.
+        assert_eq!(
+            measured_write_bytes(
+                "write_file",
+                &serde_json::json!({"path": "a", "content": "abcd"}),
+                dir.path()
+            ),
+            0
+        );
+        // A target the command never created costs nothing: a failed command
+        // must not spend the run's budget on a file it did not write.
+        assert_eq!(
+            measured_write_bytes("shell", &shell_call("echo x > absent.txt"), dir.path()),
+            0
+        );
+        // Not a writing call at all.
+        assert_eq!(
+            measured_write_bytes("shell", &shell_call("ls -la"), dir.path()),
+            0
+        );
+        // An absolute target is measured where it points, not joined onto the
+        // workdir - which would name a path that does not exist and charge the
+        // run nothing for a file it really wrote.
+        let absolute = dir.path().join("out.txt");
+        let command = format!("echo x > {}", absolute.display());
+        assert_eq!(
+            measured_write_bytes("shell", &shell_call(&command), dir.path()),
+            10
+        );
+        // A shell call with no `command` argument names nothing to measure.
+        assert_eq!(
+            measured_write_bytes("shell", &serde_json::json!({}), dir.path()),
+            0
+        );
+        // And a tool that is neither.
+        assert_eq!(
+            measured_write_bytes("read_file", &serde_json::json!({"path": "a"}), dir.path()),
+            0
         );
     }
 
