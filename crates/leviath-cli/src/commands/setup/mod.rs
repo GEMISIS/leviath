@@ -51,6 +51,7 @@ use crossterm::event::{Event, KeyEventKind};
 use state::{VerifyReply, VerifyRequest, Wizard};
 use verify::ProviderVerifier;
 
+/// Arguments for `lev setup`.
 #[derive(Args)]
 pub struct SetupArgs {
     /// Run non-interactively using only flag values (useful for scripting)
@@ -108,7 +109,9 @@ pub type EnvLookup = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 /// Everything the wizard needs from the outside world, injected so tests point
 /// it at tempdirs and a fake environment instead of the developer's real home.
 pub struct SetupEnv {
+    /// Where the config is read from and written back to.
     pub config_path: PathBuf,
+    /// Where bundled blueprints are installed.
     pub agents_dir: PathBuf,
     /// Roots for the harness scan.
     pub roots: import::Roots,

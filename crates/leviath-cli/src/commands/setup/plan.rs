@@ -27,7 +27,9 @@ pub struct SetupPlan {
 /// What actually happened, for the closing summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Applied {
+    /// The config file that was written.
     pub config_path: PathBuf,
+    /// Blueprints installed, by name.
     pub agents_installed: Vec<String>,
     /// Non-fatal problems worth telling the user about.
     pub warnings: Vec<String>,

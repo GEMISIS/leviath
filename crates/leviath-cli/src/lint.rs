@@ -72,6 +72,7 @@ impl LintSeverity {
 /// file, which no deserializer can produce.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LintFinding {
+    /// How much this matters, and therefore whether it fails the check.
     pub severity: LintSeverity,
     /// Stable slug (`"unknown-tool"`), so a finding can be referenced in an
     /// issue or grepped for in daemon logs without quoting prose.

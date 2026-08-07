@@ -37,6 +37,8 @@ use std::time::Duration;
 /// loop can be driven by canned events in tests instead of blocking on a real
 /// terminal.
 pub trait EventSource {
+    /// Wait up to `timeout` for one input event. `Ok(None)` means the timeout
+    /// elapsed with nothing to read, which is what lets a UI loop tick.
     fn poll_event(&mut self, timeout: Duration) -> std::io::Result<Option<Event>>;
 }
 
@@ -52,6 +54,7 @@ pub struct CrosstermEventSource {
 
 #[allow(clippy::new_without_default)] // constructed only by the binary's real UI entrypoints
 impl CrosstermEventSource {
+    /// Read from the real terminal.
     pub fn new() -> Self {
         Self {
             poll_fn: crossterm::event::poll,
@@ -75,10 +78,18 @@ impl EventSource for CrosstermEventSource {
 /// crossterm implementation (`CrosstermSetup`) lives in the binary, since it
 /// can only be exercised against a real terminal.
 pub trait TerminalSetup {
+    /// The backend the terminal draws through: crossterm in production, a
+    /// `TestBackend` under test.
     type B: ratatui::backend::Backend;
+    /// Take over the terminal - raw mode and the alternate screen.
     fn enable(&mut self) -> anyhow::Result<()>;
+    /// Build the terminal the UI draws into. Called after [`Self::enable`].
     fn create_terminal(&mut self) -> anyhow::Result<Terminal<Self::B>>;
+    /// Hand the terminal back. Must tolerate being called twice: the panic
+    /// hook calls it too, and a panic during teardown would otherwise leave a
+    /// terminal in raw mode.
     fn disable(&mut self);
+    /// Print whatever should remain on screen after the UI exits.
     fn print_done(&self);
 }
 

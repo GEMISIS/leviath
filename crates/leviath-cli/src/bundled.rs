@@ -22,7 +22,10 @@ pub enum AgentAction {
     /// Not installed.
     Install,
     /// Installed at a different version.
-    Update { from: String },
+    Update {
+        /// The version currently on disk, so the offer can say what it replaces.
+        from: String,
+    },
     /// Installed at the bundled version, but the files on disk differ from the
     /// bundled ones.
     Modified,

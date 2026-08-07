@@ -12,6 +12,7 @@ use crate::config::Config;
 use leviath_core::manifest::parse_manifest;
 use leviath_core::truncate_at_boundary;
 
+/// Arguments for `lev test`.
 #[derive(Args)]
 pub struct TestArgs {
     /// Path to agent project
@@ -46,6 +47,7 @@ struct TestFile {
     test: Vec<TestCase>,
 }
 
+/// Run `lev test`: drive a blueprint's declared test cases.
 pub async fn execute(args: TestArgs) -> anyhow::Result<()> {
     execute_with_registry(args, Box::new(build_registry_from_config)).await
 }

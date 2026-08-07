@@ -2,12 +2,15 @@
 
 use clap::{Args, Subcommand};
 
+/// Arguments for `lev policy`.
 #[derive(Args)]
 pub struct PolicyArgs {
+    /// Which policy subcommand to run.
     #[command(subcommand)]
     pub command: PolicyCommand,
 }
 
+/// The `lev policy` subcommands.
 #[derive(Subcommand)]
 pub enum PolicyCommand {
     /// List current policy rules (static + scripted)
@@ -18,9 +21,11 @@ pub enum PolicyCommand {
     Test(PolicyTestArgs),
 }
 
+/// Arguments for `lev policy list`. It takes none.
 #[derive(Args)]
 pub struct PolicyListArgs {}
 
+/// Arguments for `lev policy add`.
 #[derive(Args)]
 pub struct PolicyAddArgs {
     /// Tool name to create a rule for
@@ -34,6 +39,7 @@ pub struct PolicyAddArgs {
     pub max_sensitivity: String,
 }
 
+/// Arguments for `lev policy test`.
 #[derive(Args)]
 pub struct PolicyTestArgs {
     /// Tool name to test
@@ -47,6 +53,7 @@ pub struct PolicyTestArgs {
     pub taint: String,
 }
 
+/// Run `lev policy`: inspect and edit the taint-gate rules.
 pub async fn execute(args: PolicyArgs) -> anyhow::Result<()> {
     match args.command {
         PolicyCommand::List(_) => execute_list().await,

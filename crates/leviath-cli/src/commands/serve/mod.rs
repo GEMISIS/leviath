@@ -47,6 +47,7 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
+/// Run `lev serve`: expose the HTTP + WebSocket API over the daemon.
 pub async fn execute(
     args: ServeArgs,
     control: leviath_runtime::control_socket::ControlClient,

@@ -8,6 +8,7 @@ use super::resolve_cwd;
 use crate::config::Config;
 use leviath_core::manifest::parse_manifest;
 
+/// Arguments for `lev list`.
 #[derive(Args)]
 pub struct ListArgs {
     /// Filter by type (agents, blueprints, all)
@@ -136,6 +137,7 @@ fn print_agent(info: &AgentInfo) {
     }
 }
 
+/// Run `lev list`: show the installed agents.
 pub async fn execute(args: ListArgs) -> anyhow::Result<()> {
     // Propagate, don't default: a config that exists but doesn't parse would
     // silently list from the default `agent_paths`, hiding the user's own

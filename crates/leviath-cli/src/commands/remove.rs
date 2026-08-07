@@ -2,6 +2,7 @@
 
 use clap::Args;
 
+/// Arguments for `lev remove`.
 #[derive(Args)]
 pub struct RemoveArgs {
     /// Name of the installed agent to remove
@@ -9,6 +10,7 @@ pub struct RemoveArgs {
     pub name: String,
 }
 
+/// Run `lev remove`: uninstall an agent.
 pub async fn execute(args: RemoveArgs) -> anyhow::Result<()> {
     let installer = leviath_package::AgentInstaller::new();
     remove_agent(&installer, &args.name)

@@ -34,18 +34,25 @@ pub struct DaemonFanOutSpawner {
     /// Spawn-time config, read fresh per worker so a `config.toml` edit reaches
     /// fan-out workers too (shared with the daemon's main spawner).
     pub config: Arc<crate::daemon::config_reload::ConfigReloader>,
+    /// The daemon-wide MCP executor, for servers configured globally.
     pub shared_mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
+    /// Tool definitions from `shared_mcp`, resolved once rather than per worker.
     pub mcp_tool_defs: Vec<Tool>,
     /// Shared MCP pool for per-agent `[[mcp_servers]]` - a fan-out worker
     /// advertises its blueprint's already-connected servers and lazily warms any
     /// uncached ones for subsequent workers of the same type.
     pub mcp_pool: Arc<crate::daemon::mcp_pool::McpPool>,
+    /// Where a worker's prompts go. Shared with the daemon, so a fan-out
+    /// worker's question reaches the same place as any other run's.
     pub hub: InteractionHub,
+    /// Where a worker's own sub-agent spawns are sent.
     pub subagent_tx: UnboundedSender<SubAgentOp>,
+    /// The tool dispatcher every worker's calls go through.
     pub tool_service: Arc<CliToolService>,
     /// `~/.leviath/agents`, for resolving `worker_query`. `None` when there is no
     /// home directory.
     pub agents_dir: Option<PathBuf>,
+    /// The clock, injected so a test can stamp a worker deterministically.
     pub now_secs: fn() -> i64,
 }
 

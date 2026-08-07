@@ -8,6 +8,7 @@ use clap::{Args, Subcommand};
 use crate::config::Config;
 use leviath_mcp::{AuthStore, MCPClient, MCPServerConfig, OAuthClient};
 
+/// Arguments for `lev mcp`.
 #[derive(Args)]
 pub struct McpArgs {
     #[command(subcommand)]

@@ -10,6 +10,7 @@ use crate::config::Config;
 use clap::{Args, Subcommand};
 use leviath_core::{CredentialStore, CredentialStoreKind};
 
+/// Arguments for `lev auth`.
 #[derive(Debug, Args)]
 pub struct AuthArgs {
     #[command(subcommand)]

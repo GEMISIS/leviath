@@ -21,6 +21,7 @@
 
 use crate::commands;
 
+/// Every `lev` subcommand. Each variant's doc comment is what `--help` prints.
 #[derive(clap::Subcommand)]
 pub enum Commands {
     /// Create a new agent blueprint

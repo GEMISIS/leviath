@@ -20,13 +20,21 @@ use crate::config::Config;
 /// The wizard's screens, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Step {
+    /// What the wizard is about to do, before it touches anything.
     Welcome,
+    /// Pick which providers to configure.
     Providers,
+    /// Enter or confirm a credential for each picked provider.
     ProviderDetail,
+    /// The default provider and model new runs use.
     Defaults,
+    /// Concurrency, timeouts, and the other numeric ceilings.
     Limits,
+    /// Choose which bundled blueprints to install.
     Agents,
+    /// Import MCP servers found in other harnesses' configs.
     Mcp,
+    /// The whole plan, before anything is written.
     Review,
 }
 
@@ -69,7 +77,9 @@ impl Step {
 /// One row of the provider pick-list.
 #[derive(Debug, Clone)]
 pub struct ProviderRow {
+    /// Which provider this row is for.
     pub provider: Provider,
+    /// Whether the user has picked it.
     pub selected: bool,
     /// The credential as typed. Empty means "no value".
     pub value: String,
@@ -78,6 +88,7 @@ pub struct ProviderRow {
     pub from_env: Option<&'static str>,
     /// Reasoning effort, for the Claude Code transport only.
     pub effort: usize,
+    /// What the last verification attempt concluded.
     pub outcome: Outcome,
     /// A verification is in flight.
     pub checking: bool,
@@ -98,17 +109,23 @@ impl ProviderRow {
 /// One row of the blueprint list.
 #[derive(Debug, Clone)]
 pub struct AgentRow {
+    /// The bundled blueprint this row offers.
     pub agent: &'static BundledAgent,
+    /// What installing it would do: a fresh install, an upgrade, or nothing
+    /// because the same version is already there.
     pub action: AgentAction,
+    /// Whether the user has picked it.
     pub selected: bool,
 }
 
 /// One importable MCP server.
 #[derive(Debug, Clone)]
 pub struct McpRow {
+    /// The server definition as found, before collision handling.
     pub candidate: Candidate,
     /// Which harness it came from.
     pub source: String,
+    /// Whether the user has picked it.
     pub selected: bool,
     /// A server of this name is already in the Leviath config.
     pub collides: bool,
@@ -119,8 +136,11 @@ pub struct McpRow {
 /// A single editable setting on the Defaults / Limits screens.
 #[derive(Debug, Clone)]
 pub struct Field {
+    /// The setting's name, as shown.
     pub label: &'static str,
+    /// One line explaining what it does, shown under the label.
     pub help: &'static str,
+    /// Its current value, which also decides what a key press means.
     pub value: FieldValue,
 }
 
@@ -133,7 +153,12 @@ pub enum FieldValue {
     /// A toggle.
     Bool(bool),
     /// One of a fixed list.
-    Choice { options: Vec<String>, index: usize },
+    Choice {
+        /// Every value this field may take, in the order they are cycled.
+        options: Vec<String>,
+        /// Which one is selected, by position in `options`.
+        index: usize,
+    },
 }
 
 impl FieldValue {
@@ -163,14 +188,19 @@ impl FieldValue {
 /// Asked of the background verifier.
 #[derive(Debug, Clone)]
 pub struct VerifyRequest {
+    /// Which provider to check, matching the row that asked.
     pub provider_id: String,
+    /// The credentials to check, as typed or taken from the environment.
     pub creds: leviath_runtime::provider_creds::ProviderCreds,
 }
 
 /// Answered by the background verifier.
 #[derive(Debug, Clone)]
 pub struct VerifyReply {
+    /// Which provider this answers for. Replies can arrive out of order, so
+    /// this is what routes one back to its row.
     pub provider_id: String,
+    /// What the check concluded.
     pub outcome: Outcome,
 }
 
@@ -186,6 +216,7 @@ pub enum EditTarget {
 /// An in-progress text edit.
 #[derive(Debug, Clone)]
 pub struct Edit {
+    /// Where the text goes when it is committed.
     pub target: EditTarget,
     /// The shared single-line editor (cursor movement, masking).
     pub(crate) line: crate::tui::widgets::line_edit::LineEdit,
@@ -205,26 +236,38 @@ pub enum ConfirmPurpose {
 /// A pending confirmation: the dialog plus what its Yes means.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingConfirm {
+    /// What answering Yes would mean.
     pub purpose: ConfirmPurpose,
     pub(crate) dialog: crate::tui::widgets::confirm::Confirm,
 }
 
 /// The whole wizard.
 pub struct Wizard {
+    /// The screen currently shown.
     pub step: Step,
     /// Selected row within the current step.
     pub cursor: usize,
+    /// Every provider the wizard offers, picked or not.
     pub providers: Vec<ProviderRow>,
     /// Which selected provider the credential screen is showing.
     pub detail: usize,
+    /// The Defaults screen's settings.
     pub defaults: Vec<Field>,
+    /// The Limits screen's settings.
     pub limits: Vec<Field>,
+    /// Every bundled blueprint the wizard offers.
     pub agents: Vec<AgentRow>,
+    /// MCP servers found in other harnesses' configs.
     pub mcp: Vec<McpRow>,
+    /// Harnesses whose config could not be read, shown rather than swallowed
+    /// so an empty MCP list is distinguishable from a failed scan.
     pub mcp_scan_errors: Vec<String>,
+    /// The text edit in progress, if any. While this is set, typing goes here
+    /// rather than to the screen's own key bindings.
     pub edit: Option<Edit>,
     /// Show credentials in clear text.
     pub reveal: bool,
+    /// The help overlay is on screen.
     pub show_help: bool,
     /// A confirmation dialog is on screen, and (after Ctrl-C) it is the only
     /// thing keys mean until it is answered.
@@ -236,6 +279,7 @@ pub struct Wizard {
     /// hard gate on saving: the transport cannot be written to the config
     /// without it, and deselecting the transport withdraws it.
     pub claude_code_tos_accepted: bool,
+    /// The user asked to leave and the loop should stop.
     pub should_quit: bool,
     /// Set once the plan has been applied, so the loop knows to stop.
     pub finished: bool,
@@ -250,9 +294,12 @@ pub struct Wizard {
     /// `lev dash` once had a unit test launch a real browser, and this is the
     /// same shape of hazard.
     pub opener: leviath_mcp::BrowserOpener,
+    /// Where a credential check is sent. Verification runs off the UI thread
+    /// so a slow provider cannot freeze the wizard.
     pub verify_tx: mpsc::UnboundedSender<VerifyRequest>,
     verify_rx: Option<mpsc::UnboundedReceiver<VerifyRequest>>,
     reply_tx: mpsc::UnboundedSender<VerifyReply>,
+    /// Where finished checks arrive, drained once per tick.
     pub reply_rx: mpsc::UnboundedReceiver<VerifyReply>,
     /// Tick counter, for the spinner.
     pub ticks: u64,
