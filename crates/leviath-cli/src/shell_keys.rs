@@ -259,8 +259,17 @@ pub fn command_keys(command: &str) -> Vec<String> {
     let Some(segments) = tokenize(command) else {
         return Vec::new();
     };
+    keys_from_segments(&segments)
+}
+
+/// The keys a tokenized line yields.
+///
+/// Split from [`command_keys`] so a caller that has already tokenized - a test
+/// pinning one shell's escape rule against the other - reads the same
+/// implementation rather than a second copy that could drift from it.
+fn keys_from_segments(segments: &[Segment]) -> Vec<String> {
     let mut keys = BTreeSet::new();
-    for segment in &segments {
+    for segment in segments {
         match segment_key(&segment.words) {
             SegmentKey::Keys(found) => {
                 keys.extend(found.into_iter().map(|k| format!("{KEY_PREFIX}{k}")));
@@ -376,7 +385,27 @@ pub fn is_valid_prefix(entry: &str) -> bool {
 /// nesting is ambiguous), and a heredoc (whose body has its own delimiter
 /// grammar).
 fn tokenize(command: &str) -> Option<Vec<Segment>> {
+    tokenize_for(command, BACKSLASH_ESCAPES)
+}
+
+/// Whether the shell these keys describe reads `\` as an escape character.
+///
+/// It does in `sh`; it does not in `cmd.exe`, where `\` is the path separator.
+/// Reading it wrong is not cosmetic: `cat C:\Users\me\notes.md` was keyed as
+/// `shell:cat C:Usersmenotes.md`, so a Windows user's grants were recorded
+/// against paths that do not exist, and anything comparing a key to a real path
+/// compared the wrong string.
+///
+/// Matched to the platform rather than to the resolved shell. `BuiltinTools`
+/// picks `$SHELL` on Unix and `cmd.exe` on Windows, and a Unix user whose
+/// `$SHELL` is not POSIX-ish is already outside what this parser models.
+const BACKSLASH_ESCAPES: bool = cfg!(not(windows));
+
+/// [`tokenize`] with the escape rule supplied, so both readings are testable on
+/// either platform.
+fn tokenize_for(command: &str, backslash_escapes: bool) -> Option<Vec<Segment>> {
     let mut lex = Lexer::default();
+    let escapes = backslash_escapes;
     let mut chars = command.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
@@ -400,7 +429,7 @@ fn tokenize(command: &str) -> Option<Vec<Segment>> {
                 loop {
                     match chars.next()? {
                         '"' => break,
-                        '\\' => {
+                        '\\' if escapes => {
                             // Inside double quotes a backslash escapes only the
                             // four characters that would otherwise be special;
                             // anywhere else it stands for itself.
@@ -411,19 +440,25 @@ fn tokenize(command: &str) -> Option<Vec<Segment>> {
                             lex.word.push(e);
                         }
                         '`' => return None,
-                        '$' => lex.take_dollar(&mut chars)?,
+                        '$' => lex.take_dollar(&mut chars, escapes)?,
                         q => lex.word.push(q),
                     }
                 }
             }
             '`' => return None,
-            '\\' => {
+            '\\' if escapes => {
                 lex.begin_word();
                 lex.word.push(chars.next()?);
             }
+            // Not an escape on this shell, so it is data - and on Windows it is
+            // the path separator, which is the whole reason this branch exists.
+            '\\' => {
+                lex.begin_word();
+                lex.word.push('\\');
+            }
             '$' => {
                 lex.begin_word();
-                lex.take_dollar(&mut chars)?;
+                lex.take_dollar(&mut chars, escapes)?;
             }
             // A heredoc body has its own delimiter grammar, which is more than
             // a grant key is worth reading.
@@ -573,7 +608,11 @@ impl Lexer {
     /// runs a command *inside* this one, so its contents become their own
     /// segment - otherwise `echo $(curl evil)` would grant only `echo`, and a
     /// later `echo $(curl evil)` would be covered by an earlier harmless one.
-    fn take_dollar(&mut self, chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<()> {
+    fn take_dollar(
+        &mut self,
+        chars: &mut std::iter::Peekable<std::str::Chars>,
+        escapes: bool,
+    ) -> Option<()> {
         self.literal = false;
         if chars.peek() != Some(&'(') {
             return Some(());
@@ -589,7 +628,7 @@ impl Lexer {
             }
         }
         let inner = take_substitution(chars)?;
-        self.segments.extend(tokenize(&inner)?);
+        self.segments.extend(tokenize_for(&inner, escapes)?);
         Some(())
     }
 }

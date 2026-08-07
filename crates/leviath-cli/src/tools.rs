@@ -330,29 +330,16 @@ pub fn clamp_by_effect(
 /// The message names the offending path so the model can retry inside the
 /// workspace instead of guessing which part of its line was refused.
 ///
-/// # `shell_escapes_backslash`
-///
-/// Pass `cfg!(unix)`. It says whether the platform's shell reads `\` the way
-/// [`crate::shell_keys`]'s tokenizer does, and the check is skipped when it does
-/// not - because then the path this would judge is not the path the shell will
-/// open.
-///
-/// On Windows the shell is `cmd.exe`, where `\` is a path separator; the
-/// tokenizer treats it as a POSIX escape, so `> C:\Users\me\out.txt` reaches
-/// here as `C:Usersmeout.txt`. CI caught that as a *false denial* of a write
-/// inside the workspace, and the same mismatch could as easily mask an escaping
-/// one. Judging a misread path is worse than not judging it, so Windows keeps
-/// exactly the protection it had before this check existed - the `write_file`
-/// policy clamp, which reads no paths and is unaffected. Tracked in #296.
+/// Reads the target through [`crate::shell_keys`], which knows whether the
+/// platform's shell treats `\` as an escape - so `> C:\Users\me\out.txt` on
+/// Windows is judged as the path `cmd.exe` will actually open, rather than the
+/// `C:Usersmeout.txt` a POSIX reading produces. That mismatch shipped once and
+/// CI caught it denying a write *inside* the workspace.
 pub fn escaping_write_refusal(
     tool_name: &str,
     arguments: &serde_json::Value,
     workdir: &std::path::Path,
-    shell_escapes_backslash: bool,
 ) -> Option<String> {
-    if !shell_escapes_backslash {
-        return None;
-    }
     if leviath_tools::canonical_tool_name(tool_name) != "shell" {
         return None;
     }
@@ -832,7 +819,7 @@ mod policy_tests {
             "cat notes.md > ../escaped.txt",
             "echo x >> ../../etc/hosts",
         ] {
-            let refusal = escaping_write_refusal("shell", &shell_call(command), dir.path(), true);
+            let refusal = escaping_write_refusal("shell", &shell_call(command), dir.path());
             assert!(
                 refusal.is_some(),
                 "{command:?} writes outside the workdir and must be refused"
@@ -861,7 +848,7 @@ mod policy_tests {
             "ls",
         ] {
             assert_eq!(
-                escaping_write_refusal("shell", &shell_call(command), dir.path(), true),
+                escaping_write_refusal("shell", &shell_call(command), dir.path()),
                 None,
                 "{command:?} stays inside and must not be refused"
             );
@@ -871,50 +858,16 @@ mod policy_tests {
     /// An absolute path *into* the workdir is inside it, so the check cannot be
     /// a naive "is it absolute" test.
     ///
-    /// Unix-only because the path is built from a real temp directory: on
-    /// Windows those separators are backslashes, which the tokenizer eats as
-    /// POSIX escapes. That is the mismatch the flag exists for, and the test
-    /// below is its cross-platform statement.
-    #[cfg(unix)]
+    /// Built from a real temp directory, so on Windows it carries real
+    /// backslashes - which is the case that used to fail, before the tokenizer
+    /// learned that `cmd.exe` does not read them as escapes.
     #[test]
     fn an_absolute_path_into_the_workdir_is_allowed() {
         let dir = tempfile::tempdir().expect("tempdir");
         let inside = dir.path().join("out.txt");
         let command = format!("echo x > {}", inside.display());
         assert_eq!(
-            escaping_write_refusal("shell", &shell_call(&command), dir.path(), true),
-            None
-        );
-    }
-
-    /// The reason the flag exists, stated on every platform.
-    ///
-    /// `cmd.exe` does not read `\` as an escape, but the tokenizer does, so
-    /// `> C:\Users\me\out.txt` arrives here as `C:Usersmeout.txt` - a path the
-    /// shell will never open. CI caught that denying a write *inside* the
-    /// workspace, and the same mismatch could mask an escaping one. Judging a
-    /// misread path is worse than not judging it.
-    #[test]
-    fn a_shell_that_does_not_escape_backslashes_is_not_judged() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        // Refused when the tokenizer and the shell agree...
-        assert!(
-            escaping_write_refusal(
-                "shell",
-                &shell_call("echo x > /root/.bashrc"),
-                dir.path(),
-                true
-            )
-            .is_some()
-        );
-        // ...and left alone when they do not.
-        assert_eq!(
-            escaping_write_refusal(
-                "shell",
-                &shell_call("echo x > /root/.bashrc"),
-                dir.path(),
-                false
-            ),
+            escaping_write_refusal("shell", &shell_call(&command), dir.path()),
             None
         );
     }
@@ -925,26 +878,20 @@ mod policy_tests {
     fn the_refusal_covers_the_alias_and_ignores_other_tools() {
         let dir = tempfile::tempdir().expect("tempdir");
         assert!(
-            escaping_write_refusal(
-                "bash",
-                &shell_call("echo x > /root/.bashrc"),
-                dir.path(),
-                true,
-            )
-            .is_some()
+            escaping_write_refusal("bash", &shell_call("echo x > /root/.bashrc"), dir.path(),)
+                .is_some()
         );
         assert_eq!(
             escaping_write_refusal(
                 "write_file",
                 &serde_json::json!({ "path": "/root/.bashrc", "content": "x" }),
                 dir.path(),
-                true,
             ),
             None
         );
         // A shell call with no `command` argument names nothing to check.
         assert_eq!(
-            escaping_write_refusal("shell", &serde_json::json!({}), dir.path(), true),
+            escaping_write_refusal("shell", &serde_json::json!({}), dir.path()),
             None
         );
     }

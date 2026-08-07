@@ -377,7 +377,6 @@ impl ScriptHost for DaemonScriptHost {
             "shell",
             &serde_json::json!({ "command": command }),
             &self.workdir,
-            cfg!(unix),
         ) {
             return Err(refusal);
         }
