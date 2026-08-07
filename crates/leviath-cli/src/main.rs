@@ -326,13 +326,15 @@ async fn ensure_daemon_running() -> anyhow::Result<()> {
     use leviath_runtime::control_socket::is_daemon_running;
     let id = control_address()
         .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control socket"))?;
-    if is_daemon_running(&id) {
-        if !daemon_build_is_stale(read_build_marker().as_deref()) {
-            return Ok(()); // already running the current build
-        }
-        // A daemon from an older build is running. It cannot pick up new code, so
-        // restart it cleanly - it reloads its persisted agents on startup, so
-        // in-flight runs survive the swap.
+    let running = is_daemon_running(&id);
+    let steps = leviath_cli::daemon::lifecycle::start_steps(
+        running,
+        running && daemon_build_is_stale(read_build_marker().as_deref()),
+    );
+    if !steps.spawn {
+        return Ok(());
+    }
+    if steps.shutdown_first {
         eprintln!("leviath daemon is on an older build; restarting to load {CURRENT_BUILD}…");
         // Shut down quietly (straight over the control socket) rather than via
         // `daemon::send_shutdown`, whose stdout "daemon shutting down" line would
@@ -370,30 +372,32 @@ async fn real_daemon_stop() -> anyhow::Result<()> {
     use leviath_runtime::control_socket::is_daemon_running;
     let id = leviath_cli::daemon::setup::control_address()
         .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control socket"))?;
+    use leviath_cli::daemon::lifecycle::{StopFallback, stop_fallback, stop_outcome};
     if !is_daemon_running(&id) {
-        println!("daemon not running");
+        println!("{}", stop_outcome(false, false).unwrap_or_default());
         return Ok(());
     }
-    // Ask politely first. If the control channel refuses or is wedged, fall back
-    // to signalling the recorded process - otherwise a daemon that cannot be
-    // talked to cannot be stopped either, and `lev daemon restart` (which stops
-    // before it starts) could never recover.
+    // Ask politely first; the fallback for a refusal is `stop_fallback`'s call.
     if let Err(e) = commands::daemon::send_shutdown(&control_client()?).await {
         let dir = leviath_cli::daemon::setup::control_dir()
             .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the daemon pid"))?;
-        match leviath_runtime::control_socket::ControlToken::read_pid(&dir) {
-            Some(pid) => {
+        match stop_fallback(leviath_runtime::control_socket::ControlToken::read_pid(
+            &dir,
+        )) {
+            StopFallback::Signal(pid) => {
                 eprintln!("control channel did not answer ({e}); signalling pid {pid}");
                 let _ = leviath_sys::kill_process_group(pid);
             }
-            None => return Err(e),
+            StopFallback::Propagate => return Err(e),
         }
     }
-    if poll_until(&mut || !is_daemon_running(&id)).await {
-        println!("daemon stopped");
-        return Ok(());
+    match stop_outcome(true, poll_until(&mut || !is_daemon_running(&id)).await) {
+        Ok(line) => {
+            println!("{line}");
+            Ok(())
+        }
+        Err(e) => anyhow::bail!(e),
     }
-    anyhow::bail!("the leviath daemon did not shut down within 5s");
 }
 
 /// `lev daemon status`: report whether the daemon is running and its agent count.
@@ -410,14 +414,13 @@ async fn real_daemon_status() -> anyhow::Result<()> {
     } else {
         0
     };
-    println!("{}", commands::daemon::format_status(running, count));
     // Supervision is best-effort information: on a platform with no supported
     // supervisor there is simply nothing to report.
-    if let Ok(unit) = resolve_service_unit() {
-        println!(
-            "{}",
-            commands::daemon_service::format_supervision(unit.path.exists(), &unit.path)
-        );
+    let supervision = resolve_service_unit()
+        .ok()
+        .map(|unit| commands::daemon_service::format_supervision(unit.path.exists(), &unit.path));
+    for line in leviath_cli::daemon::lifecycle::status_lines(running, count, supervision) {
+        println!("{line}");
     }
     Ok(())
 }
@@ -466,28 +469,27 @@ fn run_supervisor(cmd: &(String, Vec<String>)) -> anyhow::Result<()> {
 /// supervisor, so the daemon starts at login and is restarted if it ever dies.
 fn real_daemon_install() -> anyhow::Result<()> {
     let unit = resolve_service_unit()?;
-    let path = commands::daemon_service::install(&unit)?;
-    println!("wrote {}", path.display());
-    // Re-registering a live service is an error on both platforms; drop any
-    // previous registration first so `install` is idempotent.
-    let _ = run_supervisor(&unit.deactivate);
-    remove_legacy_services();
-    run_supervisor(&unit.activate)?;
-    println!("the leviath daemon is now supervised and will restart automatically");
+    let lines = commands::daemon_service::install_with(
+        &unit,
+        &mut run_supervisor,
+        &mut remove_legacy_services,
+    )?;
+    for line in lines {
+        println!("{line}");
+    }
     Ok(())
 }
 
 /// `lev daemon uninstall`: deregister from the supervisor and remove the file.
 fn real_daemon_uninstall() -> anyhow::Result<()> {
     let unit = resolve_service_unit()?;
-    // Deregistration fails when nothing is registered; that's the desired end
-    // state either way, so only the file removal is reported.
-    let _ = run_supervisor(&unit.deactivate);
-    remove_legacy_services();
-    if commands::daemon_service::uninstall(&unit)? {
-        println!("removed {}", unit.path.display());
-    } else {
-        println!("no leviath service was installed");
+    let lines = commands::daemon_service::uninstall_with(
+        &unit,
+        &mut run_supervisor,
+        &mut remove_legacy_services,
+    )?;
+    for line in lines {
+        println!("{line}");
     }
     Ok(())
 }
@@ -497,24 +499,23 @@ fn real_daemon_uninstall() -> anyhow::Result<()> {
 /// a second supervised daemon behind. Best-effort by design: on a machine
 /// that never had the old label, every step is a no-op.
 #[cfg(target_os = "macos")]
-fn remove_legacy_services() {
-    let removed = commands::daemon_service::remove_legacy_with(
+fn remove_legacy_services() -> Vec<std::path::PathBuf> {
+    commands::daemon_service::remove_legacy_with(
         dirs::home_dir(),
         leviath_sys::current_uid(),
         &mut |bootout| {
             let _ = run_supervisor(bootout);
         },
         &mut |path| std::fs::remove_file(path).is_ok(),
-    );
-    for path in removed {
-        println!("removed legacy service file {}", path.display());
-    }
+    )
 }
 
 /// Only macOS ever shipped under a different label; elsewhere there is
 /// nothing legacy to clean up.
 #[cfg(not(target_os = "macos"))]
-fn remove_legacy_services() {}
+fn remove_legacy_services() -> Vec<std::path::PathBuf> {
+    Vec::new()
+}
 
 /// Real `lev daemon`: bind the platform control socket and drive the shared world
 /// until Ctrl-C. Wiring only - the world, host, tool service, and spawner it

@@ -355,6 +355,62 @@ pub fn remove_legacy_with(
     removed
 }
 
+/// Register the service with the platform supervisor, returning the lines to
+/// report.
+///
+/// The *order* is the part worth testing and the part that was easy to get
+/// wrong: re-registering a live service is an error on both platforms, so any
+/// previous registration is dropped first and legacy labels are cleaned before
+/// the new one is activated. Get that backwards and `install` stops being
+/// idempotent, or leaves a second supervised daemon behind.
+///
+/// Deactivation is deliberately unchecked. It fails when nothing is registered,
+/// which is the normal case on a first install and not a problem.
+///
+/// The effects are injected for the same reason [`remove_legacy_with`]'s are:
+/// `run` shells out to `launchctl`/`systemctl`, and nothing about the sequence
+/// needs a real supervisor to be checked.
+pub fn install_with(
+    unit: &ServiceUnit,
+    run: &mut dyn FnMut(&SupervisorCommand) -> Result<()>,
+    remove_legacy: &mut dyn FnMut() -> Vec<PathBuf>,
+) -> Result<Vec<String>> {
+    let path = install(unit)?;
+    let mut lines = vec![format!("wrote {}", path.display())];
+    let _ = run(&unit.deactivate);
+    lines.extend(
+        remove_legacy()
+            .iter()
+            .map(|p| format!("removed legacy service file {}", p.display())),
+    );
+    run(&unit.activate)?;
+    lines.push("the leviath daemon is now supervised and will restart automatically".to_string());
+    Ok(lines)
+}
+
+/// Deregister the service and remove its file, returning the lines to report.
+///
+/// Deregistration is unchecked for the same reason it is in [`install_with`]:
+/// it fails when nothing is registered, and that is the desired end state
+/// either way. Only the file removal is reported, because it is the only step
+/// whose outcome the user could not have predicted.
+pub fn uninstall_with(
+    unit: &ServiceUnit,
+    run: &mut dyn FnMut(&SupervisorCommand) -> Result<()>,
+    remove_legacy: &mut dyn FnMut() -> Vec<PathBuf>,
+) -> Result<Vec<String>> {
+    let _ = run(&unit.deactivate);
+    let mut lines: Vec<String> = remove_legacy()
+        .iter()
+        .map(|p| format!("removed legacy service file {}", p.display()))
+        .collect();
+    lines.push(match uninstall(unit)? {
+        true => format!("removed {}", unit.path.display()),
+        false => "no leviath service was installed".to_string(),
+    });
+    Ok(lines)
+}
+
 /// The line `lev daemon status` adds about supervision.
 pub fn format_supervision(installed: bool, path: &Path) -> String {
     if installed {
@@ -466,6 +522,136 @@ mod tests {
             activate: ("sup".to_string(), vec!["on".to_string()]),
             deactivate: ("sup".to_string(), vec!["off".to_string()]),
         }
+    }
+
+    /// Record every supervisor command, so the *order* can be asserted rather
+    /// than just the outcome.
+    type SupervisorLog = std::rc::Rc<std::cell::RefCell<Vec<String>>>;
+
+    fn recording() -> (SupervisorLog, impl FnMut(&SupervisorCommand) -> Result<()>) {
+        let log: SupervisorLog = Default::default();
+        let sink = log.clone();
+        (log, move |cmd: &SupervisorCommand| {
+            sink.borrow_mut().push(cmd.1.join(" "));
+            Ok(())
+        })
+    }
+
+    /// The ordering is the whole point: deactivate, clean legacy labels, *then*
+    /// activate. Re-registering a live service is an error on both platforms,
+    /// so activating first makes `install` non-idempotent.
+    #[test]
+    fn install_deactivates_and_cleans_before_it_activates() {
+        let dir = tempfile::tempdir().unwrap();
+        let unit = bare_unit(dir.path().join("leviath.unit"));
+        let (log, mut run) = recording();
+        let legacy = dir.path().join("old.plist");
+        let mut remove_legacy = || vec![legacy.clone()];
+
+        let lines = install_with(&unit, &mut run, &mut remove_legacy).unwrap();
+        assert_eq!(
+            *log.borrow(),
+            ["off", "on"],
+            "activated before deactivating"
+        );
+        assert!(lines[0].starts_with("wrote "), "{lines:?}");
+        assert!(lines[1].contains("legacy service file"), "{lines:?}");
+        assert!(lines[2].contains("supervised"), "{lines:?}");
+        assert!(unit.path.exists());
+    }
+
+    /// A failed *activation* is the one that matters, and must not be swallowed
+    /// the way the deactivation is.
+    #[test]
+    fn install_reports_a_failed_activation() {
+        let dir = tempfile::tempdir().unwrap();
+        let unit = bare_unit(dir.path().join("leviath.unit"));
+        let mut run = |cmd: &SupervisorCommand| match cmd.1[0].as_str() {
+            "on" => Err(anyhow::anyhow!("supervisor said no")),
+            _ => Ok(()),
+        };
+        let err = install_with(&unit, &mut run, &mut Vec::new)
+            .expect_err("a failed activation propagates");
+        assert!(err.to_string().contains("supervisor said no"), "{err}");
+    }
+
+    /// Deregistration fails when nothing is registered, which is the normal
+    /// first-run case. Propagating it would make `uninstall` fail on a machine
+    /// that simply had nothing installed.
+    #[test]
+    fn uninstall_ignores_a_failed_deregistration() {
+        let dir = tempfile::tempdir().unwrap();
+        let unit = bare_unit(dir.path().join("leviath.unit"));
+        install(&unit).unwrap();
+        let mut run = |_: &SupervisorCommand| Err(anyhow::anyhow!("nothing registered"));
+
+        let lines = uninstall_with(&unit, &mut run, &mut Vec::new).unwrap();
+        assert_eq!(lines, [format!("removed {}", unit.path.display())]);
+        assert!(!unit.path.exists());
+    }
+
+    /// A unit file that cannot be written stops the install before anything
+    /// reaches the supervisor - registering a service whose file is missing
+    /// would leave the machine referencing nothing.
+    #[test]
+    fn install_stops_when_the_unit_cannot_be_written() {
+        let dir = tempfile::tempdir().unwrap();
+        // A *file* where the unit's parent directory would go, so
+        // `create_dir_all` cannot succeed.
+        let blocker = dir.path().join("blocked");
+        std::fs::write(&blocker, "not a directory").unwrap();
+        let unit = bare_unit(blocker.join("nested").join("leviath.unit"));
+        let (log, mut run) = recording();
+
+        assert!(install_with(&unit, &mut run, &mut Vec::new).is_err());
+        assert!(
+            log.borrow().is_empty(),
+            "the supervisor was called for a unit that was never written"
+        );
+    }
+
+    /// A unit path that cannot be removed is an error, and distinct from one
+    /// that was not there - "no leviath service was installed" would be a lie
+    /// about a file still sitting on disk.
+    #[test]
+    fn uninstall_propagates_a_removal_it_could_not_do() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the unit file would be: `remove_file` refuses it
+        // with something other than NotFound on every platform.
+        let unit = bare_unit(dir.path().join("leviath.unit"));
+        std::fs::create_dir(&unit.path).unwrap();
+        let (_log, mut run) = recording();
+
+        assert!(uninstall_with(&unit, &mut run, &mut Vec::new).is_err());
+    }
+
+    /// Legacy files removed during an uninstall are reported too, not only
+    /// during an install.
+    #[test]
+    fn uninstall_reports_legacy_files_it_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let unit = bare_unit(dir.path().join("leviath.unit"));
+        install(&unit).unwrap();
+        let legacy = dir.path().join("old.plist");
+        let mut remove_legacy = || vec![legacy.clone()];
+        let (_log, mut run) = recording();
+
+        let lines = uninstall_with(&unit, &mut run, &mut remove_legacy).unwrap();
+        assert!(lines[0].contains("legacy service file"), "{lines:?}");
+        assert!(lines[1].starts_with("removed "), "{lines:?}");
+    }
+
+    /// Nothing to remove reads differently from something removed, so a user
+    /// can tell "cleaned up" from "there was nothing there".
+    #[test]
+    fn uninstall_says_when_there_was_nothing_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let unit = bare_unit(dir.path().join("absent.unit"));
+        let (log, mut run) = recording();
+
+        let lines = uninstall_with(&unit, &mut run, &mut Vec::new).unwrap();
+        assert_eq!(lines, ["no leviath service was installed"]);
+        assert_eq!(*log.borrow(), ["off"]);
     }
 
     #[test]
