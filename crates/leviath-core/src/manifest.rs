@@ -883,10 +883,13 @@ fn parse_stage_hooks(
         match key.as_str() {
             "on_stage_enter" => hooks.on_stage_enter = Some(path.to_string()),
             "on_stage_exit" => hooks.on_stage_exit = Some(path.to_string()),
+            "before_inference" => hooks.before_inference = Some(path.to_string()),
+            "after_inference" => hooks.after_inference = Some(path.to_string()),
             other => {
                 return Err(Error::Other(format!(
                     "stage '{stage_name}': unknown hook '{other}' \
-                     (this build implements: on_stage_enter, on_stage_exit)"
+                     (this build implements: on_stage_enter, on_stage_exit, \
+                     before_inference, after_inference)"
                 )));
             }
         }
@@ -1547,17 +1550,46 @@ mod tests {
         assert!(stage.hooks.declared().is_empty());
     }
 
+    /// Every hook this build implements, in one fixture: each parses, and each
+    /// reports the function it backs. A hook that parsed but never appeared in
+    /// `declared()` would be resolved at spawn and then never called.
     #[test]
-    fn both_hooks_parse_and_report_the_function_they_back() {
+    fn every_hook_parses_and_reports_the_function_it_backs() {
         let stage = stage_with_hooks(
-            "[stages.main.hooks]\non_stage_enter = \"a.rhai\"\non_stage_exit = \"b.rhai\"",
+            "[stages.main.hooks]\n\
+             on_stage_enter = \"a.rhai\"\n\
+             on_stage_exit = \"b.rhai\"\n\
+             before_inference = \"c.rhai\"\n\
+             after_inference = \"d.rhai\"",
         )
         .expect("parses");
         assert!(!stage.hooks.is_empty());
         assert_eq!(
             stage.hooks.declared(),
-            vec![("on_stage_enter", "a.rhai"), ("on_stage_exit", "b.rhai")]
+            vec![
+                ("on_stage_enter", "a.rhai"),
+                ("on_stage_exit", "b.rhai"),
+                ("before_inference", "c.rhai"),
+                ("after_inference", "d.rhai"),
+            ]
         );
+    }
+
+    /// Each hook alone also leaves `is_empty` false - a stage declaring only
+    /// the newest hook must still get its scripts resolved.
+    #[test]
+    fn any_single_hook_makes_the_stage_hooked() {
+        for field in [
+            "on_stage_enter",
+            "on_stage_exit",
+            "before_inference",
+            "after_inference",
+        ] {
+            let stage = stage_with_hooks(&format!("[stages.main.hooks]\n{field} = \"h.rhai\""))
+                .expect("parses");
+            assert!(!stage.hooks.is_empty(), "{field}");
+            assert_eq!(stage.hooks.declared(), vec![(field, "h.rhai")], "{field}");
+        }
     }
 
     #[test]

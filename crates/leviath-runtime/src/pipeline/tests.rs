@@ -10590,3 +10590,423 @@ fn a_refusal_without_a_reason_still_says_it_was_refused() {
     assert!(message.contains("refused stage 'main'"), "{message}");
     assert!(message.contains("no reason given"), "{message}");
 }
+
+// ─── before_inference / after_inference (issue #260) ─────────────────────────
+
+fn stage_hooked(field: fn(&mut leviath_core::blueprint::StageHooks, String)) -> AgentBlueprint {
+    let mut stage = leviath_core::Stage::new(
+        "main".to_string(),
+        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+    );
+    field(&mut stage.hooks, "h.rhai".to_string());
+    AgentBlueprint(blueprint(vec![stage]))
+}
+
+fn run_before_hooks(world: &mut World) {
+    let mut schedule = Schedule::default();
+    schedule.add_systems(run_before_inference_hooks);
+    schedule.run(world);
+}
+
+fn run_after_hooks(world: &mut World) {
+    let mut schedule = Schedule::default();
+    schedule.add_systems(run_after_inference_hooks);
+    schedule.run(world);
+}
+
+fn spawn_before(world: &mut World, src: &str) -> Entity {
+    world
+        .spawn((
+            stage_hooked(|h, p| h.before_inference = Some(p)),
+            agent_state(),
+            conv_window(),
+            StageCursor { index: 0 },
+            ReadyToInfer,
+            hook_scripts(src, &["before_inference"]),
+        ))
+        .id()
+}
+
+fn spawn_after(world: &mut World, src: &str) -> Entity {
+    world
+        .spawn((
+            stage_hooked(|h, p| h.after_inference = Some(p)),
+            agent_state(),
+            StageCursor { index: 0 },
+            ProcessResponse,
+            crate::components::InferenceResult {
+                response: "the raw answer".to_string(),
+                tool_calls: vec![],
+                tokens_used: 7,
+                timestamp: 0,
+            },
+            hook_scripts(src, &["after_inference"]),
+        ))
+        .id()
+}
+
+fn status_message(world: &World, e: Entity) -> Option<String> {
+    match &world.get::<AgentState>(e).expect("state").status {
+        AgentStatus::Error { message } => Some(message.clone()),
+        _ => None,
+    }
+}
+
+#[test]
+fn before_inference_can_seed_the_window_the_request_is_built_from() {
+    let mut world = World::new();
+    let e = spawn_before(
+        &mut world,
+        r#"fn before_inference(ctx) { #{ action: "modify", value: #{ conversation: "injected" } } }"#,
+    );
+    run_before_hooks(&mut world);
+    assert_eq!(region_text(&world, e, "conversation"), "injected");
+    assert!(status_message(&world, e).is_none());
+}
+
+/// A refused inference stops the agent *and* takes back `ReadyToInfer`, so
+/// `dispatch_inference` cannot pick it up in the same tick - refusing while
+/// still letting the call go is not refusing.
+#[test]
+fn before_inference_can_refuse_the_call_and_the_agent_stops_being_ready() {
+    let mut world = World::new();
+    let e = spawn_before(
+        &mut world,
+        r#"fn before_inference(ctx) { #{ action: "cancel", reason: "over budget" } }"#,
+    );
+    run_before_hooks(&mut world);
+    assert!(
+        status_message(&world, e)
+            .expect("errored")
+            .contains("over budget")
+    );
+    assert!(
+        world.get::<ReadyToInfer>(e).is_none(),
+        "a refused inference must not stay dispatchable"
+    );
+}
+
+#[test]
+fn before_inference_that_throws_errors_the_run() {
+    let mut world = World::new();
+    let e = spawn_before(&mut world, r#"fn before_inference(ctx) { throw "no" }"#);
+    run_before_hooks(&mut world);
+    assert!(
+        status_message(&world, e)
+            .expect("errored")
+            .contains("hook failed")
+    );
+}
+
+#[test]
+fn before_inference_retry_is_refused_as_unhonourable() {
+    let mut world = World::new();
+    let e = spawn_before(
+        &mut world,
+        r#"fn before_inference(ctx) { #{ action: "retry" } }"#,
+    );
+    run_before_hooks(&mut world);
+    assert!(
+        status_message(&world, e)
+            .expect("errored")
+            .contains("cannot honour")
+    );
+}
+
+#[test]
+fn before_inference_bad_modify_errors() {
+    let mut world = World::new();
+    let e = spawn_before(
+        &mut world,
+        r#"fn before_inference(ctx) { #{ action: "modify", value: #{ nope: "x" } } }"#,
+    );
+    run_before_hooks(&mut world);
+    assert!(
+        status_message(&world, e)
+            .expect("errored")
+            .contains("no region 'nope'")
+    );
+}
+
+#[test]
+fn before_inference_allow_changes_nothing() {
+    let mut world = World::new();
+    let e = spawn_before(&mut world, "fn before_inference(ctx) { () }");
+    run_before_hooks(&mut world);
+    assert_eq!(region_text(&world, e, "conversation"), "");
+    assert!(status_message(&world, e).is_none());
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+}
+
+#[test]
+fn before_inference_skips_an_out_of_range_stage() {
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            stage_hooked(|h, p| h.before_inference = Some(p)),
+            agent_state(),
+            conv_window(),
+            StageCursor { index: 99 },
+            ReadyToInfer,
+            hook_scripts(
+                r#"fn before_inference(ctx) { #{ action: "cancel" } }"#,
+                &["before_inference"],
+            ),
+        ))
+        .id();
+    run_before_hooks(&mut world);
+    assert!(status_message(&world, e).is_none());
+}
+
+#[test]
+fn before_inference_skips_a_stage_that_declared_none() {
+    let mut world = World::new();
+    let stage = leviath_core::Stage::new(
+        "main".to_string(),
+        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+    );
+    let e = world
+        .spawn((
+            AgentBlueprint(blueprint(vec![stage])),
+            agent_state(),
+            conv_window(),
+            StageCursor { index: 0 },
+            ReadyToInfer,
+            hook_scripts(
+                r#"fn before_inference(ctx) { #{ action: "cancel" } }"#,
+                &["before_inference"],
+            ),
+        ))
+        .id();
+    run_before_hooks(&mut world);
+    assert!(status_message(&world, e).is_none());
+}
+
+// ── after_inference ──
+
+#[test]
+fn after_inference_can_rewrite_the_response() {
+    let mut world = World::new();
+    let e = spawn_after(
+        &mut world,
+        r#"fn after_inference(ctx) { #{ action: "modify", value: "cleaned up" } }"#,
+    );
+    run_after_hooks(&mut world);
+    assert_eq!(
+        world
+            .get::<crate::components::InferenceResult>(e)
+            .expect("result")
+            .response,
+        "cleaned up"
+    );
+}
+
+/// The hook is shown the real response, not a placeholder.
+#[test]
+fn after_inference_sees_the_response_and_its_token_count() {
+    let mut world = World::new();
+    let e = spawn_after(
+        &mut world,
+        r#"fn after_inference(ctx) { #{ action: "modify", value: ctx.response + "/" + ctx.tokens_used } }"#,
+    );
+    run_after_hooks(&mut world);
+    assert_eq!(
+        world
+            .get::<crate::components::InferenceResult>(e)
+            .expect("result")
+            .response,
+        "the raw answer/7"
+    );
+}
+
+#[test]
+fn after_inference_can_reject_the_response() {
+    let mut world = World::new();
+    let e = spawn_after(
+        &mut world,
+        r#"fn after_inference(ctx) { #{ action: "cancel", reason: "not valid json" } }"#,
+    );
+    run_after_hooks(&mut world);
+    assert!(
+        status_message(&world, e)
+            .expect("errored")
+            .contains("not valid json")
+    );
+}
+
+#[test]
+fn after_inference_modify_must_be_text() {
+    let mut world = World::new();
+    let e = spawn_after(
+        &mut world,
+        r#"fn after_inference(ctx) { #{ action: "modify", value: #{ not: "text" } } }"#,
+    );
+    run_after_hooks(&mut world);
+    assert!(
+        status_message(&world, e)
+            .expect("errored")
+            .contains("replacement response text")
+    );
+}
+
+/// Re-inference needs an attempt bound before it can be offered, or a hook that
+/// always retries wedges the run. Refused explicitly rather than ignored.
+#[test]
+fn after_inference_retry_is_refused_with_the_reason_it_is_not_implemented() {
+    let mut world = World::new();
+    let e = spawn_after(
+        &mut world,
+        r#"fn after_inference(ctx) { #{ action: "retry" } }"#,
+    );
+    run_after_hooks(&mut world);
+    assert!(
+        status_message(&world, e)
+            .expect("errored")
+            .contains("not implemented yet")
+    );
+}
+
+#[test]
+fn after_inference_that_throws_errors_the_run() {
+    let mut world = World::new();
+    let e = spawn_after(&mut world, r#"fn after_inference(ctx) { throw "no" }"#);
+    run_after_hooks(&mut world);
+    assert!(
+        status_message(&world, e)
+            .expect("errored")
+            .contains("hook failed")
+    );
+}
+
+#[test]
+fn after_inference_allow_leaves_the_response_alone() {
+    let mut world = World::new();
+    let e = spawn_after(&mut world, "fn after_inference(ctx) { () }");
+    run_after_hooks(&mut world);
+    assert_eq!(
+        world
+            .get::<crate::components::InferenceResult>(e)
+            .expect("result")
+            .response,
+        "the raw answer"
+    );
+    assert!(status_message(&world, e).is_none());
+}
+
+/// Tool calls reach the hook as names only. It can notice what the model wants
+/// to run; it cannot rewrite the call, because the policy and taint layers are
+/// about to check exactly those and a hook that could edit them would be a way
+/// around checks the operator configured.
+#[test]
+fn after_inference_sees_tool_call_names_but_cannot_change_them() {
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            stage_hooked(|h, p| h.after_inference = Some(p)),
+            agent_state(),
+            StageCursor { index: 0 },
+            ProcessResponse,
+            crate::components::InferenceResult {
+                response: String::new(),
+                tool_calls: vec![crate::components::ToolCall {
+                    tool_id: "c1".to_string(),
+                    name: "shell".to_string(),
+                    arguments: serde_json::json!({"command": "ls"}),
+                    thought_signature: None,
+                }],
+                tokens_used: 0,
+                timestamp: 0,
+            },
+            hook_scripts(
+                r#"fn after_inference(ctx) { #{ action: "modify", value: ctx.tool_calls[0] } }"#,
+                &["after_inference"],
+            ),
+        ))
+        .id();
+    run_after_hooks(&mut world);
+    let result = world
+        .get::<crate::components::InferenceResult>(e)
+        .expect("result");
+    assert_eq!(result.response, "shell", "the hook saw the call's name");
+    assert_eq!(
+        result.tool_calls.len(),
+        1,
+        "and the call itself is untouched"
+    );
+    assert_eq!(result.tool_calls[0].name, "shell");
+    assert_eq!(result.tool_calls[0].arguments["command"], "ls");
+}
+
+#[test]
+fn after_inference_skips_an_out_of_range_stage() {
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            stage_hooked(|h, p| h.after_inference = Some(p)),
+            agent_state(),
+            StageCursor { index: 99 },
+            ProcessResponse,
+            crate::components::InferenceResult {
+                response: "x".to_string(),
+                tool_calls: vec![],
+                tokens_used: 0,
+                timestamp: 0,
+            },
+            hook_scripts(
+                r#"fn after_inference(ctx) { #{ action: "cancel" } }"#,
+                &["after_inference"],
+            ),
+        ))
+        .id();
+    run_after_hooks(&mut world);
+    assert!(status_message(&world, e).is_none());
+}
+
+#[test]
+fn after_inference_skips_a_stage_that_declared_none() {
+    let mut world = World::new();
+    let stage = leviath_core::Stage::new(
+        "main".to_string(),
+        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+    );
+    let e = world
+        .spawn((
+            AgentBlueprint(blueprint(vec![stage])),
+            agent_state(),
+            StageCursor { index: 0 },
+            ProcessResponse,
+            crate::components::InferenceResult {
+                response: "x".to_string(),
+                tool_calls: vec![],
+                tokens_used: 0,
+                timestamp: 0,
+            },
+            hook_scripts(
+                r#"fn after_inference(ctx) { #{ action: "cancel" } }"#,
+                &["after_inference"],
+            ),
+        ))
+        .id();
+    run_after_hooks(&mut world);
+    assert!(status_message(&world, e).is_none());
+}
+
+/// A bare `false` from either inference hook refuses with no reason given, and
+/// the message still has to say what was refused - an operator seeing a failed
+/// run needs the cause, not just the failure.
+#[test]
+fn an_inference_hook_refusing_without_a_reason_still_says_what_it_refused() {
+    let mut world = World::new();
+    let before = spawn_before(&mut world, "fn before_inference(ctx) { false }");
+    run_before_hooks(&mut world);
+    let msg = status_message(&world, before).expect("errored");
+    assert!(msg.contains("refused the inference"), "{msg}");
+    assert!(msg.contains("no reason given"), "{msg}");
+
+    let mut world = World::new();
+    let after = spawn_after(&mut world, "fn after_inference(ctx) { false }");
+    run_after_hooks(&mut world);
+    let msg = status_message(&world, after).expect("errored");
+    assert!(msg.contains("rejected the response"), "{msg}");
+    assert!(msg.contains("no reason given"), "{msg}");
+}

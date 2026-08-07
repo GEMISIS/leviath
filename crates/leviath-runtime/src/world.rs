@@ -45,8 +45,8 @@ use crate::pipeline::{
     dispatch_tools, dispatch_transition_choice, enforce_max_iterations, fail_stalled_dispatch,
     fail_wedged_runs, gate_requires_children, handle_empty_response, poll_dynamic_tool_refresh,
     process_response, reflect_interaction_status, refresh_advertised_tools,
-    require_context_regions, require_final_output, resolve_transition, run_stage_enter_hooks,
-    sync_tool_stages,
+    require_context_regions, require_final_output, resolve_transition, run_after_inference_hooks,
+    run_before_inference_hooks, run_stage_enter_hooks, sync_tool_stages,
 };
 use crate::providers::ProviderRegistry;
 use crate::tool_bridge::ToolLane;
@@ -328,11 +328,24 @@ impl PipelineWorld {
                 // because it needs `&mut StageInference` and dispatch fans out.
                 // Nested rather than inline: the outer tuple is at bevy's
                 // 20-system limit for `.chain()`.
-                (crate::pipeline::rotate_open_circuits, dispatch_inference).chain(),
+                // Nested tuples here and below for the same reason the circuit
+                // pair already was: the outer tuple is at bevy's 20-system
+                // `.chain()` limit, and grouping preserves the ordering.
+                //
+                // `before_inference` runs with the window assembled and before
+                // the request is built from it.
+                (
+                    run_before_inference_hooks,
+                    crate::pipeline::rotate_open_circuits,
+                    dispatch_inference,
+                )
+                    .chain(),
                 collect_inference,
                 // Intercept a fan-out stage's split response before normal routing.
                 crate::fanout::fan_out_split,
-                process_response,
+                // `after_inference` sees the response before anything is
+                // written to context or dispatched from it.
+                (run_after_inference_hooks, process_response).chain(),
                 // Apply resolved taint gate prompts (re-arming ReadyForTools)
                 // before the tool dispatch re-runs the held batch.
                 crate::gate_prompt::collect_gate_prompt,
