@@ -88,14 +88,16 @@ fn request(model: &str) -> InferenceRequest {
 
 fn build(src: &str, executor: Arc<FakeExecutor>) -> Result<RhaiProvider> {
     RhaiProvider::from_source(
-        "test".to_string(),
         src,
-        serde_json::json!({}),
-        HashMap::new(),
-        None,
-        None,
         executor,
-        no_env_allowlist(),
+        ScriptProviderSettings {
+            name: "test".to_string(),
+            init_config: serde_json::json!({}),
+            caps: HashMap::new(),
+            rate_limit: None,
+            request_timeout_secs: None,
+            env_allowlist: no_env_allowlist(),
+        },
     )
 }
 
@@ -105,14 +107,16 @@ fn build_rl(
     rate_limit: Option<RateLimitConfig>,
 ) -> RhaiProvider {
     RhaiProvider::from_source(
-        "test".to_string(),
         src,
-        serde_json::json!({}),
-        HashMap::new(),
-        rate_limit,
-        None,
         executor,
-        no_env_allowlist(),
+        ScriptProviderSettings {
+            name: "test".to_string(),
+            init_config: serde_json::json!({}),
+            caps: HashMap::new(),
+            rate_limit,
+            request_timeout_secs: None,
+            env_allowlist: no_env_allowlist(),
+        },
     )
     .unwrap()
 }
@@ -151,14 +155,16 @@ fn from_source_initialize_receives_config() {
     let src = "fn initialize(config) { #{ m: config.model } }\n\
                fn inference(s, r) { #{ content: s.m } }";
     let p = RhaiProvider::from_source(
-        "test".into(),
         src,
-        serde_json::json!({ "model": "cfg-model" }),
-        HashMap::new(),
-        None,
-        None,
         FakeExecutor::new(),
-        no_env_allowlist(),
+        ScriptProviderSettings {
+            name: "test".into(),
+            init_config: serde_json::json!({ "model": "cfg-model" }),
+            caps: HashMap::new(),
+            rate_limit: None,
+            request_timeout_secs: None,
+            env_allowlist: no_env_allowlist(),
+        },
     )
     .unwrap();
     let out = tokio_block(p.infer(&request("ignored")));
@@ -401,14 +407,16 @@ fn capabilities_and_metadata() {
         },
     );
     let p = RhaiProvider::from_source(
-        "test".into(),
         &src,
-        serde_json::json!({}),
-        caps,
-        None,
-        None,
         FakeExecutor::new(),
-        no_env_allowlist(),
+        ScriptProviderSettings {
+            name: "test".into(),
+            init_config: serde_json::json!({}),
+            caps,
+            rate_limit: None,
+            request_timeout_secs: None,
+            env_allowlist: no_env_allowlist(),
+        },
     )
     .unwrap();
 
@@ -681,14 +689,16 @@ fn sample_groq_script_compiles_and_initializes() {
     // and advertise its optional functions.
     let src = include_str!("../../../../docs/examples/groq.rhai");
     let p = RhaiProvider::from_source(
-        "groq".to_string(),
         src,
-        serde_json::json!({ "api_key": "test-key" }),
-        HashMap::new(),
-        None,
-        None,
         FakeExecutor::new(),
-        no_env_allowlist(),
+        ScriptProviderSettings {
+            name: "groq".to_string(),
+            init_config: serde_json::json!({ "api_key": "test-key" }),
+            caps: HashMap::new(),
+            rate_limit: None,
+            request_timeout_secs: None,
+            env_allowlist: no_env_allowlist(),
+        },
     )
     .unwrap();
     assert_eq!(p.meta().provider.as_deref(), Some("groq"));

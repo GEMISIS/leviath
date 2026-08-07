@@ -146,20 +146,20 @@ async fn spawn(h: &SubAgentHandle, args: &serde_json::Value) -> String {
         }
     };
 
-    let spawn_args = match resolve_spawn_args(
-        blueprint,
-        Some(&full_task),
-        &never_interactive,
-        None,
-        &h.workdir,
-        h.unattended,
-        Vec::new(),
-        child_max_depth,
-        // Sub-agents receive their whole task via `full_task`; no region flags.
+    let spawn_args = match resolve_spawn_args(crate::daemon::client::LaunchRequest {
+        path: blueprint,
+        task: Some(&full_task),
+        stdin_is_terminal: &never_interactive,
+        model: None,
+        workdir: &h.workdir,
+        yolo: h.unattended,
+        allow: Vec::new(),
+        max_depth: child_max_depth,
+        regions: // Sub-agents receive their whole task via `full_task`; no region flags.
         std::collections::HashMap::new(),
-        h.no_seed_commands,
-        child_output,
-    ) {
+        no_seed_commands: h.no_seed_commands,
+        output_request: child_output,
+    }) {
         Ok(a) => a,
         Err(e) => return format!("[error] cannot spawn '{blueprint}': {e}"),
     };

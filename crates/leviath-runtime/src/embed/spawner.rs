@@ -111,14 +111,16 @@ impl EmbedSpawner {
 
         let entity = spawn_agent_seeded(
             world.world_mut(),
-            args.run_id.clone(),
+            crate::pipeline::SeededSpawn {
+            agent_id: args.run_id.clone(),
             blueprint,
-            &seeds,
+            seeds,
             stages,
-            self.hints,
-            // The default nudge policy; blueprints override per stage/agent.
+            global_hints: self.hints,
+            global_nudge: // The default nudge policy; blueprints override per stage/agent.
             leviath_core::NudgeConfig::default(),
-            HashMap::new(),
+            region_scripts: HashMap::new(),
+        },
         )?;
 
         // Metadata + counters, so events, persistence, and status all work.

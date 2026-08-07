@@ -450,16 +450,18 @@ fn build_agent_inner(
     // 6. Spawn the agent.
     let entity = spawn_agent_seeded(
         world,
-        args.run_id.clone(),
-        blueprint,
-        &seeds,
-        stages,
-        leviath_core::config::PromptHints {
-            batch_tool: deps.config.batch_tool_hint,
-            shell: deps.config.shell_hint,
+        leviath_runtime::pipeline::SeededSpawn {
+            agent_id: args.run_id.clone(),
+            blueprint,
+            seeds,
+            stages,
+            global_hints: leviath_core::config::PromptHints {
+                batch_tool: deps.config.batch_tool_hint,
+                shell: deps.config.shell_hint,
+            },
+            global_nudge: deps.config.nudge.clone(),
+            region_scripts,
         },
-        deps.config.nudge.clone(),
-        region_scripts,
     )?;
 
     // Stage hooks, only when some stage declares one. Withholding the component

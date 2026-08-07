@@ -494,22 +494,22 @@ async fn spawn_and_wait(
     // `--yolo`: a probe that stops to ask a person for a tool approval has
     // stopped being a probe. It advertises no tools, so this waives nothing
     // that could actually run.
-    let args = crate::daemon::client::resolve_spawn_args(
-        &manifest.to_string_lossy(),
-        Some(PROBE_PROMPT),
+    let args = crate::daemon::client::resolve_spawn_args(crate::daemon::client::LaunchRequest {
+        path: &manifest.to_string_lossy(),
+        task: Some(PROBE_PROMPT),
         // The probe brings its own task, so the editor fallback is unreachable.
         // Answering "not a terminal" anyway makes that structural rather than
         // incidental: a doctor that opened an editor would be a bad joke.
-        &|| false,
-        None,
-        &workdir.to_string_lossy(),
-        true,
-        Vec::new(),
-        None,
-        std::collections::HashMap::new(),
-        false,
-        None,
-    );
+        stdin_is_terminal: &|| false,
+        model: None,
+        workdir: &workdir.to_string_lossy(),
+        yolo: true,
+        allow: Vec::new(),
+        max_depth: None,
+        regions: std::collections::HashMap::new(),
+        no_seed_commands: false,
+        output_request: None,
+    });
     let args = match args {
         Ok(args) => args,
         Err(e) => return DaemonOutcome::Failed(format!("could not build the spawn request: {e}")),

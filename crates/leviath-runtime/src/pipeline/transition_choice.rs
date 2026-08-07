@@ -365,12 +365,14 @@ pub fn collect_transition_choice(
                 match enter_stage(
                     idx,
                     &bp.0,
-                    &mut cursor,
-                    &mut state,
-                    &mut progress,
-                    &mut visits,
                     setup,
-                    &mut window,
+                    StageEntry {
+                        cursor: &mut cursor,
+                        state: &mut state,
+                        progress: &mut progress,
+                        visits: &mut visits,
+                        window: &mut window,
+                    },
                 ) {
                     Ok(visit) => {
                         // No `status = Active` here, unlike the same sequence in
