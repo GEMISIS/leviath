@@ -356,9 +356,12 @@ pub async fn dispatch_tools(
         // outright, so the shell does not get to be the spelling that works.
         // Checked before policy resolution because no policy makes it allowed:
         // this is containment, not permission.
-        if let Some(refusal) =
-            crate::tools::escaping_write_refusal(&tc.name, &tc.arguments, state.builtins.workdir())
-        {
+        if let Some(refusal) = crate::tools::escaping_write_refusal(
+            &tc.name,
+            &tc.arguments,
+            state.builtins.workdir(),
+            cfg!(unix),
+        ) {
             progress(&tc.id, &refusal);
             slots.push((tc.id.clone(), Some(refusal)));
             continue;

@@ -54,11 +54,17 @@ impl BuiltinTools {
         }
     }
 
-    /// The directory every path these tools resolve is confined to.
+    /// The directory every path these tools resolve is confined to, already
+    /// canonicalized.
     ///
     /// Exposed so the authorization layer can hold a *shell redirect* to the
     /// same fence `resolve` already holds `write_file` to. Without it the two
     /// disagree, and `> path` becomes the spelling of `write_file` that works.
+    ///
+    /// Canonical rather than as-supplied, because that is what the fence
+    /// compares against: on macOS a `/var/...` workdir resolves to
+    /// `/private/var/...`, and handing out the former would refuse every write
+    /// in the workspace.
     pub fn workdir(&self) -> &Path {
         &self.ctx.workdir
     }
@@ -94,6 +100,27 @@ mod tests {
 
     fn make_tools(dir: &std::path::Path) -> BuiltinTools {
         BuiltinTools::new(ToolContext::new(dir.to_path_buf()))
+    }
+
+    /// The accessor the authorization layer holds shell redirects against, so
+    /// `> path` answers to the same fence `resolve` holds `write_file` to.
+    ///
+    /// It reports the *canonicalized* directory, which is the point rather than
+    /// an accident: `resolves_within` canonicalizes what it is given, so a
+    /// workdir that came back uncanonicalized would compare `/var/...` against
+    /// `/private/var/...` on macOS and refuse every write in the workspace.
+    #[test]
+    fn workdir_reports_the_canonical_directory_the_tools_were_built_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        assert_eq!(tools.workdir(), canonical);
+        // And it really is inside itself by the predicate the fence uses, which
+        // is the property the accessor exists to serve.
+        assert!(leviath_core::resolves_within(
+            &tools.workdir().join("out.txt"),
+            tools.workdir()
+        ));
     }
 
     /// Built-ins over a mobile capability set (no `ProcessSpawn`), so the
