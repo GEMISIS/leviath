@@ -65,6 +65,7 @@ pub struct Source {
 /// The result of reading one source.
 #[derive(Debug, Clone)]
 pub struct Scan {
+    /// Which harness was scanned.
     pub source: Source,
     /// Servers found, or the reason the file could not be read.
     pub result: Result<Vec<Candidate>, String>,

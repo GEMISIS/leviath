@@ -3,6 +3,7 @@
 use clap::Args;
 use std::path::Path;
 
+/// Arguments for `lev add`.
 #[derive(Args)]
 pub struct AddArgs {
     /// Path to an agent directory or a .leviath-bundle file
@@ -14,6 +15,7 @@ fn agents_dir_or_error(dir: Option<std::path::PathBuf>) -> anyhow::Result<std::p
     dir.ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))
 }
 
+/// Run `lev add`: install an agent from a directory or a bundle file.
 pub async fn execute(args: AddArgs) -> anyhow::Result<()> {
     let installer = leviath_package::AgentInstaller::new();
     let agents_dir = resolve_agents_dir()?;

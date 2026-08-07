@@ -8,12 +8,15 @@ use crate::config::Config;
 
 // ─── CLI types ────────────────────────────────────────────────────────────────
 
+/// Arguments for `lev models`.
 #[derive(Args)]
 pub struct ModelsArgs {
+    /// Which models subcommand to run.
     #[command(subcommand)]
     pub command: ModelsCommand,
 }
 
+/// The `lev models` subcommands.
 #[derive(Subcommand)]
 pub enum ModelsCommand {
     /// List available models and their capabilities
@@ -22,6 +25,7 @@ pub enum ModelsCommand {
     Show(ShowArgs),
 }
 
+/// Arguments for `lev models list`.
 #[derive(Args)]
 pub struct ListArgs {
     /// Filter by provider name (anthropic, openai, ollama, openrouter)
@@ -55,6 +59,7 @@ struct ModelRow {
     capabilities_overridden: bool,
 }
 
+/// Arguments for `lev models show`.
 #[derive(Args)]
 pub struct ShowArgs {
     /// Model ID to look up
@@ -69,6 +74,7 @@ pub struct ShowArgs {
 
 // ─── Entrypoint ───────────────────────────────────────────────────────────────
 
+/// Run `lev models`: show which provider/model pairs are reachable.
 pub async fn execute(args: ModelsArgs) -> anyhow::Result<()> {
     match args.command {
         ModelsCommand::List(a) => list_with_registry(a, &build_provider_registry_from_config).await,

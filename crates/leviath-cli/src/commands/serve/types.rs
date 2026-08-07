@@ -12,6 +12,7 @@ use crate::config::Config;
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
+/// Arguments for `lev serve`.
 #[derive(Args)]
 pub struct ServeArgs {
     /// Port to listen on
@@ -78,41 +79,75 @@ pub struct ServeArgs {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
+    /// Where a run stands, re-sent whenever any of it changes.
     AgentStatus {
+        /// The agent's live id in the world.
         agent_id: String,
+        /// The durable run id, and what a per-run subscription filters on.
         run_id: String,
+        /// The run's status, as `RunStatus` renders it.
         status: String,
+        /// The stage it is in, by name.
         stage: String,
+        /// Inference turns taken in that stage, reset on entering a new one.
         iteration: usize,
+        /// Tool calls made across the whole run.
         #[serde(default)]
         tool_calls: usize,
+        /// Whether a client may send this run a mid-run message. False for a
+        /// stage that declared `accepts_messages = false`, and for a run that
+        /// has finished.
         accepts_messages: bool,
     },
+    /// How full the run's context window is, after a turn changed it.
     ContextUpdate {
+        /// The agent's live id in the world.
         agent_id: String,
+        /// The durable run id.
         run_id: String,
+        /// Tokens held across every region.
         total_tokens: usize,
+        /// The whole window's budget.
         max_tokens: usize,
     },
+    /// One log line, as also written to the stage's log files.
     Log {
+        /// The agent's live id in the world.
         agent_id: String,
+        /// The durable run id.
         run_id: String,
+        /// The line, without a trailing newline. Long lines are truncated for
+        /// the broadcast; the on-disk stage log keeps the whole thing.
         line: String,
     },
+    /// The run is blocked on a person, and this is what it is asking.
     InteractionNeeded {
+        /// The agent's live id in the world.
         agent_id: String,
+        /// The durable run id.
         run_id: String,
+        /// The prompt, forwarded as the runtime serialized it, so a new kind of
+        /// request needs no server release.
         request: serde_json::Value,
     },
+    /// A run started, including one spawned as a child of another.
     AgentSpawned {
+        /// The agent's live id in the world.
         agent_id: String,
+        /// The durable run id.
         run_id: String,
+        /// The parent's agent id when this is a sub-agent, `None` at the root.
         parent_id: Option<String>,
+        /// The blueprint it was spawned from.
         blueprint: String,
     },
+    /// A run reached a terminal status.
     AgentCompleted {
+        /// The agent's live id in the world.
         agent_id: String,
+        /// The durable run id.
         run_id: String,
+        /// The terminal status, as `RunStatus` renders it.
         status: String,
         /// The run's *error*, if it failed. Named `result` since before a run
         /// could produce one; kept for the consumers that read it.
@@ -121,13 +156,21 @@ pub enum ServerEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         final_output: Option<FinalOutputResp>,
     },
+    /// Running token totals for the whole run, after an inference landed.
     Tokens {
+        /// The agent's live id in the world.
         agent_id: String,
+        /// The durable run id.
         run_id: String,
+        /// Input tokens billed so far.
         prompt_tokens: usize,
+        /// Output tokens billed so far.
         completion_tokens: usize,
+        /// Input tokens served from the provider's prompt cache, counted within
+        /// `prompt_tokens` rather than on top of it.
         #[serde(default)]
         cached_tokens: usize,
+        /// Tokens written into the provider's prompt cache.
         #[serde(default)]
         cache_write_tokens: usize,
     },
@@ -136,7 +179,10 @@ pub enum ServerEvent {
     /// next), forwarded verbatim. `event` is the runtime's own serde-tagged
     /// [`WorldEvent`](leviath_runtime::host::WorldEvent) JSON, so clients get
     /// new event kinds without a server release.
-    World { event: serde_json::Value },
+    World {
+        /// The runtime's own serde-tagged event JSON, forwarded as-is.
+        event: serde_json::Value,
+    },
 }
 
 impl ServerEvent {
@@ -160,6 +206,8 @@ impl ServerEvent {
     }
 }
 
+/// What every request handler is given: the config, the event fan-out, and the
+/// control-socket client that reaches the daemon.
 #[derive(Clone)]
 pub struct AppState {
     pub(super) config: Arc<Config>,

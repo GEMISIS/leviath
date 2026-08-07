@@ -181,8 +181,11 @@ impl Default for SafeCommands {
 /// their config rather than in a manifest they downloaded.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSafeCommands {
+    /// Tool names this agent asks to have pre-approved.
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Shell grant-key prefixes it asks to have pre-approved. A prefix that
+    /// could write a file or run an unnamed program is refused at load.
     #[serde(default)]
     pub shell: Vec<String>,
     /// Honour this agent's own `[safe_commands]` block. Off by default:

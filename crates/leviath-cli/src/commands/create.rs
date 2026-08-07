@@ -4,6 +4,7 @@ use clap::Args;
 use std::fs;
 use std::path::Path;
 
+/// Arguments for `lev create`.
 #[derive(Args)]
 pub struct CreateArgs {
     /// Blueprint name
@@ -15,6 +16,7 @@ pub struct CreateArgs {
     pub template: String,
 }
 
+/// Run `lev create`: scaffold a new agent from a template.
 pub async fn execute(args: CreateArgs) -> anyhow::Result<()> {
     execute_with(args, &|path, contents| fs::write(path, contents))
 }

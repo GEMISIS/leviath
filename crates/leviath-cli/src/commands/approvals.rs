@@ -17,10 +17,12 @@ use crate::config::Config;
 /// Arguments for `lev approvals`.
 #[derive(Args)]
 pub struct ApprovalsArgs {
+    /// Which approvals subcommand to run.
     #[command(subcommand)]
     pub command: ApprovalsCommand,
 }
 
+/// The `lev approvals` subcommands.
 #[derive(Subcommand)]
 pub enum ApprovalsCommand {
     /// Show what runs without an approval prompt, and where each entry came from

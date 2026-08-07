@@ -23,6 +23,7 @@ pub struct AgentSource {
     /// what identifies the checkout on disk, while the blueprint's own name is
     /// what the agent calls itself.
     pub run_stem: String,
+    /// The parsed blueprint itself.
     pub blueprint: leviath_core::Blueprint,
 }
 

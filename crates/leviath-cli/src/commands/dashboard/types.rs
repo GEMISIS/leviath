@@ -11,6 +11,7 @@ use leviath_core::interaction;
 
 use ratatui::style::Color;
 
+/// Arguments for `lev dash`. It takes none; the dashboard is interactive.
 #[derive(Args)]
 pub struct DashboardArgs {}
 
@@ -136,17 +137,23 @@ pub(super) enum ConfirmAction {
 /// Display status for agents in the dashboard.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentDisplayStatus {
+    /// Working.
     Active,
+    /// Blocked on a person answering.
     Waiting,
+    /// Finished, with nothing further to accept.
     Complete,
     /// All required work done; still accepting optional follow-up input.
     CompleteInteractive,
+    /// Stopped by a failure, carrying its message.
     Error(String),
+    /// Loaded but not currently doing anything.
     Idle,
     /// Paused by the user; resumable with `r` (or `lev resume`). Distinct from
     /// `Idle` because a paused run is deliberate unfinished business, not a run
     /// that merely has not ticked yet.
     Paused,
+    /// Stopped from outside, by `lev kill` or a shutting-down daemon.
     Cancelled,
     /// On disk the run claims to be live, but the daemon has no such run and its
     /// metadata has not been touched in a long time - so nothing is driving it.
@@ -206,11 +213,17 @@ impl AgentDisplayStatus {
 /// An agent displayed in the dashboard.
 #[derive(Debug, Clone)]
 pub struct DashboardAgent {
+    /// The run id, which is also what every action against this row quotes.
     pub id: String,
+    /// The blueprint's name, as the manifest declares it.
     pub blueprint_name: String,
+    /// The stage the run is in, by name.
     pub stage: String,
+    /// That stage's position in the blueprint's list.
     pub stage_index: usize,
+    /// How many stages the blueprint has, so the pair renders as "3 of 7".
     pub num_stages: usize,
+    /// What the row shows, including states no other status enum has.
     pub status: AgentDisplayStatus,
     /// Cumulative prompt (input) tokens for background runs.
     pub tokens_in: usize,
@@ -218,7 +231,9 @@ pub struct DashboardAgent {
     pub tokens_out: usize,
     /// Cumulative tokens read from provider cache.
     pub cached_tokens: usize,
+    /// Inference turns taken in the current stage.
     pub iteration: usize,
+    /// The question a waiting run is asking, in one line, for the list row.
     pub waiting_prompt: Option<String>,
     /// Full structured interaction request (populated for WaitingInput agents)
     pub pending_request: Option<interaction::InteractionRequest>,

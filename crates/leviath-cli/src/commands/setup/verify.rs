@@ -30,9 +30,15 @@ pub enum Outcome {
     /// Not attempted - `--no-verify`, or no credential to check.
     Skipped,
     /// The provider answered. Carries its model ids, for the model picker.
-    Reachable { models: Vec<String> },
+    Reachable {
+        /// The model ids it advertised, which is what the model picker offers.
+        models: Vec<String>,
+    },
     /// The provider refused or could not be reached.
-    Failed { message: String },
+    Failed {
+        /// What went wrong, shown next to the provider's row.
+        message: String,
+    },
 }
 
 impl Outcome {
@@ -66,6 +72,9 @@ impl Outcome {
 /// tests never open a socket.
 #[allow(async_fn_in_trait)] // callers are concrete; no `dyn` and no boxing needed
 pub trait ProviderVerifier {
+    /// Ask the provider whether these credentials work, and what models they
+    /// reach. Never fails: an unreachable provider is an [`Outcome::Failed`],
+    /// not an error, because the wizard reports it rather than stopping.
     async fn verify(&self, creds: &ProviderCreds) -> Outcome;
 }
 

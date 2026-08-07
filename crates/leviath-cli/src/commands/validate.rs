@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use crate::lint::{LintEnv, LintFinding, LintSeverity, lint_manifest};
 
+/// Arguments for `lev validate`.
 #[derive(Args)]
 pub struct ValidateArgs {
     /// Path to the agent directory or agent.leviath file
@@ -24,8 +25,11 @@ pub struct ValidateArgs {
 /// The blueprint itself, for a caller that wants to know what it just validated.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct BlueprintSummary {
+    /// The blueprint's `[agent] name`.
     pub name: String,
+    /// Its declared version.
     pub version: String,
+    /// Its one-line description.
     pub description: String,
     /// Null when the manifest names no `entry_stage`, in which case the first
     /// stage is the entry.
@@ -49,9 +53,13 @@ pub struct ValidateReport {
     pub blueprint: Option<BlueprintSummary>,
     /// Present when it did not.
     pub error: Option<String>,
+    /// Everything the lint had to say, at every severity.
     pub findings: Vec<LintFinding>,
+    /// How many findings are errors. Non-zero means the blueprint will not run.
     pub errors: usize,
+    /// How many are warnings: it runs, but something looks wrong.
     pub warnings: usize,
+    /// How many are notes: things worth seeing that are not problems.
     pub notes: usize,
 }
 
@@ -382,6 +390,7 @@ fn print_script_tool_report(path: &std::path::Path) {
     }
 }
 
+/// Run `lev validate`: check a blueprint and print what is wrong with it.
 pub async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
     let config = crate::config::Config::load().ok();
     match execute_reporting_outcome(&args, config.as_ref())? {

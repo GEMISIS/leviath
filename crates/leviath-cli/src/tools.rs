@@ -16,9 +16,14 @@ use crate::config::{Config, ToolPolicy};
 /// Cheap to clone (all fields are `Arc`s). The `call` method dispatches
 /// to the appropriate executor.
 pub struct ToolRegistry {
+    /// The built-in tools, over this agent's workdir.
     pub builtins: Arc<BuiltinTools>,
+    /// The MCP executor, shared because connections are per-server rather than
+    /// per-agent.
     pub mcp: Arc<Mutex<ToolExecutor>>,
+    /// MCP tool definitions to advertise, resolved once at spawn.
     pub mcp_tool_defs: Vec<Tool>,
+    /// Which names dispatch to `builtins` rather than to MCP.
     pub builtin_names: HashSet<String>,
 }
 

@@ -1,21 +1,15 @@
 //! Leviath CLI library - re-exports for integration tests.
 //!
-//! # Why `missing_docs` is off here
+//! `missing_docs` applies here like everywhere else in the workspace. This crate
+//! ships the `lev` binary rather than a library anyone calls, so the case for
+//! exempting it was real - and the case against turned out to be stronger: the
+//! `pub` surface is what the integration tests drive, and a wire type like
+//! [`commands::serve::ServerEvent`] is read by clients that never see this
+//! source. An undocumented field there is a gap for somebody.
 //!
-//! It is on for the whole workspace, because the other crates publish a library
-//! whose docs render on docs.rs and get called by people who did not write them.
-//! This crate publishes the `lev` **binary**. Its `pub` surface is `pub` so the
-//! integration tests in `tests/` can reach it, not because anything outside
-//! calls it - `execute(args: AddArgs)` is `lev add`, and a doc comment saying so
-//! restates the module path.
-//!
-//! The 166 items that would be flagged here are mostly clap `Args` fields, which
-//! already carry their user-facing text in `#[arg(help = ...)]` or a doc comment
-//! clap consumes. Requiring a second description for the rustdoc reader who does
-//! not exist is the noise this repo's comment policy is written to keep out.
-//!
-//! Tracked in #290 if that reasoning stops holding.
-#![allow(missing_docs)]
+//! What the rule asks for is a sentence saying something the name does not. A
+//! clap `Args` field already carries its user-facing text for `--help`; the
+//! struct around it says which command it belongs to.
 
 pub mod approvals;
 pub mod bundled;

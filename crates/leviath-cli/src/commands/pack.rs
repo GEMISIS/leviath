@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use leviath_core::manifest::parse_manifest;
 
+/// Arguments for `lev pack`.
 #[derive(Args)]
 pub struct PackArgs {
     /// Path to agent project (default: current directory)
@@ -17,6 +18,7 @@ pub struct PackArgs {
     pub output: Option<String>,
 }
 
+/// Run `lev pack`: build a distributable bundle from an agent directory.
 pub async fn execute(args: PackArgs) -> anyhow::Result<()> {
     execute_with_bundle(args, &|dir| AgentBundler::new().bundle(dir)).await
 }
