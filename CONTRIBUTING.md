@@ -102,6 +102,20 @@ cargo llvm-cov --package <crate> --lib --html --open   # browsable per-crate rep
 
 > Branch coverage isn't collected: `cargo llvm-cov --branch` reliably SIGSEGVs inside LLVM's own coverage-mapping code ([open upstream bug](https://github.com/llvm/llvm-project/issues/119558)). See the doc comment atop `xtask/src/coverage.rs` for the full investigation.
 
+## Dependencies
+
+Declare a dependency in `[workspace.dependencies]` and reference it from a crate as `{ workspace = true }`. A version written inline in a crate manifest is invisible to anyone reading the root, which is how one crate ends up on a different minor from the rest without anybody deciding that.
+
+A version requirement here records **the minimum this workspace has actually been tested against, as of the last time someone deliberately raised it** — not the oldest version that might still compile. Raising a floor to match `Cargo.lock` is a no-op for resolution (the lock already picks that version), so it costs nothing and stops the requirement drifting into a claim nobody has checked. Do it when you notice the gap; there is no obligation to chase every release.
+
+To find genuinely duplicated dependencies, ask cargo:
+
+```bash
+cargo tree --duplicates
+```
+
+Not `Cargo.lock`. The lockfile records **unenabled optional** dependencies too, so a crate can appear there while never being compiled — `cargo tree -i <crate>` printing "nothing to print" is the tell. Trimming a feature to remove such an entry changes neither the build nor the lockfile.
+
 ## Cutting a release
 
 Releases are triggered by a version bump, not by a schedule. Merging a bump to

@@ -30,7 +30,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tiktoken-rs = { workspace = true }
-async-trait = "0.1"
+async-trait = { workspace = true }
 futures-core = { workspace = true }
 tokio-stream = { workspace = true }
 bytes = "1"
