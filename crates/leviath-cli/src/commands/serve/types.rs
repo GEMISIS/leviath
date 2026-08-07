@@ -13,7 +13,7 @@ use crate::config::Config;
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
 /// Arguments for `lev serve`.
-#[derive(Args)]
+#[derive(Args, Clone)]
 pub struct ServeArgs {
     /// Port to listen on
     #[arg(short, long, default_value = "3000")]
@@ -63,6 +63,23 @@ pub struct ServeArgs {
     /// filesystem. Set this to the directory the API is meant to work in.
     #[arg(long)]
     pub workdir_root: Option<PathBuf>,
+
+    /// PEM certificate chain to serve HTTPS with. Needs `--tls-key` too.
+    ///
+    /// Bring your own; Leviath never generates one. Without HTTPS the browser
+    /// console cannot reach a `lev serve` that is not on loopback - the browser
+    /// blocks the request before sending it, so no server-side header and no
+    /// `--cors` value can help. A LAN address is blocked exactly like a public
+    /// one.
+    ///
+    /// `mkcert` and `tailscale cert` both produce certificates that work here.
+    /// See the "reaching a Leviath on another machine" section of the docs.
+    #[arg(long, value_name = "PATH")]
+    pub tls_cert: Option<PathBuf>,
+
+    /// PEM private key for `--tls-cert`. Needs `--tls-cert` too.
+    #[arg(long, value_name = "PATH")]
+    pub tls_key: Option<PathBuf>,
 
     /// Refuse `"yolo": true` and `"allow": [...]` on spawn requests, so an API
     /// caller cannot waive approval prompts for an agent running on the host.

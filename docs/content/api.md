@@ -24,7 +24,15 @@ lev serve --port 3000 --token "$(openssl rand -hex 16)" --cors https://leviath.d
   (`ps`).
 - **CORS is closed by default.** Pass `--cors <origin>` (e.g. `https://leviath.dev`) or `--cors "*"`
   to allow a browser to call it cross-origin.
-- **Binds to `127.0.0.1`** by default. `--host 0.0.0.0` exposes it on your network.
+- **Binds to `127.0.0.1`** by default. `--host 0.0.0.0` exposes it on your network - and without
+  `--tls-cert`, puts the bearer token on the wire in cleartext for anyone on that network to read.
+  If the address is publicly routable, that is the open internet. See
+  [reaching a Leviath on another machine](#reaching-a-leviath-on-another-machine).
+- **`--tls-cert` / `--tls-key`** serve HTTPS instead of HTTP. Off by default, bring your own
+  certificate; Leviath never generates one.
+- **`GET /` needs no token.** It returns a fixed "Leviath is running." page and nothing else - no
+  version, no run counts, no endpoint list. It exists so a certificate can be accepted in a browser
+  tab; see the section below.
 - **`--allow-admin`** mounts the mutating admin routes. `GET /api/config` and
   `GET /api/mcp/servers` are always available. The writes are only mounted with `--allow-admin`, and
   the route is genuinely absent without it rather than gated by a check inside the handler. What you
@@ -41,6 +49,87 @@ lev serve --port 3000 --token "$(openssl rand -hex 16)" --cors https://leviath.d
 > [!CAUTION]
 > `lev serve` runs LLM-driven tools with whatever permissions the blueprint grants. Treat it as
 > trusted-network only unless hardened. See [Security](/docs/security).
+
+## Reaching a Leviath on another machine
+
+The short version: **`http://` only works on loopback.** Everything else needs HTTPS or a tunnel.
+
+A browser treats `http://localhost` and `http://127.0.0.1` as potentially trustworthy, which is the
+only reason the default setup works from a page served over HTTPS. Every other address is blocked,
+and **a LAN address is blocked exactly like a public one** - `http://192.168.1.50:3000` fails just as
+`http://34.132.206.6:8080` does:
+
+```
+Mixed Content: The page at 'https://leviath.dev/lair' was loaded over HTTPS, but requested an
+insecure resource 'http://34.132.206.6:8080/api/config'. This request has been blocked.
+```
+
+Two things that are *not* the problem, because they are what people reach for first:
+
+- **It is not CORS.** The request is killed inside the browser before it is sent, so it never reaches
+  Leviath and `--cors` is never consulted. No response header on either side lifts a mixed-content
+  block.
+- **The site cannot fix it.** leviath.dev is HTTPS-only, and an HTTPS page may not call `http://`.
+
+Pick whichever of these suits you.
+
+### mkcert, if the browser and Leviath are on machines you control
+
+The best outcome: a certificate that is *fully* trusted, with no interstitial and nothing to accept.
+[mkcert](https://github.com/FiloSottile/mkcert) installs a local CA into your OS and browser trust
+stores and will issue for a bare IP.
+
+```bash
+mkcert -install                      # once, on the machine running the BROWSER
+mkcert 192.168.1.50                  # on the machine running Leviath
+lev serve --host 0.0.0.0 --port 3000 \
+  --tls-cert ./192.168.1.50.pem --tls-key ./192.168.1.50-key.pem \
+  --cors https://leviath.dev --token "$LEVIATH_API_TOKEN"
+```
+
+Installing a CA into your trust store is a real trust decision: anything holding that CA's key can
+issue a certificate your browser will believe. `mkcert` keeps the key on the machine that made it.
+
+### Tailscale, for a publicly-trusted name
+
+`tailscale cert` issues a real certificate for your `*.ts.net` hostname, so nothing needs installing
+in a trust store and the port never faces the internet.
+
+```bash
+tailscale cert my-box.tail1234.ts.net
+lev serve --host 0.0.0.0 --tls-cert my-box.tail1234.ts.net.crt \
+  --tls-key my-box.tail1234.ts.net.key --cors https://leviath.dev
+```
+
+### Self-signed, as a fallback
+
+Works, with one manual step and one caveat.
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -keyout key.pem -out cert.pem -subj "/CN=leviath" \
+  -addext "subjectAltName=IP:192.168.1.50"
+lev serve --host 0.0.0.0 --tls-cert cert.pem --tls-key key.pem --cors https://leviath.dev
+```
+
+Then **open `https://192.168.1.50:3000/` in a browser tab and accept the warning.** That is what the
+unauthenticated `GET /` page is for: the console's requests are subresource `fetch` calls, which get
+no interstitial to click through, so the exception has to be established in a tab first. Afterwards
+the console works.
+
+Chrome discards accepted exceptions when the browser restarts, so this comes back. Firefox keeps
+them. iOS Safari is unreliable about it.
+
+### SSH forward, if you would rather not deal with certificates
+
+Nothing to install on either end, and it puts you back inside the loopback exemption.
+
+```bash
+ssh -N -L 3000:127.0.0.1:3000 you@that-machine
+```
+
+Then point the console at `http://127.0.0.1:3000`. Leave Leviath on its default `127.0.0.1` bind for
+this - `--host 0.0.0.0` is not wanted and only widens the exposure.
 
 ## Auth flow
 

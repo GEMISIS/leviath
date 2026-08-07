@@ -17,6 +17,7 @@ mod runs;
 mod search;
 #[cfg(test)]
 mod testutil;
+mod tls;
 mod tree;
 mod types;
 mod websocket;
@@ -337,6 +338,17 @@ async fn execute_with_shutdown(
             auth::require_auth,
         ))
         .with_state(state);
+
+    // Merged *after* the auth layer, which is the entire point: a browser tab
+    // cannot send an `Authorization` header, and this page exists to be opened
+    // in one. With a self-signed certificate that is how a user reaches the
+    // interstitial and accepts it, after which the console's `fetch` to the
+    // same origin inherits the exception.
+    //
+    // Deliberately says almost nothing. It is a new unauthenticated surface,
+    // and a visitor who can load it already knows the port is open - so it adds
+    // no version, no run counts, no endpoint list.
+    let app = app.merge(Router::new().route("/", get(status_page)));
     // Applied by branching on the router rather than layering an `Option`:
     // `Option<CorsLayer>` is not a `Layer`, and a permissive-but-unused layer
     // would be exactly the default this change removes.
@@ -345,9 +357,19 @@ async fn execute_with_shutdown(
         None => app,
     };
 
+    // Resolved and loaded before the listener binds. A server that binds and
+    // then fails every handshake looks like a network fault from the other
+    // machine; one that refuses to start names the file it could not read.
+    let tls = tls::resolve(args.tls_cert.clone(), args.tls_key.clone())?;
+    let tls_config = match &tls {
+        Some(paths) => Some(tls::load(paths).await?),
+        None => None,
+    };
+
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
-    tracing::info!("Listening on http://{}", addr);
-    println!("Leviath API server listening on http://{}", addr);
+    let scheme = tls::scheme(tls.as_ref());
+    tracing::info!("Listening on {}://{}", scheme, addr);
+    println!("Leviath API server listening on {scheme}://{addr}");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     if let Some(ready) = ready {
@@ -358,13 +380,76 @@ async fn execute_with_shutdown(
             .expect("infallible: a freshly bound TcpListener always has a local address");
         let _ = ready.send(local_addr);
     }
-    // axum::serve with graceful shutdown always returns Ok(()) - discard the
-    // infallible Result so LLVM-cov does not instrument an unreachable Err branch.
-    let _ = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await;
+
+    match tls_config {
+        // axum::serve with graceful shutdown always returns Ok(()) - discard the
+        // infallible Result so LLVM-cov does not instrument an unreachable Err branch.
+        None => {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown)
+                .await;
+        }
+        Some(config) => serve_tls(listener, app, config, shutdown).await,
+    }
 
     Ok(())
+}
+
+/// Serve over TLS on an already-bound listener, until `shutdown` resolves.
+///
+/// Takes the listener rather than an address so the bind, the `ready` report
+/// and the "port already in use" error are the same code on both schemes -
+/// letting `axum-server` bind would have given HTTPS its own second copy of all
+/// three, and a `--port 0` test no way to learn the port.
+///
+/// Shutdown is bridged rather than shared: `axum-server` signals through a
+/// `Handle` instead of taking a future, so a task waits on the same future the
+/// plain path awaits and converts it into a `graceful_shutdown` call.
+async fn serve_tls(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    config: axum_server::tls_rustls::RustlsConfig,
+    shutdown: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+) {
+    let handle = axum_server::Handle::new();
+    let signal = handle.clone();
+    tokio::spawn(async move {
+        shutdown.await;
+        // Some(..) rather than None: a connection that never closes would
+        // otherwise hold the process open for ever, and a WebSocket subscriber
+        // is exactly such a connection.
+        signal.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
+    });
+    // Handed over still non-blocking, which is how tokio left it. Setting it
+    // back to blocking looks tidier and *panics*: `from_tcp` re-registers the
+    // socket with tokio, which refuses a blocking one. That is also why both
+    // conversions below cannot fail here - a bound, non-blocking listener is
+    // exactly what they accept.
+    let std_listener = listener
+        .into_std()
+        .expect("infallible: a bound tokio listener always converts back");
+    let server = axum_server::from_tcp_rustls(std_listener, config)
+        .expect("infallible: the listener is bound and non-blocking, which is all this checks");
+    // Discarded for the same reason the plain path discards `axum::serve`'s:
+    // with a shutdown signal wired up this resolves to `Ok(())`, and an
+    // unreachable `Err` branch is a region the coverage gate cannot forgive.
+    let _ = server.handle(handle).serve(app.into_make_service()).await;
+}
+
+/// The unauthenticated page at `GET /`.
+///
+/// Exists so a user can open the endpoint in a browser tab, meet the
+/// certificate interstitial, and accept it - after which the console's `fetch`
+/// to that origin inherits the exception. Strictly the mechanism does not need
+/// a page (the interstitial precedes any response, so even a 401 would do), but
+/// landing on an auth error reads like a mistake rather than confirmation.
+async fn status_page() -> axum::response::Html<&'static str> {
+    axum::response::Html(
+        "<!doctype html><meta charset=utf-8><title>Leviath</title>\
+         <body style=\"font:16px system-ui;margin:4rem auto;max-width:30rem\">\
+         <h1>Leviath is running.</h1>\
+         <p>The API needs a token; this page does not serve it.</p>",
+    )
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -1054,6 +1139,8 @@ prompt = "Run"
             allow_admin: false,
             workdir_root: None,
             no_remote_yolo: false,
+            tls_cert: None,
+            tls_key: None,
         };
         assert_eq!(args.port, 3000);
         assert_eq!(args.host, "127.0.0.1");
@@ -1152,6 +1239,8 @@ prompt = "Run"
                     allow_admin: false,
                     workdir_root: None,
                     no_remote_yolo: false,
+                    tls_cert: None,
+                    tls_key: None,
                 };
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 let handle = tokio::spawn(execute_with_shutdown(
@@ -1200,6 +1289,207 @@ prompt = "Run"
         .await;
     }
 
+    /// The whole feature, end to end: a real TLS handshake against a real
+    /// listener, and the status page answering without a token.
+    ///
+    /// Everything else about TLS is tested in `tls::tests` against files. This
+    /// is the one that would catch the wiring being wrong - a certificate that
+    /// loads but a server that never speaks TLS, or a `/` route that ended up
+    /// inside the auth layer after all.
+    #[tokio::test]
+    async fn execute_serves_https_and_the_status_page_needs_no_token() {
+        crate::config::with_isolated_config_path_async("serve-mod-tls", |_fake_dir| async move {
+            with_tracing(|| {});
+            let dir = tempfile::tempdir().expect("tempdir");
+            let cert = dir.path().join("cert.pem");
+            let key = dir.path().join("key.pem");
+            std::fs::write(&cert, tls::tests::TEST_CERT).expect("write cert");
+            std::fs::write(&key, tls::tests::TEST_KEY).expect("write key");
+
+            let args = ServeArgs {
+                port: 0,
+                host: "127.0.0.1".to_string(),
+                cors: None,
+                token: Some("test-token".to_string()),
+                allow_admin: false,
+                workdir_root: None,
+                no_remote_yolo: false,
+                tls_cert: Some(cert),
+                tls_key: Some(key),
+            };
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let handle = tokio::spawn(execute_with_shutdown(
+                args,
+                no_daemon_control(),
+                Box::pin(std::future::pending()),
+                Some(ready_tx),
+            ));
+            let addr = ready_rx.await.expect("server reports its address");
+
+            // A client that trusts exactly this certificate, so a successful
+            // response proves the server presented it - not that verification
+            // was skipped.
+            let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+            use rustls_pki_types::pem::PemObject;
+            for der in
+                rustls_pki_types::CertificateDer::pem_slice_iter(tls::tests::TEST_CA.as_bytes())
+            {
+                roots
+                    .add(der.expect("a parseable certificate"))
+                    .expect("add to the root store");
+            }
+            let client_config = tokio_rustls::rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client_config));
+
+            let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+            let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from("localhost")
+                .expect("a valid name");
+            let mut tls_stream = connector
+                .connect(server_name, stream)
+                .await
+                .expect("the TLS handshake succeeds against the served certificate");
+
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            tls_stream
+                .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("write");
+            let mut resp = Vec::new();
+            tls_stream.read_to_end(&mut resp).await.expect("read");
+            let text = String::from_utf8_lossy(&resp).into_owned();
+
+            // No `Authorization` header was sent, and the page still answers -
+            // which is the property the certificate-accepting flow depends on.
+            assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+            assert!(text.contains("Leviath is running."), "{text}");
+
+            handle.abort();
+        })
+        .await;
+    }
+
+    /// Both TLS failures stop the server before it binds, which is the whole
+    /// point: one that binds and then rejects every handshake looks like a
+    /// network fault from the other machine.
+    #[tokio::test]
+    async fn a_bad_tls_configuration_stops_the_server_before_it_binds() {
+        crate::config::with_isolated_config_path_async(
+            "serve-mod-tls-bad",
+            |_fake_dir| async move {
+                with_tracing(|| {});
+                let dir = tempfile::tempdir().expect("tempdir");
+                let cert = dir.path().join("cert.pem");
+                std::fs::write(&cert, "not a certificate").expect("write");
+
+                let base = ServeArgs {
+                    port: 0,
+                    host: "127.0.0.1".to_string(),
+                    cors: None,
+                    token: Some("test-token".to_string()),
+                    allow_admin: false,
+                    workdir_root: None,
+                    no_remote_yolo: false,
+                    tls_cert: None,
+                    tls_key: None,
+                };
+
+                // One flag without the other.
+                let lone = ServeArgs {
+                    tls_cert: Some(cert.clone()),
+                    ..base.clone()
+                };
+                let err = execute_with_shutdown(
+                    lone,
+                    no_daemon_control(),
+                    Box::pin(std::future::pending()),
+                    None,
+                )
+                .await
+                .expect_err("one TLS flag alone is refused");
+                let message = format!("{err:#}");
+                assert!(message.contains("--tls-key"), "{message}");
+
+                // Both flags, but the certificate will not parse.
+                let key = dir.path().join("key.pem");
+                std::fs::write(&key, tls::tests::TEST_KEY).expect("write");
+                let unreadable = ServeArgs {
+                    tls_cert: Some(cert),
+                    tls_key: Some(key),
+                    ..base
+                };
+                let err = execute_with_shutdown(
+                    unreadable,
+                    no_daemon_control(),
+                    Box::pin(std::future::pending()),
+                    None,
+                )
+                .await
+                .expect_err("a malformed certificate is refused");
+                let message = format!("{err:#}");
+                assert!(message.contains("cert.pem"), "{message}");
+            },
+        )
+        .await;
+    }
+
+    /// The HTTPS server stops when its shutdown future resolves.
+    ///
+    /// `axum-server` signals through a `Handle` rather than taking a future, so
+    /// this is the one place the two shutdown models are bridged - and a bridge
+    /// that never fires would leave `lev serve` unkillable by anything short of
+    /// a signal.
+    #[tokio::test]
+    async fn https_shuts_down_when_its_signal_resolves() {
+        crate::config::with_isolated_config_path_async(
+            "serve-mod-tls-shutdown",
+            |_fake_dir| async move {
+                with_tracing(|| {});
+                let dir = tempfile::tempdir().expect("tempdir");
+                let cert = dir.path().join("cert.pem");
+                let key = dir.path().join("key.pem");
+                std::fs::write(&cert, tls::tests::TEST_CERT).expect("write cert");
+                std::fs::write(&key, tls::tests::TEST_KEY).expect("write key");
+
+                let args = ServeArgs {
+                    port: 0,
+                    host: "127.0.0.1".to_string(),
+                    cors: None,
+                    token: Some("test-token".to_string()),
+                    allow_admin: false,
+                    workdir_root: None,
+                    no_remote_yolo: false,
+                    tls_cert: Some(cert),
+                    tls_key: Some(key),
+                };
+                let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                let server = tokio::spawn(execute_with_shutdown(
+                    args,
+                    no_daemon_control(),
+                    Box::pin(async move {
+                        let _ = stop_rx.await;
+                    }),
+                    Some(ready_tx),
+                ));
+                ready_rx.await.expect("server reports its address");
+
+                stop_tx.send(()).expect("the server is listening for this");
+                // Returns rather than being aborted, which is what proves the
+                // signal reached `axum-server` instead of the task simply being
+                // killed.
+                let finished = tokio::time::timeout(std::time::Duration::from_secs(10), server)
+                    .await
+                    .expect("the server should stop on its own");
+                finished
+                    .expect("the task should not panic")
+                    .expect("a clean shutdown is not an error");
+            },
+        )
+        .await;
+    }
+
     /// A browser preflight for a request carrying `Authorization` must be
     /// allowed. `Access-Control-Allow-Headers: *` does NOT cover `Authorization`
     /// per the Fetch spec, so the header has to be listed explicitly — without
@@ -1219,6 +1509,8 @@ prompt = "Run"
                     allow_admin: false,
                     workdir_root: None,
                     no_remote_yolo: false,
+                    tls_cert: None,
+                    tls_key: None,
                 };
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 let handle = tokio::spawn(execute_with_shutdown(
@@ -1271,6 +1563,8 @@ prompt = "Run"
                     allow_admin: false,
                     workdir_root: None,
                     no_remote_yolo: false,
+                    tls_cert: None,
+                    tls_key: None,
                 };
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 let handle = tokio::spawn(execute_with_shutdown(
@@ -1305,6 +1599,8 @@ prompt = "Run"
                 allow_admin: false,
                 workdir_root: None,
                 no_remote_yolo: false,
+                tls_cert: None,
+                tls_key: None,
             };
             let result = execute(args, no_daemon_control()).await;
             assert!(result.is_err());
@@ -1341,6 +1637,8 @@ prompt = "Run"
                     allow_admin: false,
                     workdir_root: None,
                     no_remote_yolo: false,
+                    tls_cert: None,
+                    tls_key: None,
                 };
                 let result = execute(args, no_daemon_control()).await;
                 assert_execute_failed_on_malformed_config(&result);
@@ -1371,6 +1669,8 @@ prompt = "Run"
             allow_admin: false,
             workdir_root: None,
             no_remote_yolo: false,
+                    tls_cert: None,
+                    tls_key: None,
         };
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1422,6 +1722,8 @@ prompt = "Run"
                     allow_admin: false,
                     workdir_root: None,
                     no_remote_yolo: false,
+                    tls_cert: None,
+                    tls_key: None,
                 };
                 let result = execute(args, no_daemon_control()).await;
                 assert_execute_failed_on_port_in_use(&result);
@@ -1442,6 +1744,8 @@ prompt = "Run"
                 allow_admin: false,
                 workdir_root: None,
                 no_remote_yolo: false,
+                tls_cert: None,
+                tls_key: None,
             };
             let result = execute(args, no_daemon_control()).await;
             assert!(result.is_err(), "must refuse to start unauthenticated");
@@ -1464,6 +1768,8 @@ prompt = "Run"
                     allow_admin: false,
                     workdir_root: None,
                     no_remote_yolo: false,
+                    tls_cert: None,
+                    tls_key: None,
                 };
 
                 let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1512,6 +1818,8 @@ prompt = "Run"
                     allow_admin: false,
                     workdir_root: None,
                     no_remote_yolo: false,
+                    tls_cert: None,
+                    tls_key: None,
                 };
 
                 let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1557,6 +1865,8 @@ prompt = "Run"
                     allow_admin: false,
                     workdir_root: None,
                     no_remote_yolo: false,
+                    tls_cert: None,
+                    tls_key: None,
                 }
             }
 
@@ -1624,6 +1934,8 @@ prompt = "Run"
                     allow_admin,
                     workdir_root: None,
                     no_remote_yolo: false,
+                    tls_cert: None,
+                    tls_key: None,
                 };
                 let server = tokio::spawn(execute_with_shutdown(
                     args,
