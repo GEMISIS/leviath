@@ -52,6 +52,14 @@ unsafe_code = "forbid"
 # `#[expect(clippy::string_slice, reason = "...")]` naming the construct that
 # guarantees it. "Looks fine" is exactly the unstated invariant this lint exists to
 # stop.
+# NOTE on `missing_docs`: measured, not enabled. Turning it on flags 325 items
+# (leviath-cli 166, leviath-core 109, runtime 18, mcp 15, providers 14, tools 3),
+# and CI runs with `-D warnings`, so "warn" is "deny" here. 240 of the 325 are
+# struct fields - largely serde payload types whose field names already say what
+# they are, and a doc comment restating a field name is the noise this repo's
+# comment policy exists to keep out. The 52 non-field items (functions, methods,
+# structs, enums) are worth documenting and would make the lint affordable;
+# that is a focused piece of work, not a flag flip.
 [workspace.lints.clippy]
 string_slice = "deny"
 

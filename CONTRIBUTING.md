@@ -80,6 +80,14 @@ npm install -g @ast-grep/cli     # via npm
 
 The workspace is gated at a hard **100%** on lines, regions, and functions, with no way to opt out. Coverage-suppression markers (`#[cfg(not(test))]`, `coverage(off)`, tarpaulin/lcov/grcov annotations) are banned by the ast-grep lint above, so code can't be hidden from measurement; it has to be refactored until it's testable. The *only* un-unit-tested code is the thin `lev` binary entrypoint (`crates/leviath-cli/src/main.rs`): the composition root that wires real terminal, stdin, network, and subprocess I/O into the library's tested cores. It's excluded from coverage measurement and guarded by a CI check that requires maintainer sign-off to change.
 
+### Where a test module lives
+
+Inline `#[cfg(test)] mod tests` in the file under test is the default; 205 files use it. A sibling `foo_tests.rs` (or `foo/tests.rs`) is the sanctioned alternative, used by 24 — but only for one reason.
+
+The difference is what gets measured. An inline test module is part of the file, so the gate counts its *scaffolding* too: a helper written to build fixtures has to itself be exercised on every branch, or it fails the gate. llvm-cov excludes the sibling layout by default, so a test module whose helpers would otherwise need tests of their own belongs there. Reach for it when the scaffolding is the problem, not because a file is getting long.
+
+Shared scaffolding goes further out: `leviath-testkit` is a dev-dependency-only crate for fixtures used by more than one crate (the always-on tracing subscriber, mock HTTP servers), and it is excluded from measurement entirely. Add to it rather than copying a helper into a second crate — that copying is exactly what it was created to stop.
+
 ## Running coverage locally
 
 `cargo xtask coverage` gates each workspace package with `cargo llvm-cov --package <pkg> --fail-under-{lines,functions,regions} 100`. llvm-cov does the counting *and* the gating; there's no custom parsing or aggregation. CI enforces a hard **100%** on all three metrics on Linux, macOS, and Windows. Any file below 100% fails the build, and a browsable HTML report lands in the gitignored `coverage/` folder.
