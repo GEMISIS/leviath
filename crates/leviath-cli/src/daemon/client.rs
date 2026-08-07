@@ -115,6 +115,37 @@ pub fn never_interactive() -> bool {
     false
 }
 
+/// What `lev run` was asked for, before any of it is resolved.
+///
+/// One struct because these are one thing: the command line. Each field is a
+/// flag the user typed, and grouping them keeps the difference between "what was
+/// asked for" and "what that resolves to" visible - `resolve_spawn_args` turns
+/// this into a [`SpawnArgs`], and the two are deliberately different types.
+pub struct LaunchRequest<'a> {
+    /// The blueprint path or name, as given.
+    pub path: &'a str,
+    /// The task text, if it was given rather than read from stdin or an editor.
+    pub task: Option<&'a str>,
+    /// Whether stdin is a terminal, injected so the editor path is testable.
+    pub stdin_is_terminal: &'a dyn Fn() -> bool,
+    /// `--model`, overriding the blueprint's choice.
+    pub model: Option<String>,
+    /// The working directory tools run in.
+    pub workdir: &'a str,
+    /// `--yolo`: run unattended.
+    pub yolo: bool,
+    /// `--allow`: tools permitted outright.
+    pub allow: Vec<String>,
+    /// `--max-depth`: sub-agent tree cap.
+    pub max_depth: Option<usize>,
+    /// `--<region>` seeds, keyed by caller-input region name.
+    pub regions: HashMap<String, String>,
+    /// `--no-seed-commands`: refuse the blueprint's command seeds.
+    pub no_seed_commands: bool,
+    /// The output shape the caller asked for, overriding the blueprint's.
+    pub output_request: Option<leviath_core::output::OutputSpec>,
+}
+
 /// Resolve the local inputs of a spawn request: find and parse the manifest,
 /// resolve the `--<region>` flags, resolve the task, and mint a run id from the
 /// agent's directory name.
@@ -127,23 +158,20 @@ pub fn never_interactive() -> bool {
 /// Regions are resolved *before* the task on purpose. A typo'd `--foo` has to
 /// fail before the user is dropped into an editor and types a paragraph they
 /// are about to lose.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "resolves six independent CLI inputs into one request; grouping them would invent a type whose only member is this call"
-)]
-pub fn resolve_spawn_args(
-    path: &str,
-    task: Option<&str>,
-    stdin_is_terminal: &dyn Fn() -> bool,
-    model: Option<String>,
-    workdir: &str,
-    yolo: bool,
-    allow: Vec<String>,
-    max_depth: Option<usize>,
-    regions: HashMap<String, String>,
-    no_seed_commands: bool,
-    output_request: Option<leviath_core::output::OutputSpec>,
-) -> anyhow::Result<SpawnArgs> {
+pub fn resolve_spawn_args(req: LaunchRequest<'_>) -> anyhow::Result<SpawnArgs> {
+    let LaunchRequest {
+        path,
+        task,
+        stdin_is_terminal,
+        model,
+        workdir,
+        yolo,
+        allow,
+        max_depth,
+        regions,
+        no_seed_commands,
+        output_request,
+    } = req;
     let source = load_agent_source(path)?;
     let resolved_regions = resolve_regions(&source.blueprint, regions)?;
     let task = resolve_task(
@@ -440,19 +468,19 @@ mod tests {
         std::fs::create_dir_all(&agent_dir).unwrap();
         let manifest = write_manifest(&agent_dir);
 
-        let args = resolve_spawn_args(
-            manifest.to_str().unwrap(),
-            Some("do it"),
-            &never_interactive,
-            Some("m".to_string()),
-            "/work",
-            false,
-            Vec::new(),
-            None,
-            HashMap::new(),
-            false,
-            None,
-        )
+        let args = resolve_spawn_args(LaunchRequest {
+            path: manifest.to_str().unwrap(),
+            task: Some("do it"),
+            stdin_is_terminal: &never_interactive,
+            model: Some("m".to_string()),
+            workdir: "/work",
+            yolo: false,
+            allow: Vec::new(),
+            max_depth: None,
+            regions: HashMap::new(),
+            no_seed_commands: false,
+            output_request: None,
+        })
         .unwrap();
         assert!(args.run_id.contains("my-agent"));
         assert_eq!(args.task, "do it");
@@ -498,19 +526,19 @@ mod tests {
         // uncovered region under the 100% gate.
         assert!(relative.is_relative(), "expected a relative path");
 
-        let args = resolve_spawn_args(
-            relative.to_str().unwrap(),
-            Some("do it"),
-            &never_interactive,
-            None,
-            "/work",
-            false,
-            Vec::new(),
-            None,
-            HashMap::new(),
-            false,
-            None,
-        )
+        let args = resolve_spawn_args(LaunchRequest {
+            path: relative.to_str().unwrap(),
+            task: Some("do it"),
+            stdin_is_terminal: &never_interactive,
+            model: None,
+            workdir: "/work",
+            yolo: false,
+            allow: Vec::new(),
+            max_depth: None,
+            regions: HashMap::new(),
+            no_seed_commands: false,
+            output_request: None,
+        })
         .unwrap();
         assert!(
             std::path::Path::new(&args.blueprint_path).is_absolute(),
@@ -523,19 +551,19 @@ mod tests {
     #[test]
     fn resolve_spawn_args_errors_on_missing_manifest() {
         assert!(
-            resolve_spawn_args(
-                "/no/such/agent",
-                Some("t"),
-                &never_interactive,
-                None,
-                "/work",
-                false,
-                Vec::new(),
-                None,
-                HashMap::new(),
-                false,
-                None,
-            )
+            resolve_spawn_args(LaunchRequest {
+                path: "/no/such/agent",
+                task: Some("t"),
+                stdin_is_terminal: &never_interactive,
+                model: None,
+                workdir: "/work",
+                yolo: false,
+                allow: Vec::new(),
+                max_depth: None,
+                regions: HashMap::new(),
+                no_seed_commands: false,
+                output_request: None,
+            })
             .is_err()
         );
     }
@@ -551,19 +579,19 @@ mod tests {
         let task_file = dir.path().join("task.md");
         std::fs::write(&task_file, "  summarize the README  \n").unwrap();
 
-        let args = resolve_spawn_args(
-            manifest.to_str().unwrap(),
-            Some(task_file.to_str().unwrap()),
-            &never_interactive,
-            None,
-            "/work",
-            false,
-            Vec::new(),
-            None,
-            HashMap::new(),
-            false,
-            None,
-        )
+        let args = resolve_spawn_args(LaunchRequest {
+            path: manifest.to_str().unwrap(),
+            task: Some(task_file.to_str().unwrap()),
+            stdin_is_terminal: &never_interactive,
+            model: None,
+            workdir: "/work",
+            yolo: false,
+            allow: Vec::new(),
+            max_depth: None,
+            regions: HashMap::new(),
+            no_seed_commands: false,
+            output_request: None,
+        })
         .unwrap();
         assert_eq!(args.task, "summarize the README");
     }
@@ -577,19 +605,19 @@ mod tests {
         std::fs::create_dir_all(&agent_dir).unwrap();
         let manifest = write_manifest(&agent_dir);
 
-        let err = resolve_spawn_args(
-            manifest.to_str().unwrap(),
-            None,
-            &never_interactive,
-            None,
-            "/work",
-            false,
-            Vec::new(),
-            None,
-            HashMap::new(),
-            false,
-            None,
-        )
+        let err = resolve_spawn_args(LaunchRequest {
+            path: manifest.to_str().unwrap(),
+            task: None,
+            stdin_is_terminal: &never_interactive,
+            model: None,
+            workdir: "/work",
+            yolo: false,
+            allow: Vec::new(),
+            max_depth: None,
+            regions: HashMap::new(),
+            no_seed_commands: false,
+            output_request: None,
+        })
         .unwrap_err();
         assert!(err.to_string().contains("No task provided"), "got: {err}");
     }
@@ -602,19 +630,19 @@ mod tests {
         let manifest = write_region_manifest(&dir.path().join("reviewer"));
         let regions = HashMap::from([("bogus".to_string(), "x".to_string())]);
 
-        let err = resolve_spawn_args(
-            manifest.to_str().unwrap(),
-            None,
-            &never_interactive,
-            None,
-            "/work",
-            false,
-            Vec::new(),
-            None,
+        let err = resolve_spawn_args(LaunchRequest {
+            path: manifest.to_str().unwrap(),
+            task: None,
+            stdin_is_terminal: &never_interactive,
+            model: None,
+            workdir: "/work",
+            yolo: false,
+            allow: Vec::new(),
+            max_depth: None,
             regions,
-            false,
-            None,
-        )
+            no_seed_commands: false,
+            output_request: None,
+        })
         .unwrap_err();
         assert!(err.to_string().contains("unknown region"), "got: {err}");
     }
@@ -657,19 +685,19 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             "criteria".to_string(),
             format!("@{}", policy.to_string_lossy()),
         )]);
-        let args = resolve_spawn_args(
-            manifest.to_str().unwrap(),
-            Some("review it"),
-            &never_interactive,
-            None,
-            "/work",
-            false,
-            Vec::new(),
-            None,
+        let args = resolve_spawn_args(LaunchRequest {
+            path: manifest.to_str().unwrap(),
+            task: Some("review it"),
+            stdin_is_terminal: &never_interactive,
+            model: None,
+            workdir: "/work",
+            yolo: false,
+            allow: Vec::new(),
+            max_depth: None,
             regions,
-            false,
-            None,
-        )
+            no_seed_commands: false,
+            output_request: None,
+        })
         .unwrap();
         // `@path` was read and trimmed.
         assert_eq!(
@@ -705,19 +733,19 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         .unwrap();
         let manifest = agent_dir.join("agent.leviath");
         let regions = HashMap::from([("foo".to_string(), "x".to_string())]);
-        let err = resolve_spawn_args(
-            manifest.to_str().unwrap(),
-            Some("t"),
-            &never_interactive,
-            None,
-            "/work",
-            false,
-            Vec::new(),
-            None,
+        let err = resolve_spawn_args(LaunchRequest {
+            path: manifest.to_str().unwrap(),
+            task: Some("t"),
+            stdin_is_terminal: &never_interactive,
+            model: None,
+            workdir: "/work",
+            yolo: false,
+            allow: Vec::new(),
+            max_depth: None,
             regions,
-            false,
-            None,
-        )
+            no_seed_commands: false,
+            output_request: None,
+        })
         .unwrap_err();
         assert!(err.to_string().contains("(none)"), "got: {err}");
     }
@@ -730,19 +758,19 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         let agent_dir = dir.path().join("dirmanifest");
         std::fs::create_dir_all(agent_dir.join("agent.leviath")).unwrap();
         let regions = HashMap::from([("x".to_string(), "y".to_string())]);
-        let err = resolve_spawn_args(
-            agent_dir.to_str().unwrap(),
-            Some("t"),
-            &never_interactive,
-            None,
-            "/work",
-            false,
-            Vec::new(),
-            None,
+        let err = resolve_spawn_args(LaunchRequest {
+            path: agent_dir.to_str().unwrap(),
+            task: Some("t"),
+            stdin_is_terminal: &never_interactive,
+            model: None,
+            workdir: "/work",
+            yolo: false,
+            allow: Vec::new(),
+            max_depth: None,
             regions,
-            false,
-            None,
-        )
+            no_seed_commands: false,
+            output_request: None,
+        })
         .unwrap_err();
         assert!(err.to_string().contains("read manifest"), "got: {err}");
     }
@@ -758,19 +786,19 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         )
         .unwrap();
         let regions = HashMap::from([("x".to_string(), "y".to_string())]);
-        let err = resolve_spawn_args(
-            agent_dir.join("agent.leviath").to_str().unwrap(),
-            Some("t"),
-            &never_interactive,
-            None,
-            "/work",
-            false,
-            Vec::new(),
-            None,
+        let err = resolve_spawn_args(LaunchRequest {
+            path: agent_dir.join("agent.leviath").to_str().unwrap(),
+            task: Some("t"),
+            stdin_is_terminal: &never_interactive,
+            model: None,
+            workdir: "/work",
+            yolo: false,
+            allow: Vec::new(),
+            max_depth: None,
             regions,
-            false,
-            None,
-        )
+            no_seed_commands: false,
+            output_request: None,
+        })
         .unwrap_err();
         assert!(err.to_string().contains("parse manifest"), "got: {err}");
     }
@@ -782,19 +810,19 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         let dir = tempfile::tempdir().unwrap();
         let manifest = write_region_manifest(&dir.path().join("reviewer"));
         let regions = HashMap::from([("criteria".to_string(), "@/no/such/file.md".to_string())]);
-        let err = resolve_spawn_args(
-            manifest.to_str().unwrap(),
-            Some("review it"),
-            &never_interactive,
-            None,
-            "/work",
-            false,
-            Vec::new(),
-            None,
+        let err = resolve_spawn_args(LaunchRequest {
+            path: manifest.to_str().unwrap(),
+            task: Some("review it"),
+            stdin_is_terminal: &never_interactive,
+            model: None,
+            workdir: "/work",
+            yolo: false,
+            allow: Vec::new(),
+            max_depth: None,
             regions,
-            false,
-            None,
-        )
+            no_seed_commands: false,
+            output_request: None,
+        })
         .unwrap_err();
         assert!(
             err.to_string().contains("Failed to read region file"),
@@ -807,19 +835,19 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         let dir = tempfile::tempdir().unwrap();
         let manifest = write_region_manifest(&dir.path().join("reviewer"));
         let regions = HashMap::from([("bogus".to_string(), "x".to_string())]);
-        let err = resolve_spawn_args(
-            manifest.to_str().unwrap(),
-            Some("review it"),
-            &never_interactive,
-            None,
-            "/work",
-            false,
-            Vec::new(),
-            None,
+        let err = resolve_spawn_args(LaunchRequest {
+            path: manifest.to_str().unwrap(),
+            task: Some("review it"),
+            stdin_is_terminal: &never_interactive,
+            model: None,
+            workdir: "/work",
+            yolo: false,
+            allow: Vec::new(),
+            max_depth: None,
             regions,
-            false,
-            None,
-        )
+            no_seed_commands: false,
+            output_request: None,
+        })
         .unwrap_err();
         assert!(
             err.to_string().contains("unknown region '--bogus'"),

@@ -715,14 +715,18 @@ impl ContextWindow {
                 // so a custom region is never silently dropped.
                 leviath_core::RegionKind::Custom { script, persistent } => {
                     crate::custom_region::render_custom_region(
-                        region,
-                        self.region_scripts.get(script),
-                        *persistent,
-                        meta,
-                        self.current_tokens,
-                        self.max_tokens,
-                        &mut system_blocks,
-                        &mut messages,
+                        crate::custom_region::RegionRender {
+                            region,
+                            script: self.region_scripts.get(script),
+                            persistent: *persistent,
+                            meta,
+                            window_current: self.current_tokens,
+                            window_max: self.max_tokens,
+                        },
+                        crate::custom_region::RenderSink {
+                            system_blocks: &mut system_blocks,
+                            messages: &mut messages,
+                        },
                     );
                 }
 

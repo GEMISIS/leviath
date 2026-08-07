@@ -500,12 +500,14 @@ pub fn resolve_transition(
                 match enter_stage(
                     idx,
                     &bp.0,
-                    &mut cursor,
-                    &mut state,
-                    &mut progress,
-                    &mut visits,
                     setup,
-                    &mut window,
+                    StageEntry {
+                        cursor: &mut cursor,
+                        state: &mut state,
+                        progress: &mut progress,
+                        visits: &mut visits,
+                        window: &mut window,
+                    },
                 ) {
                     Ok(visit) => {
                         // Entering a stage is active work; clears a prior error
@@ -563,20 +565,39 @@ pub fn resolve_transition(
 /// `Ok` carries the stage's updated visit count (this entry included), which the
 /// transition systems stamp into the [`StageTransition`](crate::host::WorldEvent)
 /// event.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "updates seven unrelated per-stage components in one pass, which is cheaper than seven queries over the same entity"
-)]
+/// The per-agent components entering a stage rewrites.
+///
+/// Borrowed together because entering a stage is one atomic edit across all
+/// five: the cursor moves, per-stage progress resets, the visit count bumps,
+/// `accepts_messages` is set from the new stage's mode, and the window is
+/// re-laid-out. Doing them through five separate queries over the same entity
+/// would cost five passes to say one thing.
+pub(crate) struct StageEntry<'a> {
+    /// Where in the blueprint the agent is.
+    pub cursor: &'a mut StageCursor,
+    /// The agent's live state.
+    pub state: &'a mut AgentState,
+    /// Per-stage counters, reset on entry.
+    pub progress: &'a mut StageProgress,
+    /// How many times each stage has been entered.
+    pub visits: &'a mut VisitCounts,
+    /// The context window, re-laid-out for the new stage.
+    pub window: &'a mut ContextWindow,
+}
+
 pub(crate) fn enter_stage(
     idx: usize,
     blueprint: &leviath_core::Blueprint,
-    cursor: &mut StageCursor,
-    state: &mut AgentState,
-    progress: &mut StageProgress,
-    visits: &mut VisitCounts,
     setup: &StageSetup,
-    window: &mut ContextWindow,
+    entry: StageEntry<'_>,
 ) -> Result<usize, String> {
+    let StageEntry {
+        cursor,
+        state,
+        progress,
+        visits,
+        window,
+    } = entry;
     cursor.index = idx;
     let name = blueprint.stages[idx].name.clone();
     state.current_stage = name.clone();
@@ -730,12 +751,14 @@ pub fn force_transition(world: &mut World, entity: Entity, target_idx: usize) {
         match enter_stage(
             target_idx,
             &bp,
-            &mut cursor,
-            &mut state,
-            &mut progress,
-            &mut visits,
             &setup,
-            &mut window,
+            StageEntry {
+                cursor: &mut cursor,
+                state: &mut state,
+                progress: &mut progress,
+                visits: &mut visits,
+                window: &mut window,
+            },
         ) {
             Ok(_) => Some((stage_inf, setup, name)),
             Err(message) => {

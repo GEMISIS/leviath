@@ -114,24 +114,24 @@ impl FanOutSpawner for DaemonFanOutSpawner {
             resolve_worker_source(config, &parent_path, self.agents_dir.as_deref())?;
 
         let task = format_worker_task(item_id, item_context);
-        let mut args = resolve_spawn_args(
-            &resolve_path,
-            Some(&task),
-            &never_interactive,
-            None,
-            &workdir,
-            unattended,
-            Vec::new(),
-            None,
+        let mut args = resolve_spawn_args(crate::daemon::client::LaunchRequest {
+            path: &resolve_path,
+            task: Some(&task),
+            stdin_is_terminal: &never_interactive,
+            model: None,
+            workdir: &workdir,
+            yolo: unattended,
+            allow: Vec::new(),
+            max_depth: None,
             // Fan-out workers get their split of the parent task via `task`.
-            std::collections::HashMap::new(),
+            regions: std::collections::HashMap::new(),
             // Workers share the parent's workdir and are splits of a task the
             // parent already scoped, so re-running a repo-scan command seed once
             // per worker would be pure waste (and up to `max_workers` copies of
             // the same output).
-            true,
+            no_seed_commands: true,
             output_request,
-        )
+        })
         .map_err(|e| format!("resolve worker blueprint: {e}"))?;
         // Nest the worker under its fan-out parent in the run tree.
         args.parent_run_id = Some(parent_run_id);

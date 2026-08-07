@@ -191,14 +191,41 @@ pub fn spawn_agent(
     // blueprint to the built-in defaults.
     spawn_agent_seeded(
         world,
-        agent_id,
-        blueprint,
-        &seeds,
-        stages,
-        global_hints,
-        leviath_core::NudgeConfig::default(),
-        std::collections::HashMap::new(),
+        SeededSpawn {
+            agent_id,
+            blueprint,
+            seeds,
+            stages,
+            global_hints,
+            global_nudge: leviath_core::NudgeConfig::default(),
+            region_scripts: std::collections::HashMap::new(),
+        },
     )
+}
+
+/// Everything a seeded spawn needs besides the world it spawns into.
+///
+/// The blueprint and its resolved stages travel with the seeds and the global
+/// defaults because all six are the same decision made at different layers:
+/// what this agent starts with. The caller resolves them; this consumes them.
+pub struct SeededSpawn {
+    /// The run id this agent is registered under.
+    pub agent_id: String,
+    /// The blueprint being spawned.
+    pub blueprint: leviath_core::Blueprint,
+    /// Content for named caller-input regions, keyed by region name.
+    pub seeds: std::collections::HashMap<String, String>,
+    /// The blueprint's stages, already resolved against the provider registry.
+    pub stages: Vec<ResolvedStage>,
+    /// Config-level prompt hints, applied where the blueprint says nothing.
+    pub global_hints: leviath_core::config::PromptHints,
+    /// The config-level nudge, likewise.
+    pub global_nudge: leviath_core::NudgeConfig,
+    /// Compiled render hooks, keyed by region name.
+    pub region_scripts: std::collections::HashMap<
+        String,
+        std::sync::Arc<leviath_scripting::region_hook::RegionScript>,
+    >,
 }
 
 /// Like [`spawn_agent`], but seeds the context window from a name→content map
@@ -210,23 +237,17 @@ pub fn spawn_agent(
 /// the agent as a [`crate::pipeline::response::GlobalNudge`] component; each
 /// field is resolved per stage against the blueprint's agent-level and
 /// per-stage nudge settings when an empty response is handled.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "spawns an entity from a blueprint plus five independent seed sources; the sources have nothing in common but this call"
-)]
-pub fn spawn_agent_seeded(
-    world: &mut World,
-    agent_id: String,
-    mut blueprint: leviath_core::Blueprint,
-    seeds: &std::collections::HashMap<String, String>,
-    stages: Vec<ResolvedStage>,
-    global_hints: leviath_core::config::PromptHints,
-    global_nudge: leviath_core::NudgeConfig,
-    region_scripts: std::collections::HashMap<
-        String,
-        std::sync::Arc<leviath_scripting::region_hook::RegionScript>,
-    >,
-) -> Result<Entity, String> {
+pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entity, String> {
+    let SeededSpawn {
+        agent_id,
+        mut blueprint,
+        seeds,
+        stages,
+        global_hints,
+        global_nudge,
+        region_scripts,
+    } = spawn;
+    let seeds = &seeds;
     // Resolve any percentage region budgets against each stage's model context
     // window (the only place the model - and hence the window - is known). The
     // global layout resolves against the entry stage (stage 0); each per-stage

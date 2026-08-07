@@ -530,36 +530,51 @@ mod tests {
         status: RunStatus,
         context: Option<&ContextSnapshot>,
     ) {
-        write_run_tree(
+        write_run_tree(RunFixture {
             runs_dir,
             run_id,
             agent_path,
             status,
             context,
-            None,
-            &[],
-            0,
-            0,
-        );
+            parent_run_id: None,
+            children: &[],
+            depth: 0,
+            max_child_depth: 0,
+        });
     }
 
     /// Like [`write_run`], but with explicit tree links so recovery's re-linking
     /// pass can be exercised.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "a test fixture that writes one run with explicit tree links; every argument is a field of the record it writes"
-    )]
-    fn write_run_tree(
-        runs_dir: &Path,
-        run_id: &str,
-        agent_path: &str,
+    /// One persisted run, as a fixture writes it.
+    ///
+    /// A struct because every field is a column of the record being written, and
+    /// a nine-argument call in which three are `&str` and two are `usize` is a
+    /// transposition waiting to happen in a file whose whole job is asserting on
+    /// what got written.
+    struct RunFixture<'a> {
+        runs_dir: &'a Path,
+        run_id: &'a str,
+        agent_path: &'a str,
         status: RunStatus,
-        context: Option<&ContextSnapshot>,
-        parent_run_id: Option<&str>,
-        children: &[&str],
+        context: Option<&'a ContextSnapshot>,
+        parent_run_id: Option<&'a str>,
+        children: &'a [&'a str],
         depth: usize,
         max_child_depth: usize,
-    ) {
+    }
+
+    fn write_run_tree(f: RunFixture<'_>) {
+        let RunFixture {
+            runs_dir,
+            run_id,
+            agent_path,
+            status,
+            context,
+            parent_run_id,
+            children,
+            depth,
+            max_child_depth,
+        } = f;
         let dir = runs_dir.join(run_id);
         std::fs::create_dir_all(&dir).unwrap();
         let meta = RunMeta {
@@ -1623,39 +1638,39 @@ mod tests {
         let runs = tempfile::tempdir().unwrap();
 
         // A parent with two children + a child that records its parent + depth.
-        write_run_tree(
-            runs.path(),
-            "parent",
-            mpath,
-            RunStatus::WaitingInput,
-            None,
-            None,
-            &["child-a", "child-b"],
-            0,
-            4,
-        );
-        write_run_tree(
-            runs.path(),
-            "child-a",
-            mpath,
-            RunStatus::Running,
-            None,
-            Some("parent"),
-            &[],
-            1,
-            0,
-        );
-        write_run_tree(
-            runs.path(),
-            "child-b",
-            mpath,
-            RunStatus::Running,
-            None,
-            Some("parent"),
-            &[],
-            1,
-            0,
-        );
+        write_run_tree(RunFixture {
+            runs_dir: runs.path(),
+            run_id: "parent",
+            agent_path: mpath,
+            status: RunStatus::WaitingInput,
+            context: None,
+            parent_run_id: None,
+            children: &["child-a", "child-b"],
+            depth: 0,
+            max_child_depth: 4,
+        });
+        write_run_tree(RunFixture {
+            runs_dir: runs.path(),
+            run_id: "child-a",
+            agent_path: mpath,
+            status: RunStatus::Running,
+            context: None,
+            parent_run_id: Some("parent"),
+            children: &[],
+            depth: 1,
+            max_child_depth: 0,
+        });
+        write_run_tree(RunFixture {
+            runs_dir: runs.path(),
+            run_id: "child-b",
+            agent_path: mpath,
+            status: RunStatus::Running,
+            context: None,
+            parent_run_id: Some("parent"),
+            children: &[],
+            depth: 1,
+            max_child_depth: 0,
+        });
 
         let (mut world, cli) = test_world();
         let hub = InteractionHub::new();
@@ -1708,51 +1723,52 @@ mod tests {
         let runs = tempfile::tempdir().unwrap();
 
         // Parent lists a child that is terminal (won't reload) → no SubAgentChildren.
-        write_run_tree(
-            runs.path(),
-            "lonely-parent",
-            mpath,
-            RunStatus::WaitingInput,
+        write_run_tree(RunFixture {
+            runs_dir: runs.path(),
+            run_id: "lonely-parent",
+            agent_path: mpath,
+            status: RunStatus::WaitingInput,
+            context: None,
+            parent_run_id: None,
+            children: &["gone-child"],
+            depth: 0,
+            max_child_depth: 2,
+        });
+        write_run_tree(RunFixture {
+            runs_dir: runs.path(),
+            run_id: "gone-child",
+            agent_path: mpath,
+            status: RunStatus::Complete,
+            context: // terminal → skipped by recovery
             None,
-            None,
-            &["gone-child"],
-            0,
-            2,
-        );
-        write_run_tree(
-            runs.path(),
-            "gone-child",
-            mpath,
-            RunStatus::Complete, // terminal → skipped by recovery
-            None,
-            Some("lonely-parent"),
-            &[],
-            1,
-            0,
-        );
+            parent_run_id: Some("lonely-parent"),
+            children: &[],
+            depth: 1,
+            max_child_depth: 0,
+        });
         // Child whose parent is terminal (won't reload) → left unlinked.
-        write_run_tree(
-            runs.path(),
-            "orphan",
-            mpath,
-            RunStatus::Running,
-            None,
-            Some("gone-parent"),
-            &[],
-            1,
-            0,
-        );
-        write_run_tree(
-            runs.path(),
-            "gone-parent",
-            mpath,
-            RunStatus::Error,
-            None,
-            None,
-            &["orphan"],
-            0,
-            2,
-        );
+        write_run_tree(RunFixture {
+            runs_dir: runs.path(),
+            run_id: "orphan",
+            agent_path: mpath,
+            status: RunStatus::Running,
+            context: None,
+            parent_run_id: Some("gone-parent"),
+            children: &[],
+            depth: 1,
+            max_child_depth: 0,
+        });
+        write_run_tree(RunFixture {
+            runs_dir: runs.path(),
+            run_id: "gone-parent",
+            agent_path: mpath,
+            status: RunStatus::Error,
+            context: None,
+            parent_run_id: None,
+            children: &["orphan"],
+            depth: 0,
+            max_child_depth: 2,
+        });
 
         let (mut world, cli) = test_world();
         let hub = InteractionHub::new();

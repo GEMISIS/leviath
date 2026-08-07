@@ -75,6 +75,27 @@ pub struct RhaiProvider {
     env_allowlist: Arc<Vec<String>>,
 }
 
+/// What a script provider is configured with, as distinct from the script
+/// itself and the executor it runs against.
+///
+/// Held apart from those two because they are the parts a test substitutes: the
+/// source is what is under test and the executor is what keeps it off the
+/// network, while everything here comes from `config.toml` either way.
+pub struct ScriptProviderSettings {
+    /// The provider name this script is registered under.
+    pub name: String,
+    /// The `initialize` block from the config.
+    pub init_config: serde_json::Value,
+    /// Per-model capabilities the config declares.
+    pub caps: HashMap<String, ModelCapabilities>,
+    /// Rate limiting, when configured.
+    pub rate_limit: Option<RateLimitConfig>,
+    /// Per-request timeout, when configured.
+    pub request_timeout_secs: Option<u64>,
+    /// Environment variables the script may read.
+    pub env_allowlist: Arc<Vec<String>>,
+}
+
 impl RhaiProvider {
     /// Load a provider from a script file, using the production reqwest-backed
     /// HTTP executor. Reads + compiles the script and runs `initialize(config)`
@@ -96,33 +117,34 @@ impl RhaiProvider {
             ))
         })?;
         Self::from_source(
-            name,
             &src,
-            init_config,
-            caps,
-            rate_limit,
-            request_timeout_secs,
             Arc::new(ReqwestExecutor::new()),
-            env_allowlist,
+            ScriptProviderSettings {
+                name,
+                init_config,
+                caps,
+                rate_limit,
+                request_timeout_secs,
+                env_allowlist,
+            },
         )
     }
 
     /// Build a provider from in-memory source with an injected [`HttpExecutor`]
     /// (used by tests to avoid real network I/O).
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the injected-executor constructor takes what the real one reads from config, one parameter per setting, so a struct here would only move the list"
-    )]
     pub fn from_source(
-        name: String,
         src: &str,
-        init_config: serde_json::Value,
-        caps: HashMap<String, ModelCapabilities>,
-        rate_limit: Option<RateLimitConfig>,
-        request_timeout_secs: Option<u64>,
         executor: Arc<dyn HttpExecutor>,
-        env_allowlist: Arc<Vec<String>>,
+        settings: ScriptProviderSettings,
     ) -> Result<Self> {
+        let ScriptProviderSettings {
+            name,
+            init_config,
+            caps,
+            rate_limit,
+            request_timeout_secs,
+            env_allowlist,
+        } = settings;
         let meta = parse_provider_annotations(src);
         let init_engine = build_init_engine(env_allowlist.clone());
         let ast = init_engine

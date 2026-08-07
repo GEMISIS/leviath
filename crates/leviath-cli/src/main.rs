@@ -259,21 +259,23 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
         }
     }
     let spawn_args = leviath_cli::daemon::client::resolve_spawn_args(
-        path,
-        args.task.as_deref(),
-        &|| std::io::IsTerminal::is_terminal(&io::stdin()),
-        args.model,
-        &workdir,
-        args.yolo,
-        args.allow,
-        args.max_depth,
-        args.regions,
-        args.no_seed_commands,
-        commands::run::output_request(
-            args.output_format,
-            args.output_instructions,
-            args.output_schema,
-        )?,
+        leviath_cli::daemon::client::LaunchRequest {
+            path,
+            task: args.task.as_deref(),
+            stdin_is_terminal: &|| std::io::IsTerminal::is_terminal(&io::stdin()),
+            model: args.model,
+            workdir: &workdir,
+            yolo: args.yolo,
+            allow: args.allow,
+            max_depth: args.max_depth,
+            regions: args.regions,
+            no_seed_commands: args.no_seed_commands,
+            output_request: commands::run::output_request(
+                args.output_format,
+                args.output_instructions,
+                args.output_schema,
+            )?,
+        },
     )?;
     // Deliberately after the resolve, not before. No `--task` opens an editor,
     // and a user can sit in vim for twenty minutes: checking daemon liveness

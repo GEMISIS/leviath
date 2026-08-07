@@ -106,20 +106,50 @@ fn fallback_block(region: &Region) -> leviath_providers::SystemBlock {
 /// Temporary-style block with a warning; success is followed by a warn-only
 /// token re-check against the region's budget (no truncation - the opt-in
 /// exact-token preflight remains the hard guard).
-#[expect(
-    clippy::too_many_arguments,
-    reason = "renders through a script into two caller-owned accumulators, so the accumulators and the script context cannot be collapsed into one value"
-)]
-pub(crate) fn render_custom_region(
-    region: &Region,
-    script: Option<&Arc<RegionScript>>,
-    persistent: bool,
-    meta: &AssembleMeta,
-    window_current: usize,
-    window_max: usize,
-    system_blocks: &mut Vec<leviath_providers::SystemBlock>,
-    messages: &mut Vec<leviath_providers::Message>,
-) {
+/// What one custom region is rendered from.
+///
+/// The window figures travel with the region rather than the accumulators
+/// because a render hook is told how full the window is so it can decide how
+/// much to emit - they describe the input, not where the output lands.
+pub(crate) struct RegionRender<'a> {
+    /// The region being rendered.
+    pub region: &'a Region,
+    /// Its render hook, when it declares one.
+    pub script: Option<&'a Arc<RegionScript>>,
+    /// Whether the region persists across stage transitions.
+    pub persistent: bool,
+    /// Stage metadata the hook sees.
+    pub meta: &'a AssembleMeta,
+    /// How full the window is right now.
+    pub window_current: usize,
+    /// How full it may get.
+    pub window_max: usize,
+}
+
+/// Where a rendered region's output is appended.
+///
+/// The caller owns both accumulators and interleaves several regions into them,
+/// so they are borrowed together rather than returned.
+pub(crate) struct RenderSink<'a> {
+    /// System blocks, for regions that render into the system prompt.
+    pub system_blocks: &'a mut Vec<leviath_providers::SystemBlock>,
+    /// Messages, for regions that render into the conversation.
+    pub messages: &'a mut Vec<leviath_providers::Message>,
+}
+
+pub(crate) fn render_custom_region(render: RegionRender<'_>, out: RenderSink<'_>) {
+    let RegionRender {
+        region,
+        script,
+        persistent,
+        meta,
+        window_current,
+        window_max,
+    } = render;
+    let RenderSink {
+        system_blocks,
+        messages,
+    } = out;
     let Some(script) = script else {
         // No compiled script on the window (plain `assemble()` callers, or a
         // spawn path that skipped resolution). Same shape as a hook failure.
@@ -556,18 +586,22 @@ mod tests {
         let mut messages = Vec::new();
         with_tracing(|| {
             render_custom_region(
-                region,
-                script,
-                persistent,
-                &AssembleMeta {
-                    stage_name: "plan".to_string(),
-                    stage_iterations: 2,
-                    model: "m1".to_string(),
+                RegionRender {
+                    region,
+                    script,
+                    persistent,
+                    meta: &AssembleMeta {
+                        stage_name: "plan".to_string(),
+                        stage_iterations: 2,
+                        model: "m1".to_string(),
+                    },
+                    window_current: 50,
+                    window_max: 2000,
                 },
-                50,
-                2000,
-                &mut blocks,
-                &mut messages,
+                RenderSink {
+                    system_blocks: &mut blocks,
+                    messages: &mut messages,
+                },
             )
         });
         (blocks, messages)
