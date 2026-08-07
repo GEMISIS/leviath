@@ -552,21 +552,40 @@ impl BuiltinTools {
         // signals the group. Keeping spawn and wait in one fallible block also
         // keeps a single error arm, as `Command::output()` had.
         let run = async {
-            let child = cmd.spawn()?;
+            let mut child = cmd.spawn()?;
             // The child leads its own group, so its pid is the group id.
             let _reaper = child.id().map(ProcessGroupReaper);
-            child.wait_with_output().await
+            // Taken before the join so both pipes are drained concurrently with
+            // each other and with the wait. `piped()` above guarantees both.
+            let mut out = child.stdout.take().expect("stdout was piped");
+            let mut err = child.stderr.take().expect("stderr was piped");
+            let (stdout, stderr, status) = tokio::join!(
+                capture_capped(&mut out, MAX_CAPTURE_BYTES),
+                capture_capped(&mut err, MAX_CAPTURE_BYTES),
+                child.wait(),
+            );
+            // The exit status is the only fallible part worth failing on, so it
+            // stays the single error edge this block has - the same shape
+            // `wait_with_output()` presented. A pipe that errors mid-read is
+            // handled inside `capture_capped` as an early end of output.
+            status.map(|status| (stdout, stderr, status))
         };
 
         match timeout(timeout_duration, run).await {
             Err(_) => format!("[timed out] Command exceeded 60s: {}", command),
             Ok(Err(e)) => format!("[error] Failed to spawn shell '{}': {}", shell, e),
-            Ok(Ok(output)) => Self::format_command_output(
-                &output.stdout,
-                &output.stderr,
-                output.status.success(),
-                output.status.code().unwrap_or(-1),
-            ),
+            Ok(Ok((stdout, stderr, status))) => {
+                let body = Self::format_command_output(
+                    &stdout.kept,
+                    &stderr.kept,
+                    status.success(),
+                    status.code().unwrap_or(-1),
+                );
+                match capture_note(&stdout, &stderr) {
+                    Some(note) => format!("{body}\n\n{note}"),
+                    None => body,
+                }
+            }
         }
     }
 
@@ -603,4 +622,86 @@ impl BuiltinTools {
             result
         }
     }
+}
+
+/// Largest slice of one stream (stdout or stderr) a single shell call keeps.
+///
+/// Issue #252: `wait_with_output()` buffered a child's entire output in the
+/// daemon's memory with nothing to stop it, so a command that printed for its
+/// full 60-second budget was an accidental memory exhaustion - and on a fast
+/// local pipe that is gigabytes.
+///
+/// Sized just above `MAX_SCRIPT_IO_BYTES` (900 KB in `daemon::script_host`),
+/// which caps the same text when it reaches a Rhai tool script, so this one is
+/// the outer bound and that one stays the tighter of the two. A megabyte of
+/// shell output already overruns any region budget an agent has; keeping more
+/// of it helps nobody downstream.
+pub(crate) const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
+
+/// What one stream produced, and how much of it was kept.
+#[derive(Debug)]
+pub(crate) struct Captured {
+    pub(crate) kept: Vec<u8>,
+    /// Everything the child wrote, including what was discarded.
+    pub(crate) total: u64,
+}
+
+/// Read `stream` to EOF, keeping at most `cap` bytes.
+///
+/// **Keeps reading after the cap is reached** rather than stopping, and that is
+/// the whole design. A reader that walks away leaves the child blocked on a
+/// full pipe, so a command producing more than the cap would stop making
+/// progress and die at the timeout instead of finishing - turning a truncated
+/// result into a failed one. Past the cap the bytes are counted and dropped.
+///
+/// A read error ends the capture rather than failing the call. It means no more
+/// output is coming, which is what EOF means too, and the exit status still
+/// describes what the command did - so reporting "failed to spawn shell" for a
+/// command that ran to completion would be a lie.
+///
+/// `&mut dyn` rather than a generic: a generic here gets one instrumented
+/// monomorphization per call site, and `cargo llvm-cov` reports the ones the
+/// tests do not reach as uncovered.
+pub(crate) async fn capture_capped(
+    stream: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+    cap: usize,
+) -> Captured {
+    use tokio::io::AsyncReadExt;
+
+    let mut kept: Vec<u8> = Vec::new();
+    let mut total: u64 = 0;
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = match stream.read(&mut buf).await {
+            Ok(0) | Err(_) => return Captured { kept, total },
+            Ok(n) => n,
+        };
+        total += n as u64;
+        if kept.len() < cap {
+            let room = cap - kept.len();
+            kept.extend_from_slice(&buf[..n.min(room)]);
+        }
+    }
+}
+
+/// A line telling the agent its command outproduced the capture cap, or `None`
+/// when everything it wrote is present.
+///
+/// Said rather than silently dropped: an agent that reads a truncated listing
+/// as the whole listing draws a wrong conclusion from it, which is worse than
+/// knowing the answer is incomplete.
+pub(crate) fn capture_note(stdout: &Captured, stderr: &Captured) -> Option<String> {
+    let lost = |c: &Captured| c.total > c.kept.len() as u64;
+    let which = match (lost(stdout), lost(stderr)) {
+        (false, false) => return None,
+        (true, false) => "stdout",
+        (false, true) => "stderr",
+        (true, true) => "stdout and stderr",
+    };
+    let total = stdout.total + stderr.total;
+    Some(format!(
+        "[truncated] The command wrote {total} bytes; {which} exceeded the {MAX_CAPTURE_BYTES}-byte \
+         capture limit and only the beginning is shown. Narrow the command (a filter, a line \
+         count, a smaller range) rather than re-running it."
+    ))
 }

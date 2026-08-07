@@ -1480,6 +1480,145 @@ mod tests {
         assert_eq!(result, "(command succeeded with no output)");
     }
 
+    // ─── Bounded shell capture (issue #252) ──────────────────────────────────
+
+    use crate::exec::{Captured, MAX_CAPTURE_BYTES, capture_capped, capture_note};
+
+    /// A reader that hands back `chunk` `count` times and records how many
+    /// reads it was asked for, standing in for a child's pipe.
+    struct CountingReader {
+        remaining: usize,
+        chunk: usize,
+        reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl tokio::io::AsyncRead for CountingReader {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            self.reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if self.remaining == 0 {
+                return std::task::Poll::Ready(Ok(()));
+            }
+            let n = self.chunk.min(self.remaining).min(buf.remaining());
+            buf.put_slice(&vec![b'x'; n]);
+            self.remaining -= n;
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_capped_keeps_the_cap_and_counts_what_it_dropped() {
+        let payload = vec![b'a'; 5000];
+        let mut source = &payload[..];
+        let got = capture_capped(&mut source, 100).await;
+        assert_eq!(got.kept.len(), 100);
+        assert_eq!(got.total, 5000);
+    }
+
+    #[tokio::test]
+    async fn capture_capped_keeps_everything_under_the_cap() {
+        let payload = [b'a'; 40];
+        let mut source = &payload[..];
+        let got = capture_capped(&mut source, 100).await;
+        assert_eq!(got.kept.len(), 40);
+        assert_eq!(got.total, 40);
+    }
+
+    /// The property the whole design rests on. A reader that stopped at the cap
+    /// would leave the child blocked on a full pipe, so a command producing
+    /// more than the cap would stop making progress and die at the timeout
+    /// instead of returning a truncated answer.
+    #[tokio::test]
+    async fn capture_capped_drains_past_the_cap_so_the_child_never_blocks() {
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut source = CountingReader {
+            remaining: 10_000,
+            chunk: 1_000,
+            reads: reads.clone(),
+        };
+        let got = capture_capped(&mut source, 100).await;
+        assert_eq!(got.total, 10_000, "the tail was not read");
+        assert_eq!(got.kept.len(), 100);
+        // Ten chunks plus the final empty read that signals EOF.
+        assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 11);
+    }
+
+    /// A broken pipe ends the capture and keeps what arrived before it, rather
+    /// than discarding a completed command's output and reporting a spawn
+    /// failure for a command that actually ran.
+    #[tokio::test]
+    async fn capture_capped_treats_a_read_error_as_the_end_of_the_output() {
+        struct FailsAfterOne(bool);
+        impl tokio::io::AsyncRead for FailsAfterOne {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                if self.0 {
+                    return std::task::Poll::Ready(Err(std::io::Error::other("pipe broke")));
+                }
+                self.0 = true;
+                buf.put_slice(b"partial");
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+        let mut source = FailsAfterOne(false);
+        let got = capture_capped(&mut source, 100).await;
+        assert_eq!(got.kept, b"partial");
+        assert_eq!(got.total, 7);
+    }
+
+    fn captured(kept: usize, total: u64) -> Captured {
+        Captured {
+            kept: vec![b'x'; kept],
+            total,
+        }
+    }
+
+    #[test]
+    fn capture_note_is_silent_when_nothing_was_dropped() {
+        assert!(capture_note(&captured(10, 10), &captured(0, 0)).is_none());
+    }
+
+    #[test]
+    fn capture_note_names_whichever_stream_overran() {
+        let over = captured(10, 5_000);
+        let fine = captured(10, 10);
+        let stdout_only = capture_note(&over, &fine).expect("stdout overran");
+        assert!(stdout_only.contains("stdout exceeded"), "{stdout_only}");
+        let stderr_only = capture_note(&fine, &over).expect("stderr overran");
+        assert!(stderr_only.contains("stderr exceeded"), "{stderr_only}");
+        let both = capture_note(&over, &over).expect("both overran");
+        assert!(both.contains("stdout and stderr exceeded"), "{both}");
+        // The count is everything the command wrote, not what survived.
+        assert!(both.contains("10000 bytes"), "{both}");
+    }
+
+    /// The end-to-end twin: a real command that outproduces the cap comes back
+    /// truncated and *successful*, not timed out.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_that_floods_stdout_is_truncated_rather_than_timing_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools
+            .shell_with_timeout(
+                &json!({"command": "head -c 3000000 /dev/zero | tr '\\0' 'x'"}),
+                Duration::from_secs(30),
+            )
+            .await;
+        assert!(result.contains("[truncated]"));
+        assert!(!result.contains("[timed out]"));
+        // Kept the cap, plus the note. Nothing near the 3 MB the command wrote.
+        let ceiling = MAX_CAPTURE_BYTES + 1000;
+        assert!(result.len() < ceiling);
+    }
+
     #[tokio::test]
     async fn shell_with_timeout_fires_on_slow_command() {
         let dir = tempfile::tempdir().unwrap();

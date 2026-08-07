@@ -37,7 +37,7 @@ Read and modify files relative to the agent's working directory.
 
 | Tool | Purpose | Arguments |
 | --- | --- | --- |
-| `shell` | Run a shell command in the working directory using the system shell. Has a 60-second timeout. | `command` |
+| `shell` | Run a shell command in the working directory using the system shell. Has a 60-second timeout, and keeps at most 1 MB of each of stdout and stderr. | `command` |
 
 `bash` is an accepted alias for `shell`: a stage's `available_tools` may name either, and both
 resolve to the same tool advertised to the model.
@@ -68,6 +68,19 @@ blueprint. See [Configuration](/docs/configuration#system-prompt-hints).
 > [!WARNING]
 > `shell` requires the platform's process-spawn capability. On platforms that don't provide it, the
 > tool (and its `bash` alias) is filtered out and never advertised.
+
+### How much output comes back
+
+At most 1 MB of stdout and 1 MB of stderr per call. Past that the bytes are counted and dropped,
+and the result ends with a `[truncated]` line naming how much the command actually wrote.
+
+The command still runs to completion. Leviath keeps draining both pipes after the cap so the
+command never blocks on a full one, which would turn a truncated answer into a timed-out call.
+
+The cap is a memory bound, not a context bound. A megabyte of shell output already overruns any
+region budget an agent has, so what survives this cap gets trimmed again by the region it lands in.
+The reason it exists is that the daemon used to hold a command's entire output in memory with
+nothing to stop it, and a command printing at local-pipe speed for its full 60 seconds is gigabytes.
 
 ## Context
 
