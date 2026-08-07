@@ -374,6 +374,8 @@ impl StageHookScripts {
         let path = match hook {
             "on_stage_enter" => stage.hooks.on_stage_enter.as_deref(),
             "on_stage_exit" => stage.hooks.on_stage_exit.as_deref(),
+            "before_inference" => stage.hooks.before_inference.as_deref(),
+            "after_inference" => stage.hooks.after_inference.as_deref(),
             _ => None,
         }?;
         self.0.get(path).cloned()

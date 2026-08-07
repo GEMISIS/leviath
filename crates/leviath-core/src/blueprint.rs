@@ -784,13 +784,22 @@ pub struct StageHooks {
     /// Fires when the stage finishes, before transition evaluation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_stage_exit: Option<String>,
+    /// Fires with the context assembled, before the request is dispatched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_inference: Option<String>,
+    /// Fires with the model's response in hand, before it reaches context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_inference: Option<String>,
 }
 
 impl StageHooks {
     /// Whether any hook is declared. The whole feature is skipped when not -
     /// no file read, no compile, no engine.
     pub fn is_empty(&self) -> bool {
-        self.on_stage_enter.is_none() && self.on_stage_exit.is_none()
+        self.on_stage_enter.is_none()
+            && self.on_stage_exit.is_none()
+            && self.before_inference.is_none()
+            && self.after_inference.is_none()
     }
 
     /// Every script path this stage declares, with the hook it backs.
@@ -804,6 +813,12 @@ impl StageHooks {
         }
         if let Some(p) = self.on_stage_exit.as_deref() {
             out.push(("on_stage_exit", p));
+        }
+        if let Some(p) = self.before_inference.as_deref() {
+            out.push(("before_inference", p));
+        }
+        if let Some(p) = self.after_inference.as_deref() {
+            out.push(("after_inference", p));
         }
         out
     }
