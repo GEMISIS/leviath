@@ -11010,3 +11010,349 @@ fn an_inference_hook_refusing_without_a_reason_still_says_what_it_refused() {
     assert!(msg.contains("rejected the response"), "{msg}");
     assert!(msg.contains("no reason given"), "{msg}");
 }
+
+// ─── on_tool_call (issue #260) ───────────────────────────────────────────────
+
+fn call(name: &str, args: serde_json::Value) -> crate::components::ToolCall {
+    crate::components::ToolCall {
+        tool_id: format!("c-{name}"),
+        name: name.to_string(),
+        arguments: args,
+        thought_signature: Some("provider-token".to_string()),
+    }
+}
+
+fn spawn_tool_hooked(
+    world: &mut World,
+    src: &str,
+    calls: Vec<crate::components::ToolCall>,
+) -> Entity {
+    world
+        .spawn((
+            stage_hooked(|h, p| h.on_tool_call = Some(p)),
+            agent_state(),
+            StageCursor { index: 0 },
+            ReadyForTools,
+            crate::components::InferenceResult {
+                response: String::new(),
+                tool_calls: calls,
+                tokens_used: 0,
+                timestamp: 0,
+            },
+            hook_scripts(src, &["on_tool_call"]),
+        ))
+        .id()
+}
+
+fn run_tool_hooks(world: &mut World) {
+    let mut schedule = Schedule::default();
+    schedule.add_systems(run_tool_call_hooks);
+    schedule.run(world);
+}
+
+fn calls_of(world: &World, e: Entity) -> Vec<crate::components::ToolCall> {
+    world
+        .get::<crate::components::InferenceResult>(e)
+        .expect("result")
+        .tool_calls
+        .clone()
+}
+
+#[test]
+fn on_tool_call_sees_the_calls_and_their_arguments() {
+    let mut world = World::new();
+    let e = spawn_tool_hooked(
+        &mut world,
+        r#"fn on_tool_call(ctx) {
+             #{ action: "modify",
+                value: [#{ name: ctx.tool_calls[0].name + "-seen",
+                           arguments: ctx.tool_calls[0].arguments }] }
+           }"#,
+        vec![call("shell", serde_json::json!({"command": "ls"}))],
+    );
+    run_tool_hooks(&mut world);
+    let got = calls_of(&world, e);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].name, "shell-seen");
+    assert_eq!(got[0].arguments["command"], "ls");
+}
+
+/// Narrowing is the point: a hook can rewrite a call into something tamer.
+#[test]
+fn on_tool_call_can_rewrite_arguments() {
+    let mut world = World::new();
+    let e = spawn_tool_hooked(
+        &mut world,
+        r#"fn on_tool_call(ctx) {
+             #{ action: "modify",
+                value: [#{ name: "shell", arguments: #{ command: "ls -la" } }] }
+           }"#,
+        vec![call("shell", serde_json::json!({"command": "rm -rf /"}))],
+    );
+    run_tool_hooks(&mut world);
+    assert_eq!(calls_of(&world, e)[0].arguments["command"], "ls -la");
+}
+
+#[test]
+fn on_tool_call_can_drop_calls_entirely() {
+    let mut world = World::new();
+    let e = spawn_tool_hooked(
+        &mut world,
+        r#"fn on_tool_call(ctx) { #{ action: "modify", value: [] } }"#,
+        vec![call("shell", serde_json::json!({}))],
+    );
+    run_tool_hooks(&mut world);
+    assert!(calls_of(&world, e).is_empty());
+}
+
+/// **The safety property.** A hook has no access to the taint gate, the
+/// auto-approve marker, or tool sensitivities - it edits the calls and nothing
+/// else, so whatever it produces still faces the policy layer. If this ever
+/// stops holding, a hook becomes a way around the operator's configuration.
+#[test]
+fn on_tool_call_cannot_mark_its_own_calls_approved() {
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            stage_hooked(|h, p| h.on_tool_call = Some(p)),
+            agent_state(),
+            StageCursor { index: 0 },
+            ReadyForTools,
+            crate::components::InferenceResult {
+                response: String::new(),
+                tool_calls: vec![call("shell", serde_json::json!({"command": "ls"}))],
+                tokens_used: 0,
+                timestamp: 0,
+            },
+            crate::taint::TaintGate::new(leviath_core::taint::SecurityConfig::default()),
+            hook_scripts(
+                r#"fn on_tool_call(ctx) {
+                     #{ action: "modify",
+                        value: [#{ name: "shell", arguments: #{ command: "anything" } }] }
+                   }"#,
+                &["on_tool_call"],
+            ),
+        ))
+        .id();
+    let before = format!("{:?}", world.get::<crate::taint::TaintGate>(e));
+
+    run_tool_hooks(&mut world);
+
+    // The call was rewritten...
+    assert_eq!(calls_of(&world, e)[0].arguments["command"], "anything");
+    // ...and nothing about the gate moved, so the policy layer still decides.
+    assert_eq!(
+        format!("{:?}", world.get::<crate::taint::TaintGate>(e)),
+        before,
+        "a hook must not be able to pre-approve its own calls"
+    );
+    assert!(
+        world.get::<crate::components::GateAutoApprove>(e).is_none(),
+        "a hook must not be able to set auto-approve"
+    );
+}
+
+/// A rewritten call drops the provider's thought signature: that token
+/// describes the call the *model* produced, and echoing it back with different
+/// arguments would attribute the hook's call to the model.
+#[test]
+fn a_rewritten_call_does_not_carry_the_models_thought_signature() {
+    let mut world = World::new();
+    let e = spawn_tool_hooked(
+        &mut world,
+        r#"fn on_tool_call(ctx) { #{ action: "modify", value: [#{ name: "shell", arguments: #{} }] } }"#,
+        vec![call("shell", serde_json::json!({}))],
+    );
+    run_tool_hooks(&mut world);
+    assert!(calls_of(&world, e)[0].thought_signature.is_none());
+}
+
+#[test]
+fn on_tool_call_can_veto_with_a_reason() {
+    let mut world = World::new();
+    let e = spawn_tool_hooked(
+        &mut world,
+        r#"fn on_tool_call(ctx) { #{ action: "cancel", reason: "not on this stage" } }"#,
+        vec![call("shell", serde_json::json!({}))],
+    );
+    run_tool_hooks(&mut world);
+    assert!(
+        status_message(&world, e)
+            .expect("errored")
+            .contains("not on this stage")
+    );
+}
+
+#[test]
+fn on_tool_call_veto_without_a_reason_still_says_what_it_refused() {
+    let mut world = World::new();
+    let e = spawn_tool_hooked(
+        &mut world,
+        "fn on_tool_call(ctx) { false }",
+        vec![call("shell", serde_json::json!({}))],
+    );
+    run_tool_hooks(&mut world);
+    let msg = status_message(&world, e).expect("errored");
+    assert!(msg.contains("refused the tool calls"), "{msg}");
+    assert!(msg.contains("no reason given"), "{msg}");
+}
+
+#[test]
+fn on_tool_call_allow_leaves_the_calls_alone() {
+    let mut world = World::new();
+    let e = spawn_tool_hooked(
+        &mut world,
+        "fn on_tool_call(ctx) { () }",
+        vec![call("shell", serde_json::json!({"command": "ls"}))],
+    );
+    run_tool_hooks(&mut world);
+    let got = calls_of(&world, e);
+    assert_eq!(got[0].name, "shell");
+    assert_eq!(got[0].arguments["command"], "ls");
+    assert_eq!(
+        got[0].thought_signature.as_deref(),
+        Some("provider-token"),
+        "an untouched call keeps the provider's token"
+    );
+}
+
+#[test]
+fn on_tool_call_retry_is_refused_as_unhonourable() {
+    let mut world = World::new();
+    let e = spawn_tool_hooked(
+        &mut world,
+        r#"fn on_tool_call(ctx) { #{ action: "retry" } }"#,
+        vec![call("shell", serde_json::json!({}))],
+    );
+    run_tool_hooks(&mut world);
+    assert!(
+        status_message(&world, e)
+            .expect("errored")
+            .contains("cannot honour")
+    );
+}
+
+#[test]
+fn on_tool_call_that_throws_errors_the_run() {
+    let mut world = World::new();
+    let e = spawn_tool_hooked(
+        &mut world,
+        r#"fn on_tool_call(ctx) { throw "no" }"#,
+        vec![call("shell", serde_json::json!({}))],
+    );
+    run_tool_hooks(&mut world);
+    assert!(
+        status_message(&world, e)
+            .expect("errored")
+            .contains("hook failed")
+    );
+}
+
+#[test]
+fn a_replacement_that_is_not_an_array_errors() {
+    let mut world = World::new();
+    let e = spawn_tool_hooked(
+        &mut world,
+        r#"fn on_tool_call(ctx) { #{ action: "modify", value: "nope" } }"#,
+        vec![call("shell", serde_json::json!({}))],
+    );
+    run_tool_hooks(&mut world);
+    assert!(
+        status_message(&world, e)
+            .expect("errored")
+            .contains("must be an array")
+    );
+}
+
+#[test]
+fn a_replacement_call_without_a_name_errors() {
+    let mut world = World::new();
+    let e = spawn_tool_hooked(
+        &mut world,
+        r#"fn on_tool_call(ctx) { #{ action: "modify", value: [#{ arguments: #{} }] } }"#,
+        vec![call("shell", serde_json::json!({}))],
+    );
+    run_tool_hooks(&mut world);
+    assert!(
+        status_message(&world, e)
+            .expect("errored")
+            .contains("no 'name'")
+    );
+}
+
+/// A replacement with no `arguments` is a call with none, not an error - some
+/// tools take nothing.
+#[test]
+fn a_replacement_call_without_arguments_is_allowed() {
+    let mut world = World::new();
+    let e = spawn_tool_hooked(
+        &mut world,
+        r#"fn on_tool_call(ctx) { #{ action: "modify", value: [#{ name: "list_dir" }] } }"#,
+        vec![call("shell", serde_json::json!({}))],
+    );
+    run_tool_hooks(&mut world);
+    assert!(status_message(&world, e).is_none());
+    assert_eq!(calls_of(&world, e)[0].name, "list_dir");
+}
+
+/// Nothing to inspect means nothing to ask about - the hook is not run at all
+/// on a batch with no calls.
+#[test]
+fn on_tool_call_is_not_run_when_there_are_no_calls() {
+    let mut world = World::new();
+    let e = spawn_tool_hooked(
+        &mut world,
+        r#"fn on_tool_call(ctx) { #{ action: "cancel", reason: "should not run" } }"#,
+        vec![],
+    );
+    run_tool_hooks(&mut world);
+    assert!(status_message(&world, e).is_none());
+}
+
+#[test]
+fn on_tool_call_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
+    let mut world = World::new();
+    let out_of_range = world
+        .spawn((
+            stage_hooked(|h, p| h.on_tool_call = Some(p)),
+            agent_state(),
+            StageCursor { index: 99 },
+            ReadyForTools,
+            crate::components::InferenceResult {
+                response: String::new(),
+                tool_calls: vec![call("shell", serde_json::json!({}))],
+                tokens_used: 0,
+                timestamp: 0,
+            },
+            hook_scripts(
+                r#"fn on_tool_call(ctx) { #{ action: "cancel" } }"#,
+                &["on_tool_call"],
+            ),
+        ))
+        .id();
+    let stage = leviath_core::Stage::new(
+        "main".to_string(),
+        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+    );
+    let undeclared = world
+        .spawn((
+            AgentBlueprint(blueprint(vec![stage])),
+            agent_state(),
+            StageCursor { index: 0 },
+            ReadyForTools,
+            crate::components::InferenceResult {
+                response: String::new(),
+                tool_calls: vec![call("shell", serde_json::json!({}))],
+                tokens_used: 0,
+                timestamp: 0,
+            },
+            hook_scripts(
+                r#"fn on_tool_call(ctx) { #{ action: "cancel" } }"#,
+                &["on_tool_call"],
+            ),
+        ))
+        .id();
+    run_tool_hooks(&mut world);
+    assert!(status_message(&world, out_of_range).is_none());
+    assert!(status_message(&world, undeclared).is_none());
+}

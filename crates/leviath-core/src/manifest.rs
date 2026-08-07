@@ -885,11 +885,12 @@ fn parse_stage_hooks(
             "on_stage_exit" => hooks.on_stage_exit = Some(path.to_string()),
             "before_inference" => hooks.before_inference = Some(path.to_string()),
             "after_inference" => hooks.after_inference = Some(path.to_string()),
+            "on_tool_call" => hooks.on_tool_call = Some(path.to_string()),
             other => {
                 return Err(Error::Other(format!(
                     "stage '{stage_name}': unknown hook '{other}' \
                      (this build implements: on_stage_enter, on_stage_exit, \
-                     before_inference, after_inference)"
+                     before_inference, after_inference, on_tool_call)"
                 )));
             }
         }
@@ -1560,7 +1561,8 @@ mod tests {
              on_stage_enter = \"a.rhai\"\n\
              on_stage_exit = \"b.rhai\"\n\
              before_inference = \"c.rhai\"\n\
-             after_inference = \"d.rhai\"",
+             after_inference = \"d.rhai\"\n\
+             on_tool_call = \"e.rhai\"",
         )
         .expect("parses");
         assert!(!stage.hooks.is_empty());
@@ -1571,6 +1573,7 @@ mod tests {
                 ("on_stage_exit", "b.rhai"),
                 ("before_inference", "c.rhai"),
                 ("after_inference", "d.rhai"),
+                ("on_tool_call", "e.rhai"),
             ]
         );
     }
@@ -1584,6 +1587,7 @@ mod tests {
             "on_stage_exit",
             "before_inference",
             "after_inference",
+            "on_tool_call",
         ] {
             let stage = stage_with_hooks(&format!("[stages.main.hooks]\n{field} = \"h.rhai\""))
                 .expect("parses");
