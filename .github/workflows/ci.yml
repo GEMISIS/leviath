@@ -389,12 +389,18 @@ jobs:
           # this the moment someone else's main.rs change landed on main first -
           # and the fix looked like applying the override label to a PR that
           # never touched the file.
-          if git diff --name-only "$BASE...$HEAD" | grep -qx 'crates/leviath-cli/src/main.rs'; then
+          # Any main.rs, not just the one that exists today. The coverage
+          # exclusion is the regex `[\\/]main\.rs$` (xtask/src/coverage.rs), so
+          # a second bin crate's entrypoint would be unmeasured the day it is
+          # added - and naming one path here would have let it through both the
+          # measurement and this review gate at once.
+          CHANGED=$(git diff --name-only "$BASE...$HEAD" | grep -E '(^|/)main\.rs$' || true)
+          if [ -n "$CHANGED" ]; then
             case ",$LABELS," in
               *,allow-main-rs-change,*)
-                echo "main.rs change approved via 'allow-main-rs-change' label." ;;
+                echo "main.rs change approved via 'allow-main-rs-change' label: $CHANGED" ;;
               *)
-                echo "::error file=crates/leviath-cli/src/main.rs::main.rs is the coverage-excluded bin entrypoint; changing it needs maintainer approval. Apply the 'allow-main-rs-change' label to override."
+                echo "::error::main.rs is the coverage-excluded bin entrypoint; changing it needs maintainer approval. Apply the 'allow-main-rs-change' label to override. Changed: $CHANGED"
                 exit 1 ;;
             esac
           else
