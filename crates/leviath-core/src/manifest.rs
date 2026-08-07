@@ -751,34 +751,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
     blueprint.dynamic_tools = dynamic_tools;
 
     if let Some(compaction_table) = parsed.get("compaction").and_then(|v| v.as_table()) {
-        let mut cc = CompactionConfig::default();
-
-        if let Some(provider) = compaction_table.get("provider").and_then(|v| v.as_str()) {
-            cc.provider = provider.to_string();
-        }
-        if let Some(model) = compaction_table.get("model").and_then(|v| v.as_str()) {
-            cc.model = model.to_string();
-        }
-        if let Some(sp) = compaction_table
-            .get("system_prompt")
-            .and_then(|v| v.as_str())
-        {
-            cc.system_prompt = Some(sp.to_string());
-        }
-        if let Some(mst) = compaction_table
-            .get("max_summary_tokens")
-            .and_then(|v| v.as_integer())
-        {
-            cc.max_summary_tokens = mst as usize;
-        }
-        if let Some(temp) = compaction_table
-            .get("temperature")
-            .and_then(|v| v.as_float())
-        {
-            cc.temperature = temp as f32;
-        }
-
-        blueprint.compaction_config = Some(cc);
+        blueprint.compaction_config = Some(parse_compaction_config(compaction_table));
     }
 
     // Parse agent-level security config: [security]
@@ -819,19 +792,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
     // syntax-checked here so a broken one fails `lev validate`/`lev add`/spawn
     // loudly, instead of degrading the agent at its first out-of-workdir read.
     if let Some(rp_table) = parsed.get("read_paths").and_then(|v| v.as_table()) {
-        let mut allow = Vec::new();
-        if let Some(entries) = rp_table.get("allow").and_then(|v| v.as_array()) {
-            for entry in entries {
-                let Some(raw) = entry.as_str() else {
-                    return Err(Error::Other(format!(
-                        "[read_paths] allow entries must be strings, got: {entry}"
-                    )));
-                };
-                crate::read_paths::validate_entry_syntax(raw).map_err(Error::Other)?;
-                allow.push(raw.to_string());
-            }
-        }
-        blueprint.read_paths = Some(crate::blueprint::ReadPathsConfig { allow });
+        blueprint.read_paths = Some(parse_read_paths(rp_table)?);
     }
 
     // [safe_commands]: what this agent would like to run unprompted. Inert
@@ -839,37 +800,14 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
     // still a hard error, because a list that silently loses members reads as a
     // grant that was made.
     if let Some(sc_table) = parsed.get("safe_commands").and_then(|v| v.as_table()) {
-        let strings = |field: &str| -> Result<Vec<String>> {
-            let Some(entries) = sc_table.get(field).and_then(|v| v.as_array()) else {
-                return Ok(Vec::new());
-            };
-            entries
-                .iter()
-                .map(|entry| {
-                    entry.as_str().map(str::to_string).ok_or_else(|| {
-                        Error::Other(format!(
-                            "[safe_commands] {field} entries must be strings, got: {entry}"
-                        ))
-                    })
-                })
-                .collect()
-        };
-        blueprint.safe_commands = Some(crate::blueprint::SafeCommandsConfig {
-            tools: strings("tools")?,
-            shell: strings("shell")?,
-        });
+        blueprint.safe_commands = Some(parse_safe_commands(sc_table)?);
     }
 
     // Parse agent-level tool permissions: [tool_permissions]
     if let Some(tp_table) = parsed.get("tool_permissions").and_then(|v| v.as_table()) {
-        for (tool_name, policy_val) in tp_table {
-            if let Some(policy_str) = policy_val.as_str() {
-                blueprint.metadata.insert(
-                    format!("tool_perm:{}", tool_name),
-                    serde_json::Value::String(policy_str.to_string()),
-                );
-            }
-        }
+        blueprint
+            .metadata
+            .extend(tool_permission_metadata(tp_table));
     }
 
     // Parse file tracking config: [context.file_tracking]
@@ -878,30 +816,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
             .get("file_tracking")
             .and_then(|v| v.as_table())
     {
-        let region = ft_table
-            .get("region")
-            .and_then(|v| v.as_str())
-            .unwrap_or("files")
-            .to_string();
-        let track_reads = ft_table
-            .get("track_reads")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        let track_writes = ft_table
-            .get("track_writes")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        let max_file_tokens = ft_table
-            .get("max_file_tokens")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as usize);
-
-        blueprint.file_tracking = Some(crate::FileTrackingConfig {
-            region,
-            track_reads,
-            track_writes,
-            max_file_tokens,
-        });
+        blueprint.file_tracking = Some(parse_file_tracking(ft_table));
     }
 
     // Parse repetition-detection config: [repetition_detection]
@@ -909,38 +824,159 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
         .get("repetition_detection")
         .and_then(|v| v.as_table())
     {
-        blueprint.repetition_detection = Some(crate::RepetitionDetectionConfig {
-            max_repeat_calls: rd_table
-                .get("max_repeat_calls")
-                .and_then(|v| v.as_integer())
-                .map(|v| v as usize),
-            max_readonly_streak: rd_table
-                .get("max_readonly_streak")
-                .and_then(|v| v.as_integer())
-                .map(|v| v as usize),
-            enabled: rd_table.get("enabled").and_then(|v| v.as_bool()),
-        });
+        blueprint.repetition_detection = Some(parse_repetition_detection(rd_table));
     }
 
     // Parse cross-blueprint context transforms: [[transforms]]. Each maps a
     // parent (`from_blueprint`) region onto a child (`to_blueprint`) region when
     // a sub-agent is spawned, optionally transforming the content en route.
     if let Some(transforms_arr) = parsed.get("transforms").and_then(|v| v.as_array()) {
-        for t in transforms_arr {
-            let mappings = t
-                .get("mappings")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().map(parse_region_mapping).collect())
-                .unwrap_or_default();
-            blueprint.transforms.push(ContextTransform {
-                from_blueprint: str_field(t, "from_blueprint"),
-                to_blueprint: str_field(t, "to_blueprint"),
-                mappings,
-            });
-        }
+        blueprint
+            .transforms
+            .extend(transforms_arr.iter().map(parse_context_transform));
     }
 
     Ok(blueprint)
+}
+
+/// Parse `[compaction]` over the defaults, leaving any field the manifest does
+/// not mention at its default rather than at zero.
+fn parse_compaction_config(table: &toml::value::Table) -> CompactionConfig {
+    let mut cc = CompactionConfig::default();
+
+    if let Some(provider) = table.get("provider").and_then(|v| v.as_str()) {
+        cc.provider = provider.to_string();
+    }
+    if let Some(model) = table.get("model").and_then(|v| v.as_str()) {
+        cc.model = model.to_string();
+    }
+    if let Some(sp) = table.get("system_prompt").and_then(|v| v.as_str()) {
+        cc.system_prompt = Some(sp.to_string());
+    }
+    if let Some(mst) = table.get("max_summary_tokens").and_then(|v| v.as_integer()) {
+        cc.max_summary_tokens = mst as usize;
+    }
+    if let Some(temp) = table.get("temperature").and_then(|v| v.as_float()) {
+        cc.temperature = temp as f32;
+    }
+
+    cc
+}
+
+/// Parse `[read_paths]`. Entries are syntax-checked here so a broken one fails
+/// `lev validate`/`lev add`/spawn loudly, instead of degrading the agent at its
+/// first out-of-workdir read.
+fn parse_read_paths(table: &toml::value::Table) -> Result<crate::blueprint::ReadPathsConfig> {
+    let mut allow = Vec::new();
+    if let Some(entries) = table.get("allow").and_then(|v| v.as_array()) {
+        for entry in entries {
+            let Some(raw) = entry.as_str() else {
+                return Err(Error::Other(format!(
+                    "[read_paths] allow entries must be strings, got: {entry}"
+                )));
+            };
+            crate::read_paths::validate_entry_syntax(raw).map_err(Error::Other)?;
+            allow.push(raw.to_string());
+        }
+    }
+    Ok(crate::blueprint::ReadPathsConfig { allow })
+}
+
+/// Parse `[safe_commands]`: what this agent would like to run unprompted.
+///
+/// Inert until the user opts in, so parsing is permissive - but a non-string
+/// entry is still a hard error, because a list that silently loses members
+/// reads as a grant that was made.
+fn parse_safe_commands(table: &toml::value::Table) -> Result<crate::blueprint::SafeCommandsConfig> {
+    let strings = |field: &str| -> Result<Vec<String>> {
+        let Some(entries) = table.get(field).and_then(|v| v.as_array()) else {
+            return Ok(Vec::new());
+        };
+        entries
+            .iter()
+            .map(|entry| {
+                entry.as_str().map(str::to_string).ok_or_else(|| {
+                    Error::Other(format!(
+                        "[safe_commands] {field} entries must be strings, got: {entry}"
+                    ))
+                })
+            })
+            .collect()
+    };
+    Ok(crate::blueprint::SafeCommandsConfig {
+        tools: strings("tools")?,
+        shell: strings("shell")?,
+    })
+}
+
+/// Flatten `[tool_permissions]` into the `tool_perm:<tool>` metadata keys the
+/// permission layer reads. A non-string policy is dropped rather than rejected:
+/// the value's meaning is validated where it is resolved.
+fn tool_permission_metadata(
+    table: &toml::value::Table,
+) -> impl Iterator<Item = (String, serde_json::Value)> + use<'_> {
+    table.iter().filter_map(|(tool_name, policy_val)| {
+        policy_val.as_str().map(|policy| {
+            (
+                format!("tool_perm:{}", tool_name),
+                serde_json::Value::String(policy.to_string()),
+            )
+        })
+    })
+}
+
+/// Parse `[context.file_tracking]`. Tracking both directions into a `files`
+/// region is the default because that is what the shipped layouts assume.
+fn parse_file_tracking(table: &toml::value::Table) -> crate::FileTrackingConfig {
+    crate::FileTrackingConfig {
+        region: table
+            .get("region")
+            .and_then(|v| v.as_str())
+            .unwrap_or("files")
+            .to_string(),
+        track_reads: table
+            .get("track_reads")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        track_writes: table
+            .get("track_writes")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        max_file_tokens: table
+            .get("max_file_tokens")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize),
+    }
+}
+
+/// Parse `[repetition_detection]`. Every field stays `None` when absent so the
+/// global config's value survives; there are no local defaults to apply here.
+fn parse_repetition_detection(table: &toml::value::Table) -> crate::RepetitionDetectionConfig {
+    crate::RepetitionDetectionConfig {
+        max_repeat_calls: table
+            .get("max_repeat_calls")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize),
+        max_readonly_streak: table
+            .get("max_readonly_streak")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize),
+        enabled: table.get("enabled").and_then(|v| v.as_bool()),
+    }
+}
+
+/// Parse one `[[transforms]]` entry: a parent region mapped onto a child region
+/// when a sub-agent is spawned, optionally transformed en route.
+fn parse_context_transform(t: &toml::Value) -> ContextTransform {
+    ContextTransform {
+        from_blueprint: str_field(t, "from_blueprint"),
+        to_blueprint: str_field(t, "to_blueprint"),
+        mappings: t
+            .get("mappings")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().map(parse_region_mapping).collect())
+            .unwrap_or_default(),
+    }
 }
 
 /// A required-shaped string field, defaulting to empty when absent (the value's
