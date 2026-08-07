@@ -283,7 +283,8 @@ transform   = "summarize"
 ```bash
 lev validate .                    # check the graph, and what the blueprint leaves unsaid
 lev validate . --deny-warnings    # for CI: warnings fail too
-lev test .                        # dry-run the blueprint
+lev test .                        # run the blueprint's tests/ cases (real API calls)
+lev test . --dry-run              # parse and report them without calling a provider
 ```
 
 Beyond the graph, `lev validate` reports the fields whose absence quietly changes what a run does: a

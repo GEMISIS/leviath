@@ -145,12 +145,44 @@ consult, so there it stays the plain "these need granting" note - see
 
 ### `lev test [PATH]`
 
-Run a blueprint's tests.
+Run a blueprint's tests: everything in its `tests/` directory, against the real provider.
 
 | Flag | Purpose |
 |---|---|
-| `-f`, `--filter <PATTERN>` | Only run matching tests |
-| `--dry-run` | Validate the test structure without running agents, so no API calls happen |
+| `-f`, `--filter <PATTERN>` | Only run cases whose name contains this substring |
+| `--dry-run` | Parse and report the cases without calling a provider, so nothing is spent |
+
+Each `tests/*.toml` file holds one or more cases:
+
+```toml
+[[test]]
+name = "greeting"
+input = "Say hello"
+expect_contains = "hello"
+
+[[test]]
+name = "reads the config"
+input = "What is in config.toml?"
+expect_tool_call = "read_file"
+max_tokens = 500
+```
+
+| Key | Meaning |
+|---|---|
+| `name` | Case name. `--filter` matches on it |
+| `input` | Seeded as the task, exactly as `lev run "..."` would |
+| `expect_contains` | Case-insensitive substring the response must contain |
+| `expect_tool_call` | A tool the model must call. Only tools the stage lists in `available_tools` are offered, so a case cannot assert on a tool the stage does not have |
+| `max_tokens` | Caps this case's output. Narrows the ceiling the window and model already impose; it cannot raise it |
+
+**What a case actually runs.** One inference, not a run. `lev test` builds a fresh context
+window from the blueprint's layout, seeds `input` as the task, and assembles the request exactly
+as a live run's *first* turn would - iteration 0, region hooks active, the first stage's model and
+tools. It then calls the provider once and checks the assertions. Nothing executes: a tool call is
+asserted on, never performed, so a case can expect `write_file` without a file appearing.
+
+A `tests/*.rhai` file is run instead as a script through the scripting engine, and fails the run if
+it returns `false`.
 
 ### `lev models`
 
