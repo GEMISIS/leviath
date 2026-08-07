@@ -31,6 +31,9 @@ glob = { workspace = true }
 regex = { workspace = true }
 
 [dev-dependencies]
+# The always-on tracing subscriber, so log-macro bodies run under test.
+# Shared rather than copied: three copies of it had already drifted apart.
+leviath-testkit = { workspace = true }
 # A redirecting server, so the redirect policy is verified by following one
 # rather than by testing the decision it delegates to.
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util"] }

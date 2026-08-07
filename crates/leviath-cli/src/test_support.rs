@@ -157,19 +157,4 @@ mod tests {
         let err = serde_json::to_string(&PoisonSerialize).unwrap_err();
         assert!(err.to_string().contains("PoisonSerialize always fails"));
     }
-
-    /// Exercises the span-related trait methods (`new_span`, `record`,
-    /// `record_follows_from`, `enter`, `exit`, `event`) that plain
-    /// `tracing::info!`/`warn!` event macros elsewhere don't reach.
-    #[test]
-    fn always_on_subscriber_span_methods_are_all_no_ops() {
-        with_tracing(|| {
-            let span = tracing::info_span!("test-span", field = tracing::field::Empty);
-            span.record("field", 1);
-            let other = tracing::info_span!("other-span");
-            span.follows_from(&other);
-            let _enter = span.enter();
-            tracing::info!(parent: &span, "inside span");
-        });
-    }
 }
