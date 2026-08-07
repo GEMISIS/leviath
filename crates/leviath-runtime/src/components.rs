@@ -135,7 +135,10 @@ pub enum AgentStatus {
     Complete,
 
     /// Agent encountered an error
-    Error { message: String },
+    Error {
+        /// What went wrong, as shown to the user and written to the run record.
+        message: String,
+    },
 
     /// Agent was cancelled by the user or system
     Cancelled,

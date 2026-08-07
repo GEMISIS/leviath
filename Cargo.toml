@@ -39,8 +39,14 @@ categories = ["development-tools"]
 # dependencies (nix, temp-env) plus ONE audited in-repo exception: leviath-alloc,
 # a single-call crate that deliberately does not opt into these lints (its lib.rs
 # carries the audit note). Nothing else writes unsafe.
+# Every public item in the published library crates carries a doc comment, and
+# CI's `RUSTFLAGS: -D warnings` turns this "warn" into a blocking error, so a PR
+# that adds undocumented public API does not merge. `leviath-cli` opts out at its
+# crate root (see the note there): it ships as the `lev` binary, and its `pub`
+# surface is command plumbing rather than API anyone calls.
 [workspace.lints.rust]
 unsafe_code = "forbid"
+missing_docs = "warn"
 
 # `&s[a..b]` on a `&str` panics when an index lands inside a multi-byte character.
 # That is not hypothetical here: it aborted the daemon twice (issues #109 and #115,
@@ -52,14 +58,6 @@ unsafe_code = "forbid"
 # `#[expect(clippy::string_slice, reason = "...")]` naming the construct that
 # guarantees it. "Looks fine" is exactly the unstated invariant this lint exists to
 # stop.
-# NOTE on `missing_docs`: measured, not enabled. Turning it on flags 325 items
-# (leviath-cli 166, leviath-core 109, runtime 18, mcp 15, providers 14, tools 3),
-# and CI runs with `-D warnings`, so "warn" is "deny" here. 240 of the 325 are
-# struct fields - largely serde payload types whose field names already say what
-# they are, and a doc comment restating a field name is the noise this repo's
-# comment policy exists to keep out. The 52 non-field items (functions, methods,
-# structs, enums) are worth documenting and would make the lint affordable;
-# that is a focused piece of work, not a flag flip.
 [workspace.lints.clippy]
 string_slice = "deny"
 

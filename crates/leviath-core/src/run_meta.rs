@@ -14,9 +14,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
+    /// Accepted and being set up; no inference has been issued yet.
     Starting,
+    /// Working: inferring, calling tools, or moving between stages.
     Running,
+    /// Blocked on a person. A human-in-the-loop tool or an interaction point is
+    /// waiting for an answer, and the run holds its concurrency slot until it
+    /// gets one.
     WaitingInput,
+    /// Finished, with nothing further to accept.
     Complete,
     /// All required stages done; agent still accepts optional follow-up input.
     /// Shown as "Complete" in the dashboard - no kill option, input still enabled.
@@ -24,7 +30,10 @@ pub enum RunStatus {
     /// Paused by the user; resumes on request and is restored paused after a
     /// daemon restart.
     Paused,
+    /// Stopped by a failure. `RunMeta::error` carries what went wrong.
     Error,
+    /// Stopped from outside, by `lev kill` or a shutting-down daemon. Distinct
+    /// from [`Error`](Self::Error): nothing went wrong, someone decided.
     Cancelled,
 }
 
@@ -46,11 +55,19 @@ impl std::fmt::Display for RunStatus {
 /// Metadata for a single background agent run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunMeta {
+    /// Identifies the run everywhere, and names its directory under
+    /// `~/.leviath/runs/`. Assigned at spawn and never reused.
     pub run_id: String,
+    /// The blueprint's `[agent] name`, not the file it was loaded from. Two runs
+    /// of the same agent from different paths share this.
     pub agent_name: String,
     /// Absolute path to the agent manifest directory
     pub agent_path: String,
+    /// The task text the run was started with, verbatim.
     pub task: String,
+    /// The `provider/model` actually resolved for the entry stage, or `None`
+    /// before resolution. Later stages may use a different one; this is not
+    /// rewritten to follow them.
     pub model: Option<String>,
     /// Always 0. There is no worker process per run: the daemon hosts every run
     /// as an entity in one shared world, so no run has a pid of its own.
@@ -63,12 +80,24 @@ pub struct RunMeta {
     /// `status` and `last_progress_at` off disk for what became of it.
     #[serde(default)]
     pub pid: u32,
+    /// Where the run stands. The durable counterpart to the ECS world's live
+    /// `AgentStatus`, and the one that survives a daemon restart.
     pub status: RunStatus,
+    /// Name of the stage the run is in, matching a key under `[stages]`.
     pub current_stage: String,
+    /// Zero-based position of `current_stage` in the blueprint's stage list.
+    /// Not a progress measure: stages can loop and revisit.
     pub stage_index: usize,
+    /// How many stages the blueprint declares, so a reader can render
+    /// `stage_index` as "3 of 7" without loading the manifest.
     pub num_stages: usize,
+    /// Inference turns taken in the current stage, reset on entering a new one.
+    /// Compared against the stage's `max_iterations`.
     pub iteration: usize,
+    /// Cumulative input tokens billed across every inference this run has made,
+    /// including retries.
     pub prompt_tokens: usize,
+    /// Cumulative output tokens billed across every inference this run has made.
     pub completion_tokens: usize,
     /// Cumulative tokens read from provider cache.
     #[serde(default)]
@@ -97,6 +126,8 @@ pub struct RunMeta {
     /// saved context, so it really has just moved.
     #[serde(default)]
     pub last_progress_at: Option<i64>,
+    /// What went wrong, set alongside [`RunStatus::Error`]. `None` on every
+    /// other status.
     pub error: Option<String>,
     /// Short human-readable title generated from the task prompt (None until generated).
     #[serde(default)]
@@ -290,6 +321,12 @@ impl RunMeta {
         }
     }
 
+    /// A newly accepted run: [`RunStatus::Starting`], both timestamps now, every
+    /// counter at zero and every optional field unset.
+    ///
+    /// Only the seven values a caller genuinely knows at spawn are parameters.
+    /// Everything else is filled in by the daemon as the run proceeds, so taking
+    /// them here would invite a caller to invent a stage or a token count.
     pub fn new(
         run_id: String,
         agent_name: String,
@@ -338,6 +375,11 @@ impl RunMeta {
         }
     }
 
+    /// Stamp `updated_at` with the current time.
+    ///
+    /// Deliberately does **not** touch `last_progress_at`: the 30-second
+    /// persistence heartbeat calls this, and a run that is wedged must not look
+    /// like one that just moved. See [`RunMeta::last_progress_at`].
     pub fn touch(&mut self) {
         self.updated_at = now_secs();
     }
@@ -346,12 +388,17 @@ impl RunMeta {
 /// One content entry within a region, captured at snapshot time.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RegionEntrySnapshot {
+    /// The entry's text, exactly as it sat in the live region.
     pub content: String,
+    /// The entry's token cost as counted when it was added, carried through the
+    /// snapshot so a reload does not have to re-tokenize to rebuild budgets.
     pub tokens: usize,
     /// The entry's role/kind, so a snapshot round-trips faithfully when the
     /// daemon reloads it on restart. Defaults to `Text` for older snapshots.
     #[serde(default)]
     pub kind: crate::region::EntryKind,
+    /// Free-form structured data an entry writer attached, passed through
+    /// untouched. Nothing in the engine interprets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
     /// Key for HashMap region entries (file paths, section names, etc.)
@@ -375,10 +422,14 @@ pub struct RegionEntrySnapshot {
 /// Per-region token snapshot written by the background worker after each inference.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RegionSnapshot {
+    /// The region's name, matching its key under `[context.regions]`.
     pub name: String,
     /// Stringified kind: "pinned", "temporary", "clearable", "sliding", "compacting", "history"
     pub kind: String,
+    /// Tokens the region held when the snapshot was taken.
     pub current_tokens: usize,
+    /// The region's ceiling at snapshot time, already resolved against the
+    /// model in front of it, so a percentage budget appears here as a number.
     pub max_tokens: usize,
     /// Actual content entries stored in this region (empty for zero-token regions).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -388,9 +439,15 @@ pub struct RegionSnapshot {
 /// Snapshot of the full context window, written to `context.json` alongside `meta.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ContextSnapshot {
+    /// The stage the run was in when this was written.
     pub stage_name: String,
+    /// Tokens held across every region, which is what the next request costs
+    /// before the model's reply.
     pub total_tokens: usize,
+    /// The whole window's budget, from the blueprint's `total_budget_tokens` or
+    /// the model's own limit.
     pub max_tokens: usize,
+    /// Every region, in layout order.
     pub regions: Vec<RegionSnapshot>,
 }
 
@@ -398,10 +455,15 @@ pub struct ContextSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum StageRunStatus {
+    /// Declared but not yet entered.
     Pending,
+    /// The stage the run is in right now. At most one stage is `Active`.
     Active,
+    /// Entered, and blocked on a person answering.
     WaitingInput,
+    /// Finished and left. A stage that loops back becomes `Active` again.
     Complete,
+    /// Ended in a failure. The run's own `error` carries the message.
     Error,
 }
 
@@ -420,10 +482,17 @@ impl std::fmt::Display for StageRunStatus {
 /// Metadata record for a single stage within a run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageRecord {
+    /// The stage's name, matching its key under `[stages]`.
     pub name: String,
+    /// Zero-based position in the blueprint's stage list.
     pub index: usize,
+    /// Where this stage stands.
     pub status: StageRunStatus,
+    /// Input tokens billed while this stage was active. A revisited stage keeps
+    /// accumulating rather than resetting, so the run's total is the sum.
     pub prompt_tokens: usize,
+    /// Output tokens billed while this stage was active, accumulating the same
+    /// way.
     pub completion_tokens: usize,
     /// Tokens read from provider cache in this stage.
     #[serde(default)]
@@ -435,6 +504,8 @@ pub struct StageRecord {
 }
 
 impl StageRecord {
+    /// A stage the run has not entered yet: [`StageRunStatus::Pending`], zero
+    /// tokens, and neither timestamp set.
     pub fn new(name: String, index: usize) -> Self {
         Self {
             name,

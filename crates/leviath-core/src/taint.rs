@@ -259,6 +259,11 @@ impl RegionTaint {
         }
     }
 
+    /// The taint recorded for the entry at `index`, or `None` when the index is
+    /// past the end.
+    ///
+    /// Returns `Option` rather than defaulting to `Public` so a caller cannot
+    /// mistake "no such entry" for "that entry is clean".
     pub fn entry_taint(&self, index: usize) -> Option<TaintLevel> {
         self.entry_taints.get(index).copied()
     }
@@ -424,9 +429,16 @@ pub enum GateDecisionSource {
     /// Taint exceeded clearance - automatic block, before any user decision.
     AutoBlock,
     /// Matched a static allowlist rule.
-    AllowlistRule { rule_index: usize },
+    AllowlistRule {
+        /// Which rule matched, by position in the configured list, so a decision
+        /// can be traced back to the line that made it.
+        rule_index: usize,
+    },
     /// Matched a scripted (Rhai) rule.
-    ScriptedRule { script_name: String },
+    ScriptedRule {
+        /// The script that allowed it, by path as declared.
+        script_name: String,
+    },
     /// User allowed once interactively.
     UserAllowOnce,
     /// User created an "always allow" rule.

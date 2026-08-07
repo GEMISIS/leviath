@@ -101,16 +101,28 @@ pub struct InteractionPointState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PointOutcome {
     /// A plain option (no directive/abort/edit) ⇒ complete the point.
-    Approve { user_text: String },
+    Approve {
+        /// The option's label, injected into context so the next turn knows
+        /// which choice was made.
+        user_text: String,
+    },
     /// An abort option ⇒ cancel the run immediately.
     Abort,
     /// A directive option ⇒ inject the directive and re-run inference in-stage.
     Directive {
+        /// The option's label, injected so the next turn knows what was chosen.
         user_text: String,
+        /// The instruction attached to that option, injected alongside it.
         directive: String,
     },
     /// An edit option ⇒ inject the user's edited text and re-present the point.
-    Edit { user_text: String, edited: String },
+    Edit {
+        /// The option's label.
+        user_text: String,
+        /// What the user actually wrote, which is authoritative over whatever
+        /// was presented for editing.
+        edited: String,
+    },
     /// A point declaring `unattended = "ask"` expired or was cancelled with no
     /// answer ⇒ stop the run rather than proceed past a checkpoint nobody made.
     Unanswered,

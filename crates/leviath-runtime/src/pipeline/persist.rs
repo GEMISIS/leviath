@@ -197,6 +197,12 @@ pub(crate) fn reconcile_stage_ledger(
     }
 }
 
+/// Hand each agent's current state to the persistence lane, which writes it to
+/// disk off the schedule thread.
+///
+/// Coalescing lives here rather than in the lane: an agent whose digest has not
+/// changed since its last send is skipped, so a world full of idle runs costs
+/// nothing per tick.
 #[allow(clippy::type_complexity)]
 pub fn dispatch_persistence(
     mut agents: Query<(

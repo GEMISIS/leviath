@@ -15,7 +15,12 @@ pub enum CacheHint {
     UntilChanged,
     /// Cache the stable prefix of a sliding window.
     /// `stable_fraction` is 0.0..1.0 (default 0.75 = oldest 75% of messages are stable).
-    SlidingPrefix { stable_fraction: f32 },
+    SlidingPrefix {
+        /// How much of the window counts as stable, in `0.0..1.0`. The oldest
+        /// that fraction is cached; the newest tail is not, because it is what
+        /// changes every turn and would invalidate the whole prefix with it.
+        stable_fraction: f32,
+    },
     /// Never cache (temporary, clearable, new messages).
     Never,
 }

@@ -21,11 +21,21 @@ pub enum EntryKind {
     /// User message in conversation.
     UserMessage,
     /// Assistant response with optional tool calls.
-    AssistantTurn { tool_calls: Vec<SerializedToolCall> },
+    AssistantTurn {
+        /// The calls the model asked for, empty when it only spoke. Kept with
+        /// the turn so a reloaded context replays the same request shape the
+        /// provider originally saw.
+        tool_calls: Vec<SerializedToolCall>,
+    },
     /// Tool execution result, paired with a tool_call_id.
     ToolResult {
+        /// The `AssistantTurn` call this answers. Providers reject a result
+        /// whose id does not match a call they were shown.
         tool_call_id: String,
+        /// The tool that produced it, for display and telemetry.
         tool_name: String,
+        /// Whether the tool refused or failed, so a reload does not present a
+        /// failure back to the model as a successful result.
         is_error: bool,
     },
 }
@@ -33,8 +43,12 @@ pub enum EntryKind {
 /// A serialized tool call stored within an `AssistantTurn` entry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SerializedToolCall {
+    /// The provider-assigned call id, which the matching
+    /// [`EntryKind::ToolResult`] must quote back.
     pub id: String,
+    /// The tool the model asked for, as it named it.
     pub name: String,
+    /// The arguments as the model supplied them, unvalidated and untransformed.
     pub arguments: serde_json::Value,
     /// Opaque provider token that must be replayed with this call
     /// (Gemini's `thought_signature`). Persisted so it survives a restart.
@@ -874,13 +888,21 @@ pub enum ContentFormat {
     Mermaid,
 
     /// Source code in a specific language
-    Code { language: String },
+    Code {
+        /// The language label, used for the fence and nothing else - no
+        /// per-language parsing happens.
+        language: String,
+    },
 
     /// Markdown formatted text
     Markdown,
 
     /// Custom format with user-defined validation
-    Custom { format_name: String },
+    Custom {
+        /// The author's own name for the format, matched against the validator
+        /// registered for it.
+        format_name: String,
+    },
 }
 
 /// Trait for content validators.

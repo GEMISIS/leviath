@@ -89,13 +89,19 @@ pub struct MCPServerConfig {
 pub enum ResolvedTransport<'a> {
     /// Spawn `command` with `args` and `env`.
     Stdio {
+        /// The executable to run.
         command: &'a str,
+        /// Its arguments, passed without shell interpretation.
         args: &'a [String],
+        /// Variables to add to the child's environment, on top of whatever
+        /// `child_env_allowed` lets through from this process.
         env: &'a HashMap<String, String>,
     },
     /// Connect to `url` with `headers`.
     Http {
+        /// The server's endpoint.
         url: &'a str,
+        /// Headers to send on every request, with any `${VAR}` already expanded.
         headers: &'a HashMap<String, String>,
     },
 }

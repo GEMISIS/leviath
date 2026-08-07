@@ -14,11 +14,21 @@ pub enum ValidationError {
 
     /// Stage-level validation failure
     #[error("Invalid stage '{stage}': {message}")]
-    Stage { stage: String, message: String },
+    Stage {
+        /// The offending stage's name.
+        stage: String,
+        /// What is wrong with it.
+        message: String,
+    },
 
     /// Region-level validation failure
     #[error("Invalid region '{region}': {message}")]
-    Region { region: String, message: String },
+    Region {
+        /// The offending region's name.
+        region: String,
+        /// What is wrong with it.
+        message: String,
+    },
 
     /// Layout-level validation failure
     #[error("Invalid layout: {0}")]
@@ -31,8 +41,11 @@ pub enum ValidationError {
     /// Transition validation failure
     #[error("Invalid transition from '{from}' to '{to}': {message}")]
     Transition {
+        /// The stage the edge leaves.
         from: String,
+        /// The stage the edge names as its target, which may not exist.
         to: String,
+        /// What is wrong with it.
         message: String,
     },
 }
@@ -50,12 +63,20 @@ pub enum Error {
 
     /// Content exceeds region's token budget
     #[error("Content exceeds token budget: {used} > {max}")]
-    TokenBudgetExceeded { used: usize, max: usize },
+    TokenBudgetExceeded {
+        /// Tokens the write would have brought the region to.
+        used: usize,
+        /// The region's ceiling.
+        max: usize,
+    },
 
     /// Pinned regions alone exceed total token budget
     #[error("Pinned regions ({pinned_tokens}) exceed total budget ({total_budget})")]
     PinnedRegionsOverBudget {
+        /// Tokens held by regions that can never be evicted, which is what makes
+        /// this unrecoverable rather than a matter of dropping something.
         pinned_tokens: usize,
+        /// The whole window's budget.
         total_budget: usize,
     },
 

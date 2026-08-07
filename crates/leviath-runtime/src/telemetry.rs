@@ -33,22 +33,39 @@ pub struct Telemetry(pub Arc<dyn TelemetrySink>);
 pub enum ActivityRecord {
     /// An inference call finished (either way).
     Inference {
+        /// The provider that answered, after fallback resolution.
         provider: String,
+        /// The model identifier sent on the wire.
         model: String,
+        /// Wall-clock time of the call, including retries.
         latency_ms: u64,
+        /// Input tokens this call billed.
         prompt_tokens: usize,
+        /// Output tokens this call billed.
         completion_tokens: usize,
+        /// Input tokens served from the provider's prompt cache, counted within
+        /// `prompt_tokens` rather than on top of it.
         cached_tokens: usize,
+        /// Whether a response came back at all.
         success: bool,
     },
     /// One tool call out of a finished batch.
     ToolCall {
+        /// The tool as the model named it.
         tool_name: String,
+        /// Wall-clock time of the whole batch. The executor reports one figure
+        /// per batch, so every call in it carries the same number.
         batch_latency_ms: u64,
+        /// Derived from the `[error] ` result-text convention, so a heuristic
+        /// rather than a structured status.
         success: bool,
     },
     /// A compaction pass finished.
-    Compaction { success: bool },
+    Compaction {
+        /// Whether it produced a usable summary. A failure leaves the region
+        /// alone rather than emptying it.
+        success: bool,
+    },
 }
 
 /// Buffered [`ActivityRecord`]s awaiting the observer. Inserted alongside
