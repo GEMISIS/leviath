@@ -54,7 +54,7 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::Config;
-use crate::daemon::spawn::build_agent_for_reload;
+use crate::daemon::spawn::{SpawnDeps, build_agent_for_reload};
 use crate::daemon::tool_service::CliToolService;
 
 /// Reload every non-terminal persisted run under `runs_dir`, returning the
@@ -348,14 +348,16 @@ fn reload_one(
     };
     let entity = build_agent_for_reload(
         world.world_mut(),
-        tool_service,
-        config,
-        shared_mcp,
-        mcp_tool_defs,
-        hub,
+        SpawnDeps {
+            tool_service,
+            config,
+            shared_mcp,
+            mcp_tool_defs,
+            hub,
+            now_secs,
+            subagent_tx: subagent_tx.clone(),
+        },
         &args,
-        now_secs,
-        subagent_tx.clone(),
     )?;
 
     // Restore the persisted context, stage, iteration, and token totals.

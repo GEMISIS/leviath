@@ -24,7 +24,7 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::daemon::client::{never_interactive, resolve_spawn_args};
-use crate::daemon::spawn::build_agent;
+use crate::daemon::spawn::{SpawnDeps, build_agent};
 use crate::daemon::tool_service::CliToolService;
 
 /// Everything [`build_agent`] needs, captured so a fan-out worker can be spawned
@@ -149,14 +149,16 @@ impl FanOutSpawner for DaemonFanOutSpawner {
         let config = self.config.current();
         let child = build_agent(
             world,
-            self.tool_service.as_ref(),
-            &config,
-            self.shared_mcp.clone(),
-            &mcp_defs,
-            &self.hub,
+            SpawnDeps {
+                tool_service: self.tool_service.as_ref(),
+                config: &config,
+                shared_mcp: self.shared_mcp.clone(),
+                mcp_tool_defs: &mcp_defs,
+                hub: &self.hub,
+                now_secs: (self.now_secs)(),
+                subagent_tx: self.subagent_tx.clone(),
+            },
             &args,
-            (self.now_secs)(),
-            self.subagent_tx.clone(),
         )?;
 
         // `worker_stage` runs the same blueprint entered at that stage rather than
@@ -474,14 +476,16 @@ mod tests {
         };
         let parent = build_agent(
             world.world_mut(),
-            cli.as_ref(),
-            &spawner.config.current(),
-            spawner.shared_mcp.clone(),
-            &spawner.mcp_tool_defs,
-            &spawner.hub,
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &spawner.config.current(),
+                shared_mcp: spawner.shared_mcp.clone(),
+                mcp_tool_defs: &spawner.mcp_tool_defs,
+                hub: &spawner.hub,
+                now_secs: 100,
+                subagent_tx: spawner.subagent_tx.clone(),
+            },
             &args,
-            100,
-            spawner.subagent_tx.clone(),
         )
         .expect("parent spawns");
         (world, spawner, parent)
