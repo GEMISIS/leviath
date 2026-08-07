@@ -41,11 +41,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
-async-trait = "0.1"
+async-trait = { workspace = true }
 
 [dev-dependencies]
 leviath-testkit = { workspace = true }
-async-trait = "0.1"
+async-trait = { workspace = true }
 # `start_paused` / `advance`, so the interaction deadline is tested by moving a
 # virtual clock rather than by sleeping through a real hour.
 tokio = { workspace = true, features = ["test-util"] }
