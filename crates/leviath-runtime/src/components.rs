@@ -343,6 +343,43 @@ pub struct ContextWindow {
     >,
 }
 
+/// Compiled stage-hook scripts for an agent, keyed by the script path the
+/// blueprint wrote (issue #260).
+///
+/// Populated once at spawn by the CLI, which resolves blueprint-dir-relative
+/// paths and compile-checks the files - the same lifecycle
+/// [`ContextWindow::region_scripts`] has, and for the same reason: a broken
+/// script must fail the spawn, not the run.
+///
+/// The component is absent entirely on an agent whose blueprint declares no
+/// hooks, so the hook systems' queries skip it and nothing about the scripting
+/// engine is touched.
+#[derive(Component, Debug, Clone, Default)]
+pub struct StageHookScripts(
+    pub std::collections::HashMap<String, std::sync::Arc<leviath_scripting::stage_hook::HookScript>>,
+);
+
+impl StageHookScripts {
+    /// The compiled script backing `hook` for this stage, when the stage
+    /// declares one and it is on file.
+    ///
+    /// Returns `None` rather than erroring on a miss: spawn already refused a
+    /// blueprint whose script was unreadable or did not define what it was
+    /// named for, so a miss here means the stage simply has no such hook.
+    pub fn script_for(
+        &self,
+        stage: &leviath_core::Stage,
+        hook: &str,
+    ) -> Option<std::sync::Arc<leviath_scripting::stage_hook::HookScript>> {
+        let path = match hook {
+            "on_stage_enter" => stage.hooks.on_stage_enter.as_deref(),
+            "on_stage_exit" => stage.hooks.on_stage_exit.as_deref(),
+            _ => None,
+        }?;
+        self.0.get(path).cloned()
+    }
+}
+
 impl ContextWindow {
     /// Create a new context window with the specified budget.
     pub fn new(max_tokens: usize) -> Self {
@@ -4269,5 +4306,65 @@ mod tests {
         ] {
             assert!(!reason.needs_a_person(), "{reason} resolves on its own");
         }
+    }
+}
+
+#[cfg(test)]
+mod stage_hook_scripts_tests {
+    use super::*;
+
+    fn scripts(path: &str) -> StageHookScripts {
+        let compiled = leviath_scripting::stage_hook::compile(
+            path,
+            "fn on_stage_enter(ctx) { () } fn on_stage_exit(ctx) { () }",
+            &[],
+        )
+        .expect("compiles");
+        let mut m = std::collections::HashMap::new();
+        m.insert(path.to_string(), std::sync::Arc::new(compiled));
+        StageHookScripts(m)
+    }
+
+    fn stage_declaring(enter: Option<&str>, exit: Option<&str>) -> leviath_core::Stage {
+        let mut s = leviath_core::Stage::new(
+            "main".to_string(),
+            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        );
+        s.hooks.on_stage_enter = enter.map(str::to_string);
+        s.hooks.on_stage_exit = exit.map(str::to_string);
+        s
+    }
+
+    #[test]
+    fn each_hook_resolves_to_the_file_its_stage_named() {
+        let s = scripts("h.rhai");
+        let stage = stage_declaring(Some("h.rhai"), Some("h.rhai"));
+        assert!(s.script_for(&stage, "on_stage_enter").is_some());
+        assert!(s.script_for(&stage, "on_stage_exit").is_some());
+    }
+
+    #[test]
+    fn a_hook_the_stage_did_not_declare_resolves_to_nothing() {
+        let s = scripts("h.rhai");
+        let stage = stage_declaring(Some("h.rhai"), None);
+        assert!(s.script_for(&stage, "on_stage_exit").is_none());
+    }
+
+    /// A hook name this build does not implement resolves to nothing rather
+    /// than panicking - the caller asks by string.
+    #[test]
+    fn an_unknown_hook_name_resolves_to_nothing() {
+        let s = scripts("h.rhai");
+        let stage = stage_declaring(Some("h.rhai"), None);
+        assert!(s.script_for(&stage, "on_nothing").is_none());
+    }
+
+    /// Declared but not on file: spawn already refused that, so a miss here
+    /// means the stage simply has no such hook.
+    #[test]
+    fn a_declared_path_with_no_compiled_script_resolves_to_nothing() {
+        let s = scripts("other.rhai");
+        let stage = stage_declaring(Some("h.rhai"), None);
+        assert!(s.script_for(&stage, "on_stage_enter").is_none());
     }
 }
