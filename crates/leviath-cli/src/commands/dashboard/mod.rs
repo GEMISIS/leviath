@@ -904,6 +904,7 @@ mod tests {
                 let mut setup = TestSetup {
                     enable_should_fail: true,
                     create_should_fail: false,
+                    draw_should_fail: false,
                 };
                 let mut events = TestEventSource::new(vec![]);
                 let result = execute_core(&mut dashboard, &control, &mut setup, &mut events).await;
@@ -925,6 +926,7 @@ mod tests {
                 let mut setup = TestSetup {
                     enable_should_fail: false,
                     create_should_fail: true,
+                    draw_should_fail: false,
                 };
                 let mut events = TestEventSource::new(vec![]);
                 let result = execute_core(&mut dashboard, &control, &mut setup, &mut events).await;

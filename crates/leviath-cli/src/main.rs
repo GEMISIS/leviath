@@ -229,6 +229,35 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
     // directory branch already handles and what the docs have always promised.
     let path = args.path.as_deref().unwrap_or(".");
     let workdir = commands::run::effective_workdir(args.workdir, std::env::current_dir()?)?;
+    // Confirm a workdir an agent probably should not be pointed at (issue
+    // #252). Before resolving the task, so a cancelled run has not opened an
+    // editor first; `--yolo` and any non-terminal caller proceed with a warning
+    // rather than being refused.
+    {
+        let allowed = leviath_cli::config::Config::load()
+            .map(|c| c.security.allowed_workdirs)
+            .unwrap_or_default();
+        // `--yolo` means unattended, so it takes the warn-and-proceed path even
+        // on a terminal: the flag's whole meaning is "do not stop to ask".
+        let interactive = std::io::IsTerminal::is_terminal(&io::stdin()) && !args.yolo;
+        let ok = leviath_cli::workdir_guard::check(
+            std::path::Path::new(&workdir),
+            dirs::home_dir().as_deref(),
+            &allowed,
+            interactive,
+            &mut CrosstermSetup {
+                viewport: Viewport::Fullscreen,
+                mouse_capture: false,
+                enabled: false,
+            },
+            &mut CrosstermEventSource::new(),
+        )
+        .await;
+        if !ok {
+            println!("cancelled");
+            return Ok(());
+        }
+    }
     let spawn_args = leviath_cli::daemon::client::resolve_spawn_args(
         path,
         args.task.as_deref(),
