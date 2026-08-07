@@ -167,6 +167,25 @@ jobs:
             os: ubuntu-latest
             artifact: leviath-linux-arm64
             ext: tar.gz
+          # Statically linked, for containers older than the runner's glibc
+          # (issue #286). The gnu builds above link against whatever the
+          # runner ships and so demand GLIBC_2.38+ at run time, which is newer
+          # than most task/CI images - `curl a binary into a container` fails
+          # on anything below Ubuntu 24.04. These need nothing from the image.
+          #
+          # arm64 builds on a native ARM runner rather than cross-compiling:
+          # `aws-lc-sys` is the crypto backend (see the note on the cross
+          # toolchain below) and pointing its cmake build at a musl cross
+          # toolchain is a great deal more work than asking for the right
+          # runner. Free for public repos.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact: leviath-linux-x64-musl
+            ext: tar.gz
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            artifact: leviath-linux-arm64-musl
+            ext: tar.gz
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: leviath-macos-arm64
@@ -195,15 +214,24 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: release-${{ matrix.target }}
-      # aarch64-linux is cross-compiled from the x64 runner (hosted ARM
-      # runners aren't available for private repos on this plan). rustls
-      # keeps this simple: the only C to cross-compile is ring's, which
-      # just needs the gcc cross toolchain.
+      # aarch64-linux-gnu is cross-compiled from the x64 runner, which the gcc
+      # cross toolchain is enough for. (`aws-lc-sys` is the crypto backend, not
+      # ring - it builds here because its cmake picks the cross compiler up
+      # from `CC_aarch64_unknown_linux_gnu` below. The musl arm64 target does
+      # not get the same treatment; see the matrix note.)
       - name: Install aarch64 Linux cross toolchain
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
+      # `musl-gcc`, which is what `aws-lc-sys` compiles its C through for a
+      # musl target. Both musl targets build for the runner's own
+      # architecture, so this is the native musl toolchain, not a cross one.
+      - name: Install the musl toolchain
+        if: endsWith(matrix.target, '-linux-musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
       # Linker hardening, appended to the workflow-level `-D warnings`.
       #
       # It has to be spelled here rather than in `.cargo/config.toml`: the
@@ -220,6 +248,11 @@ jobs:
       #   - macOS: nothing to add. The Apple linker rejects `-z` options, and the
       #     platform's own protections (hardened runtime once signed, ASLR) are
       #     not rustc flags.
+      #   - Linux musl: nothing to add either, and deliberately so. RELRO and
+      #     BIND_NOW harden the GOT against being rewritten between dynamic
+      #     relocation and use; a fully static non-PIE binary has no dynamic
+      #     relocation and no GOT to protect, so the flags would be decoration.
+      #     `*-linux-gnu` below therefore stays an exact match, not `*-linux-*`.
       - name: Build release binary
         shell: bash
         env:
@@ -303,8 +336,8 @@ jobs:
           # all - the install script and both taps would resolve it and find
           # nothing to download. Count what arrived against the build matrix.
           found=$(find release -type f | wc -l)
-          if [ "$found" -ne 5 ]; then
-            echo "::error::expected 5 platform archives, found $found:"
+          if [ "$found" -ne 7 ]; then
+            echo "::error::expected 7 platform archives, found $found:"
             ls -la release/
             exit 1
           fi

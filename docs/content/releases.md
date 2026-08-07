@@ -83,6 +83,27 @@ cargo install leviath-cli
 The install scripts and package manifests live in the
 [distribution repo](https://github.com/GEMISIS/leviath-dist).
 
+### Running inside a container
+
+Every channel ships seven archives: glibc and **musl** builds for Linux on x64 and arm64, plus
+macOS on both and Windows on x64.
+
+Reach for the musl ones when you are dropping `lev` into an image you did not build. The glibc
+binaries link against the release runner's C library and so need `GLIBC_2.38` or newer, which is
+Ubuntu 24.04 and up; anything older fails at exec with a `version not found` message before it runs
+a line of Leviath. The musl archives are statically linked and need nothing from the image at all.
+
+```bash
+# glibc: fine on a modern host, fails on an older container image
+curl -fsSLO https://github.com/GEMISIS/leviath/releases/download/alpha/leviath-linux-x64.tar.gz
+
+# musl: runs anywhere
+curl -fsSLO https://github.com/GEMISIS/leviath/releases/download/alpha/leviath-linux-x64-musl.tar.gz
+```
+
+They are the same binary otherwise. The glibc builds stay the default because they use the
+platform's own resolver and NSS configuration, which is what you want on a machine you control.
+
 ## Verifying a download
 
 Every release carries a `SHA256SUMS` file generated at build time and
