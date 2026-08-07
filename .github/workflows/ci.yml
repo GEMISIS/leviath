@@ -36,13 +36,26 @@ permissions:
   contents: read
 
 jobs:
+  # Four legs, not three. `ubuntu-24.04-arm` is here because the release builds
+  # ship `aarch64-unknown-linux-{gnu,musl}` and nothing had ever run them on an
+  # ARM machine: `macos-latest` is Apple Silicon, so macOS was covered by
+  # accident, while the Linux ARM binaries went out tested only on x64.
+  #
+  # Deliberately *only* this job. Clippy and Coverage are per-OS because a
+  # `#[cfg]` arm invisible to one platform is invisible to its lint and its
+  # coverage map - but architecture changes no `cfg`, so an ARM leg there would
+  # compile and measure byte-identical code for eleven more jobs and no new
+  # information. What differs at runtime is execution: alignment, atomic
+  # widths, and whatever the C dependencies (mimalloc, aws-lc-sys) do per
+  # architecture. That is what `cargo test` exercises and why this is the leg
+  # that earns it.
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
