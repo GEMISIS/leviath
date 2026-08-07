@@ -206,20 +206,14 @@ impl AgentToolState {
     /// what stops a safe `ls` or a granted `ls` covering `ls && curl evil`. A
     /// call with no reusable key is never covered, so it prompts every time.
     async fn covers(&self, keys: &[String]) -> bool {
-        if keys.is_empty() {
-            return false;
-        }
         let staged = self
             .stage_allows
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
         let run = self.run_allows.lock().await;
-        keys.iter().all(|k| {
-            self.safe_keys.contains(k)
-                || self.safe_keys.contains(crate::shell_keys::program_of(k))
-                || staged.contains(k)
-                || run.contains(k)
+        crate::shell_keys::all_covered(keys, &|k| self.safe_keys.contains(k), &|k| {
+            staged.contains(k) || run.contains(k)
         })
     }
 

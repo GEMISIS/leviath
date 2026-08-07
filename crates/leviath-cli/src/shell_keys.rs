@@ -294,6 +294,36 @@ fn keys_from_segments(segments: &[Segment]) -> Vec<String> {
     keys.into_iter().collect()
 }
 
+/// Whether every key in `keys` is already covered, so the call runs unprompted.
+///
+/// The two predicates are deliberately not interchangeable. `safe` is the
+/// pre-approved set and is widened through [`program_of`], so a safe-listed
+/// `cat` covers `cat notes.md`. `granted` is what a person actually approved
+/// during this run, and is **not** widened: an approval is for the thing they
+/// were shown, and widening it would let a granted `git log` cover
+/// `git log > ~/.bashrc`.
+///
+/// An empty key list is never covered. A line this cannot characterize is one no
+/// grant may speak for, so it prompts every time.
+///
+/// Extracted so the daemon's `AgentToolState::covers` and the tests that pin
+/// this behaviour run the same code. Asserting on key *strings* instead would
+/// pass against a fix that emitted the right key and still let it be covered,
+/// which is exactly how the safe-list escapes went unnoticed.
+///
+/// `&dyn Fn` rather than a generic: one instantiation, so the coverage gate sees
+/// one set of regions instead of one per call site.
+pub fn all_covered(
+    keys: &[String],
+    safe: &dyn Fn(&str) -> bool,
+    granted: &dyn Fn(&str) -> bool,
+) -> bool {
+    !keys.is_empty()
+        && keys
+            .iter()
+            .all(|k| safe(k) || safe(program_of(k)) || granted(k))
+}
+
 /// Whether `command` writes a file through a shell redirect.
 ///
 /// A redirect is a file write that no tool name describes, so the caller
