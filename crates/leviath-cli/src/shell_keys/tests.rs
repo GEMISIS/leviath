@@ -765,6 +765,79 @@ fn an_env_key_is_a_writable_config_entry() {
     assert!(!safe.contains_key(&format!("{KEY_PREFIX}env:PATH")));
 }
 
+// ─── Which shell's escape rule (issue #296) ──────────────────────────────────
+
+/// The keys a line produces under one shell's escape rule, for asserting both
+/// readings from either platform.
+fn keys_under(command: &str, backslash_escapes: bool) -> Vec<String> {
+    match tokenize_for(command, backslash_escapes) {
+        Some(segments) => keys_from_segments(&segments),
+        None => Vec::new(),
+    }
+}
+
+/// The bug this rule exists for. `cmd.exe` does not read `\` as an escape, so a
+/// Windows path must survive tokenizing intact - the POSIX reading turns
+/// `C:\Users\me\notes.md` into `C:Usersmenotes.md`, which is a path nothing on
+/// the machine has, and every grant keyed on it was a grant for a file that
+/// does not exist.
+#[test]
+fn a_windows_path_survives_when_the_shell_does_not_escape() {
+    let cmd = r"cat C:\Users\me\notes.md";
+    assert_eq!(keys_under(cmd, false), [r"shell:cat C:\Users\me\notes.md"]);
+    // And the POSIX reading, which is what shipped, mangles it.
+    assert_eq!(keys_under(cmd, true), ["shell:cat C:Usersmenotes.md"]);
+}
+
+/// The same asymmetry where it decides a *write*, which is what made it visible.
+#[test]
+fn a_windows_redirect_target_survives_when_the_shell_does_not_escape() {
+    let Some(segments) = tokenize_for(r"echo x > C:\tmp\out.txt", false) else {
+        panic!("should tokenize")
+    };
+    let target = segments
+        .iter()
+        .flat_map(|s| s.writes.iter())
+        .next()
+        .expect("a write target");
+    assert_eq!(target.text, r"C:\tmp\out.txt");
+}
+
+/// The POSIX reading is unchanged where it applies - an escaped space is still
+/// one word, and an escaped separator still is not a boundary.
+#[test]
+fn the_posix_escape_reading_is_untouched() {
+    assert_eq!(keys_under(r"cat my\ file", true), ["shell:cat my file"]);
+    assert_eq!(keys_under(r"echo a\;b", true), ["shell:echo"]);
+}
+
+/// Inside double quotes the two readings already agreed, and it is worth
+/// pinning why: POSIX escapes only `$`, `"`, `\` and a backtick there, so a
+/// backslash before anything else already stood for itself. A quoted Windows
+/// path was never the broken case - the unquoted one was.
+#[test]
+fn a_quoted_windows_path_reads_the_same_either_way() {
+    let word_of = |escapes: bool| {
+        tokenize_for(r#"cat "C:\Users\me""#, escapes)
+            .expect("tokenizes")
+            .swap_remove(0)
+            .words
+            .swap_remove(1)
+            .text
+    };
+    assert_eq!(word_of(false), r"C:\Users\me");
+    assert_eq!(word_of(true), r"C:\Users\me");
+}
+
+/// The four characters POSIX *does* escape inside double quotes still escape,
+/// so widening the rule did not quietly turn `"\$HOME"` back into an expansion.
+#[test]
+fn the_four_posix_escapes_inside_double_quotes_still_escape() {
+    assert_eq!(arg_of(r#"cat "a\$b""#), "a$b");
+    assert_eq!(arg_of(r#"cat "a\`b""#), "a`b");
+    assert!(second_word(r#"cat "a\$b""#).literal, "not an expansion");
+}
+
 // ─── Where a redirect may write (issue #289) ─────────────────────────────────
 
 /// A discarded write is not a write, so nothing here needs confining. Pinned as
