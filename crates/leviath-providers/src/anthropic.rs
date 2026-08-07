@@ -277,16 +277,33 @@ impl AnthropicProvider {
     }
 
     /// Apply common Anthropic headers to a request builder.
-    fn apply_headers(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        let builder = builder
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json");
+    /// The headers every Anthropic request carries.
+    ///
+    /// The one source of truth for the set: [`Self::apply_headers`] folds it
+    /// onto a builder, and the shared `send_chat_request` takes it as pairs.
+    /// Keeping them separate is how the debug-http log drifted - it hardcoded
+    /// three headers and silently omitted `anthropic-beta`, so under
+    /// `--features debug-http` a 1h-cache request logged something the wire
+    /// never carried.
+    fn header_pairs(&self) -> Vec<(&'static str, String)> {
+        let mut headers = vec![
+            ("x-api-key", self.api_key.clone()),
+            ("anthropic-version", "2023-06-01".to_string()),
+            ("content-type", "application/json".to_string()),
+        ];
         if self.cache_ttl == CacheTtl::Ephemeral1h {
-            builder.header("anthropic-beta", "extended-cache-ttl-2025-04-11")
-        } else {
-            builder
+            headers.push((
+                "anthropic-beta",
+                "extended-cache-ttl-2025-04-11".to_string(),
+            ));
         }
+        headers
+    }
+
+    fn apply_headers(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        self.header_pairs()
+            .into_iter()
+            .fold(builder, |b, (name, value)| b.header(name, value))
     }
 
     /// Call Anthropic's exact `/messages/count_tokens` endpoint for `text`.
@@ -551,52 +568,16 @@ impl Provider for AnthropicProvider {
         maybe_dump_request(&body);
         let url = format!("{}/messages", self.base_url);
 
-        #[cfg(feature = "debug-http")]
-        let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
-        #[cfg(feature = "debug-http")]
-        {
-            let mut headers = reqwest::header::HeaderMap::new();
-            headers.insert("x-api-key", self.api_key.parse().unwrap());
-            headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
-            headers.insert("content-type", "application/json".parse().unwrap());
-            crate::debug_http::log_request("anthropic", "POST", &url, &headers, body_bytes.len());
-        }
-        #[cfg(feature = "debug-http")]
-        let start = std::time::Instant::now();
-
-        let response = crate::provider::apply_request_timeout(
-            self.apply_headers(self.client.post(&url)),
-            request.request_timeout_secs,
-        )
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| {
-            #[cfg(feature = "debug-http")]
-            crate::debug_http::log_error("anthropic", &url, &e.to_string());
-            ProviderError::RequestFailed(e.to_string())
-        })?;
-
-        #[cfg(feature = "debug-http")]
-        crate::debug_http::log_response(
+        let response = crate::openai_compat::send_chat_request(
+            &self.client,
             "anthropic",
             &url,
-            response.status().as_u16(),
-            response.headers(),
-            response.content_length(),
-            start.elapsed(),
-        );
-
-        // Shared with every other HTTP provider so a 402/401/403 (or a 400
-        // whose body says the credit balance is too low) classifies the same
-        // way everywhere - the runtime keys failover and the circuit breaker
-        // off that classification (issue #201).
-        let response =
-            crate::provider::check_http_response(response, self.rate_limiter.as_ref()).await?;
-
-        if let Some(limiter) = &self.rate_limiter {
-            limiter.reset_backoff().await;
-        }
+            &self.header_pairs(),
+            &body,
+            self.rate_limiter.as_ref(),
+            request.request_timeout_secs,
+        )
+        .await?;
 
         let response_body: serde_json::Value = response
             .json()
@@ -627,49 +608,16 @@ impl Provider for AnthropicProvider {
         maybe_dump_request(&body);
         let url = format!("{}/messages", self.base_url);
 
-        #[cfg(feature = "debug-http")]
-        let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
-        #[cfg(feature = "debug-http")]
-        {
-            let mut headers = reqwest::header::HeaderMap::new();
-            headers.insert("x-api-key", self.api_key.parse().unwrap());
-            headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
-            headers.insert("content-type", "application/json".parse().unwrap());
-            crate::debug_http::log_request("anthropic", "POST", &url, &headers, body_bytes.len());
-        }
-        #[cfg(feature = "debug-http")]
-        let start = std::time::Instant::now();
-
-        let response = crate::provider::apply_request_timeout(
-            self.apply_headers(self.client.post(&url)),
-            request.request_timeout_secs,
-        )
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| {
-            #[cfg(feature = "debug-http")]
-            crate::debug_http::log_error("anthropic", &url, &e.to_string());
-            ProviderError::RequestFailed(e.to_string())
-        })?;
-
-        #[cfg(feature = "debug-http")]
-        crate::debug_http::log_response(
+        let response = crate::openai_compat::send_chat_request(
+            &self.client,
             "anthropic",
             &url,
-            response.status().as_u16(),
-            response.headers(),
-            response.content_length(),
-            start.elapsed(),
-        );
-
-        // Same shared classification as the non-streaming path above.
-        let response =
-            crate::provider::check_http_response(response, self.rate_limiter.as_ref()).await?;
-
-        if let Some(limiter) = &self.rate_limiter {
-            limiter.reset_backoff().await;
-        }
+            &self.header_pairs(),
+            &body,
+            self.rate_limiter.as_ref(),
+            request.request_timeout_secs,
+        )
+        .await?;
 
         let byte_stream = response.bytes_stream();
         let stream = AnthropicSseStream::new(byte_stream);

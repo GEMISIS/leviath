@@ -282,43 +282,16 @@ impl Provider for OllamaProvider {
         body["stream"] = serde_json::Value::Bool(false);
         let url = format!("{}/api/chat", self.base_url);
 
-        #[cfg(feature = "debug-http")]
-        {
-            let mut headers = reqwest::header::HeaderMap::new();
-            headers.insert("content-type", "application/json".parse().unwrap());
-            let body_size = serde_json::to_vec(&body).map(|b| b.len()).unwrap_or(0);
-            crate::debug_http::log_request("ollama", "POST", &url, &headers, body_size);
-        }
-        #[cfg(feature = "debug-http")]
-        let start = std::time::Instant::now();
-
-        let response = crate::provider::apply_request_timeout(
-            self.client.post(&url),
-            request.request_timeout_secs,
-        )
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| {
-            #[cfg(feature = "debug-http")]
-            crate::debug_http::log_error("ollama", &url, &e.to_string());
-            ProviderError::RequestFailed(e.to_string())
-        })?;
-
-        #[cfg(feature = "debug-http")]
-        crate::debug_http::log_response(
+        let response = crate::openai_compat::send_chat_request(
+            &self.client,
             "ollama",
             &url,
-            response.status().as_u16(),
-            response.headers(),
-            response.content_length(),
-            start.elapsed(),
-        );
-
-        // Shared classification, which also gives Ollama the 429 handling it
-        // never had: every non-2xx used to collapse into one `ApiError`.
-        let response = crate::provider::check_http_response(response, None).await?;
+            &[("Content-Type", "application/json".to_string())],
+            &body,
+            None,
+            request.request_timeout_secs,
+        )
+        .await?;
 
         let response_body: serde_json::Value = response
             .json()
@@ -338,42 +311,16 @@ impl Provider for OllamaProvider {
         body["stream"] = serde_json::Value::Bool(true);
         let url = format!("{}/api/chat", self.base_url);
 
-        #[cfg(feature = "debug-http")]
-        {
-            let mut headers = reqwest::header::HeaderMap::new();
-            headers.insert("content-type", "application/json".parse().unwrap());
-            let body_size = serde_json::to_vec(&body).map(|b| b.len()).unwrap_or(0);
-            crate::debug_http::log_request("ollama", "POST", &url, &headers, body_size);
-        }
-        #[cfg(feature = "debug-http")]
-        let start = std::time::Instant::now();
-
-        let response = crate::provider::apply_request_timeout(
-            self.client.post(&url),
-            request.request_timeout_secs,
-        )
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| {
-            #[cfg(feature = "debug-http")]
-            crate::debug_http::log_error("ollama", &url, &e.to_string());
-            ProviderError::RequestFailed(e.to_string())
-        })?;
-
-        #[cfg(feature = "debug-http")]
-        crate::debug_http::log_response(
+        let response = crate::openai_compat::send_chat_request(
+            &self.client,
             "ollama",
             &url,
-            response.status().as_u16(),
-            response.headers(),
-            response.content_length(),
-            start.elapsed(),
-        );
-
-        // Same shared classification as the non-streaming path above.
-        let response = crate::provider::check_http_response(response, None).await?;
+            &[("Content-Type", "application/json".to_string())],
+            &body,
+            None,
+            request.request_timeout_secs,
+        )
+        .await?;
 
         let byte_stream = response.bytes_stream();
         let stream = OllamaNdjsonStream::new(byte_stream);
