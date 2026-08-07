@@ -10593,7 +10593,9 @@ fn a_refusal_without_a_reason_still_says_it_was_refused() {
 
 // ─── before_inference / after_inference (issue #260) ─────────────────────────
 
-fn stage_hooked(field: fn(&mut leviath_core::blueprint::StageHooks, String)) -> AgentBlueprint {
+fn stage_hooked(
+    field: impl FnOnce(&mut leviath_core::blueprint::StageHooks, String),
+) -> AgentBlueprint {
     let mut stage = leviath_core::Stage::new(
         "main".to_string(),
         leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
@@ -11353,6 +11355,468 @@ fn on_tool_call_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
         ))
         .id();
     run_tool_hooks(&mut world);
+    assert!(status_message(&world, out_of_range).is_none());
+    assert!(status_message(&world, undeclared).is_none());
+}
+
+// ─── on_completion / on_error (issue #260) ───────────────────────────────────
+
+fn run_terminal(world: &mut World) {
+    let mut schedule = Schedule::default();
+    schedule.add_systems(run_terminal_hooks);
+    schedule.run(world);
+}
+
+fn spawn_terminal(
+    world: &mut World,
+    src: &str,
+    hook: &'static str,
+    status: AgentStatus,
+    answer: Option<&str>,
+) -> Entity {
+    let mut state = agent_state();
+    state.status = status;
+    let bp = stage_hooked(move |h, p| match hook {
+        "on_completion" => h.on_completion = Some(p),
+        _ => h.on_error = Some(p),
+    });
+    let mut e = world.spawn((
+        bp,
+        state,
+        StageCursor { index: 0 },
+        hook_scripts(src, &[hook]),
+    ));
+    if let Some(a) = answer {
+        e.insert(crate::persistence::FinalOutput(
+            leviath_core::output::FinalOutput::new(a, None, "s".to_string(), 10),
+        ));
+    }
+    e.id()
+}
+
+fn answer_of(world: &World, e: Entity) -> String {
+    world
+        .get::<crate::persistence::FinalOutput>(e)
+        .expect("output")
+        .0
+        .content
+        .clone()
+}
+
+#[test]
+fn on_completion_can_rewrite_the_answer() {
+    let mut world = World::new();
+    let e = spawn_terminal(
+        &mut world,
+        r#"fn on_completion(ctx) { #{ action: "modify", value: "tidied: " + ctx.output } }"#,
+        "on_completion",
+        AgentStatus::Complete,
+        Some("raw answer"),
+    );
+    run_terminal(&mut world);
+    assert_eq!(answer_of(&world, e), "tidied: raw answer");
+}
+
+#[test]
+fn on_error_can_rewrite_the_message() {
+    let mut world = World::new();
+    let e = spawn_terminal(
+        &mut world,
+        r#"fn on_error(ctx) { #{ action: "modify", value: "friendly: " + ctx.error } }"#,
+        "on_error",
+        AgentStatus::Error {
+            message: "raw failure".to_string(),
+        },
+        None,
+    );
+    run_terminal(&mut world);
+    assert_eq!(
+        status_message(&world, e).expect("errored"),
+        "friendly: raw failure"
+    );
+}
+
+/// A terminal status stays true every tick, so without the fire-once marker the
+/// hook would run forever - and a rewriting hook would compound its own output.
+#[test]
+fn a_terminal_hook_runs_exactly_once() {
+    let mut world = World::new();
+    let e = spawn_terminal(
+        &mut world,
+        r#"fn on_completion(ctx) { #{ action: "modify", value: ctx.output + "!" } }"#,
+        "on_completion",
+        AgentStatus::Complete,
+        Some("x"),
+    );
+    run_terminal(&mut world);
+    run_terminal(&mut world);
+    run_terminal(&mut world);
+    assert_eq!(
+        answer_of(&world, e),
+        "x!",
+        "the hook compounded its own output"
+    );
+}
+
+/// A throwing hook must not be retried next tick, or one error becomes an
+/// infinite loop. The marker goes on before the script runs.
+#[test]
+fn a_failing_terminal_hook_is_not_retried() {
+    let mut world = World::new();
+    let e = spawn_terminal(
+        &mut world,
+        r#"fn on_completion(ctx) { throw "boom" }"#,
+        "on_completion",
+        AgentStatus::Complete,
+        Some("x"),
+    );
+    run_terminal(&mut world);
+    let first = status_message(&world, e).expect("errored");
+    run_terminal(&mut world);
+    assert_eq!(
+        status_message(&world, e).expect("still errored"),
+        first,
+        "a failing hook ran again"
+    );
+    assert!(world.get::<TerminalHookFired>(e).is_some());
+}
+
+#[test]
+fn on_completion_can_veto_the_answer() {
+    let mut world = World::new();
+    let e = spawn_terminal(
+        &mut world,
+        r#"fn on_completion(ctx) { #{ action: "cancel", reason: "schema mismatch" } }"#,
+        "on_completion",
+        AgentStatus::Complete,
+        Some("x"),
+    );
+    run_terminal(&mut world);
+    assert!(
+        status_message(&world, e)
+            .expect("errored")
+            .contains("schema mismatch")
+    );
+}
+
+/// A cancelled run was stopped from outside. Narrating that back to the
+/// operator who stopped it is not useful, so neither hook fires.
+#[test]
+fn a_cancelled_run_fires_no_terminal_hook() {
+    let mut world = World::new();
+    let e = spawn_terminal(
+        &mut world,
+        r#"fn on_completion(ctx) { #{ action: "cancel", reason: "should not run" } }"#,
+        "on_completion",
+        AgentStatus::Cancelled,
+        Some("x"),
+    );
+    run_terminal(&mut world);
+    assert!(status_message(&world, e).is_none());
+    assert!(world.get::<TerminalHookFired>(e).is_none());
+}
+
+/// A run still going fires nothing, and is not marked - it has not finished.
+#[test]
+fn a_running_agent_fires_no_terminal_hook_and_stays_unmarked() {
+    let mut world = World::new();
+    let e = spawn_terminal(
+        &mut world,
+        r#"fn on_completion(ctx) { #{ action: "cancel" } }"#,
+        "on_completion",
+        AgentStatus::Active,
+        Some("x"),
+    );
+    run_terminal(&mut world);
+    assert!(status_message(&world, e).is_none());
+    assert!(
+        world.get::<TerminalHookFired>(e).is_none(),
+        "an unfinished run must stay eligible"
+    );
+}
+
+/// The completion hook of a run that never submitted an answer sees an empty
+/// string, not a missing field.
+#[test]
+fn on_completion_without_an_answer_sees_empty_output() {
+    let mut world = World::new();
+    let e = spawn_terminal(
+        &mut world,
+        r#"fn on_completion(ctx) { if ctx.output == "" { () } else { #{ action: "cancel" } } }"#,
+        "on_completion",
+        AgentStatus::Complete,
+        None,
+    );
+    run_terminal(&mut world);
+    assert!(status_message(&world, e).is_none());
+}
+
+#[test]
+fn a_terminal_hook_modify_must_be_text() {
+    let mut world = World::new();
+    let e = spawn_terminal(
+        &mut world,
+        r#"fn on_completion(ctx) { #{ action: "modify", value: #{ not: "text" } } }"#,
+        "on_completion",
+        AgentStatus::Complete,
+        Some("x"),
+    );
+    run_terminal(&mut world);
+    assert!(
+        status_message(&world, e)
+            .expect("errored")
+            .contains("replacement text")
+    );
+}
+
+#[test]
+fn a_terminal_hook_retry_is_refused() {
+    let mut world = World::new();
+    let e = spawn_terminal(
+        &mut world,
+        r#"fn on_completion(ctx) { #{ action: "retry" } }"#,
+        "on_completion",
+        AgentStatus::Complete,
+        Some("x"),
+    );
+    run_terminal(&mut world);
+    assert!(
+        status_message(&world, e)
+            .expect("errored")
+            .contains("cannot honour")
+    );
+}
+
+#[test]
+fn a_terminal_hook_veto_without_a_reason_still_explains() {
+    let mut world = World::new();
+    let e = spawn_terminal(
+        &mut world,
+        "fn on_completion(ctx) { false }",
+        "on_completion",
+        AgentStatus::Complete,
+        Some("x"),
+    );
+    run_terminal(&mut world);
+    let msg = status_message(&world, e).expect("errored");
+    assert!(msg.contains("rejected the result"), "{msg}");
+    assert!(msg.contains("no reason given"), "{msg}");
+}
+
+#[test]
+fn a_terminal_hook_allow_leaves_everything_alone() {
+    let mut world = World::new();
+    let e = spawn_terminal(
+        &mut world,
+        "fn on_completion(ctx) { () }",
+        "on_completion",
+        AgentStatus::Complete,
+        Some("x"),
+    );
+    run_terminal(&mut world);
+    assert_eq!(answer_of(&world, e), "x");
+    assert!(status_message(&world, e).is_none());
+}
+
+/// No stage and no declared hook both mark the agent anyway: re-checking a
+/// finished run on every tick is pure work.
+#[test]
+fn a_terminal_run_with_no_hook_is_marked_so_it_is_not_rechecked() {
+    let mut world = World::new();
+    let mut state = agent_state();
+    state.status = AgentStatus::Complete;
+    let stage = leviath_core::Stage::new(
+        "main".to_string(),
+        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+    );
+    let undeclared = world
+        .spawn((
+            AgentBlueprint(blueprint(vec![stage])),
+            state.clone(),
+            StageCursor { index: 0 },
+            hook_scripts("fn on_completion(ctx) { () }", &["on_completion"]),
+        ))
+        .id();
+    let out_of_range = world
+        .spawn((
+            stage_hooked(|h, p| h.on_completion = Some(p)),
+            state,
+            StageCursor { index: 99 },
+            hook_scripts("fn on_completion(ctx) { () }", &["on_completion"]),
+        ))
+        .id();
+
+    run_terminal(&mut world);
+    assert!(world.get::<TerminalHookFired>(undeclared).is_some());
+    assert!(world.get::<TerminalHookFired>(out_of_range).is_some());
+}
+
+/// Rewriting an answer that was never submitted is refused, not dropped - a
+/// silently-ignored rewrite reads exactly like one that happened.
+#[test]
+fn on_completion_rewriting_a_missing_answer_is_refused() {
+    let mut world = World::new();
+    let e = spawn_terminal(
+        &mut world,
+        r#"fn on_completion(ctx) { #{ action: "modify", value: "new" } }"#,
+        "on_completion",
+        AgentStatus::Complete,
+        None,
+    );
+    run_terminal(&mut world);
+    assert!(
+        status_message(&world, e)
+            .expect("errored")
+            .contains("submitted none")
+    );
+}
+
+// ─── on_stage_exit (issue #260) ──────────────────────────────────────────────
+
+fn spawn_exiting(world: &mut World, src: &str) -> Entity {
+    world
+        .spawn((
+            stage_hooked(|h, p| h.on_stage_exit = Some(p)),
+            agent_state(),
+            conv_window(),
+            StageCursor { index: 0 },
+            ResolveTransition,
+            hook_scripts(src, &["on_stage_exit"]),
+        ))
+        .id()
+}
+
+fn run_exit_hooks(world: &mut World) {
+    let mut schedule = Schedule::default();
+    schedule.add_systems(run_stage_exit_hooks);
+    schedule.run(world);
+}
+
+/// The point of the hook: summarise or tidy while the finishing stage is still
+/// the current one.
+#[test]
+fn on_stage_exit_can_write_the_finishing_stages_window() {
+    let mut world = World::new();
+    let e = spawn_exiting(
+        &mut world,
+        r#"fn on_stage_exit(ctx) { #{ action: "modify", value: #{ conversation: "summary of " + ctx.stage } } }"#,
+    );
+    run_exit_hooks(&mut world);
+    assert_eq!(region_text(&world, e, "conversation"), "summary of main");
+}
+
+#[test]
+fn on_stage_exit_allow_changes_nothing() {
+    let mut world = World::new();
+    let e = spawn_exiting(&mut world, "fn on_stage_exit(ctx) { () }");
+    run_exit_hooks(&mut world);
+    assert_eq!(region_text(&world, e, "conversation"), "");
+    assert!(status_message(&world, e).is_none());
+}
+
+/// A stage that refuses to be left has nowhere to go, so this stops the run
+/// rather than blocking the transition and wedging it.
+#[test]
+fn on_stage_exit_can_refuse_and_the_run_stops() {
+    let mut world = World::new();
+    let e = spawn_exiting(
+        &mut world,
+        r#"fn on_stage_exit(ctx) { #{ action: "cancel", reason: "work unfinished" } }"#,
+    );
+    run_exit_hooks(&mut world);
+    let msg = status_message(&world, e).expect("errored");
+    assert!(msg.contains("refused to leave stage 'main'"), "{msg}");
+    assert!(msg.contains("work unfinished"), "{msg}");
+}
+
+#[test]
+fn on_stage_exit_refusing_without_a_reason_still_explains() {
+    let mut world = World::new();
+    let e = spawn_exiting(&mut world, "fn on_stage_exit(ctx) { false }");
+    run_exit_hooks(&mut world);
+    assert!(
+        status_message(&world, e)
+            .expect("errored")
+            .contains("no reason given")
+    );
+}
+
+#[test]
+fn on_stage_exit_that_throws_errors_the_run() {
+    let mut world = World::new();
+    let e = spawn_exiting(&mut world, r#"fn on_stage_exit(ctx) { throw "no" }"#);
+    run_exit_hooks(&mut world);
+    assert!(
+        status_message(&world, e)
+            .expect("errored")
+            .contains("hook failed")
+    );
+}
+
+#[test]
+fn on_stage_exit_retry_is_refused_as_unhonourable() {
+    let mut world = World::new();
+    let e = spawn_exiting(
+        &mut world,
+        r#"fn on_stage_exit(ctx) { #{ action: "retry" } }"#,
+    );
+    run_exit_hooks(&mut world);
+    assert!(
+        status_message(&world, e)
+            .expect("errored")
+            .contains("cannot honour")
+    );
+}
+
+#[test]
+fn on_stage_exit_bad_modify_errors() {
+    let mut world = World::new();
+    let e = spawn_exiting(
+        &mut world,
+        r#"fn on_stage_exit(ctx) { #{ action: "modify", value: #{ nope: "x" } } }"#,
+    );
+    run_exit_hooks(&mut world);
+    assert!(
+        status_message(&world, e)
+            .expect("errored")
+            .contains("no region 'nope'")
+    );
+}
+
+#[test]
+fn on_stage_exit_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
+    let mut world = World::new();
+    let out_of_range = world
+        .spawn((
+            stage_hooked(|h, p| h.on_stage_exit = Some(p)),
+            agent_state(),
+            conv_window(),
+            StageCursor { index: 99 },
+            ResolveTransition,
+            hook_scripts(
+                r#"fn on_stage_exit(ctx) { #{ action: "cancel" } }"#,
+                &["on_stage_exit"],
+            ),
+        ))
+        .id();
+    let stage = leviath_core::Stage::new(
+        "main".to_string(),
+        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+    );
+    let undeclared = world
+        .spawn((
+            AgentBlueprint(blueprint(vec![stage])),
+            agent_state(),
+            conv_window(),
+            StageCursor { index: 0 },
+            ResolveTransition,
+            hook_scripts(
+                r#"fn on_stage_exit(ctx) { #{ action: "cancel" } }"#,
+                &["on_stage_exit"],
+            ),
+        ))
+        .id();
+    run_exit_hooks(&mut world);
     assert!(status_message(&world, out_of_range).is_none());
     assert!(status_message(&world, undeclared).is_none());
 }

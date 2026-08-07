@@ -431,3 +431,187 @@ pub fn run_tool_call_hooks(
         }
     }
 }
+
+/// Marks an agent whose terminal hook has already run.
+///
+/// A terminal status is not an event - it stays true for every tick until the
+/// agent is unloaded - so without this the hook would fire on each of them. The
+/// marker turns a state into a one-shot.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct TerminalHookFired;
+
+/// Run `on_completion` or `on_error` once, as the run finishes.
+///
+/// Which one fires is the run's own outcome: a completed run gets
+/// `on_completion` with its answer, an errored one gets `on_error` with the
+/// message. A cancelled run gets neither - it was stopped from outside, and a
+/// hook narrating that would be reporting the operator's decision back to them.
+///
+/// `modify` replaces what the hook was shown: the final output for a
+/// completion, the message for an error. `cancel` on a completion is a
+/// meaningful veto - the answer was not acceptable - and turns the run into an
+/// error carrying the reason.
+#[allow(clippy::type_complexity)]
+pub fn run_terminal_hooks(
+    mut agents: Query<
+        (
+            Entity,
+            &StageCursor,
+            &AgentBlueprint,
+            &StageHookScripts,
+            &mut AgentState,
+            Option<&mut crate::persistence::FinalOutput>,
+        ),
+        Without<TerminalHookFired>,
+    >,
+    mut commands: Commands,
+) {
+    crate::tick_scope::clear();
+    for (entity, cursor, bp, scripts, mut state, output) in agents.iter_mut() {
+        // `Cancelled` is deliberately not here: see the doc comment.
+        let (hook, subject) = match &state.status {
+            AgentStatus::Complete => (
+                "on_completion",
+                output
+                    .as_ref()
+                    .map(|o| o.0.content.clone())
+                    .unwrap_or_default(),
+            ),
+            AgentStatus::Error { message } => ("on_error", message.clone()),
+            _ => continue,
+        };
+        crate::tick_scope::enter(entity);
+
+        let Some(stage) = bp.0.stages.get(cursor.index) else {
+            // Still mark it fired: without a stage there is no hook to look up
+            // and re-checking every tick would be pure work.
+            commands.entity(entity).insert(TerminalHookFired);
+            continue;
+        };
+        let Some(script) = scripts.script_for(stage, hook) else {
+            commands.entity(entity).insert(TerminalHookFired);
+            continue;
+        };
+
+        // Marked before running, not after: a hook that fails must not be
+        // retried on the next tick, which would make a throwing script an
+        // infinite loop rather than one error.
+        commands.entity(entity).insert(TerminalHookFired);
+
+        let ctx = serde_json::json!({
+            "stage": stage.name,
+            "stage_index": cursor.index,
+            "status": format!("{}", state.status),
+            // Named for what it is in each case, so a script reads plainly.
+            "output": if hook == "on_completion" { subject.clone() } else { String::new() },
+            "error": if hook == "on_error" { subject.clone() } else { String::new() },
+        });
+
+        match run(&script, hook, ctx) {
+            Err(e) => refuse(&mut state, hook, format!("hook failed: {e}")),
+            Ok(HookOutcome::Allow) => {}
+            Ok(HookOutcome::Modify(value)) => {
+                let Some(text) = value.as_str() else {
+                    refuse(
+                        &mut state,
+                        hook,
+                        format!("'value' must be replacement text, got: {value}"),
+                    );
+                    continue;
+                };
+                match hook {
+                    // Rewriting the answer is the point: a completion hook can
+                    // reshape what `lev result` hands back.
+                    // Refused rather than dropped when there is no answer to
+                    // rewrite: the hook asked to change something that is not
+                    // there, and a silently-ignored rewrite reads exactly like
+                    // one that happened.
+                    "on_completion" => match output {
+                        Some(mut o) => o.0.content = text.to_string(),
+                        None => refuse(
+                            &mut state,
+                            hook,
+                            "asked to rewrite the answer, but this run submitted none".to_string(),
+                        ),
+                    },
+                    _ => {
+                        state.status = AgentStatus::Error {
+                            message: text.to_string(),
+                        }
+                    }
+                }
+            }
+            Ok(HookOutcome::Cancel(reason)) => {
+                let why = reason.unwrap_or_else(|| "no reason given".to_string());
+                refuse(&mut state, hook, format!("rejected the result: {why}"));
+            }
+            // The run is over; there is nothing left to do again.
+            Ok(HookOutcome::Retry) => refuse(
+                &mut state,
+                hook,
+                "returned 'retry', which this hook cannot honour (the run has finished)"
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+/// Run `on_stage_exit` as a stage finishes, before its transition is chosen.
+///
+/// On the `ResolveTransition` marker and scheduled before `resolve_transition`,
+/// so a hook can summarise the stage's work or tidy a region while the stage is
+/// still the current one - and before the edge that leaves it is picked.
+///
+/// The window is still the finishing stage's, so `modify` writes there. A
+/// `cancel` errors the run rather than blocking the transition: a stage that
+/// refuses to be left has nowhere to go, and wedging is worse than stopping.
+#[allow(clippy::type_complexity)]
+pub fn run_stage_exit_hooks(
+    mut agents: Query<
+        (
+            Entity,
+            &StageCursor,
+            &AgentBlueprint,
+            &StageHookScripts,
+            &mut ContextWindow,
+            &mut AgentState,
+        ),
+        With<ResolveTransition>,
+    >,
+) {
+    crate::tick_scope::clear();
+    for (entity, cursor, bp, scripts, mut window, mut state) in agents.iter_mut() {
+        crate::tick_scope::enter(entity);
+        let Some(stage) = bp.0.stages.get(cursor.index) else {
+            continue;
+        };
+        let Some(script) = scripts.script_for(stage, "on_stage_exit") else {
+            continue;
+        };
+
+        let ctx = stage_ctx(&stage.name, cursor.index, &window);
+        match run(&script, "on_stage_exit", ctx) {
+            Err(e) => refuse(&mut state, "on_stage_exit", format!("hook failed: {e}")),
+            Ok(HookOutcome::Allow) => {}
+            Ok(HookOutcome::Modify(value)) => {
+                if let Err(e) = apply_modify(&mut window, &value) {
+                    refuse(&mut state, "on_stage_exit", e);
+                }
+            }
+            Ok(HookOutcome::Cancel(reason)) => {
+                let why = reason.unwrap_or_else(|| "no reason given".to_string());
+                refuse(
+                    &mut state,
+                    "on_stage_exit",
+                    format!("refused to leave stage '{}': {why}", stage.name),
+                );
+            }
+            Ok(HookOutcome::Retry) => refuse(
+                &mut state,
+                "on_stage_exit",
+                "returned 'retry', which this hook cannot honour (the stage is already over)"
+                    .to_string(),
+            ),
+        }
+    }
+}

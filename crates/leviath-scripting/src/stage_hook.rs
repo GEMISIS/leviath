@@ -59,6 +59,8 @@ pub const HOOK_NAMES: &[&str] = &[
     "before_inference",
     "after_inference",
     "on_tool_call",
+    "on_completion",
+    "on_error",
 ];
 
 /// What a hook decided.

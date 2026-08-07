@@ -3,7 +3,7 @@ title: Embedding
 description: Run the Leviath runtime inside your own Rust process with the leviath crate, with no CLI, daemon, or config file.
 group: Reference
 group_order: 3
-order: 14
+order: 15
 ---
 
 # Embedding Leviath in a Rust application

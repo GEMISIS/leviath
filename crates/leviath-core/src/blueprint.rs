@@ -794,6 +794,12 @@ pub struct StageHooks {
     /// see them - so a hook can narrow what runs, never widen it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_tool_call: Option<String>,
+    /// Fires once when the run finishes successfully.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_completion: Option<String>,
+    /// Fires once when the run finishes in error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_error: Option<String>,
 }
 
 impl StageHooks {
@@ -805,6 +811,8 @@ impl StageHooks {
             && self.before_inference.is_none()
             && self.after_inference.is_none()
             && self.on_tool_call.is_none()
+            && self.on_completion.is_none()
+            && self.on_error.is_none()
     }
 
     /// Every script path this stage declares, with the hook it backs.
@@ -827,6 +835,12 @@ impl StageHooks {
         }
         if let Some(p) = self.on_tool_call.as_deref() {
             out.push(("on_tool_call", p));
+        }
+        if let Some(p) = self.on_completion.as_deref() {
+            out.push(("on_completion", p));
+        }
+        if let Some(p) = self.on_error.as_deref() {
+            out.push(("on_error", p));
         }
         out
     }
