@@ -647,7 +647,12 @@ fn to_json_fn(v: &Dynamic) -> HostRes<String> {
 /// Percent-encode a string for use in a URL query component. Unreserved
 /// characters (`A-Z a-z 0-9 - _ . ~`, per RFC 3986) pass through; every other
 /// byte becomes `%XX`.
-fn percent_encode(input: &str) -> String {
+///
+/// Public because the script *provider* engine registers the same `encode_uri`
+/// host function and had a byte-identical copy of this. Two encoders that
+/// scripts reach by the same name is a difference waiting to be discovered by
+/// whoever writes a `.rhai` that works in one and not the other.
+pub fn percent_encode(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for &byte in input.as_bytes() {
         match byte {

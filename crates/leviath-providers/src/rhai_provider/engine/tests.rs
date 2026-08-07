@@ -146,12 +146,6 @@ fn count_tokens_heuristic_dispatches_by_hint() {
 }
 
 #[test]
-fn hex_digit_covers_both_arms() {
-    assert_eq!(hex_digit(5), '5');
-    assert_eq!(hex_digit(12), 'C');
-}
-
-#[test]
 fn to_json_fn_serializes_a_value() {
     let mut m = rhai::Map::new();
     m.insert("a".into(), 1_i64.into());

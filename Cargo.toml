@@ -39,11 +39,12 @@ categories = ["development-tools"]
 # dependencies (nix, temp-env) plus ONE audited in-repo exception: leviath-alloc,
 # a single-call crate that deliberately does not opt into these lints (its lib.rs
 # carries the audit note). Nothing else writes unsafe.
-# Every public item in the published library crates carries a doc comment, and
-# CI's `RUSTFLAGS: -D warnings` turns this "warn" into a blocking error, so a PR
-# that adds undocumented public API does not merge. `leviath-cli` opts out at its
-# crate root (see the note there): it ships as the `lev` binary, and its `pub`
-# surface is command plumbing rather than API anyone calls.
+# Every public item carries a doc comment, and CI's `RUSTFLAGS: -D warnings`
+# turns this "warn" into a blocking error, so a PR that adds undocumented public
+# API does not merge. There are no exemptions -- `leviath-cli` was the obvious
+# candidate for one and deliberately does not take it, because its `pub` surface
+# is what the integration tests drive and its wire types are read by clients that
+# never see this source. Its crate root says so.
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
