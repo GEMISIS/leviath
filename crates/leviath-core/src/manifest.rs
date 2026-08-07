@@ -57,651 +57,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
     let mut stages = Vec::new();
     if let Some(stages_table) = parsed.get("stages").and_then(|v| v.as_table()) {
         for (stage_name, stage_value) in stages_table {
-            let model_table = stage_value.get("model").and_then(|v| v.as_table());
-            let model_config = if let Some(mt) = model_table {
-                let mut models = Vec::new();
-
-                // New format: [[stages.<name>.model.models]] list
-                if let Some(models_arr) = mt.get("models").and_then(|v| v.as_array()) {
-                    for entry in models_arr {
-                        if let Some(entry_table) = entry.as_table() {
-                            models.push(ModelEntry::new(
-                                entry_table
-                                    .get("provider")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("anthropic")
-                                    .to_string(),
-                                entry_table
-                                    .get("model")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("claude-sonnet-4-6")
-                                    .to_string(),
-                            ));
-                        }
-                    }
-                }
-
-                // Backward compat: old single-model format (provider + model at
-                // top level) or old fallbacks list - treat both as models entries.
-                if models.is_empty() {
-                    if let Some(provider) = mt.get("provider").and_then(|v| v.as_str()) {
-                        let model_name = mt
-                            .get("model")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("claude-sonnet-4-6");
-                        models.push(ModelEntry::new(
-                            provider.to_string(),
-                            model_name.to_string(),
-                        ));
-                    }
-
-                    // Old fallbacks become additional models entries
-                    if let Some(fallbacks_arr) = mt.get("fallbacks").and_then(|v| v.as_array()) {
-                        for fb in fallbacks_arr {
-                            if let Some(fb_table) = fb.as_table() {
-                                models.push(ModelEntry::new(
-                                    fb_table
-                                        .get("provider")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("anthropic")
-                                        .to_string(),
-                                    fb_table
-                                        .get("model")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("claude-sonnet-4-6")
-                                        .to_string(),
-                                ));
-                            }
-                        }
-                    }
-                }
-
-                // If still empty, use defaults
-                if models.is_empty() {
-                    models.push(ModelEntry::new(
-                        "anthropic".to_string(),
-                        "claude-sonnet-4-6".to_string(),
-                    ));
-                }
-
-                let allow_user_default = mt
-                    .get("allow_user_default")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
-
-                // Parse parameters
-                let mut parameters = std::collections::HashMap::new();
-                if let Some(params) = mt.get("parameters").and_then(|v| v.as_table()) {
-                    for (k, v) in params {
-                        // Converting a parsed `toml::Value` to JSON is infallible:
-                        // serde_json maps non-finite floats to null rather than
-                        // erroring, and every other toml scalar/collection maps
-                        // cleanly.
-                        let json_val = serde_json::to_value(v)
-                            .expect("infallible: toml::Value always converts to serde_json::Value");
-                        parameters.insert(k.clone(), json_val);
-                    }
-                }
-
-                let request_timeout_secs =
-                    mt.get("request_timeout_secs").and_then(|v| v.as_integer());
-                let request_timeout_secs = request_timeout_secs
-                    .filter(|&secs| secs >= 0)
-                    .map(|secs| secs as u64);
-
-                ModelConfig {
-                    models,
-                    allow_user_default,
-                    parameters,
-                    request_timeout_secs,
-                }
-            } else {
-                ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string())
-            };
-
-            let mut stage = Stage::new(stage_name.clone(), model_config);
-
-            if let Some(mode_str) = stage_value.get("mode").and_then(|v| v.as_str()) {
-                stage = match mode_str {
-                    "interactive" => stage.with_mode(StageMode::Interactive),
-                    "interactive_points" => {
-                        let mut points = Vec::new();
-                        if let Some(pts_arr) = stage_value
-                            .get("interaction_points")
-                            .and_then(|v| v.as_array())
-                        {
-                            for pt in pts_arr {
-                                let pt_name = pt
-                                    .get("name")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let pt_prompt = pt
-                                    .get("prompt")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let pt_required =
-                                    pt.get("required").and_then(|v| v.as_bool()).unwrap_or(true);
-                                // What the point does when nobody is watching.
-                                // Absent means auto-approve, the behaviour every
-                                // `--yolo` run has had; `"ask"` opts a genuine
-                                // human checkpoint out of that. A misspelling
-                                // here would silently un-gate the checkpoint, so
-                                // it is an error rather than a fallback.
-                                let pt_unattended = match pt
-                                    .get("unattended")
-                                    .and_then(|v| v.as_str())
-                                {
-                                    None | Some("auto_approve") => {
-                                        crate::blueprint::UnattendedPolicy::AutoApprove
-                                    }
-                                    Some("ask") => crate::blueprint::UnattendedPolicy::Ask,
-                                    Some(other) => {
-                                        return Err(Error::Other(format!(
-                                            "stage '{stage_name}': interaction point '{pt_name}' \
-                                             has unattended = \"{other}\" - expected \"ask\" or \
-                                             \"auto_approve\""
-                                        )));
-                                    }
-                                };
-                                let pt_style = match pt.get("style").and_then(|v| v.as_str()) {
-                                    Some("multiple_choice") => {
-                                        crate::blueprint::InteractionStyle::MultipleChoice
-                                    }
-                                    Some("confirm") => crate::blueprint::InteractionStyle::Confirm,
-                                    _ => crate::blueprint::InteractionStyle::FreeText,
-                                };
-                                // Accept either "options" or "choices" key
-                                let pt_options: Vec<String> = pt
-                                    .get("options")
-                                    .or_else(|| pt.get("choices"))
-                                    .and_then(|v| v.as_array())
-                                    .map(|arr| {
-                                        arr.iter()
-                                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                            .collect()
-                                    })
-                                    .unwrap_or_default();
-                                // Per-option directives, keyed by option label:
-                                // [stages.<name>.interaction_points.directives]
-                                // "Revise - I'll describe changes" = "Call ask_user_text ..."
-                                // `followups` is accepted as a backward-compat alias.
-                                let pt_directives: std::collections::HashMap<String, String> = pt
-                                    .get("directives")
-                                    .or_else(|| pt.get("followups"))
-                                    .and_then(|v| v.as_table())
-                                    .map(|tbl| {
-                                        tbl.iter()
-                                            .filter_map(|(k, v)| {
-                                                v.as_str().map(|s| (k.clone(), s.to_string()))
-                                            })
-                                            .collect()
-                                    })
-                                    .unwrap_or_default();
-                                // Options that immediately abort the run:
-                                // abort_options = ["Abort - cancel this run"]
-                                let pt_abort_options: Vec<String> = pt
-                                    .get("abort_options")
-                                    .and_then(|v| v.as_array())
-                                    .map(|arr| {
-                                        arr.iter()
-                                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                            .collect()
-                                    })
-                                    .unwrap_or_default();
-                                // Options that open the last output for direct editing:
-                                // edit_options = ["Add detail - expand a section"]
-                                let pt_edit_options: Vec<String> = pt
-                                    .get("edit_options")
-                                    .and_then(|v| v.as_array())
-                                    .map(|arr| {
-                                        arr.iter()
-                                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                            .collect()
-                                    })
-                                    .unwrap_or_default();
-                                // Pinned region that holds the authoritative
-                                // document: document_region = "plan"
-                                let pt_document_region: Option<String> = pt
-                                    .get("document_region")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string());
-                                points.push(crate::blueprint::InteractionPoint {
-                                    name: pt_name,
-                                    prompt: pt_prompt,
-                                    required: pt_required,
-                                    unattended: pt_unattended,
-                                    style: pt_style,
-                                    options: pt_options,
-                                    directives: pt_directives,
-                                    abort_options: pt_abort_options,
-                                    edit_options: pt_edit_options,
-                                    document_region: pt_document_region,
-                                });
-                            }
-                        }
-                        stage.with_mode(StageMode::InteractivePoints { points })
-                    }
-                    "fan_out" => {
-                        let str_field = |key: &str| {
-                            stage_value
-                                .get(key)
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string())
-                        };
-                        let on_worker_failure = match stage_value
-                            .get("on_worker_failure")
-                            .and_then(|v| v.as_str())
-                        {
-                            Some("fail_all") => crate::blueprint::WorkerFailurePolicy::FailAll,
-                            // "continue" / missing / unknown all mean continue.
-                            _ => crate::blueprint::WorkerFailurePolicy::Continue,
-                        };
-                        let config = crate::blueprint::FanOutConfig {
-                            worker_agent: str_field("worker_agent"),
-                            worker_stage: str_field("worker_stage"),
-                            worker_query: str_field("worker_query"),
-                            merge_stage: str_field("merge_stage"),
-                            max_workers: stage_value
-                                .get("max_workers")
-                                .and_then(|v| v.as_integer())
-                                .map(|n| n as usize)
-                                .unwrap_or(4),
-                            on_worker_failure,
-                            split_prompt: str_field("split_prompt").unwrap_or_default(),
-                            results_region: str_field("results_region"),
-                            max_items: stage_value
-                                .get("max_items")
-                                .and_then(|v| v.as_integer())
-                                .filter(|n| *n > 0)
-                                .map(|n| n as usize),
-                        };
-                        stage.with_mode(StageMode::FanOut { config })
-                    }
-                    "output" => stage.with_mode(StageMode::Output),
-                    "autonomous" => stage.with_mode(StageMode::Autonomous),
-                    // A misspelled mode used to become an autonomous stage in
-                    // silence, so `mode = "outupt"` produced a stage that ran
-                    // normally and never asked for the output it was written to
-                    // produce. Region kinds have always rejected an unknown
-                    // `kind` for the same reason; this brings stage modes into
-                    // line. Any manifest this refuses was already not doing what
-                    // it said.
-                    unknown => {
-                        return Err(Error::Other(format!(
-                            "stage '{stage_name}': unknown mode \"{unknown}\" (valid modes: \
-                             autonomous, interactive, interactive_points, fan_out, output)"
-                        )));
-                    }
-                };
-            }
-
-            if let Some(max_iter) = stage_value
-                .get("max_iterations")
-                .and_then(|v| v.as_integer())
-            {
-                stage.max_iterations = Some(max_iter as usize);
-            }
-
-            if let Some(tools_arr) = stage_value
-                .get("available_tools")
-                .and_then(|v| v.as_array())
-            {
-                stage.available_tools = tools_arr
-                    .iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect();
-            }
-
-            // Human tools this stage keeps even when the run is unattended.
-            // Validated against `available_tools` by `Stage::validate`.
-            if let Some(tools_arr) = stage_value.get("required_tools").and_then(|v| v.as_array()) {
-                stage.required_tools = tools_arr
-                    .iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect();
-            }
-
-            if let Some(sp) = stage_value.get("system_prompt").and_then(|v| v.as_str()) {
-                stage.config.insert(
-                    "system_prompt".to_string(),
-                    serde_json::Value::String(sp.trim().to_string()),
-                );
-            }
-
-            // Warn on a common authoring mistake: a `system_prompt` written
-            // *after* the `[stages.X.model]` sub-table lands under
-            // `stages.X.model` (TOML nesting rules) and is silently ignored, so
-            // the stage runs with no instructions. Point the author at the fix.
-            let model_has_system_prompt = stage_value
-                .get("model")
-                .and_then(|v| v.as_table())
-                .map(|t| t.contains_key("system_prompt"))
-                .unwrap_or(false);
-            if model_has_system_prompt {
-                tracing::warn!(
-                    "stage '{stage_name}': `system_prompt` is nested under \
-                     [stages.{stage_name}.model] and will be IGNORED - move the \
-                     `system_prompt = \"\"\"...\"\"\"` line ABOVE the \
-                     [stages.{stage_name}.model] table so it belongs to the stage"
-                );
-            }
-
-            // Parse tool_routing configuration
-            if let Some(routing_table) = stage_value.get("tool_routing").and_then(|v| v.as_table())
-            {
-                let mut routing = crate::blueprint::ToolResultRouting::default();
-
-                if let Some(dr) = routing_table.get("default_region").and_then(|v| v.as_str()) {
-                    routing.default_region = dr.to_string();
-                }
-                if let Some(p) = routing_table.get("persist").and_then(|v| v.as_bool()) {
-                    routing.persist = p;
-                }
-                if let Some(mt) = routing_table
-                    .get("max_result_tokens")
-                    .and_then(|v| v.as_integer())
-                {
-                    routing.max_result_tokens = Some(mt as usize);
-                }
-                if let Some(overrides_table) =
-                    routing_table.get("overrides").and_then(|v| v.as_table())
-                {
-                    for (tool_name, region_val) in overrides_table {
-                        if let Some(region_name) = region_val.as_str() {
-                            routing
-                                .tool_overrides
-                                .insert(tool_name.clone(), region_name.to_string());
-                        }
-                    }
-                }
-
-                stage.tool_result_routing = Some(routing);
-            }
-
-            // Parse requires_children flag
-            if let Some(rc) = stage_value
-                .get("requires_children")
-                .and_then(|v| v.as_bool())
-            {
-                stage.requires_children = rc;
-            }
-
-            // Parse allow_complete flag: lets the LLM end the run at this
-            // stage (e.g. an approving review) instead of being forced down
-            // its only/first transition edge.
-            if let Some(ac) = stage_value.get("allow_complete").and_then(|v| v.as_bool()) {
-                stage.allow_complete = ac;
-            }
-
-            // Parse allow_as_worker flag: opts this stage in to being used as a
-            // fan-out `worker_stage` target.
-            if let Some(aw) = stage_value.get("allow_as_worker").and_then(|v| v.as_bool()) {
-                stage.allow_as_worker = aw;
-            }
-
-            // Whether the stage must hand back a final output. `mode = "output"`
-            // means it by definition; any other stage opts in by hand (a fan-out
-            // worker whose merge stage depends on its summary, say).
-            if let Some(ro) = stage_value.get("require_output").and_then(|v| v.as_bool()) {
-                stage.require_output = ro;
-            }
-
-            // `mode = "output"` is sugar for three settings, applied here rather
-            // than in the mode arm above because `available_tools` and
-            // `allow_complete` are read after it and would otherwise clobber
-            // them. Writing them onto the Stage - instead of special-casing the
-            // mode at dispatch - means `lev validate`, the tool filter, and the
-            // lint all read one honest list.
-            if stage.mode == StageMode::Output {
-                stage.require_output = true;
-                if !stage
-                    .available_tools
-                    .iter()
-                    .any(|t| t == crate::blueprint::SUBMIT_OUTPUT_TOOL)
-                {
-                    stage
-                        .available_tools
-                        .push(crate::blueprint::SUBMIT_OUTPUT_TOOL.to_string());
-                }
-                // An output stage is normally the last thing a run does, so it
-                // may end the run. An author who routes onward can say
-                // `allow_complete = false` and be believed.
-                if stage_value.get("allow_complete").is_none() {
-                    stage.allow_complete = true;
-                }
-            }
-
-            // Parse allow_blocking_tools flag: says this autonomous stage means
-            // to offer `ask_user_*` / `present_for_review`, so `lev validate`
-            // stops warning about it.
-            if let Some(ab) = stage_value
-                .get("allow_blocking_tools")
-                .and_then(|v| v.as_bool())
-            {
-                stage.allow_blocking_tools = ab;
-            }
-
-            // Parse per-stage security override: [stages.<name>.security]
-            if let Some(sec_table) = stage_value.get("security").and_then(|v| v.as_table()) {
-                stage.security = Some(parse_security_config(sec_table));
-            }
-
-            // Parse per-stage batch_tool_hint override: opt an individual stage
-            // in/out of the batch-tool-calls system-prompt hint (e.g. `false` for
-            // a sequential validate stage). Absent ⇒ inherit agent/global.
-            if let Some(bth) = stage_value.get("batch_tool_hint").and_then(|v| v.as_bool()) {
-                stage.batch_tool_hint = Some(bth);
-            }
-
-            // Parse per-stage shell_hint override: opt an individual stage
-            // in/out of the platform shell hint. Absent ⇒ inherit agent/global.
-            if let Some(sh) = stage_value.get("shell_hint").and_then(|v| v.as_bool()) {
-                stage.shell_hint = Some(sh);
-            }
-
-            // Parse per-stage nudge settings: [stages.<name>.nudge]. Absent ⇒
-            // each field inherits agent/global.
-            if let Some(nudge_table) = stage_value.get("nudge").and_then(|v| v.as_table()) {
-                stage.nudge = Some(parse_nudge_config(nudge_table));
-            }
-
-            // Parse per-stage sandbox override: [stages.<name>.sandbox]
-            if let Some(sandbox_table) = stage_value.get("sandbox").and_then(|v| v.as_table()) {
-                stage.sandbox = Some(parse_sandbox_config(sandbox_table)?);
-            }
-
-            // Parse the stage's declared output shape: [stages.<name>.output].
-            // Narrows [agent.output]; whoever starts the run overrides both.
-            if let Some(output_table) = stage_value.get("output").and_then(|v| v.as_table()) {
-                stage.output = Some(parse_output_spec(output_table));
-            }
-
-            // Parse accepts_messages flag: whether mid-run user messages are
-            // injected into context between inference calls. Defaults to true
-            // (via the Stage constructor); set false for stages that shouldn't
-            // be interrupted (e.g. a final report generation stage).
-            if let Some(am) = stage_value
-                .get("accepts_messages")
-                .and_then(|v| v.as_bool())
-            {
-                stage.accepts_messages = am;
-            }
-
-            // Parse per-stage tool permissions: [stages.<name>.tool_permissions]
-            if let Some(tp_table) = stage_value
-                .get("tool_permissions")
-                .and_then(|v| v.as_table())
-            {
-                for (tool_name, policy_val) in tp_table {
-                    if let Some(policy_str) = policy_val.as_str() {
-                        stage
-                            .tool_permissions
-                            .insert(tool_name.clone(), policy_str.to_string());
-                    }
-                }
-            }
-
-            // Parse per-stage context layout: [stages.<name>.context.regions].
-            // Different stages can carry different region sets - the runtime swaps
-            // to a stage's layout on entry (apply_stage_context → apply_layout),
-            // preserving overlapping regions' content by name. Absent ⇒ the stage
-            // inherits the global [context.regions] layout. NOTE (TOML nesting):
-            // like [stages.<name>.model], this must be its own `[...]` section;
-            // don't place `context = ...` inline keys after other sub-tables.
-            if let Some(regions_table) = stage_value
-                .get("context")
-                .and_then(|v| v.get("regions"))
-                .and_then(|v| v.as_table())
-            {
-                let (stage_regions, stage_total) = parse_region_layout(regions_table)?;
-                stage.context_layout = Some(ContextLayout::new(stage_regions, stage_total));
-            }
-
-            // Parse max_revisits
-            if let Some(mr) = stage_value.get("max_revisits").and_then(|v| v.as_integer()) {
-                stage.max_revisits = Some(mr as usize);
-            }
-
-            // Parse transition_prompt
-            if let Some(tp) = stage_value
-                .get("transition_prompt")
-                .and_then(|v| v.as_str())
-            {
-                stage.transition_prompt = Some(tp.trim().to_string());
-            }
-
-            // Parse transitions: [stages.<name>.transitions.<target>]
-            if let Some(transitions_table) =
-                stage_value.get("transitions").and_then(|v| v.as_table())
-            {
-                let mut transitions = std::collections::HashMap::new();
-                for (target_name, edge_value) in transitions_table {
-                    let hint = edge_value
-                        .get("hint")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-
-                    let condition = match edge_value.get("condition").and_then(|v| v.as_str()) {
-                        Some("error") => TransitionCondition::Error,
-                        Some("max_iterations") => TransitionCondition::MaxIterations,
-                        Some("llm_choice") => TransitionCondition::LlmChoice,
-                        Some("stuck") => TransitionCondition::Stuck,
-                        Some("always") | None => TransitionCondition::Always,
-                        // Reject unknown conditions rather than silently building a
-                        // `Custom(..)` edge the runtime never evaluates (a dead edge).
-                        Some(other) => {
-                            return Err(Error::Other(format!(
-                                "transition to '{target_name}' has unknown condition \
-                                 '{other}' (valid: always, error, max_iterations, \
-                                 llm_choice, stuck)"
-                            )));
-                        }
-                    };
-
-                    // Stuck thresholds live on the edge they arm, so a stage can
-                    // be armed on iterations while another is armed on wall clock.
-                    // Both halves are required together: a bare `condition =
-                    // "stuck"` edge could never fire, and thresholds under any
-                    // other condition would be silently ignored.
-                    let stuck = parse_stuck_config(edge_value);
-                    let is_stuck = condition == TransitionCondition::Stuck;
-                    if is_stuck && stuck.is_none() {
-                        return Err(Error::Other(format!(
-                            "transition to '{target_name}' has condition 'stuck' but no \
-                             threshold (set at least one of stuck_after_iterations, \
-                             stuck_after_minutes, stuck_after_same_file_edits, \
-                             stuck_after_tool_calls)"
-                        )));
-                    }
-                    if !is_stuck && stuck.is_some() {
-                        return Err(Error::Other(format!(
-                            "transition to '{target_name}' sets stuck_after_* thresholds \
-                             but its condition is not 'stuck' - they would never be read"
-                        )));
-                    }
-
-                    let transform = match edge_value.get("transform").and_then(|v| v.as_str()) {
-                        Some("clear") => EdgeTransform::Clear,
-                        Some("compact") | Some("summarize") => {
-                            EdgeTransform::Compact { prompt: None }
-                        }
-                        Some("custom") => {
-                            // Parse transform_config sub-table
-                            let tc = edge_value.get("transform_config");
-                            let carry = tc
-                                .and_then(|v| v.get("carry"))
-                                .and_then(|v| v.as_array())
-                                .map(|arr| {
-                                    arr.iter()
-                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            let compact = tc
-                                .and_then(|v| v.get("compact"))
-                                .and_then(|v| v.as_array())
-                                .map(|arr| {
-                                    arr.iter()
-                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            let clear = tc
-                                .and_then(|v| v.get("clear"))
-                                .and_then(|v| v.as_array())
-                                .map(|arr| {
-                                    arr.iter()
-                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            let compact_prompt = tc
-                                .and_then(|v| v.get("compact_prompt"))
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-                            EdgeTransform::Custom {
-                                carry,
-                                compact,
-                                clear,
-                                compact_prompt,
-                            }
-                        }
-                        Some("direct") | None => EdgeTransform::Direct,
-                        // Reject unknown transforms rather than silently downgrading
-                        // to a plain `Direct` copy (a typo would pass unnoticed).
-                        Some(other) => {
-                            return Err(Error::Other(format!(
-                                "transition to '{target_name}' has unknown transform \
-                                 '{other}' (valid: direct, clear, compact, summarize, custom)"
-                            )));
-                        }
-                    };
-
-                    // Parse the edge gate: `gate = { require_modifications = true, ... }`
-                    // (or a `[stages.<name>.transitions.<target>.gate]` sub-table).
-                    let gate = edge_value
-                        .get("gate")
-                        .and_then(|v| v.as_table())
-                        .map(parse_transition_gate);
-
-                    transitions.insert(
-                        target_name.clone(),
-                        TransitionEdge {
-                            target: target_name.clone(),
-                            condition,
-                            hint,
-                            transform,
-                            gate,
-                            stuck,
-                        },
-                    );
-                }
-                stage.transitions = Some(transitions);
-            }
-
-            stages.push(stage);
+            stages.push(parse_stage(stage_name, stage_value)?);
         }
     }
 
@@ -837,6 +193,647 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
     }
 
     Ok(blueprint)
+}
+
+/// Parse one `[stages.<name>]` table into a [`Stage`].
+///
+/// Reads nothing outside its own table, so the manifest's stage order is the
+/// only thing the caller contributes.
+fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result<Stage> {
+    let model_table = stage_value.get("model").and_then(|v| v.as_table());
+    let model_config = if let Some(mt) = model_table {
+        let mut models = Vec::new();
+
+        // New format: [[stages.<name>.model.models]] list
+        if let Some(models_arr) = mt.get("models").and_then(|v| v.as_array()) {
+            for entry in models_arr {
+                if let Some(entry_table) = entry.as_table() {
+                    models.push(ModelEntry::new(
+                        entry_table
+                            .get("provider")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("anthropic")
+                            .to_string(),
+                        entry_table
+                            .get("model")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("claude-sonnet-4-6")
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+
+        // Backward compat: old single-model format (provider + model at
+        // top level) or old fallbacks list - treat both as models entries.
+        if models.is_empty() {
+            if let Some(provider) = mt.get("provider").and_then(|v| v.as_str()) {
+                let model_name = mt
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("claude-sonnet-4-6");
+                models.push(ModelEntry::new(
+                    provider.to_string(),
+                    model_name.to_string(),
+                ));
+            }
+
+            // Old fallbacks become additional models entries
+            if let Some(fallbacks_arr) = mt.get("fallbacks").and_then(|v| v.as_array()) {
+                for fb in fallbacks_arr {
+                    if let Some(fb_table) = fb.as_table() {
+                        models.push(ModelEntry::new(
+                            fb_table
+                                .get("provider")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("anthropic")
+                                .to_string(),
+                            fb_table
+                                .get("model")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("claude-sonnet-4-6")
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // If still empty, use defaults
+        if models.is_empty() {
+            models.push(ModelEntry::new(
+                "anthropic".to_string(),
+                "claude-sonnet-4-6".to_string(),
+            ));
+        }
+
+        let allow_user_default = mt
+            .get("allow_user_default")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        // Parse parameters
+        let mut parameters = std::collections::HashMap::new();
+        if let Some(params) = mt.get("parameters").and_then(|v| v.as_table()) {
+            for (k, v) in params {
+                // Converting a parsed `toml::Value` to JSON is infallible:
+                // serde_json maps non-finite floats to null rather than
+                // erroring, and every other toml scalar/collection maps
+                // cleanly.
+                let json_val = serde_json::to_value(v)
+                    .expect("infallible: toml::Value always converts to serde_json::Value");
+                parameters.insert(k.clone(), json_val);
+            }
+        }
+
+        let request_timeout_secs = mt.get("request_timeout_secs").and_then(|v| v.as_integer());
+        let request_timeout_secs = request_timeout_secs
+            .filter(|&secs| secs >= 0)
+            .map(|secs| secs as u64);
+
+        ModelConfig {
+            models,
+            allow_user_default,
+            parameters,
+            request_timeout_secs,
+        }
+    } else {
+        ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string())
+    };
+
+    let mut stage = Stage::new(stage_name.to_string(), model_config);
+
+    if let Some(mode_str) = stage_value.get("mode").and_then(|v| v.as_str()) {
+        stage = match mode_str {
+            "interactive" => stage.with_mode(StageMode::Interactive),
+            "interactive_points" => {
+                let mut points = Vec::new();
+                if let Some(pts_arr) = stage_value
+                    .get("interaction_points")
+                    .and_then(|v| v.as_array())
+                {
+                    for pt in pts_arr {
+                        let pt_name = pt
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let pt_prompt = pt
+                            .get("prompt")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let pt_required =
+                            pt.get("required").and_then(|v| v.as_bool()).unwrap_or(true);
+                        // What the point does when nobody is watching.
+                        // Absent means auto-approve, the behaviour every
+                        // `--yolo` run has had; `"ask"` opts a genuine
+                        // human checkpoint out of that. A misspelling
+                        // here would silently un-gate the checkpoint, so
+                        // it is an error rather than a fallback.
+                        let pt_unattended = match pt.get("unattended").and_then(|v| v.as_str()) {
+                            None | Some("auto_approve") => {
+                                crate::blueprint::UnattendedPolicy::AutoApprove
+                            }
+                            Some("ask") => crate::blueprint::UnattendedPolicy::Ask,
+                            Some(other) => {
+                                return Err(Error::Other(format!(
+                                    "stage '{stage_name}': interaction point '{pt_name}' \
+                                     has unattended = \"{other}\" - expected \"ask\" or \
+                                     \"auto_approve\""
+                                )));
+                            }
+                        };
+                        let pt_style = match pt.get("style").and_then(|v| v.as_str()) {
+                            Some("multiple_choice") => {
+                                crate::blueprint::InteractionStyle::MultipleChoice
+                            }
+                            Some("confirm") => crate::blueprint::InteractionStyle::Confirm,
+                            _ => crate::blueprint::InteractionStyle::FreeText,
+                        };
+                        // Accept either "options" or "choices" key
+                        let pt_options: Vec<String> = pt
+                            .get("options")
+                            .or_else(|| pt.get("choices"))
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        // Per-option directives, keyed by option label:
+                        // [stages.<name>.interaction_points.directives]
+                        // "Revise - I'll describe changes" = "Call ask_user_text ..."
+                        // `followups` is accepted as a backward-compat alias.
+                        let pt_directives: std::collections::HashMap<String, String> = pt
+                            .get("directives")
+                            .or_else(|| pt.get("followups"))
+                            .and_then(|v| v.as_table())
+                            .map(|tbl| {
+                                tbl.iter()
+                                    .filter_map(|(k, v)| {
+                                        v.as_str().map(|s| (k.clone(), s.to_string()))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        // Options that immediately abort the run:
+                        // abort_options = ["Abort - cancel this run"]
+                        let pt_abort_options: Vec<String> = pt
+                            .get("abort_options")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        // Options that open the last output for direct editing:
+                        // edit_options = ["Add detail - expand a section"]
+                        let pt_edit_options: Vec<String> = pt
+                            .get("edit_options")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        // Pinned region that holds the authoritative
+                        // document: document_region = "plan"
+                        let pt_document_region: Option<String> = pt
+                            .get("document_region")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        points.push(crate::blueprint::InteractionPoint {
+                            name: pt_name,
+                            prompt: pt_prompt,
+                            required: pt_required,
+                            unattended: pt_unattended,
+                            style: pt_style,
+                            options: pt_options,
+                            directives: pt_directives,
+                            abort_options: pt_abort_options,
+                            edit_options: pt_edit_options,
+                            document_region: pt_document_region,
+                        });
+                    }
+                }
+                stage.with_mode(StageMode::InteractivePoints { points })
+            }
+            "fan_out" => {
+                let str_field = |key: &str| {
+                    stage_value
+                        .get(key)
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                };
+                let on_worker_failure = match stage_value
+                    .get("on_worker_failure")
+                    .and_then(|v| v.as_str())
+                {
+                    Some("fail_all") => crate::blueprint::WorkerFailurePolicy::FailAll,
+                    // "continue" / missing / unknown all mean continue.
+                    _ => crate::blueprint::WorkerFailurePolicy::Continue,
+                };
+                let config = crate::blueprint::FanOutConfig {
+                    worker_agent: str_field("worker_agent"),
+                    worker_stage: str_field("worker_stage"),
+                    worker_query: str_field("worker_query"),
+                    merge_stage: str_field("merge_stage"),
+                    max_workers: stage_value
+                        .get("max_workers")
+                        .and_then(|v| v.as_integer())
+                        .map(|n| n as usize)
+                        .unwrap_or(4),
+                    on_worker_failure,
+                    split_prompt: str_field("split_prompt").unwrap_or_default(),
+                    results_region: str_field("results_region"),
+                    max_items: stage_value
+                        .get("max_items")
+                        .and_then(|v| v.as_integer())
+                        .filter(|n| *n > 0)
+                        .map(|n| n as usize),
+                };
+                stage.with_mode(StageMode::FanOut { config })
+            }
+            "output" => stage.with_mode(StageMode::Output),
+            "autonomous" => stage.with_mode(StageMode::Autonomous),
+            // A misspelled mode used to become an autonomous stage in
+            // silence, so `mode = "outupt"` produced a stage that ran
+            // normally and never asked for the output it was written to
+            // produce. Region kinds have always rejected an unknown
+            // `kind` for the same reason; this brings stage modes into
+            // line. Any manifest this refuses was already not doing what
+            // it said.
+            unknown => {
+                return Err(Error::Other(format!(
+                    "stage '{stage_name}': unknown mode \"{unknown}\" (valid modes: \
+                     autonomous, interactive, interactive_points, fan_out, output)"
+                )));
+            }
+        };
+    }
+
+    if let Some(max_iter) = stage_value
+        .get("max_iterations")
+        .and_then(|v| v.as_integer())
+    {
+        stage.max_iterations = Some(max_iter as usize);
+    }
+
+    if let Some(tools_arr) = stage_value
+        .get("available_tools")
+        .and_then(|v| v.as_array())
+    {
+        stage.available_tools = tools_arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+    }
+
+    // Human tools this stage keeps even when the run is unattended.
+    // Validated against `available_tools` by `Stage::validate`.
+    if let Some(tools_arr) = stage_value.get("required_tools").and_then(|v| v.as_array()) {
+        stage.required_tools = tools_arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+    }
+
+    if let Some(sp) = stage_value.get("system_prompt").and_then(|v| v.as_str()) {
+        stage.config.insert(
+            "system_prompt".to_string(),
+            serde_json::Value::String(sp.trim().to_string()),
+        );
+    }
+
+    // Warn on a common authoring mistake: a `system_prompt` written
+    // *after* the `[stages.X.model]` sub-table lands under
+    // `stages.X.model` (TOML nesting rules) and is silently ignored, so
+    // the stage runs with no instructions. Point the author at the fix.
+    let model_has_system_prompt = stage_value
+        .get("model")
+        .and_then(|v| v.as_table())
+        .map(|t| t.contains_key("system_prompt"))
+        .unwrap_or(false);
+    if model_has_system_prompt {
+        tracing::warn!(
+            "stage '{stage_name}': `system_prompt` is nested under \
+             [stages.{stage_name}.model] and will be IGNORED - move the \
+             `system_prompt = \"\"\"...\"\"\"` line ABOVE the \
+             [stages.{stage_name}.model] table so it belongs to the stage"
+        );
+    }
+
+    // Parse tool_routing configuration
+    if let Some(routing_table) = stage_value.get("tool_routing").and_then(|v| v.as_table()) {
+        let mut routing = crate::blueprint::ToolResultRouting::default();
+
+        if let Some(dr) = routing_table.get("default_region").and_then(|v| v.as_str()) {
+            routing.default_region = dr.to_string();
+        }
+        if let Some(p) = routing_table.get("persist").and_then(|v| v.as_bool()) {
+            routing.persist = p;
+        }
+        if let Some(mt) = routing_table
+            .get("max_result_tokens")
+            .and_then(|v| v.as_integer())
+        {
+            routing.max_result_tokens = Some(mt as usize);
+        }
+        if let Some(overrides_table) = routing_table.get("overrides").and_then(|v| v.as_table()) {
+            for (tool_name, region_val) in overrides_table {
+                if let Some(region_name) = region_val.as_str() {
+                    routing
+                        .tool_overrides
+                        .insert(tool_name.clone(), region_name.to_string());
+                }
+            }
+        }
+
+        stage.tool_result_routing = Some(routing);
+    }
+
+    // Parse requires_children flag
+    if let Some(rc) = stage_value
+        .get("requires_children")
+        .and_then(|v| v.as_bool())
+    {
+        stage.requires_children = rc;
+    }
+
+    // Parse allow_complete flag: lets the LLM end the run at this
+    // stage (e.g. an approving review) instead of being forced down
+    // its only/first transition edge.
+    if let Some(ac) = stage_value.get("allow_complete").and_then(|v| v.as_bool()) {
+        stage.allow_complete = ac;
+    }
+
+    // Parse allow_as_worker flag: opts this stage in to being used as a
+    // fan-out `worker_stage` target.
+    if let Some(aw) = stage_value.get("allow_as_worker").and_then(|v| v.as_bool()) {
+        stage.allow_as_worker = aw;
+    }
+
+    // Whether the stage must hand back a final output. `mode = "output"`
+    // means it by definition; any other stage opts in by hand (a fan-out
+    // worker whose merge stage depends on its summary, say).
+    if let Some(ro) = stage_value.get("require_output").and_then(|v| v.as_bool()) {
+        stage.require_output = ro;
+    }
+
+    // `mode = "output"` is sugar for three settings, applied here rather
+    // than in the mode arm above because `available_tools` and
+    // `allow_complete` are read after it and would otherwise clobber
+    // them. Writing them onto the Stage - instead of special-casing the
+    // mode at dispatch - means `lev validate`, the tool filter, and the
+    // lint all read one honest list.
+    if stage.mode == StageMode::Output {
+        stage.require_output = true;
+        if !stage
+            .available_tools
+            .iter()
+            .any(|t| t == crate::blueprint::SUBMIT_OUTPUT_TOOL)
+        {
+            stage
+                .available_tools
+                .push(crate::blueprint::SUBMIT_OUTPUT_TOOL.to_string());
+        }
+        // An output stage is normally the last thing a run does, so it
+        // may end the run. An author who routes onward can say
+        // `allow_complete = false` and be believed.
+        if stage_value.get("allow_complete").is_none() {
+            stage.allow_complete = true;
+        }
+    }
+
+    // Parse allow_blocking_tools flag: says this autonomous stage means
+    // to offer `ask_user_*` / `present_for_review`, so `lev validate`
+    // stops warning about it.
+    if let Some(ab) = stage_value
+        .get("allow_blocking_tools")
+        .and_then(|v| v.as_bool())
+    {
+        stage.allow_blocking_tools = ab;
+    }
+
+    // Parse per-stage security override: [stages.<name>.security]
+    if let Some(sec_table) = stage_value.get("security").and_then(|v| v.as_table()) {
+        stage.security = Some(parse_security_config(sec_table));
+    }
+
+    // Parse per-stage batch_tool_hint override: opt an individual stage
+    // in/out of the batch-tool-calls system-prompt hint (e.g. `false` for
+    // a sequential validate stage). Absent ⇒ inherit agent/global.
+    if let Some(bth) = stage_value.get("batch_tool_hint").and_then(|v| v.as_bool()) {
+        stage.batch_tool_hint = Some(bth);
+    }
+
+    // Parse per-stage shell_hint override: opt an individual stage
+    // in/out of the platform shell hint. Absent ⇒ inherit agent/global.
+    if let Some(sh) = stage_value.get("shell_hint").and_then(|v| v.as_bool()) {
+        stage.shell_hint = Some(sh);
+    }
+
+    // Parse per-stage nudge settings: [stages.<name>.nudge]. Absent ⇒
+    // each field inherits agent/global.
+    if let Some(nudge_table) = stage_value.get("nudge").and_then(|v| v.as_table()) {
+        stage.nudge = Some(parse_nudge_config(nudge_table));
+    }
+
+    // Parse per-stage sandbox override: [stages.<name>.sandbox]
+    if let Some(sandbox_table) = stage_value.get("sandbox").and_then(|v| v.as_table()) {
+        stage.sandbox = Some(parse_sandbox_config(sandbox_table)?);
+    }
+
+    // Parse the stage's declared output shape: [stages.<name>.output].
+    // Narrows [agent.output]; whoever starts the run overrides both.
+    if let Some(output_table) = stage_value.get("output").and_then(|v| v.as_table()) {
+        stage.output = Some(parse_output_spec(output_table));
+    }
+
+    // Parse accepts_messages flag: whether mid-run user messages are
+    // injected into context between inference calls. Defaults to true
+    // (via the Stage constructor); set false for stages that shouldn't
+    // be interrupted (e.g. a final report generation stage).
+    if let Some(am) = stage_value
+        .get("accepts_messages")
+        .and_then(|v| v.as_bool())
+    {
+        stage.accepts_messages = am;
+    }
+
+    // Parse per-stage tool permissions: [stages.<name>.tool_permissions]
+    if let Some(tp_table) = stage_value
+        .get("tool_permissions")
+        .and_then(|v| v.as_table())
+    {
+        for (tool_name, policy_val) in tp_table {
+            if let Some(policy_str) = policy_val.as_str() {
+                stage
+                    .tool_permissions
+                    .insert(tool_name.clone(), policy_str.to_string());
+            }
+        }
+    }
+
+    // Parse per-stage context layout: [stages.<name>.context.regions].
+    // Different stages can carry different region sets - the runtime swaps
+    // to a stage's layout on entry (apply_stage_context → apply_layout),
+    // preserving overlapping regions' content by name. Absent ⇒ the stage
+    // inherits the global [context.regions] layout. NOTE (TOML nesting):
+    // like [stages.<name>.model], this must be its own `[...]` section;
+    // don't place `context = ...` inline keys after other sub-tables.
+    if let Some(regions_table) = stage_value
+        .get("context")
+        .and_then(|v| v.get("regions"))
+        .and_then(|v| v.as_table())
+    {
+        let (stage_regions, stage_total) = parse_region_layout(regions_table)?;
+        stage.context_layout = Some(ContextLayout::new(stage_regions, stage_total));
+    }
+
+    // Parse max_revisits
+    if let Some(mr) = stage_value.get("max_revisits").and_then(|v| v.as_integer()) {
+        stage.max_revisits = Some(mr as usize);
+    }
+
+    // Parse transition_prompt
+    if let Some(tp) = stage_value
+        .get("transition_prompt")
+        .and_then(|v| v.as_str())
+    {
+        stage.transition_prompt = Some(tp.trim().to_string());
+    }
+
+    // Parse transitions: [stages.<name>.transitions.<target>]
+    if let Some(transitions_table) = stage_value.get("transitions").and_then(|v| v.as_table()) {
+        let mut transitions = std::collections::HashMap::new();
+        for (target_name, edge_value) in transitions_table {
+            let hint = edge_value
+                .get("hint")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let condition = match edge_value.get("condition").and_then(|v| v.as_str()) {
+                Some("error") => TransitionCondition::Error,
+                Some("max_iterations") => TransitionCondition::MaxIterations,
+                Some("llm_choice") => TransitionCondition::LlmChoice,
+                Some("stuck") => TransitionCondition::Stuck,
+                Some("always") | None => TransitionCondition::Always,
+                // Reject unknown conditions rather than silently building a
+                // `Custom(..)` edge the runtime never evaluates (a dead edge).
+                Some(other) => {
+                    return Err(Error::Other(format!(
+                        "transition to '{target_name}' has unknown condition \
+                         '{other}' (valid: always, error, max_iterations, \
+                         llm_choice, stuck)"
+                    )));
+                }
+            };
+
+            // Stuck thresholds live on the edge they arm, so a stage can
+            // be armed on iterations while another is armed on wall clock.
+            // Both halves are required together: a bare `condition =
+            // "stuck"` edge could never fire, and thresholds under any
+            // other condition would be silently ignored.
+            let stuck = parse_stuck_config(edge_value);
+            let is_stuck = condition == TransitionCondition::Stuck;
+            if is_stuck && stuck.is_none() {
+                return Err(Error::Other(format!(
+                    "transition to '{target_name}' has condition 'stuck' but no \
+                     threshold (set at least one of stuck_after_iterations, \
+                     stuck_after_minutes, stuck_after_same_file_edits, \
+                     stuck_after_tool_calls)"
+                )));
+            }
+            if !is_stuck && stuck.is_some() {
+                return Err(Error::Other(format!(
+                    "transition to '{target_name}' sets stuck_after_* thresholds \
+                     but its condition is not 'stuck' - they would never be read"
+                )));
+            }
+
+            let transform = match edge_value.get("transform").and_then(|v| v.as_str()) {
+                Some("clear") => EdgeTransform::Clear,
+                Some("compact") | Some("summarize") => EdgeTransform::Compact { prompt: None },
+                Some("custom") => {
+                    // Parse transform_config sub-table
+                    let tc = edge_value.get("transform_config");
+                    let carry = tc
+                        .and_then(|v| v.get("carry"))
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let compact = tc
+                        .and_then(|v| v.get("compact"))
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let clear = tc
+                        .and_then(|v| v.get("clear"))
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let compact_prompt = tc
+                        .and_then(|v| v.get("compact_prompt"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    EdgeTransform::Custom {
+                        carry,
+                        compact,
+                        clear,
+                        compact_prompt,
+                    }
+                }
+                Some("direct") | None => EdgeTransform::Direct,
+                // Reject unknown transforms rather than silently downgrading
+                // to a plain `Direct` copy (a typo would pass unnoticed).
+                Some(other) => {
+                    return Err(Error::Other(format!(
+                        "transition to '{target_name}' has unknown transform \
+                         '{other}' (valid: direct, clear, compact, summarize, custom)"
+                    )));
+                }
+            };
+
+            // Parse the edge gate: `gate = { require_modifications = true, ... }`
+            // (or a `[stages.<name>.transitions.<target>.gate]` sub-table).
+            let gate = edge_value
+                .get("gate")
+                .and_then(|v| v.as_table())
+                .map(parse_transition_gate);
+
+            transitions.insert(
+                target_name.clone(),
+                TransitionEdge {
+                    target: target_name.clone(),
+                    condition,
+                    hint,
+                    transform,
+                    gate,
+                    stuck,
+                },
+            );
+        }
+        stage.transitions = Some(transitions);
+    }
+
+    Ok(stage)
 }
 
 /// Parse `[compaction]` over the defaults, leaving any field the manifest does
