@@ -179,6 +179,12 @@ pulldown-cmark = "0.13"
 # maintained alongside the framework itself.
 ratatui-textarea = { version = "0.9", features = ["crossterm"] }
 axum = { version = "0.8", features = ["ws"] }
+# HTTPS for `lev serve` (issue #300). Its `tls-rustls` feature resolves to
+# `rustls/aws-lc-rs` - the same provider the outbound reqwest stack already
+# uses - so this adds a server-side TLS *listener* without adding a second TLS
+# implementation or a second crypto provider, which is what the policy above
+# is about.
+axum-server = { version = "0.8", features = ["tls-rustls"] }
 tower-http = { version = "0.7", features = ["cors"] }
 
 # ── Release profile ──────────────────────────────────────────────────────────

@@ -427,6 +427,8 @@ mod tests {
             allow_admin: false,
             workdir_root: None,
             no_remote_yolo: false,
+            tls_cert: None,
+            tls_key: None,
         };
         let result = dispatch(Commands::Serve(args), &MockRisky).await;
         assert!(result.is_ok());

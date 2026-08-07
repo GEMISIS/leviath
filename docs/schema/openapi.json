@@ -46,6 +46,28 @@
     }
   ],
   "paths": {
+    "/": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Liveness page (no token required)",
+        "description": "A minimal HTML page saying the server is running. **The only route that does not require the bearer token**, because it exists to be opened in a browser tab and a tab cannot send an `Authorization` header.\n\nIts purpose is TLS, not status: with a self-signed certificate, opening this in a tab is how a user reaches the certificate interstitial and accepts it, after which a browser console's `fetch` to the same origin inherits the exception.\n\nIt deliberately reports nothing else - no version, no run counts, no endpoint list. Anyone who can load it already knows the port is open, and that should remain all they learn.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The server is running.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/blueprints": {
       "get": {
         "tags": [

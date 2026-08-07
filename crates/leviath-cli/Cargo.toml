@@ -71,6 +71,7 @@ libc = { workspace = true }
 pulldown-cmark = { workspace = true }
 ratatui-textarea = { workspace = true }
 axum = { workspace = true }
+axum-server = { workspace = true }
 tower-http = { workspace = true }
 reqwest = { workspace = true }
 url = { workspace = true }
@@ -86,6 +87,16 @@ tempfile = "3"
 
 [dev-dependencies]
 leviath-testkit = { workspace = true }
+# A TLS *client*, so the HTTPS server is tested with a real handshake against a
+# root store holding exactly the test certificate. Verifying rather than
+# skipping verification is the point: a client that accepted anything would
+# pass against a server that never presented a certificate at all. Both come in
+# with `axum-server`'s `tls-rustls`, so this adds nothing to the tree.
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
+# PEM parsing for that root store. `rustls-pki-types` rather than the more
+# obvious `rustls-pemfile`, which is unmaintained (RUSTSEC-2025-0134) and whose
+# API moved here. Already in the tree via `axum-server`.
+rustls-pki-types = { version = "1", features = ["std"] }
 # `start_paused`, so the daemon-readiness backoff is tested by moving a virtual
 # clock rather than by sleeping through its five-second timeout.
 tokio = { workspace = true, features = ["test-util"] }

@@ -391,6 +391,13 @@ Start the [REST and WebSocket API](/docs/api).
 | `--allow-admin` | off | Mount the MCP administration and config-write routes |
 | `--workdir-root <PATH>` | unset | Restrict agent working directories to this root |
 | `--no-remote-yolo` | off | Refuse `"yolo": true` and `"allow": [...]` on spawn requests |
+| `--tls-cert <PATH>` | unset | PEM certificate chain. Serves HTTPS; needs `--tls-key` too |
+| `--tls-key <PATH>` | unset | PEM private key for `--tls-cert` |
+
+> [!TIP]
+> A browser cannot call an `http://` Leviath that is not on loopback, whatever `--cors` says - not
+> even on a LAN. That is what the TLS flags are for. See
+> [reaching a Leviath on another machine](/docs/api#reaching-a-leviath-on-another-machine).
 
 > [!WARNING]
 > Prefer `LEVIATH_API_TOKEN` over `--token`. A command-line argument is visible in `ps` to every
