@@ -562,7 +562,8 @@ impl Stream for OpenAiSseStream {
 /// it only discovered after committing to a 200: the upstream provider goes
 /// down mid-generation, or the account runs out of credits between chunks. That
 /// arrives as a `data:` line whose object is `{"error":{…}}` and no `choices`,
-/// which used to fall through the usage-only branch and simply end the stream -
+/// which is why it needs an arm of its own: matched only on `choices` it fits
+/// the usage-only shape, and falling through there ends the stream cleanly -
 /// a truncated answer with nothing anywhere saying why.
 #[expect(
     clippy::string_slice,

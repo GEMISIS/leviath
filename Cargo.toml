@@ -213,7 +213,8 @@ strip = "symbols"
 # NOTE: `panic = "abort"` is deliberately NOT set, and should not be added.
 #
 # The daemon depends on unwinding. Rhai host functions are wrapped in
-# `catch_unwind` (`leviath_scripting::tool::guard_str`/`guard_dyn`) so that a
+# `catch_unwind` (`guard_str`/`guard_dyn`, private to
+# `crates/leviath-scripting/src/tool.rs`) so that a
 # panic inside a native function registered with the script engine becomes an
 # ordinary script error instead of taking the whole daemon down - that was issue
 # #109, where a byte-boundary panic inside `decode_entities` aborted the process
