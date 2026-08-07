@@ -219,7 +219,7 @@ impl Dashboard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::dashboard::test_support::make_test_dashboard;
+    use crate::commands::dashboard::test_support::{make_test_dashboard, rendered_buffer};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
@@ -289,6 +289,10 @@ mod tests {
                 dash.render_review_body(f, area, &lines, &pending);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Line 1"), "{buf}");
+        assert!(buf.contains("Line 2"), "{buf}");
+        assert!(buf.contains("Line 3"), "{buf}");
     }
 
     #[test]
@@ -307,6 +311,8 @@ mod tests {
                 dash.render_review_body(f, area, &lines, &pending);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("\u{2191}"), "no scrollbar drawn: {buf}");
     }
 
     /// Same display-row fix as the content pane: a review document whose
@@ -374,6 +380,8 @@ mod tests {
                 dash.render_review_body(f, area, &lines, &pending);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Review content"), "{buf}");
     }
 
     #[test]
@@ -392,6 +400,8 @@ mod tests {
                 dash.render_input_pane(f, area, &agent, &pending, &kind, &options);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Esc"), "{buf}");
     }
 
     #[test]
@@ -410,6 +420,8 @@ mod tests {
                 dash.render_input_pane(f, area, &agent, &pending, &kind, &options);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Esc"), "{buf}");
     }
 
     #[test]
@@ -430,6 +442,9 @@ mod tests {
                 dash.render_input_pane(f, area, &agent, &pending, &kind, &options);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Option A"), "{buf}");
+        assert!(buf.contains("Option B"), "{buf}");
     }
 
     #[test]
@@ -448,6 +463,9 @@ mod tests {
                 dash.render_input_pane(f, area, &agent, &pending, &kind, &options);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Yes"), "{buf}");
+        assert!(buf.contains("No"), "{buf}");
     }
 
     #[test]
@@ -466,6 +484,9 @@ mod tests {
                 dash.render_input_pane(f, area, &agent, &pending, &kind, &options);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("[i] respond"), "{buf}");
+        assert!(buf.contains("Choose wisely"), "{buf}");
     }
 
     #[test]
@@ -486,6 +507,8 @@ mod tests {
                 dash.render_input_pane(f, area, &agent, &pending, &kind, &options);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Edit Document"), "{buf}");
     }
 
     #[test]
@@ -510,6 +533,10 @@ mod tests {
                 dash.render_input_pane(f, area, &agent, &pending, &kind, &options);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Option A"), "{buf}");
+        assert!(buf.contains("Option B"), "{buf}");
+        assert!(buf.contains("Option C"), "{buf}");
     }
 
     #[test]
@@ -530,6 +557,9 @@ mod tests {
                 dash.render_input_pane(f, area, &agent, &pending, &kind, &options);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Yes"), "{buf}");
+        assert!(buf.contains("No"), "{buf}");
     }
 
     #[test]
@@ -549,5 +579,7 @@ mod tests {
                 dash.render_input_pane(f, area, &agent, &pending, &kind, &options);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Anything else?"), "{buf}");
     }
 }

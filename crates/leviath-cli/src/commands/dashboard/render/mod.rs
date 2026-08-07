@@ -273,7 +273,7 @@ impl Dashboard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::dashboard::test_support::make_test_dashboard;
+    use crate::commands::dashboard::test_support::{make_test_dashboard, rendered_buffer};
     use crate::commands::dashboard::types::{Toast, ToastLevel};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -317,6 +317,8 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
         terminal.draw(|f| dash.draw(f)).unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(!buf.contains("My Test"), "{buf}");
     }
 
     #[test]
@@ -330,6 +332,9 @@ mod tests {
             .push(make_test_agent("run-2", AgentDisplayStatus::Complete));
         dash.update_display_indices();
         terminal.draw(|f| dash.draw(f)).unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("My Test #1"), "{buf}");
+        assert!(buf.contains("My Test #2"), "{buf}");
     }
 
     #[test]
@@ -342,6 +347,8 @@ mod tests {
         dash.update_display_indices();
         dash.detail_view = true;
         terminal.draw(|f| dash.draw(f)).unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("ACTIVE"), "{buf}");
     }
 
     #[test]
@@ -419,6 +426,8 @@ mod tests {
         dash.input_mode = true;
 
         terminal.draw(|f| dash.draw(f)).unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("WAITING"), "{buf}");
     }
 
     #[test]
@@ -446,6 +455,8 @@ mod tests {
         dash.selected_stage = 0;
 
         terminal.draw(|f| dash.draw(f)).unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("write it"), "{buf}");
     }
 
     #[test]
@@ -473,6 +484,11 @@ mod tests {
         dash.selected_stage = 0;
 
         terminal.draw(|f| dash.draw(f)).unwrap();
+        let buf = rendered_buffer(&terminal);
+        // The pair to the Logs-mode case above: in Output mode the body is
+        // already in the output pane, so the review pane must not draw a
+        // second copy of it.
+        assert_eq!(buf.matches("write it").count(), 1, "{buf}");
     }
 
     #[test]
@@ -521,6 +537,8 @@ mod tests {
         dash.selected_stage = 0;
 
         terminal.draw(|f| dash.draw(f)).unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("WAITING"), "{buf}");
     }
 
     #[test]
@@ -548,6 +566,8 @@ mod tests {
         dash.detail_view = true;
 
         terminal.draw(|f| dash.draw(f)).unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("ACTIVE"), "{buf}");
     }
 
     #[test]
@@ -587,6 +607,8 @@ mod tests {
         dash.selected_stage = 1; // wrong stage: selected_stage_can_respond() -> false
 
         terminal.draw(|f| dash.draw(f)).unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("WAITING"), "{buf}");
     }
 
     // ─── Regression: mid-run message input pane must actually render ──────
@@ -627,6 +649,8 @@ mod tests {
         let mut dash = make_test_dashboard();
         dash.show_help = true;
         terminal.draw(|f| dash.draw(f)).unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Run list"), "{buf}");
     }
 
     #[test]
@@ -639,6 +663,8 @@ mod tests {
         dash.update_display_indices();
         dash.request_delete();
         terminal.draw(|f| dash.draw(f)).unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Esc"), "{buf}");
     }
 
     #[test]
@@ -717,6 +743,8 @@ mod tests {
             level: ToastLevel::Info,
         });
         terminal.draw(|f| dash.draw(f)).unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Hello"), "{buf}");
     }
 
     #[test]
@@ -730,6 +758,8 @@ mod tests {
                 dash.draw_detail_panel(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(!buf.contains("ACTIVE"), "{buf}");
     }
 
     #[test]
@@ -746,6 +776,8 @@ mod tests {
                 dash.draw_detail_panel(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("ACTIVE"), "{buf}");
     }
 
     #[test]
@@ -775,6 +807,8 @@ mod tests {
                 dash.draw_detail_panel(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("What should I do?"), "{buf}");
     }
 
     #[test]
@@ -793,6 +827,8 @@ mod tests {
                 dash.draw_detail_panel(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("something broke"), "{buf}");
     }
 
     #[test]
@@ -810,6 +846,8 @@ mod tests {
                 dash.draw_detail_panel(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("COMPLETE"), "{buf}");
     }
 
     #[test]
@@ -832,6 +870,8 @@ mod tests {
                 dash.draw_detail_panel(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("ctx"), "{buf}");
     }
 
     #[test]
@@ -861,6 +901,8 @@ mod tests {
                 dash.draw_detail_panel(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("WAITING"), "{buf}");
     }
 
     #[test]
@@ -910,6 +952,8 @@ mod tests {
                 dash.draw_detail_panel(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("ACTIVE"), "{buf}");
     }
 
     #[test]
@@ -926,5 +970,7 @@ mod tests {
                 dash.draw_detail_panel(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("CANCEL"), "{buf}");
     }
 }

@@ -728,7 +728,7 @@ pub(in crate::commands::dashboard) fn wrapped_rows(lines: &[Line<'static>], widt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::dashboard::test_support::make_test_dashboard;
+    use crate::commands::dashboard::test_support::{make_test_dashboard, rendered_buffer};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
@@ -794,6 +794,8 @@ mod tests {
                 dash.render_context_bar(f, area, &agent);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("ctx"), "{buf}");
     }
 
     #[test]
@@ -808,6 +810,8 @@ mod tests {
                 dash.render_context_bar(f, area, &agent);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(!buf.contains("%"), "{buf}");
     }
 
     #[test]
@@ -823,6 +827,8 @@ mod tests {
                 dash.render_context_bar(f, area, &agent);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("ctx"), "{buf}");
     }
 
     #[test]
@@ -838,6 +844,8 @@ mod tests {
                 dash.render_context_bar(f, area, &agent);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("ctx"), "{buf}");
     }
 
     #[test]
@@ -880,6 +888,10 @@ mod tests {
                 dash.render_context_bar(f, area, &agent);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        // The bar shows one initial per region, so three regions is the thing
+        // this case adds over the single-region ones above.
+        assert!(buf.contains("[P S H]"), "{buf}");
     }
 
     #[test]
@@ -895,6 +907,8 @@ mod tests {
                 dash.render_content_pane(f, area, &agent, 100);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Output"), "{buf}");
     }
 
     #[test]
@@ -963,6 +977,8 @@ mod tests {
                 dash.render_content_pane(f, area, &agent, 100);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Logs"), "{buf}");
     }
 
     #[test]
@@ -978,6 +994,8 @@ mod tests {
                 dash.render_content_pane(f, area, &agent, 100);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Context"), "{buf}");
     }
 
     #[test]
@@ -996,6 +1014,9 @@ mod tests {
                 dash.render_content_pane(f, area, &agent, 100);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Error"), "{buf}");
+        assert!(buf.contains("something broke"), "{buf}");
     }
 
     #[test]
@@ -1011,6 +1032,8 @@ mod tests {
                 dash.render_content_pane(f, area, &agent, 100);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(!buf.contains("Error  "), "{buf}");
     }
 
     #[test]
@@ -1026,6 +1049,8 @@ mod tests {
                 dash.render_content_pane(f, area, &agent, 100);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Run was cancelled."), "{buf}");
     }
 
     #[test]
@@ -1042,6 +1067,8 @@ mod tests {
                 dash.render_content_pane(f, area, &agent, 100);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("test"), "{buf}");
     }
 
     #[test]
@@ -1059,6 +1086,8 @@ mod tests {
                 dash.render_content_pane(f, area, &agent, 100);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("find"), "{buf}");
     }
 
     #[test]
@@ -1799,6 +1828,10 @@ mod tests {
                 dash.render_content_pane(f, area, &agent, 100);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        // Matches present: the title carries the position within them.
+        assert!(buf.contains("/token/"), "{buf}");
+        assert!(buf.contains("1/3"), "{buf}");
     }
 
     // ─── render_content_pane: scroll at bottom (detail_scroll = 0) ────────
@@ -1898,6 +1931,8 @@ mod tests {
                 dash.render_content_pane(f, area, &agent, 100);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("\u{2191}"), "{buf}");
     }
 
     // ─── build_output_lines: logs mode with prefixed lines ────────────────
@@ -1937,6 +1972,8 @@ mod tests {
                 dash.render_content_pane(f, area, &agent, 100);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Output"), "{buf}");
     }
 
     // ─── render_content_pane: Logs mode with tool count (run_state) ──────
@@ -1956,6 +1993,8 @@ mod tests {
                 dash.render_content_pane(f, area, &agent, 100);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Logs"), "{buf}");
     }
 
     // ─── render_context_bar: bar color variants ───────────────────────────
@@ -2028,6 +2067,8 @@ mod tests {
                 dash.render_context_bar(f, area, &agent);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("ctx"), "{buf}");
     }
 
     // ─── render_context_bar: run_state agent uses stage context ──────────
@@ -2046,6 +2087,8 @@ mod tests {
                 dash.render_context_bar(f, area, &agent);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("ctx"), "{buf}");
     }
 
     /// Seed the cached history for `run_id` so browsing tests can render an
@@ -2218,6 +2261,8 @@ mod tests {
                 dash.render_content_pane(f, area, &agent, 100);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Context"), "{buf}");
     }
 
     // ─── render_content_pane: file path hint for context mode ─────────────
@@ -2235,6 +2280,8 @@ mod tests {
                 dash.render_content_pane(f, area, &agent, 100);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Context"), "{buf}");
     }
 
     // ─── render_content_pane: file path hint for Logs mode ───────────────
@@ -2252,6 +2299,8 @@ mod tests {
                 dash.render_content_pane(f, area, &agent, 100);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Logs"), "{buf}");
     }
 
     // ─── render_content_pane: search with no matches shows 0 matches ──────
@@ -2271,5 +2320,9 @@ mod tests {
                 dash.render_content_pane(f, area, &agent, 100);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        // The counterpart to the case above: no matches says so, rather than
+        // showing a position in an empty set.
+        assert!(buf.contains("0 matches"), "{buf}");
     }
 }

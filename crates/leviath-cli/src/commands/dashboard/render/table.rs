@@ -577,6 +577,8 @@ mod tests {
                 dash.draw_agent_table(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(!buf.contains("My Test"), "{buf}");
     }
 
     #[test]
@@ -594,6 +596,8 @@ mod tests {
                 dash.draw_agent_table(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(!buf.contains("My Test"), "{buf}");
     }
 
     #[test]
@@ -614,6 +618,10 @@ mod tests {
                 dash.draw_agent_table(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("My Test #1"), "{buf}");
+        assert!(buf.contains("My Test #2"), "{buf}");
+        assert!(buf.contains("My Test #3"), "{buf}");
     }
 
     #[test]
@@ -630,6 +638,8 @@ mod tests {
                 dash.draw_agent_table(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("My Test #ecs"), "{buf}");
     }
 
     #[test]
@@ -648,6 +658,12 @@ mod tests {
                 dash.draw_agent_table(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("My Test #tok"), "{buf}");
+        // The name of the case: zero tokens render as a dash, so neither
+        // arrow glyph should be on the row at all.
+        assert!(!buf.contains("\u{2191}"), "{buf}");
+        assert!(!buf.contains("\u{2193}"), "{buf}");
     }
 
     #[test]
@@ -670,6 +686,8 @@ mod tests {
                 dash.draw_agent_table(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("fallback task text"), "{buf}");
     }
 
     #[test]
@@ -691,6 +709,9 @@ mod tests {
                 dash.draw_agent_table(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("My Test #stage"), "{buf}");
+        assert!(!buf.contains("main 1/"), "{buf}");
     }
 
     #[test]
@@ -707,6 +728,8 @@ mod tests {
                 dash.draw_agent_table(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("My Test #ctx"), "{buf}");
     }
 
     #[test]
@@ -724,6 +747,8 @@ mod tests {
                 dash.draw_agent_table(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("My Test #1"), "{buf}");
     }
 
     #[test]
@@ -738,6 +763,8 @@ mod tests {
                 dash.draw_log_panel(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(!buf.contains("Agent started"), "{buf}");
     }
 
     #[test]
@@ -821,6 +848,9 @@ mod tests {
                 dash.draw_log_panel(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Agent started"), "{buf}");
+        assert!(buf.contains("Stage changed to implement"), "{buf}");
     }
 
     fn rendered_buffer(terminal: &Terminal<TestBackend>) -> String {
@@ -885,6 +915,9 @@ mod tests {
                 dash.draw_help_bar(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(!buf.contains("back to list"), "{buf}");
+        assert!(!buf.contains("Search: /"), "{buf}");
     }
 
     #[test]
@@ -899,6 +932,8 @@ mod tests {
                 dash.draw_help_bar(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("[Esc] back"), "{buf}");
     }
 
     #[test]
@@ -915,6 +950,8 @@ mod tests {
                 dash.draw_help_bar(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("send"), "{buf}");
     }
 
     #[test]
@@ -946,6 +983,8 @@ mod tests {
                 dash.draw_help_bar(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("select"), "{buf}");
     }
 
     #[test]
@@ -962,6 +1001,8 @@ mod tests {
                 dash.draw_help_bar(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Search: /"), "{buf}");
     }
 
     #[test]
@@ -978,6 +1019,10 @@ mod tests {
                 dash.draw_help_bar(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("/test/"), "{buf}");
+        assert!(buf.contains("clear search"), "{buf}");
+        assert!(!buf.contains("Search: /"), "{buf}");
     }
 
     #[test]
@@ -995,6 +1040,8 @@ mod tests {
                 dash.draw_help_bar(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("confirm"), "{buf}");
     }
 
     #[test]
@@ -1010,6 +1057,8 @@ mod tests {
                 dash.draw_help_bar(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("Filter: /"), "{buf}");
     }
 
     #[test]
@@ -1028,6 +1077,10 @@ mod tests {
                 dash.draw_help_bar(f, area);
             })
             .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("/coder/"), "{buf}");
+        assert!(buf.contains("refine"), "{buf}");
+        assert!(!buf.contains("Filter: /"), "{buf}");
     }
 
     #[test]
