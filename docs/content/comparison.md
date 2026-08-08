@@ -23,7 +23,7 @@ Leviath rather than instead of it.
 
 ```mermaid
 flowchart TD
-  ORCH["Orchestrators<br/>Gas Town / Gas City / Smithy"]
+  ORCH["Orchestrators<br/>Gas Town / Gas City / OpenHands"]
   ORCH --> AGENTS["Agent layer"]
   subgraph AGENTS["Agent layer: pick one"]
     CC["Coding agents<br/>Claude Code, Codex"]
@@ -57,7 +57,7 @@ description comes from that project's own documentation.
 | **Expects on the machine** | One native binary | A native CLI; the SDKs want Node 18+ or Python 3.10+ | Python 3.10-3.13 | A Python or Node runtime |
 | **Headless surface** | REST, WebSocket, ACP over stdio | `claude -p`, plus the SDKs | `kickoff()` in-process, REST via AMP | Library calls, REST via LangSmith |
 | **Human in the loop** | Mid-run messages, interaction points, ask-user tools | Interactive steering and permission prompts | `human_input` pauses a task | `interrupt()` pauses and resumes |
-| **Isolation** | Opt-in per agent or stage: containers or namespaces | Opt-in OS sandbox for shell | External sandbox services | Sandbox backends via Deep Agents |
+| **Isolation** | Per-agent state, workdir, and policy; opt-in containers or namespaces for shell | Opt-in OS sandbox for shell | External sandbox services | Sandbox backends via Deep Agents |
 | **Hosted option** | None | Managed Agents | CrewAI AMP | LangSmith Deployment |
 
 ## When to reach for the other one
@@ -72,13 +72,16 @@ even run *on top of* Claude Code as a transport, so this is not either/or.
 want the workflow expressed in code, with your own types and your own tests around it. A separate
 runtime configured in TOML is friction you do not need.
 
-**Use Gas City, Gas Town, or Smithy** when the hard problem is coordinating work across issues,
-repos, and people. That is a different problem from what happens inside one agent, and Leviath does
-not try to solve it. Run Leviath underneath one of them if you want both.
+**Use Gas City, Gas Town, or [OpenHands](https://docs.all-hands.dev/)** when the hard problem is
+coordinating work across issues, repos, and people. That is a different problem from what happens
+inside one agent, and Leviath does not try to solve it. Run Leviath underneath one of them if you
+want both.
 
 **Reach for Leviath** when the hard part is inside a single unit of work: the task has distinct
 phases that want different models and different tools, you care about exactly what is in the context
 window at each phase, or you want many agents running at once without paying for a process each.
+Every run journals to disk as it goes, so a daemon you kill mid-run picks the work back up on its
+next start.
 
 ## Why you might not want Leviath
 
@@ -87,10 +90,14 @@ window at each phase, or you want many agents running at once without paying for
 - **Agents are configuration, not code.** A Leviath agent is a TOML blueprint plus optional Rhai
   script tools. If you want to write agent logic in Python or TypeScript against an SDK, that model
   is not here. Other languages drive Leviath through the [REST API](/docs/api) instead.
-- **It runs on one machine.** The daemon hosts every agent in one process on one box. There is no
-  hosted service and no multi-machine orchestration.
-- **Agents share a process.** That is what makes them cheap, and it means you do not get the
-  isolation a process-per-agent design gives you for free. [Sandboxing](/docs/security) is opt-in.
+- **There is no hosted service.** You run the daemon yourself. One box hosts every agent, which is
+  also why there is no cluster to operate: [`lev serve`](/docs/api) and
+  [The Lair](https://leviath.dev/lair) reach it remotely, but nobody runs it for you, and there is
+  no multi-machine scheduling.
+- **The OS sandbox covers shell, not everything.** Every agent has its own state, workdir fence,
+  tool policy, and panic boundary, so one agent's crash stays its own. But the opt-in
+  [sandbox](/docs/security) wraps shell execution only: file tools rely on path confinement, and
+  network tools run on the host.
 - **You need a model provider**: an API key, a local Ollama, or the Claude Code transport with its
   terms-of-service caveat.
 
@@ -112,7 +119,7 @@ agent design. Here is Leviath against it, including where it falls short.
 | 9 | Compact errors into context | ✓ | Tool, inference, and iteration-cap errors all land in context |
 | 10 | Small, focused agents | ✓ | Per-stage models, tools, and prompts, plus bounded fan-out |
 | 11 | Trigger from anywhere | partial | CLI, REST, WebSocket, ACP, signed webhooks out. No built-in scheduler, so use cron |
-| 12 | Stateless reducer | ✗ | The engine is a stateful [ECS world](/docs/engine). The run journal folds like a reducer, but the loop does not |
+| 12 | Stateless reducer | ✓ | Durable state lives on disk; the process is disposable. Runs resume on restart, and interrupted tool batches replay exactly-once |
 
 ## How we measure
 
