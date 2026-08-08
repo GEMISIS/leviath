@@ -169,8 +169,9 @@ Seeds run at spawn **before any approval prompt**, confined to the workdir and r
 entry stage's sandbox, time- and size-capped.
 
 > [!WARNING]
-> A seed command runs a shell command before you approve anything. `lev validate` prints every
-> seed a blueprint will run; review them for third-party blueprints. Refuse with
+> A seed command runs a shell command before you approve anything, so it must be covered by
+> [`[safe_commands]`](/docs/interaction#what-runs-without-asking) to run at all. `lev validate`
+> prints every seed a blueprint will run; review them for third-party blueprints. Refuse with
 > `--no-seed-commands` or `[security] allow_seed_commands = false`.
 
 ## Read paths
@@ -235,9 +236,9 @@ chance to correct itself, and the edge catches it if it does not.
 
 ```toml
 [repetition_detection]
-enabled             = true
-max_repeat_calls    = 5      # identical tool call, back to back
-max_readonly_streak = 30     # read-only calls with no modification in between
+enabled             = true   # default
+max_repeat_calls    = 3      # default; identical tool call, back to back
+max_readonly_streak = 10     # default; read-only calls with no modification in between
 ```
 
 ## Discovering tools mid-run

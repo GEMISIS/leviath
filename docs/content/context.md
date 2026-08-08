@@ -147,9 +147,11 @@ working.
 
 > [!WARNING]
 > A `command` seed runs at spawn, before the first inference and therefore before any tool-approval
-> prompt. It is the one thing a blueprint executes without being asked. `lev validate` prints every
-> command seed in a blueprint, `lev run --no-seed-commands` refuses them for one run, and
-> `[security] allow_seed_commands = false` refuses them machine-wide.
+> prompt. Because there is nobody to ask in the moment, it must also be covered by
+> [`[safe_commands]`](/docs/interaction#what-runs-without-asking), or it does not run at all.
+> `lev validate` prints every command seed in a blueprint, `lev run --no-seed-commands` refuses
+> them for one run, and `[security] allow_seed_commands = false` refuses them machine-wide. Seeds
+> run once: a daemon restart does not replay them.
 
 #### Seed paths stay in the working directory
 

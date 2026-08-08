@@ -255,7 +255,7 @@
           "type": "array",
           "items": { "$ref": "#/$defs/interactionPoint" }
         },
-        "on_worker_failure": { "enum": ["continue", "abort"] },
+        "on_worker_failure": { "enum": ["continue", "fail_all"] },
         "max_workers": { "type": "integer", "minimum": 1 },
         "worker_agent": { "type": "string" },
         "worker_stage": { "type": "string" },

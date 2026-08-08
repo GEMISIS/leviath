@@ -159,8 +159,8 @@ Nothing is written to disk. Every grant dies with the run that made it.
 
 The taint gate in [security](/docs/security) uses the same prompt shape with its own wording: an
 outbound tool that would carry sensitive data above its clearance is blocked and surfaced as a
-tool-approval, where **Allow for this run** raises the tool's clearance for the rest of the run and
-**Deny** blocks it. It offers no per-stage option, because a clearance is not keyed on what a call
+tool-approval, where **Allow for this session** raises the tool's clearance for the rest of the
+run and **Deny** blocks it. It offers no per-stage option, because a clearance is not keyed on what a call
 runs.
 
 ## Interaction points
@@ -223,9 +223,9 @@ before any code is written - and the prompt opens even under `--yolo`. The shipp
 [`interaction_timeout_secs`](/docs/configuration#limits), so an unanswered gate releases on its own
 terms instead of waiting for ever.
 
-Know what that looks like before you meet it. A `--yolo` run holding an `ask` gate reports
-`Waiting` in `lev ps`, with a wait reason of `interaction_point`, and does nothing until the timeout
-expires. The default timeout is one hour, so the run is not stuck, but for that hour it is
+Know what that looks like before you meet it. A `--yolo` run holding an `ask` gate shows
+`waiting: checkpoint` in `lev ps` (the JSON wait reason is `interaction_point`), and does nothing
+until the timeout expires. The default timeout is one hour, so the run is not stuck, but for that hour it is
 indistinguishable from a run that is. `lev respond --json` lists the question it is holding.
 
 > [!WARNING]

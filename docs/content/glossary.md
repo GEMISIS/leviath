@@ -22,7 +22,7 @@ layout. Some older text says *manifest*; it means the same file.
 **Run**: one execution of an agent. An agent is the recipe, a run is the cooking.
 
 **Run id**: the name a run is known by everywhere outside the engine, such as
-`coder-1785568852`. The CLI, the API, and the dashboard all use it. It is the handle you pass to
+`coder-1785568852-8b48c0d1e2f3`. The CLI, the API, and the dashboard all use it. It is the handle you pass to
 `lev cancel`, `lev msg`, and the rest.
 
 **Daemon**: the background process that holds every running agent. See [the daemon](/docs/daemon).
@@ -87,14 +87,16 @@ and merges the results.
 
 **Tick**: one pass of the engine over every agent. See [the engine](/docs/engine).
 
-**Fingerprint**: a count of how many agents are in each state. When a whole tick leaves it
+**Fingerprint**: a count of how many agents are in each state, plus a per-agent progress digest
+that catches an agent leaving and re-entering the same state. When a whole tick leaves it
 unchanged, nothing moved, so the engine sleeps.
 
 **Dispatch**: handing work out. A dispatch system starts a model call or a tool batch. A collect
 system picks the result up later.
 
-**Marker**: the component that says what an agent is currently doing. An agent has no status field.
-It carries one of twelve markers, and each system acts on the marker it cares about.
+**Marker**: the component that says what an agent is currently doing. An agent has no field for
+its pipeline phase. It carries one of twelve markers, and each system acts on the marker it cares
+about.
 
 **Permit**: a slot in a pool. An agent takes one before calling a model and gives it back when the
 call finishes.
