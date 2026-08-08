@@ -1,6 +1,6 @@
 ---
 title: Configuration
-description: Every key in ~/.leviath/config.toml, with its type and default.
+description: Every config.toml key with its type and default, the env vars that fill them when the file is empty, and the published JSON schema.
 group: Reference
 group_order: 3
 order: 1
@@ -12,7 +12,9 @@ Machine-wide settings live in `~/.leviath/config.toml`. [`lev setup`](/docs/cli)
 and everything below is optional: an install with one provider key works with no other key set.
 
 This page is the exhaustive list. The concept pages explain *why* each knob exists; this one is
-where you look up the exact name, type, and default.
+where you look up the exact name, type, and default. The same contract ships machine-readable as a
+[JSON schema](https://leviath.dev/docs/stable/config.schema.json) with a commented
+[example file](https://leviath.dev/docs/stable/config.example.toml).
 
 > [!NOTE]
 > The daemon watches this file and reloads it when it changes, so an edit takes effect on the

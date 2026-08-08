@@ -1,6 +1,6 @@
 ---
 title: External work queues
-description: How an external work queue should ask whether a run is still going, without leaking slots or cancelling live work.
+description: Poll lev ps --all --json to tell a live run from a dead one, without leaking slots or cancelling work that is still going.
 group: Integrations
 group_order: 5
 order: 4

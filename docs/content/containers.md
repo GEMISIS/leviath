@@ -56,8 +56,8 @@ set -euo pipefail
 export LEVIATH_HOME=/work   # data lands under /work/.leviath
 lev daemon start
 
-# `lev run` prints "spawned <run-id>" and returns straight away.
-RUN_ID=$(lev run /work/agent --task "$TASK" --yolo | awk '/^spawned /{print $2}')
+# `lev run` returns straight away; there is no blocking flag, so poll below.
+RUN_ID=$(lev run /work/agent --task "$TASK" --yolo --json | jq -r '.run_id')
 
 # `runs` holds what the daemon is actively driving. Once the id drops out of
 # that list the run is over, whatever the outcome.

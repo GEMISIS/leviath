@@ -1,6 +1,6 @@
 ---
 title: CLI reference
-description: Every `lev` command and flag, what each does, and when you need it.
+description: Every lev command and flag, which ones speak --json for scripts and CI, and how to read lev ps status and wait reasons.
 group: Reference
 group_order: 3
 order: 3

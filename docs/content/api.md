@@ -1,6 +1,6 @@
 ---
 title: HTTP API
-description: Every REST route and WebSocket stream `lev serve` exposes, with its auth model and payload shapes.
+description: Every REST route and WebSocket stream `lev serve` exposes, with auth, payload shapes, and the published OpenAPI spec.
 group: Reference
 group_order: 3
 order: 2
@@ -14,6 +14,10 @@ speaks HTTP can drive Leviath, including [The Lair](https://leviath.dev/lair), t
 ```bash
 lev serve --port 3000 --token "$(openssl rand -hex 16)" --cors https://leviath.dev
 ```
+
+Every route on this page is also published as a machine-readable
+[OpenAPI spec](https://leviath.dev/docs/stable/openapi.json), kept in lockstep with the server by
+a test, so a client generator or an agent can consume the contract directly.
 
 ## Security model
 

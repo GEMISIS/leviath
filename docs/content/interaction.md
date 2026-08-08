@@ -1,6 +1,6 @@
 ---
 title: Human-in-the-loop
-description: The three ways a person gets involved in a run: agent-raised questions, tool approvals, and blueprint interaction points.
+description: What to do when a run shows waiting: answer agent questions, tool approvals, and checkpoints with lev respond, the dashboard, or the API.
 group: Concepts
 group_order: 2
 order: 8
