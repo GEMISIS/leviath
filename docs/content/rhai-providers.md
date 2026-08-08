@@ -96,6 +96,11 @@ functions are available here. Return a state map that is persisted and passed to
 }
 ```
 
+Two field subtleties. A message's `content` is a string on plain turns, but an **array of content
+blocks** (`tool_use`, `tool_result`) whenever the agent is mid tool work, so forward it untouched
+unless your API needs a transform. And `cache_breakpoint` is present only when `true`; a normal
+message carries no such key.
+
 and must return:
 
 ```jsonc
@@ -107,6 +112,10 @@ and must return:
   "finish_reason": "Complete"   // "Complete" | "ToolCall" | "TokenLimit" | "Stop"
 }
 ```
+
+`finish_reason` also accepts the common wire spellings (`tool_calls`, `tool_use`, `length`,
+`max_tokens`, `stop_sequence`), and anything unrecognized reads as `Complete`, so most APIs'
+values pass through unmapped.
 
 ## Host functions
 
@@ -132,7 +141,11 @@ returned by `http_post`/`stream_request` is mapped to a rate-limit error automat
 ```rhai
 throw #{ message: "API key not set", transient: false };  // permanent, no retry
 throw #{ message: "server 503",      transient: true  };  // retried with backoff
+throw #{ message: "429",  kind: "rate_limited" };         // name the class exactly
 ```
+
+A `kind` of `rate_limited`, `api`, or `transport` takes precedence over `transient` when you need
+the error classed exactly.
 
 ## A complete provider
 

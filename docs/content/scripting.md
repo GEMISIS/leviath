@@ -26,7 +26,7 @@ retries stay with the runtime, and the script gets only the one decision that is
 You do not need to know Rhai to read the pages below. Each one has a complete, working script you
 can copy and change. [rhai.rs](https://rhai.rs) has the language reference if you want it.
 
-## The four extension points
+## The extension points
 
 | What | Where it goes | What the script decides |
 |---|---|---|
@@ -34,15 +34,17 @@ can copy and change. [rhai.rs](https://rhai.rs) has the language reference if yo
 | [**Context regions**](/docs/rhai-regions) | beside the agent, referenced by `script =` | How one region renders, accepts writes, and sheds content under pressure |
 | [**Stage hooks**](/docs/rhai-hooks) | beside the agent, referenced by `[stages.<name>.hooks]` | What happens at seven points in an agent's lifecycle - entering a stage, either side of an inference, before a tool call, and at the end |
 | [**Global tools**](/docs/rhai-tools) | `~/.leviath/tools/*.rhai`, or an agent's own `tools/` | A new tool, its schema, and what it does |
+| [**Output validators**](/docs/rhai-validators) | beside the agent, referenced by the stage's `[output]` block | Whether a submitted final output is accepted, and what the model is told when it is not |
 | [**Policy rules**](/docs/rhai-tools#policy-rules) | `rules/*.rhai` in your OS config dir, see [configuration](/docs/configuration#policytoml) | Whether a given tool call is allowed to fire |
 
 Each page walks its point end to end with a complete, copy-pasteable example.
 
 ## The sandbox they all share
 
-Every script runs in the same hardened engine: no `eval`, no `import`, no ambient filesystem or
+Every script runs in a hardened engine: no `eval`, no `import`, no ambient filesystem or
 network access, bounded operations and expression depth, a capped call depth, and `print`/`debug`
-muted. The host functions each extension point offers are the only way out of it, and they differ
+muted. The operation budget scales with the job: 500k operations for tool scripts and providers,
+100k for hooks, regions, and validators. The host functions each extension point offers are the only way out of it, and they differ
 by point:
 
 - Provider scripts get HTTP, JSON, SSE parsing, and encoding helpers, because mapping an API is
@@ -52,8 +54,9 @@ by point:
 - Region hooks and policy rules get **nothing**. They are pure data transforms over the `ctx` they
   are handed.
 
-Function and host-API names are matched exactly, so a typo is a hook that never fires rather than
-an error. `lev validate` and `lev tools` catch that before a run does.
+Names are matched exactly, and the match is enforced: a script missing the function its surface
+needs, or defining it with the wrong arity, fails at spawn with a compile error rather than
+silently never firing. `lev validate` and `lev tools` catch it before a run does.
 
 > [!WARNING]
 > A script tool can read environment variables, but a name that looks like a credential is refused
