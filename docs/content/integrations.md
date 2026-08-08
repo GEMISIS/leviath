@@ -8,9 +8,9 @@ order: 1
 
 # Running Leviath under another tool
 
-If you already use an orchestrator like [Gas City](/docs/gas-city) or [Smithy](/docs/smithy), you
-have something deciding *which* work happens: which issue gets picked up, which repo it runs in, who
-reviews the result. What you plug into it decides *how* one piece of that work actually gets done.
+If you already use an orchestrator like [Gas City](/docs/gas-city) or
+[OpenHands](https://docs.all-hands.dev/), you have something deciding *which* work happens: which
+issue gets picked up, which repo it runs in, who reviews the result. What you plug into it decides *how* one piece of that work actually gets done.
 
 That second job is what Leviath is. Your orchestrator keeps doing the coordinating. Leviath takes
 one task and runs it as a multi-stage agent with structured context, its own tools, and whichever
@@ -23,7 +23,7 @@ models you configured.
 
 ```mermaid
 flowchart TD
-  ORCH["Your orchestrator<br/>Gas City / Smithy / CI"]
+  ORCH["Your orchestrator<br/>Gas City / OpenHands / CI"]
   ORCH -->|"stdio JSON-RPC"| ACP["lev agent-client"]
   ORCH -->|"one process per job"| RUN["lev run"]
   ORCH -->|"HTTP + WebSocket"| API["lev serve"]
@@ -59,7 +59,7 @@ The [Gas City page](/docs/gas-city) covers what this looks like in practice.
 
 **The daemon outlives your command.** `lev run` hands the agent to a background
 [daemon](/docs/daemon) and returns. In a container that exits as soon as the command finishes, that
-is the wrong shape, and the [Smithy page](/docs/smithy) covers how to handle it.
+is the wrong shape, and [Containers and CI](/docs/containers) covers how to handle it.
 
 **Polling needs the right field.** If your side tracks slots and needs to know whether a run is
 still going, read [External work queues](/docs/work-queues) first. Two of the obvious fields to poll
@@ -73,8 +73,9 @@ It is worth saying where this does not pay off:
   Leviath earns its keep on work with several distinct phases, or on many agents at once.
 - **If your orchestration already lives in Python** and you want the workflow expressed in code
   rather than TOML, a framework you can import is a better fit than a separate runtime.
-- **If you need a hard boundary per agent**, note that Leviath runs many agents in one process. You
-  can put an agent in a [sandbox](/docs/security), but a process-per-agent tool gives you that
-  isolation without asking.
+- **If you need an OS boundary around every tool an agent has**, note that Leviath's opt-in
+  [sandbox](/docs/security) covers shell execution, and its file tools are path-confined rather
+  than containerized. Running the whole daemon in a container gives you the blanket boundary today,
+  and a container-per-job orchestrator gives you one per unit of work.
 
 [Where Leviath sits](/docs/comparison) goes into this properly.
