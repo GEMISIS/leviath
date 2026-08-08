@@ -31,7 +31,7 @@ impl StderrTail {
     fn push(&self, line: String) {
         // Poisoning would mean a panic while holding the lock; the only code
         // under it is a push/pop pair, so recover rather than propagate.
-        let mut buf = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut buf = leviath_core::sync::lock(&self.0);
         if buf.len() == STDERR_TAIL_LINES {
             buf.pop_front();
         }
@@ -40,7 +40,7 @@ impl StderrTail {
 
     /// The captured lines, newest last, or `None` if the server said nothing.
     pub(crate) fn snapshot(&self) -> Option<String> {
-        let buf = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let buf = leviath_core::sync::lock(&self.0);
         if buf.is_empty() {
             return None;
         }

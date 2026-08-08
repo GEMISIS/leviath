@@ -177,7 +177,7 @@ impl LaneInstruments {
             tools_parked: health.tools_parked as i64,
             dead_cycles: health.dead_cycles,
         };
-        let mut last = self.last.lock().expect("telemetry lane level lock");
+        let mut last = leviath_core::sync::lock(&self.last);
         self.tools_busy.add(now.tools_busy - last.tools_busy, &[]);
         self.tools_queued
             .add(now.tools_queued - last.tools_queued, &[]);
@@ -221,7 +221,7 @@ impl ProviderInstruments {
 
     fn record(&self, down: &[ProviderHealth]) {
         let now: HashSet<String> = down.iter().map(|p| p.provider.clone()).collect();
-        let mut last = self.last.lock().expect("telemetry provider level lock");
+        let mut last = leviath_core::sync::lock(&self.last);
         for p in down {
             let attrs = [KeyValue::new("leviath.provider", p.provider.clone())];
             if !last.contains(&p.provider) {
@@ -422,7 +422,7 @@ impl OtelSink {
     /// Emit a completed leaf span under the run's open stage (or, if no stage
     /// is open, under the run itself), spanning the last `duration_ms`.
     fn emit_leaf(&self, run_id: &str, name: &'static str, duration_ms: u64, attrs: Vec<KeyValue>) {
-        let mut open = self.open.lock().expect("telemetry span map lock");
+        let mut open = leviath_core::sync::lock(&self.open);
         let Some(run) = open.get_mut(run_id) else {
             return; // events for a run this sink never saw start
         };
@@ -476,10 +476,7 @@ impl TelemetrySink for OtelSink {
                 }
                 let span = self.start_span("agent.run", at_ms, attrs, None);
                 self.instruments.active.add(1, &[]);
-                self.open
-                    .lock()
-                    .expect("telemetry span map lock")
-                    .insert(run_id, OpenRun { span, stage: None });
+                leviath_core::sync::lock(&self.open).insert(run_id, OpenRun { span, stage: None });
             }
             TelemetryEvent::StageEntered {
                 run_id,
@@ -487,7 +484,7 @@ impl TelemetrySink for OtelSink {
                 stage_name,
                 at_ms,
             } => {
-                let mut open = self.open.lock().expect("telemetry span map lock");
+                let mut open = leviath_core::sync::lock(&self.open);
                 let Some(run) = open.get_mut(&run_id) else {
                     return;
                 };
@@ -515,7 +512,7 @@ impl TelemetrySink for OtelSink {
                 completion_tokens,
                 at_ms,
             } => {
-                let mut open = self.open.lock().expect("telemetry span map lock");
+                let mut open = leviath_core::sync::lock(&self.open);
                 let Some(run) = open.get_mut(&run_id) else {
                     return;
                 };
@@ -640,7 +637,7 @@ impl TelemetrySink for OtelSink {
                         KeyValue::new("leviath.empty_output", empty_output),
                     ],
                 );
-                let mut open = self.open.lock().expect("telemetry span map lock");
+                let mut open = leviath_core::sync::lock(&self.open);
                 let Some(mut run) = open.remove(&run_id) else {
                     return;
                 };
@@ -669,7 +666,7 @@ impl TelemetrySink for OtelSink {
                 kind,
                 line,
             } => {
-                let open = self.open.lock().expect("telemetry span map lock");
+                let open = leviath_core::sync::lock(&self.open);
                 let Some(run) = open.get(&run_id) else {
                     return;
                 };

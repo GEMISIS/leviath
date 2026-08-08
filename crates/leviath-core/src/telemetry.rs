@@ -278,20 +278,17 @@ pub struct MemorySink {
 impl MemorySink {
     /// A snapshot of everything emitted so far, in order.
     pub fn events(&self) -> Vec<TelemetryEvent> {
-        self.events.lock().expect("telemetry event lock").clone()
+        crate::sync::lock(&self.events).clone()
     }
 
     /// Every lane-health sample recorded so far, in order.
     pub fn lane_samples(&self) -> Vec<LaneHealth> {
-        self.lanes.lock().expect("telemetry lane lock").clone()
+        crate::sync::lock(&self.lanes).clone()
     }
 
     /// Every provider-health sample recorded so far, in order.
     pub fn provider_samples(&self) -> Vec<Vec<ProviderHealth>> {
-        self.providers
-            .lock()
-            .expect("telemetry provider lock")
-            .clone()
+        crate::sync::lock(&self.providers).clone()
     }
 
     /// How many times `force_flush` was called.
@@ -302,21 +299,15 @@ impl MemorySink {
 
 impl TelemetrySink for MemorySink {
     fn emit(&self, event: TelemetryEvent) {
-        self.events
-            .lock()
-            .expect("telemetry event lock")
-            .push(event);
+        crate::sync::lock(&self.events).push(event);
     }
 
     fn observe_lanes(&self, health: LaneHealth) {
-        self.lanes.lock().expect("telemetry lane lock").push(health);
+        crate::sync::lock(&self.lanes).push(health);
     }
 
     fn observe_providers(&self, down: &[ProviderHealth]) {
-        self.providers
-            .lock()
-            .expect("telemetry provider lock")
-            .push(down.to_vec());
+        crate::sync::lock(&self.providers).push(down.to_vec());
     }
 
     fn force_flush(&self) {
