@@ -108,7 +108,7 @@ impl GeminiProvider {
                 "https://generativelanguage.googleapis.com/v1beta/openai".to_string()
             }),
             rate_limiter,
-            capability_overrides: HashMap::new(),
+            capability_overrides: config.model_capabilities,
         }
     }
 

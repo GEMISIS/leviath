@@ -34,10 +34,25 @@ pub fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
         // providers the user skipped, and registering one produces a provider
         // that authenticates as nobody and fails at the first call.
         if let Some(key) = key.map(str::trim).filter(|k| !k.is_empty()) {
+            // Generic base_url comes from [model_providers.<name>] - no per-provider fields.
+            // Env fallback lets enterprise proxy work without a file: ANTHROPIC_BASE_URL etc.
+            let base_url = config
+                .model_providers
+                .get(name)
+                .and_then(|mp| mp.base_url.clone())
+                .or_else(|| match name {
+                    "anthropic" => std::env::var("ANTHROPIC_BASE_URL").ok(),
+                    "openai" => std::env::var("OPENAI_BASE_URL").ok(),
+                    "google" => std::env::var("GOOGLE_BASE_URL").ok(),
+                    "openrouter" => std::env::var("OPENROUTER_BASE_URL").ok(),
+                    _ => None,
+                })
+                .map(|u| u.trim().to_string())
+                .filter(|u| !u.is_empty());
             creds.push(ProviderCreds {
                 name: name.to_string(),
                 api_key: Some(key.to_string()),
-                base_url: None,
+                base_url,
                 model_capabilities: caps.clone(),
                 request_timeout_secs: timeout,
                 rate_limit: config.rate_limits.get(name).cloned(),

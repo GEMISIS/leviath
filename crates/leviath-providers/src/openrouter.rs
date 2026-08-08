@@ -54,7 +54,7 @@ impl OpenRouterProvider {
                 .base_url
                 .unwrap_or_else(|| "https://openrouter.ai/api/v1".to_string()),
             rate_limiter,
-            capability_overrides: HashMap::new(),
+            capability_overrides: config.model_capabilities,
         }
     }
 

@@ -597,6 +597,10 @@ pub struct ProviderConfig {
     /// Default is None (no timeout).
     #[serde(default)]
     pub request_timeout_secs: Option<u64>,
+
+    /// Per-model capability overrides forwarded to the provider.
+    #[serde(default)]
+    pub model_capabilities: std::collections::HashMap<String, ModelCapabilities>,
 }
 
 /// Rate limit configuration.

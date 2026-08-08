@@ -139,52 +139,72 @@ pub fn build_provider_registry_with(
         match c.name.as_str() {
             "anthropic" => {
                 if let Some(ref key) = c.api_key {
+                    let cfg = leviath_providers::ProviderConfig {
+                        api_key: key.clone(),
+                        base_url: c.base_url.clone(),
+                        rate_limit: c.rate_limit.clone(),
+                        request_timeout_secs: timeout,
+                        model_capabilities: caps.clone(),
+                    };
                     registry.register(
                         "anthropic".to_string(),
-                        Arc::new(leviath_providers::AnthropicProvider::with_overrides(
+                        Arc::new(leviath_providers::AnthropicProvider::with_config(
                             clients.get_or_build(timeout, build_client)?,
-                            key.clone(),
-                            caps,
-                            c.rate_limit.as_ref(),
+                            cfg,
                         )),
                     );
                 }
             }
             "openai" => {
                 if let Some(ref key) = c.api_key {
+                    let cfg = leviath_providers::ProviderConfig {
+                        api_key: key.clone(),
+                        base_url: c.base_url.clone(),
+                        rate_limit: c.rate_limit.clone(),
+                        request_timeout_secs: timeout,
+                        model_capabilities: caps.clone(),
+                    };
                     registry.register(
                         "openai".to_string(),
-                        Arc::new(leviath_providers::OpenAIProvider::with_overrides(
+                        Arc::new(leviath_providers::OpenAIProvider::with_config(
                             clients.get_or_build(timeout, build_client)?,
-                            key.clone(),
-                            caps,
-                            c.rate_limit.as_ref(),
+                            cfg,
                         )),
                     );
                 }
             }
             "google" => {
                 if let Some(ref key) = c.api_key {
+                    let cfg = leviath_providers::ProviderConfig {
+                        api_key: key.clone(),
+                        base_url: c.base_url.clone(),
+                        rate_limit: c.rate_limit.clone(),
+                        request_timeout_secs: timeout,
+                        model_capabilities: caps.clone(),
+                    };
                     registry.register(
                         "google".to_string(),
-                        Arc::new(leviath_providers::GeminiProvider::with_overrides(
+                        Arc::new(leviath_providers::GeminiProvider::with_config(
                             clients.get_or_build(timeout, build_client)?,
-                            key.clone(),
-                            caps,
-                            c.rate_limit.as_ref(),
+                            cfg,
                         )),
                     );
                 }
             }
             "openrouter" => {
                 if let Some(ref key) = c.api_key {
+                    let cfg = leviath_providers::ProviderConfig {
+                        api_key: key.clone(),
+                        base_url: c.base_url.clone(),
+                        rate_limit: c.rate_limit.clone(),
+                        request_timeout_secs: timeout,
+                        model_capabilities: caps.clone(),
+                    };
                     registry.register(
                         "openrouter".to_string(),
-                        Arc::new(leviath_providers::OpenRouterProvider::with_overrides(
+                        Arc::new(leviath_providers::OpenRouterProvider::with_config(
                             clients.get_or_build(timeout, build_client)?,
-                            key.clone(),
-                            caps,
-                            c.rate_limit.as_ref(),
+                            cfg,
                         )),
                     );
                 }
