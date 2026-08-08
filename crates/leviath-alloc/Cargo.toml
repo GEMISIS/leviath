@@ -2,6 +2,14 @@
 # it exists to hold a single audited `unsafe` FFI call into mimalloc that has
 # no safe wrapper anywhere on crates.io (see src/lib.rs for the full audit
 # note). Everything else in the workspace stays under `unsafe_code = "forbid"`.
+#
+# `unsafe_code` is `forbid` at the workspace root, and `forbid` cannot be lifted
+# by an attribute at the call site - that is the whole point of it - so this
+# crate cannot inherit the table and must restate it. Cargo rejects inheriting
+# and overriding at once ("cannot override `workspace.lints` in `lints`"), which
+# is why the lint tables below are a copy rather than a delta. Keep them in step
+# with `[workspace.lints]` in the root manifest, minus `unsafe_code`; `cargo
+# xtask structure` fails if they drift.
 [package]
 name = "leviath-alloc"
 description = "Allocator tuning for the leviath binary: one audited mimalloc option call"
@@ -22,3 +30,15 @@ libmimalloc-sys = { version = "0.1", features = ["extended"], optional = true }
 
 [dev-dependencies]
 temp-env = { workspace = true }
+
+# A copy of `[workspace.lints]` minus `unsafe_code`, for the reason in the
+# header note. Without this the crate inherited *nothing*, so `missing_docs` and
+# `clippy::string_slice` did not apply to it either - a wider hole than the one
+# opt-out it was documented as.
+[lints.rust]
+missing_docs = "warn"
+
+[lints.clippy]
+string_slice = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"

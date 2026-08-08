@@ -134,3 +134,77 @@ fn the_workspace_itself_passes_the_rule() {
     let over: Vec<&Measured> = measured.iter().filter(|m| m.is_over()).collect();
     assert!(over.is_empty(), "over the limit: {over:?}");
 }
+
+// ─── Every crate carries the workspace lints ────────────────────────────────
+
+const ROOT: &str = r#"
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+# a comment, which is not a lint
+string_slice = "deny"
+
+[workspace.dependencies]
+anyhow = "1"
+"#;
+
+#[test]
+fn a_crate_inheriting_the_table_is_fine() {
+    let crates = [(
+        "leviath-core".to_string(),
+        "[lints]\nworkspace = true\n".to_string(),
+    )];
+    assert!(lint_gaps(ROOT, &crates).is_empty());
+}
+
+#[test]
+fn a_crate_with_no_lints_table_is_reported() {
+    let crates = [(
+        "leviath-core".to_string(),
+        "[package]\nname = \"x\"\n".to_string(),
+    )];
+    let gaps = lint_gaps(ROOT, &crates);
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert!(
+        gaps[0].contains("none of the workspace lints apply"),
+        "{gaps:?}"
+    );
+}
+
+#[test]
+fn the_opted_out_crate_may_drop_only_its_one_exemption() {
+    // Restates everything except `unsafe_code`: allowed.
+    let complete =
+        "[lints.rust]\nmissing_docs = \"warn\"\n\n[lints.clippy]\nstring_slice = \"deny\"\n";
+    let crates = [("leviath-alloc".to_string(), complete.to_string())];
+    assert!(lint_gaps(ROOT, &crates).is_empty());
+
+    // Drops a second lint as well: reported, and named.
+    let short = "[lints.rust]\nmissing_docs = \"warn\"\n";
+    let crates = [("leviath-alloc".to_string(), short.to_string())];
+    let gaps = lint_gaps(ROOT, &crates);
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert!(gaps[0].contains("string_slice"), "{gaps:?}");
+    assert!(
+        gaps[0].contains("only exempt from `unsafe_code`"),
+        "{gaps:?}"
+    );
+}
+
+/// The rule has to hold against the real manifests, or it is decorative.
+#[test]
+fn the_workspace_itself_carries_the_lints_everywhere() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask sits under the workspace root");
+    std::env::set_current_dir(root).expect("chdir to the workspace root");
+
+    let manifests = crate_manifests().expect("crates/ should be readable");
+    assert!(manifests.len() > 5, "only found {} crates", manifests.len());
+    let root_manifest =
+        std::fs::read_to_string("Cargo.toml").expect("the root manifest should be readable");
+    let gaps = lint_gaps(&root_manifest, &manifests);
+    assert!(gaps.is_empty(), "{gaps:?}");
+}
