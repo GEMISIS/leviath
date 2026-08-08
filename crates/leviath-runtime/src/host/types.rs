@@ -10,6 +10,8 @@
 use std::collections::HashMap;
 
 use bevy_ecs::entity::Entity;
+
+use crate::world::AgentId;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
@@ -226,7 +228,7 @@ pub type Spawner = Box<dyn FnMut(&mut PipelineWorld, &SpawnArgs) -> Result<Entit
 /// control/sub-agent op targeting a run that isn't currently in memory pages it
 /// in first via the host's internal resolve-or-reload step. Installed with
 /// [`super::WorldHost::set_reloader`].
-pub type Reloader = Box<dyn FnMut(&mut PipelineWorld, &str) -> Option<Entity> + Send>;
+pub type Reloader = Box<dyn FnMut(&mut PipelineWorld, &str) -> Option<AgentId> + Send>;
 
 /// The daemon-installed last resort for cancelling a run the world cannot hold:
 /// given a run id, it forces that run's **on-disk** state to a terminal status

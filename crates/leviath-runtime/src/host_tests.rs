@@ -10,6 +10,7 @@
 //! (see CONTRIBUTING, "Where a test module lives").
 
 use super::*;
+use crate::world::AgentId;
 // Named here rather than inherited through `super::*`: the host itself no
 // longer mentions these (the types that do moved into `host::types`), so
 // leaning on the parent's imports would mean re-adding two it does not use.
@@ -175,7 +176,7 @@ fn setup() -> StageSetup {
 }
 
 /// Spawn a simple agent into the host and register it under `run_id`.
-fn spawn(host: &mut WorldHost, run_id: &str, agent_id: &str) -> Entity {
+fn spawn(host: &mut WorldHost, run_id: &str, agent_id: &str) -> AgentId {
     let e = host.world_mut().spawn_agent((
         AgentBlueprint(blueprint()),
         StageCursor { index: 0 },
@@ -356,12 +357,15 @@ async fn releasing_a_cancelled_runs_permit_wakes_the_starved_agent_behind_it() {
     // single permit is decided here rather than by the parallel dispatch.
     let holder = spawn(&mut host, "run-a", "agent-a");
     host.world_mut().run_to_fixed_point();
-    assert!(is_inferring(&mut host, holder), "the holder takes the slot");
+    assert!(
+        is_inferring(&mut host, holder.entity()),
+        "the holder takes the slot"
+    );
 
     let starved = spawn(&mut host, "run-b", "agent-b");
     host.world_mut().run_to_fixed_point();
     assert!(
-        !is_inferring(&mut host, starved),
+        !is_inferring(&mut host, starved.entity()),
         "the second agent is starved on the full pool"
     );
     // And it stays starved for as long as the slot is genuinely held - the
@@ -369,7 +373,7 @@ async fn releasing_a_cancelled_runs_permit_wakes_the_starved_agent_behind_it() {
     // first park consumes the wake the spawn itself stored; the loop has to
     // reach a park with nothing pending before "wedged" means anything.
     assert!(
-        !serve_until_inferring(&mut host, 3, PARK, starved).await,
+        !serve_until_inferring(&mut host, 3, PARK, starved.entity()).await,
         "no slot, no dispatch"
     );
 
@@ -384,7 +388,7 @@ async fn releasing_a_cancelled_runs_permit_wakes_the_starved_agent_behind_it() {
     );
 
     assert!(
-        serve_until_inferring(&mut host, 8, PARK, starved).await,
+        serve_until_inferring(&mut host, 8, PARK, starved.entity()).await,
         "the freed slot must wake the loop so the starved agent can take it; \
          without that wake the daemon parks with capacity it cannot see"
     );
@@ -477,7 +481,7 @@ fn spawn_two_stage(host: &mut WorldHost, run_id: &str, agent_id: &str) -> Entity
         ReadyToInfer,
     ));
     host.register(run_id, e);
-    e
+    e.entity()
 }
 
 /// A response that asks for one tool call - what a working stage returns
@@ -613,7 +617,7 @@ async fn a_run_that_moves_clears_the_dead_cycle_count() {
     // is built to notice.
     host.world_mut()
         .world_mut()
-        .get_mut::<AgentState>(entity)
+        .get_mut::<AgentState>(entity.entity())
         .expect("the agent is loaded")
         .iteration += 1;
     host.emit_events();
@@ -1049,7 +1053,7 @@ async fn result_reports_the_submitted_answer() {
 
     host.world_mut()
         .world_mut()
-        .entity_mut(e)
+        .entity_mut(e.entity())
         .insert(crate::persistence::FinalOutput(
             leviath_core::output::FinalOutput::new(
                 "<report/>",
@@ -1111,13 +1115,16 @@ async fn a_persisted_paused_root_is_parked_and_pages_back_in() {
     // Stamp the watermark as though the paused snapshot was dispatched.
     let mut wm = crate::pipeline::PersistWatermark::default();
     wm.stamp_status(leviath_core::run_meta::RunStatus::Paused);
-    host.world_mut().world_mut().entity_mut(e).insert(wm);
+    host.world_mut()
+        .world_mut()
+        .entity_mut(e.entity())
+        .insert(wm);
 
     host.emit_events();
 
     // Paged out: the entity is despawned, the run id unmapped, and the
     // reap hook tore the agent's state down first.
-    assert!(host.world.world().get::<AgentState>(e).is_none());
+    assert!(host.world.world().get::<AgentState>(e.entity()).is_none());
     assert!(!host.by_run_id.contains_key("run-a"));
     assert_eq!(*reaped.lock().unwrap(), 1);
     // But not lost: the listing still carries the paused row...
@@ -1167,14 +1174,14 @@ async fn a_paused_run_stays_resident_until_persisted_and_when_linked() {
     // Paused, but no watermark proof the paused snapshot was dispatched.
     host.emit_events();
     assert!(
-        host.world.world().get::<AgentState>(e).is_some(),
+        host.world.world().get::<AgentState>(e.entity()).is_some(),
         "an unpersisted pause stays resident"
     );
 
     // Persisted now, but carrying a child link: still resident.
     let mut wm = crate::pipeline::PersistWatermark::default();
     wm.stamp_status(leviath_core::run_meta::RunStatus::Paused);
-    host.world_mut().world_mut().entity_mut(e).insert((
+    host.world_mut().world_mut().entity_mut(e.entity()).insert((
         wm,
         SubAgentChildren {
             children: vec![],
@@ -1183,7 +1190,7 @@ async fn a_paused_run_stays_resident_until_persisted_and_when_linked() {
     ));
     host.emit_events();
     assert!(
-        host.world.world().get::<AgentState>(e).is_some(),
+        host.world.world().get::<AgentState>(e.entity()).is_some(),
         "a run with tree links keeps the restart question open"
     );
 
@@ -1191,11 +1198,11 @@ async fn a_paused_run_stays_resident_until_persisted_and_when_linked() {
     // the park teardown's no-reaper path is exercised too.
     host.world_mut()
         .world_mut()
-        .entity_mut(e)
+        .entity_mut(e.entity())
         .remove::<SubAgentChildren>();
     host.emit_events();
     assert!(
-        host.world.world().get::<AgentState>(e).is_none(),
+        host.world.world().get::<AgentState>(e.entity()).is_none(),
         "unlinked and persisted: parked without a reaper"
     );
     assert!(host.parked.contains_key("run-a"));
@@ -1278,7 +1285,7 @@ async fn pause_resume_cancel_by_run_id() {
 async fn spawn_op_uses_installed_spawner_and_registers() {
     let mut host = host_with(vec![]);
     host.set_spawner(Box::new(|world, args| {
-        Ok(world.spawn_agent((agent_state(&args.run_id),)))
+        Ok(world.spawn_agent((agent_state(&args.run_id),)).entity())
     }));
 
     let result = ask(&mut host, |reply| ControlOp::Spawn {
@@ -1359,7 +1366,7 @@ async fn ask_sub<T>(
 
 /// A spawner that adds a bare child agent and returns it.
 fn child_spawner() -> Spawner {
-    Box::new(|world, args| Ok(world.spawn_agent((agent_state(&args.run_id),))))
+    Box::new(|world, args| Ok(world.spawn_agent((agent_state(&args.run_id),)).entity()))
 }
 
 #[tokio::test]
@@ -1382,12 +1389,16 @@ async fn subagent_spawn_links_child_and_registers() {
 
     let child = host.by_run_id["child"];
     // The child links back to the parent at depth 1.
-    let pref = host.world.world().get::<ParentRef>(child).unwrap();
-    assert_eq!(pref.parent_entity, parent);
+    let pref = host.world.world().get::<ParentRef>(child.entity()).unwrap();
+    assert_eq!(pref.parent_entity, parent.entity());
     assert_eq!(pref.depth, 1);
     // The parent tracks the child.
-    let kids = host.world.world().get::<SubAgentChildren>(parent).unwrap();
-    assert_eq!(kids.children, vec![child]);
+    let kids = host
+        .world
+        .world()
+        .get::<SubAgentChildren>(parent.entity())
+        .unwrap();
+    assert_eq!(kids.children, vec![child.entity()]);
 }
 
 #[tokio::test]
@@ -1409,7 +1420,11 @@ async fn subagent_spawn_appends_to_existing_children() {
         assert!(r.is_ok());
     }
     let parent = host.by_run_id["parent"];
-    let kids = host.world.world().get::<SubAgentChildren>(parent).unwrap();
+    let kids = host
+        .world
+        .world()
+        .get::<SubAgentChildren>(parent.entity())
+        .unwrap();
     assert_eq!(kids.children.len(), 2);
 }
 
@@ -1480,7 +1495,7 @@ async fn subagent_check_carries_the_childs_submitted_answer() {
     let entity = spawn(&mut host, "run-a", "run-a");
     host.world
         .world_mut()
-        .entity_mut(entity)
+        .entity_mut(entity.entity())
         .insert(crate::persistence::FinalOutput(
             leviath_core::output::FinalOutput::new(
                 "changed src/lib.rs and its test",
@@ -1540,9 +1555,9 @@ async fn subagent_ops_reach_a_run_the_caller_spawned() {
     let child = spawn(&mut host, "child", "child");
     host.world_mut()
         .world_mut()
-        .entity_mut(parent)
+        .entity_mut(parent.entity())
         .insert(SubAgentChildren {
-            children: vec![child],
+            children: vec![child.entity()],
             max_child_depth: 3,
         });
 
@@ -1619,7 +1634,7 @@ async fn subagent_send_delivers_into_the_target_region() {
     let e = spawn(&mut host, "run-a", "run-a");
     host.world
         .world_mut()
-        .get_mut::<crate::components::ContextWindow>(e)
+        .get_mut::<crate::components::ContextWindow>(e.entity())
         .unwrap()
         .add_region(Region::new(
             "notes".to_string(),
@@ -1641,7 +1656,7 @@ async fn subagent_send_delivers_into_the_target_region() {
     let window = host
         .world
         .world()
-        .get::<crate::components::ContextWindow>(e)
+        .get::<crate::components::ContextWindow>(e.entity())
         .unwrap();
     assert!(window.get_region("notes").unwrap().current_tokens > 0);
     assert_eq!(window.get_region("conversation").unwrap().current_tokens, 0);
@@ -1734,12 +1749,12 @@ async fn cancel_tolerates_a_child_that_has_already_been_reaped() {
     let ghost = host.world_mut().spawn_agent((agent_state("ghost"),));
     host.world_mut()
         .world_mut()
-        .entity_mut(parent)
+        .entity_mut(parent.entity())
         .insert(SubAgentChildren {
-            children: vec![ghost],
+            children: vec![ghost.entity()],
             max_child_depth: 3,
         });
-    host.world_mut().world_mut().despawn(ghost);
+    host.world_mut().world_mut().despawn(ghost.entity());
 
     assert!(
         ask(&mut host, |reply| ControlOp::Cancel {
@@ -2001,7 +2016,7 @@ async fn message_op_is_delivered() {
     assert!(
         host.world
             .world()
-            .get::<crate::components::ContextWindow>(e)
+            .get::<crate::components::ContextWindow>(e.entity())
             .unwrap()
             .get_region("conversation")
             .unwrap()
@@ -2067,7 +2082,7 @@ async fn serve_awaits_spawn_preprocessor_before_spawning() {
     host.set_spawner(Box::new(move |world, args| {
         // The preprocessor must have completed before the spawner runs.
         assert!(ran_spawn.load(Ordering::SeqCst));
-        Ok(world.spawn_agent((agent_state(&args.run_id),)))
+        Ok(world.spawn_agent((agent_state(&args.run_id),)).entity())
     }));
     let (op_tx, op_rx) = mpsc::unbounded_channel();
     let handle = tokio::spawn(async move {
@@ -2157,7 +2172,7 @@ async fn serve_spawns_without_a_preprocessor() {
     // `None` arm of the preprocessor branch.
     let mut host = host_with(vec![]);
     host.set_spawner(Box::new(|world, args| {
-        Ok(world.spawn_agent((agent_state(&args.run_id),)))
+        Ok(world.spawn_agent((agent_state(&args.run_id),)).entity())
     }));
     let (op_tx, op_rx) = mpsc::unbounded_channel();
     let handle = tokio::spawn(async move {
@@ -2253,7 +2268,7 @@ async fn a_completed_event_carries_the_answer() {
     let entity = spawn(&mut host, "run-out", "agent-out");
     host.world_mut()
         .world_mut()
-        .entity_mut(entity)
+        .entity_mut(entity.entity())
         .insert(crate::persistence::FinalOutput(
             leviath_core::output::FinalOutput::new(
                 "what the run concluded",
@@ -2306,7 +2321,7 @@ async fn emit_events_broadcasts_agent_changes() {
     // Attach run metadata so the `Spawned` event carries the blueprint name.
     host.world_mut()
         .world_mut()
-        .entity_mut(entity)
+        .entity_mut(entity.entity())
         .insert(RunMetadata {
             run_id: "run-a".to_string(),
             agent_name: "coder".to_string(),
@@ -2372,7 +2387,10 @@ async fn emit_events_unloads_terminal_agents_when_safe() {
     let root = {
         let mut s = agent_state("root");
         s.status = AgentStatus::Complete;
-        host.world.world_mut().spawn(s).id()
+        {
+            let e = host.world.world_mut().spawn(s).id();
+            host.world.own_agent(e)
+        }
     };
     host.register("root", root);
     host.emit_events();
@@ -2383,27 +2401,36 @@ async fn emit_events_unloads_terminal_agents_when_safe() {
     host.emit_events();
     assert!(host.live_entity("root").is_none(), "reaped after emit");
     assert!(
-        host.world.world().get::<AgentState>(root).is_none(),
+        host.world
+            .world()
+            .get::<AgentState>(root.entity())
+            .is_none(),
         "entity despawned"
     );
 
     // A terminal child under a LIVE (Active) parent is deferred.
-    let parent = host.world.world_mut().spawn(agent_state("parent")).id();
+    let parent = {
+        let e = host.world.world_mut().spawn(agent_state("parent")).id();
+        host.world.own_agent(e)
+    };
     host.register("parent", parent);
     let child = {
         let mut s = agent_state("child");
         s.status = AgentStatus::Complete;
-        host.world
+        let e = host
+            .world
             .world_mut()
             .spawn((
                 s,
                 ParentRef {
-                    parent_entity: parent,
+                    // `ParentRef` links are raw entities within one world.
+                    parent_entity: parent.entity(),
                     parent_agent_id: "parent".to_string(),
                     depth: 1,
                 },
             ))
-            .id()
+            .id();
+        host.world.own_agent(e)
     };
     host.register("child", child);
     host.emit_events();
@@ -2416,7 +2443,7 @@ async fn emit_events_unloads_terminal_agents_when_safe() {
     // Once the parent is terminal, the child becomes reapable.
     host.world
         .world_mut()
-        .get_mut::<AgentState>(parent)
+        .get_mut::<AgentState>(parent.entity())
         .unwrap()
         .status = AgentStatus::Complete;
     host.emit_events();
@@ -2432,7 +2459,8 @@ async fn emit_events_unloads_terminal_agents_when_safe() {
     let orphan = {
         let mut s = agent_state("orphan");
         s.status = AgentStatus::Complete;
-        host.world
+        let e = host
+            .world
             .world_mut()
             .spawn((
                 s,
@@ -2442,7 +2470,8 @@ async fn emit_events_unloads_terminal_agents_when_safe() {
                     depth: 1,
                 },
             ))
-            .id()
+            .id();
+        host.world.own_agent(e)
     };
     host.register("orphan", orphan);
     host.emit_events();
@@ -2456,7 +2485,10 @@ async fn emit_events_unloads_terminal_agents_when_safe() {
 #[tokio::test]
 async fn emit_events_does_not_reap_non_terminal_agents() {
     let mut host = host_with(vec![]);
-    let active = host.world.world_mut().spawn(agent_state("active")).id();
+    let active = {
+        let e = host.world.world_mut().spawn(agent_state("active")).id();
+        host.world.own_agent(e)
+    };
     host.register("active", active);
     host.emit_events();
     host.emit_events();
@@ -2482,7 +2514,10 @@ async fn reaper_runs_once_per_agent_before_despawn() {
     let root = {
         let mut s = agent_state("root");
         s.status = AgentStatus::Complete;
-        host.world.world_mut().spawn(s).id()
+        {
+            let e = host.world.world_mut().spawn(s).id();
+            host.world.own_agent(e)
+        }
     };
     host.register("root", root);
     host.emit_events(); // first pass: emit terminal event, not yet reaped
@@ -2503,7 +2538,10 @@ async fn reaper_runs_once_per_agent_before_despawn() {
 fn unload_with(host: &mut WorldHost, run_id: &str, status: AgentStatus) {
     let mut s = agent_state(run_id);
     s.status = status;
-    let e = host.world.world_mut().spawn(s).id();
+    let e = {
+        let e = host.world.world_mut().spawn(s).id();
+        host.world.own_agent(e)
+    };
     host.register(run_id, e);
     host.emit_events();
     host.emit_events();
@@ -2639,10 +2677,13 @@ async fn the_status_of_an_unloaded_run_is_still_answerable() {
 
 /// Spawn a `Waiting` agent (optionally with an extra marker component) and
 /// register it under `run_id`.
-fn register_waiting(host: &mut WorldHost, run_id: &str) -> Entity {
+fn register_waiting(host: &mut WorldHost, run_id: &str) -> AgentId {
     let mut s = agent_state(run_id);
     s.status = AgentStatus::Waiting;
-    let e = host.world.world_mut().spawn(s).id();
+    let e = {
+        let e = host.world.world_mut().spawn(s).id();
+        host.world.own_agent(e)
+    };
     host.register(run_id, e);
     e
 }
@@ -2663,13 +2704,13 @@ async fn emit_events_never_unloads_waiting_agents() {
     let asking = register_waiting(&mut host, "asking");
     host.world
         .world_mut()
-        .entity_mut(asking)
+        .entity_mut(asking.entity())
         .insert(AwaitingInteraction);
     // Gated on children, and a plain parked agent.
     let gated = register_waiting(&mut host, "gated");
     host.world
         .world_mut()
-        .entity_mut(gated)
+        .entity_mut(gated.entity())
         .insert(WaitingForChildren);
     register_waiting(&mut host, "parked");
 
@@ -2787,7 +2828,7 @@ async fn event_sender_feeds_subscribers() {
 async fn emit_events_skips_despawned_agents() {
     let mut host = host_with(vec![]);
     let e = spawn(&mut host, "run-a", "agent-a");
-    host.world_mut().world_mut().despawn(e);
+    host.world_mut().world_mut().despawn(e.entity());
     // The stale run-id mapping is skipped; must not panic.
     host.emit_events();
 }
@@ -2841,7 +2882,7 @@ async fn list_skips_despawned_entity() {
     let mut host = host_with(vec![]);
     let e = spawn(&mut host, "run-a", "agent-a");
     // Despawn the entity behind the world's back; the run-id map is now stale.
-    host.world_mut().world_mut().despawn(e);
+    host.world_mut().world_mut().despawn(e.entity());
 
     let list = ask(&mut host, |reply| ControlOp::List { reply }).await.runs;
     assert!(list.is_empty()); // stale mapping filtered out
@@ -2882,9 +2923,9 @@ async fn wait_reason_is_none_unless_the_agent_is_waiting() {
     let e = spawn(&mut host, "run-a", "run-a");
     host.world_mut()
         .world_mut()
-        .entity_mut(e)
+        .entity_mut(e.entity())
         .insert(crate::pipeline::WaitingForChildren);
-    assert_eq!(host.wait_reason(e), None);
+    assert_eq!(host.wait_reason(e.entity()), None);
 }
 
 /// An entity the world no longer holds cannot be explained either.
@@ -2892,8 +2933,8 @@ async fn wait_reason_is_none_unless_the_agent_is_waiting() {
 async fn wait_reason_is_none_for_an_unknown_entity() {
     let mut host = host_with(vec![]);
     let e = spawn(&mut host, "run-a", "run-a");
-    host.world_mut().world_mut().despawn(e);
-    assert_eq!(host.wait_reason(e), None);
+    host.world_mut().world_mut().despawn(e.entity());
+    assert_eq!(host.wait_reason(e.entity()), None);
 }
 
 /// `Waiting` with nothing claiming it: report nothing rather than guess.
@@ -2901,14 +2942,14 @@ async fn wait_reason_is_none_for_an_unknown_entity() {
 async fn wait_reason_is_none_when_nothing_claims_the_wait() {
     let mut host = host_with(vec![]);
     let e = spawn(&mut host, "run-a", "run-a");
-    assert_eq!(waiting_because(&mut host, e, |_| {}), None);
+    assert_eq!(waiting_because(&mut host, e.entity(), |_| {}), None);
 }
 
 #[tokio::test]
 async fn wait_reason_reports_a_taint_gate() {
     let mut host = host_with(vec![]);
     let e = spawn(&mut host, "run-a", "run-a");
-    let reason = waiting_because(&mut host, e, |entity| {
+    let reason = waiting_because(&mut host, e.entity(), |entity| {
         entity.insert(crate::gate_prompt::AwaitingGatePrompt(1));
     });
     assert_eq!(reason, Some(WaitReason::TaintGate));
@@ -2918,7 +2959,7 @@ async fn wait_reason_reports_a_taint_gate() {
 async fn wait_reason_reports_an_interaction_point() {
     let mut host = host_with(vec![]);
     let e = spawn(&mut host, "run-a", "run-a");
-    let reason = waiting_because(&mut host, e, |entity| {
+    let reason = waiting_because(&mut host, e.entity(), |entity| {
         entity.insert(crate::interaction_points::AwaitingInteractionPoint);
     });
     assert_eq!(reason, Some(WaitReason::InteractionPoint));
@@ -2935,15 +2976,15 @@ async fn wait_reason_counts_unfinished_children() {
     {
         let world = host.world_mut().world_mut();
         world
-            .get_mut::<AgentState>(done)
+            .get_mut::<AgentState>(done.entity())
             .expect("child has state")
             .status = AgentStatus::Complete;
     }
-    let reason = waiting_because(&mut host, parent, |entity| {
+    let reason = waiting_because(&mut host, parent.entity(), |entity| {
         entity.insert((
             crate::pipeline::WaitingForChildren,
             SubAgentChildren {
-                children: vec![running, done],
+                children: vec![running.entity(), done.entity()],
                 max_child_depth: 3,
             },
         ));
@@ -2957,7 +2998,7 @@ async fn wait_reason_counts_unfinished_children() {
 async fn wait_reason_reports_children_with_none_recorded() {
     let mut host = host_with(vec![]);
     let e = spawn(&mut host, "run-a", "run-a");
-    let reason = waiting_because(&mut host, e, |entity| {
+    let reason = waiting_because(&mut host, e.entity(), |entity| {
         entity.insert(crate::pipeline::WaitingForChildren);
     });
     assert_eq!(reason, Some(WaitReason::Children { outstanding: 0 }));
@@ -3010,7 +3051,7 @@ async fn wait_reason_distinguishes_a_tool_approval_from_a_question() {
         ),
     );
     await_pending(&host, "run-a").await;
-    let reason = waiting_because(&mut host, e, |entity| {
+    let reason = waiting_because(&mut host, e.entity(), |entity| {
         entity.insert(AwaitingInteraction);
     });
     assert_eq!(reason, Some(WaitReason::ToolApproval));
@@ -3025,7 +3066,7 @@ async fn wait_reason_distinguishes_a_tool_approval_from_a_question() {
         InteractionRequest::free_text("req-2", "which one?", "implement", true),
     );
     await_pending(&host, "run-a").await;
-    assert_eq!(host.wait_reason(e), Some(WaitReason::UserPrompt));
+    assert_eq!(host.wait_reason(e.entity()), Some(WaitReason::UserPrompt));
     assert_eq!(host.interactions().cancel_for_agent("run-a"), 1);
     question.await.expect("the asking task finishes");
 }
@@ -3036,7 +3077,7 @@ async fn wait_reason_distinguishes_a_tool_approval_from_a_question() {
 async fn wait_reason_falls_back_to_user_prompt_without_a_hub_entry() {
     let mut host = host_with(vec![]);
     let e = spawn(&mut host, "run-a", "run-a");
-    let reason = waiting_because(&mut host, e, |entity| {
+    let reason = waiting_because(&mut host, e.entity(), |entity| {
         entity.insert(AwaitingInteraction);
     });
     assert_eq!(reason, Some(WaitReason::UserPrompt));
@@ -3049,7 +3090,7 @@ async fn wait_reason_falls_back_to_user_prompt_without_a_hub_entry() {
 async fn a_gate_outranks_the_generic_interaction_marker() {
     let mut host = host_with(vec![]);
     let e = spawn(&mut host, "run-a", "run-a");
-    let reason = waiting_because(&mut host, e, |entity| {
+    let reason = waiting_because(&mut host, e.entity(), |entity| {
         entity.insert((
             AwaitingInteraction,
             crate::gate_prompt::AwaitingGatePrompt(1),
@@ -3068,13 +3109,13 @@ async fn wait_reason_counts_outstanding_fan_out_workers() {
     {
         let world = host.world_mut().world_mut();
         world
-            .get_mut::<AgentState>(parent)
+            .get_mut::<AgentState>(parent.entity())
             .expect("parent has state")
             .status = AgentStatus::Waiting;
         // One worker in flight and two items not yet started ⇒ three left.
         crate::fanout::restore_fan_out_waiting(
             world,
-            parent,
+            parent.entity(),
             crate::fanout::FanOutState {
                 config: leviath_core::blueprint::FanOutConfig {
                     worker_agent: None,
@@ -3096,11 +3137,11 @@ async fn wait_reason_counts_outstanding_fan_out_workers() {
                 summaries: Vec::new(),
                 failures: Vec::new(),
             },
-            &|run_id| (run_id == "run-b").then_some(worker),
+            &|run_id| (run_id == "run-b").then_some(worker.entity()),
         );
     }
     assert_eq!(
-        host.wait_reason(parent),
+        host.wait_reason(parent.entity()),
         Some(WaitReason::FanOutWorkers { outstanding: 3 })
     );
 }
@@ -3112,7 +3153,7 @@ async fn wait_reason_counts_outstanding_fan_out_workers() {
 async fn list_reports_blueprint_shape_and_unattended() {
     let mut host = host_with(vec![]);
     let e = spawn(&mut host, "run-a", "run-a");
-    host.world_mut().world_mut().entity_mut(e).insert((
+    host.world_mut().world_mut().entity_mut(e.entity()).insert((
         RunMetadata {
             run_id: "run-a".to_string(),
             agent_name: "coder".to_string(),
@@ -3159,14 +3200,14 @@ async fn list_reports_a_finished_run_that_produced_nothing() {
     let e = spawn(&mut host, "run-a", "run-a");
     host.world_mut()
         .world_mut()
-        .entity_mut(e)
+        .entity_mut(e.entity())
         .insert(crate::persistence::RunOutcomeFlags::default());
     // Still running: nothing to say yet.
     assert!(!ask(&mut host, |reply| ControlOp::List { reply }).await.runs[0].empty_output);
 
     host.world_mut()
         .world_mut()
-        .get_mut::<AgentState>(e)
+        .get_mut::<AgentState>(e.entity())
         .expect("spawned agent has state")
         .status = AgentStatus::Complete;
     assert!(ask(&mut host, |reply| ControlOp::List { reply }).await.runs[0].empty_output);
@@ -3174,7 +3215,7 @@ async fn list_reports_a_finished_run_that_produced_nothing() {
     // ...unless it never had a way to write, which is not its failing.
     host.world_mut()
         .world_mut()
-        .get_mut::<crate::persistence::RunOutcomeFlags>(e)
+        .get_mut::<crate::persistence::RunOutcomeFlags>(e.entity())
         .expect("just inserted")
         .0
         .no_output_tools = true;
@@ -3191,11 +3232,11 @@ async fn a_submitted_answer_clears_the_listing_s_empty_verdict() {
     let e = spawn(&mut host, "run-a", "run-a");
     host.world_mut()
         .world_mut()
-        .entity_mut(e)
+        .entity_mut(e.entity())
         .insert(crate::persistence::RunOutcomeFlags::default());
     host.world_mut()
         .world_mut()
-        .get_mut::<AgentState>(e)
+        .get_mut::<AgentState>(e.entity())
         .expect("spawned agent has state")
         .status = AgentStatus::Complete;
     // Finished having written nothing: empty, and no answer to point at.
@@ -3205,7 +3246,7 @@ async fn a_submitted_answer_clears_the_listing_s_empty_verdict() {
 
     host.world_mut()
         .world_mut()
-        .entity_mut(e)
+        .entity_mut(e.entity())
         .insert(crate::persistence::FinalOutput(
             leviath_core::output::FinalOutput::new(
                 "here is what I found",
@@ -3225,7 +3266,7 @@ async fn a_submitted_answer_clears_the_listing_s_empty_verdict() {
 async fn list_explains_a_waiting_run() {
     let mut host = host_with(vec![]);
     let e = spawn(&mut host, "run-a", "run-a");
-    waiting_because(&mut host, e, |entity| {
+    waiting_because(&mut host, e.entity(), |entity| {
         entity.insert(crate::pipeline::WaitingForChildren);
     });
     let list = ask(&mut host, |reply| ControlOp::List { reply }).await.runs;

@@ -21,13 +21,13 @@ impl WorldHost {
                 let _ = reply.send(self.spawn_child(*args, &parent_run_id, max_depth));
             }
             SubAgentOp::Check { run_id, reply } => {
-                let report = self.live_entity(&run_id).and_then(|e| {
-                    self.world.agent_status(e).map(|status| SubAgentReport {
+                let report = self.live_entity(&run_id).and_then(|agent| {
+                    self.world.agent_status(agent).map(|status| SubAgentReport {
                         status,
                         final_output: self
                             .world
                             .world()
-                            .get::<crate::persistence::FinalOutput>(e)
+                            .get::<crate::persistence::FinalOutput>(agent.entity())
                             .map(|o| o.0.clone()),
                     })
                 });
@@ -80,7 +80,10 @@ impl WorldHost {
         args.parent_run_id = Some(parent_run_id.to_string());
         let parent = self
             .live_entity(parent_run_id)
-            .ok_or_else(|| format!("parent run '{parent_run_id}' is not live"))?;
+            .ok_or_else(|| format!("parent run '{parent_run_id}' is not live"))?
+            // Same world as the child about to be spawned into it, so the raw
+            // entity is what the ECS links want.
+            .entity();
         let parent_depth = self
             .world
             .world()
@@ -123,7 +126,9 @@ impl WorldHost {
         // Seed the child's context from the parent per any declared blueprint
         // context transform (planner→coder region mapping, etc.).
         crate::context_transform::apply_context_transforms(world, parent, child);
-        self.by_run_id.insert(run_id.clone(), child);
+        // The spawner ran against this world, so the child is ours.
+        let child_agent = self.world.own_agent(child);
+        self.by_run_id.insert(run_id.clone(), child_agent);
         Ok(run_id)
     }
 
@@ -162,7 +167,10 @@ impl WorldHost {
         ) else {
             return false;
         };
-        let mut stack = vec![root];
+        // `SubAgentChildren` links are raw entities within this world, so the
+        // walk stays in that space and only the endpoints are world-scoped.
+        let target = target.entity();
+        let mut stack = vec![root.entity()];
         while let Some(e) = stack.pop() {
             if e == target {
                 return true;
@@ -180,7 +188,7 @@ impl WorldHost {
         };
         // Collect the subtree (parent before children), then cancel each.
         let mut subtree = Vec::new();
-        let mut stack = vec![root];
+        let mut stack = vec![root.entity()];
         while let Some(e) = stack.pop() {
             subtree.push(e);
             if let Some(kids) = self.world.world().get::<SubAgentChildren>(e) {
@@ -196,7 +204,7 @@ impl WorldHost {
                 .world()
                 .get::<AgentState>(e)
                 .map(|s| s.agent_id.clone());
-            cancelled |= self.world.cancel(e);
+            cancelled |= self.world.cancel(self.world.own_agent(e));
             if let Some(agent_id) = agent_id {
                 self.interactions.cancel_for_agent(&agent_id);
                 // The hub is keyed by agent id but the emitted-interaction set is

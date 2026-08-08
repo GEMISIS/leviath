@@ -648,8 +648,8 @@ mod tests {
             read_paths: None,
             output_request: None,
         },));
-        reaper(&mut world, with_meta);
-        assert!(tool_service.take(with_meta).is_none());
+        reaper(&mut world, with_meta.entity());
+        assert!(tool_service.take(with_meta.entity()).is_none());
     }
 
     struct FakeProvider;

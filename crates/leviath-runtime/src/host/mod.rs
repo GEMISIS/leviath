@@ -27,7 +27,7 @@ use crate::components::{
 };
 use crate::interaction_hub::InteractionHub;
 use crate::persistence::{RunMetadata, TokenTotals};
-use crate::world::{LaneSnapshot, PipelineWorld};
+use crate::world::{AgentId, LaneSnapshot, PipelineWorld};
 
 // Sections of the former single-file host, one per concern. Glob re-exported so
 // every existing `host::ControlOp` / `host::WorldEvent` path keeps working and
@@ -40,7 +40,7 @@ pub use types::*;
 /// Owns the world and the run-id map; drives the world and services control ops.
 pub struct WorldHost {
     world: PipelineWorld,
-    by_run_id: HashMap<String, Entity>,
+    by_run_id: HashMap<String, AgentId>,
     interactions: InteractionHub,
     spawner: Option<Spawner>,
     spawn_preprocessor: Option<SpawnPreprocessor>,
@@ -221,8 +221,10 @@ impl WorldHost {
             .map(|(entity, md)| (md.run_id.clone(), entity))
             .collect();
         for (run_id, entity) in live {
-            if self.live_entity(&run_id) != Some(entity) {
-                self.by_run_id.insert(run_id, entity);
+            // Straight out of this world's query, so it is ours by construction.
+            let agent = self.world.own_agent(entity);
+            if self.live_entity(&run_id) != Some(agent) {
+                self.by_run_id.insert(run_id, agent);
             }
         }
     }
@@ -315,7 +317,7 @@ impl WorldHost {
     /// Resolve a run id to a live entity, paging it in from disk if it has been
     /// unloaded (and a reloader is installed). Returns `None` if the run is
     /// neither live nor resumable from disk. Newly-reloaded runs are registered.
-    fn resolve_or_reload(&mut self, run_id: &str) -> Option<Entity> {
+    fn resolve_or_reload(&mut self, run_id: &str) -> Option<AgentId> {
         if let Some(entity) = self.live_entity(run_id) {
             return Some(entity);
         }
@@ -337,16 +339,19 @@ impl WorldHost {
     }
 
     /// Record the run-id → entity mapping for a freshly-spawned agent.
-    pub fn register(&mut self, run_id: impl Into<String>, entity: Entity) {
+    pub fn register(&mut self, run_id: impl Into<String>, agent: AgentId) {
         let run_id = run_id.into();
         self.parked.remove(&run_id);
-        self.by_run_id.insert(run_id, entity);
+        self.by_run_id.insert(run_id, agent);
     }
 
     /// Resolve a run id to a **live** entity (one that still exists in the world).
-    fn live_entity(&self, run_id: &str) -> Option<Entity> {
-        let entity = *self.by_run_id.get(run_id)?;
-        self.world.world().get::<AgentState>(entity).map(|_| entity)
+    fn live_entity(&self, run_id: &str) -> Option<AgentId> {
+        let agent = *self.by_run_id.get(run_id)?;
+        self.world
+            .world()
+            .get::<AgentState>(agent.entity())
+            .map(|_| agent)
     }
 
     /// Apply one control op and reply on its channel. A dropped reply receiver is
@@ -366,7 +371,9 @@ impl WorldHost {
                             spawner(&mut self.world, &args)
                         })) {
                             Ok(Ok(entity)) => {
-                                self.by_run_id.insert(args.run_id.clone(), entity);
+                                // Spawned into this world, so it is ours.
+                                let agent = self.world.own_agent(entity);
+                                self.by_run_id.insert(args.run_id.clone(), agent);
                                 Ok(args.run_id.clone())
                             }
                             Ok(Err(e)) => Err(e),
@@ -397,7 +404,11 @@ impl WorldHost {
                 // point of bounding the finished buffer.
                 let output = self
                     .live_entity(&run_id)
-                    .and_then(|e| self.world.world().get::<crate::persistence::FinalOutput>(e))
+                    .and_then(|agent| {
+                        self.world
+                            .world()
+                            .get::<crate::persistence::FinalOutput>(agent.entity())
+                    })
                     .map(|o| o.0.clone());
                 let _ = reply.send(output);
             }

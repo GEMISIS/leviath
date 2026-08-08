@@ -139,9 +139,9 @@ impl WorldHost {
         let world = self.world.world();
         self.by_run_id
             .iter()
-            .filter_map(|(run_id, &entity)| {
-                let state = world.get::<AgentState>(entity)?;
-                Some(self.entry_for(run_id, entity, state))
+            .filter_map(|(run_id, &agent)| {
+                let state = world.get::<AgentState>(agent.entity())?;
+                Some(self.entry_for(run_id, agent.entity(), state))
             })
             // Parked (paused, paged-out) runs are still the daemon's runs; an
             // operator must not lose sight of one just because it left memory.

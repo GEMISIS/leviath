@@ -173,8 +173,56 @@ impl LaneSnapshot {
     }
 }
 
+/// Identifies one [`PipelineWorld`] within this process.
+///
+/// Only ever compared, never interpreted. A counter rather than a random value
+/// because a mismatch is easier to read in a test failure as `1 != 2`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WorldId(u64);
+
+/// An agent, together with the world that spawned it.
+///
+/// `Entity` is an index plus a generation minted *per world*, so two worlds
+/// hand out the same id for their first agent. Nothing in `Entity` records
+/// which one it came from, so passing one world's entity to another was not
+/// refused - it named a real, different agent there, and the call acted on that
+/// one instead. `b.pause(a_entity)` paused B's own agent while the caller
+/// believed it had paused A's, silently.
+///
+/// The provenance has to travel *with* the id, which is what this is. It cannot
+/// be built outside this module: the only sources are [`PipelineWorld::spawn_agent`]
+/// and [`PipelineWorld::spawn_from_blueprint`], so an id always names an agent
+/// in the world that minted it.
+///
+/// A tag component on the agent was tried first and does not work: looking the
+/// tag up on the foreign id resolves to the *local* agent, whose tag naturally
+/// matches, so the check passes and guards nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AgentId {
+    world: WorldId,
+    entity: Entity,
+}
+
+impl AgentId {
+    /// The raw ECS entity.
+    ///
+    /// For code already inside the owning world - systems, queries, direct
+    /// `World` access - where same-world is true by construction. Crossing a
+    /// world boundary with the result is the bug this type exists to prevent.
+    pub fn entity(self) -> Entity {
+        self.entity
+    }
+
+    /// Which world minted this id.
+    pub fn world(self) -> WorldId {
+        self.world
+    }
+}
+
 /// The shared ECS world that hosts and drives every agent.
 pub struct PipelineWorld {
+    /// This world's identity, carried by every [`AgentId`] it mints.
+    id: WorldId,
     world: World,
     schedule: Schedule,
     wake: Arc<Notify>,
@@ -214,6 +262,8 @@ impl PipelineWorld {
         // runs in parallel. (The schedule executor itself is single-threaded -
         // see `tick_schedule`.)
         bevy_tasks::ComputeTaskPool::get_or_init(bevy_tasks::TaskPool::default);
+        static NEXT_WORLD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = WorldId(NEXT_WORLD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
 
         let wake = Arc::new(Notify::new());
         let shutdown = Arc::new(Notify::new());
@@ -431,6 +481,7 @@ impl PipelineWorld {
         );
 
         Self {
+            id,
             world,
             schedule,
             wake,
@@ -482,10 +533,13 @@ impl PipelineWorld {
 
     /// Spawn an agent from its pre-built component bundle and wake the driver so
     /// the next fixed-point picks it up. Returns the new entity.
-    pub fn spawn_agent(&mut self, bundle: impl Bundle) -> Entity {
-        let e = self.world.spawn(bundle).id();
+    pub fn spawn_agent(&mut self, bundle: impl Bundle) -> AgentId {
+        let entity = self.world.spawn(bundle).id();
         self.wake.notify_one();
-        e
+        AgentId {
+            world: self.id,
+            entity,
+        }
     }
 
     /// Spawn an agent from a blueprint + task + per-stage resolution (see
@@ -498,8 +552,8 @@ impl PipelineWorld {
         task: &str,
         stages: Vec<crate::pipeline::ResolvedStage>,
         global_hints: leviath_core::config::PromptHints,
-    ) -> Result<Entity, String> {
-        let e = crate::pipeline::spawn_agent(
+    ) -> Result<AgentId, String> {
+        let entity = crate::pipeline::spawn_agent(
             &mut self.world,
             agent_id,
             blueprint,
@@ -508,7 +562,10 @@ impl PipelineWorld {
             global_hints,
         )?;
         self.wake.notify_one();
-        Ok(e)
+        Ok(AgentId {
+            world: self.id,
+            entity,
+        })
     }
 
     /// Deliver a message to a running agent (routed to its inbox on the next
@@ -645,10 +702,39 @@ impl PipelineWorld {
         self.tool_lane.narrow(upto)
     }
 
+    /// Wrap an entity that came out of this world, for callers that hold one.
+    ///
+    /// Exposed for the host and for recovery: both query this world directly,
+    /// so the entities they get back are ours by construction. Not a general
+    /// escape - there is no way to build an [`AgentId`] for a world you do not
+    /// already have in hand.
+    pub fn own_agent(&self, entity: Entity) -> AgentId {
+        self.own(entity)
+    }
+
+    /// Wrap an entity this world already owns.
+    ///
+    /// For entities that came out of this world's own queries, where same-world
+    /// is true by construction. Private: outside code must get its ids from a
+    /// spawn, which is what makes [`AgentId`] mean anything.
+    fn own(&self, entity: Entity) -> AgentId {
+        AgentId {
+            world: self.id,
+            entity,
+        }
+    }
+
     /// The status of an agent, if it still exists.
-    pub fn agent_status(&self, entity: Entity) -> Option<AgentStatus> {
+    ///
+    /// An id another world minted reports `None` rather than this world's agent
+    /// of the same raw entity - see [`AgentId`]. `pause`, `resume` and `cancel`
+    /// all read status through here, so guarding it guards them.
+    pub fn agent_status(&self, agent: AgentId) -> Option<AgentStatus> {
+        if agent.world != self.id {
+            return None;
+        }
         self.world
-            .get::<AgentState>(entity)
+            .get::<AgentState>(agent.entity)
             .map(|s| s.status.clone())
     }
 
@@ -656,8 +742,13 @@ impl PipelineWorld {
     /// longer exists. The async-starting dispatchers only act on `Active` agents,
     /// so this is how the world pauses/resumes/cancels an agent - a non-`Active`
     /// agent is simply data the systems skip until it is `Active` again.
-    pub fn set_status(&mut self, entity: Entity, status: AgentStatus) -> bool {
-        let Some(mut state) = self.world.get_mut::<AgentState>(entity) else {
+    pub fn set_status(&mut self, agent: AgentId, status: AgentStatus) -> bool {
+        // Every status mutation funnels through here, so this is the one place a
+        // foreign id has to be refused.
+        if agent.world != self.id {
+            return false;
+        }
+        let Some(mut state) = self.world.get_mut::<AgentState>(agent.entity) else {
             return false;
         };
         state.status = status;
@@ -671,10 +762,10 @@ impl PipelineWorld {
     /// resolution depend on, so overwriting it would wedge the run, and pausing
     /// a terminal agent is meaningless. Returns `false` if the agent no longer
     /// exists or is not in a pausable state.
-    pub fn pause(&mut self, entity: Entity) -> bool {
-        match self.agent_status(entity) {
+    pub fn pause(&mut self, agent: AgentId) -> bool {
+        match self.agent_status(agent) {
             Some(AgentStatus::Active | AgentStatus::Idle) => {
-                self.set_status(entity, AgentStatus::Paused)
+                self.set_status(agent, AgentStatus::Paused)
             }
             _ => false,
         }
@@ -682,18 +773,18 @@ impl PipelineWorld {
 
     /// Resume a paused agent. `Idle` is also accepted (resume-as-nudge for an
     /// agent that has not ticked yet); anything else returns `false`.
-    pub fn resume(&mut self, entity: Entity) -> bool {
-        match self.agent_status(entity) {
+    pub fn resume(&mut self, agent: AgentId) -> bool {
+        match self.agent_status(agent) {
             Some(AgentStatus::Paused | AgentStatus::Idle) => {
-                self.set_status(entity, AgentStatus::Active)
+                self.set_status(agent, AgentStatus::Active)
             }
             _ => false,
         }
     }
 
     /// Cancel an agent (it stops starting new work; in-flight results still land).
-    pub fn cancel(&mut self, entity: Entity) -> bool {
-        self.set_status(entity, AgentStatus::Cancelled)
+    pub fn cancel(&mut self, agent: AgentId) -> bool {
+        self.set_status(agent, AgentStatus::Cancelled)
     }
 
     /// Run one schedule tick over every agent, catching a panic from any system
@@ -714,7 +805,7 @@ impl PipelineWorld {
         };
         let message = panic_status_message(&panicked.message);
         match panicked.entity {
-            Some(entity) if self.set_status(entity, AgentStatus::Error { message }) => {
+            Some(entity) if self.set_status(self.own(entity), AgentStatus::Error { message }) => {
                 tracing::error!(
                     ?entity,
                     panic = %panicked.message,
@@ -761,7 +852,7 @@ impl PipelineWorld {
                 message: panic_status_message(&message),
             };
             // The entity came straight out of the query above, so it exists.
-            let _ = self.set_status(entity, status);
+            let _ = self.set_status(self.own(entity), status);
         }
         TickOutcome::AgentFailed
     }
@@ -1229,7 +1320,7 @@ mod tests {
     }
 
     /// Spawn a single-stage agent, initially ready to infer.
-    fn spawn(world: &mut PipelineWorld) -> Entity {
+    fn spawn(world: &mut PipelineWorld) -> AgentId {
         world.spawn_agent((
             AgentBlueprint(blueprint()),
             StageCursor { index: 0 },
@@ -1385,7 +1476,7 @@ mod tests {
         assert!(
             world
                 .world()
-                .entity(entity)
+                .entity(entity.entity())
                 .get::<crate::tick_scope::PanickedInParallel>()
                 .is_none(),
             "the marker must be drained once acted on"
@@ -1428,7 +1519,11 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-        assert_eq!(victim, Some(entity), "the system saw the spawned agent");
+        assert_eq!(
+            victim,
+            Some(entity.entity()),
+            "the system saw the spawned agent"
+        );
         let status = world.agent_status(entity);
         assert!(
             matches!(status, Some(AgentStatus::Error { ref message })
@@ -1469,12 +1564,15 @@ mod tests {
 
         // Nothing has dispatched, and within the grace period that is still
         // just a wait - but it is now a *recorded* one.
-        let state = world.world().get::<AgentState>(e).expect("the agent");
+        let state = world
+            .world()
+            .get::<AgentState>(e.entity())
+            .expect("the agent");
         assert_eq!(state.iteration, 0, "not a single inference happened");
         assert_eq!(state.status, AgentStatus::Active);
         let stall = world
             .world()
-            .get::<crate::pipeline::DispatchStall>(e)
+            .get::<crate::pipeline::DispatchStall>(e.entity())
             .expect("the decline is recorded");
         assert_eq!(stall.reason, crate::pipeline::StallReason::ProviderMissing);
 
@@ -1485,7 +1583,7 @@ mod tests {
             chrono::Utc::now().timestamp() - crate::pipeline::DEFAULT_STALL_TIMEOUT_SECS as i64 - 1;
         world
             .world_mut()
-            .get_mut::<crate::pipeline::DispatchStall>(e)
+            .get_mut::<crate::pipeline::DispatchStall>(e.entity())
             .expect("the stall record")
             .since = past;
         world.run_to_fixed_point();
@@ -1497,7 +1595,7 @@ mod tests {
             "got: {status:?}"
         );
         assert!(
-            world.world().get::<ReadyToInfer>(e).is_none(),
+            world.world().get::<ReadyToInfer>(e.entity()).is_none(),
             "and it is out of the dispatch systems"
         );
     }
@@ -1521,7 +1619,10 @@ mod tests {
         // Strip the agent of the marker it spawned with. Nothing in the engine
         // does this; a panicking system that dropped a marker without landing a
         // successor is what it stands in for.
-        world.world_mut().entity_mut(e).remove::<ReadyToInfer>();
+        world
+            .world_mut()
+            .entity_mut(e.entity())
+            .remove::<ReadyToInfer>();
         world.run_to_fixed_point();
 
         // First pass records it. Inside the grace period it is still just a wait.
@@ -1532,14 +1633,14 @@ mod tests {
         );
         let since = world
             .world()
-            .get::<crate::pipeline::Wedged>(e)
+            .get::<crate::pipeline::Wedged>(e.entity())
             .expect("the wedge is recorded")
             .since;
 
         // Backdate past the grace period, as the host's redrive would find it.
         world
             .world_mut()
-            .get_mut::<crate::pipeline::Wedged>(e)
+            .get_mut::<crate::pipeline::Wedged>(e.entity())
             .expect("the wedge record")
             .since = since - 61;
         world.run_to_fixed_point();
@@ -1618,7 +1719,7 @@ mod tests {
         assert!(
             world
                 .world()
-                .get::<ContextWindow>(e)
+                .get::<ContextWindow>(e.entity())
                 .unwrap()
                 .get_region("conversation")
                 .unwrap()
@@ -1693,7 +1794,7 @@ mod tests {
         assert!(
             world
                 .world()
-                .get::<ContextWindow>(e)
+                .get::<ContextWindow>(e.entity())
                 .unwrap()
                 .get_region("conversation")
                 .unwrap()
@@ -1764,9 +1865,12 @@ mod tests {
     async fn agent_status_is_none_for_unknown_entity() {
         let world = build_world(registry_with(vec![]));
         assert_eq!(
+            // Scoped to this world, but naming an entity it never spawned.
             world.agent_status(
-                Entity::from_raw_u32(999)
-                    .expect("a small literal index is always a valid entity id")
+                world.own_agent(
+                    Entity::from_raw_u32(999)
+                        .expect("a small literal index is always a valid entity id")
+                )
             ),
             None
         );
@@ -1849,15 +1953,13 @@ mod tests {
     #[tokio::test]
     async fn status_ops_return_false_for_unknown_entity() {
         let mut world = build_world(registry_with(vec![]));
-        assert!(!world.pause(
-            Entity::from_raw_u32(999).expect("a small literal index is always a valid entity id")
-        ));
-        assert!(!world.resume(
-            Entity::from_raw_u32(999).expect("a small literal index is always a valid entity id")
-        ));
-        assert!(!world.cancel(
-            Entity::from_raw_u32(999).expect("a small literal index is always a valid entity id")
-        ));
+        // Scoped to this world, but naming an entity it never spawned.
+        let unknown = world.own_agent(
+            Entity::from_raw_u32(999).expect("a small literal index is always a valid entity id"),
+        );
+        assert!(!world.pause(unknown));
+        assert!(!world.resume(unknown));
+        assert!(!world.cancel(unknown));
     }
 
     #[tokio::test]
@@ -2338,7 +2440,7 @@ mod tests {
         };
         crate::restore::restore_agent(
             world.world_mut(),
-            entity,
+            entity.entity(),
             &snapshot,
             0,
             3,
@@ -2347,13 +2449,13 @@ mod tests {
 
         let state = world
             .world()
-            .get::<crate::components::AgentState>(entity)
+            .get::<crate::components::AgentState>(entity.entity())
             .unwrap();
         assert_eq!(state.status, AgentStatus::Active);
         assert_eq!(state.iteration, 3);
         let win = world
             .world()
-            .get::<crate::components::ContextWindow>(entity)
+            .get::<crate::components::ContextWindow>(entity.entity())
             .unwrap();
         assert_eq!(
             win.get_region("conversation").unwrap().content[0].content,
@@ -2447,38 +2549,62 @@ mod tests {
         assert!(b.agent_status(in_a).is_none());
     }
 
-    /// **A known hazard, pinned rather than fixed.**
+    /// `set_status` guards separately, and needs its own case.
     ///
-    /// `Entity` is an index plus a generation minted *per world*, so two worlds
-    /// hand out the same id for their first agent - asserted below, because the
-    /// collision is the normal case and not a corner one. Nothing in the type
-    /// records which world minted it, so passing one world's entity to another
-    /// is not refused: it names a real, different agent there, and the call acts
-    /// on that one instead. Silently.
-    ///
-    /// This cannot be closed from inside the world. A tag component was tried
-    /// and does not work: looking the tag up on the foreign id resolves to the
-    /// *local* agent, whose tag naturally matches, so the check passes. The
-    /// provenance has to travel with the id - a handle carrying the world's
-    /// identity, returned by `spawn_agent` and required by the entity-taking
-    /// methods - which changes every signature that stores an `Entity` (the
-    /// host's run-id map, recovery, fan-out).
-    ///
-    /// Harmless today: one world exists per process, so no entity can be
-    /// foreign. It has to be closed before a second one is introduced, and this
-    /// test is here so that lands as a failing assertion rather than a bug.
+    /// `pause`/`resume`/`cancel` read status first, so a foreign id stops at
+    /// `agent_status` and never reaches the mutation. A caller holding a foreign
+    /// id can still call `set_status` directly, which is the path this covers.
     #[tokio::test]
-    async fn a_foreign_entity_silently_names_the_wrong_agent() {
+    async fn set_status_refuses_a_foreign_agent_id() {
         let mut a = build_world(ProviderRegistry::new());
         let mut b = build_world(ProviderRegistry::new());
         let in_a = spawn(&mut a);
         let in_b = spawn(&mut b);
-        assert_eq!(in_a, in_b, "the ids collide, which is the whole problem");
 
-        // Pause "A's agent" against world B: B pauses its own instead.
-        assert!(b.pause(in_a));
+        assert!(!b.set_status(in_a, AgentStatus::Complete), "B accepted it");
+        // B's own agent, which shares the raw id, is untouched.
+        assert_ne!(b.agent_status(in_b), Some(AgentStatus::Complete));
+        // And B still works on its own.
+        assert!(b.set_status(in_b, AgentStatus::Complete));
+        assert_eq!(b.agent_status(in_b), Some(AgentStatus::Complete));
+    }
+
+    /// The hazard [`AgentId`] exists for, now closed.
+    ///
+    /// The raw entities still collide - that is a property of bevy, not
+    /// something this can change - but an [`AgentId`] carries the world that
+    /// minted it, so the collision no longer means the two name the same agent.
+    /// Before this, `b.pause(a_entity)` paused B's own agent while the caller
+    /// believed it had paused A's, silently.
+    #[tokio::test]
+    async fn a_foreign_agent_id_is_refused_rather_than_naming_the_wrong_agent() {
+        let mut a = build_world(ProviderRegistry::new());
+        let mut b = build_world(ProviderRegistry::new());
+        let in_a = spawn(&mut a);
+        let in_b = spawn(&mut b);
+
+        // The underlying ids do collide - the problem is real, not hypothetical.
+        assert_eq!(
+            in_a.entity(),
+            in_b.entity(),
+            "the raw ids collide, which is what made this silent"
+        );
+        // But the handles do not, because they remember where they came from.
+        assert_ne!(in_a, in_b);
+        assert_ne!(in_a.world(), in_b.world());
+
+        // B refuses A's agent instead of acting on its own.
+        assert!(!b.pause(in_a), "B accepted a foreign id");
+        assert!(
+            b.agent_status(in_a).is_none(),
+            "B answered for a foreign id"
+        );
+        assert_ne!(b.agent_status(in_b), Some(AgentStatus::Paused));
+
+        // Each world still works normally on its own.
+        assert!(a.pause(in_a));
+        assert_eq!(a.agent_status(in_a), Some(AgentStatus::Paused));
+        assert!(b.pause(in_b));
         assert_eq!(b.agent_status(in_b), Some(AgentStatus::Paused));
-        // A's agent never moved - the caller's intent was lost in silence.
-        assert_ne!(a.agent_status(in_a), Some(AgentStatus::Paused));
     }
 }
