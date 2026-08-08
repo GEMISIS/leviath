@@ -35,6 +35,15 @@ struct AgentTools {
 /// it does and does not provide.
 pub struct BasicToolService {
     hub: InteractionHub,
+    /// Keyed by raw `Entity`, deliberately.
+    ///
+    /// Two worlds mint the same entity id, so an entity-keyed map shared between
+    /// them would hand one world's tool state to the other's agent. This map is
+    /// not shared: a `BasicToolService` is built once per `AgentWorld`, and the
+    /// only writer is that world's own spawner. An [`crate::world::AgentId`] key
+    /// would carry a world the `ToolService::execute` signature has no way to
+    /// supply - it is handed a bare `Entity` by the tool lane, with no world in
+    /// reach - so it would buy nothing and cost the trait.
     agents: Mutex<HashMap<Entity, Arc<AgentTools>>>,
 }
 

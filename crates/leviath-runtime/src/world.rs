@@ -180,6 +180,15 @@ impl LaneSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WorldId(u64);
 
+/// The identity of the world this resource lives in.
+///
+/// Stored *inside* the world so that code holding only a
+/// [`bevy_ecs::world::World`] - a system, or a free function called from one -
+/// can still tell whether an [`AgentId`] belongs to it. Without this the check
+/// would only be possible on [`PipelineWorld`], which is not what a system has.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnWorldId(pub WorldId);
+
 /// An agent, together with the world that spawned it.
 ///
 /// `Entity` is an index plus a generation minted *per world*, so two worlds
@@ -204,6 +213,41 @@ pub struct AgentId {
 }
 
 impl AgentId {
+    /// Scope a raw entity to the world it came out of.
+    ///
+    /// The reverse of [`Self::resolve_in`], for a system holding a query result
+    /// that needs to call something taking an [`AgentId`]. Wrapping and then
+    /// resolving inside the same world always round-trips; an id built this way
+    /// in one world and resolved in another does not, which is the point.
+    pub fn in_world(world: &World, entity: Entity) -> Self {
+        Self {
+            // A world assembled by hand in a test has no identity to borrow;
+            // `resolve_in` accepts any id against such a world, so the pair
+            // still round-trips.
+            world: world
+                .get_resource::<OwnWorldId>()
+                .map_or(WorldId(0), |own| own.0),
+            entity,
+        }
+    }
+
+    /// The entity, if this id belongs to `world`.
+    ///
+    /// The check any code holding a raw [`World`] should make before touching an
+    /// agent it was handed. `None` means the id came from a different world, in
+    /// which case its raw entity would name some *other* agent here - which is
+    /// the whole failure this type exists to prevent.
+    ///
+    /// A world with no [`OwnWorldId`] resource (a bare test world assembled by
+    /// hand) accepts any id: it never minted one, so there is nothing to
+    /// disagree with.
+    pub fn resolve_in(self, world: &World) -> Option<Entity> {
+        match world.get_resource::<OwnWorldId>() {
+            Some(own) if own.0 != self.world => None,
+            _ => Some(self.entity),
+        }
+    }
+
     /// The raw ECS entity.
     ///
     /// For code already inside the owning world - systems, queries, direct
@@ -297,6 +341,7 @@ impl PipelineWorld {
         let gp_runtime = runtime.clone();
 
         let mut world = World::new();
+        world.insert_resource(OwnWorldId(id));
         world.insert_resource(Providers(providers));
         world.insert_resource(InferenceStage {
             // The wake goes into the pools, not just the bridges: freeing a slot
@@ -2567,6 +2612,82 @@ mod tests {
         // And B still works on its own.
         assert!(b.set_status(in_b, AgentStatus::Complete));
         assert_eq!(b.agent_status(in_b), Some(AgentStatus::Complete));
+    }
+
+    /// The world carries its own identity, so a *raw* `World` can check too.
+    ///
+    /// This is what lets the free functions called from inside systems -
+    /// `force_transition`, `apply_context_transforms`,
+    /// `restore_interaction_point` - refuse a foreign id. They are handed a
+    /// `&mut World`, never a `PipelineWorld`, so without the resource there is
+    /// nothing for them to compare against.
+    #[tokio::test]
+    async fn a_raw_world_refuses_an_id_another_world_minted() {
+        let mut a = build_world(ProviderRegistry::new());
+        let mut b = build_world(ProviderRegistry::new());
+        let in_a = spawn(&mut a);
+        let in_b = spawn(&mut b);
+
+        // Resolving in its own world yields the entity...
+        assert_eq!(in_a.resolve_in(a.world()), Some(in_a.entity()));
+        // ...and in the other world, nothing - even though the raw id is valid
+        // there and names one of B's own agents.
+        assert_eq!(in_a.resolve_in(b.world()), None);
+        assert_eq!(in_b.resolve_in(a.world()), None);
+
+        // Round-tripping through the same world always works, which is what the
+        // systems do with their query results.
+        let round = AgentId::in_world(a.world(), in_a.entity());
+        assert_eq!(round.resolve_in(a.world()), Some(in_a.entity()));
+    }
+
+    /// The free functions a system calls refuse a foreign id, and do nothing.
+    ///
+    /// Each takes a `&mut World` and would otherwise act on whichever local
+    /// agent happened to share the raw entity: move it to another stage, seed it
+    /// from a stranger's context, or park it on a prompt it never asked for.
+    #[tokio::test]
+    async fn the_world_taking_helpers_refuse_a_foreign_agent_id() {
+        let mut a = build_world(ProviderRegistry::new());
+        let mut b = build_world(ProviderRegistry::new());
+        let in_a = spawn(&mut a);
+        let in_b = spawn(&mut b);
+        let before = b.agent_status(in_b);
+
+        // Stage transition: B's agent must not move because A asked.
+        let stage_before = b
+            .world()
+            .get::<crate::pipeline::StageCursor>(in_b.entity())
+            .map(|c| c.index);
+        crate::pipeline::force_transition(b.world_mut(), in_a, 1);
+        let stage_after = b
+            .world()
+            .get::<crate::pipeline::StageCursor>(in_b.entity())
+            .map(|c| c.index);
+        assert_eq!(stage_before, stage_after, "a foreign id moved a stage");
+
+        // Context seeding: nothing copied between worlds.
+        crate::context_transform::apply_context_transforms(b.world_mut(), in_a, in_a);
+
+        // A restored interaction point must not land on B's agent.
+        crate::interaction_points::restore_interaction_point(
+            b.world_mut(),
+            in_a,
+            crate::interaction_points::InteractionPointState {
+                cursor: 0,
+                round: 0,
+                body: "not for you".to_string(),
+            },
+        );
+        assert!(
+            b.world()
+                .get::<crate::components::AwaitingInteraction>(in_b.entity())
+                .is_none(),
+            "a foreign id parked B's agent on a prompt"
+        );
+
+        // And B's agent is exactly as it was.
+        assert_eq!(b.agent_status(in_b), before);
     }
 
     /// The hazard [`AgentId`] exists for, now closed.

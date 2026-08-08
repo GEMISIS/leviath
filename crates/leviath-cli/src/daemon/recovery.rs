@@ -417,9 +417,11 @@ fn reload_one(
         .ok()
         .and_then(|s| serde_json::from_str::<InteractionPointState>(&s).ok())
     {
+        // Built against this world's ECS a few lines above, so it is ours.
+        let agent = world.own_agent(entity);
         leviath_runtime::interaction_points::restore_interaction_point(
             world.world_mut(),
-            entity,
+            agent,
             state,
         );
     }

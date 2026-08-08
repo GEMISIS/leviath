@@ -2912,7 +2912,7 @@ fn waiting_because(
         let mut e = world.entity_mut(entity);
         attach(&mut e);
     }
-    host.wait_reason(entity)
+    host.wait_reason(AgentId::in_world(host.world.world(), entity))
 }
 
 /// A run that is not waiting has nothing to explain, whatever markers it
@@ -2925,7 +2925,7 @@ async fn wait_reason_is_none_unless_the_agent_is_waiting() {
         .world_mut()
         .entity_mut(e.entity())
         .insert(crate::pipeline::WaitingForChildren);
-    assert_eq!(host.wait_reason(e.entity()), None);
+    assert_eq!(host.wait_reason(e), None);
 }
 
 /// An entity the world no longer holds cannot be explained either.
@@ -2934,7 +2934,7 @@ async fn wait_reason_is_none_for_an_unknown_entity() {
     let mut host = host_with(vec![]);
     let e = spawn(&mut host, "run-a", "run-a");
     host.world_mut().world_mut().despawn(e.entity());
-    assert_eq!(host.wait_reason(e.entity()), None);
+    assert_eq!(host.wait_reason(e), None);
 }
 
 /// `Waiting` with nothing claiming it: report nothing rather than guess.
@@ -3066,7 +3066,7 @@ async fn wait_reason_distinguishes_a_tool_approval_from_a_question() {
         InteractionRequest::free_text("req-2", "which one?", "implement", true),
     );
     await_pending(&host, "run-a").await;
-    assert_eq!(host.wait_reason(e.entity()), Some(WaitReason::UserPrompt));
+    assert_eq!(host.wait_reason(e), Some(WaitReason::UserPrompt));
     assert_eq!(host.interactions().cancel_for_agent("run-a"), 1);
     question.await.expect("the asking task finishes");
 }
@@ -3141,7 +3141,7 @@ async fn wait_reason_counts_outstanding_fan_out_workers() {
         );
     }
     assert_eq!(
-        host.wait_reason(parent.entity()),
+        host.wait_reason(parent),
         Some(WaitReason::FanOutWorkers { outstanding: 3 })
     );
 }
@@ -3356,4 +3356,44 @@ fn every_world_event_variant_carries_its_run_id() {
     for ev in events {
         assert_eq!(ev.run_id(), "run-x");
     }
+}
+
+/// `wait_reason` refuses an id from another world.
+///
+/// Without the check it would answer with the wait reason of whichever local
+/// agent shared the raw entity - reporting one run's state as another's in
+/// `lev ps`.
+#[tokio::test]
+async fn wait_reason_refuses_a_foreign_agent_id() {
+    let mut host = host_with(vec![]);
+    let mine = register_waiting(&mut host, "mine");
+    host.world
+        .world_mut()
+        .entity_mut(mine.entity())
+        .insert(crate::pipeline::WaitingForChildren);
+    // This world does answer for its own.
+    assert!(host.wait_reason(mine).is_some());
+
+    // A second world's id names nothing here, even though the raw entity is
+    // valid in both.
+    let mut other = PipelineWorld::new(
+        crate::providers::ProviderRegistry::new(),
+        Arc::new(NoTools),
+        InferencePoolConfig::new(),
+        1,
+        None,
+        Handle::current(),
+    );
+    // Spawn in the other world until it mints the *same* raw entity, so this
+    // tests a genuine collision rather than an id that simply is not there.
+    let theirs = loop {
+        let candidate = other.spawn_agent((agent_state("theirs"),));
+        if candidate.entity() == mine.entity() {
+            break candidate;
+        }
+    };
+    assert!(
+        host.wait_reason(theirs).is_none(),
+        "answered for a foreign id"
+    );
 }

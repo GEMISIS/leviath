@@ -25,7 +25,16 @@ use crate::pipeline::{AgentBlueprint, CompactionSettings, InferenceStage, Provid
 /// Seed `child`'s context from `parent`'s per a declared blueprint transform.
 /// No-op unless both carry an [`AgentBlueprint`] with different names and a
 /// matching [`ContextTransform`](leviath_core::blueprint::ContextTransform) exists.
-pub fn apply_context_transforms(world: &mut World, parent: Entity, child: Entity) {
+pub fn apply_context_transforms(
+    world: &mut World,
+    parent: crate::world::AgentId,
+    child: crate::world::AgentId,
+) {
+    // Both ends have to be in this world: seeding a child's context from a
+    // *different* world's parent would copy one run's data into another.
+    let (Some(parent), Some(child)) = (parent.resolve_in(world), child.resolve_in(world)) else {
+        return;
+    };
     let Some(mappings) = collect_transform_mappings(world, parent, child) else {
         return;
     };
@@ -429,7 +438,9 @@ mod tests {
             ))
             .id();
 
-        apply_context_transforms(&mut w, parent, child);
+        let parent_id = crate::world::AgentId::in_world(&w, parent);
+        let child_id = crate::world::AgentId::in_world(&w, child);
+        apply_context_transforms(&mut w, parent_id, child_id);
 
         let cw = w.get::<ContextWindow>(child).unwrap();
         let task = cw.get_region("task").unwrap();
@@ -456,7 +467,9 @@ mod tests {
                 window_with(&[("task", "")]),
             ))
             .id();
-        apply_context_transforms(&mut w, p, c);
+        let parent_id = crate::world::AgentId::in_world(&w, p);
+        let child_id = crate::world::AgentId::in_world(&w, c);
+        apply_context_transforms(&mut w, parent_id, child_id);
         assert_eq!(
             w.get::<ContextWindow>(c)
                 .unwrap()
@@ -478,7 +491,9 @@ mod tests {
                 window_with(&[("task", "")]),
             ))
             .id();
-        apply_context_transforms(&mut w2, p2, c2);
+        let parent_id = crate::world::AgentId::in_world(&w2, p2);
+        let child_id = crate::world::AgentId::in_world(&w2, c2);
+        apply_context_transforms(&mut w2, parent_id, child_id);
         assert_eq!(
             w2.get::<ContextWindow>(c2)
                 .unwrap()
@@ -499,7 +514,9 @@ mod tests {
             ))
             .id();
         let c3 = w3.spawn(bp_with_transforms("b", vec![])).id(); // no window
-        apply_context_transforms(&mut w3, p3, c3);
+        let parent_id = crate::world::AgentId::in_world(&w3, p3);
+        let child_id = crate::world::AgentId::in_world(&w3, c3);
+        apply_context_transforms(&mut w3, parent_id, child_id);
         assert!(w3.get::<ContextWindow>(c3).is_none());
     }
 
@@ -659,7 +676,9 @@ mod tests {
             ))
             .id();
 
-        apply_context_transforms(&mut w, parent, child);
+        let parent_id = crate::world::AgentId::in_world(&w, parent);
+        let child_id = crate::world::AgentId::in_world(&w, child);
+        apply_context_transforms(&mut w, parent_id, child_id);
 
         // Raw content is written now (fallback)...
         assert_eq!(
