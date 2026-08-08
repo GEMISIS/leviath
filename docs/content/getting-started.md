@@ -24,54 +24,79 @@ flowchart LR
 
 ## Install
 
-**macOS (Homebrew, recommended)**
+One command, any platform. It installs a prebuilt binary, so no Rust toolchain is needed.
 
-```bash
-brew tap gemisis/leviath https://github.com/GEMISIS/leviath-dist.git
-brew trust gemisis/leviath # Homebrew 6 requires trusting third-party taps
-brew install leviath            # or: leviath-beta, leviath-alpha
-```
-
-**macOS and Linux (one-liner)**
+**macOS and Linux**
 
 ```bash
 curl -fsSL https://leviath.dev/install.sh | sh
 ```
 
-That takes the stable channel. Set `LEVIATH_CHANNEL` to `beta` or `alpha` to switch:
-
-```bash
-LEVIATH_CHANNEL=beta curl -fsSL https://leviath.dev/install.sh | sh
-```
-
-On macOS it uses Homebrew if you have it. On Linux it downloads a prebuilt binary. Either way no
-Rust toolchain is needed.
-
-**Windows (PowerShell)**
+**Windows**
 
 ```powershell
 powershell -ExecutionPolicy Bypass -c "irm https://leviath.dev/install.ps1 | iex"
 ```
 
-Or with Scoop:
+Check it worked:
+
+```bash
+lev --version
+```
+
+That is the whole install. The options below are here when you want them, not because you need
+them.
+
+<details>
+<summary>Prefer Homebrew or Scoop</summary>
+
+The one-liners above already use Homebrew on macOS when you have it. To manage the tap yourself:
+
+```bash
+brew tap gemisis/leviath https://github.com/GEMISIS/leviath-dist.git
+brew trust gemisis/leviath # Homebrew 6 requires trusting third-party taps
+brew install leviath
+```
+
+On Windows, Scoop works the same way:
 
 ```powershell
 scoop bucket add leviath https://github.com/GEMISIS/leviath-dist.git
-scoop install leviath           # or: leviath-beta, leviath-alpha
+scoop install leviath
 ```
 
-Every install method offers three channels. `stable` is the default and is what you want unless you
-have a reason to be ahead of it. See [Releases and channels](/docs/releases) for what `beta` and
-`alpha` mean and how often each moves.
+</details>
 
-**Cargo** (any platform, needs [Rust](https://rustup.rs/)):
+<details>
+<summary>Switch to the beta or alpha channel</summary>
+
+`stable` is the default and is what you want unless you have a reason to be ahead of it. To ride a
+faster channel, set `LEVIATH_CHANNEL` for the installer:
+
+```bash
+LEVIATH_CHANNEL=beta curl -fsSL https://leviath.dev/install.sh | sh
+```
+
+Homebrew and Scoop name the channels as separate packages instead: install `leviath-beta` or
+`leviath-alpha` in place of `leviath`. See [Releases and channels](/docs/releases) for what each
+channel means and how often it moves.
+
+</details>
+
+<details>
+<summary>Build with Cargo, or embed the runtime</summary>
+
+With [Rust](https://rustup.rs/) installed:
 
 ```bash
 cargo install leviath-cli                # released version from crates.io
 cargo install --git https://github.com/GEMISIS/leviath.git --bin lev   # latest development build
 ```
 
-To embed the runtime in your own application instead, add the [`leviath`](https://crates.io/crates/leviath) crate as a dependency.
+To embed the runtime in your own application instead of running the CLI, add the
+[`leviath`](https://crates.io/crates/leviath) crate as a dependency.
+
+</details>
 
 ## Configure a provider
 
@@ -79,17 +104,40 @@ One provider is all you need: an API key from Anthropic, OpenAI, Google AI, or O
 or a local [Ollama](https://ollama.com) with no key at all.
 
 ```bash
-lev setup                                            # interactive wizard
-lev setup --non-interactive --anthropic-key sk-ant-… # scriptable
+lev setup
 ```
+
+The wizard detects keys already in your environment, sets a default model, and installs the
+pre-built agents.
 
 > [!TIP]
 > No API key handy? Point Leviath at a local [Ollama](https://ollama.com) install and run
 > entirely offline. `lev setup` will detect it. See [Providers](/docs/providers) for the full list.
 
+<details>
+<summary>Script the setup instead</summary>
+
+For CI, containers, or any headless machine:
+
+```bash
+lev setup --non-interactive --anthropic-key "$ANTHROPIC_API_KEY" --install-agents
+```
+
+Two flags matter more than they look:
+
+- `--install-agents` installs the pre-built agents. Without it, non-interactive setup configures
+  the provider and installs nothing.
+- `--default-model <provider>/<model>` sets the model every stage falls back to. Without a default
+  model, a blueprint's own list decides, which may not pick your provider.
+
+The other credential flags are `--openai-key`, `--google-key`, `--openrouter-key`, and
+`--ollama-url`. See [`lev setup`](/docs/cli#lev-setup) for the full set.
+
+</details>
+
 ## Run an agent
 
-Pick one of the ten [pre-built agents](/docs/agents) and give it a task:
+Pick one of the ten [pre-built agents](/docs/agent-catalog) and give it a task:
 
 ```bash
 lev run coder --task "Build a CLI that converts CSV to JSON"
@@ -122,37 +170,15 @@ live with the TUI [dashboard](/docs/dashboard):
 lev dash
 ```
 
-> [!NOTE]
-> Prefer a browser or a REST/WebSocket client? `lev serve` exposes the same daemon over HTTP.
-> See the [API](/docs/api) and the web console.
+> [!TIP]
+> Prefer a visual UI? Run [`lev serve`](/docs/api) and open
+> [The Lair](https://leviath.dev/lair), the browser console. It shows the same daemon: live runs,
+> context, logs, and interactions, from any browser.
 
-## On Windows
-
-`lev` itself is the same on every platform, and the commands above work unchanged in PowerShell.
-Two things around it differ.
-
-Environment variables. The shell examples in these docs use the Unix `VAR=value command` prefix,
-which PowerShell and `cmd` do not have:
-
-```powershell
-$env:ANTHROPIC_API_KEY = "sk-ant-..."     # PowerShell
-lev run coder --task "Fix the failing test"
-```
-
-```bat
-set ANTHROPIC_API_KEY=sk-ant-...
-lev run coder --task "Fix the failing test"
-```
-
-Quoting. PowerShell strips the outer quotes before `lev` sees the argument, so a task containing a
-literal quote needs escaping, and single quotes are safest when the text contains `$`:
-
-```powershell
-lev run coder --task 'Handle the $HOME case'
-```
-
-The agent's own shell is a separate matter: it runs through `cmd.exe`, not a POSIX shell, and
-Leviath tells the model so. See [which shell you get](/docs/tools#which-shell-you-get).
+On Windows the agent's shell is `cmd.exe`, not a POSIX shell, and Leviath tells the model so. See
+[which shell you get](/docs/tools#which-shell-you-get), and
+[Troubleshooting](/docs/troubleshooting#windows-quoting-and-environment-variables) for PowerShell
+quoting and environment-variable syntax.
 
 ## Create your own
 
@@ -167,8 +193,9 @@ and the context regions. See [Agents](/docs/agents) to go deeper.
 
 ## Where to go next
 
-- [Agent blueprints](/docs/agents) is the natural next page. It covers what goes in an
-  `agent.leviath` file.
+- The [Agent catalog](/docs/agent-catalog) tours the ten pre-built agents and what each is for.
+- [Agent blueprints](/docs/agents) covers what goes in an `agent.leviath` file, for building your
+  own.
 - [Troubleshooting](/docs/troubleshooting) has the common snags, and `lev doctor` diagnoses most of
   them for you.
 - [Glossary](/docs/glossary) defines every term these docs use in a particular way. Worth a skim if
@@ -176,4 +203,4 @@ and the context regions. See [Agents](/docs/agents) to go deeper.
 - [Where Leviath sits](/docs/comparison) is for deciding whether you want Leviath at all, and what
   to run alongside it.
 - [Where Leviath fits](/docs/integrations) covers driving Leviath from a tool you already use, like
-  Gas City, Smithy, or a CI job.
+  an orchestrator or a CI job.

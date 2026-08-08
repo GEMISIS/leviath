@@ -139,6 +139,34 @@ rather than Leviath's built-in table. Note that a valid dated identifier such as
 absence there is not proof of a bad name. See
 [model identifiers](/docs/providers#model-identifiers).
 
+## Windows quoting and environment variables
+
+`lev` itself is the same on every platform, and the commands in these docs work unchanged in
+PowerShell. Two things around it differ.
+
+Environment variables. The shell examples in these docs use the Unix `VAR=value command` prefix,
+which PowerShell and `cmd` do not have:
+
+```powershell
+$env:ANTHROPIC_API_KEY = "sk-ant-..."     # PowerShell
+lev run coder --task "Fix the failing test"
+```
+
+```bat
+set ANTHROPIC_API_KEY=sk-ant-...
+lev run coder --task "Fix the failing test"
+```
+
+Quoting. PowerShell strips the outer quotes before `lev` sees the argument, so a task containing a
+literal quote needs escaping, and single quotes are safest when the text contains `$`:
+
+```powershell
+lev run coder --task 'Handle the $HOME case'
+```
+
+The agent's own shell is a separate matter: it runs through `cmd.exe`, not a POSIX shell, and
+Leviath tells the model so. See [which shell you get](/docs/tools#which-shell-you-get).
+
 ## A Windows agent keeps trying `cat`, `ls`, and `grep`
 
 The `shell` tool runs through `cmd.exe` on Windows, where those do not exist. Leviath names the
