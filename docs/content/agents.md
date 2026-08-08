@@ -9,7 +9,26 @@ order: 3
 # Agent blueprints (`agent.leviath`)
 
 An agent is a directory with an `agent.leviath` file, a TOML **blueprint** describing a
-multi-stage [workflow graph](/docs/stages). `lev create <name>` scaffolds one.
+multi-stage [workflow graph](/docs/stages).
+
+> [!NOTE]
+> **Before this page:** [Getting Started](/docs/getting-started). The
+> [agent catalog](/docs/agent-catalog) shows ten complete blueprints worth stealing from.
+> **In one line:** stages, each with its own model and tools, joined by transitions, over a shared
+> context layout.
+
+Start from a scaffold rather than a blank file:
+
+```bash
+lev create my-agent
+cd my-agent
+lev run . --task "Your task here"
+```
+
+A blueprint needs very little to run: a name, an entry stage, and one stage with a prompt.
+Everything else on this page is opt-in from there. A fuller one looks like this
+(machine-checkable against the published
+[blueprint schema](https://leviath.dev/docs/stable/blueprint.schema.json)):
 
 ```toml
 [agent]
@@ -107,16 +126,17 @@ temperature = 0.2
 max_tokens  = 8000
 ```
 
-Model selection is per stage, and only per stage. There are two ways to get this wrong quietly, and
-`lev validate` reports both. See
+Model selection is per stage, and only per stage. There are two ways to get this wrong quietly (a
+top-level `[model]` block, which parses and is read by nothing, and a stage naming no model, which
+silently takes the host default), and `lev validate` reports both. See
 [every stage should name its own model](/docs/stages#every-stage-should-name-its-own-model).
 
 ### Which tools a stage gets
 
 `available_tools` lists what the stage may call.
 
-`required_tools` is the exception to the unattended cut. A `--yolo` run drops every tool that waits
-on a person, and this is where a stage names the ones it wants kept anyway. Every entry must also
+`required_tools` is the exception to the unattended cut. A [`--yolo`](/docs/glossary) run drops
+every tool that waits on a person, and this is where a stage names the ones it wants kept anyway. Every entry must also
 appear in `available_tools`.
 
 Naming a tool here also settles the `blocking-tool-in-autonomous-stage` lint for it, since listing

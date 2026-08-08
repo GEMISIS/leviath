@@ -1,6 +1,6 @@
 ---
 title: Providers
-description: Configure Anthropic, OpenAI, Google, OpenRouter, or a local Ollama, and choose which model each stage uses.
+description: Configure Anthropic, OpenAI, Google, OpenRouter, Ollama, or Claude Code from a key or an env var, and pick which model each stage uses.
 group: Reference
 group_order: 3
 order: 6
@@ -8,8 +8,11 @@ order: 6
 
 # Providers
 
-Leviath needs at least one model provider. Configure them with `lev setup` or by writing keys via
-the [API](/docs/api).
+Leviath needs at least one model provider, and a key reaches it three ways. Exporting the
+provider's environment variable is enough on its own, with no config file at all. `lev setup`
+writes it into `~/.leviath/config.toml` for you, interactively or with
+`--non-interactive --anthropic-key ...`. Or write the config file yourself; every key is in
+[Configuration](/docs/configuration).
 
 | Provider | Env var | Get a key |
 |---|---|---|
@@ -18,7 +21,9 @@ the [API](/docs/api).
 | Google (Gemini) | `GOOGLE_API_KEY` | [aistudio.google.com](https://aistudio.google.com/app/apikey) |
 | OpenRouter | `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) |
 | Ollama | `OLLAMA_HOST` (optional, local) | [ollama.com/download](https://ollama.com/download) |
-| Claude Code | none (subscription) | see below |
+| Claude Code | none (subscription; terms caveat below) | see below |
+
+The setup flag `--ollama-url` sets the same base URL that `OLLAMA_HOST` supplies.
 
 ## Model identifiers
 
@@ -165,11 +170,11 @@ your default still has the blueprint's own entries to fall back to.
 > falls through to whatever the blueprint listed. Set `default_model` alongside it. `lev doctor`
 > says so when you have not.
 
-### Running the bundled agents on another provider
+### Running the bundled agents on your provider
 
-The [bundled agents](/docs/agent-catalog) list Anthropic, OpenAI, and Ollama, in that order. None of
-them lists OpenRouter, Google, or a custom Rhai provider. Naming yours as the default is what makes
-them use it:
+The [bundled agents](/docs/agent-catalog) list all five providers, so any configured key works out
+of the box. But each blueprint's own order decides which is tried first, and a custom Rhai
+provider is never on the list. Naming yours as the default is what puts it in front:
 
 ```toml
 default_provider = "openrouter"

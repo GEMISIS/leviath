@@ -26,6 +26,12 @@ flowchart LR
   D --> AG["live agent state"]
 ```
 
+## Answer a waiting run
+
+The most common reason to open the dashboard: a run stopped to ask you something. Select the run
+with the arrow keys, press `Enter` for its detail view, then press `i` to open the interaction
+panel and answer. `lev respond` does the same from the shell.
+
 ## What's on screen
 
 - **Agent table**: title and run id, blueprint, stage, status, tokens, and start time, with

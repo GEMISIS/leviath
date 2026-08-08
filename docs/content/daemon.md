@@ -95,6 +95,9 @@ lev daemon install         # launchd (macOS) / systemd --user (Linux)
 lev daemon uninstall
 ```
 
+There is no Windows service integration yet: `lev daemon install` reports itself unsupported
+there. Use `lev daemon start`, and remember that `lev run` starts a daemon automatically anyway.
+
 > [!TIP]
 > An installed daemon plus [`lev serve`](/docs/api) is all you need to drive Leviath from the
 > [The Lair](https://leviath.dev/lair), the browser console, with no terminal involved.

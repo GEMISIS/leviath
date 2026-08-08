@@ -1,6 +1,6 @@
 ---
 title: Rhai scripting
-description: Why Leviath embeds the Rhai scripting language, and what you can extend with it.
+description: The Rhai extension points, providers, tools, regions, hooks, and validators, and the sandbox each one runs in.
 group: Reference
 group_order: 3
 order: 7

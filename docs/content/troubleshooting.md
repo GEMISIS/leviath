@@ -17,37 +17,24 @@ resolution, one real inference, and the daemon handoff, in that order, and repor
 check that fails tells you which section below you need. In particular it separates "my keys are
 wrong" from "the daemon is stuck", which look identical from the outside.
 
-## The Lair can't reach my server
+## The install worked, but `lev` is not found
 
-[The Lair](https://leviath.dev/lair), the browser console, talks straight to your `lev serve`
-endpoint, so three things must line up:
+The installer finished, and `lev --version` says `command not found`. Almost always the shell just
+has not picked up the new PATH entry yet: open a new terminal (or re-source your shell profile)
+and try again. The installer prints where it put the binary; if that directory is not on your
+PATH, add it. On Windows, a new PowerShell window picks up the PATH change made by the installer.
 
-1. **The server is running** with a token: `lev serve --token <t>`.
-2. **CORS allows the site's origin**: add `--cors https://leviath.dev` (or `--cors "*"`). Without
-   it, the browser blocks the request before your server ever sees it.
-3. **The token matches** the one you entered in the console.
+## Install fails with an auth error
 
-```bash
-lev serve --token 6618… --cors https://leviath.dev --allow-admin
-```
+No token is needed, because the repos and release assets are public. A 401/403 during install usually
+means leftovers from the private alpha: remove any
+`url."https://…@github.com/GEMISIS/".insteadOf` rewrite from `~/.gitconfig`, unset stale
+`GITHUB_TOKEN` / `HOMEBREW_GITHUB_API_TOKEN` exports (an expired token *fails* requests that
+would succeed anonymously), and retry.
 
-> [!WARNING]
-> A page served over **https** can't call an **http** endpoint (mixed content). `http://127.0.0.1`
-> is exempt, so localhost works; for a remote box use TLS, an SSH tunnel, or the Docker image.
-
-## I get `401 Unauthorized`
-
-The token is missing or wrong. REST clients send `Authorization: Bearer <token>`; WebSocket clients
-pass `?token=<token>` in the URL (browsers can't set WS headers). Confirm the value matches what you
-passed to `--token`.
-
-## An admin action returns `405` or `404`
-
-Config-write and MCP add/remove live behind `--allow-admin`. Without that flag the mutating route is
-not mounted, and you get whichever error fits the path: **405** for `PUT /api/config` and
-`POST /api/mcp/servers`, because those paths still answer `GET`, and **404** for
-`DELETE /api/mcp/servers/{name}`, because nothing is mounted there at all. The read routes keep
-working either way. Restart with `lev serve … --allow-admin`.
+> [!NOTE]
+> Still stuck? Open an issue or a private security advisory on
+> [GitHub](https://github.com/GEMISIS/leviath).
 
 ## No provider configured
 
@@ -116,6 +103,53 @@ stage log:
 [failover] ollama/qwen3.5:9b is unusable (Request failed: error sending request for url
 (http://localhost:11434/api/chat)); retrying on openrouter/openai/gpt-4o-mini
 ```
+
+## A run vanished when I closed my terminal
+
+It didn't. `lev run` hands the agent to the [daemon](/docs/daemon), which keeps hosting it. Bring
+it back with `lev ps` or `lev dash`. If the daemon itself was stopped, it reloads interrupted runs
+on its next start.
+
+## A run says `running` but never does anything
+
+Check its provider first, with `lev doctor`. If a stage's model list names only providers you
+haven't configured, `lev run` refuses the spawn outright and tells you which ones it tried.
+Configure one with `lev setup`, or add it to `config.toml` and restart the daemon.
+
+A run that gets past that and still can't dispatch (say you removed a provider key after it
+started) is failed after `[limits] stall_timeout_secs`, 60 seconds by default. Its `meta.json`
+records the reason. Set the limit to `0` to wait indefinitely instead.
+
+Waiting for a busy model is *not* this. An agent queued behind other in-flight requests to the same
+model is working as intended and is never failed, however long the queue takes. Raise
+`[limits] max_concurrent_inferences` if you want more of them running at once.
+
+## A run I spawned is not in `lev ps`
+
+There are three of these, and they need different answers.
+
+**It is still starting.** A spawn is not a start. Loading the blueprint, running any seed
+commands, and getting through the first inference all happen before an agent can call its first
+tool, and a cold model can take several seconds on its own. A run in this state is in `lev ps`
+already, at `iteration 0`. It is there; give it a moment.
+
+**It finished, and you looked within the retention window.** It is still listed, with the
+status it ended on. An `error` row at `ITER 0` and `TOOLS 0` is a run that never got a turn,
+and the message says why. `HTTP 402` there means the provider account is out of credit, not
+that Leviath lost the run.
+
+**It finished longer ago than the window.** Now it really is gone from the listing, and the
+answer is on disk: `~/.leviath/runs/<run-id>/meta.json`, or `GET /api/agents`, which reads the
+same records and does not expire them. Widen `[limits] finished_retention_secs` if you are
+polling less often than the default five minutes.
+
+If it is none of those, the spawn itself failed and no run was ever created. `lev run` reports
+that on the spot, and the daemon logs it at `error` level, so check there rather than in the
+listing.
+
+This matters most to anything that schedules work by spawning agents and watching for them.
+Poll the listing rather than timing how long a run "should" take: a wall-clock deadline that is
+shorter than a cold start will keep giving up on runs that were about to work.
 
 ## My OpenRouter agent finishes without saying anything
 
@@ -190,47 +224,6 @@ shares that terminal and draws nothing extra. The one child that is still meant
 to be visible is your editor: `lev run` with no `--task` opens `$EDITOR` in the
 console on purpose, and that is not this bug.
 
-## A run says `running` but never does anything
-
-Check its provider first, with `lev doctor`. If a stage's model list names only providers you
-haven't configured, `lev run` refuses the spawn outright and tells you which ones it tried.
-Configure one with `lev setup`, or add it to `config.toml` and restart the daemon.
-
-A run that gets past that and still can't dispatch (say you removed a provider key after it
-started) is failed after `[limits] stall_timeout_secs`, 60 seconds by default. Its `meta.json`
-records the reason. Set the limit to `0` to wait indefinitely instead.
-
-Waiting for a busy model is *not* this. An agent queued behind other in-flight requests to the same
-model is working as intended and is never failed, however long the queue takes. Raise
-`[limits] max_concurrent_inferences` if you want more of them running at once.
-
-## A run I spawned is not in `lev ps`
-
-There are three of these, and they need different answers.
-
-**It is still starting.** A spawn is not a start. Loading the blueprint, running any seed
-commands, and getting through the first inference all happen before an agent can call its first
-tool, and a cold model can take several seconds on its own. A run in this state is in `lev ps`
-already, at `iteration 0`. It is there; give it a moment.
-
-**It finished, and you looked within the retention window.** It is still listed, with the
-status it ended on. An `error` row at `ITER 0` and `TOOLS 0` is a run that never got a turn,
-and the message says why. `HTTP 402` there means the provider account is out of credit, not
-that Leviath lost the run.
-
-**It finished longer ago than the window.** Now it really is gone from the listing, and the
-answer is on disk: `~/.leviath/runs/<run-id>/meta.json`, or `GET /api/agents`, which reads the
-same records and does not expire them. Widen `[limits] finished_retention_secs` if you are
-polling less often than the default five minutes.
-
-If it is none of those, the spawn itself failed and no run was ever created. `lev run` reports
-that on the spot, and the daemon logs it at `error` level, so check there rather than in the
-listing.
-
-This matters most to anything that schedules work by spawning agents and watching for them.
-Poll the listing rather than timing how long a run "should" take: a wall-clock deadline that is
-shorter than a cold start will keep giving up on runs that were about to work.
-
 ## Every run looks busy but nothing finishes
 
 Run `lev ps` and read the line under the table. If there isn't one, the daemon thinks it is
@@ -289,20 +282,34 @@ That's what [stuck detection](/docs/stages#stuck-detection) is for. Add a `condi
 with thresholds (`stuck_after_iterations`, `stuck_after_same_file_edits`, …) so the runtime escapes
 the stage automatically instead of burning tokens.
 
-## A run vanished when I closed my terminal
+## The Lair can't reach my server
 
-It didn't. `lev run` hands the agent to the [daemon](/docs/daemon), which keeps hosting it. Bring
-it back with `lev ps` or `lev dash`. If the daemon itself was stopped, it reloads interrupted runs
-on its next start.
+[The Lair](https://leviath.dev/lair), the browser console, talks straight to your `lev serve`
+endpoint, so three things must line up:
 
-## Install fails with an auth error
+1. **The server is running** with a token: `lev serve --token <t>`.
+2. **CORS allows the site's origin**: add `--cors https://leviath.dev` (or `--cors "*"`). Without
+   it, the browser blocks the request before your server ever sees it.
+3. **The token matches** the one you entered in the console.
 
-No token is needed, because the repos and release assets are public. A 401/403 during install usually
-means leftovers from the private alpha: remove any
-`url."https://…@github.com/GEMISIS/".insteadOf` rewrite from `~/.gitconfig`, unset stale
-`GITHUB_TOKEN` / `HOMEBREW_GITHUB_API_TOKEN` exports (an expired token *fails* requests that
-would succeed anonymously), and retry.
+```bash
+lev serve --token 6618… --cors https://leviath.dev --allow-admin
+```
 
-> [!NOTE]
-> Still stuck? Open an issue or a private security advisory on
-> [GitHub](https://github.com/GEMISIS/leviath).
+> [!WARNING]
+> A page served over **https** can't call an **http** endpoint (mixed content). `http://127.0.0.1`
+> is exempt, so localhost works; for a remote box use TLS, an SSH tunnel, or the Docker image.
+
+## I get `401 Unauthorized`
+
+The token is missing or wrong. REST clients send `Authorization: Bearer <token>`; WebSocket clients
+pass `?token=<token>` in the URL (browsers can't set WS headers). Confirm the value matches what you
+passed to `--token`.
+
+## An admin action returns `405` or `404`
+
+Config-write and MCP add/remove live behind `--allow-admin`. Without that flag the mutating route is
+not mounted, and you get whichever error fits the path: **405** for `PUT /api/config` and
+`POST /api/mcp/servers`, because those paths still answer `GET`, and **404** for
+`DELETE /api/mcp/servers/{name}`, because nothing is mounted there at all. The read routes keep
+working either way. Restart with `lev serve … --allow-admin`.

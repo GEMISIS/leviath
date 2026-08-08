@@ -23,7 +23,7 @@ Leviath rather than instead of it.
 
 ```mermaid
 flowchart TD
-  ORCH["Orchestrators<br/>Gas Town / Gas City / OpenHands"]
+  ORCH["Orchestrators<br/>Gas City / OpenHands"]
   ORCH --> AGENTS["Agent layer"]
   subgraph AGENTS["Agent layer: pick one"]
     CC["Coding agents<br/>Claude Code, Codex"]
@@ -55,7 +55,7 @@ description comes from that project's own documentation.
 | **Multi-agent** | Stage graphs plus in-process fan-out | Subagents within a session | Role-based crews, coordinated by flows | Explicit graphs of deterministic and agentic steps |
 | **Agents are defined in** | TOML plus Rhai scripts | Markdown and YAML, or SDK code | Python classes or YAML | Python or TypeScript |
 | **Expects on the machine** | One native binary | A native CLI; the SDKs want Node 18+ or Python 3.10+ | Python 3.10-3.13 | A Python or Node runtime |
-| **Headless surface** | REST, WebSocket, ACP over stdio | `claude -p`, plus the SDKs | `kickoff()` in-process, REST via AMP | Library calls, REST via LangSmith |
+| **Headless surface** | REST, WebSocket, [ACP](/docs/agent-client-protocol) over stdio | `claude -p`, plus the SDKs | `kickoff()` in-process, REST via AMP | Library calls, REST via LangSmith |
 | **Human in the loop** | Mid-run messages, interaction points, ask-user tools | Interactive steering and permission prompts | `human_input` pauses a task | `interrupt()` pauses and resumes |
 | **Isolation** | Per-agent state, workdir, and policy; opt-in containers or namespaces for shell | Opt-in OS sandbox for shell | External sandbox services | Sandbox backends via Deep Agents |
 | **Hosted option** | None | Managed Agents | CrewAI AMP | LangSmith Deployment |
@@ -72,8 +72,9 @@ even run *on top of* Claude Code as a transport, so this is not either/or.
 want the workflow expressed in code, with your own types and your own tests around it. A separate
 runtime configured in TOML is friction you do not need.
 
-**Use Gas City, Gas Town, or [OpenHands](https://docs.all-hands.dev/)** when the hard problem is
-coordinating work across issues, repos, and people. That is a different problem from what happens
+**Use [Gas City](/docs/gas-city) (an orchestration-builder SDK from the
+[Gas Town Hall](https://gastownhall.ai/) project) or [OpenHands](https://docs.all-hands.dev/)**
+when the hard problem is coordinating work across issues, repos, and people. That is a different problem from what happens
 inside one agent, and Leviath does not try to solve it. Run Leviath underneath one of them if you
 want both.
 

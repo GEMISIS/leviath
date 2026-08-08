@@ -1,6 +1,6 @@
 ---
 title: Final outputs
-description: Let an agent hand back an answer, in whatever shape you ask for, instead of leaving you to read its logs.
+description: Get a structured answer out of a run with output formats, schemas, and lev result, instead of scraping its logs.
 group: Concepts
 group_order: 2
 order: 6

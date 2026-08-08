@@ -1,6 +1,6 @@
 ---
 title: Agent catalog
-description: The ten pre-built agents Leviath ships, what each one is for, and the command to run it.
+description: The ten pre-built agents Leviath ships, what each is for, how to install them, and the lev run command for each.
 group: Get started
 group_order: 1
 order: 2
@@ -8,24 +8,27 @@ order: 2
 
 # Agent catalog
 
-Leviath ships with ten pre-built agents. `lev setup` installs them into `~/.leviath/agents/`, one
-directory per agent, each holding an `agent.leviath` [blueprint](/docs/agents). Run any of them by
-name:
+Leviath ships with ten pre-built agents. `lev setup` installs them into `~/.leviath/agents/`
+(scripting it? pass `--install-agents`), one directory per agent, each holding an `agent.leviath`
+[blueprint](/docs/agents). Run any of them by name:
 
 ```bash
 lev run coder --task "Build a CLI that converts CSV to JSON"
 ```
 
+Each entry names the models its stages prefer. Those are first choices, not requirements: every
+bundled agent lists all five providers, and a stage falls back to the one you configured.
+
 This page is also a set of worked examples. Each section shows the agent's real stages and how
 they route, so you can copy the patterns into your own blueprint (`lev create my-agent` scaffolds
-one, then read [Agents](/docs/agents)). The diagrams show the main path. To stay readable they
-leave out three things every blueprint carries: `error` edges into a recovery stage (drawn once
-per agent), escape edges that jump to the deliverable when a loop hits its revisit cap, and the
-final summary stage that writes the run's [output](/docs/outputs).
+one, then read [Agents](/docs/agents)). The diagrams show the main path; error-recovery edges and
+the final summary stage that writes the run's [output](/docs/outputs) are left out to keep them
+readable.
 
 > [!TIP]
 > Pick by the shape of the work: a codebase change (the coding agents), a question to answer from
-> sources (the research agents), or a recurring chore like logs, briefings, or drafts.
+> sources (the research agents), or a recurring chore like logs, briefings, or drafts. Not sure?
+> Run `coder`.
 
 ## software-engineer
 
@@ -55,8 +58,10 @@ lev run software-engineer --task "Add rate limiting to the public API"
 ```
 
 The `plan` stage runs in `interactive_points` mode, so it pauses for your approval before the flow
-continues. That is the [human-in-the-loop](/docs/interaction) pattern. `discover` and `plan` run on
-Sonnet; `implement`, `review`, and `reassess` step up to Opus.
+continues. That is the [human-in-the-loop](/docs/interaction) pattern, and the plan gate holds
+**even under `--yolo`**, deliberately, because everything after it writes code. For a fully
+unattended run, use `coder`. `discover` and `plan` run on Sonnet; `implement`, `review`, and
+`reassess` step up to Opus.
 
 ## coder
 

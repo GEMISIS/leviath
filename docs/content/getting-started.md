@@ -1,6 +1,6 @@
 ---
 title: Getting Started
-description: Install Leviath, configure a provider, and run your first agent, in four steps.
+description: Install Leviath, configure a provider interactively or headlessly for CI, and run your first agent, in four steps.
 group: Get started
 group_order: 1
 order: 1
@@ -137,12 +137,18 @@ The other credential flags are `--openai-key`, `--google-key`, `--openrouter-key
 
 ## Run an agent
 
-Pick one of the ten [pre-built agents](/docs/agent-catalog) and give it a task:
+First `cd` into the directory you want the agent working in. That directory becomes the run's
+**workdir**: its file tools are confined to it, and its output lands there.
+
+Then pick one of the ten [pre-built agents](/docs/agent-catalog) and give it a task:
 
 ```bash
 lev run coder --task "Build a CLI that converts CSV to JSON"
 lev run deep-researcher --task "Survey the state of solid-state batteries"
 ```
+
+A run spends real API tokens on your configured provider. For a free first try, point
+`lev setup` at a local Ollama instead.
 
 Leave `--task` off and your editor opens on a template, which is easier than
 fighting shell quoting for anything longer than a sentence. It also takes a
@@ -170,10 +176,32 @@ live with the TUI [dashboard](/docs/dashboard):
 lev dash
 ```
 
+One thing to expect: the agent **stops and asks** before it writes a file or runs a shell command,
+because those tools default to `ask`. Answer in `lev dash` (select the run, `Enter`, then `i`), or
+pass `--yolo` to pre-approve everything for an unattended run. See
+[Interaction](/docs/interaction).
+
+## Read the result
+
+When the run finishes, the answer is one command away:
+
+```bash
+lev ps                    # every run and its status; finished ones stay listed for a while
+lev result <run-id>       # what the agent handed back
+```
+
+Files the agent created are in the workdir you ran it from. See [Outputs](/docs/outputs) for
+structured answers.
+
 > [!TIP]
-> Prefer a visual UI? Run [`lev serve`](/docs/api) and open
-> [The Lair](https://leviath.dev/lair), the browser console. It shows the same daemon: live runs,
-> context, logs, and interactions, from any browser.
+> Prefer a visual UI? Serve the daemon over HTTP and open
+> [The Lair](https://leviath.dev/lair), the browser console:
+>
+> ```bash
+> lev serve --token <your-secret> --cors https://leviath.dev
+> ```
+>
+> It shows the same daemon: live runs, context, logs, and interactions, from any browser.
 
 On Windows the agent's shell is `cmd.exe`, not a POSIX shell, and Leviath tells the model so. See
 [which shell you get](/docs/tools#which-shell-you-get), and

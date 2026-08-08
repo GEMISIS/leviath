@@ -1,6 +1,6 @@
 ---
 title: Gas City
-description: Wiring Leviath into Gas City as the agent backend behind its orchestration.
+description: Wiring Leviath into Gas City, the multi-agent orchestration SDK, as the coding-agent backend behind its workflows.
 group: Integrations
 group_order: 5
 order: 2
