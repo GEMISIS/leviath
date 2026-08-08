@@ -53,7 +53,7 @@ Two ways to deal with it.
 #!/usr/bin/env bash
 set -euo pipefail
 
-export LEVIATH_HOME=/work/.leviath
+export LEVIATH_HOME=/work   # data lands under /work/.leviath
 lev daemon start
 
 # `lev run` prints "spawned <run-id>" and returns straight away.

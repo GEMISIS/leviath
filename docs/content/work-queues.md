@@ -51,13 +51,17 @@ for it to still remember, the runs on disk it is not holding, and whether it ans
 ```json
 {
   "daemon_reachable": true,
-  "runs": [{ "run_id": "coder-1785568852", "status": "active", "last_progress_at": 1785568852 }],
-  "finished": [{ "run_id": "coder-1785568700", "status": "error" }],
+  "runs": [{ "run_id": "coder-1785568852-8b48c1e0f3a2", "status": "Active", "last_progress_at": 1785568852 }],
+  "finished": [{ "run_id": "coder-1785568700-2f91d4a07b6c", "status": { "Error": { "message": "HTTP 402 Payment Required" } } }],
   "not_running": [
-    { "run_id": "coder-1785568100", "status": "complete", "updated_at": 1785568600, "abandoned": false }
+    { "run_id": "coder-1785568100-c05e7d2891fa", "status": "complete", "updated_at": 1785568600, "abandoned": false }
   ]
 }
 ```
+
+Note the casing. Entries in `runs` and `finished` carry the daemon's own status
+(`Active`, `Waiting`, `Complete`, and `Error` as an object with a `message`), while `not_running`
+entries come from `meta.json` on disk and use lowercase (`complete`, `error`). Match on both.
 
 For each run your queue thinks is in progress, act on which list it turned up in:
 
