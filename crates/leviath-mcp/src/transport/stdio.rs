@@ -10,7 +10,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStdin, ChildStdout};
 
 use super::Transport;
 use super::jsonrpc::{self, Inbound, JsonRpcRequest, JsonRpcResponse};
@@ -141,7 +141,7 @@ impl StdioTransport {
         args: &[&str],
         env: &HashMap<String, String>,
     ) -> std::io::Result<Child> {
-        let mut cmd = Command::new(command);
+        let mut cmd = leviath_sys::child_command_async(command);
 
         // Build a clean environment, then layer the explicitly configured vars
         // (intentional, from MCP config) on top.
@@ -157,7 +157,6 @@ impl StdioTransport {
         // The server talks JSON-RPC over those pipes and has no use for a
         // console. It matters most here: `command_candidates` resolves `npx` to
         // `npx.cmd`, a batch file, which Windows always runs through `cmd.exe`.
-        leviath_sys::hide_console_window(cmd.as_std_mut());
 
         cmd.spawn()
     }

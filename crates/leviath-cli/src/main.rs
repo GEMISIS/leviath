@@ -347,7 +347,9 @@ async fn ensure_daemon_running() -> anyhow::Result<()> {
         poll_until(&mut || !is_daemon_running(&id)).await;
     }
     let exe = std::env::current_exe()?;
-    let mut cmd = std::process::Command::new(exe);
+    // The daemon is a background process: started from Explorer or a
+    // service it has no console to share, so a raw spawn would open one.
+    let mut cmd = leviath_sys::child_command(exe);
     cmd.arg("daemon")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -357,7 +359,10 @@ async fn ensure_daemon_running() -> anyhow::Result<()> {
     if poll_until(&mut || is_daemon_running(&id)).await {
         return Ok(());
     }
-    anyhow::bail!("the leviath daemon did not start within 5s");
+    anyhow::bail!(
+        "the leviath daemon did not start within {:?}",
+        leviath_cli::daemon::readiness::READY_TIMEOUT
+    );
 }
 
 /// `lev daemon start`: auto-start a detached daemon if none is running.
@@ -457,7 +462,7 @@ fn resolve_service_unit() -> anyhow::Result<commands::daemon_service::ServiceUni
 /// failure. The real subprocess spawn - the argv it runs is built and tested in
 /// `commands::daemon_service`.
 fn run_supervisor(cmd: &(String, Vec<String>)) -> anyhow::Result<()> {
-    let out = std::process::Command::new(&cmd.0).args(&cmd.1).output()?;
+    let out = leviath_sys::child_command(&cmd.0).args(&cmd.1).output()?;
     if out.status.success() {
         return Ok(());
     }

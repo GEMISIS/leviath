@@ -1,5 +1,6 @@
 //! Process control: detached spawning and console-window suppression.
 
+use std::ffi::OsStr;
 use std::process::Command;
 
 /// Configure `cmd` so the spawned child detaches into its own process group,
@@ -33,6 +34,45 @@ pub fn configure_detached(cmd: &mut Command) {
 /// here, alongside `CREATE_NO_WINDOW`, rather than at a call site.
 pub fn hide_console_window(cmd: &mut Command) {
     crate::platform::hide_console_window(cmd);
+}
+
+/// A [`Command`] for a child that must not take a console window.
+///
+/// **This is where the decision is made.** Hiding used to be a second call the
+/// caller made after building the command, at seven sites across five crates,
+/// and a new spawn site that forgot it looked exactly like one that did not
+/// need it. Making it part of construction means the only way to get a child
+/// process is to have already answered the question.
+///
+/// The counterpart is [`terminal_command`], for the single child that is meant
+/// to be seen. There is no third option on purpose: a `Command::new` outside
+/// this module is rejected by `.sgrules/no-raw-command-new.yml`.
+pub fn child_command(program: impl AsRef<OsStr>) -> Command {
+    let mut cmd = Command::new(program);
+    hide_console_window(&mut cmd);
+    cmd
+}
+
+/// The tokio twin of [`child_command`].
+///
+/// `tokio::process::Command` wraps a `std::process::Command`, so `as_std_mut`
+/// reaches the one the flag is written on and both flavours share a single
+/// implementation rather than a second copy of the `#[cfg]`.
+pub fn child_command_async(program: impl AsRef<OsStr>) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(program);
+    hide_console_window(cmd.as_std_mut());
+    cmd
+}
+
+/// A [`Command`] for a child that *must* inherit the user's terminal.
+///
+/// The editor `lev run` opens is the only one: it draws in the terminal it
+/// inherits, and starting `vim` without a console leaves it nowhere to draw and
+/// nothing to read from. Named rather than reached for with a bare
+/// `Command::new` so the exception is a decision in the source instead of an
+/// omission, and so the lint has something to point at.
+pub fn terminal_command(program: impl AsRef<OsStr>) -> Command {
+    Command::new(program)
 }
 
 /// SIGKILL every process in the group led by `pgid` (a no-op on platforms
@@ -135,5 +175,30 @@ mod tests {
         // observable on Windows, and is asserted in that platform module.
         let mut cmd = Command::new("true");
         hide_console_window(&mut cmd);
+    }
+
+    /// The constructors have to *be* the decision, not just offer it: a caller
+    /// that builds through them gets a hidden console without a second call.
+    /// The flag itself is only observable on Windows and is asserted in that
+    /// platform module; here the point is that construction succeeds and the
+    /// program survives, so a caller cannot be silently handed a broken command.
+    #[test]
+    fn child_command_builds_a_usable_command() {
+        let cmd = child_command("true");
+        assert_eq!(cmd.get_program(), "true");
+    }
+
+    #[test]
+    fn child_command_async_builds_a_usable_command() {
+        let cmd = child_command_async("true");
+        assert_eq!(cmd.as_std().get_program(), "true");
+    }
+
+    /// The editor is the one child meant to be seen, so this deliberately does
+    /// *not* hide the console - see `editor.rs`, its only caller.
+    #[test]
+    fn terminal_command_builds_a_usable_command() {
+        let cmd = terminal_command("true");
+        assert_eq!(cmd.get_program(), "true");
     }
 }

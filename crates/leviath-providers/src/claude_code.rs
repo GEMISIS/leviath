@@ -183,7 +183,7 @@ impl ClaudeCodeProvider {
         let prompt_file = stage_prompt_file(temp_dir, &Self::build_system_prompt(request))
             .map_err(prompt_file_error)?;
 
-        let mut cmd = tokio::process::Command::new(&self.binary_path);
+        let mut cmd = leviath_sys::child_command_async(&self.binary_path);
         cmd.args([
             "--print",
             "--output-format",
@@ -210,7 +210,6 @@ impl ClaudeCodeProvider {
         cmd.stderr(std::process::Stdio::piped());
         // This runs once per inference call, so on Windows it would be a
         // console window per turn of every agent.
-        leviath_sys::hide_console_window(cmd.as_std_mut());
 
         let mut child = retry_etxtbsy(|| cmd.spawn()).await.map_err(|e| {
             // Permanent: a missing or unusable binary will not fix itself, and

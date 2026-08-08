@@ -30,6 +30,11 @@ tracing = { workspace = true }
 # is otherwise pure Rust plus its TLS stack.
 fs4 = { workspace = true }
 
+# Only for `tokio::process::Command`, so the console-window decision can be made
+# once for both command flavours here rather than duplicated in every crate that
+# spawns children. `process` alone - this crate runs no runtime of its own.
+tokio = { workspace = true, features = ["process"] }
+
 # The OS credential store (macOS Keychain / Windows Credential Manager / Secret
 # Service). Optional: see the `keychain` feature above. `keyring-core` is used
 # directly for the `Entry` API so tests can install an in-memory store as the

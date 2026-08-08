@@ -88,7 +88,7 @@ fn sanitize(run_id: &str) -> String {
 
 /// Build the host shell command (no sandbox) - the exact prior behavior.
 fn host_command(shell: &str, flag: &str, command: &str, workdir: &Path) -> TokioCommand {
-    let mut c = TokioCommand::new(shell);
+    let mut c = leviath_sys::child_command_async(shell);
     c.arg(flag).arg(command).current_dir(workdir);
     c
 }
@@ -266,7 +266,6 @@ fn real_run(argv: &[String]) -> Result<(), String> {
     cmd.args(&argv[1..]);
     // `docker run`/`docker rm` are bookkeeping the operator never watches, so
     // they get no console window on Windows.
-    leviath_sys::hide_console_window(&mut cmd);
     let output = cmd.output().map_err(|e| e.to_string())?;
     if output.status.success() {
         Ok(())
@@ -293,7 +292,7 @@ impl ShellExecutor for SandboxManager {
             SandboxKind::Namespace => {
                 if self.namespace_ok {
                     let argv = leviath_sys::namespace_argv(shell, flag, command, cfg.network);
-                    let mut c = TokioCommand::new(&argv[0]);
+                    let mut c = leviath_sys::child_command_async(&argv[0]);
                     c.args(&argv[1..]).current_dir(workdir);
                     c
                 } else {
@@ -315,7 +314,7 @@ impl ShellExecutor for SandboxManager {
                         CONTAINER_SHELL_FLAG,
                         command,
                     );
-                    let mut c = TokioCommand::new(&argv[0]);
+                    let mut c = leviath_sys::child_command_async(&argv[0]);
                     c.args(&argv[1..]);
                     c
                 }
