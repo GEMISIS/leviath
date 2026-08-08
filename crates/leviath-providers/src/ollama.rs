@@ -157,7 +157,12 @@ impl OllamaProvider {
         // OpenAI format (Ollama speaks the OpenAI chat shape). The shared
         // helper matters here: a naive conversion drops the system prompt and
         // serializes tool blocks as raw JSON.
-        let messages = crate::openai_compat::openai_messages(request);
+        // Ollama declares `tool_calls.function.arguments` as an object and
+        // rejects OpenAI's JSON-string spelling, so history replays as objects.
+        let messages = crate::openai_compat::openai_messages_with(
+            request,
+            crate::openai_compat::ToolArgsFormat::Object,
+        );
 
         let caps = self.capabilities(&request.model);
         let options = if caps.supports_temperature {

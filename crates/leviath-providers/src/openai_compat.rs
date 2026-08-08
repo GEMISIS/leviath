@@ -98,6 +98,15 @@ pub async fn send_chat_request(
 /// result), so tool history round-trips correctly on OpenAI-compatible APIs
 /// instead of being serialized raw in Anthropic block form.
 pub fn message_to_openai(role: &str, content: &MessageContent) -> Vec<serde_json::Value> {
+    message_to_openai_with(role, content, ToolArgsFormat::JsonString)
+}
+
+/// [`message_to_openai`], naming how tool-call arguments are rendered.
+pub fn message_to_openai_with(
+    role: &str,
+    content: &MessageContent,
+    tool_args: ToolArgsFormat,
+) -> Vec<serde_json::Value> {
     match content {
         MessageContent::Text(text) => {
             vec![serde_json::json!({ "role": role, "content": text })]
@@ -133,7 +142,7 @@ pub fn message_to_openai(role: &str, content: &MessageContent) -> Vec<serde_json
                         let mut call = serde_json::json!({
                             "id": id,
                             "type": "function",
-                            "function": { "name": name, "arguments": input.to_string() }
+                            "function": { "name": name, "arguments": tool_args.render(input) }
                         });
                         // Echoed back exactly where the provider put it.
                         if let Some(sig) = thought_signature {
@@ -182,12 +191,20 @@ pub fn message_to_openai(role: &str, content: &MessageContent) -> Vec<serde_json
 /// converted via [`message_to_openai`]. Reused by every OpenAI-compatible
 /// provider so system prompts and tool history are handled uniformly.
 pub fn openai_messages(request: &InferenceRequest) -> Vec<serde_json::Value> {
+    openai_messages_with(request, ToolArgsFormat::JsonString)
+}
+
+/// [`openai_messages`], naming how tool-call arguments are rendered.
+pub fn openai_messages_with(
+    request: &InferenceRequest,
+    tool_args: ToolArgsFormat,
+) -> Vec<serde_json::Value> {
     let mut messages: Vec<serde_json::Value> = Vec::new();
     for block in &request.system {
         messages.push(serde_json::json!({ "role": "system", "content": block.text }));
     }
     for msg in &request.messages {
-        messages.extend(message_to_openai(&msg.role, &msg.content));
+        messages.extend(message_to_openai_with(&msg.role, &msg.content, tool_args));
     }
     satisfy_call_turn_order(drop_unpaired_tool_turns(messages))
 }
@@ -269,6 +286,38 @@ fn drop_unpaired_tool_turns(messages: Vec<serde_json::Value>) -> Vec<serde_json:
         .zip(keep)
         .filter_map(|(m, keep)| keep.then_some(m))
         .collect()
+}
+
+/// How a server wants a prior tool call's arguments replayed.
+///
+/// The second place the dialect forked. OpenAI carries `arguments` as a
+/// *JSON-encoded string*; Ollama's Go server declares the field as
+/// `api.ToolCallFunctionArguments` and rejects the string form outright:
+///
+/// ```text
+/// json: cannot unmarshal string into Go struct field
+/// ChatRequest.messages.tool_calls.function.arguments
+/// ```
+///
+/// The first call of a turn therefore succeeded and the *second* failed, once
+/// there was history to replay - which reads exactly like a model that is bad
+/// at tool use, and is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolArgsFormat {
+    /// A JSON-encoded string. OpenAI, OpenRouter, Gemini's compat endpoint.
+    JsonString,
+    /// A JSON object. Ollama.
+    Object,
+}
+
+impl ToolArgsFormat {
+    /// Render `input` the way this dialect expects it.
+    pub fn render(self, input: &serde_json::Value) -> serde_json::Value {
+        match self {
+            Self::JsonString => serde_json::Value::String(input.to_string()),
+            Self::Object => input.clone(),
+        }
+    }
 }
 
 /// Which key an OpenAI-dialect server expects the output-token cap under.
@@ -2244,5 +2293,88 @@ mod tests {
             TokenLimitField::MaxCompletionTokens.key(),
             "max_completion_tokens"
         );
+    }
+
+    // ─── Tool-call arguments are spelled per dialect ────────────────────────
+
+    fn one_tool_use() -> MessageContent {
+        MessageContent::Blocks(vec![ContentBlock::ToolUse {
+            id: "call_1".to_string(),
+            name: "read_file".to_string(),
+            input: serde_json::json!({ "path": "notes.txt" }),
+            thought_signature: None,
+        }])
+    }
+
+    #[test]
+    fn openai_gets_tool_arguments_as_a_json_string() {
+        let msgs = message_to_openai("assistant", &one_tool_use());
+        let args = &msgs[0]["tool_calls"][0]["function"]["arguments"];
+        assert!(args.is_string());
+        assert_eq!(args.as_str().unwrap_or_default(), r#"{"path":"notes.txt"}"#);
+    }
+
+    #[test]
+    fn ollama_gets_tool_arguments_as_an_object() {
+        // Ollama's Go server types this field as ToolCallFunctionArguments and
+        // rejects the string spelling, so a second turn - the first one with
+        // history to replay - failed with HTTP 400.
+        let msgs = message_to_openai_with("assistant", &one_tool_use(), ToolArgsFormat::Object);
+        let args = &msgs[0]["tool_calls"][0]["function"]["arguments"];
+        assert!(args.is_object());
+        assert_eq!(args["path"], "notes.txt");
+    }
+
+    #[test]
+    fn each_arg_format_renders_its_own_shape() {
+        let input = serde_json::json!({ "a": 1 });
+        assert!(ToolArgsFormat::JsonString.render(&input).is_string());
+        assert!(ToolArgsFormat::Object.render(&input).is_object());
+    }
+
+    #[test]
+    fn the_arg_format_reaches_the_messages_a_provider_actually_sends() {
+        // Regression: `openai_messages_with` took the format and then called the
+        // unparameterised `message_to_openai`, so the argument was dead and
+        // Ollama kept getting the string it rejects. A test on the leaf function
+        // passed the whole time - this one asserts the path.
+        let req = InferenceRequest {
+            // The result has to be here too: `drop_unpaired_tool_turns`
+            // discards a call with no answer, which would empty the array and
+            // make this assert on nothing.
+            messages: vec![
+                Message {
+                    role: "assistant".to_string(),
+                    content: one_tool_use(),
+                    cache_breakpoint: false,
+                },
+                Message {
+                    role: "user".to_string(),
+                    content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                        tool_use_id: "call_1".to_string(),
+                        content: "the access code is 7731".to_string(),
+                        is_error: false,
+                    }]),
+                    cache_breakpoint: false,
+                },
+            ],
+            ..sample_request()
+        };
+        let msgs = openai_messages_with(&req, ToolArgsFormat::Object);
+        let call = msgs
+            .iter()
+            .find_map(|m| m.get("tool_calls").and_then(|t| t.get(0)))
+            .expect("the assistant turn carries a tool call");
+        assert!(
+            call["function"]["arguments"].is_object(),
+            "the format did not reach the emitted message: {call}"
+        );
+
+        let msgs = openai_messages_with(&req, ToolArgsFormat::JsonString);
+        let call = msgs
+            .iter()
+            .find_map(|m| m.get("tool_calls").and_then(|t| t.get(0)))
+            .expect("the assistant turn carries a tool call");
+        assert!(call["function"]["arguments"].is_string());
     }
 }
