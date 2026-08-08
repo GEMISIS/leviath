@@ -3985,11 +3985,13 @@ conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
                 .expect("every bundled agent ships an agent.leviath");
             let bp = leviath_core::manifest::parse_manifest(content)
                 .expect("every bundled agent's manifest parses");
-            let args = args_with("a task", HashMap::new(), "/w");
-            let refused =
-                resolve_seeds(&bp, &args, "/w", &seed_policy(), &no_read_paths()).is_err();
+            // The question is `accepts_task`, not "did `resolve_seeds` error".
+            // Driving the whole resolver here reported `coder` as refusing a
+            // task on Windows only, because one of its *path* seeds failed
+            // against the fixture workdir - an unrelated error the proxy could
+            // not tell apart from the one under test.
             assert!(
-                !(content.contains("--task") && refused),
+                !content.contains("--task") || bp.accepts_task(),
                 "{name} tells the user to pass --task but declares no region to hold one"
             );
         }
