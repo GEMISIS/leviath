@@ -14,17 +14,13 @@ pub fn own_process_group(cmd: &mut Command) {
     let _ = cmd;
 }
 
-/// Start `cmd` without a console window, so an agent's shell calls do not flash
-/// consoles across the desktop on Windows (issue #228).
+/// Build a child-process command with no console window.
 ///
-/// The tokio twin of [`leviath_sys::hide_console_window`], which takes a
-/// `std::process::Command`; `as_std_mut` reaches the one tokio wraps, so the
-/// flag has a single implementation rather than a second copy of the `#[cfg]`.
-/// A no-op everywhere but Windows. Only for a child whose stdio is piped, which
-/// is every caller here.
-pub fn hide_console_window(cmd: &mut Command) {
-    leviath_sys::hide_console_window(cmd.as_std_mut());
-}
+/// Re-exported from [`leviath_sys::child_command_async`] so the tool lane names
+/// it without reaching across crates at every call site. The decision lives
+/// there, once, for both command flavours - see that function for why it is
+/// made at construction rather than by a second call the caller can forget.
+pub use leviath_sys::child_command_async as child_command;
 
 /// SIGKILLs a shell's whole process group when dropped.
 ///

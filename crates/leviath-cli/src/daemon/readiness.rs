@@ -9,7 +9,19 @@
 use std::time::Duration;
 
 /// How long to keep asking before giving up.
-pub const READY_TIMEOUT: Duration = Duration::from_secs(5);
+///
+/// Windows gets longer. Starting the daemon there has to bind a named pipe and
+/// detach into a job object, and under a supervisor opening many sessions at
+/// once those serialise: the 5s that is generous on Unix was regularly missed,
+/// leaving sessions `runtime-missing` and the control pipe reporting "All pipe
+/// instances are busy" (os error 231). The cost of the longer window is paid
+/// only by a start that would otherwise have failed - the poll returns as soon
+/// as the daemon answers, and a healthy one answers in ~20ms on either
+/// platform.
+pub const READY_TIMEOUT: Duration = match cfg!(windows) {
+    true => Duration::from_secs(15),
+    false => Duration::from_secs(5),
+};
 
 /// First gap between polls.
 const FIRST_DELAY: Duration = Duration::from_millis(2);
@@ -116,5 +128,21 @@ mod tests {
         // stays there rather than growing without bound.
         assert_eq!(gaps[6], MAX_DELAY);
         assert_eq!(gaps[7], MAX_DELAY);
+    }
+
+    /// The window is a platform decision, so assert the decision rather than a
+    /// number: Windows has to bind a named pipe and detach into a job object,
+    /// and a supervisor starting many sessions serialises those.
+    #[test]
+    fn windows_gets_a_longer_readiness_window_than_unix() {
+        // Arithmetic rather than a branch: a `match`/`if` on `cfg!` leaves the
+        // other platform's arm unreachable here, which the 100% gate reads as an
+        // uncovered region.
+        let expected = 5 + 10 * u64::from(cfg!(windows));
+        assert_eq!(READY_TIMEOUT.as_secs(), expected);
+        // Whatever the platform, the window has to outlast the backoff ceiling
+        // by enough to poll more than once - a window shorter than MAX_DELAY
+        // would give up after a single sleep.
+        assert!(READY_TIMEOUT > MAX_DELAY * 10);
     }
 }

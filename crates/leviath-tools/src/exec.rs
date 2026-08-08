@@ -525,7 +525,7 @@ impl BuiltinTools {
         let mut cmd = match &self.shell_executor {
             Some(executor) => executor.build_command(shell, flag, command, &workdir),
             None => {
-                let mut c = Command::new(shell);
+                let mut c = crate::platform::child_command(shell);
                 c.arg(flag).arg(command).current_dir(&workdir);
                 c
             }
@@ -556,7 +556,6 @@ impl BuiltinTools {
         // An agent runs this dozens of times per run, and on Windows each spawn
         // would otherwise be given a console window. Applied here rather than in
         // either branch above so it covers the sandboxed command too.
-        hide_console_window(&mut cmd);
         // `spawn` inherits stdio where `output` pipes it; pipe explicitly so the
         // command's output is still captured.
         cmd.stdout(std::process::Stdio::piped())

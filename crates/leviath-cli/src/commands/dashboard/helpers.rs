@@ -122,11 +122,11 @@ fn yank_to_clipboard_with(
     osc52_fallback: fn(&str) -> bool,
 ) -> bool {
     use std::io::Write as IoWrite;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     // Try native clipboard tools first - most reliable
     for (cmd, args) in clipboard_cmds {
-        let mut command = Command::new(cmd);
+        let mut command = leviath_sys::child_command(cmd);
         command
             .args(*args)
             .stdin(Stdio::piped())
@@ -134,7 +134,6 @@ fn yank_to_clipboard_with(
             .stderr(Stdio::null());
         // The dashboard is a full-screen TUI; a console window popping over it
         // on every yank would be the worst place for one.
-        leviath_sys::hide_console_window(&mut command);
         if let Ok(mut child) = command.spawn() {
             // `child.stdin` is guaranteed `Some` here because the child was
             // spawned with `.stdin(Stdio::piped())` above - an `if let`

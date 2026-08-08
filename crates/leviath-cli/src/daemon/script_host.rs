@@ -720,10 +720,6 @@ impl ScriptIo for RealScriptIo {
         // tool, which does the same.
         cmd.kill_on_drop(true);
         leviath_tools::own_process_group(&mut cmd);
-        // No console window on Windows - a script tool's `shell()` is as chatty
-        // as the built-in one. Applied here, after the sandbox has had its say,
-        // so the sandboxed command is covered too.
-        leviath_tools::hide_console_window(&mut cmd);
         // `spawn` inherits stdio where `output` pipes it; pipe explicitly so the
         // command's output is still captured.
         cmd.stdout(std::process::Stdio::piped())
@@ -806,7 +802,7 @@ pub(crate) fn host_shell_command(
     command: &str,
     workdir: &Path,
 ) -> TokioCommand {
-    let mut c = TokioCommand::new(shell);
+    let mut c = leviath_sys::child_command_async(shell);
     c.arg(flag).arg(command).current_dir(workdir);
     c
 }

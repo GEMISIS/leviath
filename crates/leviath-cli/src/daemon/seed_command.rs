@@ -209,9 +209,6 @@ fn build_seed_command(
 /// orphaning it.
 fn run_seed_command(mut cmd: TokioCommand, timeout: Duration) -> Result<String, String> {
     cmd.kill_on_drop(true);
-    // One per seeded region at spawn, and `output()` pipes both streams, so
-    // there is no console for this to want on Windows.
-    leviath_tools::hide_console_window(&mut cmd);
     std::thread::spawn(move || {
         // A current-thread runtime with no ambient runtime present only fails on
         // OS resource exhaustion, at which point the spawn itself is doomed

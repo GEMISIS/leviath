@@ -1,0 +1,46 @@
+id: no-raw-command-new
+language: rust
+severity: error
+message: >-
+  Build child processes with `leviath_sys::child_command` (or
+  `child_command_async` for a `tokio::process::Command`), not `Command::new`.
+  On Windows a child of a process that has no console - the daemon started from
+  Explorer, from a service, or from a UI console - gets a brand new window on
+  the interactive desktop, and agent tooling spawns shells many times per run
+  (issue #228). Hiding it used to be a *second* call made after building the
+  command, at seven sites across five crates, which meant a new spawn site that
+  forgot looked exactly like one that did not need it. The constructors make the
+  decision part of construction, so the only way to get a child process is to
+  have already answered the question.
+  The one child that is meant to be seen - the editor `lev run` opens, which
+  draws in the terminal it inherits - uses `terminal_command`, so the exception
+  is a decision in the source rather than an omission.
+  Tests may use `Command::new` freely: nothing they spawn reaches an interactive
+  desktop, and this rule does not read test modules.
+rule:
+  any:
+    - pattern: Command::new($$$)
+    - pattern: TokioCommand::new($$$)
+    - pattern: std::process::Command::new($$$)
+    - pattern: tokio::process::Command::new($$$)
+  not:
+    inside:
+      kind: mod_item
+      has:
+        kind: identifier
+        regex: 'tests$'
+      stopBy: end
+files:
+  - "crates/**/*.rs"
+ignores:
+  # Build scripts run at compile time on a developer's machine, never on a
+  # user's desktop.
+  - "**/build.rs"
+  # The constructors themselves, and the platform code that writes the flag.
+  - "crates/leviath-sys/src/process.rs"
+  - "crates/leviath-sys/src/platform/**"
+  - "crates/leviath-sys/src/browser.rs"
+  # Test modules and sibling test files.
+  - "**/tests.rs"
+  - "**/*_tests.rs"
+  - "**/tests/**"

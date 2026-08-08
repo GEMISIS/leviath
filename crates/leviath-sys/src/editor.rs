@@ -129,13 +129,13 @@ pub fn launch_via(
         let Some((program, args)) = editor_argv(candidate, path_str.as_ref()) else {
             continue;
         };
-        let mut cmd = Command::new(program);
+        // The one child meant to be seen: it inherits this process's stdio and
+        // draws in the user's terminal, so starting `vim` or `edit` without a
+        // console would leave it nowhere to draw and nothing to read from.
+        // `terminal_command` says that, where a bare `Command::new` would only
+        // have looked like a forgotten `child_command`.
+        let mut cmd = crate::process::terminal_command(program);
         cmd.args(args);
-        // Deliberately *not* `hide_console_window`, unlike every other spawn in
-        // this workspace: the editor is the one child that is meant to be seen.
-        // It inherits this process's stdio and draws in the user's terminal, so
-        // starting `vim` or `edit` without a console would leave it nowhere to
-        // draw and nothing to read from.
 
         match run(&mut cmd) {
             // Exited, even non-zero: the user closed the editor.

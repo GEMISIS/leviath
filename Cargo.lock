@@ -2608,6 +2608,7 @@ dependencies = [
  "nix 0.31.3",
  "temp-env",
  "tempfile",
+ "tokio",
  "tracing",
 ]
 
