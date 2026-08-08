@@ -43,17 +43,15 @@ pub struct WorkItem {
 
 /// Parse a split response into work items. Tolerates markdown fences and prose by
 /// extracting the outermost `[ … ]`. (Ported from the deleted imperative engine.)
-#[expect(
-    clippy::string_slice,
-    reason = "`s` and `e` come from `find`/`rfind` on the ASCII '[' and ']', so both are char \
-              boundaries and the inclusive range ends on the last byte of ']'"
-)]
 pub fn parse_work_items(content: &str) -> Result<Vec<WorkItem>, String> {
     let trimmed = content.trim();
+    // Every rejection folds into one error: this parses model output, so
+    // "malformed input yields `Err`" has to hold for every shape of malformed.
     let slice = match (trimmed.find('['), trimmed.rfind(']')) {
-        (Some(s), Some(e)) if e > s => &trimmed[s..=e],
-        _ => return Err("split output is not a JSON array".to_string()),
-    };
+        (Some(s), Some(e)) if e > s => trimmed.get(s..=e),
+        _ => None,
+    }
+    .ok_or_else(|| "split output is not a JSON array".to_string())?;
     serde_json::from_str(slice)
         .map_err(|e| format!("split output is not a valid JSON array of work items: {e}"))
 }

@@ -78,11 +78,6 @@ impl Dashboard {
         );
     }
 
-    #[expect(
-        clippy::string_slice,
-        reason = "the `starts_with(&home)` guard makes `home.len()` the end of a matched prefix, \
-                  which is a char boundary"
-    )]
     pub(in crate::commands::dashboard) fn render_info_strip(
         &self,
         frame: &mut Frame,
@@ -105,10 +100,11 @@ impl Dashboard {
         let home = dirs::home_dir()
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_default();
-        let workdir_display = if !home.is_empty() && agent.workdir.starts_with(&home) {
-            format!("~{}", &agent.workdir[home.len()..])
-        } else {
-            agent.workdir.clone()
+        // One operation rather than a guard plus a byte offset, so the test and
+        // the cut cannot disagree about where the prefix ended.
+        let workdir_display = match agent.workdir.strip_prefix(&home) {
+            Some(rest) if !home.is_empty() => format!("~{rest}"),
+            _ => agent.workdir.clone(),
         };
         let workdir_truncated = truncate(&workdir_display, 42);
 

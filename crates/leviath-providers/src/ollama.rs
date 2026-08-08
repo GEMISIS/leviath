@@ -419,11 +419,6 @@ impl OllamaNdjsonStream {
 impl Stream for OllamaNdjsonStream {
     type Item = Result<StreamChunk>;
 
-    #[expect(
-        clippy::string_slice,
-        reason = "`newline_pos` is a `find` hit for the ASCII '\\n', so it and `newline_pos + 1` \
-                  are char boundaries"
-    )]
     fn poll_next(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -432,9 +427,14 @@ impl Stream for OllamaNdjsonStream {
 
         loop {
             // Try to parse a complete JSON line
-            if let Some(newline_pos) = this.buffer.find('\n') {
-                let line = this.buffer[..newline_pos].to_string();
-                this.buffer = this.buffer[newline_pos + 1..].to_string();
+            // Split off one complete NDJSON line, if the newline ending it has
+            // arrived. Both halves are copied out before the buffer is replaced.
+            let split = this
+                .buffer
+                .split_once('\n')
+                .map(|(line, rest)| (line.to_string(), rest.to_string()));
+            if let Some((line, rest)) = split {
+                this.buffer = rest;
 
                 let line = line.trim();
                 if line.is_empty() {

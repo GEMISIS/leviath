@@ -41,19 +41,14 @@ pub(crate) struct AuthServerMetadata {
 ///
 /// Returns `None` when the header is absent or carries no such parameter, in
 /// which case the caller falls back to the well-known path.
-#[expect(
-    clippy::string_slice,
-    reason = "`start` is a `find` hit plus the length of the ASCII needle it matched, and `end` is \
-              a `find` hit or the length - all char boundaries"
-)]
 pub(crate) fn resource_metadata_url(www_authenticate: Option<&str>) -> Option<String> {
     let header = www_authenticate?;
     // The parameter looks like: Bearer resource_metadata="https://…", …
-    let start = header.find("resource_metadata=")? + "resource_metadata=".len();
-    let rest = &header[start..];
+    let (_, rest) = header.split_once("resource_metadata=")?;
     let rest = rest.strip_prefix('"').unwrap_or(rest);
-    let end = rest.find('"').unwrap_or(rest.len());
-    let url = rest[..end].trim();
+    // An unterminated value runs to the end of the header rather than being
+    // discarded, which is what the quote-less form of the parameter looks like.
+    let url = rest.split_once('"').map_or(rest, |(value, _)| value).trim();
     if url.is_empty() {
         None
     } else {
