@@ -575,15 +575,12 @@ impl Stream for OpenAiSseStream {
 /// which is why it needs an arm of its own: matched only on `choices` it fits
 /// the usage-only shape, and falling through there ends the stream cleanly -
 /// a truncated answer with nothing anywhere saying why.
-#[expect(
-    clippy::string_slice,
-    reason = "`event_end` is a `find` hit for the ASCII \"\\n\\n\" terminator, so it and \
-              `event_end + 2` are char boundaries"
-)]
 pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<StreamChunk>>> {
-    let event_end = buffer.find("\n\n")?;
-    let event_text = buffer[..event_end].to_string();
-    *buffer = buffer[event_end + 2..].to_string();
+    // `None` until the double newline that terminates an event has arrived;
+    // the caller polls again with more bytes.
+    let (event_text, rest) = buffer.split_once("\n\n")?;
+    let event_text = event_text.to_string();
+    *buffer = rest.to_string();
 
     for line in event_text.lines() {
         if let Some(data) = line.strip_prefix("data: ") {

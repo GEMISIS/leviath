@@ -20,16 +20,14 @@ use crate::runstate;
 /// runs dir outside `$HOME`, which isn't portable (`std::env::temp_dir()` lives
 /// *under* the home directory on Windows, so it only ever hits the shortened
 /// branch there).
-#[expect(
-    clippy::string_slice,
-    reason = "the `starts_with(home)` guard makes `home.len()` the end of a matched prefix, which \
-              is a char boundary"
-)]
 fn shorten_home_path(raw: String, home: &str) -> String {
-    if !home.is_empty() && raw.starts_with(home) {
-        format!("~{}", &raw[home.len()..])
-    } else {
-        raw
+    // `strip_prefix` rather than `starts_with` plus `&raw[home.len()..]`: it does
+    // the test and the cut as one operation, so they cannot disagree about where
+    // the prefix ended. The empty-home guard stays because `strip_prefix("")`
+    // matches everything.
+    match raw.strip_prefix(home) {
+        Some(rest) if !home.is_empty() => format!("~{rest}"),
+        _ => raw,
     }
 }
 
@@ -657,11 +655,6 @@ impl Dashboard {
         }
     }
 
-    #[expect(
-        clippy::string_slice,
-        reason = "`prefix_end` is only non-zero on a `starts_with` branch, where it is the length \
-                  of the ASCII tag that just matched - a char boundary"
-    )]
     fn build_output_lines(
         &self,
         agent: &DashboardAgent,
@@ -686,24 +679,30 @@ impl Dashboard {
             content
                 .lines()
                 .map(|l| {
-                    let (color, prefix_end) = if l.starts_with("[tool]") {
-                        (C_ACCENT, 6)
+                    // The tag is carried as the literal itself rather than its
+                    // length, so the two can never disagree.
+                    let (color, tag) = if l.starts_with("[tool]") {
+                        (C_ACCENT, "[tool]")
                     } else if l.starts_with("[error]") {
-                        (C_ERROR, 7)
+                        (C_ERROR, "[error]")
                     } else if l.starts_with("[denied]") {
-                        (C_WARN, 8)
+                        (C_WARN, "[denied]")
                     } else if l.starts_with("---") || l.starts_with("[All") {
-                        (C_DIM, 0)
+                        (C_DIM, "")
                     } else {
-                        (C_MUTED, 0)
+                        (C_MUTED, "")
                     };
-                    if prefix_end > 0 && l.len() > prefix_end {
+                    // Every arm above picked `tag` off a `starts_with` that just
+                    // matched, and the empty tag strips nothing.
+                    let rest = l.strip_prefix(tag).unwrap_or(l);
+                    if !tag.is_empty() && !rest.is_empty() {
+                        // A tagged line reads as a bold tag plus muted body.
                         Line::from(vec![
                             Span::styled(
-                                format!(" {}", &l[..prefix_end]),
+                                format!(" {tag}"),
                                 Style::default().fg(color).add_modifier(Modifier::BOLD),
                             ),
-                            Span::styled(l[prefix_end..].to_string(), Style::default().fg(C_MUTED)),
+                            Span::styled(rest.to_string(), Style::default().fg(C_MUTED)),
                         ])
                     } else {
                         Line::from(Span::styled(format!(" {}", l), Style::default().fg(color)))

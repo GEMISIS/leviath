@@ -114,21 +114,14 @@ fn resolve_var(name: &str, allowlist: &[String]) -> Option<String> {
     std::env::var(name).ok()
 }
 
-#[expect(
-    clippy::string_slice,
-    reason = "`start` and `end` are `find` hits, offset only by the lengths of the ASCII literals \
-              `${` and `}` - all char boundaries"
-)]
 pub(crate) fn expand_env_allowing(value: &str, allowlist: &[String]) -> String {
     let mut out = String::with_capacity(value.len());
     let mut rest = value;
 
-    while let Some(start) = rest.find("${") {
-        out.push_str(&rest[..start]);
-        let after = &rest[start + 2..];
-        match after.find('}') {
-            Some(end) => {
-                let name = &after[..end];
+    while let Some((before, after)) = rest.split_once("${") {
+        out.push_str(before);
+        match after.split_once('}') {
+            Some((name, tail)) => {
                 match resolve_var(name, allowlist) {
                     Some(v) => out.push_str(&v),
                     None => tracing::warn!(
@@ -138,12 +131,13 @@ pub(crate) fn expand_env_allowing(value: &str, allowlist: &[String]) -> String {
                          server genuinely needs it"
                     ),
                 }
-                rest = &after[end + 1..];
+                rest = tail;
             }
             None => {
                 // Unterminated `${` - emit it literally rather than eating the
                 // rest of the value.
-                out.push_str(&rest[start..]);
+                out.push_str("${");
+                out.push_str(after);
                 return out;
             }
         }
