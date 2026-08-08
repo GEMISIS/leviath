@@ -1,7 +1,8 @@
 //! OpenAI provider implementation.
 
 use crate::openai_compat::{
-    OpenAiSseStream, build_openai_request_body, parse_openai_response, send_chat_request,
+    OpenAiSseStream, TokenLimitField, build_openai_request_body_with, parse_openai_response,
+    send_chat_request,
 };
 #[cfg(test)]
 use crate::provider::FinishReason;
@@ -132,7 +133,7 @@ impl Provider for OpenAIProvider {
             limiter.acquire().await?;
         }
 
-        let body = build_openai_request_body(request);
+        let body = build_openai_request_body_with(request, TokenLimitField::MaxCompletionTokens);
         let url = format!("{}/chat/completions", self.base_url);
 
         let response = send_chat_request(
@@ -173,7 +174,8 @@ impl Provider for OpenAIProvider {
             limiter.acquire().await?;
         }
 
-        let mut body = build_openai_request_body(request);
+        let mut body =
+            build_openai_request_body_with(request, TokenLimitField::MaxCompletionTokens);
         body["stream"] = serde_json::Value::Bool(true);
         body["stream_options"] = serde_json::json!({ "include_usage": true });
         let url = format!("{}/chat/completions", self.base_url);
@@ -316,7 +318,7 @@ mod tests {
             request_timeout_secs: None,
         };
 
-        let body = build_openai_request_body(&request);
+        let body = build_openai_request_body_with(&request, TokenLimitField::MaxCompletionTokens);
         assert_eq!(body["model"], "gpt-5.4-mini");
         assert_eq!(body["messages"].as_array().unwrap().len(), 2);
     }
