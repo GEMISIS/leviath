@@ -20,15 +20,16 @@ pub(crate) struct SseEvent {
 /// untouched so the caller can append more bytes and retry. Events are
 /// terminated by a blank line; `\r\n` is normalized, since a server behind a
 /// proxy may emit either ending.
-#[expect(
-    clippy::string_slice,
-    reason = "`end` is a `find` hit for an ASCII line terminator, so it is a char boundary"
-)]
 pub(crate) fn parse_sse_frame(buffer: &mut String) -> Option<SseEvent> {
     // A frame ends at the first blank line, in whichever line ending arrives.
-    let (end, sep_len) = find_frame_end(buffer)?;
-    let raw = buffer[..end].to_string();
-    buffer.drain(..end + sep_len);
+    // Copy the frame out, then drop it and its terminator from the front: what
+    // `split_frame` left as the remainder is exactly what should stay behind, so
+    // the length of the terminator never has to be named.
+    let (raw, remainder) = {
+        let (frame, rest) = split_frame(buffer)?;
+        (frame.to_string(), rest.len())
+    };
+    buffer.drain(..buffer.len() - remainder);
 
     let mut event = None;
     let mut data_lines: Vec<&str> = Vec::new();
@@ -60,16 +61,19 @@ pub(crate) fn parse_sse_frame(buffer: &mut String) -> Option<SseEvent> {
     })
 }
 
-/// Byte offset of the blank line ending the first frame, plus its length.
-fn find_frame_end(buffer: &str) -> Option<(usize, usize)> {
-    let lf = buffer.find("\n\n");
-    let crlf = buffer.find("\r\n\r\n");
+/// The first complete frame and everything after its terminator.
+fn split_frame(buffer: &str) -> Option<(&str, &str)> {
+    let lf = buffer.split_once("\n\n");
+    let crlf = buffer.split_once("\r\n\r\n");
     match (lf, crlf) {
         // Whichever terminator comes first wins; a `\r\n\r\n` also contains a
-        // `\n\r\n`, so comparing positions is what keeps them straight.
-        (Some(l), Some(c)) if c <= l => Some((c, 4)),
-        (Some(l), _) => Some((l, 2)),
-        (None, Some(c)) => Some((c, 4)),
+        // `\n\r\n`, so comparing how much text precedes each is what keeps them
+        // straight. Splitting rather than locating means neither terminator's
+        // length is written down, so neither can drift from the string it
+        // belongs to.
+        (Some(l), Some(c)) if c.0.len() <= l.0.len() => Some(c),
+        (Some(l), _) => Some(l),
+        (None, Some(c)) => Some(c),
         (None, None) => None,
     }
 }

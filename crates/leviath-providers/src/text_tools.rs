@@ -92,39 +92,30 @@ pub fn render_system_suffix(tools: &[Tool]) -> String {
 /// a `name` is skipped. An *unterminated* fence is left in the prose untouched -
 /// a truncated reply shouldn't have its visible text silently eaten. An `id`
 /// emitted by the model is ignored; ids are the runtime's to allocate.
-#[expect(
-    clippy::string_slice,
-    reason = "every index here is a `find` hit offset by the length of an ASCII literal \
-              (FENCE_OPEN, FENCE_CLOSE, '\\n'), so all of them are char boundaries"
-)]
 pub fn parse_tool_calls(text: &str) -> (String, Vec<(String, serde_json::Value)>) {
     let mut prose = String::new();
     let mut calls = Vec::new();
     let mut rest = text;
 
-    while let Some(open) = rest.find(FENCE_OPEN) {
+    // Each step splits what is left rather than indexing into it, so no offset
+    // is ever measured against a string other than the one it came from - which
+    // is what the earlier `body_start + close_rel + FENCE_CLOSE.len()` form had
+    // to be read carefully to confirm.
+    while let Some((before_fence, after_tag)) = rest.split_once(FENCE_OPEN) {
         // Body starts after the info string's line break. A fence with no
         // newline after the tag can't have a body, so treat it as unterminated.
-        let after_tag = &rest[open + FENCE_OPEN.len()..];
-        let Some(nl) = after_tag.find('\n') else {
+        let Some((_info, from_body)) = after_tag.split_once('\n') else {
             break;
         };
-        let body_start = open + FENCE_OPEN.len() + nl + 1;
-        let Some(close_rel) = rest[body_start..].find(FENCE_CLOSE) else {
+        let Some((body, after_close)) = from_body.split_once(FENCE_CLOSE) else {
             break; // unterminated - leave the remainder as prose
         };
-        let body = &rest[body_start..body_start + close_rel];
 
-        prose.push_str(&rest[..open]);
+        prose.push_str(before_fence);
         calls.extend(parse_call_array(body));
 
         // Continue after the closing fence, skipping to the end of its line.
-        let after_close = body_start + close_rel + FENCE_CLOSE.len();
-        let line_end = rest[after_close..]
-            .find('\n')
-            .map(|i| after_close + i + 1)
-            .unwrap_or(rest.len());
-        rest = &rest[line_end..];
+        rest = after_close.split_once('\n').map_or("", |(_, next)| next);
     }
     prose.push_str(rest);
 

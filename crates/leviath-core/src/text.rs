@@ -10,10 +10,19 @@
 //!
 //! That failure has happened for real: a byte cut-off through a flag emoji
 //! inside a Rhai host function double-panicked and aborted the whole daemon.
-//! Keeping the walk-back in one tested place means a new
-//! truncation site cannot forget it. The workspace also denies
-//! `clippy::string_slice`, so reaching for a raw `&s[..n]` instead of these
-//! helpers is a compile error unless the boundary is proven at the call site.
+//! Keeping the walk-back in one tested place means a new truncation site cannot
+//! forget it. The workspace denies `clippy::string_slice` with no exceptions, so
+//! reaching for a raw `&s[..n]` instead of these helpers is a compile error.
+//!
+//! [`substring`] and [`split_at_boundary`] are the general replacements, and
+//! both are *total*: no combination of offsets makes either panic. That matters
+//! more than it sounds. The proof obligation on `&s[a..b]` is real but it is
+//! discharged by reading, and the sites that need it most are byte-offset
+//! scanners walking text nobody in this repo wrote - fetched HTML, a model's
+//! fenced output, an SSE frame off the wire. Those are exactly the places where
+//! a careful reading is least likely to be right, and where being wrong took
+//! the daemon down. Clamping is a worse answer than a correct index and a much
+//! better one than an abort.
 
 /// Largest byte index `<= max` that is a char boundary in `s`.
 ///
@@ -27,17 +36,45 @@ pub fn floor_char_boundary(s: &str, max: usize) -> usize {
     end
 }
 
+/// The text of `s` between two byte offsets, with both ends walked back to a
+/// char boundary and clamped into the string.
+///
+/// This is the workspace's substitute for `&s[a..b]`, and it is total: there is
+/// no offset, ordering or overflow of the two arguments that can make it panic.
+/// A range running off the end yields what is there, and a backwards range
+/// yields nothing. Callers that have *searched* for their offsets get the exact
+/// slice they asked for, because a `find` hit is already a boundary; callers
+/// that computed one get the nearest cut that does not split a character.
+///
+/// That totality is the point. A scanner walking byte offsets through text it
+/// did not author - HTML from a fetch, a model's fenced output, an SSE frame -
+/// cannot be read closely enough to prove every offset correct, and the failure
+/// mode for getting one wrong used to be aborting the daemon.
+pub fn substring(s: &str, start: usize, end: usize) -> &str {
+    let end = floor_char_boundary(s, end);
+    let start = floor_char_boundary(s, start.min(end));
+    // Both bounds are now char boundaries at or inside `s`, so the range is
+    // always valid and the fallback is unreachable. It is spelled out anyway so
+    // that a later change to the clamping above cannot reintroduce a panic.
+    s.get(start..end).unwrap_or("")
+}
+
+/// `s` cut in two at `mid`, walked back to a char boundary.
+///
+/// The pair form of [`substring`], for scanners that need both the text before
+/// an offset and the text after it. `mid` past the end puts everything in the
+/// first half.
+pub fn split_at_boundary(s: &str, mid: usize) -> (&str, &str) {
+    let mid = floor_char_boundary(s, mid);
+    (substring(s, 0, mid), substring(s, mid, s.len()))
+}
+
 /// `&s[..max]`, backed off to the nearest char boundary at or before `max`.
 ///
 /// Returns all of `s` when `max` reaches the end. Callers append their own
 /// ellipsis or truncation marker - this only cuts.
-#[expect(
-    clippy::string_slice,
-    reason = "floor_char_boundary returns a char boundary by construction - this is the one raw \
-              slice the rest of the workspace defers to"
-)]
 pub fn truncate_at_boundary(s: &str, max: usize) -> &str {
-    &s[..floor_char_boundary(s, max)]
+    substring(s, 0, max)
 }
 
 /// Smallest byte index `>= min` that is a char boundary in `s`.
@@ -63,11 +100,6 @@ pub fn ceil_char_boundary(s: &str, min: usize) -> usize {
 /// window never loses a character that was inside the requested radius, and the
 /// match itself cannot be clipped by a boundary walk. `at` past the end clamps,
 /// so a stale offset yields a short window instead of a panic.
-#[expect(
-    clippy::string_slice,
-    reason = "both indices come from the boundary helpers above, so the range is a char boundary \
-              by construction"
-)]
 pub fn snippet_around(s: &str, at: usize, radius: usize) -> String {
     let at = at.min(s.len());
     let start = floor_char_boundary(s, at.saturating_sub(radius));
@@ -76,7 +108,7 @@ pub fn snippet_around(s: &str, at: usize, radius: usize) -> String {
     if start > 0 {
         out.push('…');
     }
-    out.push_str(&s[start..end]);
+    out.push_str(substring(s, start, end));
     if end < s.len() {
         out.push('…');
     }
@@ -237,5 +269,36 @@ mod tests {
         assert_eq!(truncate_at_boundary("abc🎉def", 5), "abc");
         assert_eq!(truncate_at_boundary("🎉abc", 2), "");
         assert_eq!(truncate_at_boundary("", 5), "");
+    }
+
+    #[test]
+    fn substring_is_total() {
+        assert_eq!(substring("abcdef", 2, 4), "cd");
+        assert_eq!(substring("abcdef", 0, 6), "abcdef");
+        // Both ends walk back off a multi-byte character rather than panicking.
+        assert_eq!(substring("a🎉b", 1, 4), "");
+        assert_eq!(substring("a🎉b", 0, 3), "a");
+        assert_eq!(substring("a🎉b", 1, 5), "🎉");
+        // No pair of arguments panics: past the end, backwards, and saturated.
+        assert_eq!(substring("abc", 1, 99), "bc");
+        assert_eq!(substring("abc", 99, 99), "");
+        assert_eq!(substring("abc", 2, 1), "");
+        assert_eq!(substring("abc", usize::MAX, usize::MAX), "");
+        assert_eq!(substring("", 3, 9), "");
+    }
+
+    #[test]
+    fn split_at_boundary_halves_rejoin_to_the_input() {
+        assert_eq!(split_at_boundary("abcdef", 2), ("ab", "cdef"));
+        assert_eq!(split_at_boundary("abc", 0), ("", "abc"));
+        // A cut inside the emoji lands before it, so nothing is lost or doubled.
+        assert_eq!(split_at_boundary("a🎉b", 3), ("a", "🎉b"));
+        // Past the end puts everything in the first half.
+        assert_eq!(split_at_boundary("abc", 99), ("abc", ""));
+        assert_eq!(split_at_boundary("", 4), ("", ""));
+        for mid in 0..=10 {
+            let (head, tail) = split_at_boundary("a🎉bc", mid);
+            assert_eq!(format!("{head}{tail}"), "a🎉bc", "lost text at mid={mid}");
+        }
     }
 }

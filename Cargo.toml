@@ -53,12 +53,21 @@ missing_docs = "warn"
 # That is not hypothetical here: it aborted the daemon twice (issues #109 and #115,
 # a byte cut-off through an emoji inside a Rhai host function), and an audit found
 # two more live instances plus four hand-rolled copies of the walk-back loop. So it
-# is denied workspace-wide. Cut with `leviath_core::truncate_at_boundary` /
-# `floor_char_boundary`, or -- when the index provably *is* a boundary because it
-# came from `find`/`char_indices`/`starts_with` -- annotate the enclosing item with
-# `#[expect(clippy::string_slice, reason = "...")]` naming the construct that
-# guarantees it. "Looks fine" is exactly the unstated invariant this lint exists to
-# stop.
+# is denied workspace-wide, with no exceptions: there are zero suppressions of it
+# in the tree and a lint rule that fails the build on a new one.
+#
+# Reach for `leviath_core::text` instead. `substring` and `split_at_boundary` are
+# the general replacements and both are total - no combination of offsets makes
+# either panic - and `truncate_at_boundary` / `snippet_around` cover the common
+# cuts. Where the text is being scanned rather than cut, `split_once` is usually
+# the real answer, and it removes the delimiter-length arithmetic along with the
+# index.
+#
+# The suppressions this paragraph used to sanction all turned out to be worth
+# removing. Every one named a construct that guaranteed the index was a boundary,
+# and every one of those claims was true - but the proof lived in a comment, and
+# the code around it was free to drift. What replaced them is not a better comment
+# but a signature that cannot be wrong.
 [workspace.lints.clippy]
 string_slice = "deny"
 

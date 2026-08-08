@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use leviath_core::text::{split_at_boundary, substring};
 use rhai::{AST, Dynamic, Engine, EvalAltResult, Map, Position, Scope};
 use serde::Deserialize;
 
@@ -701,31 +702,34 @@ fn strip_raw_text_elements(html: &str) -> String {
     s
 }
 
-#[expect(
-    clippy::string_slice,
-    reason = "`i` only ever advances by `ch.len_utf8()` and `rel` comes from `find`, so both are \
-              char boundaries; `to_ascii_lowercase` preserves byte lengths, so `lower` and `html` \
-              share them"
-)]
 fn strip_element(html: &str, tag: &str) -> String {
     let lower = html.to_ascii_lowercase();
     let open = format!("<{tag}");
     let close = format!("</{tag}>");
     let mut out = String::with_capacity(html.len());
-    let mut i = 0;
-    while i < html.len() {
-        if lower[i..].starts_with(&open) {
-            match lower[i..].find(&close) {
+    // The two strings are walked together rather than sharing a byte cursor.
+    // `to_ascii_lowercase` does preserve byte lengths, so a shared index would
+    // be correct, but it is correct by an invariant stated nowhere in the types;
+    // advancing both by the same amount at each step makes it structural.
+    let mut rest = html;
+    let mut lower_rest = lower.as_str();
+    loop {
+        if lower_rest.starts_with(&open) {
+            match lower_rest.find(&close) {
                 Some(rel) => {
-                    i += rel + close.len();
+                    let skip = rel + close.len();
+                    rest = split_at_boundary(rest, skip).1;
+                    lower_rest = split_at_boundary(lower_rest, skip).1;
                     continue;
                 }
                 None => break, // unclosed element - drop the rest
             }
         }
-        let ch = html[i..].chars().next().unwrap();
+        // Also the loop's ordinary exit, once the input is used up.
+        let Some(ch) = rest.chars().next() else { break };
         out.push(ch);
-        i += ch.len_utf8();
+        rest = split_at_boundary(rest, ch.len_utf8()).1;
+        lower_rest = split_at_boundary(lower_rest, ch.len_utf8()).1;
     }
     out
 }
@@ -765,36 +769,33 @@ const ENTITY_SCAN_CHARS: usize = 12;
 /// an unstated invariant that a later edit could quietly break. Indices from
 /// `char_indices` are boundaries by construction, so there is nothing left to
 /// get wrong. Entities are all ASCII, so the two bounds agree on any real one.
-#[expect(
-    clippy::string_slice,
-    reason = "`amp` comes from `find` and `semi` from `char_indices`, so every index here is a \
-              char boundary; `after[1..]` is safe because `after` starts at the single-byte '&'"
-)]
 fn decode_entities(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(amp) = rest.find('&') {
-        out.push_str(&rest[..amp]);
-        let after = &rest[amp..];
+        // `after` still carries the '&', so something that turns out not to be
+        // an entity can be re-emitted verbatim.
+        let (before, after) = split_at_boundary(rest, amp);
+        out.push_str(before);
         let semi = after
             .char_indices()
             .take(ENTITY_SCAN_CHARS)
             .find(|&(_, c)| c == ';')
             .map(|(i, _)| i);
         match semi {
-            Some(semi) => match decode_one_entity(&after[1..semi]) {
+            Some(semi) => match decode_one_entity(substring(after, 1, semi)) {
                 Some(ch) => {
                     out.push(ch);
-                    rest = &after[semi + 1..];
+                    rest = split_at_boundary(after, semi + 1).1;
                 }
                 None => {
                     out.push('&');
-                    rest = &after[1..];
+                    rest = split_at_boundary(after, 1).1;
                 }
             },
             None => {
                 out.push('&');
-                rest = &after[1..];
+                rest = split_at_boundary(after, 1).1;
             }
         }
     }
