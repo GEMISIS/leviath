@@ -2,21 +2,22 @@ id: no-lint-suppression
 language: rust
 severity: error
 message: >-
-  This lint may not be suppressed. Every one of these was cleared from the tree
-  by changing the code, and the fix was usually better than the suppression:
-  `too_many_arguments` became parameter structs (and `SystemParam` for the bevy
-  system), `permissions_set_readonly_false` became restoring the file's original
-  permissions rather than synthesising "not read-only", `deprecated` became
-  socket2 (the layer that owns socket options), `async_fn_in_trait` became an
-  explicit `impl Future` that states whether the future is `Send`,
-  `match_same_arms` became one named constant per case, and `new_without_default`
-  became a constructor named for what it does. If a new one seems unavoidable,
-  it is worth an hour before it is worth an attribute - and if it genuinely is
-  unavoidable, change this rule in the same PR and say why.
-  `clippy::string_slice` was the last exception and is no longer one. Cut with
-  `leviath_core::text::{substring, split_at_boundary, truncate_at_boundary}`,
-  which are total, or scan with `split_once`, which drops the delimiter-length
-  arithmetic along with the index.
+  Lint suppressions are banned outright: `#[allow]` and `#[expect]`, inner or
+  outer, with or without a `reason`. The tree carries zero of them.
+  A `reason` is not a licence. Every suppression this repo ever had carried one,
+  and every reason was true when written - they were still worth deleting,
+  because a reason documents an invariant while leaving the code free to drift
+  away from it. Each fix beat the attribute: parameter structs (and `SystemParam`
+  for the bevy system), restoring a file's original permissions, socket2, an
+  explicit `impl Future`, one named constant per match arm, and
+  `leviath_core::text`'s total `substring` / `split_at_boundary` for `&s[a..b]`.
+  `#[expect]` is banned alongside `#[allow]` on purpose. It is the better of the
+  two, but that only matters once you have decided to suppress - and an
+  `#[expect]` for an unlisted lint used to pass clippy and ast-grep in silence.
+  If a new one looks unavoidable, it is worth an hour before it is worth an
+  attribute. If it genuinely is, change this rule in the same PR and say why.
 rule:
-  kind: attribute_item
-  regex: '(allow|expect)\((clippy::(too_many_arguments|type_complexity|match_same_arms|new_without_default|permissions_set_readonly_false|enum_variant_names|string_slice)|dead_code|deprecated|async_fn_in_trait)'
+  any:
+    - kind: attribute_item
+    - kind: inner_attribute_item
+  regex: '^#!?\[\s*(allow|expect)\s*\('
