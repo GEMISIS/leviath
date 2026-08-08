@@ -67,8 +67,9 @@ example = """
 ```
 
 `format` is a label. Markdown, XML, CSV, [a2ui](https://a2ui.org/), a media type, or a format you
-invent this afternoon all work the same way. The label, your instructions, and your example go into
-the `submit_output` tool description and the stage's system prompt.
+invent this afternoon all work the same way. The label, your instructions, and your example go
+into the `submit_output` tool description, and into the stage's system prompt too when
+`require_output` is set.
 
 The label travels with the answer so a reader can act on it. [The Lair](https://leviath.dev/lair),
 the browser console, renders a2ui differently from markdown by matching on that string.
@@ -229,7 +230,8 @@ can tell a missing answer from an answer nobody asked for.
 
 Give the stage enough `max_iterations` to spend that budget. Each nudge costs one iteration, so a
 stage that runs out of iterations first ends on its `max_iterations` path instead. That path takes
-precedence, and the run records `max_iterations_hit` rather than `output_forced`.
+precedence over the nudge, and the run records both flags, `max_iterations_hit` and
+`output_forced`, so the outcome stays honest about what was required.
 
 ## What each surface returns
 
