@@ -97,7 +97,7 @@ lev daemon uninstall
 
 > [!TIP]
 > An installed daemon plus [`lev serve`](/docs/api) is all you need to drive Leviath from the
-> browser [console](/app), with no terminal involved.
+> [The Lair](https://leviath.dev/lair), the browser console, with no terminal involved.
 
 ## Config changes take effect on the next run
 

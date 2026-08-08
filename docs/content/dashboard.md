@@ -15,13 +15,14 @@ of runs, answer their questions, and steer them.
 lev dash
 ```
 
-It reads the same [daemon](/docs/daemon) the browser [console](/app) does, just over the local
+It reads the same [daemon](/docs/daemon) that [The Lair](https://leviath.dev/lair), the browser
+console, does, just over the local
 control socket instead of HTTP:
 
 ```mermaid
 flowchart LR
   DASH["lev dash (TUI)"] -->|control socket| D["Daemon"]
-  CONSOLE["Browser console"] -->|"HTTP + WS"| SERVE["lev serve"] --> D
+  CONSOLE["The Lair (browser)"] -->|"HTTP + WS"| SERVE["lev serve"] --> D
   D --> AG["live agent state"]
 ```
 
@@ -111,5 +112,5 @@ For a graph agent, `g` in the detail view opens the full-screen stage explorer:
 `Tab` switches between the two, and `Esc` or `g` closes the explorer.
 
 > [!TIP]
-> Prefer a browser, or want to drive Leviath from another machine? The [agent console](/app)
-> mirrors the dashboard over the [HTTP API](/docs/api).
+> Prefer a browser, or want to drive Leviath from another machine?
+> [The Lair](https://leviath.dev/lair) mirrors the dashboard over the [HTTP API](/docs/api).

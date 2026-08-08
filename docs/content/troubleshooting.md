@@ -17,10 +17,10 @@ resolution, one real inference, and the daemon handoff, in that order, and repor
 check that fails tells you which section below you need. In particular it separates "my keys are
 wrong" from "the daemon is stuck", which look identical from the outside.
 
-## The console can't reach my server
+## The Lair can't reach my server
 
-The browser [console](/app) talks straight to your `lev serve` endpoint, so three things must line
-up:
+[The Lair](https://leviath.dev/lair), the browser console, talks straight to your `lev serve`
+endpoint, so three things must line up:
 
 1. **The server is running** with a token: `lev serve --token <t>`.
 2. **CORS allows the site's origin**: add `--cors https://leviath.dev` (or `--cors "*"`). Without

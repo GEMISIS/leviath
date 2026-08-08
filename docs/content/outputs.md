@@ -70,8 +70,8 @@ example = """
 invent this afternoon all work the same way. The label, your instructions, and your example go into
 the `submit_output` tool description and the stage's system prompt.
 
-The label travels with the answer so a reader can act on it. A browser console that renders a2ui
-differently from markdown matches on that string.
+The label travels with the answer so a reader can act on it. [The Lair](https://leviath.dev/lair),
+the browser console, renders a2ui differently from markdown by matching on that string.
 
 ## Checking the answer
 

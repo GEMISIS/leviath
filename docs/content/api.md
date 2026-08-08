@@ -9,7 +9,7 @@ order: 2
 # HTTP API (`lev serve`)
 
 `lev serve` exposes a REST + WebSocket API in front of the [daemon](/docs/daemon), so anything that
-speaks HTTP can drive Leviath, including the browser [console](/app).
+speaks HTTP can drive Leviath, including [The Lair](https://leviath.dev/lair), the browser console.
 
 ```bash
 lev serve --port 3000 --token "$(openssl rand -hex 16)" --cors https://leviath.dev
@@ -352,5 +352,5 @@ timeout_secs = 10      # per-attempt request timeout
 ```
 
 > [!TIP]
-> The [browser console](/app) is a full reference client for this API (connection, spawn, live
+> [The Lair](https://leviath.dev/lair) is a full reference client for this API (connection, spawn, live
 > dashboard, blueprint editing, MCP and policy management), built on the same typed endpoints.
