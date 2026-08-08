@@ -1010,7 +1010,7 @@ available_tools = ["stub_search"]
 system_prompt = "use stub_search"
 
 [context.regions]
-task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller_input = "task" }} }}
+task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
 "#,
                 stub_py.to_string_lossy()
             ),

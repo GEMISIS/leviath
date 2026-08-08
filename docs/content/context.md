@@ -145,6 +145,12 @@ inherited = { kind = "pinned", seed = { caller = "brief" } }
 A region literally named `task` gets `seed = "task_input"` implicitly, so older blueprints keep
 working.
 
+A `seed` that matches none of the forms above is ignored and the region starts empty. `lev validate`
+reports that as `region-seed-not-understood`, which is worth reading before wondering why a region
+came out blank: the table keys are exactly the ones in the left column, so `{ caller_input = "..." }`
+is a typo for `{ caller = "..." }` and seeds nothing. And a blueprint that seeds no region from the
+task refuses a task outright rather than running without it.
+
 > [!WARNING]
 > A `command` seed runs at spawn, before the first inference and therefore before any tool-approval
 > prompt. Because there is nobody to ask in the moment, it must also be covered by

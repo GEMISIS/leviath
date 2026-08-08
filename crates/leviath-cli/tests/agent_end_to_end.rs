@@ -47,8 +47,11 @@ use leviath_runtime::{AgentStatus, ProviderRegistry};
 /// call and the test passes while proving nothing. Asking "have I already been
 /// handed a tool result?" cannot drift that way.
 struct WritesThenAnswers {
-    /// Workdir-relative path the model asks to create.
-    target: String,
+    // No target field, deliberately: handing the provider the filename would
+    // let this test pass with the task text dropped somewhere between `--task`
+    // and the prompt, which is a bug this repo has actually shipped. The target
+    // is read back out of the prompt instead, so the file on disk is evidence
+    // that the task arrived.
     /// How many times the model was consulted *after* the tool had run, so the
     /// test can prove the result made it back into context.
     ///
@@ -60,6 +63,25 @@ struct WritesThenAnswers {
 }
 
 impl WritesThenAnswers {
+    /// The word after `write ` in whatever the model was shown.
+    ///
+    /// Scans the system blocks as well as the messages, because which of the
+    /// two a pinned region is rendered into is the context assembler's business
+    /// and not something this test should pin.
+    fn target_from_prompt(request: &InferenceRequest) -> Option<String> {
+        let from_system = request.system.iter().map(|b| b.text.clone());
+        let from_messages = request.messages.iter().filter_map(|m| match &m.content {
+            MessageContent::Text(t) => Some(t.clone()),
+            MessageContent::Blocks(_) => None,
+        });
+        from_system.chain(from_messages).find_map(|text| {
+            text.split_whitespace()
+                .skip_while(|w| !w.eq_ignore_ascii_case("write"))
+                .nth(1)
+                .map(str::to_string)
+        })
+    }
+
     fn already_ran_the_tool(request: &InferenceRequest) -> bool {
         request.messages.iter().any(|m| match &m.content {
             MessageContent::Blocks(blocks) => blocks
@@ -85,7 +107,8 @@ impl Provider for WritesThenAnswers {
                 id: "call-1".to_string(),
                 name: "write_file".to_string(),
                 arguments: serde_json::json!({
-                    "path": self.target,
+                    "path": Self::target_from_prompt(request)
+                        .unwrap_or_else(|| "the-task-never-arrived".to_string()),
                     "content": "written by the agent\n",
                 }),
                 thought_signature: None,
@@ -142,6 +165,13 @@ model = { provider = "e2e", model = "m" }
 description = "Write the file"
 available_tools = ["write_file"]
 system_prompt = "Write the file you were asked for, then stop."
+
+# Without this the task text has nowhere to land, and the run would answer a
+# question it was never given. The provider below reads its target back out of
+# the prompt, so a missing region fails the test rather than passing it.
+[context.regions]
+task = { kind = "pinned", max_tokens = 500, seed = "task" }
+conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
 "#
 }
 
@@ -165,7 +195,6 @@ async fn an_agent_runs_a_tool_and_the_file_lands_on_disk() {
     providers.register(
         "e2e".to_string(),
         Arc::new(WritesThenAnswers {
-            target: "output.txt".to_string(),
             answering_turns: answering_turns.clone(),
         }),
     );

@@ -596,6 +596,12 @@ description = "child"
 
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+
+# Every caller here spawns the child with a task, and a child with nowhere to
+# put one is refused - which is the point: a sub-agent that silently discards
+# its parent's instructions is the failure this fixture would otherwise model.
+[context.regions]
+task = { kind = "pinned", max_tokens = 1000 }
 "#,
         )
         .unwrap();

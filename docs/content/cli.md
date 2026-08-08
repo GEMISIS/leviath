@@ -78,7 +78,9 @@ dropped.
 > [!NOTE]
 > `--task` fills the caller-input key `task`. A blueprint receives it only if some region asks for
 > that key, either with `seed = "task_input"` or by being named `task` (which gets the seed
-> implicitly). A blueprint with neither has nowhere to put the prompt, and it is dropped.
+> implicitly). Passing a task to a blueprint with neither is refused at spawn rather than dropped,
+> because the run would otherwise answer a question it was never given. The error names the caller
+> input the agent does take, so `lev run reviewer -t "..."` points you at `--diff` instead.
 
 #### Writing the task in your editor
 
@@ -124,6 +126,7 @@ in three levels: an **error** exits non-zero, a **warning** does not, and a **no
 | warning | `stage-missing-mode` | No `mode`, so the stage runs as `autonomous`. |
 | warning | `stage-missing-max-iterations` | Unbounded unless `[limits] default_max_iterations` is set. Fan-out stages are exempt. |
 | warning | `agent-model-block-ignored` | A top-level `[model]` block. Nothing reads it; model selection is per stage. |
+| warning | `region-seed-not-understood` | A region's `seed` is not one of the recognized forms, so it is ignored and the region starts empty. Usually a typo in the table key: it is `{ caller = "task" }`, not `{ caller_input = "task" }`. |
 | warning | `blocking-tool-in-autonomous-stage` | An autonomous stage grants `ask_user_*`, `present_for_review` or `edit_document`. With nobody attached the run parks there until it is killed. Set `allow_blocking_tools = true` on the stage to say you meant it. |
 | warning | `implicit-shell-policy` | A shell grant with no policy behind it. The default is `ask`, and an unattended run waits on that prompt rather than being denied. |
 | warning | `unknown-model` | A model this build has not heard of, checked only against providers with a closed catalog. Ollama, OpenRouter and script providers are never checked. |
