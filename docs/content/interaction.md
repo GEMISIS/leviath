@@ -20,7 +20,8 @@ A Leviath run does not have to be autonomous. There are three ways a person gets
 | A checkpoint that always happens | An [interaction point](#interaction-points) | The runtime, every time |
 | To redirect a run already going | `lev msg` | You, whenever you like |
 
-You can answer from the [dashboard](/docs/dashboard), the browser [console](/app), the CLI, or the
+You can answer from the [dashboard](/docs/dashboard), from
+[The Lair](https://leviath.dev/lair), the browser console, from the CLI, or the
 [HTTP API](/docs/api).
 
 > [!NOTE]
@@ -270,7 +271,7 @@ lev respond <request-id> --deny          # reject
 ```
 
 You don't have to use the CLI. The same open questions can be answered interactively from the
-[dashboard](/docs/dashboard) (press `i`), from the browser [console](/app), or over the
+[dashboard](/docs/dashboard) (press `i`), from [The Lair](https://leviath.dev/lair), or over the
 [API](/docs/api) via `GET/POST /api/agents/{id}/interaction`: read the pending question, then post
 the answer.
 
