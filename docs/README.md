@@ -89,7 +89,7 @@ whole bar. These rules exist because the docs drifted away from it once already.
 ## Tone rules
 
 We sell Leviath on what it does well, not on what other tools do badly. Someone who uses Gas City,
-Smithy, Claude Code, CrewAI, or LangGraph should finish a page here feeling their tool got more
+OpenHands, Claude Code, CrewAI, or LangGraph should finish a page here feeling their tool got more
 useful, not that it got insulted.
 
 1. **Describe, do not rate.** Say what a tool does and where it sits. The comparison page's own

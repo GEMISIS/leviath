@@ -315,7 +315,7 @@ Methodology and raw data will be published alongside the benchmark results.
 ## How it compares
 
 Leviath is a runtime that agents run *on*. Claude Code is a polished coding agent you work with,
-CrewAI and LangGraph are frameworks you build agents *in*, and Gas Town, Gas City and Smithy are
+CrewAI and LangGraph are frameworks you build agents *in*, and Gas Town, Gas City and OpenHands are
 orchestrators that decide which work happens. Several of those are worth running alongside Leviath
 rather than instead of it.
 
