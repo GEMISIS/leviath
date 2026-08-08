@@ -58,7 +58,7 @@ pub fn reload_persisted_agents(
     world: &mut PipelineWorld,
     deps: SpawnDeps<'_>,
     runs_dir: &Path,
-) -> Vec<(String, Entity)> {
+) -> Vec<(String, leviath_runtime::world::AgentId)> {
     let mut reloaded: Vec<(RunMeta, Entity)> = Vec::new();
     let Ok(dir_entries) = std::fs::read_dir(runs_dir) else {
         return Vec::new(); // no runs dir yet - nothing to recover
@@ -93,9 +93,11 @@ pub fn reload_persisted_agents(
     // resume any parent that was parked mid fan-out.
     relink_tree(world, &reloaded);
     restore_fan_outs(world, &reloaded, runs_dir);
+    // Scoped on the way out: the host stores these for the life of the daemon,
+    // which is exactly where a bare entity would lose track of its world.
     reloaded
         .into_iter()
-        .map(|(meta, entity)| (meta.run_id, entity))
+        .map(|(meta, entity)| (meta.run_id, world.own_agent(entity)))
         .collect()
 }
 
@@ -109,13 +111,14 @@ pub fn reload_run(
     deps: SpawnDeps<'_>,
     run_id: &str,
     runs_dir: &std::path::Path,
-) -> Option<Entity> {
+) -> Option<leviath_runtime::world::AgentId> {
     let run_dir = runs_dir.join(run_id);
     let meta = read_meta(&run_dir)?;
     if is_terminal(&meta.status) {
         return None; // a finished run isn't paged back in
     }
-    reload_one(world, deps, &meta, &run_dir).ok()
+    let entity = reload_one(world, deps, &meta, &run_dir).ok()?;
+    Some(world.own_agent(entity))
 }
 
 /// Rebuild `FanOutWaiting` for any reloaded parent that was parked mid fan-out
@@ -424,7 +427,8 @@ fn reload_one(
     // A run the user paused stays paused across the restart: the default
     // restore presents it `Active`, which would silently resume it.
     if meta.status == RunStatus::Paused {
-        world.pause(entity);
+        // Built against this world's ECS, so it is ours.
+        world.pause(world.own_agent(entity));
     }
 
     Ok(entity)
@@ -814,7 +818,7 @@ mod tests {
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].0, run_id);
         let entity = restored[0].1;
-        (world, entity)
+        (world, entity.entity())
     }
 
     /// An unattended run comes back unattended. Dropping `--yolo` on reload was
@@ -951,18 +955,18 @@ mod tests {
         assert_eq!(run_id, "run-live");
         assert_eq!(world.agent_status(*entity), Some(AgentStatus::Active));
         // Iteration + preserved metadata restored.
-        let md = world.world().get::<RunMetadata>(*entity).unwrap();
+        let md = world.world().get::<RunMetadata>(entity.entity()).unwrap();
         assert_eq!(md.started_at, 111);
         assert_eq!(md.title.as_deref(), Some("Resume Me"));
         assert_eq!(md.callback_url.as_deref(), Some("http://cb"));
-        let totals = world.world().get::<TokenTotals>(*entity).unwrap();
+        let totals = world.world().get::<TokenTotals>(entity.entity()).unwrap();
         assert_eq!(totals.prompt_tokens, 42);
         assert_eq!(totals.tool_calls, 3);
         // ...as are the run's productivity flags, so a resumed run doesn't report
         // itself as having modified nothing.
         let flags = world
             .world()
-            .get::<leviath_runtime::persistence::RunOutcomeFlags>(*entity)
+            .get::<leviath_runtime::persistence::RunOutcomeFlags>(entity.entity())
             .unwrap();
         assert_eq!(flags.0.modified_files, vec!["src/a.rs".to_string()]);
         assert_eq!(flags.0.modified_file_count, 1);
@@ -974,7 +978,7 @@ mod tests {
         // erase the copy already on disk.
         let output = world
             .world()
-            .get::<leviath_runtime::persistence::FinalOutput>(*entity)
+            .get::<leviath_runtime::persistence::FinalOutput>(entity.entity())
             .expect("a submitted answer survives the restart");
         assert_eq!(output.0.content, "already answered");
         assert_eq!(output.0.stage, "implement");
@@ -1055,7 +1059,7 @@ mod tests {
         );
 
         assert_eq!(restored.len(), 1);
-        assert_restored_from_archive(&world, restored[0].1);
+        assert_restored_from_archive(&world, restored[0].1.entity());
     }
 
     /// A crash *during* the journal append can leave a torn trailing frame. Recovery
@@ -1117,7 +1121,7 @@ mod tests {
 
         assert_eq!(restored.len(), 1);
         // The valid prefix folds → resume still uses the journal's fresh state.
-        assert_restored_from_archive(&world, restored[0].1);
+        assert_restored_from_archive(&world, restored[0].1.entity());
     }
 
     /// Append raw journal records to an existing `run.lvr`, the way the live
@@ -1228,7 +1232,7 @@ mod tests {
 
         assert_eq!(restored.len(), 1);
         let entity = restored[0].1;
-        let entries = conversation_of(&world, entity);
+        let entries = conversation_of(&world, entity.entity());
         // The assistant turn landed with both calls...
         assert!(entries.iter().any(|e| matches!(
             &e.kind,
@@ -1247,7 +1251,7 @@ mod tests {
         assert!(
             world
                 .world()
-                .get::<leviath_runtime::pipeline::ReadyToInfer>(entity)
+                .get::<leviath_runtime::pipeline::ReadyToInfer>(entity.entity())
                 .is_some()
         );
     }
@@ -1337,7 +1341,7 @@ mod tests {
         );
 
         assert_eq!(restored.len(), 1);
-        let entries = conversation_of(&world, restored[0].1);
+        let entries = conversation_of(&world, restored[0].1.entity());
         // Exactly the persisted turn - no second copy, no interrupted synthesis.
         assert_eq!(
             entries
@@ -1414,13 +1418,15 @@ mod tests {
         assert!(
             world
                 .world()
-                .get::<leviath_runtime::interaction_points::AwaitingInteractionPoint>(*entity)
+                .get::<leviath_runtime::interaction_points::AwaitingInteractionPoint>(
+                    entity.entity()
+                )
                 .is_some()
         );
         assert!(
             world
                 .world()
-                .get::<leviath_runtime::pipeline::ReadyToInfer>(*entity)
+                .get::<leviath_runtime::pipeline::ReadyToInfer>(entity.entity())
                 .is_none(),
             "the spawn-set ReadyToInfer is cleared so the inference lane won't fire"
         );
@@ -1617,13 +1623,13 @@ mod tests {
         assert!(
             world
                 .world()
-                .get::<FanOutWaiting>(by_id["parent-fo"])
+                .get::<FanOutWaiting>(by_id["parent-fo"].entity())
                 .is_some()
         );
         assert!(
             world
                 .world()
-                .get::<FanOutWaiting>(by_id["bad-fo"])
+                .get::<FanOutWaiting>(by_id["bad-fo"].entity())
                 .is_none()
         );
     }
@@ -1696,19 +1702,24 @@ mod tests {
         let child_b = by_id["child-b"];
 
         // Parent's SubAgentChildren rebuilt with both children + the depth cap.
-        let kids = world.world().get::<SubAgentChildren>(parent).unwrap();
+        let kids = world
+            .world()
+            .get::<SubAgentChildren>(parent.entity())
+            .unwrap();
         assert_eq!(kids.max_child_depth, 4);
         assert_eq!(kids.children.len(), 2);
-        assert!(kids.children.contains(&child_a) && kids.children.contains(&child_b));
+        assert!(
+            kids.children.contains(&child_a.entity()) && kids.children.contains(&child_b.entity())
+        );
         // Each child's ParentRef points back at the parent, at its stored depth.
-        let pr = world.world().get::<ParentRef>(child_a).unwrap();
-        assert_eq!(pr.parent_entity, parent);
+        let pr = world.world().get::<ParentRef>(child_a.entity()).unwrap();
+        assert_eq!(pr.parent_entity, parent.entity());
         assert_eq!(pr.parent_agent_id, "parent");
         assert_eq!(pr.depth, 1);
         // The serializable child list is kept in sync for the next snapshot.
         let state = world
             .world()
-            .get::<leviath_runtime::components::AgentState>(parent)
+            .get::<leviath_runtime::components::AgentState>(parent.entity())
             .unwrap();
         assert_eq!(state.spawned_children_ids, vec!["child-a", "child-b"]);
     }
@@ -1794,11 +1805,16 @@ mod tests {
         assert!(
             world
                 .world()
-                .get::<SubAgentChildren>(by_id["lonely-parent"])
+                .get::<SubAgentChildren>(by_id["lonely-parent"].entity())
                 .is_none()
         );
         // Orphan's parent didn't reload → no ParentRef attached.
-        assert!(world.world().get::<ParentRef>(by_id["orphan"]).is_none());
+        assert!(
+            world
+                .world()
+                .get::<ParentRef>(by_id["orphan"].entity())
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1831,7 +1847,12 @@ mod tests {
             runs.path(),
         );
         assert_eq!(restored.len(), 1);
-        assert!(world.world().get::<TokenTotals>(restored[0].1).is_some());
+        assert!(
+            world
+                .world()
+                .get::<TokenTotals>(restored[0].1.entity())
+                .is_some()
+        );
     }
 
     #[tokio::test]

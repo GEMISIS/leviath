@@ -24,7 +24,7 @@ impl WorldHost {
     /// Called after each drive to quiescence, so subscribers see every change.
     pub(super) fn emit_events(&mut self) {
         self.adopt_unregistered_runs();
-        let pairs: Vec<(String, Entity)> = self
+        let pairs: Vec<(String, AgentId)> = self
             .by_run_id
             .iter()
             .map(|(k, &v)| (k.clone(), v))
@@ -38,7 +38,10 @@ impl WorldHost {
         let mut to_reap: Vec<(String, Entity, RunListEntry)> = Vec::new();
         let mut to_park: Vec<(String, Entity, RunListEntry)> = Vec::new();
         let now = chrono::Utc::now().timestamp();
-        for (run_id, entity) in pairs {
+        for (run_id, agent) in pairs {
+            // Unwrapped once: everything below reaches into this world's ECS,
+            // where same-world is true by construction.
+            let entity = agent.entity();
             let Some(state) = self.world.world().get::<AgentState>(entity) else {
                 continue; // reaped between registration and now
             };

@@ -1935,7 +1935,10 @@ system = { kind = "pinned", max_tokens = 1000 }
         )
         .expect("spawn succeeds");
 
-        assert_eq!(world.agent_status(entity), Some(AgentStatus::Active));
+        assert_eq!(
+            world.agent_status(world.own_agent(entity)),
+            Some(AgentStatus::Active)
+        );
         let meta = world
             .world()
             .get::<RunMetadata>(entity)
@@ -2261,7 +2264,10 @@ system = { kind = "pinned", max_tokens = 1000 }
         )
         .expect("spawn succeeds");
 
-        assert_eq!(world.agent_status(entity), Some(AgentStatus::Active));
+        assert_eq!(
+            world.agent_status(world.own_agent(entity)),
+            Some(AgentStatus::Active)
+        );
         // The run metadata was attached.
         let md = world
             .world()
@@ -2369,7 +2375,10 @@ system = { kind = "pinned", max_tokens = 1000 }
             &args,
         )
         .expect("spawn succeeds");
-        assert_eq!(world.agent_status(entity), Some(AgentStatus::Active));
+        assert_eq!(
+            world.agent_status(world.own_agent(entity)),
+            Some(AgentStatus::Active)
+        );
 
         // The config deny stands: read_file is refused, not executed.
         let out = leviath_runtime::pipeline::ToolService::exec_for(
@@ -2985,7 +2994,10 @@ system_prompt = "be brief"
             &spawn_args(&manifest.to_string_lossy()),
         )
         .expect("spawn succeeds");
-        assert_eq!(world.agent_status(entity), Some(AgentStatus::Active));
+        assert_eq!(
+            world.agent_status(world.own_agent(entity)),
+            Some(AgentStatus::Active)
+        );
         // Compaction settings were attached.
         assert!(world.world().get::<CompactionSettings>(entity).is_some());
     }
@@ -3123,7 +3135,10 @@ system_prompt = "be brief"
             &spawn_args(&manifest.to_string_lossy()),
         )
         .expect("spawn succeeds");
-        assert_eq!(world.agent_status(entity), Some(AgentStatus::Active));
+        assert_eq!(
+            world.agent_status(world.own_agent(entity)),
+            Some(AgentStatus::Active)
+        );
     }
 
     /// A declared-but-ungranted `[read_paths]` still spawns; the warning-logging
@@ -3149,7 +3164,10 @@ system_prompt = "be brief"
             &spawn_args(&manifest.to_string_lossy()),
         )
         .expect("spawn succeeds even when nothing grants the declaration");
-        assert_eq!(world.agent_status(entity), Some(AgentStatus::Active));
+        assert_eq!(
+            world.agent_status(world.own_agent(entity)),
+            Some(AgentStatus::Active)
+        );
     }
 
     /// A malformed grant entry in the user's own config fails the spawn - the

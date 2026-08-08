@@ -509,7 +509,10 @@ mod tests {
             .expect("worker spawns");
         // The worker entered the `second` stage (index 1).
         assert_eq!(world.world().get::<StageCursor>(child).unwrap().index, 1);
-        assert_eq!(world.agent_status(child), Some(AgentStatus::Active));
+        assert_eq!(
+            world.agent_status(world.own_agent(child)),
+            Some(AgentStatus::Active)
+        );
     }
 
     /// A worker of an unattended parent is unattended. Spawning workers attended
