@@ -376,7 +376,16 @@ async fn run_interaction_point(ask: PointAsk, lane: PromptLane<InteractionPointO
 /// A no-op (leaving the default restore in place) when the interaction-point lane
 /// isn't wired (a test world), or when the stage is no longer an interactive-points
 /// stage / the cursor is out of range (e.g. the blueprint changed under the run).
-pub fn restore_interaction_point(world: &mut World, entity: Entity, state: InteractionPointState) {
+pub fn restore_interaction_point(
+    world: &mut World,
+    agent: crate::world::AgentId,
+    state: InteractionPointState,
+) {
+    // An id from another world would name a different agent here, and this
+    // writes a pending prompt onto it.
+    let Some(entity) = agent.resolve_in(world) else {
+        return;
+    };
     // The lane + hub must both be wired (they are in the daemon; absent in a test
     // world) - otherwise there is nothing to await the re-opened request.
     let Some(((outcomes, wake, runtime), hub)) = world
@@ -2003,9 +2012,10 @@ mod tests {
     async fn restore_rearms_waiting_and_reopens_the_prompt() {
         let (mut world, hub, _rx) = resume_world();
         let e = restored_agent(&mut world, blueprint_with(vec![plan_point()]));
+        let agent = crate::world::AgentId::in_world(&world, e);
         restore_interaction_point(
             &mut world,
-            e,
+            agent,
             InteractionPointState {
                 cursor: 0,
                 round: 2,
@@ -2038,9 +2048,10 @@ mod tests {
     async fn restore_then_answer_drives_the_transition() {
         let (mut world, hub, mut rx) = resume_world();
         let e = restored_agent(&mut world, blueprint_with(vec![plan_point()]));
+        let agent = crate::world::AgentId::in_world(&world, e);
         restore_interaction_point(
             &mut world,
-            e,
+            agent,
             InteractionPointState {
                 cursor: 0,
                 round: 0,
@@ -2077,9 +2088,10 @@ mod tests {
     async fn restore_noop_on_noninteractive_stage() {
         let (mut world, hub, _rx) = resume_world();
         let e = restored_agent(&mut world, noninteractive_bp());
+        let agent = crate::world::AgentId::in_world(&world, e);
         restore_interaction_point(
             &mut world,
-            e,
+            agent,
             InteractionPointState {
                 cursor: 0,
                 round: 0,
@@ -2104,9 +2116,10 @@ mod tests {
         // No InteractionPointStage / hub resources (a test world) ⇒ no-op.
         let mut world = World::new();
         let e = restored_agent(&mut world, blueprint_with(vec![plan_point()]));
+        let agent = crate::world::AgentId::in_world(&world, e);
         restore_interaction_point(
             &mut world,
-            e,
+            agent,
             InteractionPointState {
                 cursor: 0,
                 round: 0,

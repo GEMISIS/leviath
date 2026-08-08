@@ -125,7 +125,11 @@ impl WorldHost {
             .push(run_id.clone());
         // Seed the child's context from the parent per any declared blueprint
         // context transform (planner→coder region mapping, etc.).
-        crate::context_transform::apply_context_transforms(world, parent, child);
+        crate::context_transform::apply_context_transforms(
+            world,
+            crate::world::AgentId::in_world(world, parent),
+            crate::world::AgentId::in_world(world, child),
+        );
         // The spawner ran against this world, so the child is ours.
         let child_agent = self.world.own_agent(child);
         self.by_run_id.insert(run_id.clone(), child_agent);

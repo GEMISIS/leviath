@@ -20,8 +20,11 @@ impl WorldHost {
     /// request of their own, so both also carry [`AwaitingInteraction`]; asking
     /// the specific markers first is what keeps them from all reporting as a
     /// generic prompt.
-    pub fn wait_reason(&self, entity: Entity) -> Option<WaitReason> {
+    pub fn wait_reason(&self, agent: crate::world::AgentId) -> Option<WaitReason> {
         let world = self.world.world();
+        // An id from another world names a different agent here, which would
+        // report that one's wait reason as this run's.
+        let entity = agent.resolve_in(world)?;
         let state = world.get::<AgentState>(entity)?;
         if state.status != AgentStatus::Waiting {
             return None;
@@ -102,7 +105,7 @@ impl WorldHost {
         RunListEntry {
             run_id: run_id.to_string(),
             status: state.status.clone(),
-            wait_reason: self.wait_reason(entity),
+            wait_reason: self.wait_reason(crate::world::AgentId::in_world(world, entity)),
             stage: state.current_stage.clone(),
             stage_index: world
                 .get::<crate::pipeline::StageCursor>(entity)

@@ -415,7 +415,11 @@ fn finish_fan_out(world: &mut World, parent: Entity, w: FanOutWaiting) {
             .get::<AgentBlueprint>(parent)
             .and_then(|bp| bp.0.stages.iter().position(|s| s.name == name))
     }) {
-        Some(idx) => crate::pipeline::force_transition(world, parent, idx),
+        Some(idx) => crate::pipeline::force_transition(
+            world,
+            crate::world::AgentId::in_world(world, parent),
+            idx,
+        ),
         None => {
             world.entity_mut(parent).insert(ResolveTransition);
         }
@@ -486,7 +490,11 @@ fn start_worker(
         .push(worker_id);
     // Seed the worker's context from the parent per any declared blueprint
     // context transform (when a fan-out worker runs a different blueprint).
-    crate::context_transform::apply_context_transforms(world, parent, child);
+    crate::context_transform::apply_context_transforms(
+        world,
+        crate::world::AgentId::in_world(world, parent),
+        crate::world::AgentId::in_world(world, child),
+    );
     Ok(child)
 }
 
@@ -1954,16 +1962,17 @@ mod tests {
                 window(),
             ))
             .id();
-        force_transition(&mut world, e, 1);
+        let agent = crate::world::AgentId::in_world(&world, e);
+        force_transition(&mut world, agent, 1);
         assert!(world.get::<ToolResultRoutingComponent>(e).is_some());
         assert!(world.get::<ReadyToInfer>(e).is_some());
 
         // Despawned entity: no panic, no effect.
-        force_transition(
-            &mut world,
+        let gone = crate::world::AgentId::in_world(
+            &world,
             Entity::from_raw_u32(9191).expect("a small literal index is always a valid entity id"),
-            1,
         );
+        force_transition(&mut world, gone, 1);
     }
 
     #[test]
@@ -2000,7 +2009,8 @@ mod tests {
         let mut w = ContextWindow::new(1000);
         w.add_region(Region::new("task".to_string(), RegionKind::Pinned, 20));
         let (mut world, e) = world_with(bp, setups, w);
-        force_transition(&mut world, e, 1);
+        let agent = crate::world::AgentId::in_world(&world, e);
+        force_transition(&mut world, agent, 1);
         assert_errored(&world, e);
     }
 

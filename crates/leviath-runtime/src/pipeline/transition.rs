@@ -716,7 +716,12 @@ pub(crate) fn attach_stage_components(
 /// or the daemon (spawning a fan-out worker directly at its worker stage) where no
 /// [`Commands`] queue is available. On a system-prompt overflow the agent is
 /// marked `Error`, mirroring the transition systems.
-pub fn force_transition(world: &mut World, entity: Entity, target_idx: usize) {
+pub fn force_transition(world: &mut World, agent: crate::world::AgentId, target_idx: usize) {
+    // Moving the wrong agent to a stage is how a run silently ends up somewhere
+    // its blueprint never sent it.
+    let Some(entity) = agent.resolve_in(world) else {
+        return;
+    };
     // Phase 1 (scoped borrow): mutate the agent's own state via `enter_stage`,
     // returning the components Phase 2 must insert - or `None` if the agent is
     // gone or its system prompt overflowed (already marked `Error` in-place).

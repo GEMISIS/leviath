@@ -168,7 +168,11 @@ impl FanOutSpawner for DaemonFanOutSpawner {
                 .get::<AgentBlueprint>(child)
                 .and_then(|bp| bp.0.stages.iter().position(|s| s.name == stage))
             {
-                Some(idx) => force_transition(world, child, idx),
+                Some(idx) => force_transition(
+                    world,
+                    leviath_runtime::world::AgentId::in_world(world, child),
+                    idx,
+                ),
                 None => return Err(format!("worker stage '{stage}' not found in blueprint")),
             }
         }
