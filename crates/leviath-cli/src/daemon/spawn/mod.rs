@@ -103,6 +103,270 @@ pub fn build_agent_for_reload(
     build_agent_inner(world, deps, args, false)
 }
 
+/// Reject a spawn request that cannot work, before anything is built over it.
+///
+/// Both checks guard a failure that would otherwise surface far from its cause,
+/// which is why they run first and together rather than where each value is
+/// eventually used.
+fn check_spawn_request(args: &SpawnArgs) -> Result<(), String> {
+    // The run id becomes a directory name, and everything this run writes lands
+    // under it: `meta.json`, the context snapshot, the answer sidecar. The
+    // persistence lane joins it to the runs directory without checking, so a
+    // component holding `..` would place a run's files outside it.
+    //
+    // Not reachable from the API, which mints its own id (`new_run_id` replaces
+    // every character that is not alphanumeric or a hyphen), and a control
+    // socket client is already the same user. It is one comparison to make the
+    // property hold where the request is accepted rather than resting on both of
+    // those staying true.
+    if !leviath_core::is_safe_path_component(&args.run_id) {
+        return Err(format!(
+            "run id '{}' is not a usable directory name",
+            args.run_id
+        ));
+    }
+
+    // The working directory must exist before anything is built over it.
+    // `ToolContext::new` silently keeps a path it can't canonicalize, so without
+    // this a bogus workdir spawns a healthy-looking agent whose every tool call
+    // fails with a message naming the shell rather than the directory (#107).
+    if !std::fs::metadata(&args.workdir).is_ok_and(|m| m.is_dir()) {
+        return Err(format!(
+            "workspace '{}' does not exist or is not a directory",
+            args.workdir
+        ));
+    }
+
+    Ok(())
+}
+
+/// Read, parse and validate the blueprint, then fold the request's and the
+/// user's ceilings into it.
+///
+/// Returns the manifest text alongside the blueprint because later phases need
+/// the raw source too - `[tool_script_permissions]` is read from it directly.
+fn load_blueprint(
+    args: &SpawnArgs,
+    config: &crate::config::Config,
+) -> Result<(String, leviath_core::Blueprint), String> {
+    let content = std::fs::read_to_string(&args.blueprint_path)
+        .map_err(|e| format!("read manifest '{}': {e}", args.blueprint_path))?;
+    let mut blueprint = leviath_core::manifest::parse_manifest(&content)
+        .map_err(|e| format!("parse manifest: {e}"))?;
+    blueprint
+        .validate()
+        .map_err(|e| format!("invalid blueprint: {e}"))?;
+    // What `lev validate` would have said, in the daemon log. Nothing here
+    // refuses a spawn: these are authoring mistakes whose cost is a run that
+    // behaves oddly hours later, and the whole point is that they are invisible
+    // until then. Logging them means the answer is already in `daemon.log`
+    // whenever someone goes looking for why a run stalled.
+    log_blueprint_lint(&content, &blueprint, &args.blueprint_path);
+    // A request-level `--max-depth` overrides the blueprint's sub-agent depth cap.
+    if let Some(md) = args.max_depth {
+        blueprint.max_child_depth = Some(md);
+    }
+    // Apply the deps.config's `default_max_iterations` to any stage that doesn't set
+    // its own, so an agent can't loop forever with no completion signal
+    // (`enforce_max_iterations` treats `None`/0 as unbounded). A stage's explicit
+    // `max_iterations` always wins.
+    if let Some(default_max) = config.limits.default_max_iterations {
+        for stage in &mut blueprint.stages {
+            // `0` means *unbounded* to the pipeline, and `get_or_insert` only
+            // fills `None` - so a manifest writing `max_iterations = 0` looked
+            // like "unset" while actually opting out of the user's ceiling
+            // entirely, and looped without limit against their API keys. A
+            // manifest may still declare its own finite number; it may not
+            // declare "no limit" over a user who asked for one.
+            match stage.max_iterations {
+                None | Some(0) => stage.max_iterations = Some(default_max),
+                Some(_) => {}
+            }
+        }
+    }
+
+    Ok((content, blueprint))
+}
+
+/// Everything phase 7 attaches that is not already on the entity.
+///
+/// A struct because these are one thing - the durable record of a run - rather
+/// than ten independent arguments, and because ten positional arguments of
+/// which four are collections is a transposition waiting to happen.
+struct RunRecordParts {
+    agent_name: String,
+    model_label: Option<String>,
+    num_stages: usize,
+    read_path_counts: Option<leviath_core::run_meta::ReadPathGrantCounts>,
+    output_validators:
+        HashMap<String, std::sync::Arc<leviath_scripting::output_validator::OutputValidator>>,
+    outcome_flags: leviath_runtime::persistence::RunOutcomeFlags,
+    compaction: Option<leviath_core::CompactionConfig>,
+    tool_sensitivities: Option<HashMap<String, leviath_core::TaintLevel>>,
+    security: leviath_core::taint::SecurityConfig,
+    mcp_overrides: std::collections::HashMap<String, leviath_core::policy::McpToolOverride>,
+}
+
+/// Record the run on its entity: metadata, counters, and the markers that
+/// decide how the pipeline treats it.
+fn attach_run_record(
+    world: &mut World,
+    entity: Entity,
+    args: &SpawnArgs,
+    deps: &SpawnDeps<'_>,
+    parts: RunRecordParts,
+) {
+    let metadata = RunMetadata {
+        run_id: args.run_id.clone(),
+        agent_name: parts.agent_name,
+        agent_path: args.blueprint_path.clone(),
+        task: args.task.clone(),
+        model: parts.model_label,
+        workdir: args.workdir.clone(),
+        num_stages: parts.num_stages,
+        started_at: deps.now_secs,
+        parent_run_id: args.parent_run_id.clone(),
+        metadata: args.metadata.clone(),
+        callback_url: args.callback_url.clone(),
+        callback_secret: args.callback_secret.clone(),
+        title: None,
+        unattended: args.yolo,
+        read_paths: parts.read_path_counts,
+        output_request: args.output.clone(),
+    };
+    {
+        let mut entity_mut = world.entity_mut(entity);
+        if !parts.output_validators.is_empty() {
+            entity_mut.insert(leviath_runtime::components::OutputValidators(
+                parts.output_validators,
+            ));
+        }
+        entity_mut.insert((
+            metadata,
+            TokenTotals::default(),
+            PersistWatermark::default(),
+            // Fresh counters; a reloaded run gets its accumulated flags put back
+            // by `recovery::reload_persisted_agents`.
+            parts.outcome_flags,
+        ));
+        // Mark eligible runs for one-shot title generation (the `title` module
+        // fills `RunMetadata.title`, which the dashboard displays and
+        // searches). Root runs only: sub-agents inherit their parent's context
+        // in the run list, and titling every fan-out worker would multiply
+        // cheap-but-nonzero LLM calls for no UX gain.
+        (deps.config.title.enabled && !args.task.is_empty() && args.parent_run_id.is_none())
+            .then_some(leviath_runtime::title::PendingTitle)
+            .into_iter()
+            .for_each(|marker| {
+                entity_mut.insert(marker);
+            });
+        // `--yolo` means run unattended, so a blueprint's stage-boundary
+        // checkpoints are approved rather than parked on a deps.hub nobody is
+        // watching. (`.then_some(..).into_iter()` keeps the non-yolo path
+        // branch-free, matching the taint-gate marker below.)
+        args.yolo
+            .then_some(leviath_runtime::components::InteractionAutoApprove)
+            .into_iter()
+            .for_each(|marker| {
+                entity_mut.insert(marker);
+            });
+        // `Option`'s iterator inserts compaction settings when present without a
+        // dangling `if let` block-end region.
+        parts.compaction.into_iter().for_each(|cc| {
+            entity_mut.insert(CompactionSettings(cc));
+        });
+        // Attach the taint gate + per-tool sensitivities and turn on the window's
+        // taint tracking when the blueprint opts in (`Option`'s iterator keeps the
+        // enforcement path region-free when taint is off).
+        parts
+            .tool_sensitivities
+            .into_iter()
+            .for_each(|sensitivities| {
+                let mut gate = leviath_runtime::TaintGate::new(parts.security.clone());
+                gate.apply_mcp_overrides(&parts.mcp_overrides);
+                entity_mut.insert((
+                    gate,
+                    leviath_runtime::pipeline::ToolSensitivities(sensitivities),
+                ));
+                // `--yolo` means run unattended: waive taint-gate prompts (the
+                // tool-policy wildcard below doesn't cover them), so a headless run
+                // never blocks on a gate no one can answer.
+                if args.yolo {
+                    entity_mut.insert(leviath_runtime::components::GateAutoApprove);
+                }
+                // `Option`'s iterator enables tracking without a dead "no window" arm
+                // (a freshly spawned agent always carries a ContextWindow).
+                entity_mut
+                    .get_mut::<leviath_runtime::components::ContextWindow>()
+                    .into_iter()
+                    .for_each(|mut window| window.enable_taint_tracking());
+            });
+    }
+}
+
+/// What taint tracking this agent runs under.
+///
+/// The three travel together because they are one decision: whether to gate at
+/// all, which reclassifications apply, and the per-tool sensitivities that fall
+/// out of both. Returning them separately invited a caller to build a gate from
+/// one and forget the others.
+struct TaintSetup {
+    security: leviath_core::taint::SecurityConfig,
+    mcp_overrides: std::collections::HashMap<String, leviath_core::policy::McpToolOverride>,
+    tool_sensitivities: Option<HashMap<String, leviath_core::TaintLevel>>,
+}
+
+/// Resolve the agent's taint configuration against the global setting, the
+/// blueprint's own `[security]` block, and the world's policy overrides.
+fn resolve_taint_setup(
+    world: &World,
+    blueprint: &leviath_core::Blueprint,
+    config: &crate::config::Config,
+    all_tool_defs: &[leviath_providers::Tool],
+    read_paths_granted: bool,
+) -> TaintSetup {
+    // `resolve_security` (rather than `unwrap_or_default`, which forced taint on
+    // for every agent because `SecurityConfig::default()` is taint-on) means a
+    // blueprint with no `[security]` block correctly inherits the global setting -
+    // off by default. When on, the agent's outbound tool calls are gated
+    // against its context taint + the policy allowlist; when off no gate is
+    // attached (zero enforcement overhead).
+    let security = leviath_core::taint::resolve_security(
+        config.taint_tracking,
+        blueprint.security.as_ref(),
+        None,
+    );
+    // The `[mcp_overrides]` from policy.toml (loaded into the world at daemon
+    // setup), applied to every gate this agent gets so a user's reclassified
+    // MCP tool is enforced, not just printed by `lev policy list`.
+    let mcp_overrides = world
+        .get_resource::<leviath_runtime::pipeline::PolicyGate>()
+        .map(|p| p.0.mcp_overrides.clone())
+        .unwrap_or_default();
+    let tool_sensitivities: Option<HashMap<String, leviath_core::TaintLevel>> =
+        security.taint_tracking.then(|| {
+            let mut gate = leviath_runtime::TaintGate::new(security.clone());
+            gate.apply_mcp_overrides(&mcp_overrides);
+            let mut map: HashMap<String, leviath_core::TaintLevel> = all_tool_defs
+                .iter()
+                .map(|t| {
+                    (
+                        t.name.clone(),
+                        gate.tool_classification(&t.name).sensitivity,
+                    )
+                })
+                .collect();
+            bump_read_sensitivities(&mut map, read_paths_granted);
+            map
+        });
+
+    TaintSetup {
+        security,
+        mcp_overrides,
+        tool_sensitivities,
+    }
+}
+
 /// Log whatever `lev validate` would have reported about this manifest.
 ///
 /// The lint env is built from the manifest's own directory so the agent's
@@ -143,70 +407,11 @@ fn build_agent_inner(
     args: &SpawnArgs,
     enforce_seeds: bool,
 ) -> Result<Entity, String> {
-    // 0a. The run id becomes a directory name, and everything this run writes
-    // lands under it: `meta.json`, the context snapshot, the answer sidecar. The
-    // persistence lane joins it to the runs directory without checking, so a
-    // component holding `..` would place a run's files outside it.
-    //
-    // Not reachable from the API, which mints its own id (`new_run_id` replaces
-    // every character that is not alphanumeric or a hyphen), and a control
-    // socket client is already the same user. It is one comparison to make the
-    // property hold where the request is accepted rather than resting on both of
-    // those staying true.
-    if !leviath_core::is_safe_path_component(&args.run_id) {
-        return Err(format!(
-            "run id '{}' is not a usable directory name",
-            args.run_id
-        ));
-    }
-
-    // 0. The working directory must exist before anything is built over it.
-    // `ToolContext::new` silently keeps a path it can't canonicalize, so without
-    // this a bogus workdir spawns a healthy-looking agent whose every tool call
-    // fails with a message naming the shell rather than the directory (#107).
-    if !std::fs::metadata(&args.workdir).is_ok_and(|m| m.is_dir()) {
-        return Err(format!(
-            "workspace '{}' does not exist or is not a directory",
-            args.workdir
-        ));
-    }
+    // 0. Everything that can be judged from the request alone.
+    check_spawn_request(args)?;
 
     // 1. Load the blueprint (the client resolves the manifest path).
-    let content = std::fs::read_to_string(&args.blueprint_path)
-        .map_err(|e| format!("read manifest '{}': {e}", args.blueprint_path))?;
-    let mut blueprint = leviath_core::manifest::parse_manifest(&content)
-        .map_err(|e| format!("parse manifest: {e}"))?;
-    blueprint
-        .validate()
-        .map_err(|e| format!("invalid blueprint: {e}"))?;
-    // What `lev validate` would have said, in the daemon log. Nothing here
-    // refuses a spawn: these are authoring mistakes whose cost is a run that
-    // behaves oddly hours later, and the whole point is that they are invisible
-    // until then. Logging them means the answer is already in `daemon.log`
-    // whenever someone goes looking for why a run stalled.
-    log_blueprint_lint(&content, &blueprint, &args.blueprint_path);
-    // A request-level `--max-depth` overrides the blueprint's sub-agent depth cap.
-    if let Some(md) = args.max_depth {
-        blueprint.max_child_depth = Some(md);
-    }
-    // Apply the deps.config's `default_max_iterations` to any stage that doesn't set
-    // its own, so an agent can't loop forever with no completion signal
-    // (`enforce_max_iterations` treats `None`/0 as unbounded). A stage's explicit
-    // `max_iterations` always wins.
-    if let Some(default_max) = deps.config.limits.default_max_iterations {
-        for stage in &mut blueprint.stages {
-            // `0` means *unbounded* to the pipeline, and `get_or_insert` only
-            // fills `None` - so a manifest writing `max_iterations = 0` looked
-            // like "unset" while actually opting out of the user's ceiling
-            // entirely, and looped without limit against their API keys. A
-            // manifest may still declare its own finite number; it may not
-            // declare "no limit" over a user who asked for one.
-            match stage.max_iterations {
-                None | Some(0) => stage.max_iterations = Some(default_max),
-                Some(_) => {}
-            }
-        }
-    }
+    let (content, blueprint) = load_blueprint(args, deps.config)?;
 
     // 2a. Entry stage + per-stage sandbox resolution. Each stage's effective
     // sandbox cascades stage → agent → global (`resolve_sandbox`); building the
@@ -325,40 +530,19 @@ fn build_agent_inner(
     let max_child_depth = blueprint.max_child_depth.unwrap_or(DEFAULT_SUBAGENT_DEPTH);
     // Taint gate: opt-in via the blueprint's `[security]` block, else the global
     // deps.config's `taint_tracking`, else off. Cascading through
-    // `resolve_security` (rather than `unwrap_or_default`, which forced taint on
-    // for every agent because `SecurityConfig::default()` is taint-on) means a
-    // blueprint with no `[security]` block correctly inherits the global setting -
-    // off by default. When on, the agent's outbound tool calls are gated
-    // against its context taint + the policy allowlist; when off no gate is
-    // attached (zero enforcement overhead).
-    let security = leviath_core::taint::resolve_security(
-        deps.config.taint_tracking,
-        blueprint.security.as_ref(),
-        None,
+    // Taint: whether this agent's outbound calls are gated, and against what.
+    let TaintSetup {
+        security,
+        mcp_overrides,
+        tool_sensitivities,
+    } = resolve_taint_setup(
+        world,
+        &blueprint,
+        deps.config,
+        &all_tool_defs,
+        read_paths_granted,
     );
-    // The `[mcp_overrides]` from policy.toml (loaded into the world at daemon
-    // setup), applied to every gate this agent gets so a user's reclassified
-    // MCP tool is enforced, not just printed by `lev policy list`.
-    let mcp_overrides = world
-        .get_resource::<leviath_runtime::pipeline::PolicyGate>()
-        .map(|p| p.0.mcp_overrides.clone())
-        .unwrap_or_default();
-    let tool_sensitivities: Option<HashMap<String, leviath_core::TaintLevel>> =
-        security.taint_tracking.then(|| {
-            let mut gate = leviath_runtime::TaintGate::new(security.clone());
-            gate.apply_mcp_overrides(&mcp_overrides);
-            let mut map: HashMap<String, leviath_core::TaintLevel> = all_tool_defs
-                .iter()
-                .map(|t| {
-                    (
-                        t.name.clone(),
-                        gate.tool_classification(&t.name).sensitivity,
-                    )
-                })
-                .collect();
-            bump_read_sensitivities(&mut map, read_paths_granted);
-            map
-        });
+
     // Per-stage tool permissions (in stage order) + the entry stage's index, for
     // the tool state's stage-scoped policy layer.
     let stage_perms_by_index: Vec<HashMap<String, String>> = blueprint
@@ -476,89 +660,24 @@ fn build_agent_inner(
 
     // 7. Attach run metadata / token totals / persistence watermark (+ optional
     // compaction settings).
-    let metadata = RunMetadata {
-        run_id: args.run_id.clone(),
-        agent_name: agent_name.clone(),
-        agent_path: args.blueprint_path.clone(),
-        task: args.task.clone(),
-        model: model_label,
-        workdir: args.workdir.clone(),
-        num_stages,
-        started_at: deps.now_secs,
-        parent_run_id: args.parent_run_id.clone(),
-        metadata: args.metadata.clone(),
-        callback_url: args.callback_url.clone(),
-        callback_secret: args.callback_secret.clone(),
-        title: None,
-        unattended: args.yolo,
-        read_paths: read_path_counts,
-        output_request: args.output.clone(),
-    };
-    {
-        let mut entity_mut = world.entity_mut(entity);
-        if !output_validators.is_empty() {
-            entity_mut.insert(leviath_runtime::components::OutputValidators(
-                output_validators,
-            ));
-        }
-        entity_mut.insert((
-            metadata,
-            TokenTotals::default(),
-            PersistWatermark::default(),
-            // Fresh counters; a reloaded run gets its accumulated flags put back
-            // by `recovery::reload_persisted_agents`.
+    attach_run_record(
+        world,
+        entity,
+        args,
+        &deps,
+        RunRecordParts {
+            agent_name: agent_name.clone(),
+            model_label,
+            num_stages,
+            read_path_counts,
+            output_validators,
             outcome_flags,
-        ));
-        // Mark eligible runs for one-shot title generation (the `title` module
-        // fills `RunMetadata.title`, which the dashboard displays and
-        // searches). Root runs only: sub-agents inherit their parent's context
-        // in the run list, and titling every fan-out worker would multiply
-        // cheap-but-nonzero LLM calls for no UX gain.
-        (deps.config.title.enabled && !args.task.is_empty() && args.parent_run_id.is_none())
-            .then_some(leviath_runtime::title::PendingTitle)
-            .into_iter()
-            .for_each(|marker| {
-                entity_mut.insert(marker);
-            });
-        // `--yolo` means run unattended, so a blueprint's stage-boundary
-        // checkpoints are approved rather than parked on a deps.hub nobody is
-        // watching. (`.then_some(..).into_iter()` keeps the non-yolo path
-        // branch-free, matching the taint-gate marker below.)
-        args.yolo
-            .then_some(leviath_runtime::components::InteractionAutoApprove)
-            .into_iter()
-            .for_each(|marker| {
-                entity_mut.insert(marker);
-            });
-        // `Option`'s iterator inserts compaction settings when present without a
-        // dangling `if let` block-end region.
-        compaction.into_iter().for_each(|cc| {
-            entity_mut.insert(CompactionSettings(cc));
-        });
-        // Attach the taint gate + per-tool sensitivities and turn on the window's
-        // taint tracking when the blueprint opts in (`Option`'s iterator keeps the
-        // enforcement path region-free when taint is off).
-        tool_sensitivities.into_iter().for_each(|sensitivities| {
-            let mut gate = leviath_runtime::TaintGate::new(security.clone());
-            gate.apply_mcp_overrides(&mcp_overrides);
-            entity_mut.insert((
-                gate,
-                leviath_runtime::pipeline::ToolSensitivities(sensitivities),
-            ));
-            // `--yolo` means run unattended: waive taint-gate prompts (the
-            // tool-policy wildcard below doesn't cover them), so a headless run
-            // never blocks on a gate no one can answer.
-            if args.yolo {
-                entity_mut.insert(leviath_runtime::components::GateAutoApprove);
-            }
-            // `Option`'s iterator enables tracking without a dead "no window" arm
-            // (a freshly spawned agent always carries a ContextWindow).
-            entity_mut
-                .get_mut::<leviath_runtime::components::ContextWindow>()
-                .into_iter()
-                .for_each(|mut window| window.enable_taint_tracking());
-        });
-    }
+            compaction,
+            tool_sensitivities,
+            security: security.clone(),
+            mcp_overrides,
+        },
+    );
 
     // 8. Register the per-agent tool state.
     // Launch overrides: `--yolo` allows every tool (`*` wildcard); `--allow X`
