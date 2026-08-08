@@ -562,7 +562,11 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
     // Record the build we started from so a later CLI can detect stale code and
     // restart us (must happen right after we win the single-instance bind).
     leviath_cli::daemon::setup::write_build_marker();
-    let mut host = setup_daemon_host(config, runs_dir, tokio::runtime::Handle::current()).await;
+    // Fallible because building a provider's outbound HTTPS client can fail -
+    // in practice when the machine's root certificate store cannot be read. The
+    // daemon refuses to start rather than accepting runs it could never infer
+    // for, and the error names the cause instead of a panic backtrace.
+    let mut host = setup_daemon_host(config, runs_dir, tokio::runtime::Handle::current()).await?;
 
     // Accept connections and feed control ops to the host; `Subscribe`
     // connections stream world events from the host's event sender.

@@ -5,7 +5,6 @@ use axum::http::StatusCode;
 use axum::response::Json;
 
 use super::types::*;
-use crate::commands::run::build_provider_registry_from_config;
 use crate::config::Config;
 
 /// Redacted view of a config — booleans for keys, never their values.
@@ -112,7 +111,24 @@ pub(super) async fn validate_config_key(Json(req): Json<ValidateKeyReq>) -> Json
 }
 
 pub(super) async fn get_models(State(state): State<AppState>) -> Json<Vec<ModelEntry>> {
-    let registry = build_provider_registry_from_config(&state.config);
+    models_with(&state, &leviath_providers::provider::build_http_client).await
+}
+
+/// [`get_models`], with client construction injected so the "no usable HTTPS
+/// client" answer is reachable from a test.
+pub(super) async fn models_with(
+    state: &AppState,
+    build_client: leviath_providers::provider::HttpClientFactory<'_>,
+) -> Json<Vec<ModelEntry>> {
+    // Nothing to list if no client could be built; the endpoint answers with an
+    // empty set rather than failing the request, matching how it treats a
+    // provider whose `list_models` errors.
+    let Ok(registry) = crate::commands::run::session::build_provider_registry_from_config_with(
+        &state.config,
+        build_client,
+    ) else {
+        return Json(Vec::new());
+    };
     let mut models = Vec::new();
 
     for provider_name in registry.provider_names() {
@@ -584,5 +600,15 @@ mod tests {
         let v: ValidateKeyResp = serde_json::from_slice(&bytes).unwrap();
         assert!(!v.valid);
         assert!(v.message.is_some());
+    }
+
+    #[tokio::test]
+    async fn the_models_endpoint_is_empty_when_no_https_client_can_be_built() {
+        let state = test_state();
+        let Json(models) = super::models_with(&state, &|_t| {
+            Err(leviath_providers::provider::malformed_url_error())
+        })
+        .await;
+        assert!(models.is_empty());
     }
 }

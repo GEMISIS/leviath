@@ -174,13 +174,18 @@ fn from_source_initialize_receives_config() {
 #[test]
 fn from_script_reads_missing_file() {
     let err = RhaiProvider::from_script(
-        "test".into(),
         std::path::Path::new("/no/such/provider.rhai"),
-        serde_json::json!({}),
-        HashMap::new(),
-        None,
-        None,
-        no_env_allowlist(),
+        std::sync::Arc::new(crate::rhai_provider::host::ReqwestExecutor::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        )),
+        crate::rhai_provider::ScriptProviderSettings {
+            name: "test".to_string(),
+            init_config: serde_json::json!({}),
+            caps: HashMap::new(),
+            rate_limit: None,
+            request_timeout_secs: None,
+            env_allowlist: no_env_allowlist(),
+        },
     )
     .err()
     .unwrap();
@@ -197,13 +202,18 @@ fn from_script_loads_real_file() {
     )
     .unwrap();
     let p = RhaiProvider::from_script(
-        "test".into(),
         &path,
-        serde_json::json!({}),
-        HashMap::new(),
-        None,
-        None,
-        no_env_allowlist(),
+        std::sync::Arc::new(crate::rhai_provider::host::ReqwestExecutor::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        )),
+        crate::rhai_provider::ScriptProviderSettings {
+            name: "test".to_string(),
+            init_config: serde_json::json!({}),
+            caps: HashMap::new(),
+            rate_limit: None,
+            request_timeout_secs: None,
+            env_allowlist: no_env_allowlist(),
+        },
     )
     .unwrap();
     assert_eq!(p.name(), "test");

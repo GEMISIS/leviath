@@ -454,7 +454,12 @@ fn builtin_table() -> Vec<BuiltinEntry> {
 /// passed, so every call site shares a single instrumented instantiation.
 async fn list_with_registry(
     args: ListArgs,
-    build_registry: &dyn Fn(&Config) -> leviath_runtime::ProviderRegistry,
+    build_registry: &dyn Fn(
+        &Config,
+    ) -> Result<
+        leviath_runtime::ProviderRegistry,
+        leviath_providers::ProviderError,
+    >,
 ) -> anyhow::Result<()> {
     let config = Config::load()?;
     for warning in config.validate_keys() {
@@ -476,7 +481,7 @@ async fn list_with_registry(
     // knows about made a user with one key scroll past dozens of models they
     // had no credential for, and hid whether their own key had been picked up
     // at all. `--all` restores the full catalogue for shopping around.
-    let registry = build_registry(&config);
+    let registry = build_registry(&config)?;
     let available: std::collections::HashSet<String> = registry
         .provider_names()
         .into_iter()
@@ -620,7 +625,12 @@ async fn list_with_registry(
 /// [`list_with_registry`] for why.
 async fn show_with_registry(
     args: ShowArgs,
-    build_registry: &dyn Fn(&Config) -> leviath_runtime::ProviderRegistry,
+    build_registry: &dyn Fn(
+        &Config,
+    ) -> Result<
+        leviath_runtime::ProviderRegistry,
+        leviath_providers::ProviderError,
+    >,
 ) -> anyhow::Result<()> {
     let config = Config::load()?;
     for warning in config.validate_keys() {
@@ -652,7 +662,7 @@ async fn show_with_registry(
     if args.remote
         && let Some(ref provider_name) = args.provider
     {
-        let registry = build_registry(&config);
+        let registry = build_registry(&config)?;
         if let Some(provider) = registry.get(provider_name) {
             match provider.list_models().await {
                 Ok(models) => {
@@ -1588,7 +1598,8 @@ mod tests {
         provider_name: &'static str,
         models: Vec<ModelInfo>,
         fail: bool,
-    ) -> impl Fn(&Config) -> leviath_runtime::ProviderRegistry {
+    ) -> impl Fn(&Config) -> Result<leviath_runtime::ProviderRegistry, leviath_providers::ProviderError>
+    {
         // `Fn` (not `FnOnce`) so the closure can be called through the
         // `&dyn Fn` trait object `list_with_registry`/`show_with_registry`
         // now take - see the doc comment on `list_with_registry` for why.
@@ -1604,7 +1615,7 @@ mod tests {
                     fail,
                 }),
             );
-            registry
+            Ok(registry)
         }
     }
 
@@ -2183,6 +2194,59 @@ mod tests {
                 };
                 let result = show_with_registry(args, &mock_registry("mock", vec![], false)).await;
                 assert!(result.is_err());
+            },
+        )
+        .await;
+    }
+
+    /// A builder that fails the way a machine with no readable root
+    /// certificate store would.
+    fn cannot_build(
+        _config: &Config,
+    ) -> Result<leviath_runtime::ProviderRegistry, leviath_providers::ProviderError> {
+        Err(leviath_providers::ProviderError::ClientBuild(
+            "no roots".to_string(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn list_reports_a_registry_that_will_not_build() {
+        crate::config::with_isolated_config_path_async(
+            "models-list_reports_a_registry_that_will_not_build",
+            |_fake_dir| async move {
+                let args = ListArgs {
+                    remote: false,
+                    provider: None,
+                    all: false,
+                    json: false,
+                };
+                let err = list_with_registry(args, &cannot_build)
+                    .await
+                    .expect_err("a failing registry builder should fail the command");
+                assert!(err.to_string().contains("root certificate store"));
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn show_reports_a_registry_that_will_not_build() {
+        crate::config::with_isolated_config_path_async(
+            "models-show_reports_a_registry_that_will_not_build",
+            |_fake_dir| async move {
+                // Both `remote` and `provider`: the registry is only built
+                // when the two are given together.
+                let args = ShowArgs {
+                    // A model the built-in table does not know, so the lookup
+                    // falls through to the registry instead of returning early.
+                    model: "not-a-built-in-model".to_string(),
+                    provider: Some("anthropic".to_string()),
+                    remote: true,
+                };
+                let err = show_with_registry(args, &cannot_build)
+                    .await
+                    .expect_err("a failing registry builder should fail the command");
+                assert!(err.to_string().contains("root certificate store"));
             },
         )
         .await;

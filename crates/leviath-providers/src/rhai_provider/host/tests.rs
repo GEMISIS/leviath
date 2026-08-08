@@ -167,31 +167,37 @@ fn req(method: HttpMethod, url: String, body: Option<&str>) -> HostRequest {
 #[tokio::test]
 async fn reqwest_executor_get_ok() {
     let url = mock_server("200 OK", &[], "hello-body").await;
-    let out = ReqwestExecutor::new()
-        .execute(req(HttpMethod::Get, url, None))
-        .await
-        .unwrap();
+    let out = ReqwestExecutor::new(
+        crate::provider::build_http_client(None).expect("a test client builds"),
+    )
+    .execute(req(HttpMethod::Get, url, None))
+    .await
+    .unwrap();
     assert_eq!(out, "hello-body");
 }
 
 #[tokio::test]
 async fn reqwest_executor_post_with_body() {
     let url = mock_server("200 OK", &[], "{}").await;
-    let out = ReqwestExecutor::default()
-        .execute(req(HttpMethod::Post, url, Some("{\"a\":1}")))
-        .await
-        .unwrap();
+    let out = ReqwestExecutor::new(
+        crate::provider::build_http_client(None).expect("a test client builds"),
+    )
+    .execute(req(HttpMethod::Post, url, Some("{\"a\":1}")))
+    .await
+    .unwrap();
     assert_eq!(out, "{}");
 }
 
 #[tokio::test]
 async fn reqwest_executor_429_with_retry_after() {
     let url = mock_server("429 Too Many Requests", &[("Retry-After", "7")], "slow").await;
-    let err = ReqwestExecutor::new()
-        .execute(req(HttpMethod::Get, url, None))
-        .await
-        .err()
-        .unwrap();
+    let err = ReqwestExecutor::new(
+        crate::provider::build_http_client(None).expect("a test client builds"),
+    )
+    .execute(req(HttpMethod::Get, url, None))
+    .await
+    .err()
+    .unwrap();
     assert!(matches!(
         err,
         HostHttpError::RateLimited {
@@ -203,26 +209,30 @@ async fn reqwest_executor_429_with_retry_after() {
 #[tokio::test]
 async fn reqwest_executor_non_2xx_is_api_error() {
     let url = mock_server("500 Internal Server Error", &[], "boom").await;
-    let err = ReqwestExecutor::new()
-        .execute(req(HttpMethod::Get, url, None))
-        .await
-        .err()
-        .unwrap();
+    let err = ReqwestExecutor::new(
+        crate::provider::build_http_client(None).expect("a test client builds"),
+    )
+    .execute(req(HttpMethod::Get, url, None))
+    .await
+    .err()
+    .unwrap();
     assert!(matches!(err, HostHttpError::Api(m) if m.contains("500")));
 }
 
 #[tokio::test]
 async fn reqwest_executor_transport_error() {
     // Nothing listening on this port → connection refused.
-    let err = ReqwestExecutor::new()
-        .execute(req(
-            HttpMethod::Get,
-            "http://127.0.0.1:19998".to_string(),
-            None,
-        ))
-        .await
-        .err()
-        .unwrap();
+    let err = ReqwestExecutor::new(
+        crate::provider::build_http_client(None).expect("a test client builds"),
+    )
+    .execute(req(
+        HttpMethod::Get,
+        "http://127.0.0.1:19998".to_string(),
+        None,
+    ))
+    .await
+    .err()
+    .unwrap();
     assert!(matches!(err, HostHttpError::Transport(_)));
 }
 
@@ -235,7 +245,7 @@ async fn reqwest_executor_stream_forwards_events() {
     )
     .await;
     let (tx, mut rx) = mpsc::channel(16);
-    ReqwestExecutor::new()
+    ReqwestExecutor::new(crate::provider::build_http_client(None).expect("a test client builds"))
         .execute_stream(req(HttpMethod::Post, url, Some("{}")), tx)
         .await;
     assert_eq!(rx.recv().await.unwrap().unwrap(), "{\"a\":1}");
@@ -245,7 +255,7 @@ async fn reqwest_executor_stream_forwards_events() {
 #[tokio::test]
 async fn reqwest_executor_stream_transport_error() {
     let (tx, mut rx) = mpsc::channel(16);
-    ReqwestExecutor::new()
+    ReqwestExecutor::new(crate::provider::build_http_client(None).expect("a test client builds"))
         .execute_stream(
             req(
                 HttpMethod::Post,
@@ -278,11 +288,13 @@ async fn reqwest_executor_body_read_error_is_transport() {
         let _ = sock.flush().await;
         let _ = sock.shutdown().await;
     });
-    let err = ReqwestExecutor::new()
-        .execute(req(HttpMethod::Get, format!("http://{addr}"), None))
-        .await
-        .err()
-        .unwrap();
+    let err = ReqwestExecutor::new(
+        crate::provider::build_http_client(None).expect("a test client builds"),
+    )
+    .execute(req(HttpMethod::Get, format!("http://{addr}"), None))
+    .await
+    .err()
+    .unwrap();
     assert!(matches!(err, HostHttpError::Transport(_)));
 }
 
@@ -303,11 +315,13 @@ async fn reqwest_executor_non_2xx_body_read_error() {
         let _ = sock.flush().await;
         let _ = sock.shutdown().await;
     });
-    let err = ReqwestExecutor::new()
-        .execute(req(HttpMethod::Get, format!("http://{addr}"), None))
-        .await
-        .err()
-        .unwrap();
+    let err = ReqwestExecutor::new(
+        crate::provider::build_http_client(None).expect("a test client builds"),
+    )
+    .execute(req(HttpMethod::Get, format!("http://{addr}"), None))
+    .await
+    .err()
+    .unwrap();
     assert!(matches!(err, HostHttpError::Api(_)));
 }
 
@@ -315,7 +329,7 @@ async fn reqwest_executor_non_2xx_body_read_error() {
 async fn reqwest_executor_stream_non_2xx_error() {
     let url = mock_server("503 Service Unavailable", &[], "down").await;
     let (tx, mut rx) = mpsc::channel(16);
-    ReqwestExecutor::new()
+    ReqwestExecutor::new(crate::provider::build_http_client(None).expect("a test client builds"))
         .execute_stream(req(HttpMethod::Post, url, Some("{}")), tx)
         .await;
     assert!(matches!(

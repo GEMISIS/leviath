@@ -99,9 +99,33 @@ pub fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
 /// a [`ScriptProviderLayer`](leviath_runtime::script_provider::ScriptProviderLayer)
 /// is then attached so Rhai *script providers* resolve lazily and
 /// hot-reload from `~/.leviath/providers/`.
-pub fn build_provider_registry_from_config(config: &Config) -> ProviderRegistry {
-    let registry = build_provider_registry(&provider_creds_from_config(config));
-    attach_script_layer(registry, crate::config::providers_dir(), config)
+pub fn build_provider_registry_from_config(
+    config: &Config,
+) -> Result<ProviderRegistry, leviath_providers::ProviderError> {
+    build_provider_registry_from_config_with(
+        config,
+        &leviath_providers::provider::build_http_client,
+    )
+}
+
+/// [`build_provider_registry_from_config`], with client construction injected.
+///
+/// The seam that makes "this machine cannot build an HTTPS client" reachable
+/// from a test: reqwest will not fail to build one in any environment a test can
+/// arrange, so the failure has to be handed in.
+pub fn build_provider_registry_from_config_with(
+    config: &Config,
+    build_client: leviath_providers::provider::HttpClientFactory<'_>,
+) -> Result<ProviderRegistry, leviath_providers::ProviderError> {
+    let registry = leviath_runtime::provider_creds::build_provider_registry_with(
+        &provider_creds_from_config(config),
+        build_client,
+    )?;
+    Ok(attach_script_layer(
+        registry,
+        crate::config::providers_dir(),
+        config,
+    ))
 }
 
 /// Attach a [`ScriptProviderLayer`](leviath_runtime::script_provider::ScriptProviderLayer)
@@ -165,7 +189,8 @@ mod tests {
     #[test]
     fn build_provider_registry_with_empty_config() {
         let config = Config::default();
-        let registry = build_provider_registry_from_config(&config);
+        let registry =
+            build_provider_registry_from_config(&config).expect("an HTTPS client builds in tests");
         // Ollama needs no key and is always on.
         assert!(registry.has("ollama"));
         // Claude Code needs no key either, but is opt-in - a default config
@@ -187,7 +212,8 @@ mod tests {
             },
             ..Config::default()
         };
-        let registry = build_provider_registry_from_config(&config);
+        let registry =
+            build_provider_registry_from_config(&config).expect("an HTTPS client builds in tests");
         assert!(registry.has("anthropic"));
     }
 
@@ -200,7 +226,8 @@ mod tests {
             },
             ..Config::default()
         };
-        let registry = build_provider_registry_from_config(&config);
+        let registry =
+            build_provider_registry_from_config(&config).expect("an HTTPS client builds in tests");
         assert!(registry.has("openai"));
     }
 
@@ -216,7 +243,8 @@ mod tests {
             },
             ..Config::default()
         };
-        let registry = build_provider_registry_from_config(&config);
+        let registry =
+            build_provider_registry_from_config(&config).expect("an HTTPS client builds in tests");
         assert!(registry.has("google"));
     }
 
@@ -226,7 +254,8 @@ mod tests {
             openrouter_api_key: Some("sk-or-test-12345".to_string()),
             ..Config::default()
         };
-        let registry = build_provider_registry_from_config(&config);
+        let registry =
+            build_provider_registry_from_config(&config).expect("an HTTPS client builds in tests");
         assert!(registry.has("openrouter"));
     }
 
@@ -236,7 +265,8 @@ mod tests {
             ollama_base_url: Some("http://my-server:11434".to_string()),
             ..Config::default()
         };
-        let registry = build_provider_registry_from_config(&config);
+        let registry =
+            build_provider_registry_from_config(&config).expect("an HTTPS client builds in tests");
         assert!(registry.has("ollama"));
     }
 
@@ -291,7 +321,8 @@ mod tests {
             ..Config::default()
         };
         temp_env::with_var("LEVIATH_HOME", Some(home.path().as_os_str()), || {
-            let registry = build_provider_registry_from_config(&config);
+            let registry = build_provider_registry_from_config(&config)
+                .expect("an HTTPS client builds in tests");
             assert!(registry.has("groq"));
             assert!(registry.get("groq").is_some());
         });
@@ -315,7 +346,8 @@ mod tests {
             ollama_base_url: Some("http://custom:11434".to_string()),
             ..Config::default()
         };
-        let registry = build_provider_registry_from_config(&config);
+        let registry =
+            build_provider_registry_from_config(&config).expect("an HTTPS client builds in tests");
         assert!(registry.has("anthropic"));
         assert!(registry.has("openai"));
         assert!(registry.has("google"));
@@ -414,7 +446,8 @@ mod tests {
     #[test]
     fn build_provider_registry_defaults_have_ollama_only() {
         let config = Config::default();
-        let registry = build_provider_registry_from_config(&config);
+        let registry =
+            build_provider_registry_from_config(&config).expect("an HTTPS client builds in tests");
         // Ollama is present regardless of key configuration; claude-code is not,
         // until the user opts in.
         assert!(registry.has("ollama"));
@@ -443,7 +476,11 @@ mod tests {
         );
         assert_eq!(cc.options.get("effort").map(String::as_str), Some("low"));
         assert!(cc.api_key.is_none());
-        assert!(build_provider_registry_from_config(&config).has("claude-code"));
+        assert!(
+            build_provider_registry_from_config(&config)
+                .expect("an HTTPS client builds in tests")
+                .has("claude-code")
+        );
     }
 
     #[test]
@@ -492,7 +529,8 @@ mod tests {
             },
             ..crate::config::Config::default()
         };
-        let registry = build_provider_registry_from_config(&config);
+        let registry =
+            build_provider_registry_from_config(&config).expect("an HTTPS client builds in tests");
         // Verify anthropic provider was registered
         assert!(registry.has("anthropic"));
         // Verify ollama always registered
@@ -521,7 +559,8 @@ mod tests {
             model_capabilities: caps,
             ..crate::config::Config::default()
         };
-        let registry = build_provider_registry_from_config(&config);
+        let registry =
+            build_provider_registry_from_config(&config).expect("an HTTPS client builds in tests");
         assert!(registry.has("ollama"));
     }
 

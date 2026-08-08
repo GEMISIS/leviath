@@ -34,9 +34,9 @@ pub struct OpenRouterProvider {
 
 impl OpenRouterProvider {
     /// Create a new OpenRouter provider.
-    pub fn new(api_key: String) -> Self {
+    pub fn new(client: reqwest::Client, api_key: String) -> Self {
         Self {
-            client: crate::provider::build_http_client(None),
+            client,
             api_key,
             base_url: "https://openrouter.ai/api/v1".to_string(),
             rate_limiter: None,
@@ -45,9 +45,8 @@ impl OpenRouterProvider {
     }
 
     /// Create a new OpenRouter provider with full configuration.
-    pub fn with_config(config: ProviderConfig) -> Self {
+    pub fn with_config(client: reqwest::Client, config: ProviderConfig) -> Self {
         let rate_limiter = config.rate_limit.as_ref().map(RateLimiter::new);
-        let client = crate::provider::build_http_client(config.request_timeout_secs);
         Self {
             client,
             api_key: config.api_key,
@@ -61,13 +60,13 @@ impl OpenRouterProvider {
 
     /// Create a new OpenRouter provider with per-model capability overrides.
     pub fn with_overrides(
+        client: reqwest::Client,
         api_key: String,
         overrides: HashMap<String, ModelCapabilities>,
-        timeout_secs: Option<u64>,
         rate_limit: Option<&crate::provider::RateLimitConfig>,
     ) -> Self {
         Self {
-            client: crate::provider::build_http_client(timeout_secs),
+            client,
             api_key,
             base_url: "https://openrouter.ai/api/v1".to_string(),
             rate_limiter: rate_limit.map(crate::rate_limit::RateLimiter::new),
@@ -502,13 +501,19 @@ mod tests {
 
     #[test]
     fn test_provider_creation() {
-        let provider = OpenRouterProvider::new("test-key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         assert_eq!(provider.name(), "openrouter");
     }
 
     #[test]
     fn test_build_request_body() {
-        let provider = OpenRouterProvider::new("test-key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![crate::provider::Message {
@@ -530,7 +535,10 @@ mod tests {
 
     #[test]
     fn test_build_request_body_passes_through_extra_params() {
-        let provider = OpenRouterProvider::new("test-key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![crate::provider::Message {
@@ -552,7 +560,10 @@ mod tests {
 
     #[test]
     fn test_build_request_body_prepends_system_blocks() {
-        let provider = OpenRouterProvider::new("test-key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let request = InferenceRequest {
             system: vec![crate::provider::SystemBlock {
                 text: "You are a helpful assistant.".to_string(),
@@ -582,7 +593,10 @@ mod tests {
 
     #[test]
     fn test_build_request_body_serializes_tool_history() {
-        let provider = OpenRouterProvider::new("test-key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![
@@ -637,26 +651,38 @@ mod tests {
 
     #[test]
     fn test_name() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         assert_eq!(provider.name(), "openrouter");
     }
 
     #[tokio::test]
     async fn test_count_tokens() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let tokens = provider.count_tokens("Hello, world!", "any-model").await;
         assert_eq!(tokens, 4); // ceil(13 / 4): the shared estimate rounds up
     }
 
     #[tokio::test]
     async fn test_count_tokens_empty() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         assert_eq!(provider.count_tokens("", "any-model").await, 0);
     }
 
     #[test]
     fn test_max_context_tokens() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         // Unknown model ⇒ the conservative fallback.
         assert_eq!(provider.max_context_tokens("any-model"), 128_000);
         // A known large-context model reports its real size (not a flat 128K) -
@@ -678,7 +704,10 @@ mod tests {
             rate_limit: None,
             request_timeout_secs: None,
         };
-        let provider = OpenRouterProvider::with_config(config);
+        let provider = OpenRouterProvider::with_config(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            config,
+        );
         assert_eq!(provider.base_url, "https://openrouter.ai/api/v1");
     }
 
@@ -690,7 +719,10 @@ mod tests {
             rate_limit: None,
             request_timeout_secs: None,
         };
-        let provider = OpenRouterProvider::with_config(config);
+        let provider = OpenRouterProvider::with_config(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            config,
+        );
         assert_eq!(provider.base_url, "https://custom.openrouter.ai");
     }
 
@@ -708,14 +740,22 @@ mod tests {
                 max_output_tokens: 10,
             },
         );
-        let provider = OpenRouterProvider::with_overrides("key".to_string(), overrides, None, None);
+        let provider = OpenRouterProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+            overrides,
+            None,
+        );
         let caps = provider.capabilities("custom/model");
         assert_eq!(caps.max_context_tokens, 99);
     }
 
     #[test]
     fn test_capabilities_google_gemini() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let caps = provider.capabilities("google/gemini-3.5-flash");
         assert!(caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 1_048_576);
@@ -724,21 +764,30 @@ mod tests {
 
     #[test]
     fn test_capabilities_llama4_scout() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let caps = provider.capabilities("meta-llama/llama-4-scout-17b");
         assert_eq!(caps.max_context_tokens, 10_000_000);
     }
 
     #[test]
     fn test_capabilities_llama4_maverick() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let caps = provider.capabilities("meta-llama/llama-4-maverick");
         assert_eq!(caps.max_context_tokens, 1_048_576);
     }
 
     #[test]
     fn test_capabilities_deepseek_r1() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let caps = provider.capabilities("deepseek/deepseek-r1");
         assert!(!caps.supports_temperature);
         assert!(!caps.supports_tools);
@@ -747,7 +796,10 @@ mod tests {
 
     #[test]
     fn test_capabilities_deepseek_v4_pro() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let caps = provider.capabilities("deepseek/deepseek-v4-pro");
         assert_eq!(caps.max_context_tokens, 1_048_576);
         assert_eq!(caps.max_output_tokens, 393_216);
@@ -755,7 +807,10 @@ mod tests {
 
     #[test]
     fn test_capabilities_deepseek_v_series() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let caps = provider.capabilities("deepseek/deepseek-v3");
         assert_eq!(caps.max_context_tokens, 1_048_576);
         assert_eq!(caps.max_output_tokens, 65_536);
@@ -763,42 +818,60 @@ mod tests {
 
     #[test]
     fn test_capabilities_mistral_large() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let caps = provider.capabilities("mistralai/mistral-large-latest");
         assert_eq!(caps.max_context_tokens, 262_144);
     }
 
     #[test]
     fn test_capabilities_mistralai_general() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let caps = provider.capabilities("mistralai/mistral-small-latest");
         assert_eq!(caps.max_context_tokens, 131_072);
     }
 
     #[test]
     fn test_capabilities_qwen36() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let caps = provider.capabilities("qwen/qwen3.6-235b");
         assert_eq!(caps.max_context_tokens, 1_048_576);
     }
 
     #[test]
     fn test_capabilities_qwen3_coder() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let caps = provider.capabilities("qwen/qwen3-coder-plus");
         assert_eq!(caps.max_context_tokens, 1_048_576);
     }
 
     #[test]
     fn test_capabilities_qwen_general() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let caps = provider.capabilities("qwen/qwen3-32b");
         assert_eq!(caps.max_context_tokens, 131_072);
     }
 
     #[test]
     fn test_capabilities_anthropic_via_openrouter() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let caps = provider.capabilities("anthropic/claude-sonnet-4-6");
         assert!(caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 1_000_000);
@@ -807,21 +880,30 @@ mod tests {
 
     #[test]
     fn test_capabilities_anthropic_no_temp() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let caps = provider.capabilities("anthropic/claude-opus-4-8");
         assert!(!caps.supports_temperature);
     }
 
     #[test]
     fn test_capabilities_anthropic_fable5_no_temp() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let caps = provider.capabilities("anthropic/claude-fable-5");
         assert!(!caps.supports_temperature);
     }
 
     #[test]
     fn test_capabilities_openai_o_series() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let caps = provider.capabilities("openai/o3-mini");
         assert!(!caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 200_000);
@@ -829,7 +911,10 @@ mod tests {
 
     #[test]
     fn test_capabilities_openai_gpt5() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let caps = provider.capabilities("openai/gpt-5.4-mini");
         assert!(caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 1_050_000);
@@ -837,7 +922,10 @@ mod tests {
 
     #[test]
     fn test_capabilities_unknown_fallback() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let caps = provider.capabilities("totally/unknown-model");
         assert!(caps.supports_temperature);
         assert!(caps.supports_tools);
@@ -847,7 +935,10 @@ mod tests {
 
     #[test]
     fn test_build_request_body_anthropic_cache_breakpoint() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![
@@ -881,7 +972,10 @@ mod tests {
 
     #[test]
     fn test_build_request_body_non_anthropic_no_cache_breakpoint() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![crate::provider::Message {
@@ -905,7 +999,10 @@ mod tests {
 
     #[test]
     fn test_build_request_body_max_4_breakpoints() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let messages: Vec<crate::provider::Message> = (0..6)
             .map(|i| crate::provider::Message {
                 role: "user".to_string(),
@@ -933,7 +1030,10 @@ mod tests {
 
     #[test]
     fn test_build_request_body_with_tools() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![crate::provider::Message {
@@ -961,7 +1061,10 @@ mod tests {
 
     #[test]
     fn test_build_request_body_no_temp_for_deepseek_r1() {
-        let provider = OpenRouterProvider::new("key".to_string());
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         let request = InferenceRequest {
             system: vec![],
             messages: vec![crate::provider::Message {
@@ -985,12 +1088,15 @@ mod tests {
     // ─── HTTP-call-level tests via a raw-TCP mock server ───────────────────
 
     fn provider_with_url(url: String) -> OpenRouterProvider {
-        OpenRouterProvider::with_config(ProviderConfig {
-            api_key: "test-key".to_string(),
-            base_url: Some(url),
-            rate_limit: None,
-            request_timeout_secs: None,
-        })
+        OpenRouterProvider::with_config(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            ProviderConfig {
+                api_key: "test-key".to_string(),
+                base_url: Some(url),
+                rate_limit: None,
+                request_timeout_secs: None,
+            },
+        )
     }
 
     fn simple_request() -> InferenceRequest {
@@ -1147,11 +1253,19 @@ mod tests {
             requests_per_minute: 5,
             tokens_per_minute: 1_000,
         };
-        let limited =
-            OpenRouterProvider::with_overrides("k".to_string(), HashMap::new(), None, Some(&cfg));
+        let limited = OpenRouterProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+            HashMap::new(),
+            Some(&cfg),
+        );
         assert!(limited.rate_limiter.is_some());
-        let unlimited =
-            OpenRouterProvider::with_overrides("k".to_string(), HashMap::new(), None, None);
+        let unlimited = OpenRouterProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+            HashMap::new(),
+            None,
+        );
         assert!(unlimited.rate_limiter.is_none());
     }
 }

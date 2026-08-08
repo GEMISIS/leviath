@@ -784,8 +784,10 @@ async fn cleanup_run_removes_the_run_and_its_saved_state() {
 // ─── run_checks ───────────────────────────────────────────────────────────────
 
 /// A registry builder that ignores the config and always yields `registry`.
-fn always(registry: ProviderRegistry) -> impl Fn(&Config) -> ProviderRegistry {
-    move |_| registry.clone()
+fn always(
+    registry: ProviderRegistry,
+) -> impl Fn(&Config) -> Result<ProviderRegistry, leviath_providers::ProviderError> {
+    move |_| Ok(registry.clone())
 }
 
 /// Write the smallest `config.toml` that parses, naming `provider`/`model` as
@@ -954,4 +956,30 @@ async fn execute_wires_the_real_registry_builder() {
     })
     .await;
     assert_eq!(err.to_string(), "doctor failed at: resolve");
+}
+
+/// A registry builder that fails the way a machine with an unreadable root
+/// certificate store would.
+fn cannot_build(_config: &Config) -> Result<ProviderRegistry, leviath_providers::ProviderError> {
+    Err(leviath_providers::ProviderError::ClientBuild(
+        "no roots".to_string(),
+    ))
+}
+
+#[tokio::test]
+async fn a_registry_that_will_not_build_is_reported_as_a_failed_check() {
+    let checks = with_env(|root| async move {
+        write_config(&root, "anthropic", None, "");
+        run_checks(&DoctorArgs::default(), &cannot_build, DaemonTarget::Skip).await
+    })
+    .await;
+    let providers = checks
+        .iter()
+        .find(|c| c.name == "providers")
+        .expect("a providers check");
+    assert!(
+        providers
+            .detail
+            .contains("could not build any provider client")
+    );
 }

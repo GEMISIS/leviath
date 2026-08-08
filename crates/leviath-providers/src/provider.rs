@@ -134,6 +134,24 @@ pub enum ProviderError {
     #[error("API error: {0}")]
     ApiError(String),
 
+    /// The outbound HTTP client could not be constructed, so this provider
+    /// cannot make any request at all.
+    ///
+    /// This is the *client* side: the workspace builds `reqwest` with `rustls`
+    /// and `rustls-native-certs`, so constructing a client reads the machine's
+    /// root certificate store in order to speak HTTPS to a provider API. A
+    /// failure here means that store could not be read, not that any particular
+    /// request was rejected - and it has nothing to do with `lev serve`'s own
+    /// `--tls-cert` / `--tls-key`, which are a separate, already-fallible path.
+    ///
+    /// Separate from [`ProviderError::RequestFailed`] because no retry, backoff
+    /// or change of model affects it; the remedy is on the host.
+    #[error(
+        "outbound HTTPS client could not be built ({0}); leviath reads the system root \
+         certificate store to reach provider APIs"
+    )]
+    ClientBuild(String),
+
     /// The provider cannot serve any request until someone intervenes - the
     /// account is out of credits, or the key is bad. `detail` keeps the raw
     /// provider response for the logs; the message leads with what to do.
@@ -211,6 +229,10 @@ impl ProviderError {
             ProviderError::InvalidResponse(_)
             | ProviderError::TokenLimitExceeded { .. }
             | ProviderError::Unavailable { .. }
+            // The machine could not build an HTTPS client. Every retry does the
+            // same work and reads the same certificate store, so it fails the
+            // same way - and so would every other provider.
+            | ProviderError::ClientBuild(_)
             | ProviderError::Other(_) => false,
         }
     }
@@ -671,6 +693,41 @@ fn same_origin_hop(attempt: &reqwest::redirect::Attempt<'_>) -> bool {
     })
 }
 
+/// The error `reqwest` reports when a client cannot be built, re-exported for
+/// the same reason as [`HttpClient`].
+pub use reqwest::Error as HttpError;
+
+/// An [`HttpError`] instance, for tests that need to drive a failure path.
+///
+/// Constructing one otherwise is impossible: `reqwest::Error` has no public
+/// constructor, and client construction cannot be made to fail from the
+/// outside - a malformed `HTTPS_PROXY` is ignored rather than rejected, which
+/// was measured rather than assumed. Handing the builder a string that is not a
+/// URL produces one without any I/O. (An unknown *scheme* does not: reqwest
+/// accepts it here and only fails on send.)
+pub fn malformed_url_error() -> HttpError {
+    reqwest::Client::builder()
+        .build()
+        .expect("a builder with no options set always yields a client")
+        .get("http://[")
+        .build()
+        .expect_err("reqwest rejects a string that is not a URL")
+}
+
+/// The HTTP client providers hold, re-exported so callers can name the type
+/// without taking a direct `reqwest` dependency of their own.
+pub use reqwest::Client as HttpClient;
+
+/// Builds an outbound HTTPS client for a given request timeout.
+///
+/// Injected so the failure path is reachable. `reqwest` will not fail to build a
+/// client in any environment a test can arrange - a malformed `HTTPS_PROXY` is
+/// ignored rather than rejected, which was measured, not assumed - so without a
+/// seam the error arm would be unreachable code that no test could prove and the
+/// coverage gate could not accept.
+pub type HttpClientFactory<'a> =
+    &'a (dyn Fn(Option<u64>) -> std::result::Result<reqwest::Client, reqwest::Error> + Send + Sync);
+
 /// The HTTP client every provider talks through.
 ///
 /// Redirects are capped and confined to the origin the request started on. That
@@ -681,7 +738,9 @@ fn same_origin_hop(attempt: &reqwest::redirect::Attempt<'_>) -> bool {
 ///
 /// `timeout_secs` of `None` leaves the request untimed, which is what a
 /// streaming call needs - a long generation is not a stalled one.
-pub fn build_http_client(timeout_secs: Option<u64>) -> reqwest::Client {
+pub fn build_http_client(
+    timeout_secs: Option<u64>,
+) -> std::result::Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .pool_max_idle_per_host(0)
         // Follow a redirect only while it stays on the host the key was meant
@@ -707,7 +766,6 @@ pub fn build_http_client(timeout_secs: Option<u64>) -> reqwest::Client {
             timeout_secs.unwrap_or(DEFAULT_INFERENCE_TIMEOUT_SECS),
         ))
         .build()
-        .expect("failed to build reqwest client")
 }
 
 /// Trait for LLM providers.
@@ -897,6 +955,7 @@ mod tests {
     async fn a_same_origin_redirect_is_followed() {
         let (base, hits) = serve_sequence(vec![redirect_to("/second"), OK_BODY.to_string()]).await;
         let response = build_http_client(Some(10))
+            .expect("an HTTPS client builds in tests")
             .get(format!("{base}/first"))
             .header("x-api-key", "super-secret")
             .send()
@@ -916,6 +975,7 @@ mod tests {
         let (base, _) = serve_sequence(vec![redirect_to(&format!("{thief}/steal"))]).await;
 
         let response = build_http_client(Some(10))
+            .expect("an HTTPS client builds in tests")
             .get(format!("{base}/first"))
             .header("x-api-key", "super-secret")
             .send()
@@ -931,6 +991,16 @@ mod tests {
             0,
             "no request carrying the api key may reach another origin"
         );
+    }
+
+    #[test]
+    fn malformed_url_error_yields_a_real_reqwest_error() {
+        // The only way to obtain a `reqwest::Error` without I/O, and the reason
+        // the client-build failure path is testable at all. If a future reqwest
+        // starts accepting this input, the error paths that depend on it become
+        // unreachable - so this asserts the trigger still triggers.
+        let err = malformed_url_error();
+        assert!(err.is_builder(), "expected a builder error, got {err:?}");
     }
 
     #[test]
@@ -1668,7 +1738,7 @@ mod tests {
 
     #[test]
     fn build_http_client_with_timeout() {
-        let client = build_http_client(Some(30));
+        let client = build_http_client(Some(30)).expect("an HTTPS client builds in tests");
         // Should successfully build a client; we cannot inspect the timeout
         // directly, but confirming it doesn't panic is the coverage goal.
         drop(client);
@@ -1676,7 +1746,7 @@ mod tests {
 
     #[test]
     fn build_http_client_without_timeout() {
-        let client = build_http_client(None);
+        let client = build_http_client(None).expect("an HTTPS client builds in tests");
         drop(client);
     }
 
@@ -1713,7 +1783,7 @@ mod tests {
         // The production client (no client-level duration cap) plus a short
         // per-request deadline. If the per-request timeout were not applied this
         // send would hang and the test would time out instead of asserting.
-        let client = build_http_client(None);
+        let client = build_http_client(None).expect("an HTTPS client builds in tests");
         let start = Instant::now();
         let builder = client
             .post(format!("http://{addr}/"))
@@ -1735,7 +1805,7 @@ mod tests {
     fn apply_request_timeout_none_is_a_noop() {
         // The `None` arm must return the builder unchanged (no per-request cap);
         // build a request both ways and confirm both are constructible.
-        let client = build_http_client(None);
+        let client = build_http_client(None).expect("an HTTPS client builds in tests");
         let with_none = apply_request_timeout(client.post("http://example.invalid/"), None);
         let with_some = apply_request_timeout(client.post("http://example.invalid/"), Some(5));
         assert!(with_none.build().is_ok());

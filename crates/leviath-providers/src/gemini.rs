@@ -88,9 +88,9 @@ pub struct GeminiProvider {
 
 impl GeminiProvider {
     /// Create a new Gemini provider.
-    pub fn new(api_key: String) -> Self {
+    pub fn new(client: reqwest::Client, api_key: String) -> Self {
         Self {
-            client: crate::provider::build_http_client(None),
+            client,
             api_key,
             base_url: "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
             rate_limiter: None,
@@ -99,9 +99,8 @@ impl GeminiProvider {
     }
 
     /// Create a new Gemini provider with full configuration.
-    pub fn with_config(config: ProviderConfig) -> Self {
+    pub fn with_config(client: reqwest::Client, config: ProviderConfig) -> Self {
         let rate_limiter = config.rate_limit.as_ref().map(RateLimiter::new);
-        let client = crate::provider::build_http_client(config.request_timeout_secs);
         Self {
             client,
             api_key: config.api_key,
@@ -115,13 +114,13 @@ impl GeminiProvider {
 
     /// Create a new Gemini provider with per-model capability overrides.
     pub fn with_overrides(
+        client: reqwest::Client,
         api_key: String,
         overrides: HashMap<String, ModelCapabilities>,
-        timeout_secs: Option<u64>,
         rate_limit: Option<&crate::provider::RateLimitConfig>,
     ) -> Self {
         Self {
-            client: crate::provider::build_http_client(timeout_secs),
+            client,
             api_key,
             base_url: "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
             rate_limiter: rate_limit.map(crate::rate_limit::RateLimiter::new),
@@ -419,13 +418,19 @@ mod tests {
 
     #[test]
     fn test_provider_name() {
-        let provider = GeminiProvider::new("test-key".to_string());
+        let provider = GeminiProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         assert_eq!(provider.name(), "google");
     }
 
     #[test]
     fn test_default_base_url() {
-        let provider = GeminiProvider::new("test-key".to_string());
+        let provider = GeminiProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         assert_eq!(
             provider.base_url,
             "https://generativelanguage.googleapis.com/v1beta/openai"
@@ -434,7 +439,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_gemini_35_flash() {
-        let provider = GeminiProvider::new("test-key".to_string());
+        let provider = GeminiProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let caps = provider.builtin_capabilities("gemini-3.5-flash");
         assert!(caps.supports_temperature);
         assert!(caps.supports_streaming);
@@ -446,7 +454,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_gemini_31_pro() {
-        let provider = GeminiProvider::new("test-key".to_string());
+        let provider = GeminiProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let caps = provider.builtin_capabilities("gemini-3.1-pro-preview");
         assert!(caps.supports_temperature);
         assert!(caps.supports_tools);
@@ -456,7 +467,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_gemini_3_flash() {
-        let provider = GeminiProvider::new("test-key".to_string());
+        let provider = GeminiProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let caps = provider.builtin_capabilities("gemini-3-flash");
         assert!(caps.supports_temperature);
         assert!(caps.supports_tools);
@@ -466,7 +480,10 @@ mod tests {
 
     #[test]
     fn test_builtin_capabilities_gemini_31_flash_lite() {
-        let provider = GeminiProvider::new("test-key".to_string());
+        let provider = GeminiProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let caps = provider.builtin_capabilities("gemini-3.1-flash-lite");
         assert!(caps.supports_temperature);
         assert!(caps.supports_tools);
@@ -476,7 +493,10 @@ mod tests {
 
     #[test]
     fn test_default_capabilities() {
-        let provider = GeminiProvider::new("test-key".to_string());
+        let provider = GeminiProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         let caps = provider.builtin_capabilities("gemini-future-model");
         assert!(caps.supports_temperature);
         assert!(caps.supports_streaming);
@@ -500,8 +520,12 @@ mod tests {
                 max_output_tokens: 1,
             },
         );
-        let provider =
-            GeminiProvider::with_overrides("test-key".to_string(), overrides, None, None);
+        let provider = GeminiProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+            overrides,
+            None,
+        );
         let caps = provider.capabilities("gemini-3.5-flash");
         assert!(!caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 1);
@@ -588,7 +612,10 @@ mod tests {
 
     #[test]
     fn test_context_limits() {
-        let provider = GeminiProvider::new("test-key".to_string());
+        let provider = GeminiProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
         assert_eq!(provider.max_context_tokens("gemini-3.5-flash"), 1_048_576);
         assert_eq!(
             provider.max_context_tokens("gemini-3.1-pro-preview"),
@@ -606,7 +633,10 @@ mod tests {
             rate_limit: None,
             request_timeout_secs: None,
         };
-        let provider = GeminiProvider::with_config(config);
+        let provider = GeminiProvider::with_config(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            config,
+        );
         assert!(
             provider
                 .base_url
@@ -622,7 +652,10 @@ mod tests {
             rate_limit: None,
             request_timeout_secs: None,
         };
-        let provider = GeminiProvider::with_config(config);
+        let provider = GeminiProvider::with_config(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            config,
+        );
         assert_eq!(provider.base_url, "https://custom.google.com");
     }
 
@@ -637,7 +670,10 @@ mod tests {
             }),
             request_timeout_secs: None,
         };
-        let provider = GeminiProvider::with_config(config);
+        let provider = GeminiProvider::with_config(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            config,
+        );
         assert!(provider.rate_limiter.is_some());
     }
 
@@ -754,7 +790,12 @@ mod tests {
                 max_output_tokens: 10,
             },
         );
-        let provider = GeminiProvider::with_overrides("key".to_string(), overrides, None, None);
+        let provider = GeminiProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+            overrides,
+            None,
+        );
         let caps = provider.capabilities("gemini-custom");
         assert_eq!(caps.max_context_tokens, 42);
         assert!(!caps.supports_temperature);
@@ -762,15 +803,22 @@ mod tests {
 
     #[test]
     fn test_capabilities_builtin_fallthrough() {
-        let provider =
-            GeminiProvider::with_overrides("key".to_string(), HashMap::new(), None, None);
+        let provider = GeminiProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+            HashMap::new(),
+            None,
+        );
         let caps = provider.capabilities("gemini-3.5-flash");
         assert_eq!(caps.max_context_tokens, 1_048_576);
     }
 
     #[test]
     fn test_max_context_tokens_delegates() {
-        let provider = GeminiProvider::new("key".to_string());
+        let provider = GeminiProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
         assert_eq!(provider.max_context_tokens("gemini-3.5-flash"), 1_048_576);
     }
 
@@ -797,12 +845,15 @@ mod tests {
     // ─── HTTP-call-level tests via a raw-TCP mock server ───────────────────
 
     fn provider_with_url(url: String) -> GeminiProvider {
-        GeminiProvider::with_config(ProviderConfig {
-            api_key: "test-key".to_string(),
-            base_url: Some(url),
-            rate_limit: None,
-            request_timeout_secs: None,
-        })
+        GeminiProvider::with_config(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            ProviderConfig {
+                api_key: "test-key".to_string(),
+                base_url: Some(url),
+                rate_limit: None,
+                request_timeout_secs: None,
+            },
+        )
     }
 
     fn simple_request() -> InferenceRequest {
@@ -1079,7 +1130,10 @@ mod tests {
 
     #[test]
     fn native_base_strips_openai_suffix() {
-        let provider = GeminiProvider::new("k".to_string());
+        let provider = GeminiProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+        );
         assert_eq!(
             provider.native_base().as_deref(),
             Some("https://generativelanguage.googleapis.com/v1beta")
@@ -1118,10 +1172,19 @@ mod tests {
             requests_per_minute: 5,
             tokens_per_minute: 1_000,
         };
-        let limited =
-            GeminiProvider::with_overrides("k".to_string(), HashMap::new(), None, Some(&cfg));
+        let limited = GeminiProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+            HashMap::new(),
+            Some(&cfg),
+        );
         assert!(limited.rate_limiter.is_some());
-        let unlimited = GeminiProvider::with_overrides("k".to_string(), HashMap::new(), None, None);
+        let unlimited = GeminiProvider::with_overrides(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+            HashMap::new(),
+            None,
+        );
         assert!(unlimited.rate_limiter.is_none());
     }
 }

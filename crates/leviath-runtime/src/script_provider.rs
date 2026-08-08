@@ -21,6 +21,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 
+use leviath_providers::rhai_provider::host::{HttpExecutor, ReqwestExecutor};
 use leviath_providers::{ModelCapabilities, Provider, RateLimitConfig, RhaiProvider};
 
 /// Per-provider configuration from `[model_providers.<name>]`. All fields are
@@ -54,6 +55,15 @@ pub struct ScriptProviderLayer {
     /// during inference, not through a tool call, so nothing it does passes an
     /// approval prompt.
     env_allowlist: Arc<Vec<String>>,
+    /// The HTTP executor every script provider shares, built once when the
+    /// layer is created.
+    ///
+    /// Kept as the `Result` rather than unwrapped: constructing it reads the
+    /// machine's root certificate store and can fail, and a layer is built
+    /// during daemon start-up where there is nothing to return an error to. A
+    /// failure therefore surfaces when a script provider is actually resolved,
+    /// which is the first moment it matters.
+    executor: std::result::Result<Arc<dyn HttpExecutor>, leviath_providers::provider::HttpError>,
     cache: Mutex<HashMap<String, Cached>>,
 }
 
@@ -67,12 +77,41 @@ impl ScriptProviderLayer {
         request_timeout_secs: Option<u64>,
         env_allowlist: Vec<String>,
     ) -> Self {
+        let executor = leviath_providers::provider::build_http_client(request_timeout_secs)
+            .map(|client| Arc::new(ReqwestExecutor::new(client)) as Arc<dyn HttpExecutor>);
+        Self::with_executor(
+            dir,
+            overrides,
+            default_caps,
+            request_timeout_secs,
+            env_allowlist,
+            executor,
+        )
+    }
+
+    /// [`new`](Self::new), with the shared HTTP executor supplied.
+    ///
+    /// The seam that makes the "no usable HTTPS client" path reachable: reqwest
+    /// cannot be made to fail from the outside, so a test has to hand in the
+    /// failure.
+    pub fn with_executor(
+        dir: PathBuf,
+        overrides: HashMap<String, ScriptProviderSpec>,
+        default_caps: HashMap<String, ModelCapabilities>,
+        request_timeout_secs: Option<u64>,
+        env_allowlist: Vec<String>,
+        executor: std::result::Result<
+            Arc<dyn HttpExecutor>,
+            leviath_providers::provider::HttpError,
+        >,
+    ) -> Self {
         Self {
             dir,
             overrides,
             default_caps,
             request_timeout_secs,
             env_allowlist: Arc::new(env_allowlist),
+            executor,
             cache: Mutex::new(HashMap::new()),
         }
     }
@@ -154,15 +193,30 @@ impl ScriptProviderLayer {
             .map(|s| s.init_config.clone())
             .unwrap_or_else(|| serde_json::json!({}));
         let rate_limit = spec.and_then(|s| s.rate_limit.clone());
+        let executor = match &self.executor {
+            Ok(executor) => Arc::clone(executor),
+            Err(e) => {
+                tracing::warn!(
+                    provider = %name,
+                    error = %e,
+                    "no outbound HTTPS client, so script providers cannot run; \
+                     leviath reads the system root certificate store at start-up"
+                );
+                return None;
+            }
+        };
         // No lock held here - see the note above.
         match RhaiProvider::from_script(
-            name.to_string(),
             &path,
-            init_config,
-            self.default_caps.clone(),
-            rate_limit,
-            self.request_timeout_secs,
-            self.env_allowlist.clone(),
+            executor,
+            leviath_providers::rhai_provider::ScriptProviderSettings {
+                name: name.to_string(),
+                init_config,
+                caps: self.default_caps.clone(),
+                rate_limit,
+                request_timeout_secs: self.request_timeout_secs,
+                env_allowlist: self.env_allowlist.clone(),
+            },
         ) {
             Ok(p) => {
                 let provider: Arc<dyn Provider> = Arc::new(p);
@@ -425,5 +479,33 @@ mod tests {
             Vec::new(),
         );
         assert!(l.get_or_load("echo").is_some());
+    }
+
+    #[test]
+    fn a_layer_with_no_usable_https_client_resolves_nothing() {
+        // The machine cannot build an HTTPS client, so no script provider can
+        // run. Reachable only by handing the failure in: reqwest will not fail
+        // to build a client in any environment a test can arrange.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("p.rhai");
+        std::fs::write(
+            &path,
+            "fn initialize(c) { #{} }\nfn inference(s, r) { #{ content: \"x\" } }",
+        )
+        .expect("write script");
+        let layer = ScriptProviderLayer::with_executor(
+            dir.path().to_path_buf(),
+            HashMap::new(),
+            HashMap::new(),
+            None,
+            Vec::new(),
+            Err(leviath_providers::provider::malformed_url_error()),
+        );
+        // The script is present and valid; only the client is missing.
+        assert!(path.exists());
+        assert!(
+            layer.get_or_load("p").is_none(),
+            "a layer with no client must not hand back a provider"
+        );
     }
 }
