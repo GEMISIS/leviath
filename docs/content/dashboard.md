@@ -28,8 +28,9 @@ flowchart LR
 
 ## What's on screen
 
-- **Agent table**: blueprint/title, stage index, status, tokens in/out, context-window occupancy,
-  iteration, elapsed time, model, and sub-agent depth. Titles are auto-generated per run.
+- **Agent table**: title and run id, blueprint, stage, status, tokens, and start time, with
+  sub-agents nested under their parent. Titles are auto-generated per run. The model, iteration,
+  and context-window occupancy live in the detail view.
 - **Detail view**: per-stage tabs or a graph view of the workflow, a context-window visualization,
   and content panes for **Output**, **Logs**, and **Context** (JSON). Markdown is rendered.
 - **Interactions**: answer an agent's question (free-text, edit, multiple-choice, tool-approval, or

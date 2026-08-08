@@ -66,9 +66,10 @@ When an ACP host connects, it advertises what it can do during the `initialize` 
 that implements `session/request_permission` can be asked to approve a tool call, and Leviath will
 ask. Gas City sends no client capabilities, so there is nobody to ask.
 
-Leviath does not deadlock on that. It surfaces the approval as output and the run
-[parks](/docs/glossary), waiting for an answer that cannot arrive. The run is not broken, but it
-will not move either.
+Leviath does not deadlock on that. It surfaces the approval as output and keeps the turn in
+flight, waiting for an answer from somewhere else: `lev respond` or `lev dash` on the same
+machine. Unanswered, the approval is denied after `[limits] interaction_timeout_secs`, an hour by
+default. A timeout is never read as consent.
 
 `--yolo` approves every tool call so nothing stops to ask. If that is more trust than you want to
 extend, name the tools you are happy with instead:
@@ -130,8 +131,8 @@ It should sit there waiting for JSON-RPC on stdin. That is correct. Diagnostics 
 because stdout belongs to the protocol.
 
 Then open a session in Gas City and prompt the agent. Output streams back as the run progresses. If
-it connects but nothing ever happens, the run has most likely parked on a tool approval, which means
-`--yolo` or a wider `--allow` list.
+it connects but nothing ever happens, the run is most likely waiting on a tool approval, which
+means answering with `lev respond`, or running with `--yolo` or a wider `--allow` list.
 
 ## What Leviath does not bring
 

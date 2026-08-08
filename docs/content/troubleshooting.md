@@ -89,9 +89,9 @@ layer and names the first one that breaks.
 ## `has no usable provider`, but I do have a key
 
 The message names what it tried: `stage 'parallel_fix' has no usable provider (tried: anthropic)`.
-That stage's `models` list simply never mentions the provider you configured. A blueprint only starts
-on a provider it lists, and the [bundled agents](/docs/agent-catalog) list Anthropic, OpenAI, and
-Ollama only, so a Google or OpenRouter key does not qualify.
+That stage's `models` list simply never mentions the provider you configured. A blueprint only
+starts on a provider it lists. The [bundled agents](/docs/agent-catalog) list all five providers,
+so with them any key qualifies; a blueprint you downloaded or wrote may list fewer.
 
 Set `default_provider` and `default_model` together, which puts your provider ahead of the
 blueprint's list for every stage that has not opted out. `--model <provider>/<model>` does it for

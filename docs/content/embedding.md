@@ -15,7 +15,7 @@ file, no socket.
 
 ```toml
 [dependencies]
-leviath = "0.1"
+leviath = "0.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -78,6 +78,8 @@ returning.
 | `provider(creds)` | Register a provider from credentials. Repeatable. `ProviderCreds::simple(name)` covers key-free providers like `ollama`. |
 | `register_provider(name, arc)` | Register your own `Provider` implementation, including mocks for tests. Wins over a credentials entry with the same name. |
 | `default_model(provider, model)` | The fallback when none of a stage's listed models has a registered provider. |
+| `fallback_model(provider, model)` | Where a run moves when its provider fails mid-run, so a single-model blueprint survives an outage. |
+| `prompt_hints(hints)` | Turn on the batch-tool and shell hints, which are off by default on the embed path. |
 | `tool_service(arc)` | Replace the built-in tool service with your own (see below). |
 | `state_dir(dir)` | Persist runs on disk in the daemon's layout (`dir/runs/<run_id>/`). Without it the world is fully in memory and never touches disk. |
 | `inference_pool(config)` | Per-model inference concurrency limits. |
@@ -95,7 +97,7 @@ behaviour:
 |---|---|
 | `caller_input` | Filled from `SpawnSpec::regions`. The task prompt fills the `task` key |
 | `literal` | Resolves as written |
-| `file`, `glob`, `rhai`, `command` | Not run. They only produce an error when the region is `required` |
+| `files`, `glob`, `rhai`, `command` | Not run. They only produce an error when the region is `required` |
 
 ## Events
 

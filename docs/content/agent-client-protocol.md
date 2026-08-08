@@ -93,10 +93,12 @@ carries no field for it.
 ## Permission handling
 
 Hosts that implement the client-side methods advertise capabilities at `initialize`, and the agent
-surfaces tool approvals as `session/request_permission` requests the host answers. Hosts that send no
-capabilities (Gas City sends none) cannot answer such a request, so instead of deadlocking, tool
-approvals are surfaced as output and the run **parks**. Use `--yolo` (or scoped `--allow` flags) to run
-unattended against such a host.
+surfaces tool approvals as `session/request_permission` requests the host answers. Hosts that send
+no capabilities (Gas City sends none) cannot answer such a request, so instead of deadlocking, the
+question is surfaced as output and the turn stays in flight. Answer it from Leviath's own
+surfaces, `lev respond` or `lev dash`, and the run continues; unanswered, it is denied after
+`[limits] interaction_timeout_secs`. Use `--yolo` (or scoped `--allow` flags) to run unattended
+against such a host.
 
 ## Connecting a host
 

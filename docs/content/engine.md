@@ -142,12 +142,13 @@ flowchart TD
    immediately, and sends everything else to the tool lane.
 5. **`collect_tools`** merges the results back into the order the model asked for them, files each
    into a context region per the stage's tool routing, and returns the agent to `ReadyToInfer`.
-6. **`resolve_transition`** ends the stage with one of five answers: `Terminal` (done),
+6. **`resolve_transition`** ends the stage with one of six answers: `Terminal` (done),
    `TerminalError` (failed with no `error` edge to catch it), `Next` (take this edge), `Choose`
-   (ask the model which edge), or `Resume` (a `stuck` interrupt fired with no `stuck` edge, so
-   keep going).
+   (ask the model which edge), `Resume` (a `stuck` interrupt fired with no `stuck` edge, so keep
+   going), or `DeadEnd` (every outgoing edge is exhausted, which routes down the `error` edge or
+   fails the run rather than faking a completion).
 
-Those are six of roughly thirty-five systems. The rest handle compaction, stuck detection,
+Those are six of roughly forty-five systems. The rest handle compaction, stuck detection,
 iteration caps, interaction points, fan-out, telemetry, and persistence, all in a fixed order every
 pass. See [Multi-stage workflows](/docs/stages) for the transition conditions and
 [Structured context](/docs/context) for the regions.
@@ -162,8 +163,9 @@ gives you backpressure for free: a full pool just means an agent stays `ReadyToI
 tick finds it a slot.
 
 At the end of a tick, Leviath counts how many agents carry each of the twelve markers. Those
-counts are the world's **fingerprint**. The loop does not tick on a clock. It ticks for as long as
-the fingerprint keeps changing, and when a whole tick changes nothing it sleeps:
+counts are the world's **fingerprint**. The loop does not do its work on a clock. It ticks for as
+long as the fingerprint keeps changing, and when a whole tick changes nothing it sleeps (one slow
+30-second timer stays armed as a safety net, re-driving anything a lost wakeup would strand):
 
 ```rust
 loop {
