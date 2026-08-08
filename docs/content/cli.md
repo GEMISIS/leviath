@@ -138,6 +138,7 @@ in three levels: an **error** exits non-zero, a **warning** does not, and a **no
 | Flag | Purpose |
 |---|---|
 | `--deny-warnings` | Exit non-zero on warnings too. Notes still never fail. |
+| `--json` | Print the report as one JSON object with `valid`, `blueprint`, `error`, and `findings` |
 
 The same findings are written to `daemon.log` when a run spawns, so a blueprint that was never
 validated still says what is wrong with it. Nothing there refuses a spawn.
@@ -207,12 +208,14 @@ Serve an agent over the [Agent Client Protocol](/docs/agent-client-protocol) as 
 | `--allow <TOOL>` | Allow one tool outright. Repeatable |
 | `--max-depth <N>` | Override the maximum sub-agent tree depth |
 | `--no-seed-commands` | Refuse the blueprint's command seeds |
+| `--output-format <LABEL>` | Ask the agent for its [final output](/docs/outputs) in this format |
+| `--output-instructions <TEXT>` | Extra instructions for that final output |
 
 ## Blueprints and packaging
 
 | Command | Flags | Purpose |
 |---|---|---|
-| `lev list` | `-f`, `--filter <agents\|blueprints\|all>` (default `all`) | List installed and bundled blueprints. An agent declaring [`[read_paths]`](/docs/security#reading-outside-the-workdir) also shows how many of its entries your config grants |
+| `lev list` | `--json`, `-f`, `--filter <agents\|blueprints\|all>` (default `all`) | List installed and bundled blueprints. An agent declaring [`[read_paths]`](/docs/security#reading-outside-the-workdir) also shows how many of its entries your config grants |
 | `lev add <PACKAGE>` | | Install a blueprint directory or `.leviath-bundle`. Prints what the package grants itself before installing |
 | `lev remove <NAME>` | | Uninstall a blueprint |
 | `lev pack [PATH]` | `-o`, `--output <FILE>` (default `{name}-{version}.leviath-bundle`) | Bundle a blueprint for [sharing](/docs/packaging) |
@@ -488,8 +491,10 @@ per run, each capped at 64 output tokens; `--no-daemon` bills one.
 
 ### `lev setup`
 
-The interactive [provider](/docs/providers) wizard. Every value it asks for has a flag, so the
-whole thing is scriptable.
+The interactive [provider](/docs/providers) wizard. Every credential and agent choice it asks for
+has a flag, so headless setup is scriptable. The wizard's Limits screen edits the
+[`[limits]`](/docs/configuration#limits) keys, which have no flags: script those by writing
+`config.toml` directly.
 
 | Flag | Purpose |
 |---|---|

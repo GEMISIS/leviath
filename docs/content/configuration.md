@@ -105,6 +105,7 @@ max_concurrent_tools      = 8    # agents whose tool batches may run at once, da
 default_max_iterations    = 50   # fallback cap for a stage that sets none
 exact_token_counting      = false
 script_shell_timeout_secs = 60
+mcp_idle_disconnect_secs  = 60   # disconnect an MCP server no agent has used for this long
 stall_timeout_secs        = 60   # fail a run that can never dispatch
 dead_cycles_before_relief = 10   # widen the tool lane after this long going nowhere
 finished_retention_secs   = 300  # keep a finished run in `lev ps` this long
@@ -123,6 +124,7 @@ max_run_write_bytes       = 10737418240  # 10 GiB; delete the line for no limit
 | `default_max_iterations` | `50` | A stage's own `max_iterations` always wins |
 | `exact_token_counting` | `false` | Count each request exactly before sending it. See below |
 | `script_shell_timeout_secs` | `60` | Cap on a Rhai script tool's `shell()` host call |
+| `mcp_idle_disconnect_secs` | `60` | Disconnect an [MCP server](/docs/mcp) no agent has used for this long. It reconnects on next use |
 | `stall_timeout_secs` | `60` | Fail a run that can never dispatch. See below |
 | `dead_cycles_before_relief` | `10` | 30-second cycles with a full [tool lane](/docs/engine#the-tool-lane) and nothing moving before the lane widens. `0` never widens it |
 | `finished_retention_secs` | `300` | How long a finished run stays in [`lev ps`](/docs/cli#runs-that-have-finished). See below |
@@ -193,6 +195,7 @@ Machine-wide switches that are not part of the per-tool permission cascade.
 
 ```toml
 [security]
+allowed_workdirs           = []   # workdir roots lev run accepts without a confirm prompt
 allow_seed_commands        = true
 allow_local_network        = false
 allow_env_vars             = ["MY_PROVIDER_KEY"]
@@ -207,6 +210,7 @@ credential_store           = "file"   # file | keychain
 
 | Key | Default | Notes |
 |---|---|---|
+| `allowed_workdirs` | `[]` | Directories a run's workdir may sit under without being confirmed. Empty asks only about the alarming cases: a home directory or a filesystem root. Listing a path silences the prompt for everything under it |
 | `allow_seed_commands` | `true` | Whether a blueprint's `seed = { command = "..." }` regions may run at all. They execute at spawn, before the first approval prompt, so a seed also has to be covered by `[safe_commands]` - there is nobody to ask in the moment. `--no-seed-commands` refuses them for one run |
 | `allow_local_network` | `false` | Whether agent fetches may reach loopback, private, and link-local addresses. Off, this blocks cloud metadata, your own `lev serve`, and the LAN |
 | `allow_env_vars` | `[]` | Credential-shaped variable names a Rhai script may read through `env_var()`. Matching is exact and case-insensitive, and there is no wildcard |
@@ -495,7 +499,7 @@ model replies with text before making any tool call.
 [nudge]
 enabled = true
 max     = 3
-text    = "You have tools available. Please use them to complete the task."
+text    = "You have tools available. Please use them to complete the task. Start by reading the relevant files in the working directory."
 ```
 
 All three keys are optional and each is overridden independently by an agent's `[agent.nudge]` or a
@@ -553,8 +557,11 @@ that one file, never a walk up the tree, and a variable you have already exporte
 A cloned repository *is* the working directory, so its `.env` is content somebody else wrote.
 Credentials from it load normally - that is what the feature is for - but the handful of names that
 decide where configuration comes from or what gets executed are ignored, with a warning naming them:
-the `LEVIATH_` namespace, `PATH`, `SHELL`, `EDITOR`, `VISUAL`, and the `LD_*` and `DYLD_*` loader
-variables. Without that, one line of `LEVIATH_CONFIG_PATH` in a repository you cloned would point
+the `LEVIATH_` namespace, `PATH`, `SHELL`, `EDITOR`, `VISUAL`, the `LD_*` and `DYLD_*` loader
+variables, and the interpreter and tool hook variables that turn a later command into code
+execution (`BASH_ENV`, `GIT_SSH_COMMAND` and the other `GIT_*` hooks, `PAGER`, `NODE_OPTIONS`,
+`PYTHONSTARTUP`, `PYTHONPATH`, `PERL5OPT`, `RUBYOPT`, `JAVA_TOOL_OPTIONS`, `RUSTC_WRAPPER`, and
+their kin). Without that, one line of `LEVIATH_CONFIG_PATH` in a repository you cloned would point
 Leviath at a config file of its choosing, with its own MCP server commands and tool permissions.
 Export those yourself if you meant them.
 

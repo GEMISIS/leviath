@@ -255,14 +255,15 @@ With nothing configured, tools fall back to these:
 
 | Tool | Default |
 |---|---|
-| `read_file`, `list_dir` | `allow` |
+| `read_file`, `read_files`, `list_dir` | `allow` |
 | `write_file`, `edit_file`, `shell` (and its `bash` alias) | `ask` |
+| `context_read`, `context_write`, `context_append`, `context_delete`, `context_list` | `allow` |
 | `ask_user_text`, `ask_user_choice`, `ask_user_confirm`, `edit_document` | `allow` |
 | `spawn_agent`, `check_agent`, `wait_for_agent`, `send_to_agent`, `kill_agent` | `allow` |
 | Everything else, built-in or MCP | `ask` |
 
-Read-only built-ins run freely, mutating ones ask, and human-in-the-loop tools are always allowed
-because prompting before a prompt would be circular.
+Read-only built-ins and the agent's own context tools run freely, mutating ones ask, and
+human-in-the-loop tools are always allowed because prompting before a prompt would be circular.
 
 ### How a policy is resolved
 
