@@ -632,7 +632,7 @@ impl ControlClient {
 
     /// Present `token` on every connection this client opens.
     pub fn with_token(self, token: ControlToken) -> Self {
-        *self.token.lock().expect("token lock never poisoned") = Some(token);
+        *leviath_core::sync::lock(&self.token) = Some(token);
         self
     }
 
@@ -659,10 +659,7 @@ impl ControlClient {
 
     /// The token to present right now, if any.
     fn current_token(&self) -> Option<ControlToken> {
-        self.token
-            .lock()
-            .expect("token lock never poisoned")
-            .clone()
+        leviath_core::sync::lock(&self.token).clone()
     }
 
     /// Re-read the token file after a refusal. Returns `true` when the file
@@ -681,7 +678,7 @@ impl ControlClient {
         let Ok(fresh) = ControlToken::load(dir) else {
             return false;
         };
-        let mut cached = self.token.lock().expect("token lock never poisoned");
+        let mut cached = leviath_core::sync::lock(&self.token);
         let changed = cached.as_ref().is_none_or(|t| !t.matches(fresh.expose()));
         if changed {
             *cached = Some(fresh);

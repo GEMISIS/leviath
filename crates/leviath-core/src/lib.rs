@@ -30,6 +30,7 @@ pub mod run_archive;
 pub mod run_meta;
 pub mod sandbox;
 pub mod secrets;
+pub mod sync;
 pub mod taint;
 pub mod telemetry;
 pub mod text;
