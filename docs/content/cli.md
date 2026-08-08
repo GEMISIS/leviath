@@ -16,6 +16,11 @@ symptom, and `lev doctor` checks the usual causes for you.
 
 `-v` / `--verbose` is global and works on every subcommand.
 
+Scripting against the CLI? `--json` is on `run`, `ps`, `doctor`, `validate`, `list`, `models list`,
+`context`, `result`, `respond`, `tools`, `approvals safe`, and `mcp list`. Everything else prints
+for a person. Warnings go to stderr, so stdout parses on its own. A service that would rather
+speak HTTP should use [`lev serve`](/docs/api) instead.
+
 Most commands talk to the [shared-world daemon](/docs/daemon). `lev run`, `lev dash`, `lev serve`,
 and `lev agent-client` start one automatically if none is running, and restart it if it is running
 an older build.
