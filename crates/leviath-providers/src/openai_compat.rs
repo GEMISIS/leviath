@@ -26,7 +26,6 @@ use std::pin::Pin;
 /// `headers` are applied both to the outgoing request and (feature-gated)
 /// to the logged header map, so the wire request and the debug log stay
 /// in sync.
-#[cfg_attr(not(feature = "debug-http"), allow(unused_variables))]
 pub async fn send_chat_request(
     client: &reqwest::Client,
     provider_name: &str,
@@ -36,6 +35,14 @@ pub async fn send_chat_request(
     limiter: Option<&RateLimiter>,
     request_timeout_secs: Option<u64>,
 ) -> Result<reqwest::Response> {
+    // Nothing outside the feature-gated logging below reads `provider_name`, so
+    // without `debug-http` it is genuinely unused. Discarding that one binding
+    // by name beats the function-wide `allow(unused_variables)` this replaced:
+    // that attribute would equally have hidden a parameter someone stopped using
+    // for real, and it covered a signature of seven.
+    #[cfg(not(feature = "debug-http"))]
+    let _ = provider_name;
+
     #[cfg(feature = "debug-http")]
     {
         let mut header_map = reqwest::header::HeaderMap::new();

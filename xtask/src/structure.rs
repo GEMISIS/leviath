@@ -115,11 +115,122 @@ pub fn measure(paths: &[String], read: &dyn Fn(&str) -> Result<String>) -> Resul
     Ok(out)
 }
 
+/// Crates allowed to restate `[workspace.lints]` instead of inheriting it, with
+/// the single lint each may drop.
+///
+/// Cargo rejects inheriting and overriding in one manifest, so a crate that must
+/// escape one lint has to copy the whole table - and `leviath-alloc` escaping
+/// `unsafe_code` is how it ended up inheriting *nothing*, silently losing
+/// `missing_docs` and `clippy::string_slice` too. Anything on this list is
+/// checked against the root table so that cannot happen quietly again.
+const LINT_OPT_OUTS: &[(&str, &str)] = &[("leviath-alloc", "unsafe_code")];
+
+/// The lint names a manifest declares under `[<prefix>.rust]` / `[<prefix>.clippy]`.
+fn declared_lints(manifest: &str, prefix: &str) -> Vec<String> {
+    let rust = format!("[{prefix}.rust]");
+    let clippy = format!("[{prefix}.clippy]");
+    let mut out = Vec::new();
+    let mut inside = false;
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            inside = trimmed == rust || trimmed == clippy;
+        } else if inside
+            && !trimmed.starts_with('#')
+            && let Some((key, _)) = trimmed.split_once(" = ")
+        {
+            out.push(key.to_string());
+        }
+    }
+    out
+}
+
+/// Whether a manifest opts into the workspace lint table.
+fn inherits_workspace_lints(manifest: &str) -> bool {
+    let mut inside = false;
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            inside = trimmed == "[lints]";
+        } else if inside && trimmed == "workspace = true" {
+            return true;
+        }
+    }
+    false
+}
+
+/// Crates that neither inherit `[workspace.lints]` nor restate it in full.
+///
+/// Pure so the rule is testable on synthetic manifests: `crates` is
+/// `(name, manifest text)`.
+pub fn lint_gaps(root_manifest: &str, crates: &[(String, String)]) -> Vec<String> {
+    let expected = declared_lints(root_manifest, "workspace.lints");
+    let mut gaps = Vec::new();
+    for (name, manifest) in crates {
+        if inherits_workspace_lints(manifest) {
+            continue;
+        }
+        let Some((_, exempt)) = LINT_OPT_OUTS.iter().find(|(c, _)| c == name) else {
+            gaps.push(format!(
+                "{name} has no `[lints] workspace = true`, so none of the workspace lints \
+                 apply to it"
+            ));
+            continue;
+        };
+        let declared = declared_lints(manifest, "lints");
+        gaps.extend(
+            expected
+                .iter()
+                .filter(|lint| lint.as_str() != *exempt && !declared.contains(lint))
+                .map(|lint| {
+                    format!(
+                        "{name} restates the lint table but omits `{lint}`; it is only \
+                         exempt from `{exempt}`"
+                    )
+                }),
+        );
+    }
+    gaps
+}
+
 /// Run the check.
 pub fn run(mode: StructureMode) -> Result<()> {
     let paths = walk_workspace()?;
     let measured = measure(&paths, &|p| Ok(std::fs::read_to_string(p)?))?;
-    report(mode, &measured)
+    report(mode, &measured)?;
+    if mode == StructureMode::List {
+        return Ok(());
+    }
+    let gaps = lint_gaps(&std::fs::read_to_string("Cargo.toml")?, &crate_manifests()?);
+    for gap in &gaps {
+        eprintln!("[structure] {gap}");
+    }
+    if !gaps.is_empty() {
+        bail!(
+            "{} crate(s) do not carry the workspace lints. Give the manifest a `[lints]` \
+             table with `workspace = true`, or - only if the crate must escape one lint - \
+             restate the root table without that one.",
+            gaps.len()
+        );
+    }
+    println!("structure: every crate carries the workspace lints");
+    Ok(())
+}
+
+/// `(crate name, manifest text)` for every member under `crates/`.
+fn crate_manifests() -> Result<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir("crates")?.flatten() {
+        let manifest = entry.path().join("Cargo.toml");
+        if manifest.is_file() {
+            out.push((
+                entry.file_name().to_string_lossy().into_owned(),
+                std::fs::read_to_string(&manifest)?,
+            ));
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 /// Render the outcome, and fail when something is over.

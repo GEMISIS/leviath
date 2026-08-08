@@ -71,6 +71,22 @@ missing_docs = "warn"
 [workspace.lints.clippy]
 string_slice = "deny"
 
+# Suppressing a lint is itself a compile error. `allow_attributes` rejects
+# `#[allow(...)]` outright and `allow_attributes_without_reason` requires a
+# `reason = "..."` on anything that remains, so silencing a lint takes a
+# deliberate edit to this table rather than a line in a file nobody re-reads.
+#
+# This is the compiler enforcing what `.sgrules/no-lint-suppression.yml` already
+# enforced by pattern, and it is strictly wider: the rule matches attribute
+# syntax, while these follow the lint through forms a grep does not see. The one
+# violation in the tree when they were switched on was
+# `#[cfg_attr(not(feature = "debug-http"), allow(unused_variables))]`, which no
+# search for `#[allow(` finds and which only exists in a non-default feature
+# build. Keep both - the ast-grep rule still gives a better message and runs on
+# the pre-commit path without a full check.
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+
 [workspace.dependencies]
 # Core crates. Path + version: the path is used inside the workspace, the
 # version is what lands in published manifests -- `cargo publish` hard-errors
