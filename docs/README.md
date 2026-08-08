@@ -58,6 +58,9 @@ look. You do not run a build here; you write Markdown, and it ships on the next 
      render in the browser, so a syntax error breaks the diagram. Check yours before committing.
    - Callouts: `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, `> [!CAUTION]` (put the
      marker on its own line).
+   - `<details>`/`<summary>` blocks for optional depth (extra install methods, scriptable
+     variants). Leave a blank line after `</summary>` so the markdown inside still renders, and
+     keep headings out of them, since collapsed headings vanish from the on-page TOC.
    - Cross-links as `/docs/<slug>` (no channel). The renderer rewrites them to the reader's channel.
 
 4. Write it to the rules below.
