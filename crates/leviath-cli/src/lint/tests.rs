@@ -184,6 +184,73 @@ fn an_agent_level_model_block_is_warned_about() {
     assert!(findings[0].stage.is_none(), "{findings:?}");
 }
 
+// ─── Seeds the parser threw away ──────────────────────────────────────────────
+
+/// A seed table with no key the parser recognizes leaves the region empty.
+///
+/// This is what a one-character typo looks like, and it is what a "coder-shaped"
+/// fixture in this repo shipped with for months: `caller_input` instead of
+/// `caller`, silently seeding nothing.
+#[test]
+fn a_seed_table_with_no_recognized_key_is_warned_about() {
+    let toml = format!(
+        "{}\n[context.regions.notes]\nkind = \"pinned\"\nmax_tokens = 100\n\
+         seed = {{ caller_input = \"task\" }}\n",
+        manifest(CLEAN_STAGE)
+    );
+    let findings = lint(&toml, &LintEnv::default());
+    assert_eq!(codes(&findings), ["region-seed-not-understood"]);
+    assert!(findings[0].message.contains("notes"), "{findings:?}");
+}
+
+/// A seed that is neither a string nor a table goes the same way.
+#[test]
+fn a_seed_of_the_wrong_type_is_warned_about() {
+    let toml = format!(
+        "{}\n[context.regions.notes]\nkind = \"pinned\"\nmax_tokens = 100\nseed = 42\n",
+        manifest(CLEAN_STAGE)
+    );
+    assert_eq!(
+        codes(&lint(&toml, &LintEnv::default())),
+        ["region-seed-not-understood"]
+    );
+}
+
+/// Every recognized form stays silent, so the check cannot become noise.
+#[test]
+fn the_recognized_seed_forms_are_not_warned_about() {
+    for seed in [
+        r#""task""#,
+        r#""input""#,
+        r#"{ caller = "extra" }"#,
+        r#"{ literal = "x" }"#,
+        r#"{ files = ["a.txt"] }"#,
+        r#"{ glob = "*.rs" }"#,
+        r#"{ rhai = "\"x\"" }"#,
+        r#"{ command = "git ls-files" }"#,
+    ] {
+        let toml = format!(
+            "{}\n[context.regions.notes]\nkind = \"pinned\"\nmax_tokens = 100\nseed = {seed}\n",
+            manifest(CLEAN_STAGE)
+        );
+        let codes = codes(&lint(&toml, &LintEnv::default()));
+        assert!(
+            !codes.contains(&"region-seed-not-understood"),
+            "seed {seed} was reported as unreadable: {codes:?}"
+        );
+    }
+}
+
+/// A region with no `seed` key at all is not a dropped seed.
+#[test]
+fn a_region_declaring_no_seed_is_not_warned_about() {
+    let findings = lint(&manifest(CLEAN_STAGE), &LintEnv::default());
+    assert!(
+        !codes(&findings).contains(&"region-seed-not-understood"),
+        "{findings:?}"
+    );
+}
+
 // ─── Declared: the fallbacks ──────────────────────────────────────────────────
 
 /// Text the linter cannot re-read yields no declaration findings at all, rather

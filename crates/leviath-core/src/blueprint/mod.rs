@@ -6,7 +6,7 @@
 //! shared, installed, and versioned.
 
 use crate::error::ValidationError;
-use crate::layout::ContextLayout;
+use crate::layout::{ContextLayout, RegionSeed};
 use crate::lifecycle::CompactionConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -189,6 +189,55 @@ impl Blueprint {
             safe_commands: None,
             output: None,
         }
+    }
+
+    /// Whether any region is seeded from the caller's `task`.
+    ///
+    /// The blueprint's answer to "do you take a task?", which is a different
+    /// question from whether one was supplied. An agent driven by named regions
+    /// (`reviewer` takes `--diff` and `--criteria`) answers no, and handing it a
+    /// task would put that text nowhere at all - so both the CLI, before it asks
+    /// for one, and the daemon, before it spawns, ask this first.
+    pub fn accepts_task(&self) -> bool {
+        self.context_layout
+            .regions
+            .iter()
+            .any(|r| matches!(&r.seed, Some(RegionSeed::CallerInput { name }) if name == "task"))
+    }
+
+    /// The caller input keys this blueprint does read, in declaration order.
+    ///
+    /// Used to turn "that agent takes no task" into a message naming what it
+    /// takes instead, which is the difference between a dead end and a fix.
+    pub fn caller_inputs(&self) -> Vec<&str> {
+        self.context_layout
+            .regions
+            .iter()
+            .filter_map(|r| match &r.seed {
+                Some(RegionSeed::CallerInput { name }) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Why a task cannot be given to this blueprint, phrased for the user.
+    ///
+    /// One message rather than two, because the CLI refuses before it asks for a
+    /// task and the daemon refuses before it spawns, and a user who hit one and
+    /// then the other should not be told two different things.
+    pub fn task_refusal(&self) -> String {
+        let inputs = self.caller_inputs();
+        let takes = match inputs.is_empty() {
+            true => "it takes no caller input at all".to_string(),
+            false => format!("it takes: {}", inputs.join(", ")),
+        };
+        format!(
+            "agent '{}' was given a task but declares no region to put it in, so the task \
+             would be ignored - {takes}. Add a region seeded from the task, for example:\n\
+             [context.regions]\ntask = {{ kind = \"pinned\", max_tokens = 2000, \
+             required = true, seed = \"task\" }}",
+            self.name,
+        )
     }
 
     /// Agent-level tool permissions, keyed by tool name.
@@ -492,6 +541,65 @@ mod tests {
     use crate::layout::ContextLayout;
     use crate::layout::RegionDefinition;
     use crate::region::RegionKind;
+
+    /// Build a blueprint from a manifest, so these read as the TOML an author
+    /// would actually write rather than as hand-assembled structs.
+    fn bp_with_regions(regions_toml: &str) -> Blueprint {
+        crate::manifest::parse_manifest(&format!(
+            r#"
+[agent]
+name = "asked"
+
+[stages.main]
+mode = "autonomous"
+model = {{ provider = "anthropic", model = "m" }}
+
+[context.regions]
+{regions_toml}
+"#
+        ))
+        .expect("fixture parses")
+    }
+
+    #[test]
+    fn a_blueprint_accepts_a_task_when_some_region_seeds_from_it() {
+        // Both spellings: the explicit seed and the region named `task`, which
+        // gets the same seed implicitly.
+        assert!(
+            bp_with_regions(r#"brief = { kind = "pinned", max_tokens = 10, seed = "task" }"#)
+                .accepts_task()
+        );
+        assert!(bp_with_regions(r#"task = { kind = "pinned", max_tokens = 10 }"#).accepts_task());
+    }
+
+    #[test]
+    fn a_blueprint_taking_other_caller_input_does_not_accept_a_task() {
+        let bp = bp_with_regions(r#"diff = { kind = "pinned", max_tokens = 10, seed = "diff" }"#);
+        assert!(!bp.accepts_task());
+        assert_eq!(bp.caller_inputs(), ["diff"]);
+    }
+
+    #[test]
+    fn the_refusal_names_what_the_agent_takes_instead() {
+        let bp = bp_with_regions(
+            r#"diff = { kind = "pinned", max_tokens = 10, seed = "diff" }
+criteria = { kind = "pinned", max_tokens = 10, seed = "criteria" }"#,
+        );
+        let msg = bp.task_refusal();
+        assert!(msg.contains("agent 'asked'"), "{msg}");
+        assert!(msg.contains("it takes: diff, criteria"), "{msg}");
+    }
+
+    #[test]
+    fn the_refusal_says_so_when_the_agent_takes_nothing() {
+        let bp = bp_with_regions(r#"notes = { kind = "pinned", max_tokens = 10 }"#);
+        assert!(bp.caller_inputs().is_empty());
+        // Bound rather than called inside the assert message: a message
+        // expression only runs when the assert fails, so it would be an
+        // uncovered region on every green run.
+        let msg = bp.task_refusal();
+        assert!(msg.contains("it takes no caller input at all"), "{msg}");
+    }
 
     #[test]
     fn resolve_nudge_defaults_when_nothing_is_configured() {

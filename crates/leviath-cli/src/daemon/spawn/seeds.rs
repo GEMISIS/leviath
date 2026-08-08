@@ -88,6 +88,18 @@ pub(super) fn resolve_seeds(
     // Unknown caller keys are tolerated here (silently unused): the CLI already
     // rejects typos client-side in `resolve_spawn_args`, and an ACP host sending
     // a stray `---region:...---` marker shouldn't fail the whole turn over it.
+    //
+    // `task` is the exception, because it is not a stray marker - it is the
+    // request. A blueprint that seeds no region from it drops the task on the
+    // floor and runs anyway: the agent answers a question nobody asked, having
+    // spent the tokens to do it. Four different models were observed replying
+    // "I'm ready, what would you like?" to a task that had been supplied.
+    // Refusing here costs one clear error instead of a plausible-looking run.
+    // The CLI refuses this earlier and with the same message, but the API and
+    // ACP paths do not go through the CLI at all, so the check lives here too.
+    if !args.task.trim().is_empty() && !blueprint.accepts_task() {
+        return Err(blueprint.task_refusal());
+    }
 
     let base = std::path::Path::new(workdir);
     let mut seeds: HashMap<String, String> = HashMap::new();

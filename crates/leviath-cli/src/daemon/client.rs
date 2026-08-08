@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 
 use anyhow::bail;
-use leviath_core::layout::RegionSeed;
 use leviath_runtime::control_socket::{ControlClient, ControlResponse};
 use leviath_runtime::host::SpawnArgs;
 
@@ -77,18 +76,10 @@ fn resolve_regions(
     blueprint: &leviath_core::Blueprint,
     regions: HashMap<String, String>,
 ) -> anyhow::Result<HashMap<String, String>> {
-    let declared: Vec<String> = blueprint
-        .context_layout
-        .regions
-        .iter()
-        .filter_map(|r| match &r.seed {
-            Some(RegionSeed::CallerInput { name }) => Some(name.clone()),
-            _ => None,
-        })
-        .collect();
+    let declared = blueprint.caller_inputs();
     let mut out = HashMap::new();
     for (name, raw) in regions {
-        if !declared.contains(&name) {
+        if !declared.contains(&name.as_str()) {
             bail!(
                 "unknown region '--{name}'; this agent's caller-input regions are: {}",
                 if declared.is_empty() {
@@ -153,7 +144,9 @@ pub struct LaunchRequest<'a> {
 /// `task` is what `--task` was given, if anything. Left off, [`resolve_task`]
 /// opens the user's editor, which is why `stdin_is_terminal` is threaded
 /// through: the probe itself is real I/O and belongs to the binary, so callers
-/// inject it (tests pass a `fn` that always says no).
+/// inject it (tests pass a `fn` that always says no). None of that happens for a
+/// blueprint that takes no task: it is not asked for one, and giving it one is
+/// an error rather than text with nowhere to go.
 ///
 /// Regions are resolved *before* the task on purpose. A typo'd `--foo` has to
 /// fail before the user is dropped into an editor and types a paragraph they
@@ -174,12 +167,22 @@ pub fn resolve_spawn_args(req: LaunchRequest<'_>) -> anyhow::Result<SpawnArgs> {
     } = req;
     let source = load_agent_source(path)?;
     let resolved_regions = resolve_regions(&source.blueprint, regions)?;
-    let task = resolve_task(
-        task,
-        &source.blueprint.name,
-        &source.blueprint.description,
-        stdin_is_terminal,
-    )?;
+    // An agent driven by named regions takes no task, so neither demanding one
+    // nor opening an editor to write one would make sense - `lev run reviewer
+    // --diff @x.patch` is a complete command line. Handing it one anyway is the
+    // error, and it is the same message the daemon would give.
+    let task = match source.blueprint.accepts_task() {
+        true => resolve_task(
+            task,
+            &source.blueprint.name,
+            &source.blueprint.description,
+            stdin_is_terminal,
+        )?,
+        false => match task.map(str::trim).unwrap_or("") {
+            "" => String::new(),
+            _ => anyhow::bail!(source.blueprint.task_refusal()),
+        },
+    };
 
     Ok(SpawnArgs {
         run_id: new_run_id(&source.run_stem),
@@ -620,6 +623,117 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.to_string().contains("No task provided"), "got: {err}");
+    }
+
+    /// A blueprint driven by named regions, taking no task at all.
+    fn write_taskless_manifest(dir: &std::path::Path) -> std::path::PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("agent.leviath"),
+            r#"
+[agent]
+name = "diffonly"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+
+[context.regions]
+diff = { kind = "pinned", max_tokens = 4000, seed = "diff" }
+conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
+"#,
+        )
+        .unwrap();
+        dir.join("agent.leviath")
+    }
+
+    /// `lev run diffonly --diff ...` is a complete command line, so no task is
+    /// demanded and no editor is opened - which is the whole reason the demand
+    /// is conditional rather than unconditional.
+    #[test]
+    fn an_agent_that_takes_no_task_is_not_asked_for_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write_taskless_manifest(&dir.path().join("diffonly"));
+        let mut regions = HashMap::new();
+        regions.insert("diff".to_string(), "a patch".to_string());
+
+        let args = resolve_spawn_args(LaunchRequest {
+            path: manifest.to_str().unwrap(),
+            task: None,
+            // Says stdin is not a TTY, so an unconditional demand would error
+            // here rather than fall through to the editor.
+            stdin_is_terminal: &never_interactive,
+            model: None,
+            workdir: "/work",
+            yolo: false,
+            allow: Vec::new(),
+            max_depth: None,
+            regions,
+            no_seed_commands: false,
+            output_request: None,
+        })
+        .expect("no task is required of an agent that takes none");
+        assert_eq!(args.task, "");
+        assert_eq!(
+            args.regions.get("diff").map(String::as_str),
+            Some("a patch")
+        );
+    }
+
+    /// The other half: handing that agent a task is the error, and the message
+    /// points at the input it does take.
+    #[test]
+    fn an_agent_that_takes_no_task_refuses_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write_taskless_manifest(&dir.path().join("diffonly"));
+
+        let err = resolve_spawn_args(LaunchRequest {
+            path: manifest.to_str().unwrap(),
+            task: Some("review my code"),
+            stdin_is_terminal: &never_interactive,
+            model: None,
+            workdir: "/work",
+            yolo: false,
+            allow: Vec::new(),
+            max_depth: None,
+            regions: HashMap::new(),
+            no_seed_commands: false,
+            output_request: None,
+        })
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("declares no region to put it in"),
+            "got: {msg}"
+        );
+        assert!(msg.contains("it takes: diff"), "got: {msg}");
+    }
+
+    /// A `--task` of nothing but whitespace is the same as none, so it must not
+    /// trip the refusal.
+    #[test]
+    fn a_blank_task_is_not_a_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write_taskless_manifest(&dir.path().join("diffonly"));
+
+        let args = resolve_spawn_args(LaunchRequest {
+            path: manifest.to_str().unwrap(),
+            task: Some("   "),
+            stdin_is_terminal: &never_interactive,
+            model: None,
+            workdir: "/work",
+            yolo: false,
+            allow: Vec::new(),
+            max_depth: None,
+            regions: HashMap::new(),
+            no_seed_commands: false,
+            output_request: None,
+        })
+        .expect("blank is the same as absent");
+        assert_eq!(args.task, "");
     }
 
     /// Pins the ordering: a typo'd region flag must fail *before* the user is

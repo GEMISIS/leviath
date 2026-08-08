@@ -376,7 +376,8 @@ mod tests {
     fn two_stage_manifest() -> String {
         "[agent]\nname = \"host\"\nversion = \"0.1.0\"\ndescription = \"d\"\nentry_stage = \"first\"\n\n\
          [stages.first]\nmodel = { provider = \"anthropic\", model = \"m\" }\nsystem_prompt = \"first\"\n\n\
-         [stages.second]\nmodel = { provider = \"anthropic\", model = \"m\" }\nallow_as_worker = true\nsystem_prompt = \"second\"\n"
+         [stages.second]\nmodel = { provider = \"anthropic\", model = \"m\" }\nallow_as_worker = true\nsystem_prompt = \"second\"\n\n\
+         [context.regions]\ntask = { kind = \"pinned\", max_tokens = 2000 }\n"
             .to_string()
     }
 
@@ -627,9 +628,14 @@ mod tests {
         std::fs::create_dir_all(&bad_dir).unwrap();
         std::fs::write(
             bad_dir.join("agent.leviath"),
+            // The `task` region is not incidental: a fan-out hands each worker
+            // its item as the task, and a worker with nowhere to put one is
+            // refused before validation ever runs - which would make this test
+            // pass on the wrong error.
             "[agent]\nname = \"bad\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
              [stages.only]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\n\
-             [stages.only.transitions.nowhere]\n",
+             [stages.only.transitions.nowhere]\n\n\
+             [context.regions]\ntask = { kind = \"pinned\", max_tokens = 500 }\n",
         )
         .unwrap();
         let err = spawner

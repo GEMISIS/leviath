@@ -263,6 +263,7 @@ pub fn lint_manifest(content: &str, blueprint: &Blueprint, env: &LintEnv) -> Vec
         );
     }
 
+    findings.extend(lint_dropped_seeds(&declared, blueprint));
     findings.extend(lint_command_seeds(blueprint));
     findings.extend(lint_read_paths(blueprint, env));
     findings.extend(lint_safe_commands(blueprint, env));
@@ -289,6 +290,43 @@ pub fn lint_manifest(content: &str, blueprint: &Blueprint, env: &LintEnv) -> Vec
     findings
 }
 
+/// A region wrote a `seed` the parser could not read, so it has none.
+///
+/// `parse_region_seed` returns `None` for a seed table with no recognized key
+/// and for a seed that is neither a string nor a table, and the region then
+/// simply starts empty. That is deliberate - an unknown key is not worth
+/// rejecting a whole manifest over - but it is invisible, and a one-character
+/// typo (`caller_input` for `caller`) reads exactly like a working blueprint
+/// until an agent answers a question it was never given. This is the check that
+/// says so.
+fn lint_dropped_seeds(declared: &Declared, blueprint: &Blueprint) -> Vec<LintFinding> {
+    declared
+        .seeded_regions
+        .iter()
+        .filter(|name| {
+            blueprint
+                .context_layout
+                .get_region(name)
+                .is_some_and(|r| r.seed.is_none())
+        })
+        .map(|name| {
+            LintFinding::new(
+                LintSeverity::Warning,
+                "region-seed-not-understood",
+                format!(
+                    "region '{name}' declares a seed that isn't one of the \
+                     recognized forms, so it is ignored and the region starts empty"
+                ),
+            )
+            .with_fix(
+                "use a string (the caller input key), or one of \
+                 { caller = }, { literal = }, { files = }, { glob = }, \
+                 { rhai = }, { command = }",
+            )
+        })
+        .collect()
+}
+
 // ─── Declared keys ────────────────────────────────────────────────────────────
 
 /// Which optional keys the manifest text actually writes, per stage, plus the
@@ -297,6 +335,9 @@ pub fn lint_manifest(content: &str, blueprint: &Blueprint, env: &LintEnv) -> Vec
 struct Declared {
     /// A top-level `[model]` table exists. Nothing reads it.
     agent_model_block: bool,
+    /// Regions whose text writes a `seed` key, whatever its shape. Compared
+    /// against the parsed seed to catch the ones the parser threw away.
+    seeded_regions: Vec<String>,
     /// Per stage name, the keys that stage wrote.
     stages: HashMap<String, StageKeys>,
     /// The manifest text could not be re-read. Every key is then reported as
@@ -322,6 +363,22 @@ impl Declared {
             };
         };
         let agent_model_block = root.get("model").is_some_and(toml::Value::is_table);
+        // Both region spellings - inline `name = { seed = ... }` under
+        // `[context.regions]` and a `[context.regions.name]` section - land here
+        // as the same nested table, so one path covers both.
+        let seeded_regions = root
+            .get("context")
+            .and_then(toml::Value::as_table)
+            .and_then(|c| c.get("regions"))
+            .and_then(toml::Value::as_table)
+            .map(|regions| {
+                regions
+                    .iter()
+                    .filter(|(_, body)| body.get("seed").is_some())
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         let stages = root
             .get("stages")
             .and_then(toml::Value::as_table)
@@ -341,6 +398,7 @@ impl Declared {
             .unwrap_or_default();
         Self {
             agent_model_block,
+            seeded_regions,
             stages,
             opaque: false,
         }

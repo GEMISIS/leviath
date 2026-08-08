@@ -39,7 +39,9 @@ pub(crate) fn write_test_agent(
 /// those tests exercise spawn/reload *logic*, not the shipped blueprint, so they
 /// must stay isolated from blueprint edits. Budgets are absolute (window-
 /// independent) so a fake small-context test model can't starve the region the
-/// stage system prompt is injected into.
+/// stage system prompt is injected into. The `task` region is load-bearing:
+/// every caller spawns this with a task, and a blueprint with nowhere to put one
+/// is refused at spawn.
 #[cfg(test)]
 pub(crate) fn inline_coder_manifest() -> String {
     r#"[agent]
@@ -82,6 +84,7 @@ system_prompt = "Review the implementation."
 
 [context.regions]
 system = { kind = "pinned", max_tokens = 8000 }
+task = { kind = "pinned", max_tokens = 2000 }
 codebase = { kind = "temporary", max_tokens = 20000 }
 conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
 "#

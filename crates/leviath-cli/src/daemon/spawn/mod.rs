@@ -1118,7 +1118,10 @@ system = { kind = "pinned", max_tokens = 1000 }
         SpawnArgs {
             run_id: "run-x".to_string(),
             blueprint_path: path.to_string(),
-            task: "do the thing".to_string(),
+            // No task by default: most of these fixtures declare no region to
+            // receive one, and supplying a task a blueprint cannot hold is now
+            // refused. Tests that care about the task set it explicitly.
+            task: String::new(),
             regions: HashMap::new(),
             model: None,
             workdir: std::env::temp_dir().to_string_lossy().to_string(),
@@ -1594,8 +1597,11 @@ system = { kind = "pinned", max_tokens = 1000 }
         let manifest = dir.path().join("agent.leviath");
         std::fs::write(
             &manifest,
+            // Titling is gated on a non-empty task, so this blueprint has to
+            // accept one - a region named `task` picks it up implicitly.
             "[agent]\nname = \"titler\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\n\
+             [context.regions]\ntask = { kind = \"pinned\", max_tokens = 1000 }\n",
         )
         .unwrap();
         let (mut world, cli) = test_world();
@@ -1613,7 +1619,10 @@ system = { kind = "pinned", max_tokens = 1000 }
                 now_secs: 100,
                 subagent_tx: sub_tx(),
             },
-            &spawn_args(&manifest.to_string_lossy()),
+            &SpawnArgs {
+                task: "title me".to_string(),
+                ..spawn_args(&manifest.to_string_lossy())
+            },
         )
         .expect("spawn succeeds");
         assert!(
@@ -3226,6 +3235,14 @@ system_prompt = "be brief"
     // ─── resolve_seeds ────────────────────────────────────────────────────────
 
     fn bp(regions_toml: &str) -> Blueprint {
+        // A region named `task` picks up the caller's task implicitly, which is
+        // how a real blueprint accepts one - and without it a supplied task is
+        // refused. Skipped when the caller declares its own, or the key would
+        // be duplicated.
+        let implicit_task = match regions_toml.contains("task") {
+            true => "",
+            false => "task = { kind = \"pinned\", max_tokens = 1000 }",
+        };
         let toml = format!(
             r#"
 [agent]
@@ -3240,6 +3257,7 @@ model = "claude-sonnet-5"
 
 [context.regions]
 {regions_toml}
+{implicit_task}
 conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
 "#
         );
@@ -3871,5 +3889,109 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         let scripts = resolve_stage_hook_scripts(&blueprint, bp_path.to_str().expect("utf8"))
             .expect("a script beside the blueprint loads");
         assert!(scripts.contains_key("h.rhai"));
+    }
+
+    // ─── A task the blueprint cannot hold ───────────────────────────────────
+
+    /// The same fixture as [`bp`] but without the implicit `task` region, for
+    /// the tests that are *about* a blueprint which accepts no task.
+    fn bp_taking_no_task(regions_toml: &str) -> Blueprint {
+        let toml = format!(
+            r#"
+[agent]
+name = "seedy"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+
+[context.regions]
+{regions_toml}
+conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
+"#
+        );
+        leviath_core::manifest::parse_manifest(&toml).unwrap()
+    }
+
+    #[test]
+    fn a_task_the_blueprint_cannot_hold_is_refused() {
+        // Observed live: an agent handed a task it had no region for answered
+        // "I'm ready, what would you like?" and finished successfully, having
+        // spent a full turn on a question nobody asked.
+        let bp = bp_taking_no_task(r#"notes = { kind = "pinned", max_tokens = 100 }"#);
+        let args = args_with("do the thing", HashMap::new(), "/w");
+        let err = resolve_seeds(&bp, &args, "/w", &seed_policy(), &no_read_paths())
+            .expect_err("a task with nowhere to go should be refused");
+        assert!(err.contains("declares no region to put it in"), "{err}");
+        // The message has to say what the agent *does* take, or the user is left
+        // guessing which flag to reach for instead.
+        assert!(err.contains("takes no caller input at all"), "{err}");
+    }
+
+    #[test]
+    fn the_refusal_names_the_input_the_agent_does_take() {
+        let bp =
+            bp_taking_no_task(r#"diff = { kind = "pinned", max_tokens = 100, seed = "diff" }"#);
+        let args = args_with("do the thing", HashMap::new(), "/w");
+        let err =
+            resolve_seeds(&bp, &args, "/w", &seed_policy(), &no_read_paths()).expect_err("refused");
+        assert!(err.contains("it takes: diff"), "{err}");
+    }
+
+    #[test]
+    fn an_agent_driven_by_named_regions_still_spawns_with_no_task() {
+        // `lev run reviewer --diff @x.patch` supplies no task at all. Refusing
+        // *that* would break every agent that takes named input instead.
+        let bp =
+            bp_taking_no_task(r#"diff = { kind = "pinned", max_tokens = 100, seed = "diff" }"#);
+        let mut regions = HashMap::new();
+        regions.insert("diff".to_string(), "a patch".to_string());
+        let args = args_with("", regions, "/w");
+        let seeds = resolve_seeds(&bp, &args, "/w", &seed_policy(), &no_read_paths())
+            .expect("no task was supplied, so there is nothing to refuse");
+        assert_eq!(seeds.get("diff").map(String::as_str), Some("a patch"));
+    }
+
+    #[test]
+    fn a_whitespace_only_task_is_not_treated_as_a_task() {
+        let bp = bp_taking_no_task(r#"notes = { kind = "pinned", max_tokens = 100 }"#);
+        let args = args_with("   \n ", HashMap::new(), "/w");
+        resolve_seeds(&bp, &args, "/w", &seed_policy(), &no_read_paths())
+            .expect("blank is the same as absent");
+    }
+
+    /// Every bundled agent that tells the user to pass `--task` can hold one.
+    ///
+    /// The refusal above is only safe if no shipped agent trips it while being
+    /// driven the documented way. `reviewer` takes `--diff`, not `--task`, and
+    /// that is fine; what would not be fine is an agent whose own description
+    /// says `--task` while its blueprint has nowhere to put it.
+    #[test]
+    fn every_bundled_agent_that_documents_a_task_accepts_one() {
+        for agent in crate::bundled::BUNDLED_AGENTS {
+            let name = agent.name;
+            // Static `expect` messages rather than an interpolated `panic!`:
+            // both facts already have their own named test (`bundled.rs` for
+            // the manifest's presence, `manifest_integration.rs` for its
+            // parse), so naming the agent here buys nothing and the closure
+            // would leave a region no test can reach.
+            let (_, content) = agent
+                .files
+                .iter()
+                .find(|(rel, _)| *rel == "agent.leviath")
+                .expect("every bundled agent ships an agent.leviath");
+            let bp = leviath_core::manifest::parse_manifest(content)
+                .expect("every bundled agent's manifest parses");
+            let args = args_with("a task", HashMap::new(), "/w");
+            let refused =
+                resolve_seeds(&bp, &args, "/w", &seed_policy(), &no_read_paths()).is_err();
+            assert!(
+                !(content.contains("--task") && refused),
+                "{name} tells the user to pass --task but declares no region to hold one"
+            );
+        }
     }
 }
