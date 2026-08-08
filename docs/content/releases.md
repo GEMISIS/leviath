@@ -40,7 +40,8 @@ any channel.
 Rolling tags (`alpha`, `beta`, `latest`) are recreated on every publish and
 always point at the current build for that channel. Each stable deploy also
 cuts an immutable versioned release. Release titles follow the same scheme:
-`Leviath v0.1.2-Alpha`, `Leviath v0.1.2-Beta`, and `Leviath v0.1.2` for stable.
+`Leviath v0.1.2-Alpha`, `Leviath v0.1.2-Beta`, and `Leviath v0.1.2` for the immutable stable
+release, while the rolling `latest` is titled with its channel.
 
 Maintainers can re-cut a channel without a bump - to recover from an
 infrastructure failure, say - by running the workflow by hand with its `force`
@@ -53,16 +54,16 @@ immutable tag is never moved.
 **Homebrew** has one formula per channel:
 
 ```bash
+brew tap gemisis/leviath https://github.com/GEMISIS/leviath-dist.git
 brew install leviath          # stable
 brew install leviath-beta
 brew install leviath-alpha
 ```
 
-**Linux install script** takes a channel flag:
+**The install script** takes the channel from an environment variable:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/GEMISIS/leviath-dist/main/install.sh \
-  | bash -s -- --channel stable    # or beta, alpha
+LEVIATH_CHANNEL=beta curl -fsSL https://leviath.dev/install.sh | sh   # or alpha, stable
 ```
 
 **Scoop** mirrors the Homebrew layout:

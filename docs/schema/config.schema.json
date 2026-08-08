@@ -45,13 +45,6 @@
       "type": "boolean",
       "default": true
     },
-    "allow": {
-      "type": "array",
-      "description": "Tools allowed outright, the config-file form of repeated --allow.",
-      "items": {
-        "type": "string"
-      }
-    },
     "providers": {
       "type": "object",
       "additionalProperties": false,
@@ -119,6 +112,12 @@
           "minimum": 0,
           "default": 60
         },
+        "mcp_idle_disconnect_secs": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 60,
+          "description": "Disconnect an MCP server no agent has used for this long. It reconnects on next use."
+        },
         "stall_timeout_secs": {
           "type": "integer",
           "minimum": 0,
@@ -172,6 +171,14 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "allowed_workdirs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Directories a run's workdir may sit under without being confirmed. Empty asks only about a home directory or a filesystem root."
+        },
         "allow_seed_commands": {
           "type": "boolean",
           "default": true,

@@ -85,7 +85,7 @@ Per daemon, sampled every 30 seconds:
 | `leviath.provider.circuit.open` | Providers Leviath has currently stopped sending work to |
 | `leviath.provider.circuit.opened.total` | Times a provider was pulled, attributed by `leviath.provider` and `leviath.reason` |
 
-`leviath.reason` is one of `credits-exhausted`, `auth-failed`, or `forbidden`.
+`leviath.reason` is one of `credits-exhausted`, `auth-failed`, `forbidden`, or `unreachable`.
 
 ## The three worth alerting on
 

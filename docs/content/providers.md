@@ -15,9 +15,9 @@ the [API](/docs/api).
 |---|---|---|
 | Anthropic | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/settings/keys) |
 | OpenAI | `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/api-keys) |
-| Google (Gemini) | `GOOGLE_API_KEY` | [aistudio.google.com](https://aistudio.google.com/apikey) |
+| Google (Gemini) | `GOOGLE_API_KEY` | [aistudio.google.com](https://aistudio.google.com/app/apikey) |
 | OpenRouter | `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) |
-| Ollama | none (local) | [ollama.com/download](https://ollama.com/download) |
+| Ollama | `OLLAMA_HOST` (optional, local) | [ollama.com/download](https://ollama.com/download) |
 | Claude Code | none (subscription) | see below |
 
 ## Model identifiers
@@ -46,10 +46,11 @@ lev models list --all                        # every provider, even unconfigured
 
 > [!NOTE]
 > Without `--remote`, `lev models list` prints a built-in table of well-known models. It is a
-> convenience, not the catalog. A model absent from it is not necessarily invalid, and Leviath does
-> not check model strings against it: `lev validate` never looks at them, and an unrecognized string
-> gets a conservative 128K context / 8192 output assumption locally and is then sent to the provider
-> as written.
+> convenience, not the catalog. A model absent from it is not necessarily invalid: `lev validate`
+> flags an unrecognized string with an `unknown-model` warning, never an error, and the string is
+> still sent to the provider exactly as written. Locally an unrecognized model gets conservative
+> capability assumptions: 128K context and 8192 output on OpenRouter, 8192 context and 4096 output
+> elsewhere.
 
 ### Dated and rotating identifiers
 
