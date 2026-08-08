@@ -87,6 +87,15 @@ tempfile = "3"
 
 [dev-dependencies]
 leviath-testkit = { workspace = true }
+# `SO_LINGER(0)` on one websocket test's socket, to force an RST rather than a
+# FIN. Tokio deprecates its own `set_linger` because the option blocks a runtime
+# thread on drop - a real hazard, and irrelevant to a socket the test closes
+# immediately. socket2 is the layer that owns socket options, is already in the
+# tree as a tokio dependency, and makes no claim about a runtime, so this is
+# using the right API rather than silencing the wrong one.
+socket2 = "0.6"
+
+
 # A TLS *client*, so the HTTPS server is tested with a real handshake against a
 # root store holding exactly the test certificate. Verifying rather than
 # skipping verification is the point: a client that accepted anything would

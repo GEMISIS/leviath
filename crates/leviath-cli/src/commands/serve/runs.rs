@@ -56,31 +56,27 @@ const MAX_HIGHLIGHTS: usize = 5;
 /// timestamps on a run, and each variant is named for the `RunMeta` field it
 /// reads and the query value that selects it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(
-    clippy::enum_variant_names,
-    reason = "named after the fields they read"
-)]
 enum SortKey {
-    StartedAt,
-    UpdatedAt,
-    LastProgressAt,
+    Started,
+    Updated,
+    LastProgress,
 }
 
 impl SortKey {
     fn parse(raw: &str) -> Option<Self> {
         match raw {
-            "started_at" => Some(SortKey::StartedAt),
-            "updated_at" => Some(SortKey::UpdatedAt),
-            "last_progress_at" => Some(SortKey::LastProgressAt),
+            "started_at" => Some(SortKey::Started),
+            "updated_at" => Some(SortKey::Updated),
+            "last_progress_at" => Some(SortKey::LastProgress),
             _ => None,
         }
     }
 
     fn as_str(self) -> &'static str {
         match self {
-            SortKey::StartedAt => "started_at",
-            SortKey::UpdatedAt => "updated_at",
-            SortKey::LastProgressAt => "last_progress_at",
+            SortKey::Started => "started_at",
+            SortKey::Updated => "updated_at",
+            SortKey::LastProgress => "last_progress_at",
         }
     }
 
@@ -92,9 +88,9 @@ impl SortKey {
     /// the key non-null, which the cursor needs.
     fn value(self, meta: &RunMeta) -> i64 {
         match self {
-            SortKey::StartedAt => meta.started_at,
-            SortKey::UpdatedAt => meta.updated_at,
-            SortKey::LastProgressAt => meta.last_progress_at.unwrap_or(meta.started_at),
+            SortKey::Started => meta.started_at,
+            SortKey::Updated => meta.updated_at,
+            SortKey::LastProgress => meta.last_progress_at.unwrap_or(meta.started_at),
         }
     }
 }

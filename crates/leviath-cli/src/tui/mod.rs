@@ -45,20 +45,21 @@ pub trait EventSource {
 /// Production [`EventSource`]: reads real terminal input via crossterm.
 /// Uses injectable function pointers for `poll` and `read` so the two
 /// branches of `poll_event` can be exercised in unit tests without a real
-/// TTY.  In production, construct via [`CrosstermEventSource::new`]. Wired
+/// TTY.  In production, construct via [`CrosstermEventSource::open`]. Wired
 /// into the real UIs only by the binary.
 pub struct CrosstermEventSource {
     poll_fn: fn(Duration) -> std::io::Result<bool>,
     read_fn: fn() -> std::io::Result<Event>,
 }
 
-#[expect(
-    clippy::new_without_default,
-    reason = "constructed only by the binary's real UI entrypoints, where a Default would be a way to build one that reads no terminal"
-)] // constructed only by the binary's real UI entrypoints
 impl CrosstermEventSource {
-    /// Read from the real terminal.
-    pub fn new() -> Self {
+    /// Open a source over the real terminal.
+    ///
+    /// Named `open` rather than `new` deliberately. A `new` with no arguments
+    /// invites a `Default` impl, and a defaulted event source is one that reads
+    /// no terminal - which is exactly the thing a test should have to ask for
+    /// explicitly rather than get by writing `..Default::default()`.
+    pub fn open() -> Self {
         Self {
             poll_fn: crossterm::event::poll,
             read_fn: crossterm::event::read,
@@ -404,7 +405,7 @@ mod tests {
     fn crossterm_event_source_new_stores_the_real_crossterm_functions() {
         // Taking a function's address never invokes it, so constructing the
         // production source touches no real terminal state.
-        let _source = CrosstermEventSource::new();
+        let _source = CrosstermEventSource::open();
     }
 
     #[test]

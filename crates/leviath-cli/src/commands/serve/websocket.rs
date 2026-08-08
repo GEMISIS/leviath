@@ -1176,12 +1176,15 @@ mod tests {
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            // Set SO_LINGER to 0 - causes RST on close instead of FIN.
-            #[expect(
-                deprecated,
-                reason = "SO_LINGER(0) is the point - it forces an RST rather than a FIN, which is what this test needs and what the deprecation does not offer a replacement for"
-            )]
-            stream.set_linger(Some(Duration::from_secs(0))).unwrap();
+            // `SO_LINGER(0)` makes the close send an RST rather than a FIN,
+            // which is the abrupt disconnect this test is about. Set through
+            // socket2 rather than tokio's own (deprecated) `set_linger`: tokio
+            // deprecates it because the option blocks a runtime thread on drop,
+            // which is a real hazard and not one this socket has - it is closed
+            // on the next line.
+            socket2::SockRef::from(&stream)
+                .set_linger(Some(Duration::from_secs(0)))
+                .unwrap();
             // Close immediately (drop triggers RST).
         });
 

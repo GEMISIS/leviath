@@ -250,7 +250,7 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
                 mouse_capture: false,
                 enabled: false,
             },
-            &mut CrosstermEventSource::new(),
+            &mut CrosstermEventSource::open(),
         )
         .await;
         if !ok {
@@ -621,7 +621,7 @@ async fn real_dashboard(_args: DashboardArgs) -> anyhow::Result<()> {
         mouse_capture: true,
         enabled: false,
     };
-    let mut events = CrosstermEventSource::new();
+    let mut events = CrosstermEventSource::open();
     commands::dashboard::execute_with(control, &mut setup, &mut events, real_yank).await
 }
 
@@ -687,7 +687,7 @@ async fn real_setup(args: commands::setup::SetupArgs) -> anyhow::Result<()> {
                 mouse_capture: false,
                 enabled: false,
             },
-            &mut CrosstermEventSource::new(),
+            &mut CrosstermEventSource::open(),
             false,
         )
         .await;
@@ -706,7 +706,7 @@ async fn real_setup(args: commands::setup::SetupArgs) -> anyhow::Result<()> {
         mouse_capture: false,
         enabled: false,
     };
-    let mut events = CrosstermEventSource::new();
+    let mut events = CrosstermEventSource::open();
     commands::setup::execute_core(&mut wizard, &env, &mut setup, &mut events).await
 }
 

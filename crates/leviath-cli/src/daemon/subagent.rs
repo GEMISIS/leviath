@@ -989,16 +989,18 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         );
     }
 
+    /// A host that answers only `Send`, plus what a test needs to assert on it.
+    struct SendRecordingHost {
+        /// The handle under test.
+        handle: SubAgentHandle,
+        /// Each `Send` op's `target_region`, in arrival order.
+        regions: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+        /// The service loop, joined at the end of the test.
+        task: tokio::task::JoinHandle<()>,
+    }
+
     /// A host that answers only `Send`, recording each op's `target_region`.
-    #[expect(
-        clippy::type_complexity,
-        reason = "returns the handle beside the recording buffer the assertions read"
-    )]
-    fn send_recording_host() -> (
-        SubAgentHandle,
-        std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
-        tokio::task::JoinHandle<()>,
-    ) {
+    fn send_recording_host() -> SendRecordingHost {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let regions = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let regions_task = regions.clone();
@@ -1019,7 +1021,11 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
                 }
             }
         });
-        (handle_with(tx), regions, task)
+        SendRecordingHost {
+            handle: handle_with(tx),
+            regions,
+            task,
+        }
     }
 
     /// `target_region` was schema-advertised and documented but never read on
@@ -1027,7 +1033,11 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     /// documented default (conversation), so they forward as `None`.
     #[tokio::test]
     async fn send_forwards_target_region() {
-        let (h, regions, task) = send_recording_host();
+        let SendRecordingHost {
+            handle: h,
+            regions,
+            task,
+        } = send_recording_host();
         for args in [
             json!({ "agent_id": "c", "message": "hi", "target_region": "notes" }),
             json!({ "agent_id": "c", "message": "hi" }),

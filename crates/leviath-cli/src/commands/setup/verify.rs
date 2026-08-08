@@ -70,15 +70,16 @@ impl Outcome {
 ///
 /// The whole point is that the wizard never calls a provider directly, so its
 /// tests never open a socket.
-#[expect(
-    async_fn_in_trait,
-    reason = "same as dispatch::RiskyExecutors: a test seam, never a dyn object"
-)] // callers are concrete; no `dyn` and no boxing needed
 pub trait ProviderVerifier {
     /// Ask the provider whether these credentials work, and what models they
     /// reach. Never fails: an unreachable provider is an [`Outcome::Failed`],
     /// not an error, because the wizard reports it rather than stopping.
-    async fn verify(&self, creds: &ProviderCreds) -> Outcome;
+    ///
+    /// Returns `impl Future` rather than being an `async fn` so the `Send`
+    /// bound is part of the contract. An `async fn` in a trait leaves it
+    /// unstated, which is fine while every caller is concrete and becomes a
+    /// silent constraint the moment one is not.
+    fn verify(&self, creds: &ProviderCreds) -> impl std::future::Future<Output = Outcome> + Send;
 }
 
 /// `--no-verify`: report everything as unchecked without a round trip.
