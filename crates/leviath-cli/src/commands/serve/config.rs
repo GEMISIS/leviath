@@ -166,6 +166,28 @@ mod tests {
     use crate::commands::serve::types::ServerEvent;
     use crate::config::Config;
 
+    /// A default config whose ollama endpoint cannot answer.
+    ///
+    /// Ollama is always registered, so on a machine running `ollama serve` its
+    /// `list_models` *succeeds* and the `if let Ok(list)` in `models_with` never
+    /// takes its other arm - which made `cargo xtask coverage --package
+    /// leviath-cli` fail locally while passing in CI, where nothing is
+    /// listening. Port 1 is reserved and never bound, so the result stops
+    /// depending on what happens to be running on the developer's machine.
+    fn state_without_a_reachable_ollama() -> AppState {
+        let (tx, _) = broadcast::channel::<ServerEvent>(64);
+        AppState {
+            config: Arc::new(Config {
+                ollama_base_url: Some("http://127.0.0.1:1".to_string()),
+                ..Config::default()
+            }),
+            event_tx: tx,
+            control: crate::commands::serve::testutil::no_daemon_client(),
+            mcp: crate::commands::serve::mcp::McpAdmin::default(),
+            limits: Default::default(),
+        }
+    }
+
     fn test_state() -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);
         AppState {
@@ -358,9 +380,11 @@ mod tests {
 
     #[tokio::test]
     async fn get_models_returns_ok() {
+        // A reachable ollama would make `list_models` succeed and leave the
+        // other arm of `if let Ok(list)` unrun - see `state_without_a_reachable_ollama`.
         let app = Router::new()
             .route("/api/models", get(get_models))
-            .with_state(test_state());
+            .with_state(state_without_a_reachable_ollama());
         let req = Request::builder()
             .uri("/api/models")
             .body(Body::empty())
