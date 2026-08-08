@@ -13,9 +13,10 @@ message: >-
   became a constructor named for what it does. If a new one seems unavoidable,
   it is worth an hour before it is worth an attribute - and if it genuinely is
   unavoidable, change this rule in the same PR and say why.
-  `clippy::string_slice` is the one exception, and only as `#[expect(...,
-  reason = "...")]`: the root Cargo.toml documents it as the sanctioned hatch,
-  naming the construct that guarantees the index is a char boundary.
+  `clippy::string_slice` was the last exception and is no longer one. Cut with
+  `leviath_core::text::{substring, split_at_boundary, truncate_at_boundary}`,
+  which are total, or scan with `split_once`, which drops the delimiter-length
+  arithmetic along with the index.
 rule:
   kind: attribute_item
-  regex: '(allow|expect)\((clippy::(too_many_arguments|type_complexity|match_same_arms|new_without_default|permissions_set_readonly_false|enum_variant_names)|dead_code|deprecated|async_fn_in_trait)'
+  regex: '(allow|expect)\((clippy::(too_many_arguments|type_complexity|match_same_arms|new_without_default|permissions_set_readonly_false|enum_variant_names|string_slice)|dead_code|deprecated|async_fn_in_trait)'
