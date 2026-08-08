@@ -8,8 +8,9 @@ order: 2
 
 # Agent catalog
 
-Leviath ships with ten pre-built agents. They live in `agents/`, one directory per agent, each
-holding an `agent.leviath` [blueprint](/docs/agents). Run any of them by name:
+Leviath ships with ten pre-built agents. `lev setup` installs them into `~/.leviath/agents/`, one
+directory per agent, each holding an `agent.leviath` [blueprint](/docs/agents). Run any of them by
+name:
 
 ```bash
 lev run coder --task "Build a CLI that converts CSV to JSON"
@@ -17,8 +18,10 @@ lev run coder --task "Build a CLI that converts CSV to JSON"
 
 This page is also a set of worked examples. Each section shows the agent's real stages and how
 they route, so you can copy the patterns into your own blueprint (`lev create my-agent` scaffolds
-one, then read [Agents](/docs/agents)). The diagrams show the main path; almost every stage also
-carries an `error` edge into a recovery stage, drawn once per agent to keep things readable.
+one, then read [Agents](/docs/agents)). The diagrams show the main path. To stay readable they
+leave out three things every blueprint carries: `error` edges into a recovery stage (drawn once
+per agent), escape edges that jump to the deliverable when a loop hits its revisit cap, and the
+final summary stage that writes the run's [output](/docs/outputs).
 
 > [!TIP]
 > Pick by the shape of the work: a codebase change (the coding agents), a question to answer from
@@ -36,8 +39,10 @@ flowchart TD
     plan --> prototype
     plan --> implement
     prototype --> implement
+    prototype -->|re-plan| plan
     prototype -->|stuck| reassess
     implement --> review
+    implement -->|re-plan| plan
     review -->|issues| implement
     implement -->|stuck| reassess
     reassess --> implement
@@ -55,8 +60,9 @@ Sonnet; `implement`, `review`, and `reassess` step up to Opus.
 
 ## coder
 
-The same discover, prototype, implement, review shape without the human gate. Reach for it when
-you just want the change made.
+The same discover, prototype, implement, review shape without the plan gate. Reach for it when
+you just want the change made. The `review` stage still runs interactive, so you see the review
+before the run decides it is done.
 
 ```mermaid
 flowchart TD
@@ -64,6 +70,7 @@ flowchart TD
     analyze --> implement
     analyze --> prototype
     prototype --> implement
+    prototype -->|re-plan| analyze
     prototype -->|stuck| reassess
     implement --> review
     review -->|issues| implement
@@ -110,6 +117,7 @@ the numbers say. Reach for it when you want a dataset you can open, not a paragr
 ```mermaid
 flowchart TD
     scope --> split
+    scope -->|small enough| build
     split -->|fan out| gather_worker
     gather_worker --> build
     build --> present
@@ -127,11 +135,11 @@ subject, so a broad question is gathered in parallel rather than one source at a
 [Sub-agents and fan-out](/docs/sub-agents).
 
 Each worker hands back CSV rows through [`submit_output`](/docs/outputs), and `require_output` makes
-that a guarantee rather than a hope. Because the worker declares `format = "csv"`, a worker whose
-rows do not parse is told so and retries before the merge ever sees them.
+that a guarantee rather than a hope. The worker's `format = "csv"` label travels with the
+submission, so the merge knows what shape it is being handed.
 
-`present` names `data/dataset.csv` in its `artifacts`, so a caller fetches the file rather than
-parsing its path out of prose.
+`present` is instructed to name `data/dataset.csv` in its `artifacts`, so a caller fetches the file
+rather than parsing its path out of prose.
 
 ## researcher
 
