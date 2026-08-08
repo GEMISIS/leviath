@@ -52,8 +52,9 @@ JSON-encoded, and a bare `()` is an empty string. A missing optional param reads
 A tool gets a wider host surface than a provider script, because it acts on behalf of a running
 agent. The functions come in two kinds.
 
-**These reach the outside world**, and each one is gated by the tool's own `@requires` line and by
-the agent's permissions:
+**These reach the outside world**, and each one is gated per function by
+[`[tool_script_permissions]`](/docs/configuration#tool_script_permissions), resolved at spawn. A
+tool's `@requires` line is not a gate: it only filters which platforms discover the tool at all.
 
 | Function | Does |
 |---|---|
@@ -96,7 +97,8 @@ html_to_text(body)
 ```
 
 For parameter shapes that directives cannot express (enums, array `items`, numeric bounds), drop a
-sibling `tool.toml` next to the script. When present it overrides the annotations entirely:
+sibling `.toml` named after the script (`export.toml` beside `export.rhai`). When present it
+overrides the annotations entirely:
 
 ```toml
 # ~/.leviath/tools/export.toml   (beside export.rhai)

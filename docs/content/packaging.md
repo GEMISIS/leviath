@@ -50,8 +50,9 @@ lev add ./my-agent                    # install from a directory
 Installing under a name that already exists replaces the previous install.
 
 When a blueprint asks for anything unusual, `lev add` prints an inventory of exactly what it wants
-so you can look before running it. Unusual means pre-approved tools, script host access, a disabled
-sandbox, or a command that runs at startup.
+so you can look before running it. Unusual means pre-approved tools, script host access, shipped
+executable script tools, `[read_paths]` declarations with their grant status, a disabled sandbox,
+or a command that runs at startup.
 
 > [!WARNING]
 > A blueprint can carry executable `.rhai` tool scripts, grant its own tool permissions, and
@@ -67,10 +68,8 @@ in the current directory, blueprints from configured paths, and the bundled cata
 
 ```bash
 lev list                              # everything
-lev list --filter agents              # narrow the listing
+lev list --json                       # the same, for a script
 ```
-
-- `-f`, `--filter <all|agents|blueprints>`: filter the output. Defaults to `all`.
 
 ## Remove a blueprint
 

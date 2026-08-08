@@ -20,12 +20,14 @@ Leviath gives you three separate controls, and you can use as few or as many as 
 | Read paths | Which files can it see? | [Reading outside the workdir](#reading-outside-the-workdir) |
 | Taint tracking | Can it send what it read somewhere? | [Taint tracking](#taint-tracking-experimental) |
 
-Tool permissions are a fourth, and they live in [Built-in tools](/docs/tools).
+Tool permissions are a fourth, and they live in [Built-in tools](/docs/tools). Where API keys are
+stored is `[security] credential_store` in [Configuration](/docs/configuration#security).
 
 > [!NOTE]
 > **Before this page:** [Agent blueprints](/docs/agents).
 > **In one line:** everything here is opt-in, and an installed blueprint can tighten these settings
-> but never loosen them - beyond, for a tool you have not configured, Leviath's own default.
+> but never loosen them. The one narrow exception: a blueprint may pre-allow `web_search` and
+> `web_fetch` when you have not configured those tools yourself.
 
 ## Sandboxes
 
@@ -40,19 +42,37 @@ network = false
 kind = "none"             # run discovery on the host…
 ```
 
-**Containers**, using Docker or Podman, give you the real thing. The daemon keeps one warm container
-per agent and tears it down when the agent finishes. Inside it, every Linux capability is dropped
-and the process cannot regain privileges, and both process count and memory are capped. Your file
-tools keep working, because the workdir is mounted in.
+The sandbox covers what the agent **executes**: the `shell` tool, a blueprint's seed commands, and
+a Rhai script tool's `shell()` calls. File tools stay on the host and rely on workdir
+[path confinement](#reading-outside-the-workdir) instead; the sandbox bind-mounts the workdir so
+both see the same files. `web_fetch`, `web_search`, and a script's HTTP functions also run on the
+host, so `network = false` fences the sandboxed commands, not those tools. So do
+[MCP servers](/docs/mcp), which are host processes shared across agents. Widening the sandbox to
+cover all of that is tracked in
+[leviath#326](https://github.com/GEMISIS/leviath/issues/326). For a blanket boundary today, run
+the whole daemon in a container.
 
-**Namespaces** are lighter and need no container runtime. They isolate process IDs, and with
-`network = false` they cut off connectivity. They do *not* isolate the filesystem, which is the
-important limitation: a namespace shares the host's. Use one when you want cheap process and network
-isolation, and a container when you want the agent genuinely fenced off.
+**Containers**, using Docker or Podman, give you the real thing. The daemon keeps a warm container
+per sandbox configuration, so stages with identical settings share one, and tears them down when
+the agent finishes. Inside it, every Linux capability is dropped and the process cannot regain
+privileges, and both process count and memory are capped.
+
+**Namespaces** (Linux only) are lighter and need no container runtime. They isolate process IDs,
+and with `network = false` they cut off connectivity. They do *not* isolate the filesystem, which
+is the important limitation: a namespace shares the host's. Use one when you want cheap process
+and network isolation, and a container when you want the agent's commands genuinely fenced off.
+
+When the configured mechanism is unavailable, a `namespace` off Linux or a `container` with no
+engine on `PATH`, the agent **fails to spawn** with a clear error. That is
+`on_unavailable = "error"`, the default; set `on_unavailable = "warn"` to log and fall back to the
+host instead.
 
 > [!IMPORTANT]
-> An *installed* agent can only ever **tighten** its sandbox: it can raise the walls, never lower
-> them. A blueprint you install can't quietly turn isolation off.
+> An *installed* agent can never weaken the sandbox you configured: it may pick a stricter kind,
+> never a looser one, and its own `engine` choice is always discarded, because the engine binary
+> runs on the host at spawn, before any prompt. With no `[sandbox]` of your own, a blueprint may
+> still opt in with its own image and mounts, so read a downloaded agent's sandbox block rather
+> than assuming it.
 
 ## Reading outside the workdir
 
@@ -110,7 +130,7 @@ Four other commands surface the same thing, so this is hard to miss:
 |---|---|
 | `lev list` | The same granted-over-declared counts under each agent |
 | `lev add` | The status of what you just installed |
-| `lev run` | Repeats the warning and the stanza to add when you start the agent |
+| `lev run` | Warns in the daemon log when an agent declares reads and your config grants none |
 | `lev ps` | A `READS` column, granted over declared. `0/2` is a run that is up and will have every read outside its workdir refused |
 
 Those checks compare patterns, not paths on disk, so treat them as the first answer rather than the
