@@ -1068,7 +1068,8 @@ prompt = "p"
         std::fs::create_dir_all(&dir).unwrap();
         let manifest_path = dir.join("agent.leviath");
         std::fs::write(&manifest_path, test_manifest()).unwrap();
-        let mut perms = std::fs::metadata(&manifest_path).unwrap().permissions();
+        let original = std::fs::metadata(&manifest_path).unwrap().permissions();
+        let mut perms = original.clone();
         perms.set_readonly(true);
         std::fs::set_permissions(&manifest_path, perms).unwrap();
 
@@ -1083,19 +1084,11 @@ prompt = "p"
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
 
-        // Test-only cleanup so the temp dir can be removed afterward - not
-        // production/security-relevant code, so clippy's warning about
-        // `set_readonly(false)` making the file world-writable on Unix
-        // doesn't apply here.
-        #[expect(
-            clippy::permissions_set_readonly_false,
-            reason = "test-only cleanup: re-enabling write on a throwaway tempdir file so it can be removed, which is the one case the lint's security concern does not cover"
-        )]
-        {
-            let mut perms = std::fs::metadata(&manifest_path).unwrap().permissions();
-            perms.set_readonly(false);
-            let _ = std::fs::set_permissions(&manifest_path, perms);
-        }
+        // Put the original permissions back so the directory can be removed on
+        // Windows, where a read-only file cannot be deleted. Restoring what was
+        // there beats `set_readonly(false)`, which on Unix sets *every* write
+        // bit and would hand back a mode the file never had.
+        let _ = std::fs::set_permissions(&manifest_path, original);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

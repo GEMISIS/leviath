@@ -82,7 +82,7 @@ fn ids(runs: &[RunMeta]) -> Vec<&str> {
 fn defaults_are_a_descending_started_at_page_of_fifty_over_the_cheap_sources() {
     let r = resolve_ok(&[]);
     assert_eq!(r.limit, DEFAULT_LIMIT);
-    assert_eq!(r.sort, SortKey::StartedAt);
+    assert_eq!(r.sort, SortKey::Started);
     assert!(r.descending);
     assert!(r.q.is_none());
     assert_eq!(r.sources, vec![Source::Meta, Source::Files]);
@@ -108,13 +108,10 @@ fn an_unknown_sort_order_or_source_is_refused_by_name() {
 
 #[test]
 fn every_sort_key_and_order_resolves() {
-    assert_eq!(
-        resolve_ok(&[("sort", "updated_at")]).sort,
-        SortKey::UpdatedAt
-    );
+    assert_eq!(resolve_ok(&[("sort", "updated_at")]).sort, SortKey::Updated);
     assert_eq!(
         resolve_ok(&[("sort", "last_progress_at")]).sort,
-        SortKey::LastProgressAt
+        SortKey::LastProgress
     );
     assert!(!resolve_ok(&[("order", "asc")]).descending);
 }
@@ -264,10 +261,10 @@ fn runs_sharing_a_sort_value_are_broken_apart_by_id() {
 fn a_missing_last_progress_at_falls_back_to_started_at() {
     let mut meta = meta_at("a", 500);
     meta.last_progress_at = None;
-    assert_eq!(SortKey::LastProgressAt.value(&meta), 500);
+    assert_eq!(SortKey::LastProgress.value(&meta), 500);
     meta.last_progress_at = Some(900);
-    assert_eq!(SortKey::LastProgressAt.value(&meta), 900);
-    assert_eq!(SortKey::UpdatedAt.value(&meta), 500);
+    assert_eq!(SortKey::LastProgress.value(&meta), 900);
+    assert_eq!(SortKey::Updated.value(&meta), 500);
 }
 
 /// Walking the whole list a page at a time must visit every run exactly once.

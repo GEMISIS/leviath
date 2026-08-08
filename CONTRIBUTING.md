@@ -80,6 +80,41 @@ npm install -g @ast-grep/cli     # via npm
 
 The workspace is gated at a hard **100%** on lines, regions, and functions, with no way to opt out. Coverage-suppression markers (`#[cfg(not(test))]`, `coverage(off)`, tarpaulin/lcov/grcov annotations) are banned by the ast-grep lint above, so code can't be hidden from measurement; it has to be refactored until it's testable. The *only* un-unit-tested code is the thin `lev` binary entrypoint (`crates/leviath-cli/src/main.rs`): the composition root that wires real terminal, stdin, network, and subprocess I/O into the library's tested cores. It's excluded from coverage measurement and guarded by a CI check that requires maintainer sign-off to change.
 
+### Suppressing a lint
+
+You cannot. `cargo xtask`'s ast-grep rules fail the build on `#[allow(...)]` or
+`#[expect(...)]` for `too_many_arguments`, `type_complexity`, `dead_code`,
+`deprecated`, `async_fn_in_trait`, `match_same_arms`, `new_without_default`,
+`permissions_set_readonly_false` and `enum_variant_names`.
+
+Every one of those was cleared from this tree by changing the code, and in each
+case the change was better than the suppression it replaced:
+
+| Lint | What it turned into |
+|---|---|
+| `too_many_arguments` | Parameter structs, and `#[derive(SystemParam)]` for the bevy system. One of them exposed the same three fields written out twice, now a single `PromptLane<T>` |
+| `permissions_set_readonly_false` | Restoring the file's *original* permissions instead of synthesising "not read-only" — which on Unix hands back `0o666` for a file that was `0o644` |
+| `deprecated` | `socket2`, the layer that owns socket options, rather than tokio's wrapper that deprecates the option because it blocks a *runtime* thread |
+| `async_fn_in_trait` | An explicit `impl Future` that states whether the future is `Send`. Adding the bound to `RiskyExecutors` did not compile, which is the useful answer: those futures hold non-`Send` state across awaits and the `async fn` left that unsaid |
+| `match_same_arms` | One named constant per case, so "these can move independently" is expressed rather than commented |
+| `new_without_default` | A constructor named for what it does (`open`, not `new`) |
+| `dead_code` | Deleting the field, or wiring it up — `lev test` had two keys that parsed and did nothing |
+
+`clippy::string_slice` is the one exception, and only as `#[expect(..., reason =
+"...")]` naming the construct that guarantees the index is a char boundary. The
+root `Cargo.toml` explains why that one has a hatch: it exists because slicing a
+`&str` aborted the daemon twice.
+
+`#[expect]` rather than `#[allow]` for that exception, and the difference
+matters: `expect` fails the build the moment the lint stops firing, so a
+suppression cannot outlive the problem it was written for. Converting the tree
+from `allow` to `expect` found **six** that were already dead, including a
+`dead_code` on a field that was being read.
+
+If a new suppression looks unavoidable, it is worth an hour before it is worth an
+attribute. If it genuinely is unavoidable, change `.sgrules/no-lint-suppression.yml`
+in the same PR and say why.
+
 ### How long a file may be
 
 `cargo xtask structure` holds every source file to **1,200 lines of production code**, and the pre-commit hook and CI both run it. It costs about a tenth of a second: it reads files and counts, nothing more.

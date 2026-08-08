@@ -121,48 +121,94 @@ pub enum Commands {
 ///
 /// `async fn` in a trait is fine here: `dispatch` takes `&impl RiskyExecutors`
 /// (static dispatch, no `dyn`), so no boxing or `Send` bound is required.
-#[expect(
-    async_fn_in_trait,
-    reason = "the trait exists to be a test seam and is never used as a dyn object, so the auto-trait bounds the lint warns about cannot matter here"
-)]
 pub trait RiskyExecutors {
+    // Each method returns `impl Future` rather than being an `async fn`, so what
+    // the future promises is stated rather than inferred.
+    //
+    // Deliberately **not** `+ Send`. These run on the CLI's single-threaded
+    // entry path and hold non-`Send` state across awaits - the daemon-readiness
+    // poll takes a `&mut dyn FnMut() -> bool`, and the TUI paths hold terminal
+    // handles. Adding the bound does not compile, which is the useful answer:
+    // an `async fn` here left that unsaid, and this says it.
     /// `lev run` - auto-starts the daemon (real process spawn) if needed and
     /// spawns the agent into the shared world over the control socket.
-    async fn run(&self, args: commands::run::RunArgs) -> anyhow::Result<()>;
+    fn run(
+        &self,
+        args: commands::run::RunArgs,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
     /// `lev ps` - resolves the control-socket path and queries the daemon.
-    async fn ps(&self, args: commands::ps::PsArgs) -> anyhow::Result<()>;
+    fn ps(
+        &self,
+        args: commands::ps::PsArgs,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
     /// `lev msg` - resolves the control-socket path and sends a message.
-    async fn msg(&self, args: commands::ctl::MsgArgs) -> anyhow::Result<()>;
+    fn msg(
+        &self,
+        args: commands::ctl::MsgArgs,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
     /// `lev cancel` - resolves the control-socket path and cancels a run.
-    async fn cancel(&self, args: commands::ctl::CancelArgs) -> anyhow::Result<()>;
+    fn cancel(
+        &self,
+        args: commands::ctl::CancelArgs,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
     /// `lev pause` - resolves the control-socket path and pauses a run.
-    async fn pause(&self, args: commands::ctl::PauseArgs) -> anyhow::Result<()>;
+    fn pause(
+        &self,
+        args: commands::ctl::PauseArgs,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
     /// `lev resume` - resolves the control-socket path and resumes a run.
-    async fn resume(&self, args: commands::ctl::ResumeArgs) -> anyhow::Result<()>;
+    fn resume(
+        &self,
+        args: commands::ctl::ResumeArgs,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
     /// `lev respond` - resolves the control-socket path and answers/lists interactions.
-    async fn respond(&self, args: commands::ctl::RespondArgs) -> anyhow::Result<()>;
+    fn respond(
+        &self,
+        args: commands::ctl::RespondArgs,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
     /// `lev doctor` - makes real billed inference calls, and (unless
     /// `--no-daemon`) auto-starts the daemon and spawns a throwaway run.
-    async fn doctor(&self, args: commands::doctor::DoctorArgs) -> anyhow::Result<()>;
+    fn doctor(
+        &self,
+        args: commands::doctor::DoctorArgs,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
     /// `lev setup` - interactive (blocking stdin) or `--non-interactive`.
-    async fn setup(&self, args: commands::setup::SetupArgs) -> anyhow::Result<()>;
+    fn setup(
+        &self,
+        args: commands::setup::SetupArgs,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
     /// `lev dash` - takes over the real terminal and blocks on real keyboard input.
-    async fn dashboard(&self, args: commands::dashboard::DashboardArgs) -> anyhow::Result<()>;
+    fn dashboard(
+        &self,
+        args: commands::dashboard::DashboardArgs,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
     /// `lev serve` - binds a real port and serves indefinitely.
-    async fn serve(&self, args: commands::serve::ServeArgs) -> anyhow::Result<()>;
+    fn serve(
+        &self,
+        args: commands::serve::ServeArgs,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
     /// `lev agent-client` - takes over real stdin/stdout to speak the Agent
     /// Client Protocol against the shared-world daemon.
-    async fn agent_client(
+    fn agent_client(
         &self,
         args: commands::agent_client::AgentClientArgs,
-    ) -> anyhow::Result<()>;
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
     /// `lev daemon` - binds the control socket and serves the shared world.
-    async fn daemon(&self, args: commands::daemon::DaemonArgs) -> anyhow::Result<()>;
+    fn daemon(
+        &self,
+        args: commands::daemon::DaemonArgs,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
     /// `lev mcp` - rewrites config, opens a browser for OAuth, touches the token store.
-    async fn mcp(&self, args: commands::mcp::McpArgs) -> anyhow::Result<()>;
+    fn mcp(
+        &self,
+        args: commands::mcp::McpArgs,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
 
     /// `lev auth` - reads the config file and may write the OS credential store.
-    async fn auth(&self, args: commands::auth::AuthArgs) -> anyhow::Result<()>;
+    fn auth(
+        &self,
+        args: commands::auth::AuthArgs,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
 }
 
 /// Inject argv-prescanned dynamic `--<region>` seed flags into a parsed

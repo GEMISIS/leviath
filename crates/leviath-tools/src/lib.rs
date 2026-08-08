@@ -1371,13 +1371,6 @@ mod tests {
         assert!(result.contains("Failed to read directory"));
     }
 
-    // `set_readonly(false)` widens Unix perms beyond the original, but here it
-    // only re-enables cleanup of a throwaway tempdir file, which is exactly
-    // what we want.
-    #[expect(
-        clippy::permissions_set_readonly_false,
-        reason = "same as the blueprints test: set_readonly(false) here only re-enables cleanup of a temp file this test created moments ago"
-    )]
     #[tokio::test]
     async fn edit_file_write_failure_after_successful_match() {
         let dir = tempfile::tempdir().unwrap();
@@ -1388,8 +1381,10 @@ mod tests {
         // Make the file read-only so the read succeeds but the write-back
         // fails. `set_readonly(true)` is cross-platform (clears the write bits
         // on Unix; sets the read-only attribute on Windows), so the write
-        // error arm is exercised on every OS.
-        let mut perms = fs::metadata(&file_path).unwrap().permissions();
+        // error arm is exercised on every OS. The original permissions are kept
+        // so they can be put back exactly, rather than reconstructed.
+        let original = fs::metadata(&file_path).unwrap().permissions();
+        let mut perms = original.clone();
         perms.set_readonly(true);
         fs::set_permissions(&file_path, perms).unwrap();
 
@@ -1400,10 +1395,11 @@ mod tests {
             )
             .await;
 
-        // Restore permissions so tempdir cleanup can remove the file.
-        let mut perms = fs::metadata(&file_path).unwrap().permissions();
-        perms.set_readonly(false);
-        fs::set_permissions(&file_path, perms).unwrap();
+        // Put the original permissions back so tempdir cleanup can remove the
+        // file on Windows, where a read-only file cannot be deleted. Restoring
+        // what was there beats `set_readonly(false)`, which on Unix sets *every*
+        // write bit and would hand back 0o666 for a file that was 0o644.
+        fs::set_permissions(&file_path, original).unwrap();
 
         assert!(result.contains("[error]"));
         assert!(result.contains("Failed to write"));

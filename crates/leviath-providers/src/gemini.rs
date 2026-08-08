@@ -31,6 +31,30 @@ enum GeminiFamily {
 }
 
 impl GeminiFamily {
+    /// `(max_context_tokens, max_output_tokens)` for the Flash-Lite family.
+    const FLASH_LITE_LIMITS: (usize, usize) = (1_048_576, 65_535);
+    /// The same, for Pro.
+    const PRO_LIMITS: (usize, usize) = (1_048_576, 65_535);
+    /// The same, for Flash.
+    const FLASH_LIMITS: (usize, usize) = (1_048_576, 65_535);
+    /// The same, for anything this classifier does not recognise.
+    const OTHER_LIMITS: (usize, usize) = (1_048_576, 65_535);
+
+    /// This family's context and output ceilings.
+    ///
+    /// Four named constants that happen to agree today, rather than one shared
+    /// value: the point is that a family's limits can move without disturbing
+    /// the others, and four constants say that where four identical match arms
+    /// only looked like an oversight - which is what the lint kept reporting.
+    const fn limits(self) -> (usize, usize) {
+        match self {
+            Self::FlashLite => Self::FLASH_LITE_LIMITS,
+            Self::Pro => Self::PRO_LIMITS,
+            Self::Flash => Self::FLASH_LIMITS,
+            Self::Other => Self::OTHER_LIMITS,
+        }
+    }
+
     fn classify(model: &str) -> Self {
         if model.contains("flash-lite") {
             GeminiFamily::FlashLite
@@ -118,19 +142,7 @@ impl GeminiProvider {
     /// - gemini-3-flash (complex multimodal/agentic)
     /// - gemini-3.1-flash-lite (cost-efficient, high-volume)
     fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
-        // All families currently share these values; the match keeps them
-        // labelled by family so any one can be adjusted independently (the arms
-        // are intentionally identical today - divergence-readiness scaffolding).
-        #[expect(
-            clippy::match_same_arms,
-            reason = "the arms are identical today and deliberately kept separate, so each family's limits can move without disturbing the others"
-        )]
-        let (max_context_tokens, max_output_tokens) = match GeminiFamily::classify(model) {
-            GeminiFamily::FlashLite => (1_048_576, 65_535),
-            GeminiFamily::Pro => (1_048_576, 65_535),
-            GeminiFamily::Flash => (1_048_576, 65_535),
-            GeminiFamily::Other => (1_048_576, 65_535),
-        };
+        let (max_context_tokens, max_output_tokens) = GeminiFamily::classify(model).limits();
         ModelCapabilities {
             supports_temperature: true,
             supports_streaming: true,

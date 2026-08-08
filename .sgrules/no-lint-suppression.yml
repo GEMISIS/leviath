@@ -1,0 +1,21 @@
+id: no-lint-suppression
+language: rust
+severity: error
+message: >-
+  This lint may not be suppressed. Every one of these was cleared from the tree
+  by changing the code, and the fix was usually better than the suppression:
+  `too_many_arguments` became parameter structs (and `SystemParam` for the bevy
+  system), `permissions_set_readonly_false` became restoring the file's original
+  permissions rather than synthesising "not read-only", `deprecated` became
+  socket2 (the layer that owns socket options), `async_fn_in_trait` became an
+  explicit `impl Future` that states whether the future is `Send`,
+  `match_same_arms` became one named constant per case, and `new_without_default`
+  became a constructor named for what it does. If a new one seems unavoidable,
+  it is worth an hour before it is worth an attribute - and if it genuinely is
+  unavoidable, change this rule in the same PR and say why.
+  `clippy::string_slice` is the one exception, and only as `#[expect(...,
+  reason = "...")]`: the root Cargo.toml documents it as the sanctioned hatch,
+  naming the construct that guarantees the index is a char boundary.
+rule:
+  kind: attribute_item
+  regex: '(allow|expect)\((clippy::(too_many_arguments|type_complexity|match_same_arms|new_without_default|permissions_set_readonly_false|enum_variant_names)|dead_code|deprecated|async_fn_in_trait)'
