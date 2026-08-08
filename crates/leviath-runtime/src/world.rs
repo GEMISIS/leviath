@@ -2413,4 +2413,72 @@ mod tests {
         world.run_until_idle(20).await;
         assert_eq!(world.agent_status(e), Some(AgentStatus::Complete));
     }
+
+    // ─── Two worlds at once ─────────────────────────────────────────────────
+    //
+    // Multi-world is planned, so the properties it rests on are asserted now
+    // rather than discovered later. Two of these pass today; the third records
+    // a real hazard that is *not* closed, so that it is a known quantity rather
+    // than a surprise.
+
+    #[tokio::test]
+    async fn two_worlds_each_drive_their_own_agents() {
+        let mut a = build_world(ProviderRegistry::new());
+        let mut b = build_world(ProviderRegistry::new());
+        let in_a = spawn(&mut a);
+        let in_b = spawn(&mut b);
+
+        assert!(a.agent_status(in_a).is_some());
+        assert!(b.agent_status(in_b).is_some());
+
+        // Pausing in one leaves the other alone: no shared resource ties the
+        // two worlds' agent state together.
+        assert!(a.pause(in_a));
+        assert_eq!(a.agent_status(in_a), Some(AgentStatus::Paused));
+        assert_ne!(b.agent_status(in_b), Some(AgentStatus::Paused));
+    }
+
+    #[tokio::test]
+    async fn a_world_with_no_agents_does_not_answer_for_a_foreign_entity() {
+        let mut a = build_world(ProviderRegistry::new());
+        let b = build_world(ProviderRegistry::new());
+        let in_a = spawn(&mut a);
+        // `b` has spawned nothing, so the id names nothing there.
+        assert!(b.agent_status(in_a).is_none());
+    }
+
+    /// **A known hazard, pinned rather than fixed.**
+    ///
+    /// `Entity` is an index plus a generation minted *per world*, so two worlds
+    /// hand out the same id for their first agent - asserted below, because the
+    /// collision is the normal case and not a corner one. Nothing in the type
+    /// records which world minted it, so passing one world's entity to another
+    /// is not refused: it names a real, different agent there, and the call acts
+    /// on that one instead. Silently.
+    ///
+    /// This cannot be closed from inside the world. A tag component was tried
+    /// and does not work: looking the tag up on the foreign id resolves to the
+    /// *local* agent, whose tag naturally matches, so the check passes. The
+    /// provenance has to travel with the id - a handle carrying the world's
+    /// identity, returned by `spawn_agent` and required by the entity-taking
+    /// methods - which changes every signature that stores an `Entity` (the
+    /// host's run-id map, recovery, fan-out).
+    ///
+    /// Harmless today: one world exists per process, so no entity can be
+    /// foreign. It has to be closed before a second one is introduced, and this
+    /// test is here so that lands as a failing assertion rather than a bug.
+    #[tokio::test]
+    async fn a_foreign_entity_silently_names_the_wrong_agent() {
+        let mut a = build_world(ProviderRegistry::new());
+        let mut b = build_world(ProviderRegistry::new());
+        let in_a = spawn(&mut a);
+        let in_b = spawn(&mut b);
+        assert_eq!(in_a, in_b, "the ids collide, which is the whole problem");
+
+        // Pause "A's agent" against world B: B pauses its own instead.
+        assert!(b.pause(in_a));
+        assert_eq!(b.agent_status(in_b), Some(AgentStatus::Paused));
+        // A's agent never moved - the caller's intent was lost in silence.
+        assert_ne!(a.agent_status(in_a), Some(AgentStatus::Paused));
+    }
 }
