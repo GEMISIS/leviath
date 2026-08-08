@@ -14,7 +14,6 @@ request_timeout_secs = 600
 taint_tracking = false
 batch_tool_hint = true
 shell_hint = true
-allow = ["read_file"]
 
 [providers]
 anthropic_api_key = "sk-ant-example"
